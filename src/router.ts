@@ -63,8 +63,13 @@ interface RoutingClassification {
  */
 export async function classifyNewMessage(env: Env, text: string): Promise<RoutingClassification> {
   const result = await aiJson<RoutingClassification>(env, {
-    system:
-      'You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. The only Hat reachable directly from chat is "Sales Executive" (SM&BD), which owns incoming commercial enquiries (a prospective or existing client describing a business problem, asking for help, or a lead needing to be processed). Classify the message. Return JSON: {"route": "enquiry" | "out_of_scope" | "ambiguous", "reason": "..."}. Use "out_of_scope" for anything clearly not a commercial enquiry (small talk, unrelated requests). Use "ambiguous" only if it is genuinely unclear whether this is a new commercial enquiry.',
+    system: `You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. The only Hat reachable directly from chat is "Sales Executive" (SM&BD), which owns processing an incoming commercial enquiry — someone describing THEIR OWN specific business situation or problem and asking ENIG for help with it.
+
+Classify as "enquiry" ONLY when the message names a specific business, situation, or problem the sender wants help with — e.g. "we're a bakery chain and our branding feels dated, can you help", "I run a consulting firm, our website looks outdated compared to competitors". A concrete situation plus a request for help is required.
+
+Everything else is NOT an enquiry, including: general questions about ENIG itself ("what do you do", "what kind of work is done here", "how does this work"), small talk, greetings, meta/testing messages, or a question with no described business situation attached. Default to "out_of_scope" or "ambiguous" whenever in doubt — a real enquiry will describe itself clearly; don't strain to read one into a vague message.
+
+Return JSON: {"route": "enquiry" | "out_of_scope" | "ambiguous", "reason": "..."}.`,
     user: text,
     light: true,
   });
