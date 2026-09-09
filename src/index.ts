@@ -71,7 +71,7 @@ export default {
       const chatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : Number(env.MARTIN_TELEGRAM_USER_ID);
       const threadId = threadIdForUnit(env, "SM&BD");
       const enquiryText = `Email enquiry${body.from ? ` from ${body.from}` : ""}${body.subject ? ` — "${body.subject}"` : ""}:\n\n${body.text}`;
-      await routeIncomingText(env, chatId, enquiryText, threadId);
+      await routeIncomingText(env, chatId, enquiryText, threadId, { forceNewEnquiry: true });
       return new Response("ok");
     }
 

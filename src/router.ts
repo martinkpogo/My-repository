@@ -70,16 +70,27 @@ export async function classifyNewMessage(env: Env, text: string): Promise<Routin
   return result ?? { route: "ambiguous", reason: "Classification failed." };
 }
 
-export async function routeIncomingText(env: Env, chatId: number, text: string, threadId?: number): Promise<void> {
+export async function routeIncomingText(
+  env: Env,
+  chatId: number,
+  text: string,
+  threadId?: number,
+  options: { forceNewEnquiry?: boolean } = {},
+): Promise<void> {
   if (text.startsWith("/")) return; // commands handled by caller
 
-  const activeId = await getActiveWorkId(env, chatId, threadId);
-  if (activeId) {
-    const stub = getSessionStub(env, activeId);
-    const state = await stub.getState();
-    if (state && state.awaiting) {
-      await stub.handleTextReply(text);
-      return;
+  // A brand-new contact (e.g. an email) is never a reply to whatever work
+  // item happens to be active in this topic — only a Telegram-typed message
+  // can plausibly continue an in-progress conversation.
+  if (!options.forceNewEnquiry) {
+    const activeId = await getActiveWorkId(env, chatId, threadId);
+    if (activeId) {
+      const stub = getSessionStub(env, activeId);
+      const state = await stub.getState();
+      if (state && state.awaiting) {
+        await stub.handleTextReply(text);
+        return;
+      }
     }
   }
 
