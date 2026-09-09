@@ -70,6 +70,33 @@ export async function aiText(env: Env, system: string, user: string, options: Ai
   }
 }
 
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** Like aiText, but carries prior conversation turns as real message history. */
+export async function aiChat(
+  env: Env,
+  system: string,
+  history: ChatTurn[],
+  userMessage: string,
+  maxTokens = 800,
+): Promise<string> {
+  const messages = [
+    { role: "system", content: system },
+    ...history.map((t) => ({ role: t.role, content: t.content })),
+    { role: "user", content: userMessage },
+  ];
+  try {
+    const result = await env.AI.run(env.AI_MODEL_PRIMARY as any, { messages, temperature: 0.6, max_tokens: maxTokens } as any);
+    return coerceToText(result);
+  } catch (err) {
+    console.error("Workers AI call failed", err);
+    return "";
+  }
+}
+
 /**
  * Workers AI response shapes vary by model: usually a plain string or
  * { response: string }, but some models return { response: {...} } for

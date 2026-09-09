@@ -1,6 +1,7 @@
 import type { Env, Unit } from "./types";
 import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
+import { generalChatReply } from "./chat";
 
 export function newWorkId(): string {
   return crypto.randomUUID();
@@ -99,40 +100,27 @@ export async function routeIncomingText(
     await sendMessage(env, chatId, "This topic isn't mapped to a Unit yet.", undefined, threadId);
     return;
   }
+
+  // Finance and the four not-yet-built Units don't take structured work
+  // from chat, but the topic isn't dead either — hold open conversation
+  // there, with memory, rather than a rigid refusal every time.
   if (unitContext !== "dm" && unitContext !== "SM&BD") {
-    const message =
-      unitContext === "Finance"
-        ? "Finance's Value-Based Pricing Assessor only activates via a Handoff from SM&BD — it doesn't take work directly from chat."
-        : `No Hat is available for ${unitContext} yet in this workspace — not built in this slice.`;
-    await sendMessage(env, chatId, message, undefined, threadId);
+    const reply = await generalChatReply(env, unitContext, chatId, threadId, text);
+    await sendMessage(env, chatId, reply || "...", undefined, threadId);
     return;
   }
 
   const classification = await classifyNewMessage(env, text);
-  if (classification.route === "out_of_scope") {
-    await sendMessage(
-      env,
-      chatId,
-      "No Hat currently available here covers that. This workspace handles incoming commercial enquiries (SM&BD) and value-based pricing (Finance, via Handoff only).",
-      undefined,
-      threadId,
-    );
-    return;
-  }
-  if (classification.route === "ambiguous") {
-    await sendMessage(
-      env,
-      chatId,
-      `I can't determine whether this is a new commercial enquiry.${classification.reason ? ` ${classification.reason}` : ""} If it is, resend clearly describing the enquiry. If it's a reply to something in progress, use /sessions to pick the right work item first.`,
-      undefined,
-      threadId,
-    );
+  if (classification.route === "enquiry") {
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "SM&BD", "Sales Executive", threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleIncomingEnquiry(text);
     return;
   }
 
-  const workId = newWorkId();
-  const stub = getSessionStub(env, workId);
-  await stub.init(workId, chatId, "SM&BD", "Sales Executive", threadId);
-  await setActiveWorkId(env, chatId, threadId, workId);
-  await stub.handleIncomingEnquiry(text);
+  // Not a new enquiry — hold open conversation instead of a rigid refusal.
+  const reply = await generalChatReply(env, "SM&BD", chatId, threadId, text);
+  await sendMessage(env, chatId, reply || "...", undefined, threadId);
 }
