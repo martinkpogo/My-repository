@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 
 const TOKEN_ENDPOINT = "https://authn.read.ai/oauth2/token";
-const AUTHORIZE_UI = "https://api.read.ai/oauth/ui";
+const AUTHORIZATION_ENDPOINT = "https://authn.read.ai/oauth2/auth";
 const API_BASE = "https://api.read.ai";
 const SCOPE = "openid email offline_access profile meeting:read";
 const TOKENS_KV_KEY = "readai_oauth_tokens";
@@ -53,7 +53,7 @@ export function buildAuthorizeUrl(env: Env, redirectUri: string, state: string, 
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
   });
-  return `${AUTHORIZE_UI}?${params.toString()}`;
+  return `${AUTHORIZATION_ENDPOINT}?${params.toString()}`;
 }
 
 export async function exchangeCodeForTokens(
