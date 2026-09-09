@@ -161,6 +161,42 @@ export default {
       });
     }
 
+    // Independent watchdog: meant to be pinged by a SECOND, separate external
+    // scheduler (different provider than the one hitting
+    // /admin/run-finance-discovery). If the discovery trigger has gone
+    // silent - the external scheduler running it stopped, paused, or was
+    // never set up - this notices via the Worker's own KV record and DMs
+    // Martin directly, instead of the Handoff just sitting Pending forever
+    // with no one told. Throttled independently so a prolonged outage
+    // doesn't spam.
+    if (url.pathname === "/admin/watchdog" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const lastRun = await env.STATE_KV.get("last_cron_run");
+      const staleMs = lastRun ? Date.now() - new Date(lastRun).getTime() : Infinity;
+      const isStale = staleMs > WATCHDOG_STALE_THRESHOLD_MS;
+      if (isStale) {
+        const lastAlertKey = "watchdog_alert_last_sent";
+        const lastAlert = await env.STATE_KV.get(lastAlertKey);
+        if (!lastAlert || Date.now() - Number(lastAlert) > WATCHDOG_ALERT_MIN_INTERVAL_MS) {
+          const minutesSince = lastRun ? Math.round(staleMs / 60000) : null;
+          await sendMessage(
+            env,
+            Number(env.MARTIN_TELEGRAM_USER_ID),
+            minutesSince === null
+              ? `*Watchdog alert*: Finance-Handoff discovery has never run - /admin/run-finance-discovery may not be scheduled. Nothing will surface Pending Handoffs until it runs.`
+              : `*Watchdog alert*: Finance-Handoff discovery hasn't run in ${minutesSince} minute(s). Check that its external scheduler (cron-job.org) is still active - until it runs, Pending Handoffs won't be picked up or reported.`,
+          );
+          await env.STATE_KV.put(lastAlertKey, String(Date.now()));
+        }
+      }
+      return new Response(JSON.stringify({ ok: true, stale: isStale, last_cron_run: lastRun ?? null }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     return new Response("not found", { status: 404 });
   },
 
@@ -404,6 +440,8 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
 }
 
 const STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS = 15 * 60 * 1000;
+const WATCHDOG_STALE_THRESHOLD_MS = 3 * 60 * 1000;
+const WATCHDOG_ALERT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 // Runs on every scheduled tick (as often as the cron fires, currently every
 // 1 minute for Finance-discovery latency), but only actually messages
