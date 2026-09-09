@@ -3,6 +3,7 @@ import { richText, select, updatePage } from "../notion";
 import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
+import { setActiveWorkId, threadIdForUnit } from "../router";
 import * as sales from "./salesExecutive";
 
 interface PriceJudgement {
@@ -13,6 +14,12 @@ interface PriceJudgement {
 }
 
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
+  // Finance is its own Unit with its own topic/workspace - it speaks there,
+  // not wherever the enquiry happened to originate (state.threadId, usually
+  // SM&BD's topic). Falls back to state.threadId if Finance has no topic
+  // configured, so this is a no-op when UNIT_TOPIC_MAP is unset.
+  const financeThreadId = threadIdForUnit(env, "Finance") ?? state.threadId;
+
   await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
     entry: `Handoff picked up: ${state.matterName}`,
@@ -46,10 +53,14 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       state.chatId,
       `*Finance held the quote request* for *${state.entityName}*.\n\nReason: ${reason}\n\nSend more value context (not a budget figure) and I'll re-submit to Finance.`,
       undefined,
-      state.threadId,
+      financeThreadId,
     );
     state.stage = "handoff_held";
     state.awaiting = "value_context_more";
+    state.financeThreadId = financeThreadId;
+    if (financeThreadId !== undefined) {
+      await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
+    }
     return state;
   }
 
@@ -70,7 +81,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     state.chatId,
     `*Finance quote ready* for *${state.entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nPreparing the Draft Proposal now.`,
     undefined,
-    state.threadId,
+    financeThreadId,
   );
 
   state.quote = { price: judgement.price, rationale: judgement.rationale ?? "" };

@@ -121,6 +121,11 @@ export class WorkSession extends DurableObject<Env> {
       const activeKey = `active:${state.chatId}:${state.threadId ?? "dm"}`;
       const active = await this.env.STATE_KV.get(activeKey);
       if (active === state.workId) await this.env.STATE_KV.delete(activeKey);
+      if (state.financeThreadId !== undefined && state.financeThreadId !== state.threadId) {
+        const financeActiveKey = `active:${state.chatId}:${state.financeThreadId}`;
+        const financeActive = await this.env.STATE_KV.get(financeActiveKey);
+        if (financeActive === state.workId) await this.env.STATE_KV.delete(financeActiveKey);
+      }
     }
   }
 }

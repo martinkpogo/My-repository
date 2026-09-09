@@ -98,6 +98,14 @@ export interface WorkState {
   candidateEntities?: { id: string; name: string }[];
   candidateMatters?: { id: string; name: string }[];
   blockedReason?: string;
+
+  /**
+   * Set when Finance (or another picked-up Unit) has posted a blocker to its
+   * OWN topic and is awaiting a reply there, rather than in the topic the
+   * enquiry originated from. Lets a reply typed in that topic resume this
+   * session, and lets terminal cleanup clear that topic's active pointer too.
+   */
+  financeThreadId?: number;
 }
 
 export interface SessionSummary {
