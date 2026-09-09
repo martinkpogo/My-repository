@@ -1,0 +1,38 @@
+name = "enig-agent"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"
+
+[[durable_objects.bindings]]
+name = "WORK_SESSION"
+class_name = "WorkSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkSession"]
+
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+NOTION_VERSION = "2025-09-03"
+AI_MODEL_PRIMARY = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct"
+ENTITY_DATA_SOURCE_ID = "437248f7-f6d8-4e70-873b-7b1eb0fdc519"
+MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
+PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
+HANDOFFS_DATA_SOURCE_ID = "935cff62-de01-4920-9743-782c7d210455"
+ACTIVITY_LOG_DATA_SOURCE_ID = "423e7f93-5f9d-435d-856a-e183120d3d8f"
+
+# Secrets (set with `wrangler secret put <NAME>`, never committed):
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_WEBHOOK_SECRET
+#   MARTIN_TELEGRAM_USER_ID
+#   NOTION_TOKEN
