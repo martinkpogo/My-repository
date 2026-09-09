@@ -99,7 +99,28 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
   -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-### 5. Local dev
+### 5. Read.ai (optional — automatic call notes)
+
+If you want sales-call transcripts fed in automatically instead of pasting
+notes into Telegram yourself, requires a Read.ai **Pro, Enterprise, or
+Enterprise+** plan (webhooks aren't on the free tier):
+
+1. In Read.ai: **Integrations → Your Integrations → Webhooks**
+   (`app.read.ai/analytics/integrations/user/workflow/webhooks`) — a
+   personal webhook covers your own meetings, which is what you want here.
+2. Set the webhook URL to `https://<your-worker-subdomain>.workers.dev/readai/webhook`
+3. Read.ai shows a signing key once, at creation — copy it, then:
+   ```bash
+   npx wrangler secret put READAI_WEBHOOK_SECRET
+   ```
+   paste the signing key at the prompt.
+4. When a call ends, the Worker checks whether a work item is currently
+   waiting on call notes (i.e. you're mid-flow with the Sales Executive Hat)
+   and feeds the transcript/summary in automatically. If nothing is waiting,
+   it messages you on Telegram instead of guessing which enquiry it belongs
+   to — same ambiguity rule as everywhere else in this system.
+
+### 6. Local dev
 
 ```bash
 cp .dev.vars.example .dev.vars   # fill in real values

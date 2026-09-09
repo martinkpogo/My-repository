@@ -4,6 +4,8 @@ import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import type { SessionSummary } from "./types";
+import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
+import type { ReadAiPayload } from "./readai";
 
 export { WorkSession } from "./session";
 
@@ -24,6 +26,24 @@ export default {
       }
       const update = (await request.json()) as TelegramUpdate;
       await handleUpdate(env, update);
+      return new Response("ok");
+    }
+
+    if (url.pathname === "/readai/webhook" && request.method === "POST") {
+      const rawBody = await request.text();
+      const valid = await verifyReadAiSignature(env, rawBody, request.headers.get("X-Read-Signature"));
+      if (!valid) return new Response("forbidden", { status: 403 });
+
+      const payload = JSON.parse(rawBody) as ReadAiPayload;
+      if (payload.trigger !== "meeting_end") return new Response("ok");
+
+      if (payload.request_id) {
+        const seenKey = `readai_seen:${payload.request_id}`;
+        if (await env.STATE_KV.get(seenKey)) return new Response("ok");
+        await env.STATE_KV.put(seenKey, "1", { expirationTtl: 60 * 60 * 24 * 7 });
+      }
+
+      await handleReadAiMeetingEnd(env, payload);
       return new Response("ok");
     }
 
@@ -102,6 +122,28 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     await stub.handleCallback(action, value);
     return;
   }
+}
+
+async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise<void> {
+  const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+  const title = payload.title ?? "a meeting";
+  const activeId = await getActiveWorkId(env, chatId);
+
+  if (activeId) {
+    const stub = getSessionStub(env, activeId);
+    const state = await stub.getState();
+    if (state && state.awaiting === "call_notes") {
+      await sendMessage(env, chatId, `Read.ai call ended: *${title}*. Feeding it in as call notes for the active work item.`);
+      await stub.handleTextReply(formatCallNotesFromPayload(payload));
+      return;
+    }
+  }
+
+  await sendMessage(
+    env,
+    chatId,
+    `Read.ai sent a summary for *${title}*, but no work item is currently expecting call notes.${payload.report_url ? ` Report: ${payload.report_url}` : ""} Use /sessions to pick the right work item, then paste the notes in yourself.`,
+  );
 }
 
 async function listSessions(env: Env, chatId: number): Promise<void> {
