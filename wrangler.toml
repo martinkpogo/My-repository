@@ -19,11 +19,15 @@ binding = "STATE_KV"
 id = "9c01e73f957949d796de688c1c37cbf0"
 
 [triggers]
-# Every 1 minute (cron's fastest granularity) for fast Finance-Handoff
-# discovery latency. The separate stale-handoff Telegram digest throttles
-# itself to at most once per 15 min regardless of how often this fires —
-# see STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS in src/index.ts.
-crons = ["* * * * *"]
+# Every 15 minutes for Finance-Handoff discovery. The separate
+# stale-handoff Telegram digest throttles itself to at most once per 15
+# min regardless of how often this fires — see
+# STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS in src/index.ts. This native
+# trigger has never actually fired on this account (see
+# /admin/last-cron-run) — the real schedule is the external cron-job.org
+# job hitting /admin/run-finance-discovery, which must be updated to
+# match separately.
+crons = ["*/15 * * * *"]
 
 [vars]
 NOTION_VERSION = "2025-09-03"

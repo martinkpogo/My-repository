@@ -440,7 +440,10 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
 }
 
 const STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS = 15 * 60 * 1000;
-const WATCHDOG_STALE_THRESHOLD_MS = 3 * 60 * 1000;
+// Discovery now runs every 15 min (see wrangler.toml / cron-job.org), so a
+// legitimate gap between runs can be nearly that long — the threshold has
+// to clear one full cycle plus buffer, or every check would false-alarm.
+const WATCHDOG_STALE_THRESHOLD_MS = 20 * 60 * 1000;
 const WATCHDOG_ALERT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 // Runs on every scheduled tick (as often as the cron fires, currently every
