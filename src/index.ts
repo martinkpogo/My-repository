@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId } from "./router";
+import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId, threadIdForUnit } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import type { SessionSummary } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
@@ -54,6 +54,24 @@ export default {
       }
 
       await handleReadAiMeetingEnd(env, payload);
+      return new Response("ok");
+    }
+
+    // Fed by a Gmail-polling Apps Script (or any other email source) —
+    // treats the email body as a new incoming enquiry, exactly as if it had
+    // been typed into the SM&BD topic. Shared-secret gated.
+    if (url.pathname === "/email/webhook" && request.method === "POST") {
+      const secret = request.headers.get("X-Email-Webhook-Secret");
+      if (!env.EMAIL_WEBHOOK_SECRET || secret !== env.EMAIL_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const body = (await request.json()) as { from?: string; subject?: string; text?: string };
+      if (!body.text) return new Response("Missing text", { status: 400 });
+
+      const chatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : Number(env.MARTIN_TELEGRAM_USER_ID);
+      const threadId = threadIdForUnit(env, "SM&BD");
+      const enquiryText = `Email enquiry${body.from ? ` from ${body.from}` : ""}${body.subject ? ` — "${body.subject}"` : ""}:\n\n${body.text}`;
+      await routeIncomingText(env, chatId, enquiryText, threadId);
       return new Response("ok");
     }
 

@@ -38,6 +38,17 @@ export function resolveUnitForThread(env: Env, threadId?: number): Unit | "unmap
   return entry ? (entry[0] as Unit) : "unmapped";
 }
 
+/** Reverse of resolveUnitForThread: the topic thread id configured for a Unit, if any. */
+export function threadIdForUnit(env: Env, unit: Unit): number | undefined {
+  if (!env.UNIT_TOPIC_MAP) return undefined;
+  try {
+    const map: Record<string, number> = JSON.parse(env.UNIT_TOPIC_MAP);
+    return map[unit];
+  } catch {
+    return undefined;
+  }
+}
+
 interface RoutingClassification {
   route: "enquiry" | "out_of_scope" | "ambiguous";
   reason?: string;

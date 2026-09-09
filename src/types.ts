@@ -26,6 +26,12 @@ export interface Env {
    * as a plain 1:1 chat with no topic awareness (legacy/DM mode).
    */
   UNIT_TOPIC_MAP?: string;
+
+  /** The ENIG HQ Supergroup's chat id (negative number). Only needed if using Telegram topics. */
+  TELEGRAM_GROUP_CHAT_ID?: string;
+
+  /** Shared secret for the Gmail-polling Apps Script -> /email/webhook. */
+  EMAIL_WEBHOOK_SECRET?: string;
 }
 
 export type Unit = "SM&BD" | "Finance" | "Strategy" | "Research & Intelligence" | "Creative & Design" | "Operations";

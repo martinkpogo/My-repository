@@ -164,7 +164,54 @@ chain, but Read.ai's own docs note a broken chain "may require manual
 intervention" — if pulling ever starts failing with an authorization error,
 just redo step 4.
 
-### 6. Local dev
+### 6. Telegram Topics (optional — one topic per Unit)
+
+Simulates "one dedicated AI Workspace per Unit" inside a single Telegram
+Supergroup, closer to the original per-Unit Claude Project model than one
+flat chat:
+
+1. Create a Telegram **Group**, then enable **Topics** in its settings
+   (auto-converts it to a Supergroup).
+2. Add the bot to the group and make it an **admin** — required for it to
+   see every message regardless of Telegram's privacy-mode filtering.
+3. Create one topic per Unit: **SM&BD**, **Finance**, **Strategy**,
+   **Research & Intelligence**, **Creative & Design**, **Operations**.
+4. Deploy, keep `wrangler tail` open, then send a test message in each
+   topic — each logs a line like `Message received: chat -100xxxx, thread N`.
+5. Fill in `UNIT_TOPIC_MAP` in `wrangler.toml` with the real thread ids, and
+   `TELEGRAM_GROUP_CHAT_ID` if you want email-sourced enquiries (below) to
+   land in the group rather than your personal DM. Redeploy.
+
+Only SM&BD's topic accepts new enquiries directly — Finance's topic
+explains it only activates via Handoff, and the four unbuilt Units' topics
+say no Hat is available there yet. Unset `UNIT_TOPIC_MAP` entirely to fall
+back to the original flat 1:1 chat behavior.
+
+### 7. Email intake for enquiries (optional)
+
+Two options, from no-setup to fully automatic:
+
+- **Manual (works today, no setup):** forward or paste the email content
+  into the SM&BD topic — an enquiry is just text describing a business
+  problem, regardless of source.
+- **Automatic via Gmail:** a free Google Apps Script polls your inbox and
+  forwards labeled emails to the Worker.
+  1. In Gmail, create a filter that applies a label (e.g. `ENIG-Enquiry`)
+     to whatever mail should count as an incoming enquiry.
+  2. Set the secret: `npx wrangler secret put EMAIL_WEBHOOK_SECRET`
+  3. Go to **script.google.com** → **New project**, paste in
+     `scripts/gmail-enquiry-poller.gs` from this repo, fill in the same
+     secret and your Worker URL at the top of the script.
+  4. In the script editor, **Triggers** (clock icon) → **Add Trigger** →
+     run `checkForEnquiries` on a **time-driven** trigger, every 5 minutes.
+  5. It POSTs new labeled emails to `/email/webhook`, which creates a new
+     SM&BD work item exactly as if the enquiry had been typed into Telegram,
+     then labels the thread `ENIG-Enquiry-Sent` so it isn't reprocessed.
+- **Automatic via a custom domain:** if you have a domain on Cloudflare's
+  DNS, Cloudflare Email Routing + an Email Worker can trigger this same
+  Worker directly on inbound mail — ask if you want this built instead.
+
+### 8. Local dev
 
 ```bash
 cp .dev.vars.example .dev.vars   # fill in real values
