@@ -111,13 +111,60 @@ export default {
       return new Response(body, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
+    // Testing convenience only: runs the same Pending-Finance-Handoff
+    // discovery the cron does, on demand, instead of waiting up to 15
+    // minutes for the next scheduled tick. Gated the same as every other
+    // admin endpoint. Does not change what the discovery does or how
+    // Finance executes - only when it's triggered.
+    if (url.pathname === "/admin/run-finance-discovery" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const picked = await discoverPendingFinanceHandoffs(env);
+      return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     return new Response("not found", { status: 404 });
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    await discoverPendingFinanceHandoffs(env);
     await checkStaleHandoffs(env);
   },
 };
+
+/**
+ * The Finance side of the SM&BD -> Finance execution boundary. SM&BD's Hat
+ * code only ever creates the Handoff (Status: Pending) and records the
+ * handoff_workitem mapping, then returns - it never calls into Finance
+ * directly. This runs on its own schedule and discovers that Handoff
+ * independently, the same way a separate Finance AI Workspace would.
+ */
+async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    and: [
+      { property: "Status", select: { equals: "Pending" } },
+      { property: "To Unit", select: { equals: "Finance" } },
+      { property: "Type", select: { equals: "Work" } },
+    ],
+  });
+
+  let pickedUp = 0;
+  for (const handoff of pending) {
+    const workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    if (!workId) {
+      console.error(`Pending Finance Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
+      continue;
+    }
+    const stub = getSessionStub(env, workId);
+    await stub.runFinancePickup();
+    pickedUp++;
+  }
+  return pickedUp;
+}
 
 async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
   if (update.message) {

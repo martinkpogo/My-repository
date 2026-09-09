@@ -333,6 +333,12 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   });
 
   state.handoffId = handoff.id;
+  // SM&BD's execution ends here. Finance is a separate Unit and must
+  // discover and pick up this Handoff independently (see the scheduled
+  // discoverPendingFinanceHandoffs run in index.ts) rather than being
+  // invoked in-process from this call. This mapping is how that later,
+  // separate invocation finds its way back to this work item.
+  await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
   await logActivity(env, {
     entry: `Handoff to Finance created: ${state.matterName}`,
     type: "Activity",
@@ -344,7 +350,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 
   state.stage = "awaiting_quote";
   state.awaiting = undefined;
-  return finance.handlePickup(env, state);
+  return state;
 }
 
 export async function handleMoreValueContext(env: Env, state: WorkState, text: string): Promise<WorkState> {

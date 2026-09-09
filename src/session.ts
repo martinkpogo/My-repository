@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./hats/salesExecutive";
+import * as finance from "./hats/financeValueBasedPricing";
 import { sendMessage } from "./telegram";
 
 export class WorkSession extends DurableObject<Env> {
@@ -42,6 +43,17 @@ export class WorkSession extends DurableObject<Env> {
         await sendMessage(this.env, state.chatId, "This work item isn't awaiting a reply right now. Use /sessions to switch context.");
         return state;
     }
+  }
+
+  /**
+   * Invoked independently by index.ts's scheduled Finance-Handoff discovery
+   * (never by SM&BD directly) once a Pending Handoff addressed to Finance is
+   * found. This is the actual cross-Unit execution boundary: SM&BD's own
+   * call already returned before this ever runs.
+   */
+  async runFinancePickup(): Promise<WorkState> {
+    const state = await this.require();
+    return this.save(await finance.handlePickup(this.env, state));
   }
 
   async handleCallback(action: string, value: string): Promise<WorkState> {
