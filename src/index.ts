@@ -129,17 +129,20 @@ export default {
       return new Response(body, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
-    // Testing convenience only: runs the same Pending-Finance-Handoff
-    // discovery the cron does, on demand, instead of waiting up to 15
-    // minutes for the next scheduled tick. Gated the same as every other
-    // admin endpoint. Does not change what the discovery does or how
-    // Finance executes - only when it's triggered.
+    // Runs everything the native Cloudflare Cron Trigger was supposed to
+    // (confirmed correctly configured but never actually firing - see
+    // /admin/last-cron-run) - Finance-Handoff discovery and the
+    // stale-handoff digest. Called on a schedule by a GitHub Actions
+    // workflow (.github/workflows/finance-discovery-cron.yml) as a
+    // workaround. Gated the same as every other admin endpoint.
     if (url.pathname === "/admin/run-finance-discovery" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
         return new Response("forbidden", { status: 403 });
       }
+      await env.STATE_KV.put("last_cron_run", new Date().toISOString());
       const picked = await discoverPendingFinanceHandoffs(env);
+      await checkStaleHandoffs(env);
       return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked }), {
         headers: { "content-type": "application/json" },
       });

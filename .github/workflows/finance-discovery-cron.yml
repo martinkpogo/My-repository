@@ -1,0 +1,23 @@
+name: Finance Handoff Discovery
+
+# Works around Cloudflare's native Cron Trigger not firing on this account
+# (confirmed correctly configured and deployed, but never actually
+# invoked — see /admin/last-cron-run). This calls the same discovery
+# endpoint on GitHub's own schedule instead.
+#
+# Requires a repository secret named WORKER_ADMIN_KEY set to the same
+# value as the Worker's TELEGRAM_WEBHOOK_SECRET (Settings -> Secrets and
+# variables -> Actions -> New repository secret).
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Finance Handoff discovery
+        run: |
+          curl -sS -f "https://enig-agent.martnkpogo.workers.dev/admin/run-finance-discovery?key=${{ secrets.WORKER_ADMIN_KEY }}"
