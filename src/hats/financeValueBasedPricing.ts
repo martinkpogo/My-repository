@@ -45,6 +45,8 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       env,
       state.chatId,
       `*Finance held the quote request* for *${state.entityName}*.\n\nReason: ${reason}\n\nSend more value context (not a budget figure) and I'll re-submit to Finance.`,
+      undefined,
+      state.threadId,
     );
     state.stage = "handoff_held";
     state.awaiting = "value_context_more";
@@ -67,6 +69,8 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     env,
     state.chatId,
     `*Finance quote ready* for *${state.entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nPreparing the Draft Proposal now.`,
+    undefined,
+    state.threadId,
   );
 
   state.quote = { price: judgement.price, rationale: judgement.rationale ?? "" };

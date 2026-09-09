@@ -14,11 +14,12 @@ export interface TelegramUpdate {
     chat: { id: number };
     from?: { id: number };
     text?: string;
+    message_thread_id?: number;
   };
   callback_query?: {
     id: string;
     from: { id: number };
-    message?: { chat: { id: number } };
+    message?: { chat: { id: number }; message_thread_id?: number };
     data?: string;
   };
 }
@@ -38,6 +39,7 @@ export async function sendMessage(
   chatId: number,
   text: string,
   buttons?: InlineButton[][],
+  threadId?: number,
 ): Promise<void> {
   const chunks = splitText(text);
   for (let i = 0; i < chunks.length; i++) {
@@ -47,6 +49,7 @@ export async function sendMessage(
       text: chunks[i],
       parse_mode: "Markdown",
     };
+    if (threadId !== undefined) payload.message_thread_id = threadId;
     if (isLast && buttons) {
       payload.reply_markup = { inline_keyboard: buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.callback_data }))) };
     }

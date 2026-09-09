@@ -34,6 +34,12 @@ MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
 HANDOFFS_DATA_SOURCE_ID = "935cff62-de01-4920-9743-782c7d210455"
 ACTIVITY_LOG_DATA_SOURCE_ID = "423e7f93-5f9d-435d-856a-e183120d3d8f"
+# Optional — maps each Unit to its Telegram forum topic's message_thread_id,
+# simulating one dedicated AI Workspace per Unit inside a single Supergroup.
+# Leave unset to keep the bot as a plain 1:1 chat (all traffic treated as
+# SM&BD, matching the original design). Fill in real thread ids once the
+# group + topics exist — see README.md.
+# UNIT_TOPIC_MAP = '{"SM&BD": 2, "Finance": 4, "Strategy": 6, "Research & Intelligence": 8, "Creative & Design": 10, "Operations": 12}'
 
 # Secrets (set with `wrangler secret put <NAME>`, never committed):
 #   TELEGRAM_BOT_TOKEN

@@ -169,31 +169,44 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
 async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
   if (update.message) {
     const chatId = update.message.chat.id;
+    const threadId = update.message.message_thread_id;
+    if (threadId !== undefined) {
+      // Visible in `wrangler tail` — read a topic's thread id off this line
+      // when setting up UNIT_TOPIC_MAP.
+      console.log(`Message received: chat ${chatId}, thread ${threadId}`);
+    }
     const fromId = update.message.from?.id;
     if (String(fromId) !== env.MARTIN_TELEGRAM_USER_ID) {
-      await sendMessage(env, chatId, "This bot is private.");
+      await sendMessage(env, chatId, "This bot is private.", undefined, threadId);
       return;
     }
     const text = update.message.text ?? "";
     if (text === "/start") {
-      await sendMessage(env, chatId, "ENIG agent runtime online. Send a commercial enquiry to start, or /sessions to see open work items.");
+      await sendMessage(
+        env,
+        chatId,
+        "ENIG agent runtime online. Send a commercial enquiry to start, or /sessions to see open work items.",
+        undefined,
+        threadId,
+      );
       return;
     }
     if (text === "/sessions") {
-      await listSessions(env, chatId);
+      await listSessions(env, chatId, threadId);
       return;
     }
     if (text.startsWith("/")) {
-      await sendMessage(env, chatId, "Unknown command. Try /sessions.");
+      await sendMessage(env, chatId, "Unknown command. Try /sessions.", undefined, threadId);
       return;
     }
-    await routeIncomingText(env, chatId, text);
+    await routeIncomingText(env, chatId, text, threadId);
     return;
   }
 
   if (update.callback_query) {
     const cq = update.callback_query;
     const chatId = cq.message?.chat.id;
+    const threadId = cq.message?.message_thread_id;
     if (String(cq.from.id) !== env.MARTIN_TELEGRAM_USER_ID || !chatId) {
       await answerCallbackQuery(env, cq.id, "Not authorized.");
       return;
@@ -203,53 +216,55 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     await answerCallbackQuery(env, cq.id);
 
     if (action === "switch") {
-      await setActiveWorkId(env, chatId, workId);
-      await sendMessage(env, chatId, `Switched active context to work item ${workId}.`);
+      await setActiveWorkId(env, chatId, threadId, workId);
+      await sendMessage(env, chatId, `Switched active context to work item ${workId}.`, undefined, threadId);
       return;
     }
 
     if (action === "pullcall") {
-      await handlePullReadAiCall(env, chatId, workId);
+      await handlePullReadAiCall(env, chatId, workId, threadId);
       return;
     }
 
     if (action === "pullcallpick") {
-      await applyReadAiMeeting(env, chatId, workId, value);
+      await applyReadAiMeeting(env, chatId, workId, value, undefined, threadId);
       return;
     }
 
     const stub = getSessionStub(env, workId);
     const state = await stub.getState();
     if (!state) {
-      await sendMessage(env, chatId, "That work item no longer exists.");
+      await sendMessage(env, chatId, "That work item no longer exists.", undefined, threadId);
       return;
     }
-    await setActiveWorkId(env, chatId, workId);
+    await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleCallback(action, value);
     return;
   }
 }
 
-async function handlePullReadAiCall(env: Env, chatId: number, workId: string): Promise<void> {
+async function handlePullReadAiCall(env: Env, chatId: number, workId: string, threadId?: number): Promise<void> {
   if (!(await isAuthorized(env))) {
     await sendMessage(
       env,
       chatId,
       "Read.ai isn't connected yet. Visit /oauth/readai/start?key=<your webhook secret> in a browser once to authorize it, then try again.",
+      undefined,
+      threadId,
     );
     return;
   }
   const stub = getSessionStub(env, workId);
   const state = await stub.getState();
   if (!state) {
-    await sendMessage(env, chatId, "That work item no longer exists.");
+    await sendMessage(env, chatId, "That work item no longer exists.", undefined, threadId);
     return;
   }
   let meetings;
   try {
     meetings = await listRecentMeetings(env, new Date(state.createdAt).getTime());
   } catch (err) {
-    await sendMessage(env, chatId, `Couldn't reach Read.ai: ${err}`);
+    await sendMessage(env, chatId, `Couldn't reach Read.ai: ${err}`, undefined, threadId);
     return;
   }
   if (meetings.length === 0) {
@@ -257,11 +272,13 @@ async function handlePullReadAiCall(env: Env, chatId: number, workId: string): P
       env,
       chatId,
       "No Read.ai meetings found since this enquiry started. Try again after the call ends, or type notes manually.",
+      undefined,
+      threadId,
     );
     return;
   }
   if (meetings.length === 1) {
-    await applyReadAiMeeting(env, chatId, workId, meetings[0].id, meetings[0].title);
+    await applyReadAiMeeting(env, chatId, workId, meetings[0].id, meetings[0].title, threadId);
     return;
   }
   const buttons: InlineButton[][] = meetings.map((m) => [
@@ -270,20 +287,33 @@ async function handlePullReadAiCall(env: Env, chatId: number, workId: string): P
       callback_data: `pullcallpick:${workId}:${m.id}`,
     },
   ]);
-  await sendMessage(env, chatId, "Multiple recent Read.ai meetings found — which one?", buttons);
+  await sendMessage(env, chatId, "Multiple recent Read.ai meetings found — which one?", buttons, threadId);
 }
 
-async function applyReadAiMeeting(env: Env, chatId: number, workId: string, meetingId: string, knownTitle?: string): Promise<void> {
+async function applyReadAiMeeting(
+  env: Env,
+  chatId: number,
+  workId: string,
+  meetingId: string,
+  knownTitle?: string,
+  threadId?: number,
+): Promise<void> {
   let meeting;
   try {
     meeting = await getMeeting(env, meetingId);
   } catch (err) {
-    await sendMessage(env, chatId, `Couldn't fetch that meeting from Read.ai: ${err}`);
+    await sendMessage(env, chatId, `Couldn't fetch that meeting from Read.ai: ${err}`, undefined, threadId);
     return;
   }
-  await sendMessage(env, chatId, `Pulled *${meeting.title ?? knownTitle ?? "the meeting"}* from Read.ai — feeding it in as call notes.`);
+  await sendMessage(
+    env,
+    chatId,
+    `Pulled *${meeting.title ?? knownTitle ?? "the meeting"}* from Read.ai — feeding it in as call notes.`,
+    undefined,
+    threadId,
+  );
   const stub = getSessionStub(env, workId);
-  await setActiveWorkId(env, chatId, workId);
+  await setActiveWorkId(env, chatId, threadId, workId);
   await stub.handleTextReply(formatCallNotesFromPayload(meeting));
 }
 
@@ -309,22 +339,22 @@ async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise
   );
 }
 
-async function listSessions(env: Env, chatId: number): Promise<void> {
+async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
   const raw = await env.STATE_KV.get("sessions_index");
   const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
   const open = index.filter((s) => s.stage !== "complete" && s.stage !== "closed_not_qualified");
   if (open.length === 0) {
-    await sendMessage(env, chatId, "No open work items. Send a new enquiry to start one.");
+    await sendMessage(env, chatId, "No open work items. Send a new enquiry to start one.", undefined, threadId);
     return;
   }
-  const activeId = await getActiveWorkId(env, chatId);
+  const activeId = await getActiveWorkId(env, chatId, threadId);
   const buttons: InlineButton[][] = open.map((s) => [
     {
       text: `${s.workId === activeId ? "• " : ""}${s.unit}/${s.hat} — ${s.label} (${s.stage})`,
       callback_data: `switch:${s.workId}:`,
     },
   ]);
-  await sendMessage(env, chatId, "Open work items:", buttons);
+  await sendMessage(env, chatId, "Open work items:", buttons, threadId);
 }
 
 const STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS = 15 * 60 * 1000;

@@ -19,9 +19,16 @@ export interface Env {
   READAI_WEBHOOK_SECRET?: string;
   READAI_OAUTH_CLIENT_ID?: string;
   READAI_OAUTH_CLIENT_SECRET?: string;
+
+  /**
+   * JSON object mapping Unit name -> Telegram forum topic message_thread_id,
+   * e.g. {"SM&BD": 2, "Finance": 4}. Optional — when unset, the bot behaves
+   * as a plain 1:1 chat with no topic awareness (legacy/DM mode).
+   */
+  UNIT_TOPIC_MAP?: string;
 }
 
-export type Unit = "SM&BD" | "Finance";
+export type Unit = "SM&BD" | "Finance" | "Strategy" | "Research & Intelligence" | "Creative & Design" | "Operations";
 
 export type QualificationAssessment = "Satisfied" | "Not Satisfied" | "Insufficient Evidence";
 
@@ -55,6 +62,7 @@ export interface PendingApproval {
 export interface WorkState {
   workId: string;
   chatId: number;
+  threadId?: number;
   unit: Unit;
   hat: string;
   stage: string;

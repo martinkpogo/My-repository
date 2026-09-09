@@ -69,6 +69,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
     state.chatId,
     `*New enquiry — Sales Executive*\n\n${text}\n\nIs this an existing Entity, or should I create a new one?`,
     buttons,
+    state.threadId,
   );
   state.stage = "awaiting_entity_pick";
   state.awaiting = "entity_pick";
@@ -126,6 +127,7 @@ async function proceedToMatterIdentification(env: Env, state: WorkState): Promis
     state.chatId,
     `Entity: *${state.entityName}*.\n\nIs this enquiry part of existing commercial work, or a new Matter?`,
     buttons,
+    state.threadId,
   );
   state.stage = "awaiting_matter_pick";
   state.awaiting = "matter_pick";
@@ -188,6 +190,7 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
     state.chatId,
     `*Sales call prep — ${state.entityName}*\n\n${brief}\n\nWhen the call is done, send me the call notes / insights as a message and I'll process qualification.`,
     [[{ text: "📞 Pull latest Read.ai call", callback_data: `pullcall:${state.workId}:` }]],
+    state.threadId,
   );
   await logActivity(env, {
     entry: `Sales call prep sent for ${state.entityName}`,
@@ -219,6 +222,8 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
       env,
       state.chatId,
       "I couldn't determine qualification from the evidence given — the assessment was inconclusive. Please send additional call notes or clarification.",
+      undefined,
+      state.threadId,
     );
     state.awaiting = "call_notes";
     state.stage = "awaiting_call_clarification";
@@ -249,6 +254,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
           { text: "❌ Not yet", callback_data: `qualify:${state.workId}:reject` },
         ],
       ],
+      state.threadId,
     );
     state.stage = "awaiting_qualification_approval";
     state.awaiting = undefined;
@@ -257,11 +263,13 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
       env,
       state.chatId,
       `*Qualification: More Information Required*\n\n${evidenceText}\n\nSend the missing information and I'll re-evaluate.`,
+      undefined,
+      state.threadId,
     );
     state.stage = "awaiting_more_info";
     state.awaiting = "call_notes";
   } else {
-    await sendMessage(env, state.chatId, `*Qualification: Not Qualified*\n\n${evidenceText}`);
+    await sendMessage(env, state.chatId, `*Qualification: Not Qualified*\n\n${evidenceText}`, undefined, state.threadId);
     await logActivity(env, {
       entry: `Work item closed — Not Qualified: ${state.entityName}`,
       type: "Activity",
@@ -276,7 +284,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
 
 export async function handleLeadToProspectApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(env, state.chatId, "Understood — Lead→Prospect not approved. Send more context if there's anything further to evaluate.");
+    await sendMessage(env, state.chatId, "Understood — Lead→Prospect not approved. Send more context if there's anything further to evaluate.", undefined, state.threadId);
     await logActivity(env, {
       entry: `Lead→Prospect not approved: ${state.entityName}`,
       type: "Decision",
@@ -302,6 +310,8 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
     env,
     state.chatId,
     `*${state.entityName}* is now a Prospect. What's the proposed intervention (what ENIG would actually do)? Send it as a message — no pricing/budget figures, just the scope.`,
+    undefined,
+    state.threadId,
   );
   state.stage = "awaiting_intervention";
   state.awaiting = "intervention";
@@ -385,6 +395,7 @@ Use the authoritative Finance quote and rationale exactly as given for Investmen
         { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
       ],
     ],
+    state.threadId,
   );
   state.stage = "awaiting_proposal_approval";
   state.awaiting = undefined;
@@ -393,7 +404,7 @@ Use the authoritative Finance quote and rationale exactly as given for Investmen
 
 export async function handleProposalApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(env, state.chatId, "What should change in the draft? Send your feedback as a message.");
+    await sendMessage(env, state.chatId, "What should change in the draft? Send your feedback as a message.", undefined, state.threadId);
     state.stage = "awaiting_proposal_revision";
     state.awaiting = "proposal_feedback";
     return state;
@@ -418,7 +429,7 @@ export async function handleProposalApproval(env: Env, state: WorkState, approve
     outcome: "Complete",
   });
 
-  await sendMessage(env, state.chatId, `Proposal created in Draft status: ${page.url}`);
+  await sendMessage(env, state.chatId, `Proposal created in Draft status: ${page.url}`, undefined, state.threadId);
   state.stage = "complete";
   state.awaiting = undefined;
   return state;
@@ -433,12 +444,18 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
   );
   state.proposalDraft = revised;
   state.proposalRevisionCount = (state.proposalRevisionCount ?? 0) + 1;
-  await sendMessage(env, state.chatId, `*Revised Draft Proposal*\n\n${revised}`, [
+  await sendMessage(
+    env,
+    state.chatId,
+    `*Revised Draft Proposal*\n\n${revised}`,
     [
-      { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
-      { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
+      [
+        { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
+        { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
+      ],
     ],
-  ]);
+    state.threadId,
+  );
   state.stage = "awaiting_proposal_approval";
   state.awaiting = undefined;
   return state;

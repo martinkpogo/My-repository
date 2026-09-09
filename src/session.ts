@@ -5,11 +5,12 @@ import * as finance from "./hats/financeValueBasedPricing";
 import { sendMessage } from "./telegram";
 
 export class WorkSession extends DurableObject<Env> {
-  async init(workId: string, chatId: number, unit: Unit, hat: string): Promise<void> {
+  async init(workId: string, chatId: number, unit: Unit, hat: string, threadId?: number): Promise<void> {
     const now = new Date().toISOString();
     const state: WorkState = {
       workId,
       chatId,
+      threadId,
       unit,
       hat,
       stage: "new",
@@ -40,7 +41,7 @@ export class WorkSession extends DurableObject<Env> {
       case "proposal_feedback":
         return this.save(await sales.handleProposalFeedback(this.env, state, text));
       default:
-        await sendMessage(this.env, state.chatId, "This work item isn't awaiting a reply right now. Use /sessions to switch context.");
+        await sendMessage(this.env, state.chatId, "This work item isn't awaiting a reply right now. Use /sessions to switch context.", undefined, state.threadId);
         return state;
     }
   }
