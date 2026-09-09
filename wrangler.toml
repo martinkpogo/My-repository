@@ -24,7 +24,7 @@ crons = ["*/15 * * * *"]
 [vars]
 NOTION_VERSION = "2025-09-03"
 AI_MODEL_PRIMARY = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct"
+AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct-fast"
 ENTITY_DATA_SOURCE_ID = "437248f7-f6d8-4e70-873b-7b1eb0fdc519"
 MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
