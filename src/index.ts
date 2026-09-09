@@ -68,7 +68,7 @@ export default {
       const state = generateState();
       const verifier = generateCodeVerifier();
       const challenge = await codeChallengeFromVerifier(verifier);
-      await env.STATE_KV.put(`readai_oauth_state:${state}`, verifier, { expirationTtl: 600 });
+      await env.STATE_KV.put(`readai_oauth_state:${state}`, verifier, { expirationTtl: 1800 });
       const redirectUri = `${url.origin}/oauth/readai/callback`;
       const authorizeUrl = buildAuthorizeUrl(env, redirectUri, state, challenge);
       return Response.redirect(authorizeUrl, 302);
