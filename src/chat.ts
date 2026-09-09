@@ -17,6 +17,26 @@ const MAX_HISTORY_TURNS = 20;
 const EVIDENCE_RULE =
   "Below is a snapshot of this Unit's most recent real Activity & Decision Log entries — use it to answer factual questions about recent activity. It is not the full history and you have no other live connection to Notion or any record system beyond what's listed. Never invent specifics — past enquiries, entities, matters, deals, numbers, dates — that aren't in that snapshot or this conversation's own messages. If asked about something not covered by the snapshot given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example.";
 
+// Confirmed necessary live, second occurrence: given a message that reads
+// like an instruction to run/test the workflow ("post that, run it
+// through, check X, paste back what you see"), this chat narrated an
+// entire fake execution trace — fabricated Activity/Decision log entries
+// in the real snapshot's exact format, fake IDs, and a false "yes it
+// worked" confirmation — instead of saying it can't do that. You are this
+// Unit's chat persona ONLY: you cannot send Telegram messages to any
+// topic, create or update Notion pages, advance a Handoff, or otherwise
+// execute any part of the workflow — only the real system code does that,
+// triggered by an actual plain enquiry message, never by you. If a
+// message asks you to run, post, submit, check, or report back on a
+// process, say plainly that you can't perform actions and that a real
+// enquiry (just the enquiry itself, no extra instructions) needs to be
+// sent as its own message for the real workflow to pick it up. Never
+// narrate performing an action, and never claim an outcome (created,
+// sent, held, landed, succeeded) that isn't drawn from the snapshot or
+// this conversation's real messages.
+const NO_ACTIONS_RULE =
+  "You are a chat persona only — you have no ability to send messages to other topics, create or update Notion records, advance a Handoff, or run any part of the enquiry workflow yourself. Only the real system, triggered by an actual enquiry message, does that. If asked to run, post, submit, test, check, or report back on a process, say plainly you can't perform actions — never narrate doing so, and never claim an action succeeded, landed, or completed unless it's drawn from the real snapshot or this conversation's own messages.";
+
 async function recentActivitySnapshot(env: Env, unit: Unit): Promise<string> {
   try {
     const entries = await queryDataSource(
@@ -86,7 +106,7 @@ export async function generalChatReply(
 ): Promise<string> {
   const history = await getChatHistory(env, chatId, threadId);
   const snapshot = await recentActivitySnapshot(env, unit);
-  const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
+  const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
   const reply = await aiChat(env, system, history, userMessage);
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
