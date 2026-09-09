@@ -37,6 +37,9 @@ ACTIVITY_LOG_DATA_SOURCE_ID = "423e7f93-5f9d-435d-856a-e183120d3d8f"
 # Maps each Unit to its Telegram forum topic's message_thread_id in the
 # ENIG HQ Supergroup, simulating one dedicated AI Workspace per Unit.
 UNIT_TOPIC_MAP = '{"SM&BD": 4, "Finance": 6, "Strategy": 8, "Research & Intelligence": 10, "Creative & Design": 12, "Operations": 14}'
+# The ENIG HQ Supergroup's chat id — where email-sourced enquiries (and
+# any other session-less notification we choose to send there) land.
+TELEGRAM_GROUP_CHAT_ID = "-1004435157576"
 
 # Secrets (set with `wrangler secret put <NAME>`, never committed):
 #   TELEGRAM_BOT_TOKEN
@@ -44,3 +47,4 @@ UNIT_TOPIC_MAP = '{"SM&BD": 4, "Finance": 6, "Strategy": 8, "Research & Intellig
 #   MARTIN_TELEGRAM_USER_ID
 #   NOTION_TOKEN
 #   READAI_WEBHOOK_SECRET (optional — only needed if you wire up Read.ai)
+#   EMAIL_WEBHOOK_SECRET (optional — only needed if you wire up Gmail intake)
