@@ -19,5 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Finance Handoff discovery
+        env:
+          WORKER_ADMIN_KEY: ${{ secrets.WORKER_ADMIN_KEY }}
         run: |
-          curl -sS -f "https://enig-agent.martnkpogo.workers.dev/admin/run-finance-discovery?key=${{ secrets.WORKER_ADMIN_KEY }}"
+          echo "Secret length: ${#WORKER_ADMIN_KEY}"
+          curl -sS -f "https://enig-agent.martnkpogo.workers.dev/admin/run-finance-discovery?key=${WORKER_ADMIN_KEY}"
