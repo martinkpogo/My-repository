@@ -3,6 +3,7 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./hats/salesExecutive";
 import * as finance from "./hats/financeValueBasedPricing";
 import { sendMessage } from "./telegram";
+import { logActivity } from "./log";
 
 export class WorkSession extends DurableObject<Env> {
   async init(workId: string, chatId: number, unit: Unit, hat: string, threadId?: number): Promise<void> {
@@ -57,6 +58,19 @@ export class WorkSession extends DurableObject<Env> {
     return this.save(await finance.handlePickup(this.env, state));
   }
 
+  async cancel(): Promise<WorkState> {
+    const state = await this.require();
+    state.stage = "cancelled";
+    state.awaiting = undefined;
+    await logActivity(this.env, {
+      entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
+      type: "Activity",
+      area: state.unit,
+      outcome: "Complete",
+    });
+    return this.save(state);
+  }
+
   async handleCallback(action: string, value: string): Promise<WorkState> {
     const state = await this.require();
     switch (action) {
@@ -99,12 +113,12 @@ export class WorkSession extends DurableObject<Env> {
     const raw = await this.env.STATE_KV.get(key);
     const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
     const withoutSelf = index.filter((s) => s.workId !== state.workId);
-    const isTerminal = state.stage === "complete" || state.stage === "closed_not_qualified";
+    const isTerminal = state.stage === "complete" || state.stage === "closed_not_qualified" || state.stage === "cancelled";
     // Terminal work items drop out of the index (they no longer show as "open").
     const kept = isTerminal ? withoutSelf.slice(-50) : [...withoutSelf, summary].slice(-50);
     await this.env.STATE_KV.put(key, JSON.stringify(kept));
     if (isTerminal) {
-      const activeKey = `active:${state.chatId}`;
+      const activeKey = `active:${state.chatId}:${state.threadId ?? "dm"}`;
       const active = await this.env.STATE_KV.get(activeKey);
       if (active === state.workId) await this.env.STATE_KV.delete(activeKey);
     }

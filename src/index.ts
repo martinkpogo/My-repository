@@ -203,7 +203,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, or /sessions to see open work items.",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one.",
         undefined,
         threadId,
       );
@@ -211,6 +211,17 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     }
     if (text === "/sessions") {
       await listSessions(env, chatId, threadId);
+      return;
+    }
+    if (text === "/cancel") {
+      const activeId = await getActiveWorkId(env, chatId, threadId);
+      if (!activeId) {
+        await sendMessage(env, chatId, "Nothing active here to cancel.", undefined, threadId);
+        return;
+      }
+      const stub = getSessionStub(env, activeId);
+      await stub.cancel();
+      await sendMessage(env, chatId, "Cancelled the active work item.", undefined, threadId);
       return;
     }
     if (text.startsWith("/")) {
