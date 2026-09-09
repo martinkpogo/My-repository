@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
-import { answerCallbackQuery, sendMessage } from "./telegram";
+import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import type { SessionSummary } from "./types";
@@ -25,6 +25,21 @@ export default {
       const update = (await request.json()) as TelegramUpdate;
       await handleUpdate(env, update);
       return new Response("ok");
+    }
+
+    // One-time setup helper: registers this Worker's own /telegram/webhook URL
+    // with Telegram, using the bot token already stored as a Cloudflare
+    // secret. Never requires the bot token to leave Cloudflare. Gated on the
+    // webhook secret you already set, so only you can trigger it.
+    if (url.pathname === "/admin/register-webhook" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const webhookUrl = `${url.origin}/telegram/webhook`;
+      const res = await setWebhook(env, webhookUrl);
+      const body = await res.text();
+      return new Response(body, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
     return new Response("not found", { status: 404 });
