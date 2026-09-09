@@ -327,6 +327,12 @@ async function listSessions(env: Env, chatId: number): Promise<void> {
   await sendMessage(env, chatId, "Open work items:", buttons);
 }
 
+const STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS = 15 * 60 * 1000;
+
+// Runs on every scheduled tick (as often as the cron fires, currently every
+// 1 minute for Finance-discovery latency), but only actually messages
+// Martin at most once per STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS - discovery
+// and notification cadence are independent concerns.
 async function checkStaleHandoffs(env: Env): Promise<void> {
   const results = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
     or: [
@@ -335,6 +341,11 @@ async function checkStaleHandoffs(env: Env): Promise<void> {
     ],
   });
   if (results.length === 0) return;
+
+  const lastSentKey = "stale_handoff_digest_last_sent";
+  const lastSent = await env.STATE_KV.get(lastSentKey);
+  if (lastSent && Date.now() - Number(lastSent) < STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS) return;
+
   const lines = results.map((p) => {
     const status = plainText(p.properties.Status);
     const toUnit = plainText(p.properties["To Unit"]);
@@ -346,4 +357,5 @@ async function checkStaleHandoffs(env: Env): Promise<void> {
     Number(env.MARTIN_TELEGRAM_USER_ID),
     `*Handoff check-in* — ${results.length} item(s) not Closed:\n\n${lines.join("\n")}`,
   );
+  await env.STATE_KV.put(lastSentKey, String(Date.now()));
 }

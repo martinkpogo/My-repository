@@ -19,8 +19,10 @@ binding = "STATE_KV"
 id = "9c01e73f957949d796de688c1c37cbf0"
 
 [triggers]
-# TEMPORARY for testing the SM&BD -> Finance discovery boundary — revert to
-# */15 * * * * once confirmed working live.
+# Every 1 minute (cron's fastest granularity) for fast Finance-Handoff
+# discovery latency. The separate stale-handoff Telegram digest throttles
+# itself to at most once per 15 min regardless of how often this fires —
+# see STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS in src/index.ts.
 crons = ["* * * * *"]
 
 [vars]
