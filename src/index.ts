@@ -145,10 +145,24 @@ export default {
       });
     }
 
+    // Diagnostic: when did the cron trigger last actually run, per the
+    // Worker's own record - no live-watching required, check anytime.
+    if (url.pathname === "/admin/last-cron-run" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const lastRun = await env.STATE_KV.get("last_cron_run");
+      return new Response(JSON.stringify({ last_cron_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     return new Response("not found", { status: 404 });
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    await env.STATE_KV.put("last_cron_run", new Date().toISOString());
     await discoverPendingFinanceHandoffs(env);
     await checkStaleHandoffs(env);
   },
