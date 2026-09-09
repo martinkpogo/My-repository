@@ -56,9 +56,13 @@ export async function queryDataSource(
   env: Env,
   dataSourceId: string,
   filter?: Record<string, unknown>,
+  options?: { pageSize?: number; sortByCreatedDescending?: boolean },
 ): Promise<NotionPage[]> {
-  const body: Record<string, unknown> = { page_size: 20 };
+  const body: Record<string, unknown> = { page_size: options?.pageSize ?? 20 };
   if (filter) body.filter = filter;
+  if (options?.sortByCreatedDescending) {
+    body.sorts = [{ timestamp: "created_time", direction: "descending" }];
+  }
   const data = await notionFetch(env, `/data_sources/${dataSourceId}/query`, {
     method: "POST",
     body: JSON.stringify(body),

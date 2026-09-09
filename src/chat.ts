@@ -1,19 +1,45 @@
 import type { Env, Unit } from "./types";
 import { aiChat } from "./ai";
 import type { ChatTurn } from "./ai";
+import { plainText, queryDataSource } from "./notion";
 
 const MAX_HISTORY_TURNS = 20;
 
 // Universal Role Contract, evidence rule: consequential claims must be
 // attributable to a specific source; unsupported material claims are
-// unverified until sourced. This chat has no live connection to Notion or
-// any other record — it must never fabricate specifics about real
-// business records (entities, matters, enquiries, deals, numbers, dates)
-// to sound helpful. Confirmed necessary live: asked "do you remember any
-// enquiries," it invented three entirely fictional ones with plausible
-// specifics instead of saying it couldn't check.
+// unverified until sourced. Confirmed necessary live: asked "do you
+// remember any enquiries," this chat invented three entirely fictional
+// ones with plausible specifics instead of saying it couldn't check.
+// Below, it's handed a real snapshot of this Unit's recent Activity &
+// Decision Log entries as grounding — but that's still only a recent
+// slice, not full database access, so the rule against inventing beyond
+// what it was actually given still applies.
 const EVIDENCE_RULE =
-  "You have no live connection to Notion, the Handoffs/Entity/Matters databases, or any other record system — only this conversation's own recent messages. Never invent specifics about real business records: past enquiries, entities, matters, deals, numbers, dates, or anything you'd need an actual database to know. If asked about real records or history you have no access to, say so plainly and point to /sessions (open work items) or the actual Notion database — never answer with a plausible-sounding invented example.";
+  "Below is a snapshot of this Unit's most recent real Activity & Decision Log entries — use it to answer factual questions about recent activity. It is not the full history and you have no other live connection to Notion or any record system beyond what's listed. Never invent specifics — past enquiries, entities, matters, deals, numbers, dates — that aren't in that snapshot or this conversation's own messages. If asked about something not covered by the snapshot given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example.";
+
+async function recentActivitySnapshot(env: Env, unit: Unit): Promise<string> {
+  try {
+    const entries = await queryDataSource(
+      env,
+      env.ACTIVITY_LOG_DATA_SOURCE_ID,
+      { property: "Area", rich_text: { equals: unit } },
+      { pageSize: 15, sortByCreatedDescending: true },
+    );
+    if (entries.length === 0) return "(no Activity & Decision Log entries found for this Unit yet)";
+    return entries
+      .map((e) => {
+        const entry = plainText(e.properties.Entry);
+        const type = plainText(e.properties.Type);
+        const activity = plainText(e.properties["Activity / Event"]);
+        const decisions = plainText(e.properties.Decisions);
+        return `- [${type}] ${entry}${activity ? ` — ${activity}` : ""}${decisions ? ` (decision: ${decisions})` : ""}`;
+      })
+      .join("\n");
+  } catch (err) {
+    console.error("Failed to fetch Activity & Decision Log snapshot", err);
+    return "(couldn't reach the Activity & Decision Log right now)";
+  }
+}
 
 const UNIT_PERSONAS: Record<Unit, string> = {
   "SM&BD":
@@ -59,7 +85,8 @@ export async function generalChatReply(
   userMessage: string,
 ): Promise<string> {
   const history = await getChatHistory(env, chatId, threadId);
-  const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}`;
+  const snapshot = await recentActivitySnapshot(env, unit);
+  const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
   const reply = await aiChat(env, system, history, userMessage);
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
