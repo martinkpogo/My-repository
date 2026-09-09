@@ -19,7 +19,9 @@ binding = "STATE_KV"
 id = "9c01e73f957949d796de688c1c37cbf0"
 
 [triggers]
-crons = ["*/15 * * * *"]
+# TEMPORARY for testing the SM&BD -> Finance discovery boundary — revert to
+# */15 * * * * once confirmed working live.
+crons = ["* * * * *"]
 
 [vars]
 NOTION_VERSION = "2025-09-03"
