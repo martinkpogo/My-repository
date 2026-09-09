@@ -99,11 +99,12 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
   -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-### 5. Read.ai (optional — automatic call notes)
+### 5. Read.ai (optional — call notes without typing them yourself)
 
-If you want sales-call transcripts fed in automatically instead of pasting
-notes into Telegram yourself, requires a Read.ai **Pro, Enterprise, or
-Enterprise+** plan (webhooks aren't on the free tier):
+Two independent integrations exist, pick one (or neither and keep typing
+notes manually — that always works, no setup needed):
+
+**Option A — Webhook (push, fully automatic, needs Pro/Enterprise/Enterprise+):**
 
 1. In Read.ai: **Integrations → Your Integrations → Webhooks**
    (`app.read.ai/analytics/integrations/user/workflow/webhooks`) — a
@@ -113,12 +114,55 @@ Enterprise+** plan (webhooks aren't on the free tier):
    ```bash
    npx wrangler secret put READAI_WEBHOOK_SECRET
    ```
-   paste the signing key at the prompt.
 4. When a call ends, the Worker checks whether a work item is currently
-   waiting on call notes (i.e. you're mid-flow with the Sales Executive Hat)
-   and feeds the transcript/summary in automatically. If nothing is waiting,
-   it messages you on Telegram instead of guessing which enquiry it belongs
-   to — same ambiguity rule as everywhere else in this system.
+   waiting on call notes and feeds the transcript/summary in automatically.
+   If nothing is waiting, it messages you on Telegram instead of guessing
+   which enquiry it belongs to.
+
+**Option B — OAuth pull API (on-demand, works on the free plan, open beta):**
+
+Read.ai's free-plan-compatible pull API requires OAuth 2.1 (browser-based,
+one-time bootstrap; no static API keys yet). Setup:
+
+1. Register an OAuth client (self-service, instant, no approval wait):
+   ```bash
+   curl -X POST https://api.read.ai/oauth/register \
+     -H "Content-Type: application/json" \
+     -d '{
+       "client_name": "ENIG Agent",
+       "redirect_uris": ["https://<your-worker-subdomain>.workers.dev/oauth/readai/callback"],
+       "grant_types": ["authorization_code", "refresh_token"],
+       "response_types": ["code"],
+       "scope": "openid email offline_access profile meeting:read",
+       "token_endpoint_auth_method": "client_secret_basic"
+     }'
+   ```
+   Response includes `client_id` and `client_secret` (shown once).
+2. Set both as Cloudflare secrets:
+   ```bash
+   npx wrangler secret put READAI_OAUTH_CLIENT_ID
+   npx wrangler secret put READAI_OAUTH_CLIENT_SECRET
+   ```
+3. If you're in a Read.ai workspace, enable **Downloads** under
+   **Workspace Settings → Reports & Sharing** — required for API pull access
+   regardless of plan.
+4. Deploy (`npm run deploy`), then authorize once by visiting, in a browser:
+   ```
+   https://<your-worker-subdomain>.workers.dev/oauth/readai/start?key=<your TELEGRAM_WEBHOOK_SECRET>
+   ```
+   Sign in and consent. You should land on a page saying "Read.ai
+   authorized." If Read.ai's consent UI instead shows you a `code=...` and
+   `state=...` to copy rather than redirecting automatically, just visit
+   `.../oauth/readai/callback?code=...&state=...` yourself with those values.
+5. From then on, whenever a work item is waiting on call notes, its Telegram
+   message includes a **"📞 Pull latest Read.ai call"** button — tap it to
+   fetch and apply the transcript instead of typing notes.
+
+Access tokens last 10 minutes and refresh automatically (rotating refresh
+tokens, stored in KV). There's no documented hard expiry on the refresh
+chain, but Read.ai's own docs note a broken chain "may require manual
+intervention" — if pulling ever starts failing with an authorization error,
+just redo step 4.
 
 ### 6. Local dev
 

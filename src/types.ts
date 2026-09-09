@@ -17,6 +17,8 @@ export interface Env {
   MARTIN_TELEGRAM_USER_ID: string;
   NOTION_TOKEN: string;
   READAI_WEBHOOK_SECRET?: string;
+  READAI_OAUTH_CLIENT_ID?: string;
+  READAI_OAUTH_CLIENT_SECRET?: string;
 }
 
 export type Unit = "SM&BD" | "Finance";

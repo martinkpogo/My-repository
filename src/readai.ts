@@ -32,7 +32,17 @@ export async function verifyReadAiSignature(
   return timingSafeEqualHex(computedHex, signatureHeader);
 }
 
-export function formatCallNotesFromPayload(payload: ReadAiPayload): string {
+export interface CallNotesSource {
+  title?: string;
+  summary?: string;
+  action_items?: { text: string }[];
+  key_questions?: { text: string }[];
+  transcript?: {
+    speaker_blocks?: { speaker?: { name?: string }; words?: string }[];
+  };
+}
+
+export function formatCallNotesFromPayload(payload: CallNotesSource): string {
   const parts: string[] = [];
   if (payload.title) parts.push(`Meeting: ${payload.title}`);
   if (payload.summary) parts.push(`Summary: ${payload.summary}`);

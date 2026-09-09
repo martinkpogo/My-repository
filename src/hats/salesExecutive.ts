@@ -187,6 +187,7 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
     env,
     state.chatId,
     `*Sales call prep — ${state.entityName}*\n\n${brief}\n\nWhen the call is done, send me the call notes / insights as a message and I'll process qualification.`,
+    [[{ text: "📞 Pull latest Read.ai call", callback_data: `pullcall:${state.workId}:` }]],
   );
   await logActivity(env, {
     entry: `Sales call prep sent for ${state.entityName}`,
