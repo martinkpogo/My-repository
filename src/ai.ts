@@ -4,6 +4,12 @@ export interface AiJsonOptions {
   system: string;
   user: string;
   light?: boolean;
+  maxTokens?: number;
+}
+
+export interface AiTextOptions {
+  light?: boolean;
+  maxTokens?: number;
 }
 
 /**
@@ -27,7 +33,10 @@ export async function aiJson<T = Record<string, unknown>>(
 
   let raw: string;
   try {
-    const result = await env.AI.run(model as any, { messages, temperature: 0.2 } as any);
+    const result = await env.AI.run(
+      model as any,
+      { messages, temperature: 0.2, max_tokens: opts.maxTokens ?? 1024 } as any,
+    );
     raw = coerceToText(result);
   } catch (err) {
     console.error("Workers AI call failed", err);
@@ -43,14 +52,17 @@ export async function aiJson<T = Record<string, unknown>>(
   }
 }
 
-export async function aiText(env: Env, system: string, user: string, light = false): Promise<string> {
-  const model = light ? env.AI_MODEL_LIGHT : env.AI_MODEL_PRIMARY;
+export async function aiText(env: Env, system: string, user: string, options: AiTextOptions = {}): Promise<string> {
+  const model = options.light ? env.AI_MODEL_LIGHT : env.AI_MODEL_PRIMARY;
   const messages = [
     { role: "system", content: system },
     { role: "user", content: user },
   ];
   try {
-    const result = await env.AI.run(model as any, { messages, temperature: 0.4 } as any);
+    const result = await env.AI.run(
+      model as any,
+      { messages, temperature: 0.4, max_tokens: options.maxTokens ?? 1536 } as any,
+    );
     return coerceToText(result);
   } catch (err) {
     console.error("Workers AI call failed", err);

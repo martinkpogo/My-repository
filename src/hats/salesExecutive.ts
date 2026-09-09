@@ -364,6 +364,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
 Identification | Situation Summary | Objective | Proposed Intervention / Scope | Basis for the Investment | Investment | Timeline / Delivery Schedule | What ENIG Needs from the Client | Next Steps.
 Use the authoritative Finance quote and rationale exactly as given for Investment — never alter, convert, or reinterpret the price. Do not disclose internal Finance reasoning not intended for the client; translate it into client-facing value language instead. Do not expose internal budget discussion. Keep it concise and professional. Do not invent a timeline if none is known.`,
     `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: $${state.quote?.price} — rationale: ${state.quote?.rationale}`,
+    { maxTokens: 3000 },
   );
 
   state.proposalDraft = draft;
@@ -422,6 +423,7 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
     env,
     "You are the Sales Executive Hat revising a client-facing Draft Proposal based on Martin's feedback. Keep the same section structure. Never alter the authoritative quoted price unless Martin's feedback explicitly instructs a price change (it does not have authority to invent a new price on its own — if feedback implies a price change, keep the existing price and flag the conflict in a note prefixed 'NOTE TO MARTIN:').",
     `Current draft:\n${state.proposalDraft}\n\nMartin's feedback:\n${feedback}`,
+    { maxTokens: 3000 },
   );
   state.proposalDraft = revised;
   state.proposalRevisionCount = (state.proposalRevisionCount ?? 0) + 1;
