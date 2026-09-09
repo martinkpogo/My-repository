@@ -27,8 +27,8 @@ export async function aiJson<T = Record<string, unknown>>(
 
   let raw: string;
   try {
-    const result = (await env.AI.run(model as any, { messages, temperature: 0.2 } as any)) as any;
-    raw = typeof result === "string" ? result : result?.response ?? "";
+    const result = await env.AI.run(model as any, { messages, temperature: 0.2 } as any);
+    raw = coerceToText(result);
   } catch (err) {
     console.error("Workers AI call failed", err);
     return null;
@@ -50,12 +50,32 @@ export async function aiText(env: Env, system: string, user: string, light = fal
     { role: "user", content: user },
   ];
   try {
-    const result = (await env.AI.run(model as any, { messages, temperature: 0.4 } as any)) as any;
-    return typeof result === "string" ? result : result?.response ?? "";
+    const result = await env.AI.run(model as any, { messages, temperature: 0.4 } as any);
+    return coerceToText(result);
   } catch (err) {
     console.error("Workers AI call failed", err);
     return "";
   }
+}
+
+/**
+ * Workers AI response shapes vary by model: usually a plain string or
+ * { response: string }, but some models return { response: {...} } for
+ * structured output, or an array of streamed chunks. Always normalize to a
+ * single string so callers never have to guard against non-string values.
+ */
+function coerceToText(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (result == null) return "";
+  const response = (result as { response?: unknown }).response;
+  if (typeof response === "string") return response;
+  if (Array.isArray(response)) {
+    return response
+      .map((chunk) => (typeof chunk === "string" ? chunk : coerceToText(chunk)))
+      .join("");
+  }
+  if (response != null) return JSON.stringify(response);
+  return JSON.stringify(result);
 }
 
 function extractJson(raw: string): string | null {
