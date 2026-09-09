@@ -16,7 +16,7 @@ new_sqlite_classes = ["WorkSession"]
 
 [[kv_namespaces]]
 binding = "STATE_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "9c01e73f957949d796de688c1c37cbf0"
 
 [triggers]
 crons = ["*/15 * * * *"]
