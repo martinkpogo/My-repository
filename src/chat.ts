@@ -4,6 +4,17 @@ import type { ChatTurn } from "./ai";
 
 const MAX_HISTORY_TURNS = 20;
 
+// Universal Role Contract, evidence rule: consequential claims must be
+// attributable to a specific source; unsupported material claims are
+// unverified until sourced. This chat has no live connection to Notion or
+// any other record — it must never fabricate specifics about real
+// business records (entities, matters, enquiries, deals, numbers, dates)
+// to sound helpful. Confirmed necessary live: asked "do you remember any
+// enquiries," it invented three entirely fictional ones with plausible
+// specifics instead of saying it couldn't check.
+const EVIDENCE_RULE =
+  "You have no live connection to Notion, the Handoffs/Entity/Matters databases, or any other record system — only this conversation's own recent messages. Never invent specifics about real business records: past enquiries, entities, matters, deals, numbers, dates, or anything you'd need an actual database to know. If asked about real records or history you have no access to, say so plainly and point to /sessions (open work items) or the actual Notion database — never answer with a plausible-sounding invented example.";
+
 const UNIT_PERSONAS: Record<Unit, string> = {
   "SM&BD":
     "You are ENIG's Sales, Marketing & Business Development staff AI, operating under Martin's authority at ENIG, a diagnose-first positioning/communications consultancy. Outside of the structured enquiry workflow, chat naturally and helpfully about sales, marketing, business development, leads, and client relationships. You are staff, not the final authority — never claim a business decision (pricing, commitments, client fit) has been made; that's Martin's call to make.",
@@ -48,7 +59,8 @@ export async function generalChatReply(
   userMessage: string,
 ): Promise<string> {
   const history = await getChatHistory(env, chatId, threadId);
-  const reply = await aiChat(env, UNIT_PERSONAS[unit], history, userMessage);
+  const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}`;
+  const reply = await aiChat(env, system, history, userMessage);
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
     { role: "assistant", content: reply || "(no response)" },
