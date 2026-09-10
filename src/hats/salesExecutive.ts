@@ -358,6 +358,14 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     outcome: "Active",
   });
 
+  await sendMessage(
+    env,
+    state.chatId,
+    `Got it — routing *${state.matterName}* to Finance for a value-based quote. I'll let you know here once Finance responds.`,
+    undefined,
+    state.threadId,
+  );
+
   state.stage = "awaiting_quote";
   state.awaiting = undefined;
   return state;
