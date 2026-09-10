@@ -2,6 +2,13 @@ import type { Env, Unit } from "./types";
 import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
 import { generalChatReply } from "./chat";
+import { getGovernance } from "./governance";
+
+// Canonical Notion governance source for this Workspace's routing/execution
+// constraints (Core Structure category 3 — one AI Project Instructions page
+// per AI Workspace). Governs which Hat a new incoming work item routes to;
+// does not restate any Hat's own operating procedure.
+const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d";
 
 export function newWorkId(): string {
   return crypto.randomUUID();
@@ -56,15 +63,46 @@ interface RoutingClassification {
 }
 
 /**
- * Universal Role Contract, hat_selection.chat_driven_request: match the
- * incoming request against the Hat purposes available in this Worker.
- * Only Sales Executive (SM&BD) is chat-entry; Value-Based Pricing Assessor
- * (Finance) only ever activates via a Handoff, never directly from chat.
+ * Workspace-level routing decision for a genuinely new work item. Governed
+ * by the canonical SM&BD AI Project Instructions (retrieved live, not
+ * restated in code) — this is the "Workspace matches the incoming request
+ * against the Hats belonging to that Unit" step the Universal Role Contract
+ * describes (Value-Based Pricing Assessor/Finance only ever activates via a
+ * Handoff, never directly from chat, so it's never a candidate here).
+ * Returns null if that governance can't be retrieved; the caller must not
+ * classify or route without it (Martin is told directly, per the
+ * fail-closed rule — no hardcoded fallback, no queued retry).
  */
-export async function classifyNewMessage(env: Env, text: string): Promise<RoutingClassification> {
-  const result = await aiJson<RoutingClassification>(env, {
-    system: `You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. The only Hat reachable directly from chat is "Sales Executive" (SM&BD), which owns processing an incoming commercial enquiry — someone describing THEIR OWN specific business situation or problem and asking ENIG for help with it.
+export async function classifyNewMessage(
+  env: Env,
+  chatId: number,
+  text: string,
+  threadId?: number,
+): Promise<RoutingClassification | null> {
+  const projectInstructions = await getGovernance(
+    env,
+    SMBD_PROJECT_INSTRUCTIONS_PAGE_ID,
+    "SM&BD AI Project Instructions",
+  );
+  if (!projectInstructions) {
+    console.error("classifyNewMessage: SM&BD Project Instructions retrieval failed — refusing to classify/route");
+    await sendMessage(
+      env,
+      chatId,
+      "This message wasn't processed — routing governance couldn't be retrieved from Notion. Please resend once resolved.",
+      undefined,
+      threadId,
+    );
+    return null;
+  }
 
+  const result = await aiJson<RoutingClassification>(env, {
+    system: `You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. Below is the canonical SM&BD AI Project Instructions, retrieved from Notion — it is authoritative for how incoming work in this workspace is classified and which Hat/specialization it routes to. Follow it exactly.
+
+=== SM&BD AI PROJECT INSTRUCTIONS (retrieved from Notion's canonical governance) ===
+${projectInstructions}
+
+=== CLASSIFICATION TASK (execution mechanics — not part of the governance above) ===
 Classify as "enquiry" ONLY when the message names a specific business, situation, or problem the sender wants help with — e.g. "we're a bakery chain and our branding feels dated, can you help", "I run a consulting firm, our website looks outdated compared to competitors". A concrete situation plus a request for help is required.
 
 Everything else is NOT an enquiry, including: general questions about ENIG itself ("what do you do", "what kind of work is done here", "how does this work"), small talk, greetings, meta/testing messages, or a question with no described business situation attached. Default to "out_of_scope" or "ambiguous" whenever in doubt — a real enquiry will describe itself clearly; don't strain to read one into a vague message.
@@ -115,10 +153,18 @@ export async function routeIncomingText(
     return;
   }
 
-  const classification = await classifyNewMessage(env, text);
+  const classification = await classifyNewMessage(env, chatId, text, threadId);
+  if (!classification) return; // retrieval failed — Martin already told, nothing further to do.
   if (classification.route === "enquiry") {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
+    // "Sales Executive" is the current single chat-reachable Hat
+    // implementation constraint. It is not an independent governance
+    // source. The canonical Workspace Project Instructions (retrieved
+    // above, governing the route/out_of_scope/ambiguous classification
+    // itself) remain the authority for the routing rule. A future second
+    // chat-reachable Hat requires a proper routing mechanism and separate
+    // architectural change; do not solve that here.
     await stub.init(workId, chatId, "SM&BD", "Sales Executive", threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleIncomingEnquiry(text);

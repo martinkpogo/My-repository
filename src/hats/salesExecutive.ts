@@ -13,26 +13,101 @@ import {
 import { aiJson, aiText } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 import * as finance from "./financeValueBasedPricing";
 
-const QUALIFICATION_CONDITIONS = [
-  {
-    key: "within_specialization",
-    text: "The situation/problem described by the lead falls within ENIG's defined specialization scope (positioning, perception, how the business communicates).",
-  },
-  {
-    key: "allows_diagnosis_first",
-    text: "The lead is willing to let ENIG understand and diagnose the underlying situation before committing to a prescribed solution.",
-  },
-  {
-    key: "open_to_ballpark_amount_and_time",
-    text: "The lead is open to the indicative level of investment and time communicated during the sales conversation.",
-  },
-  {
-    key: "ready_to_commit_required_resources",
-    text: "The lead is prepared to commit the necessary budget, time, internal attention, access, participation, or other resources.",
-  },
-] as const;
+// Canonical Notion governance sources for this Hat. Explicit page IDs, not
+// title search, per the Universal Role Contract's evidence rule (a
+// consequential source must be attributable, not guessed at by name match).
+const SALES_EXECUTIVE_HAT_DEFINITION_PAGE_ID = "3cfcb004-e583-810f-8281-c448edaa5de6";
+// Only needed where an Agent call performs the actual Entity lifecycle
+// judgment (qualification) — not fetched for stages where Entity handling
+// is already mechanically enforced by code.
+const ENTITY_BUSINESS_OBJECT_PAGE_ID = "3cecb004-e583-81a9-b95e-e6ab79a3e5f3";
+
+interface SalesExecutiveGovernance {
+  hatDefinition: string;
+  universalRoleContract: string;
+  entitySpecification?: string;
+}
+
+/**
+ * Retrieves the governance this Hat operates under, at the granularity each
+ * call site actually needs — Hat Definition + URC always; the Entity
+ * specification only where the caller says it's performing a judgment the
+ * Entity lifecycle governs. Returns null if any required source can't be
+ * retrieved; callers must treat null as "cannot proceed," never substitute
+ * hardcoded text in its place (mirrors Finance's getGovernance contract).
+ */
+async function getSalesExecutiveGovernance(
+  env: Env,
+  options: { includeEntitySpecification?: boolean } = {},
+): Promise<SalesExecutiveGovernance | null> {
+  const [hatDefinition, universalRoleContract, entitySpecification] = await Promise.all([
+    getGovernance(env, SALES_EXECUTIVE_HAT_DEFINITION_PAGE_ID, "Sales Executive Hat Definition"),
+    getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
+    options.includeEntitySpecification
+      ? getGovernance(env, ENTITY_BUSINESS_OBJECT_PAGE_ID, "Entity Business Object specification")
+      : Promise.resolve(null),
+  ]);
+  if (!hatDefinition || !universalRoleContract) return null;
+  if (options.includeEntitySpecification && !entitySpecification) return null;
+  return { hatDefinition, universalRoleContract, entitySpecification: entitySpecification ?? undefined };
+}
+
+function buildSalesCallPrepSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
+  return [
+    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for this role — follow them exactly as written.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== TASK (execution context — not part of the governance above) ===",
+    "Prepare Martin for a sales call: what we know, what's still unknown, and questions to ask to test the Hat Definition's canonical qualification conditions above. Keep it under 200 words, plain text, no markdown headers.",
+  ].join("\n\n");
+}
+
+function buildQualificationSystemPrompt(
+  hatDefinition: string,
+  universalRoleContract: string,
+  entitySpecification: string,
+): string {
+  return [
+    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract, Hat Definition, and Entity Business Object specification are authoritative for evaluating the four canonical qualification conditions — follow them exactly as written. Never infer missing evidence.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== ENTITY BUSINESS OBJECT SPECIFICATION ===",
+    entitySpecification,
+    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+    'Evaluate each of the four canonical qualification conditions named above, strictly from the evidence given. Return JSON: {"conditions":[{"condition":"<canonical condition key, exactly as given above>","evidence":"...","assessment":"Satisfied|Not Satisfied|Insufficient Evidence"}, ...all four...], "overall":"Qualified|Not Qualified|More Information Required"}. overall is Qualified only if ALL four are Satisfied.',
+  ].join("\n\n");
+}
+
+function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
+  return [
+    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for the Draft Proposal's required content, structure, and authority limits — follow them exactly as written.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== TASK (execution context — not part of the governance above) ===",
+    "Draft the complete client-facing Draft Proposal for the entity/matter/quote data given below, following the Hat Definition's proposal_content_standard exactly (section headers, order, and content rules) and its authority_limits (the quoted price must not be altered, converted, or reinterpreted; internal Finance reasoning not intended for the client must not be disclosed). Keep it concise and professional.",
+  ].join("\n\n");
+}
+
+function buildProposalRevisionSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
+  return [
+    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for how this Draft Proposal may be revised and for the authority limits that apply — follow them exactly as written.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== TASK (execution context — not part of the governance above) ===",
+    "Revise the current Draft Proposal below according to Martin's feedback, keeping the same section structure per the Hat Definition's proposal_content_standard. Per the Hat Definition's authority_limits, you have no authority to change the quoted price — if Martin's feedback appears to require a price change, do not apply it: keep the existing price and add a note prefixed 'NOTE TO MARTIN:' explaining the conflict.",
+  ].join("\n\n");
+}
 
 export async function handleIncomingEnquiry(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.enquiryText = text;
@@ -179,9 +254,33 @@ async function ensureEntityIsAtLeastLead(env: Env, state: WorkState): Promise<vo
 }
 
 async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> {
+  const governance = await getSalesExecutiveGovernance(env);
+  if (!governance) {
+    console.error(`Sales Executive call-prep blocked — governance retrieval failed for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Sales-call preparation blocked — governance retrieval failed: ${state.entityName}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale:
+        "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to prepare the call brief without it.",
+      outcome: "Blocked",
+    });
+    // No automatic retry trigger exists at this point in the flow (unlike
+    // call notes or proposal feedback, nothing the user sends re-invokes
+    // this step) — documented as a known limitation, not solved here.
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't prepare the sales-call brief for *${state.entityName}* — couldn't retrieve canonical governance from Notion. There's no automatic retry for this step; please try again once resolved.`,
+      undefined,
+      state.threadId,
+    );
+    return state;
+  }
+
   const brief = await aiText(
     env,
-    "You are the Sales Executive Hat at ENIG, a diagnose-first positioning/communications consultancy. Prepare Martin for a sales call: what we know, what's still unknown, and questions to ask to test the four qualification conditions (in scope for ENIG, open to diagnosis-first, open to ballpark investment/time, ready to commit resources). Keep it under 200 words, plain text, no markdown headers.",
+    buildSalesCallPrepSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
     `Entity: ${state.entityName}\nMatter: ${state.matterName}\nEnquiry: ${state.enquiryText}`,
   );
 
@@ -212,8 +311,30 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     Current_understanding: richText(state.callNotes.slice(0, 1900)),
   });
 
+  const governance = await getSalesExecutiveGovernance(env, { includeEntitySpecification: true });
+  if (!governance) {
+    console.error(`Sales Executive qualification blocked — governance retrieval failed for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Qualification blocked — governance retrieval failed: ${state.entityName}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale:
+        "Could not retrieve canonical Sales Executive Hat Definition, Universal Role Contract, and/or Entity Business Object specification from Notion. Refusing to evaluate qualification without it.",
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't evaluate qualification for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Not proceeding without it. Send the call notes again once resolved and I'll re-evaluate.`,
+      undefined,
+      state.threadId,
+    );
+    state.awaiting = "call_notes";
+    return state;
+  }
+
   const qualification = await aiJson<QualificationResult>(env, {
-    system: `You are the Sales Executive Hat. Evaluate each of the four canonical qualification conditions strictly from the evidence given. Never infer missing evidence. Conditions:\n${QUALIFICATION_CONDITIONS.map((c, i) => `${i + 1}. ${c.key}: ${c.text}`).join("\n")}\nReturn JSON: {"conditions":[{"condition":"within_specialization","evidence":"...","assessment":"Satisfied|Not Satisfied|Insufficient Evidence"}, ...all four...], "overall":"Qualified|Not Qualified|More Information Required"}. overall is Qualified only if ALL four are Satisfied.`,
+    system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
     user: `Enquiry: ${state.enquiryText}\n\nCall notes: ${state.callNotes}`,
   });
 
@@ -382,11 +503,33 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
 }
 
 export async function handleQuoteReceived(env: Env, state: WorkState): Promise<WorkState> {
+  const governance = await getSalesExecutiveGovernance(env);
+  if (!governance) {
+    console.error(`Sales Executive proposal drafting blocked — governance retrieval failed for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Proposal drafting blocked — governance retrieval failed: ${state.entityName}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale:
+        "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to draft the Proposal without it.",
+      outcome: "Blocked",
+    });
+    // No automatic retry trigger exists here: Finance's Handoff is already
+    // Closed with the quote recorded by the time this runs, and nothing the
+    // user sends re-invokes drafting. Known limitation, not solved here.
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't prepare the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. There's no automatic retry for this step; please try again once resolved.`,
+      undefined,
+      state.threadId,
+    );
+    return state;
+  }
+
   const draft = await aiText(
     env,
-    `You are the Sales Executive Hat at ENIG drafting a client-facing Draft Proposal. Follow this exact structure, in order, with these section headers:
-Identification | Situation Summary | Objective | Proposed Intervention / Scope | Basis for the Investment | Investment | Timeline / Delivery Schedule | What ENIG Needs from the Client | Next Steps.
-Use the authoritative Finance quote and rationale exactly as given for Investment — never alter, convert, or reinterpret the price. Do not disclose internal Finance reasoning not intended for the client; translate it into client-facing value language instead. Do not expose internal budget discussion. Keep it concise and professional. Do not invent a timeline if none is known.`,
+    buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
     `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: $${state.quote?.price} — rationale: ${state.quote?.rationale}`,
     { maxTokens: 3000 },
   );
@@ -444,9 +587,31 @@ export async function handleProposalApproval(env: Env, state: WorkState, approve
 }
 
 export async function handleProposalFeedback(env: Env, state: WorkState, feedback: string): Promise<WorkState> {
+  const governance = await getSalesExecutiveGovernance(env);
+  if (!governance) {
+    console.error(`Sales Executive proposal revision blocked — governance retrieval failed for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Proposal revision blocked — governance retrieval failed: ${state.entityName}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale:
+        "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to revise the Proposal without it.",
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't revise the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Send your feedback again once resolved and I'll re-apply it.`,
+      undefined,
+      state.threadId,
+    );
+    state.awaiting = "proposal_feedback";
+    return state;
+  }
+
   const revised = await aiText(
     env,
-    "You are the Sales Executive Hat revising a client-facing Draft Proposal based on Martin's feedback. Keep the same section structure. Never alter the authoritative quoted price unless Martin's feedback explicitly instructs a price change (it does not have authority to invent a new price on its own — if feedback implies a price change, keep the existing price and flag the conflict in a note prefixed 'NOTE TO MARTIN:').",
+    buildProposalRevisionSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
     `Current draft:\n${state.proposalDraft}\n\nMartin's feedback:\n${feedback}`,
     { maxTokens: 3000 },
   );
