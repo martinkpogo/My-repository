@@ -1,9 +1,10 @@
 import type { Env, WorkState } from "../types";
-import { getPageContent, richText, select, updatePage } from "../notion";
+import { richText, select, updatePage } from "../notion";
 import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
 import { setActiveWorkId, threadIdForUnit } from "../router";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 import * as sales from "./salesExecutive";
 
 interface PriceJudgement {
@@ -13,44 +14,11 @@ interface PriceJudgement {
   reason_if_insufficient?: string;
 }
 
-// Canonical Notion governance sources for this Hat, verified live in the
-// audit that preceded this change. Explicit page IDs, not title search, per
+// Canonical Notion governance source for this Hat, verified live in the
+// audit that preceded this change. Explicit page ID, not title search, per
 // the Universal Role Contract's evidence rule (a consequential source must
 // be attributable, not guessed at by name match).
 const FINANCE_HAT_DEFINITION_PAGE_ID = "3cecb004-e583-81f9-a52e-e24872a52eff";
-const UNIVERSAL_ROLE_CONTRACT_PAGE_ID = "3cecb004-e583-81ee-8f1e-f0d58532f4aa";
-
-// Bounded so a Notion edit takes effect within a known window rather than
-// indefinitely — matches the current Finance-discovery cadence.
-const GOVERNANCE_CACHE_TTL_SECONDS = 15 * 60;
-
-/**
- * Retrieves one governance page's content, cached in STATE_KV under a
- * clearly namespaced key with a bounded TTL. Returns null on any failure
- * (cache and live fetch both unavailable, or the page came back empty) —
- * callers must treat null as "cannot proceed," never substitute hardcoded
- * text in its place.
- */
-async function getGovernance(env: Env, pageId: string, label: string): Promise<string | null> {
-  const cacheKey = `governance:${pageId}`;
-  try {
-    const cached = await env.STATE_KV.get(cacheKey);
-    if (cached) return cached;
-  } catch (err) {
-    console.error(`Governance cache read failed for ${label} (${pageId})`, err);
-  }
-  try {
-    const content = await getPageContent(env, pageId);
-    if (!content.trim()) throw new Error("retrieved page content was empty");
-    env.STATE_KV.put(cacheKey, content, { expirationTtl: GOVERNANCE_CACHE_TTL_SECONDS }).catch((err) => {
-      console.error(`Governance cache write failed for ${label} (${pageId})`, err);
-    });
-    return content;
-  } catch (err) {
-    console.error(`Governance retrieval failed for ${label} (${pageId})`, err);
-    return null;
-  }
-}
 
 function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
   return [
