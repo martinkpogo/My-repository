@@ -1,4 +1,4 @@
-import type { Env, WorkState, QualificationResult } from "../types";
+import type { Env, WorkState, QualificationResult, QualificationConditionResult } from "../types";
 import {
   createPage,
   getPage,
@@ -23,6 +23,27 @@ const SALES_EXECUTIVE_HAT_DEFINITION_PAGE_ID = "3cfcb004-e583-810f-8281-c448edaa
 // judgment (qualification) — not fetched for stages where Entity handling
 // is already mechanically enforced by code.
 const ENTITY_BUSINESS_OBJECT_PAGE_ID = "3cecb004-e583-81a9-b95e-e6ab79a3e5f3";
+
+// Plain-English labels for the Telegram-facing qualification message —
+// the raw condition slugs (within_specialization, etc.) stay in the
+// Activity Log's decisionRationale for traceability, but Martin shouldn't
+// have to read snake_case.
+const CONDITION_LABELS: Record<QualificationConditionResult["condition"], string> = {
+  within_specialization: "Within our specialization",
+  allows_diagnosis_first: "Open to a diagnosis-first approach",
+  open_to_ballpark_amount_and_time: "Open to discussing budget & timeline",
+  ready_to_commit_required_resources: "Ready to commit the resources needed",
+};
+
+function formatQualificationEvidence(conditions: QualificationConditionResult[]): string {
+  return conditions
+    .map((c) => {
+      const label = CONDITION_LABELS[c.condition] ?? c.condition;
+      const heading = c.assessment === "Satisfied" ? label : `${label} — ${c.assessment.toLowerCase()}`;
+      return `• *${heading}*\n   ${c.evidence}`;
+    })
+    .join("\n\n");
+}
 
 interface SalesExecutiveGovernance {
   hatDefinition: string;
@@ -359,15 +380,13 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     outcome: qualification.overall === "Qualified" ? "Active" : "Complete",
   });
 
-  const evidenceText = qualification.conditions
-    .map((c) => `• *${c.condition}*: ${c.assessment}\n   ${c.evidence}`)
-    .join("\n\n");
+  const evidenceText = formatQualificationEvidence(qualification.conditions);
 
   if (qualification.overall === "Qualified") {
     await sendMessage(
       env,
       state.chatId,
-      `*Qualification: Qualified* — all four conditions satisfied.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`,
+      `*Qualification: Qualified* — all four conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`,
       [
         [
           { text: "✅ Approve Lead→Prospect", callback_data: `qualify:${state.workId}:approve` },
