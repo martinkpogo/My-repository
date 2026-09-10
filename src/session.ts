@@ -26,31 +26,36 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async handleIncomingEnquiry(text: string): Promise<WorkState> {
-    const state = await this.require();
-    return this.save(await sales.handleIncomingEnquiry(this.env, state, text));
+    return this.execute((state) => sales.handleIncomingEnquiry(this.env, state, text));
   }
 
   async handleTextReply(text: string): Promise<WorkState> {
-    const state = await this.require();
-    switch (state.awaiting) {
-      case "call_notes":
-        return this.save(await sales.handleCallNotes(this.env, state, text));
-      case "intervention":
-        return this.save(await sales.handleInterventionText(this.env, state, text));
-      case "value_context_more":
-        return this.save(await sales.handleMoreValueContext(this.env, state, text));
-      case "quote_redo_reason":
-        return this.save(await finance.handleQuoteRedoReason(this.env, state, text));
-      case "matter_redo_reason":
-        return this.save(await sales.handleMatterRedoReason(this.env, state, text));
-      case "entity_redo_reason":
-        return this.save(await sales.handleEntityRedoReason(this.env, state, text));
-      case "proposal_feedback":
-        return this.save(await sales.handleProposalFeedback(this.env, state, text));
-      default:
-        await sendMessage(this.env, state.chatId, "This work item isn't awaiting a reply right now. Use /sessions to switch context.", undefined, state.threadId);
-        return state;
-    }
+    return this.execute((state) => {
+      switch (state.awaiting) {
+        case "call_notes":
+          return sales.handleCallNotes(this.env, state, text);
+        case "intervention":
+          return sales.handleInterventionText(this.env, state, text);
+        case "value_context_more":
+          return sales.handleMoreValueContext(this.env, state, text);
+        case "quote_redo_reason":
+          return finance.handleQuoteRedoReason(this.env, state, text);
+        case "matter_redo_reason":
+          return sales.handleMatterRedoReason(this.env, state, text);
+        case "entity_redo_reason":
+          return sales.handleEntityRedoReason(this.env, state, text);
+        case "proposal_feedback":
+          return sales.handleProposalFeedback(this.env, state, text);
+        default:
+          return sendMessage(
+            this.env,
+            state.chatId,
+            "This work item isn't awaiting a reply right now. Use /sessions to switch context.",
+            undefined,
+            state.threadId,
+          ).then(() => state);
+      }
+    });
   }
 
   /**
@@ -60,8 +65,7 @@ export class WorkSession extends DurableObject<Env> {
    * call already returned before this ever runs.
    */
   async runFinancePickup(): Promise<WorkState> {
-    const state = await this.require();
-    return this.save(await finance.handlePickup(this.env, state));
+    return this.execute((state) => finance.handlePickup(this.env, state));
   }
 
   /**
@@ -72,49 +76,81 @@ export class WorkSession extends DurableObject<Env> {
    * call already returned before this ever runs.
    */
   async runProposalDrafting(): Promise<WorkState> {
-    const state = await this.require();
-    return this.save(await sales.handleQuoteReceived(this.env, state));
+    return this.execute((state) => sales.handleQuoteReceived(this.env, state));
   }
 
   async cancel(): Promise<WorkState> {
-    const state = await this.require();
-    state.stage = "cancelled";
-    state.awaiting = undefined;
-    await logActivity(this.env, {
-      entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
-      type: "Activity",
-      area: state.unit,
-      outcome: "Complete",
+    return this.execute(async (state) => {
+      state.stage = "cancelled";
+      state.awaiting = undefined;
+      await logActivity(this.env, {
+        entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
+        type: "Activity",
+        area: state.unit,
+        outcome: "Complete",
+      });
+      return state;
     });
-    return this.save(state);
   }
 
   async handleCallback(action: string, value: string): Promise<WorkState> {
-    const state = await this.require();
-    switch (action) {
-      case "entity":
-        return this.save(await sales.handleEntityChoice(this.env, state, value));
-      case "entitynew":
-        return this.save(await sales.handleEntityCreationApproval(this.env, state, value === "approve"));
-      case "matter":
-        return this.save(await sales.handleMatterChoice(this.env, state, value));
-      case "matternew":
-        return this.save(await sales.handleMatterCreationApproval(this.env, state, value === "approve"));
-      case "qualify":
-        return this.save(await sales.handleLeadToProspectApproval(this.env, state, value === "approve"));
-      case "proposal":
-        return this.save(await sales.handleProposalApproval(this.env, state, value === "approve"));
-      case "quote":
-        return this.save(await finance.handleQuoteApproval(this.env, state, value === "approve"));
-      default:
-        return state;
-    }
+    return this.execute((state) => {
+      switch (action) {
+        case "entity":
+          return sales.handleEntityChoice(this.env, state, value);
+        case "entitynew":
+          return sales.handleEntityCreationApproval(this.env, state, value === "approve");
+        case "matter":
+          return sales.handleMatterChoice(this.env, state, value);
+        case "matternew":
+          return sales.handleMatterCreationApproval(this.env, state, value === "approve");
+        case "qualify":
+          return sales.handleLeadToProspectApproval(this.env, state, value === "approve");
+        case "proposal":
+          return sales.handleProposalApproval(this.env, state, value === "approve");
+        case "quote":
+          return finance.handleQuoteApproval(this.env, state, value === "approve");
+        default:
+          return Promise.resolve(state);
+      }
+    });
   }
 
   private async require(): Promise<WorkState> {
     const state = await this.getState();
     if (!state) throw new Error("Work session state missing");
     return state;
+  }
+
+  /**
+   * Runtime protection layer (Gap B of the architecture audit): every
+   * public execution method routes through here. Fetches state once,
+   * runs the Hat logic, and saves the result — but if the Hat logic throws
+   * (a Notion outage, a malformed response not already handled by a
+   * fail-closed check, or any other unexpected defect), the error is
+   * logged and Martin is notified directly in the topic this work item
+   * belongs to, instead of the request failing silently. Nothing partial
+   * is treated as success: the pre-error state is what gets saved, since
+   * a thrown error means whatever write it was attempting did not
+   * complete. This is a safety net, not a substitute for the fail-closed
+   * governance checks already inside each Hat function — those still run
+   * first and produce their own explicit, specific messages.
+   */
+  private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
+    const state = await this.require();
+    try {
+      return await this.save(await fn(state));
+    } catch (err) {
+      console.error(`WorkSession ${state.workId} execution failed`, err);
+      await sendMessage(
+        this.env,
+        state.chatId,
+        `⚠️ Something went wrong processing this work item. The error has been logged for review and nothing further was changed — try again, or use /sessions to check its current state.`,
+        undefined,
+        state.threadId,
+      ).catch((notifyErr) => console.error(`WorkSession ${state.workId} failure notification also failed`, notifyErr));
+      return state;
+    }
   }
 
   private async save(state: WorkState): Promise<WorkState> {

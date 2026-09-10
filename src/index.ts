@@ -35,7 +35,14 @@ export default {
         }
       }
       const update = (await request.json()) as TelegramUpdate;
-      await handleUpdate(env, update);
+      try {
+        await handleUpdate(env, update);
+      } catch (err) {
+        console.error("Unhandled error processing Telegram update", err, JSON.stringify(update));
+        await notifyMartinOfFailure(env, update).catch((notifyErr) =>
+          console.error("Failed to notify Martin of unhandled webhook error", notifyErr),
+        );
+      }
       return new Response("ok");
     }
 
@@ -141,12 +148,25 @@ export default {
         return new Response("forbidden", { status: 403 });
       }
       await env.STATE_KV.put("last_cron_run", new Date().toISOString());
-      const picked = await discoverPendingFinanceHandoffs(env);
-      const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
-      await checkStaleHandoffs(env);
-      return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked, smbd_handoffs_picked_up: pickedForSMBD }), {
-        headers: { "content-type": "application/json" },
-      });
+      try {
+        const picked = await discoverPendingFinanceHandoffs(env);
+        const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+        await checkStaleHandoffs(env);
+        return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked, smbd_handoffs_picked_up: pickedForSMBD }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        console.error("Unhandled error in /admin/run-finance-discovery", err);
+        await sendMessage(
+          env,
+          Number(env.MARTIN_TELEGRAM_USER_ID),
+          `⚠️ The Handoff discovery run failed unexpectedly. Logged for review — will retry next cycle.`,
+        ).catch((notifyErr) => console.error("Failed to notify Martin of discovery-route failure", notifyErr));
+        return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
     }
 
     // Diagnostic: when did the cron trigger last actually run, per the
@@ -203,11 +223,57 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     await env.STATE_KV.put("last_cron_run", new Date().toISOString());
-    await discoverPendingFinanceHandoffs(env);
-    await discoverPendingSMBDHandoffs(env);
-    await checkStaleHandoffs(env);
+    try {
+      await discoverPendingFinanceHandoffs(env);
+      await discoverPendingSMBDHandoffs(env);
+      await checkStaleHandoffs(env);
+    } catch (err) {
+      console.error("Unhandled error in scheduled discovery run", err);
+      await sendMessage(
+        env,
+        Number(env.MARTIN_TELEGRAM_USER_ID),
+        `⚠️ The scheduled Handoff discovery run failed unexpectedly. Logged for review — will retry next cycle.`,
+      ).catch((notifyErr) => console.error("Failed to notify Martin of scheduled-run failure", notifyErr));
+    }
   },
 };
+
+/**
+ * Runtime protection layer (Gap B of the architecture audit) for the two
+ * discovery loops below: a Durable Object RPC call can fail at the
+ * transport level (not just inside the Hat logic it invokes, which already
+ * has its own protection in session.ts's execute()) — the Handoff stays
+ * Pending either way, so it's automatically retried next cycle rather than
+ * silently dropped. Logs and notifies Martin directly rather than aborting
+ * the rest of the batch.
+ */
+async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: unknown): Promise<void> {
+  console.error(`Automated pickup failed for Handoff ${handoffId}`, err);
+  await sendMessage(
+    env,
+    Number(env.MARTIN_TELEGRAM_USER_ID),
+    `⚠️ Automated pickup failed for Handoff ${handoffId}. Logged for review — it stays Pending and will retry next cycle.`,
+  ).catch((notifyErr) => console.error(`Failed to notify Martin of pickup failure for ${handoffId}`, notifyErr));
+}
+
+/**
+ * Runtime protection layer (Gap B) for the main Telegram entry point: if
+ * handleUpdate throws anything not already caught by a more specific
+ * fail-closed check, this reports it to the same chat/topic the update
+ * came from (falling back to Martin's DM when that can't be determined)
+ * instead of the request failing silently.
+ */
+async function notifyMartinOfFailure(env: Env, update: TelegramUpdate): Promise<void> {
+  const chatId = update.message?.chat.id ?? update.callback_query?.message?.chat.id ?? Number(env.MARTIN_TELEGRAM_USER_ID);
+  const threadId = update.message?.message_thread_id ?? update.callback_query?.message?.message_thread_id;
+  await sendMessage(
+    env,
+    chatId,
+    `⚠️ Something went wrong processing that. It's been logged for review — nothing further was changed. Please try again.`,
+    undefined,
+    threadId,
+  );
+}
 
 /**
  * The Finance side of the SM&BD -> Finance execution boundary. SM&BD's Hat
@@ -233,8 +299,12 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
       continue;
     }
     const stub = getSessionStub(env, workId);
-    await stub.runFinancePickup();
-    pickedUp++;
+    try {
+      await stub.runFinancePickup();
+      pickedUp++;
+    } catch (err) {
+      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+    }
   }
   return pickedUp;
 }
@@ -265,8 +335,12 @@ async function discoverPendingSMBDHandoffs(env: Env): Promise<number> {
       continue;
     }
     const stub = getSessionStub(env, workId);
-    await stub.runProposalDrafting();
-    pickedUp++;
+    try {
+      await stub.runProposalDrafting();
+      pickedUp++;
+    } catch (err) {
+      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+    }
   }
   return pickedUp;
 }
