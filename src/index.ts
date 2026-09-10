@@ -142,8 +142,9 @@ export default {
       }
       await env.STATE_KV.put("last_cron_run", new Date().toISOString());
       const picked = await discoverPendingFinanceHandoffs(env);
+      const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
       await checkStaleHandoffs(env);
-      return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked }), {
+      return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked, smbd_handoffs_picked_up: pickedForSMBD }), {
         headers: { "content-type": "application/json" },
       });
     }
@@ -203,6 +204,7 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     await env.STATE_KV.put("last_cron_run", new Date().toISOString());
     await discoverPendingFinanceHandoffs(env);
+    await discoverPendingSMBDHandoffs(env);
     await checkStaleHandoffs(env);
   },
 };
@@ -232,6 +234,38 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
     }
     const stub = getSessionStub(env, workId);
     await stub.runFinancePickup();
+    pickedUp++;
+  }
+  return pickedUp;
+}
+
+/**
+ * The SM&BD side of the Finance -> SM&BD execution boundary — the return
+ * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
+ * Finance's own approval handler only ever creates this Handoff (Status:
+ * Pending) and records the handoff_workitem mapping, then returns — it
+ * never calls into SM&BD directly. This runs on its own schedule and
+ * discovers that Handoff independently, the same way discoverPendingFinanceHandoffs
+ * does for the opposite direction.
+ */
+async function discoverPendingSMBDHandoffs(env: Env): Promise<number> {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    and: [
+      { property: "Status", select: { equals: "Pending" } },
+      { property: "To Unit", select: { equals: "SM&BD" } },
+      { property: "Type", select: { equals: "Work" } },
+    ],
+  });
+
+  let pickedUp = 0;
+  for (const handoff of pending) {
+    const workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    if (!workId) {
+      console.error(`Pending SM&BD Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
+      continue;
+    }
+    const stub = getSessionStub(env, workId);
+    await stub.runProposalDrafting();
     pickedUp++;
   }
   return pickedUp;

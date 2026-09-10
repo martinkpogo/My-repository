@@ -1,11 +1,10 @@
 import type { Env, WorkState } from "../types";
-import { getPage, plainText, relationIds, richText, select, updatePage } from "../notion";
+import { createPage, getPage, plainText, relation, relationIds, richText, select, title, updatePage } from "../notion";
 import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
 import { setActiveWorkId, threadIdForUnit } from "../router";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
-import * as sales from "./salesExecutive";
 
 interface PriceJudgement {
   sufficient: boolean;
@@ -189,15 +188,107 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     decisionRationale: judgement.rationale ?? "",
     outcome: "Complete",
   });
+
+  // The quote is a judgment call, not final authority (per the Finance Hat
+  // Definition's authority_limits) — it goes to Martin for review before it
+  // becomes the authoritative quote SM&BD is allowed to build a proposal on.
+  state.quote = { price: judgement.price, rationale: judgement.rationale ?? "" };
+  state.stage = "awaiting_quote_approval";
+  state.awaiting = undefined;
+  state.financeThreadId = financeThreadId;
+  if (financeThreadId !== undefined) {
+    await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
+  }
   await sendMessage(
     env,
     state.chatId,
-    `*Finance quote ready* for *${context.entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nPreparing the Draft Proposal now.`,
+    `*Finance quote ready* for *${context.entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to SM&BD for the Draft Proposal?`,
+    [
+      [
+        { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
+        { text: "❌ Not yet", callback_data: `quote:${state.workId}:reject` },
+      ],
+    ],
+    financeThreadId,
+  );
+  return state;
+}
+
+/**
+ * Martin's approval gate on the quote itself, distinct from the Draft
+ * Proposal review gate later — per the Finance Hat Definition's
+ * authority_limits ("The quote is a judgment call, not final authority —
+ * subject to Martin's direct authorization"). Approval does NOT hand off
+ * in-process to SM&BD (that would repeat the same in-process cross-Unit
+ * call the SM&BD -> Finance boundary was corrected away from): it creates a
+ * new Handoff, Finance -> SM&BD, and returns. SM&BD's own independent
+ * discovery (discoverPendingSMBDHandoffs in index.ts) picks it up, the same
+ * way Finance discovers Handoffs addressed to it.
+ */
+export async function handleQuoteApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const financeThreadId = state.financeThreadId ?? threadIdForUnit(env, "Finance") ?? state.threadId;
+
+  if (!approved) {
+    await updatePage(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(
+        "Martin did not approve the quote as computed. Awaiting further value context or direction before reassessing.",
+      ),
+    });
+    await logActivity(env, {
+      entry: `Finance quote not approved: ${state.matterName ?? state.entityName}`,
+      type: "Decision",
+      area: "Finance",
+      decisionRationale: "Martin declined to approve the computed quote.",
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Understood — the quote for *${state.entityName}* hasn't been approved. Send additional value context and I'll reassess.`,
+      undefined,
+      financeThreadId,
+    );
+    state.stage = "handoff_held";
+    state.awaiting = "value_context_more";
+    return state;
+  }
+
+  const followUp = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    Handoff: title(`Draft Proposal — ${state.matterName}`),
+    "From Unit": select("Finance"),
+    "From Hat": richText("Value-Based Pricing Assessor"),
+    "To Unit": select("SM&BD"),
+    "To Hat": richText("Sales Executive"),
+    Type: select("Work"),
+    Status: select("Pending"),
+    Reason: richText(`Value-based quote approved by Martin for ${state.matterName}; ready for Draft Proposal preparation.`),
+    "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
+    Matter: relation([state.matterId!]),
+    "Verified Facts & Sources": richText(
+      `Authoritative quote: $${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
+    ),
+  });
+  state.handoffId = followUp.id;
+  await env.STATE_KV.put(`handoff_workitem:${followUp.id}`, state.workId);
+
+  await logActivity(env, {
+    entry: `Quote approved — routed to SM&BD for Draft Proposal: ${state.matterName}`,
+    type: "Activity",
+    area: "Finance",
+    activity: `Handoff ${followUp.id} — quote approved and queued for SM&BD.`,
+    nextActions: "SM&BD to pick up and prepare the Draft Proposal.",
+    outcome: "Complete",
+  });
+  await sendMessage(
+    env,
+    state.chatId,
+    `Quote approved — queued for SM&BD to prepare the Draft Proposal for *${state.entityName}*.`,
     undefined,
     financeThreadId,
   );
 
-  state.quote = { price: judgement.price, rationale: judgement.rationale ?? "" };
-  state.stage = "quote_received";
-  return sales.handleQuoteReceived(env, state);
+  state.stage = "quote_approved";
+  state.awaiting = undefined;
+  return state;
 }

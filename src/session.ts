@@ -58,6 +58,18 @@ export class WorkSession extends DurableObject<Env> {
     return this.save(await finance.handlePickup(this.env, state));
   }
 
+  /**
+   * The return-leg mirror of runFinancePickup: invoked independently by
+   * index.ts's scheduled SM&BD-Handoff discovery (never by Finance
+   * directly) once a Pending Handoff addressed to SM&BD is found — the
+   * approved quote queued by finance.handleQuoteApproval. Finance's own
+   * call already returned before this ever runs.
+   */
+  async runProposalDrafting(): Promise<WorkState> {
+    const state = await this.require();
+    return this.save(await sales.handleQuoteReceived(this.env, state));
+  }
+
   async cancel(): Promise<WorkState> {
     const state = await this.require();
     state.stage = "cancelled";
@@ -82,6 +94,8 @@ export class WorkSession extends DurableObject<Env> {
         return this.save(await sales.handleLeadToProspectApproval(this.env, state, value === "approve"));
       case "proposal":
         return this.save(await sales.handleProposalApproval(this.env, state, value === "approve"));
+      case "quote":
+        return this.save(await finance.handleQuoteApproval(this.env, state, value === "approve"));
       default:
         return state;
     }

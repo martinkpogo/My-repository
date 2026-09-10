@@ -45,6 +45,24 @@ function formatQualificationEvidence(conditions: QualificationConditionResult[])
     .join("\n\n");
 }
 
+/**
+ * Reads the authoritative quote back off the Finance -> SM&BD Handoff's own
+ * "Verified Facts & Sources" field, per the same context_transfer discipline
+ * Finance's own resolveHandoffBusinessContext applies in the other
+ * direction — the receiving Unit reconstructs from the Handoff record
+ * itself, never trusts the sending Unit's (or its own prior) session state
+ * for a value that crossed a Unit boundary. Returns null on any parse
+ * failure; callers must treat null as "cannot proceed."
+ */
+function parseAuthoritativeQuote(verifiedFactsAndSources: string): { price: number; rationale: string } | null {
+  const priceMatch = verifiedFactsAndSources.match(/Authoritative quote:\s*\$([\d,.]+)/);
+  if (!priceMatch) return null;
+  const price = Number(priceMatch[1].replace(/,/g, ""));
+  if (!Number.isFinite(price)) return null;
+  const rationaleMatch = verifiedFactsAndSources.match(/Rationale:\s*([\s\S]*)/);
+  return { price, rationale: rationaleMatch ? rationaleMatch[1].trim() : "" };
+}
+
 interface SalesExecutiveGovernance {
   hatDefinition: string;
   universalRoleContract: string;
@@ -534,7 +552,36 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
   return state;
 }
 
+/**
+ * The SM&BD side of the Finance -> SM&BD execution boundary. Invoked only
+ * via runProposalDrafting, itself only invoked by index.ts's scheduled
+ * SM&BD-Handoff discovery once a Pending Handoff (the quote Martin
+ * approved) addressed to SM&BD is found — never called in-process from
+ * Finance's own approval handler.
+ */
 export async function handleQuoteReceived(env: Env, state: WorkState): Promise<WorkState> {
+  const handoff = await getPage(env, state.handoffId!);
+  const quote = parseAuthoritativeQuote(plainText(handoff.properties["Verified Facts & Sources"]));
+  if (!quote) {
+    console.error(`Sales Executive proposal drafting blocked — could not read the authoritative quote from Handoff ${state.handoffId}`);
+    await logActivity(env, {
+      entry: `Draft Proposal blocked — quote unreadable from Handoff: ${state.entityName}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale:
+        "Could not read the authoritative Finance quote from the Handoff's own Notion record. Refusing to proceed without it; Handoff left Pending for automatic retry.",
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't read the Finance quote for *${state.entityName}* from its Handoff record. Not proceeding without it — will retry automatically on the next discovery cycle.`,
+      undefined,
+      state.threadId,
+    );
+    return state;
+  }
+
   const governance = await getSalesExecutiveGovernance(env);
   if (!governance) {
     console.error(`Sales Executive proposal drafting blocked — governance retrieval failed for work ${state.workId}`);
@@ -543,31 +590,40 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
       type: "Blocker",
       area: "SM&BD",
       decisionRationale:
-        "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to draft the Proposal without it.",
+        "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to draft the Proposal without it; Handoff left Pending for automatic retry.",
       outcome: "Blocked",
     });
-    // No automatic retry trigger exists here: Finance's Handoff is already
-    // Closed with the quote recorded by the time this runs, and nothing the
-    // user sends re-invokes drafting. Known limitation, not solved here.
     await sendMessage(
       env,
       state.chatId,
-      `Couldn't prepare the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. There's no automatic retry for this step; please try again once resolved.`,
+      `Couldn't prepare the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Will retry automatically on the next discovery cycle.`,
       undefined,
       state.threadId,
     );
     return state;
   }
 
+  // Both checks above must pass BEFORE marking Picked-up, so a transient
+  // failure leaves the Handoff Pending for automatic retry rather than
+  // stuck — mirrors Finance's own handlePickup ordering.
+  state.quote = quote;
+  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
+
   const draft = await aiText(
     env,
     buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
-    `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: $${state.quote?.price} — rationale: ${state.quote?.rationale}`,
+    `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: $${state.quote.price} — rationale: ${state.quote.rationale}`,
     { maxTokens: 3000 },
   );
 
   state.proposalDraft = draft;
   state.proposalRevisionCount = 0;
+
+  await updatePage(env, state.handoffId!, {
+    Status: select("Closed"),
+    "Work Completed": richText("Draft Proposal prepared and presented to Martin for review."),
+  });
+
   await sendMessage(
     env,
     state.chatId,
