@@ -206,7 +206,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     [
       [
         { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
-        { text: "❌ Not yet", callback_data: `quote:${state.workId}:reject` },
+        { text: "🔁 Redo", callback_data: `quote:${state.workId}:redo` },
       ],
     ],
     financeThreadId,
@@ -231,21 +231,19 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   if (!approved) {
     await updatePage(env, state.handoffId!, {
       Status: select("Held"),
-      "Open Questions": richText(
-        "Martin did not approve the quote as computed. Awaiting further value context or direction before reassessing.",
-      ),
+      "Open Questions": richText("Martin requested a redo of the quote. Awaiting his reasoning before reassessing."),
     });
     await logActivity(env, {
-      entry: `Finance quote not approved: ${state.matterName ?? state.entityName}`,
+      entry: `Finance quote redo requested: ${state.matterName ?? state.entityName}`,
       type: "Decision",
       area: "Finance",
-      decisionRationale: "Martin declined to approve the computed quote.",
+      decisionRationale: "Martin requested a redo of the computed quote.",
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `Understood — the quote for *${state.entityName}* hasn't been approved. Send additional value context and I'll reassess.`,
+      `Got it — why are you requesting a redo for *${state.entityName}*? Tell me what's off or what to take into account, and I'll queue it for Finance to reassess and give you a new quote to review.`,
       undefined,
       financeThreadId,
     );
