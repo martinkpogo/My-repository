@@ -421,6 +421,13 @@ async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise
   );
 }
 
+// Work-item stages are internal code states (e.g. "awaiting_qualification_approval")
+// used for control flow, not written for a human reader — this turns any of
+// them into plain English for display without needing a maintained mapping.
+function humanizeStage(stage: string): string {
+  return stage.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
 async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
   const raw = await env.STATE_KV.get("sessions_index");
   const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
@@ -432,7 +439,7 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
   const activeId = await getActiveWorkId(env, chatId, threadId);
   const buttons: InlineButton[][] = open.map((s) => [
     {
-      text: `${s.workId === activeId ? "• " : ""}${s.unit}/${s.hat} — ${s.label} (${s.stage})`,
+      text: `${s.workId === activeId ? "• " : ""}${s.unit}/${s.hat} — ${s.label} (${humanizeStage(s.stage)})`,
       callback_data: `switch:${s.workId}:`,
     },
   ]);
