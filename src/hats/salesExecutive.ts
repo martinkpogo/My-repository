@@ -14,7 +14,6 @@ import { aiJson, aiText } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
-import * as finance from "./financeValueBasedPricing";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -494,12 +493,26 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 
 export async function handleMoreValueContext(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.proposedIntervention = `${state.proposedIntervention}\n\nAdditional value context: ${text}`;
+  // SM&BD's authority here is mechanical only: record the new content and
+  // make the Handoff queue-eligible again. This is not a determination that
+  // Finance's Hold gate is resolved -- Finance's own judgment in
+  // handlePickup (invoked only via independent discovery, never from here)
+  // remains the sole authority over sufficiency and the resulting
+  // Held/Closed outcome. SM&BD's execution ends here.
   await updatePage(env, state.handoffId!, {
     "Verified Facts & Sources": richText(
       `Proposed intervention + value context:\n${state.proposedIntervention}`.slice(0, 1900),
     ),
+    Status: select("Pending"),
   });
-  return finance.handlePickup(env, state);
+  await sendMessage(
+    env,
+    state.chatId,
+    `Got it — added to the Handoff for *${state.entityName}* and queued for Finance to reassess. I'll let you know here once Finance responds.`,
+    undefined,
+    state.financeThreadId ?? state.threadId,
+  );
+  return state;
 }
 
 export async function handleQuoteReceived(env: Env, state: WorkState): Promise<WorkState> {
