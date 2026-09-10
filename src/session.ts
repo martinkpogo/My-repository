@@ -39,6 +39,8 @@ export class WorkSession extends DurableObject<Env> {
         return this.save(await sales.handleInterventionText(this.env, state, text));
       case "value_context_more":
         return this.save(await sales.handleMoreValueContext(this.env, state, text));
+      case "quote_redo_reason":
+        return this.save(await finance.handleQuoteRedoReason(this.env, state, text));
       case "proposal_feedback":
         return this.save(await sales.handleProposalFeedback(this.env, state, text));
       default:

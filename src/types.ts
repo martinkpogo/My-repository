@@ -78,7 +78,8 @@ export interface WorkState {
     | "entity_pick"
     | "matter_pick"
     | "intervention"
-    | "value_context_more";
+    | "value_context_more"
+    | "quote_redo_reason";
   createdAt: string;
   updatedAt: string;
 

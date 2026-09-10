@@ -78,8 +78,8 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   // configured, so this is a no-op when UNIT_TOPIC_MAP is unset.
   const financeThreadId = threadIdForUnit(env, "Finance") ?? state.threadId;
 
-  // Business context and governance are both checked BEFORE the Handoff is
-  // marked Picked-up, so a Notion outage leaves it Pending and it's retried
+  // Business context is reconstructed BEFORE the Handoff is marked
+  // Picked-up, so a Notion outage leaves it Pending and it's retried
   // automatically on the next discovery cycle, rather than stuck in a
   // Picked-up limbo needing manual recovery.
   const context = await resolveHandoffBusinessContext(env, state.handoffId!);
@@ -103,6 +103,37 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     return state;
   }
 
+  return judgeQuote(env, state, {
+    entityName: context.entityName,
+    matterName: context.matterName,
+    judgmentContext: context.judgmentContext,
+    financeThreadId,
+    awaitingOnInsufficient: "value_context_more",
+    activityLabel: "picked up the quote request",
+  });
+}
+
+/**
+ * The Martin <-> Finance conversation that produces a price judgment,
+ * shared by the initial pickup and by a redo (handleQuoteRedoReason) —
+ * same governance retrieval, same AI judgment call, same Held/Closed
+ * branching. Governance is checked BEFORE the Handoff is marked Picked-up,
+ * so a transient failure leaves its prior status intact rather than stuck.
+ */
+async function judgeQuote(
+  env: Env,
+  state: WorkState,
+  input: {
+    entityName: string;
+    matterName: string;
+    judgmentContext: string;
+    financeThreadId: number | undefined;
+    awaitingOnInsufficient: NonNullable<WorkState["awaiting"]>;
+    activityLabel: string;
+  },
+): Promise<WorkState> {
+  const { entityName, matterName, judgmentContext, financeThreadId, awaitingOnInsufficient, activityLabel } = input;
+
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, FINANCE_HAT_DEFINITION_PAGE_ID, "Finance Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
@@ -115,18 +146,18 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     ]
       .filter(Boolean)
       .join(" and ");
-    console.error(`Finance handlePickup: governance retrieval failed (${missing}) for handoff ${state.handoffId}`);
+    console.error(`Finance judgeQuote: governance retrieval failed (${missing}) for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Finance pickup blocked — governance retrieval failed: ${context.matterName}`,
+      entry: `Finance quote judgment blocked — governance retrieval failed: ${matterName}`,
       type: "Blocker",
       area: "Finance",
-      decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it; Handoff left Pending for automatic retry.`,
+      decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`,
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `*Finance couldn't pick up the quote request* for *${context.entityName}*.\n\nCouldn't retrieve its canonical governance from Notion (${missing}). Not proceeding without it — will retry automatically on the next discovery cycle.`,
+      `Couldn't assess the quote for *${entityName}* — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`,
       undefined,
       financeThreadId,
     );
@@ -135,16 +166,16 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
 
   await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
-    entry: `Handoff picked up: ${context.matterName}`,
+    entry: `Finance ${activityLabel}: ${matterName}`,
     type: "Activity",
     area: "Finance",
-    activity: "Value-Based Pricing Assessor picked up quote request.",
+    activity: `Value-Based Pricing Assessor ${activityLabel}.`,
     outcome: "Active",
   });
 
   const judgement = await aiJson<PriceJudgement>(env, {
     system: buildFinanceSystemPrompt(hatDefinition, universalRoleContract),
-    user: `Entity: ${context.entityName}\nProposed intervention and value context:\n${context.judgmentContext}`,
+    user: `Entity: ${entityName}\nProposed intervention and value context:\n${judgmentContext}`,
   });
 
   if (!judgement || judgement.sufficient !== true || typeof judgement.price !== "number") {
@@ -154,7 +185,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       "Open Questions": richText(reason),
     });
     await logActivity(env, {
-      entry: `Handoff held — insufficient value context: ${context.matterName}`,
+      entry: `Handoff held — insufficient value context: ${matterName}`,
       type: "Blocker",
       area: "Finance",
       decisionRationale: reason,
@@ -163,12 +194,12 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     await sendMessage(
       env,
       state.chatId,
-      `*Finance has held the quote request* for *${context.entityName}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
+      `*Finance has held the quote request* for *${entityName}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
       undefined,
       financeThreadId,
     );
     state.stage = "handoff_held";
-    state.awaiting = "value_context_more";
+    state.awaiting = awaitingOnInsufficient;
     state.financeThreadId = financeThreadId;
     if (financeThreadId !== undefined) {
       await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
@@ -181,7 +212,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     "Work Completed": richText(`Quoted price: $${judgement.price}. Rationale: ${judgement.rationale ?? ""}`.slice(0, 1900)),
   });
   await logActivity(env, {
-    entry: `Quote judged: $${judgement.price} — ${context.matterName}`,
+    entry: `Quote judged: $${judgement.price} — ${matterName}`,
     type: "Decision",
     area: "Finance",
     decisions: `Value-based quote: $${judgement.price}`,
@@ -202,7 +233,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   await sendMessage(
     env,
     state.chatId,
-    `*Finance quote ready* for *${context.entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to SM&BD for the Draft Proposal?`,
+    `*Finance quote ready* for *${entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to SM&BD for the Draft Proposal?`,
     [
       [
         { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
@@ -212,6 +243,53 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     financeThreadId,
   );
   return state;
+}
+
+/**
+ * Handles Martin's reasoning after he clicks Redo on a computed quote.
+ * This stays entirely within Finance — Martin is critiquing Finance's own
+ * judgment, not supplying business facts SM&BD owns (contrast
+ * sales.handleMoreValueContext, used for the latter) — so it acts
+ * immediately rather than requeuing the Handoff Pending for cron discovery
+ * to re-pick-up asynchronously; no Unit boundary is being crossed.
+ */
+export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
+  const financeThreadId = state.financeThreadId ?? threadIdForUnit(env, "Finance") ?? state.threadId;
+
+  const context = await resolveHandoffBusinessContext(env, state.handoffId!);
+  if (!context) {
+    console.error(`Finance redo blocked — business-context reconstruction failed for handoff ${state.handoffId}`);
+    await logActivity(env, {
+      entry: `Finance redo blocked — could not reconstruct business context: ${state.entityName}`,
+      type: "Blocker",
+      area: "Finance",
+      decisionRationale:
+        "Could not read the Handoff's own Notion records to apply Martin's redo reasoning. Refusing to proceed without it.",
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't read the Handoff record for *${state.entityName}* to apply your reasoning. Please try again once resolved.`,
+      undefined,
+      financeThreadId,
+    );
+    return state;
+  }
+
+  const augmentedContext = `${context.judgmentContext}\n\nMartin's redo reasoning: ${reasonText}`;
+  await updatePage(env, state.handoffId!, {
+    "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
+  });
+
+  return judgeQuote(env, state, {
+    entityName: context.entityName,
+    matterName: context.matterName,
+    judgmentContext: augmentedContext,
+    financeThreadId,
+    awaitingOnInsufficient: "quote_redo_reason",
+    activityLabel: "resumed reassessment following Martin's redo reasoning",
+  });
 }
 
 /**
@@ -243,12 +321,12 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     await sendMessage(
       env,
       state.chatId,
-      `Got it — why are you requesting a redo for *${state.entityName}*? Tell me what's off or what to take into account, and I'll queue it for Finance to reassess and give you a new quote to review.`,
+      `Got it — why are you requesting a redo for *${state.entityName}*? Tell me what's off or what to take into account, and I'll reassess and get you a new quote to review.`,
       undefined,
       financeThreadId,
     );
-    state.stage = "handoff_held";
-    state.awaiting = "value_context_more";
+    state.stage = "quote_redo_requested";
+    state.awaiting = "quote_redo_reason";
     return state;
   }
 
