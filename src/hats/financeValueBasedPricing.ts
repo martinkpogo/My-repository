@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../types";
-import { richText, select, updatePage } from "../notion";
+import { getPageContent, richText, select, updatePage } from "../notion";
 import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
@@ -13,12 +13,97 @@ interface PriceJudgement {
   reason_if_insufficient?: string;
 }
 
+// Canonical Notion governance sources for this Hat, verified live in the
+// audit that preceded this change. Explicit page IDs, not title search, per
+// the Universal Role Contract's evidence rule (a consequential source must
+// be attributable, not guessed at by name match).
+const FINANCE_HAT_DEFINITION_PAGE_ID = "3cecb004-e583-81f9-a52e-e24872a52eff";
+const UNIVERSAL_ROLE_CONTRACT_PAGE_ID = "3cecb004-e583-81ee-8f1e-f0d58532f4aa";
+
+// Bounded so a Notion edit takes effect within a known window rather than
+// indefinitely — matches the current Finance-discovery cadence.
+const GOVERNANCE_CACHE_TTL_SECONDS = 15 * 60;
+
+/**
+ * Retrieves one governance page's content, cached in STATE_KV under a
+ * clearly namespaced key with a bounded TTL. Returns null on any failure
+ * (cache and live fetch both unavailable, or the page came back empty) —
+ * callers must treat null as "cannot proceed," never substitute hardcoded
+ * text in its place.
+ */
+async function getGovernance(env: Env, pageId: string, label: string): Promise<string | null> {
+  const cacheKey = `governance:${pageId}`;
+  try {
+    const cached = await env.STATE_KV.get(cacheKey);
+    if (cached) return cached;
+  } catch (err) {
+    console.error(`Governance cache read failed for ${label} (${pageId})`, err);
+  }
+  try {
+    const content = await getPageContent(env, pageId);
+    if (!content.trim()) throw new Error("retrieved page content was empty");
+    env.STATE_KV.put(cacheKey, content, { expirationTtl: GOVERNANCE_CACHE_TTL_SECONDS }).catch((err) => {
+      console.error(`Governance cache write failed for ${label} (${pageId})`, err);
+    });
+    return content;
+  } catch (err) {
+    console.error(`Governance retrieval failed for ${label} (${pageId})`, err);
+    return null;
+  }
+}
+
+function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
+  return [
+    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for your role, responsibilities, authority limits, and stop conditions — follow them exactly as written.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+    'Return JSON: {"sufficient": true, "price": <number>, "rationale": "..."} if you can judge a value-based price responsibly per the Hat Definition above, or {"sufficient": false, "reason_if_insufficient": "..."} if the Hat Definition\'s own rule for insufficient context applies to this case.',
+  ].join("\n\n");
+}
+
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
   // Finance is its own Unit with its own topic/workspace - it speaks there,
   // not wherever the enquiry happened to originate (state.threadId, usually
   // SM&BD's topic). Falls back to state.threadId if Finance has no topic
   // configured, so this is a no-op when UNIT_TOPIC_MAP is unset.
   const financeThreadId = threadIdForUnit(env, "Finance") ?? state.threadId;
+
+  // Governance is checked BEFORE the Handoff is marked Picked-up, so a
+  // Notion outage leaves it Pending and it's retried automatically on the
+  // next discovery cycle, rather than stuck in a Picked-up limbo needing
+  // manual recovery.
+  const [hatDefinition, universalRoleContract] = await Promise.all([
+    getGovernance(env, FINANCE_HAT_DEFINITION_PAGE_ID, "Finance Hat Definition"),
+    getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
+  ]);
+
+  if (!hatDefinition || !universalRoleContract) {
+    const missing = [
+      !hatDefinition ? "Finance Hat Definition" : null,
+      !universalRoleContract ? "Universal Role Contract" : null,
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    console.error(`Finance handlePickup: governance retrieval failed (${missing}) for handoff ${state.handoffId}`);
+    await logActivity(env, {
+      entry: `Finance pickup blocked — governance retrieval failed: ${state.matterName}`,
+      type: "Blocker",
+      area: "Finance",
+      decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it; Handoff left Pending for automatic retry.`,
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `*Finance couldn't pick up the quote request* for *${state.entityName}*.\n\nCouldn't retrieve its canonical governance from Notion (${missing}). Not proceeding without it — will retry automatically on the next discovery cycle.`,
+      undefined,
+      financeThreadId,
+    );
+    return state;
+  }
 
   await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
@@ -30,8 +115,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   });
 
   const judgement = await aiJson<PriceJudgement>(env, {
-    system:
-      "You are the Value-Based Pricing Assessor Hat at ENIG. Judge a value-based price (USD) for the proposed intervention using ONLY the value context given. You have NOT been given, and must NOT infer or use, any disclosed budget or willingness-to-pay figure. If the value context is insufficient to responsibly judge a price, do not estimate around the gap. Return JSON: {\"sufficient\": true, \"price\": <number>, \"rationale\": \"...\"} or {\"sufficient\": false, \"reason_if_insufficient\": \"...\"}.",
+    system: buildFinanceSystemPrompt(hatDefinition, universalRoleContract),
     user: `Entity: ${state.entityName}\nProposed intervention and value context:\n${state.proposedIntervention}`,
   });
 

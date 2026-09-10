@@ -112,3 +112,45 @@ export function plainText(prop: any): string {
 export function relationIds(prop: any): string[] {
   return (prop?.relation ?? []).map((r: any) => r.id);
 }
+
+/**
+ * Retrieves a Notion page's block-children content as plain text, paginating
+ * as needed. Governance pages (Hat Definitions, Universal Role Contract,
+ * etc.) are a flat sequence of a `code` block (the machine-readable yaml
+ * definition) followed by prose blocks (the human-readable explanation) —
+ * code blocks are tagged so the two stay distinguishable. Only top-level
+ * blocks are read; nested children are not recursed into. Not a general
+ * Notion renderer — just enough to make a governance page's own text usable
+ * as authoritative context.
+ */
+export async function getPageContent(env: Env, pageId: string): Promise<string> {
+  const parts: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const query = `?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const data = await notionFetch(env, `/blocks/${pageId}/children${query}`);
+    for (const block of data.results ?? []) {
+      const text = plainTextFromBlock(block);
+      if (text) parts.push(text);
+    }
+    cursor = data.has_more ? data.next_cursor : undefined;
+  } while (cursor);
+  return parts.join("\n\n");
+}
+
+function plainTextFromBlock(block: any): string {
+  const type = block?.type;
+  const value = type ? block[type] : undefined;
+  const richTextArray = value?.rich_text;
+  if (!Array.isArray(richTextArray)) return "";
+  const text = richTextArray.map((t: any) => t?.plain_text ?? "").join("");
+  if (!text) return "";
+  if (type === "code") {
+    const language = value.language ?? "";
+    return `[CODE${language ? ` language=${language}` : ""}]\n${text}\n[/CODE]`;
+  }
+  if (typeof type === "string" && type.startsWith("heading_")) {
+    return `## ${text}`;
+  }
+  return text;
+}
