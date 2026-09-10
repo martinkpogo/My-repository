@@ -166,8 +166,28 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
 
   const name = extracted?.organisation || extracted?.name || "";
   const email = extracted?.email || "";
+  const phone = extracted?.phone || "";
 
-  const candidates = await findEntityCandidates(env, name, email);
+  const match = await findEntityMatch(env, name, email, phone);
+
+  // one_determinate_match: use existing Entity directly — a clean email or
+  // phone match doesn't need a confirmation click per the SM&BD AI Project
+  // Instructions' entity_identification outcomes.
+  if (match.determinate) {
+    const page = await getPage(env, match.determinate.id);
+    state.entityId = page.id;
+    state.entityName = plainText(page.properties.Name);
+    await logActivity(env, {
+      entry: `Entity matched: ${state.entityName}`,
+      type: "Activity",
+      area: "SM&BD",
+      activity: `Determinate match (email/phone) for incoming enquiry — using existing Entity.`,
+      outcome: "Active",
+    });
+    return proceedToMatterIdentification(env, state);
+  }
+
+  const candidates = match.plausible;
   state.candidateEntities = candidates.map((c) => ({ id: c.id, name: c.name }));
 
   const buttons = [
@@ -175,7 +195,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
     [{ text: `➕ Create new Entity${name ? `: ${name}` : ""}`, callback_data: `entity:${state.workId}:new` }],
   ];
 
-  state.entityDraft = { name: name || "New contact", email, phone: extracted?.phone || "", type: extracted?.organisation ? "Organisation" : "Individual" };
+  state.entityDraft = { name: name || "New contact", email, phone, type: extracted?.organisation ? "Organisation" : "Individual" };
 
   await sendMessage(
     env,
@@ -861,21 +881,51 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
   return state;
 }
 
-async function findEntityCandidates(env: Env, name: string, email: string): Promise<{ id: string; name: string }[]> {
-  const results: { id: string; name: string }[] = [];
+interface EntityMatchResult {
+  // Set only when exactly one record matched on a determinate identity
+  // signal (email or phone) — per the Entity identification rule's
+  // one_determinate_match outcome, this is used directly with no
+  // confirmation click. Multiple determinate-signal matches, or any
+  // name-only match, are never determinate — they always go to `plausible`
+  // for Martin to confirm or reject, per the "never auto-select" rule.
+  determinate?: { id: string; name: string };
+  plausible: { id: string; name: string }[];
+}
+
+async function findEntityMatch(env: Env, name: string, email: string, phone: string): Promise<EntityMatchResult> {
+  const determinateMatches: { id: string; name: string }[] = [];
   if (email) {
     const byEmail = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
       property: "Email",
       email: { equals: email },
     });
-    for (const p of byEmail) results.push({ id: p.id, name: plainText(p.properties.Name) });
+    for (const p of byEmail) determinateMatches.push({ id: p.id, name: plainText(p.properties.Name) });
   }
-  if (results.length === 0 && name) {
+  if (phone) {
+    const byPhone = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
+      property: "Phone",
+      phone_number: { equals: phone },
+    });
+    for (const p of byPhone) {
+      if (!determinateMatches.some((m) => m.id === p.id)) {
+        determinateMatches.push({ id: p.id, name: plainText(p.properties.Name) });
+      }
+    }
+  }
+
+  if (determinateMatches.length === 1) return { determinate: determinateMatches[0], plausible: [] };
+  if (determinateMatches.length > 1) return { plausible: determinateMatches.slice(0, 5) };
+
+  // No determinate signal matched — fall back to a fuzzy name search. This
+  // is never determinate (a substring match isn't reliable identity
+  // evidence), so even a single result here still goes to Martin to
+  // confirm rather than being auto-selected.
+  if (name) {
     const byName = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
       property: "Name",
       title: { contains: name },
     });
-    for (const p of byName) results.push({ id: p.id, name: plainText(p.properties.Name) });
+    return { plausible: byName.map((p) => ({ id: p.id, name: plainText(p.properties.Name) })).slice(0, 5) };
   }
-  return results.slice(0, 5);
+  return { plausible: [] };
 }
