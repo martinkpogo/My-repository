@@ -439,17 +439,19 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
   await sendMessage(env, chatId, "Open work items:", buttons, threadId);
 }
 
-const STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS = 15 * 60 * 1000;
+// A digest only needs to reach Martin when the outstanding set actually
+// changes, or as a backstop so a stuck item is never silently forgotten --
+// resending the identical list every discovery tick is just noise.
+const STALE_HANDOFF_DIGEST_BACKSTOP_MS = 24 * 60 * 60 * 1000;
 // Discovery now runs every 15 min (see wrangler.toml / cron-job.org), so a
 // legitimate gap between runs can be nearly that long — the threshold has
 // to clear one full cycle plus buffer, or every check would false-alarm.
 const WATCHDOG_STALE_THRESHOLD_MS = 20 * 60 * 1000;
 const WATCHDOG_ALERT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
-// Runs on every scheduled tick (as often as the cron fires, currently every
-// 1 minute for Finance-discovery latency), but only actually messages
-// Martin at most once per STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS - discovery
-// and notification cadence are independent concerns.
+// Runs on every discovery tick, but only actually messages Martin when the
+// set of outstanding (Pending/Held) Handoffs has changed since the last
+// digest, or the backstop interval has elapsed with no change at all.
 async function checkStaleHandoffs(env: Env): Promise<void> {
   const results = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
     or: [
@@ -460,8 +462,20 @@ async function checkStaleHandoffs(env: Env): Promise<void> {
   if (results.length === 0) return;
 
   const lastSentKey = "stale_handoff_digest_last_sent";
-  const lastSent = await env.STATE_KV.get(lastSentKey);
-  if (lastSent && Date.now() - Number(lastSent) < STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS) return;
+  const lastFingerprintKey = "stale_handoff_digest_last_fingerprint";
+  const fingerprint = results
+    .map((p) => `${p.id}:${plainText(p.properties.Status)}`)
+    .sort()
+    .join(",");
+
+  const [lastSent, lastFingerprint] = await Promise.all([
+    env.STATE_KV.get(lastSentKey),
+    env.STATE_KV.get(lastFingerprintKey),
+  ]);
+
+  const changed = fingerprint !== lastFingerprint;
+  const backstopDue = !lastSent || Date.now() - Number(lastSent) >= STALE_HANDOFF_DIGEST_BACKSTOP_MS;
+  if (!changed && !backstopDue) return;
 
   const lines = results.map((p) => {
     const status = plainText(p.properties.Status);
@@ -475,4 +489,5 @@ async function checkStaleHandoffs(env: Env): Promise<void> {
     `*Handoff check-in* — ${results.length} item(s) not Closed:\n\n${lines.join("\n")}`,
   );
   await env.STATE_KV.put(lastSentKey, String(Date.now()));
+  await env.STATE_KV.put(lastFingerprintKey, fingerprint);
 }
