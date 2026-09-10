@@ -164,7 +164,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     await sendMessage(
       env,
       state.chatId,
-      `*Finance held the quote request* for *${context.entityName}*.\n\nReason: ${reason}\n\nSend more value context (not a budget figure) and I'll re-submit to Finance.`,
+      `*Finance has held the quote request* for *${context.entityName}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
       undefined,
       financeThreadId,
     );
