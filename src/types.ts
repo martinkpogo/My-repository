@@ -79,7 +79,8 @@ export interface WorkState {
     | "matter_pick"
     | "intervention"
     | "value_context_more"
-    | "quote_redo_reason";
+    | "quote_redo_reason"
+    | "matter_redo_reason";
   createdAt: string;
   updatedAt: string;
 
@@ -99,6 +100,14 @@ export interface WorkState {
   candidateEntities?: { id: string; name: string }[];
   candidateMatters?: { id: string; name: string }[];
   blockedReason?: string;
+
+  /**
+   * A proposed new Matter's drafted title + stated need, shown to Martin
+   * for approval before the record is created — per the SM&BD AI Project
+   * Instructions' Matter identification rule ("pass through the applicable
+   * creation authorization gate before creating the Matter record").
+   */
+  matterDraft?: { name: string; statedNeed: string };
 
   /**
    * Set when Finance (or another picked-up Unit) has posted a blocker to its

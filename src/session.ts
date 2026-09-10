@@ -41,6 +41,8 @@ export class WorkSession extends DurableObject<Env> {
         return this.save(await sales.handleMoreValueContext(this.env, state, text));
       case "quote_redo_reason":
         return this.save(await finance.handleQuoteRedoReason(this.env, state, text));
+      case "matter_redo_reason":
+        return this.save(await sales.handleMatterRedoReason(this.env, state, text));
       case "proposal_feedback":
         return this.save(await sales.handleProposalFeedback(this.env, state, text));
       default:
@@ -92,6 +94,8 @@ export class WorkSession extends DurableObject<Env> {
         return this.save(await sales.handleEntityChoice(this.env, state, value));
       case "matter":
         return this.save(await sales.handleMatterChoice(this.env, state, value));
+      case "matternew":
+        return this.save(await sales.handleMatterCreationApproval(this.env, state, value === "approve"));
       case "qualify":
         return this.save(await sales.handleLeadToProspectApproval(this.env, state, value === "approve"));
       case "proposal":

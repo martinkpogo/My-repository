@@ -249,38 +249,96 @@ async function proceedToMatterIdentification(env: Env, state: WorkState): Promis
 
 export async function handleMatterChoice(env: Env, state: WorkState, choice: string): Promise<WorkState> {
   if (choice === "new") {
-    const summary = await aiJson<{ name: string; stated_need: string }>(env, {
-      system:
-        "From the enquiry text, produce a short Matter title (max 8 words) and a one-sentence Stated_need. Return JSON {name, stated_need}.",
-      user: state.enquiryText ?? "",
-      light: true,
-    });
-    const name = summary?.name || `Enquiry — ${state.entityName}`;
-    const page = await createPage(env, env.MATTERS_DATA_SOURCE_ID, {
-      Matter: title(name),
-      Entity: relation([state.entityId!]),
-      Status: select("Open"),
-      Stated_need: richText(summary?.stated_need ?? state.enquiryText ?? ""),
-      Next_action: richText("Arrange sales call with Martin"),
-      Evidence_source: richText(`Telegram enquiry, ${new Date().toISOString()}`),
-    });
-    state.matterId = page.id;
-    state.matterName = name;
-    await logActivity(env, {
-      entry: `Matter created: ${name}`,
-      type: "Decision",
-      area: "SM&BD",
-      decisions: `New distinct unit of commercial work identified for ${state.entityName}.`,
-      outcome: "Complete",
-    });
-  } else {
-    const page = await getPage(env, choice);
-    state.matterId = page.id;
-    state.matterName = plainText(page.properties.Matter);
+    return draftNewMatter(env, state, state.enquiryText ?? "");
   }
+
+  const page = await getPage(env, choice);
+  state.matterId = page.id;
+  state.matterName = plainText(page.properties.Matter);
+  await ensureEntityIsAtLeastLead(env, state);
+  return prepareSalesCall(env, state);
+}
+
+/**
+ * Drafts a new Matter's title + stated need and presents it to Martin for
+ * approval — per the SM&BD AI Project Instructions' Matter identification
+ * rule ("pass through the applicable creation authorization gate before
+ * creating the Matter record"). Nothing is written to Notion until
+ * handleMatterCreationApproval confirms it.
+ */
+async function draftNewMatter(env: Env, state: WorkState, guidance: string): Promise<WorkState> {
+  const summary = await aiJson<{ name: string; stated_need: string }>(env, {
+    system:
+      "From the enquiry text, produce a short Matter title (max 8 words) and a one-sentence Stated_need. Return JSON {name, stated_need}.",
+    user: guidance,
+    light: true,
+  });
+  const name = summary?.name || `Enquiry — ${state.entityName}`;
+  const statedNeed = summary?.stated_need || state.enquiryText || "";
+  state.matterDraft = { name, statedNeed };
+
+  await sendMessage(
+    env,
+    state.chatId,
+    `*Proposed new Matter*\n\n*${name}*\n${statedNeed}\n\nCreate this Matter?`,
+    [
+      [
+        { text: "✅ Approve", callback_data: `matternew:${state.workId}:approve` },
+        { text: "🔁 Redo", callback_data: `matternew:${state.workId}:redo` },
+      ],
+    ],
+    state.threadId,
+  );
+  state.stage = "awaiting_matter_creation_approval";
+  state.awaiting = undefined;
+  return state;
+}
+
+export async function handleMatterCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (!approved) {
+    await sendMessage(
+      env,
+      state.chatId,
+      "Got it — what should change about this Matter? Tell me what's off or what to take into account, and I'll redraft it.",
+      undefined,
+      state.threadId,
+    );
+    state.stage = "matter_redo_requested";
+    state.awaiting = "matter_redo_reason";
+    return state;
+  }
+
+  const draft = state.matterDraft!;
+  const page = await createPage(env, env.MATTERS_DATA_SOURCE_ID, {
+    Matter: title(draft.name),
+    Entity: relation([state.entityId!]),
+    Status: select("Open"),
+    Stated_need: richText(draft.statedNeed),
+    Next_action: richText("Arrange sales call with Martin"),
+    Evidence_source: richText(`Telegram enquiry, ${new Date().toISOString()}`),
+  });
+  state.matterId = page.id;
+  state.matterName = draft.name;
+  state.matterDraft = undefined;
+  await logActivity(env, {
+    entry: `Matter created: ${draft.name}`,
+    type: "Decision",
+    area: "SM&BD",
+    decisions: `New distinct unit of commercial work identified for ${state.entityName}.`,
+    decisionRationale: "Approved by Martin.",
+    outcome: "Complete",
+  });
 
   await ensureEntityIsAtLeastLead(env, state);
   return prepareSalesCall(env, state);
+}
+
+export async function handleMatterRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
+  const previous = state.matterDraft;
+  const guidance = previous
+    ? `Original enquiry: ${state.enquiryText ?? ""}\n\nPrevious draft: ${previous.name} — ${previous.statedNeed}\n\nMartin's redo reasoning: ${reasonText}`
+    : `${state.enquiryText ?? ""}\n\nMartin's redo reasoning: ${reasonText}`;
+  return draftNewMatter(env, state, guidance);
 }
 
 async function ensureEntityIsAtLeastLead(env: Env, state: WorkState): Promise<void> {
@@ -408,7 +466,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
       [
         [
           { text: "✅ Approve Lead→Prospect", callback_data: `qualify:${state.workId}:approve` },
-          { text: "❌ Not yet", callback_data: `qualify:${state.workId}:reject` },
+          { text: "🔁 Redo", callback_data: `qualify:${state.workId}:redo` },
         ],
       ],
       state.threadId,
@@ -441,11 +499,18 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
 
 export async function handleLeadToProspectApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(env, state.chatId, "Understood — Lead→Prospect not approved. Send more context if there's anything further to evaluate.", undefined, state.threadId);
+    await sendMessage(
+      env,
+      state.chatId,
+      `Got it — why isn't *${state.entityName}* ready to progress yet? Send what's missing or what to reconsider, and I'll re-evaluate qualification.`,
+      undefined,
+      state.threadId,
+    );
     await logActivity(env, {
-      entry: `Lead→Prospect not approved: ${state.entityName}`,
+      entry: `Lead→Prospect redo requested: ${state.entityName}`,
       type: "Decision",
       area: "SM&BD",
+      decisionRationale: "Martin requested a redo of the qualification assessment.",
       outcome: "Blocked",
     });
     state.stage = "qualification_hold";
