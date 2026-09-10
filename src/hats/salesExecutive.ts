@@ -175,7 +175,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
     [{ text: `➕ Create new Entity${name ? `: ${name}` : ""}`, callback_data: `entity:${state.workId}:new` }],
   ];
 
-  (state as any)._entityDraft = { name: name || "New contact", email, phone: extracted?.phone || "", type: extracted?.organisation ? "Organisation" : "Individual" };
+  state.entityDraft = { name: name || "New contact", email, phone: extracted?.phone || "", type: extracted?.organisation ? "Organisation" : "Individual" };
 
   await sendMessage(
     env,
@@ -191,30 +191,104 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
 
 export async function handleEntityChoice(env: Env, state: WorkState, choice: string): Promise<WorkState> {
   if (choice === "new") {
-    const draft = (state as any)._entityDraft ?? { name: "New contact", email: "", phone: "", type: "Individual" };
-    const page = await createPage(env, env.ENTITY_DATA_SOURCE_ID, {
-      Name: title(draft.name),
-      "Entity Type": select(draft.type),
-      Status: select("Lead"),
-      ...(draft.email ? { Email: { email: draft.email } } : {}),
-      ...(draft.phone ? { Phone: { phone_number: draft.phone } } : {}),
-    });
-    state.entityId = page.id;
-    state.entityName = draft.name;
-    await logActivity(env, {
-      entry: `Entity created: ${draft.name}`,
-      type: "Decision",
-      area: "SM&BD",
-      decisions: `Created new Entity for work ${state.workId}`,
-      decisionRationale: "No existing Entity record matched the incoming enquiry.",
-      outcome: "Complete",
-    });
-  } else {
-    const page = await getPage(env, choice);
-    state.entityId = page.id;
-    state.entityName = plainText(page.properties.Name);
+    return presentEntityDraft(env, state);
   }
+
+  const page = await getPage(env, choice);
+  state.entityId = page.id;
+  state.entityName = plainText(page.properties.Name);
   return proceedToMatterIdentification(env, state);
+}
+
+/**
+ * Shows the drafted new-Entity record to Martin for approval before it's
+ * created — per the Universal Role Contract's rule that drafted content is
+ * shown in chat for approval before being written to Notion. Nothing is
+ * written until handleEntityCreationApproval confirms it.
+ */
+async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState> {
+  const draft = state.entityDraft ?? { name: "New contact", email: "", phone: "", type: "Individual" };
+  state.entityDraft = draft;
+
+  const details = [
+    `Name: ${draft.name}`,
+    `Type: ${draft.type}`,
+    draft.email ? `Email: ${draft.email}` : null,
+    draft.phone ? `Phone: ${draft.phone}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  await sendMessage(
+    env,
+    state.chatId,
+    `*Proposed new Entity*\n\n${details}\n\nCreate this Entity?`,
+    [
+      [
+        { text: "✅ Approve", callback_data: `entitynew:${state.workId}:approve` },
+        { text: "🔁 Redo", callback_data: `entitynew:${state.workId}:redo` },
+      ],
+    ],
+    state.threadId,
+  );
+  state.stage = "awaiting_entity_creation_approval";
+  state.awaiting = undefined;
+  return state;
+}
+
+export async function handleEntityCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (!approved) {
+    await sendMessage(
+      env,
+      state.chatId,
+      "Got it — what should change about this Entity? Tell me what's off or what to take into account, and I'll redraft it.",
+      undefined,
+      state.threadId,
+    );
+    state.stage = "entity_redo_requested";
+    state.awaiting = "entity_redo_reason";
+    return state;
+  }
+
+  const draft = state.entityDraft!;
+  const page = await createPage(env, env.ENTITY_DATA_SOURCE_ID, {
+    Name: title(draft.name),
+    "Entity Type": select(draft.type),
+    Status: select("Lead"),
+    ...(draft.email ? { Email: { email: draft.email } } : {}),
+    ...(draft.phone ? { Phone: { phone_number: draft.phone } } : {}),
+  });
+  state.entityId = page.id;
+  state.entityName = draft.name;
+  state.entityDraft = undefined;
+  await logActivity(env, {
+    entry: `Entity created: ${draft.name}`,
+    type: "Decision",
+    area: "SM&BD",
+    decisions: `Created new Entity for work ${state.workId}`,
+    decisionRationale: "No existing Entity record matched the incoming enquiry. Approved by Martin.",
+    outcome: "Complete",
+  });
+
+  return proceedToMatterIdentification(env, state);
+}
+
+export async function handleEntityRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
+  const previous = state.entityDraft;
+  const extracted = await aiJson<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
+    system:
+      "Extract the sender's identifying details for a business Entity record. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
+    user: `Original enquiry: ${state.enquiryText ?? ""}\n\nPrevious draft: ${JSON.stringify(previous ?? {})}\n\nMartin's redo reasoning: ${reasonText}`,
+    light: true,
+  });
+  const name = extracted?.organisation || extracted?.name || previous?.name || "New contact";
+  state.entityDraft = {
+    name,
+    email: extracted?.email || previous?.email || "",
+    phone: extracted?.phone || previous?.phone || "",
+    type: extracted?.organisation ? "Organisation" : previous?.type || "Individual",
+  };
+  return presentEntityDraft(env, state);
 }
 
 async function proceedToMatterIdentification(env: Env, state: WorkState): Promise<WorkState> {

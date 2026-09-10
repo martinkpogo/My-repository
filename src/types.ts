@@ -80,7 +80,8 @@ export interface WorkState {
     | "intervention"
     | "value_context_more"
     | "quote_redo_reason"
-    | "matter_redo_reason";
+    | "matter_redo_reason"
+    | "entity_redo_reason";
   createdAt: string;
   updatedAt: string;
 
@@ -108,6 +109,14 @@ export interface WorkState {
    * creation authorization gate before creating the Matter record").
    */
   matterDraft?: { name: string; statedNeed: string };
+
+  /**
+   * A proposed new Entity's drafted fields, shown to Martin for approval
+   * before the record is created — per the same Universal Role Contract
+   * rule ("Drafted content...shown in chat for approval before being
+   * written to Notion") applied to Matter creation above.
+   */
+  entityDraft?: { name: string; email: string; phone: string; type: string };
 
   /**
    * Set when Finance (or another picked-up Unit) has posted a blocker to its
