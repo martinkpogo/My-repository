@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./hats/salesExecutive";
 import * as finance from "./hats/financeValueBasedPricing";
-import * as marketing from "./hats/marketing";
+import * as marketing from "./hats/marketingHats";
 import { sendMessage } from "./telegram";
 import { logActivity } from "./log";
 

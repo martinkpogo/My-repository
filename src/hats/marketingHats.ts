@@ -1,14 +1,14 @@
-import type { Env, WorkState } from "../../types";
-import { aiJson } from "../../ai";
-import { logActivity } from "../../log";
-import { sendMessage } from "../../telegram";
-import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
+import type { Env, WorkState } from "../types";
+import { aiJson } from "../ai";
+import { logActivity } from "../log";
+import { sendMessage } from "../telegram";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 import {
   MARKETING_HATS,
   MARKETING_HAT_NAMES,
   marketingHatSummaryList,
   type MarketingHatName,
-} from "./definitions";
+} from "./marketingHatDefinitions";
 
 function isMarketingHat(hat: string): hat is MarketingHatName {
   return (MARKETING_HAT_NAMES as string[]).includes(hat);
