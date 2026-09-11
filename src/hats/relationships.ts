@@ -17,46 +17,44 @@ export interface MarketingRelationshipDefinition {
 
 export const REGISTERED_MARKETING_RELATIONSHIPS: MarketingRelationshipDefinition[] = [
   {
-    id: "REL_MS_CS",
-    from: "Marketing Strategist",
-    to: "Content Strategist",
-    conditional: true,
-    description: "Marketing Strategist defines marketing strategy before Content Strategist defines content strategy.",
-  },
-  {
-    id: "REL_MS_BCS",
+    id: "brand-communications-strategist__positioning",
     from: "Marketing Strategist",
     to: "Brand & Communications Strategist",
-    conditional: true,
-    description: "Marketing Strategist defines marketing direction before Brand & Communications Strategist defines messaging guidance.",
+    conditional: false,
+    description:
+      "Overall marketing positioning established by Marketing Strategist before Brand & Communications Strategist translates that positioning into communication guidance.",
   },
   {
-    id: "REL_MS_DM",
+    id: "content-strategist__brand-guidance",
+    from: "Brand & Communications Strategist",
+    to: "Content Strategist",
+    conditional: false,
+    description:
+      "Established brand and communications guidance that Content Strategist relies on when defining content direction.",
+  },
+  {
+    id: "content-manager__content-strategy",
+    from: "Content Strategist",
+    to: "Content Manager",
+    conditional: false,
+    description:
+      "Established content strategy that Content Manager relies on when turning content direction into executable workflow.",
+  },
+  {
+    id: "digital-marketer__overall-marketing-strategy",
     from: "Marketing Strategist",
     to: "Digital Marketer",
     conditional: true,
-    description: "Marketing Strategist defines campaign objectives and channels before Digital Marketer executes digital campaigns.",
+    description:
+      "Overall marketing strategy (objectives, target audiences/priority markets, campaign strategy, strategic channel recommendations) that Digital Marketer executes within — established or changed only when a request actually sets or redefines that direction, not by routine execution such as campaign targeting, budget adjustments within an approved strategy, placements, scheduling, or performance/tactical optimization.",
   },
   {
-    id: "REL_BCS_CS",
-    from: "Brand & Communications Strategist",
-    to: "Content Strategist",
-    conditional: true,
-    description: "Brand & Communications Strategist establishes tone/messaging guidance before Content Strategist defines content pillars/briefs.",
-  },
-  {
-    id: "REL_CS_CM",
-    from: "Content Strategist",
-    to: "Content Manager",
-    conditional: true,
-    description: "Content Strategist creates content briefs before Content Manager coordinates production workflow.",
-  },
-  {
-    id: "REL_CM_DM",
-    from: "Content Manager",
+    id: "digital-marketer__strategic-channel-mix",
+    from: "Marketing Strategist",
     to: "Digital Marketer",
     conditional: true,
-    description: "Content Manager prepares and schedules content assets before Digital Marketer distributes them.",
+    description:
+      "Strategic channel mix decisions (determining which channels to use vs running an assigned channel) owned by Marketing Strategist that Digital Marketer relies on when executing digital campaigns.",
   },
 ];
 
