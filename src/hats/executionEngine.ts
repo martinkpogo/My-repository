@@ -5,6 +5,10 @@ import { sendMessage } from "../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from "./registry";
+import {
+  resolveMarketingCandidateRelationships,
+  selectMarketingAmbiguityReasonCode,
+} from "./relationships";
 
 /**
  * Shared Marketing execution mechanics only — not a Hat registry, and not
@@ -20,9 +24,9 @@ import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from 
  * authority system or a second source of Hat responsibilities.
  */
 
-interface IntakeClassification {
-  outcome: "hat" | "ambiguous";
-  hat?: MarketingHatName;
+interface Stage1IntakeClassification {
+  candidates?: MarketingHatName[];
+  establishing?: boolean;
   reason?: string;
 }
 
@@ -36,57 +40,70 @@ interface HatActionDecision {
 
 /**
  * Entry point for a new Marketing work item, analogous to
- * sales.handleIncomingEnquiry — classifies which of the five Marketing
- * Hats owns the request, per the Universal Role Contract's hat_selection
- * rule ("match the incoming request against all Hat purposes... belonging
- * to this session's Unit"). Only the short one-line purpose per Hat is
- * used here (progressive context) — full Hat detail is only loaded once
- * a specific Hat is confirmed to own the task.
+ * sales.handleIncomingEnquiry. Uses a two-stage deterministic routing model:
+ * - Stage 1 identifies genuinely plausible candidate Hats and whether establishing is needed.
+ * - Stage 2 evaluates specific registered sequential relationships between candidates deterministically.
  */
 export async function handleMarketingIntake(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.marketingTaskText = text;
 
-  const classification = await aiJson<IntakeClassification>(env, {
-    system: `You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit. Below are the five Marketing Hats and their purposes — match the request to exactly one.
+  // Stage 1: LLM identifies candidate Hats and establishing context
+  const stage1 = await aiJson<Stage1IntakeClassification>(env, {
+    system: `You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit. Below are the five Marketing Hats and their purposes. Identify ALL genuinely plausible candidate Hats for the incoming request, and whether establishing foundational strategy/briefs/guidance is required.
 
 ${marketingHatSummaryList()}
 
-Return JSON: {"outcome": "hat", "hat": "<exact Hat name from the list above>"} if exactly one Hat clearly owns this. Return {"outcome": "ambiguous", "reason": "..."} if the request could plausibly belong to more than one Hat, or doesn't give enough information to tell. Never guess between two plausible Hats — treat that as ambiguous.`,
+Return JSON:
+{
+  "candidates": ["<exact Hat name 1>", ...],
+  "establishing": true | false,
+  "reason": "<brief rationale>"
+}
+- candidates: list 1 or more Marketing Hats that are genuinely plausible candidates for this request.
+- establishing: set true if creating/establishing strategy, guidance, or briefs from scratch; set false if managing or executing against already-established direction.`,
     user: text,
     light: true,
   });
 
-  if (!classification) {
-    console.error(`Marketing intake classification failed for work ${state.workId}`);
+  if (!stage1 || !stage1.candidates) {
+    const reasonCode = selectMarketingAmbiguityReasonCode(null);
+    console.error(`Marketing Stage 1 classification failed for work ${state.workId}`);
     await logActivity(env, {
-      entry: `Marketing intake blocked — classification failed`,
+      entry: `Marketing intake blocked [${reasonCode}] — classification failed`,
       type: "Blocker",
       area: "Marketing",
-      decisionRationale: "Could not classify which Marketing Hat owns this request. Refusing to guess.",
+      decisionRationale: `Could not classify Marketing candidates for this request. Refusing to guess. Reason code: ${reasonCode}`,
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      "Couldn't determine which Marketing Hat this belongs to — the classification failed. Please resend or rephrase.",
+      "Couldn't determine which Marketing Hat this belongs to — classification failed. Please resend or rephrase.",
       undefined,
       state.threadId,
     );
     return state;
   }
 
-  if (classification.outcome === "ambiguous" || !classification.hat || !isMarketingHat(classification.hat)) {
+  const validCandidates = stage1.candidates.filter(isMarketingHat);
+
+  // Stage 2: Deterministic, request-text-free evaluation of registered sequential relationships
+  const stage2 = resolveMarketingCandidateRelationships(validCandidates, stage1.establishing);
+
+  if (!stage2.resolved || !stage2.hat) {
+    const reasonCode = selectMarketingAmbiguityReasonCode(stage2);
+    const reasonText = stage2.reason ?? stage1.reason ?? "Request could plausibly belong to more than one Marketing Hat.";
     await logActivity(env, {
-      entry: `Marketing intake ambiguous`,
+      entry: `Marketing intake ambiguous [${reasonCode}]`,
       type: "Blocker",
       area: "Marketing",
-      decisionRationale: classification.reason ?? "Request could plausibly belong to more than one Marketing Hat.",
+      decisionRationale: `${reasonText} (Reason code: ${reasonCode})`,
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `I'm not sure which Marketing Hat this belongs to${classification.reason ? ` — ${classification.reason}` : ""}. Can you clarify what's needed?`,
+      `I'm not sure which Marketing Hat this belongs to — ${reasonText}. Can you clarify what's needed?`,
       undefined,
       state.threadId,
     );
@@ -95,9 +112,9 @@ Return JSON: {"outcome": "hat", "hat": "<exact Hat name from the list above>"} i
     return state;
   }
 
-  state.hat = classification.hat;
+  state.hat = stage2.hat;
   await logActivity(env, {
-    entry: `Marketing task routed to ${classification.hat}`,
+    entry: `Marketing task routed to ${stage2.hat}${stage2.relationshipId ? ` via relationship ${stage2.relationshipId}` : ""}`,
     type: "Activity",
     area: "Marketing",
     activity: text,
