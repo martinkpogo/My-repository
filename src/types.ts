@@ -36,6 +36,30 @@ export interface Env {
 
 export type Unit = "SM&BD" | "Finance" | "Strategy" | "Research & Intelligence" | "Creative & Design" | "Operations";
 
+export type MarketingHatName =
+  | "Marketing Strategist"
+  | "Brand & Communications Strategist"
+  | "Content Strategist"
+  | "Content Manager"
+  | "Digital Marketer";
+
+/**
+ * Preserves the conceptual hierarchy Unit -> Specialization -> Hat (per
+ * Notion's Core Structure: every Hat's required_fields include both unit
+ * and specialization) as explicit fields, matching the shape of the
+ * canonical Hat Definition pages these were transcribed from.
+ */
+export interface MarketingHatDefinition {
+  name: MarketingHatName;
+  unit: "SM&BD";
+  specialization: "Marketing";
+  purpose: string;
+  owns: string[];
+  doesNotOwn: string[];
+  /** Code-enforced allow-list of Hats this Hat may propose a transition to. */
+  routesTo: MarketingHatName[];
+}
+
 export type QualificationAssessment = "Satisfied" | "Not Satisfied" | "Insufficient Evidence";
 
 export interface QualificationConditionResult {

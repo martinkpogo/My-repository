@@ -1,17 +1,53 @@
-import type { Env, WorkState } from "../types";
+import type { Env, WorkState, MarketingHatDefinition, MarketingHatName } from "../types";
 import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
-import {
-  MARKETING_HATS,
-  MARKETING_HAT_NAMES,
-  marketingHatSummaryList,
-  type MarketingHatName,
-} from "./marketingHatDefinitions";
+import { MARKETING_STRATEGIST } from "./marketingStrategist";
+import { BRAND_COMMUNICATIONS_STRATEGIST } from "./brandCommunicationsStrategist";
+import { CONTENT_STRATEGIST } from "./contentStrategist";
+import { CONTENT_MANAGER } from "./contentManager";
+import { DIGITAL_MARKETER } from "./digitalMarketer";
+
+/**
+ * Shared execution engine for the five Marketing specialization Hats
+ * (each defined in its own file: marketingStrategist.ts,
+ * brandCommunicationsStrategist.ts, contentStrategist.ts,
+ * contentManager.ts, digitalMarketer.ts — Unit: SM&BD, Specialization:
+ * Marketing). This module plays the same role for those five files that
+ * governance.ts, notion.ts, and ai.ts already play for salesExecutive.ts
+ * and financeValueBasedPricing.ts: shared infrastructure a Hat's own file
+ * calls into, not a duplicate authority system. It exists because these
+ * five Hats' operating mechanics — classify intake, then draft within
+ * ownership / propose a transition / ask for clarification, always gated
+ * on Martin's explicit approval — are genuinely identical across all
+ * five; only the data (each Hat's own purpose/owns/doesNotOwn/routesTo)
+ * differs, which is why that data lives separately, one file per Hat.
+ *
+ * Per this build's explicit direction, none of the five Hat Definitions
+ * are fetched live from Notion — each is a one-time transcription of the
+ * canonical, Martin-approved page already in Notion (ENIG HQ > 2. Units &
+ * Hats). The Universal Role Contract remains the one exception: existing,
+ * already-shared governance every Hat inherits, fetched here exactly as
+ * salesExecutive.ts and financeValueBasedPricing.ts already do.
+ */
+const MARKETING_HATS: Record<MarketingHatName, MarketingHatDefinition> = {
+  "Marketing Strategist": MARKETING_STRATEGIST,
+  "Brand & Communications Strategist": BRAND_COMMUNICATIONS_STRATEGIST,
+  "Content Strategist": CONTENT_STRATEGIST,
+  "Content Manager": CONTENT_MANAGER,
+  "Digital Marketer": DIGITAL_MARKETER,
+};
+
+const MARKETING_HAT_NAMES = Object.keys(MARKETING_HATS) as MarketingHatName[];
 
 function isMarketingHat(hat: string): hat is MarketingHatName {
   return (MARKETING_HAT_NAMES as string[]).includes(hat);
+}
+
+/** Short, flat summary of every Marketing Hat — used for intake classification, never the full per-Hat detail. */
+export function marketingHatSummaryList(): string {
+  return MARKETING_HAT_NAMES.map((name) => `- ${name}: ${MARKETING_HATS[name].purpose}`).join("\n");
 }
 
 interface IntakeClassification {
@@ -104,13 +140,11 @@ Return JSON: {"outcome": "hat", "hat": "<exact Hat name from the list above>"} i
 /**
  * Shared per-Hat execution, used by every one of the five Marketing Hats.
  * Loads only the current Hat's own full definition (never the other
- * four's) plus the Universal Role Contract (existing, reused governance
- * infrastructure — the one piece of Notion-hosted governance every Hat
- * still inherits). Asks the model to decide: draft an output within this
- * Hat's own ownership, propose a transition to another Hat, or stop and
- * ask for clarification. None of these is itself authorization — each
- * branch still requires Martin's explicit approval before anything is
- * treated as done.
+ * four's) plus the Universal Role Contract. Asks the model to decide:
+ * draft an output within this Hat's own ownership, propose a transition
+ * to another Hat, or stop and ask for clarification. None of these is
+ * itself authorization — each branch still requires Martin's explicit
+ * approval before anything is treated as done.
  */
 async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   const hatName = state.hat as MarketingHatName;
@@ -272,7 +306,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   return state;
 }
 
-function buildHatSystemPrompt(hat: (typeof MARKETING_HATS)[MarketingHatName], universalRoleContract: string): string {
+function buildHatSystemPrompt(hat: MarketingHatDefinition, universalRoleContract: string): string {
   return [
     `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
     "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
