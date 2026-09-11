@@ -41,8 +41,10 @@ Telegram  ──webhook──▶  Worker (src/index.ts)
                            │
                            ├─ router.ts        Hat selection / ambiguity guard
                            ├─ session.ts       Durable Object: one per work item
-                           │    ├─ hats/salesExecutive.ts
-                           │    └─ hats/financeValueBasedPricing.ts
+                           │    ├─ units/smbd/sales/salesExecutive.ts
+                           │    ├─ units/smbd/marketing/*.ts   (5 Hats)
+                           │    ├─ units/finance/valueBasedPricingAssessor.ts
+                           │    └─ hats/registry.ts            (Hat discovery + Marketing engine)
                            ├─ notion.ts        Notion API (data sources)
                            ├─ ai.ts            Workers AI (JSON-mode calls)
                            ├─ log.ts           Activity & Decision Log writer
@@ -233,7 +235,9 @@ created in Notion.
 ## Extending to the remaining Units
 
 Per the Build Method: prove this slice live on a real quote request first,
-then apply the same pattern — one Hat module under `src/hats/`, wired into
+then apply the same pattern — one Hat module under `src/units/<unit>/<specialization>/`
+(or directly under `src/units/<unit>/` where no specialization split exists,
+as with Finance), registered in `src/hats/registry.ts` and wired into
 `session.ts`'s dispatch and `router.ts`'s Hat-selection classifier — to
 Research & Intelligence, Strategy, Creative & Design, and Operations, one at
 a time.

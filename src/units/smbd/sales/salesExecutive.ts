@@ -1,4 +1,4 @@
-import type { Env, WorkState, QualificationResult, QualificationConditionResult } from "../types";
+import type { Env, WorkState, QualificationResult, QualificationConditionResult } from "../../../types";
 import {
   createPage,
   getPage,
@@ -9,11 +9,11 @@ import {
   select,
   title,
   updatePage,
-} from "../notion";
-import { aiJson, aiText } from "../ai";
-import { logActivity } from "../log";
-import { sendMessage } from "../telegram";
-import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
+} from "../../../notion";
+import { aiJson, aiText } from "../../../ai";
+import { logActivity } from "../../../log";
+import { sendMessage } from "../../../telegram";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governance";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a

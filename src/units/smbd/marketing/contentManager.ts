@@ -1,4 +1,4 @@
-import type { MarketingHatDefinition } from "../types";
+import type { MarketingHatDefinition } from "../../../hats/types";
 
 /**
  * Content Manager — Unit: SM&BD, Specialization: Marketing.

@@ -3,7 +3,7 @@ import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
 import { generalChatReply } from "./chat";
 import { getGovernance } from "./governance";
-import { marketingHatSummaryList } from "./hats/marketingEngine";
+import { marketingHatSummaryList } from "./hats/registry";
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page

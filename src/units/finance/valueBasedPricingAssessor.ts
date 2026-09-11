@@ -1,10 +1,10 @@
-import type { Env, WorkState } from "../types";
-import { createPage, getPage, plainText, relation, relationIds, richText, select, title, updatePage } from "../notion";
-import { aiJson } from "../ai";
-import { logActivity } from "../log";
-import { sendMessage } from "../telegram";
-import { setActiveWorkId, threadIdForUnit } from "../router";
-import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
+import type { Env, WorkState } from "../../types";
+import { createPage, getPage, plainText, relation, relationIds, richText, select, title, updatePage } from "../../notion";
+import { aiJson } from "../../ai";
+import { logActivity } from "../../log";
+import { sendMessage } from "../../telegram";
+import { setActiveWorkId, threadIdForUnit } from "../../router";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 
 interface PriceJudgement {
   sufficient: boolean;

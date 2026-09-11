@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
-import * as sales from "./hats/salesExecutive";
-import * as finance from "./hats/financeValueBasedPricing";
-import * as marketing from "./hats/marketingEngine";
+import * as sales from "./units/smbd/sales/salesExecutive";
+import * as finance from "./units/finance/valueBasedPricingAssessor";
+import * as marketing from "./hats/executionEngine";
 import { sendMessage } from "./telegram";
 import { logActivity } from "./log";
 

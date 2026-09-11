@@ -1,4 +1,4 @@
-import type { MarketingHatDefinition } from "../types";
+import type { MarketingHatDefinition } from "../../../hats/types";
 
 /**
  * Marketing Strategist — Unit: SM&BD, Specialization: Marketing.
