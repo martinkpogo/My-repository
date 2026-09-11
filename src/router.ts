@@ -130,9 +130,19 @@ Return JSON: {"route": "enquiry" | "out_of_scope" | "ambiguous", "reason": "..."
  */
 async function classifyMarketingTask(env: Env, text: string): Promise<"marketing" | "not_marketing" | null> {
   const result = await aiJson<{ specialization: "marketing" | "not_marketing" }>(env, {
-    system: `Determine whether the following message is an internal ENIG Marketing-specialization task — i.e. it belongs to one of these Hats:\n\n${marketingHatSummaryList()}\n\nA Marketing task is internal work like defining objectives, audiences, campaign or channel strategy, messaging/brand guidance, content strategy or briefs, content workflow/scheduling, or digital campaign/advertising execution. It is NOT a client's incoming business enquiry (e.g. "we need help with our branding" from a prospective client) and not general small talk. Return JSON: {"specialization": "marketing"} or {"specialization": "not_marketing"}. Default to "not_marketing" whenever unsure.`,
+    system: `You classify incoming messages for ENIG, a consultancy. Below are ENIG's five internal Marketing Hats:
+
+${marketingHatSummaryList()}
+
+Classify the message as "marketing" if Martin (ENIG's own operator, talking to his own internal team) is asking ENIG's own team to do ANY of: set marketing/campaign objectives or target audiences, decide channel or campaign strategy, define brand voice/tone/messaging/key messages, plan or review content (themes, briefs, calendars, scheduling, production workflow, publication), or plan/execute/optimize digital or paid advertising campaigns. This includes short, imperative, or informally-worded requests — e.g. "define our Q2 objectives", "what tone should our website use", "get this scheduled for publication", "reallocate the ad budget" all count as "marketing".
+
+Classify as "not_marketing" only if the message is: (a) a prospective CLIENT's incoming business enquiry describing their own company's problem and asking ENIG for help, or (b) general small talk / unrelated to marketing work entirely.
+
+Examples of "marketing": "Define our Q2 marketing objectives", "What tone should we use across our channels?", "We need content pillars for this quarter", "Get the blog post scheduled and published", "Increase the ad budget on the better-performing campaign".
+Examples of "not_marketing": "We're a bakery chain and our branding feels dated, can you help?" (client enquiry), "How's it going?" (small talk).
+
+Return JSON: {"specialization": "marketing"} or {"specialization": "not_marketing"}.`,
     user: text,
-    light: true,
   });
   return result?.specialization ?? null;
 }
