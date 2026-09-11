@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./hats/salesExecutive";
 import * as finance from "./hats/financeValueBasedPricing";
+import * as marketing from "./hats/marketing";
 import { sendMessage } from "./telegram";
 import { logActivity } from "./log";
 
@@ -29,6 +30,10 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => sales.handleIncomingEnquiry(this.env, state, text));
   }
 
+  async handleMarketingRequest(text: string): Promise<WorkState> {
+    return this.execute((state) => marketing.handleMarketingIntake(this.env, state, text));
+  }
+
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (state.awaiting) {
@@ -46,6 +51,10 @@ export class WorkSession extends DurableObject<Env> {
           return sales.handleEntityRedoReason(this.env, state, text);
         case "proposal_feedback":
           return sales.handleProposalFeedback(this.env, state, text);
+        case "marketing_feedback":
+          return marketing.handleMarketingFeedback(this.env, state, text);
+        case "marketing_clarification":
+          return marketing.handleMarketingClarification(this.env, state, text);
         default:
           return sendMessage(
             this.env,
@@ -110,6 +119,12 @@ export class WorkSession extends DurableObject<Env> {
           return sales.handleProposalApproval(this.env, state, value === "approve");
         case "quote":
           return finance.handleQuoteApproval(this.env, state, value === "approve");
+        case "markettransition":
+          return marketing.handleTransitionApproval(this.env, state, value === "approve");
+        case "marketdraft":
+          return marketing.handleDraftApproval(this.env, state, value === "approve");
+        case "marketpaid":
+          return marketing.handlePaidMediaApproval(this.env, state, value === "approve");
         default:
           return Promise.resolve(state);
       }

@@ -3,6 +3,7 @@ import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
 import { generalChatReply } from "./chat";
 import { getGovernance } from "./governance";
+import { marketingHatSummaryList } from "./hats/marketing/definitions";
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page
@@ -114,6 +115,28 @@ Return JSON: {"route": "enquiry" | "out_of_scope" | "ambiguous", "reason": "..."
   return result ?? { route: "ambiguous", reason: "Classification failed." };
 }
 
+/**
+ * Coarse specialization check, run before the existing Sales enquiry
+ * classifier: is this an internal Marketing-specialization task (owned by
+ * one of the five Marketing Hats), as opposed to a client-facing sales
+ * enquiry or general conversation? Per the SM&BD Unit's own Notion
+ * definition, Marketing is one of three specializations this Unit covers
+ * (Sales, Marketing, Business Development) — this is the specialization
+ * step; which of the five Marketing Hats owns it is decided separately,
+ * inside marketing.handleMarketingIntake, using only that Hat's own
+ * short purpose per Hat (progressive context, not the full definitions).
+ * Returns null on failure — callers fall through to the existing Sales
+ * path unchanged rather than guessing.
+ */
+async function classifyMarketingTask(env: Env, text: string): Promise<"marketing" | "not_marketing" | null> {
+  const result = await aiJson<{ specialization: "marketing" | "not_marketing" }>(env, {
+    system: `Determine whether the following message is an internal ENIG Marketing-specialization task — i.e. it belongs to one of these Hats:\n\n${marketingHatSummaryList()}\n\nA Marketing task is internal work like defining objectives, audiences, campaign or channel strategy, messaging/brand guidance, content strategy or briefs, content workflow/scheduling, or digital campaign/advertising execution. It is NOT a client's incoming business enquiry (e.g. "we need help with our branding" from a prospective client) and not general small talk. Return JSON: {"specialization": "marketing"} or {"specialization": "not_marketing"}. Default to "not_marketing" whenever unsure.`,
+    user: text,
+    light: true,
+  });
+  return result?.specialization ?? null;
+}
+
 export async function routeIncomingText(
   env: Env,
   chatId: number,
@@ -153,18 +176,33 @@ export async function routeIncomingText(
     return;
   }
 
+  // Specialization check first: Marketing is a distinct specialization
+  // within this same SM&BD Unit (per the Unit's own Notion definition),
+  // with its own five-Hat classification handled inside
+  // marketing.handleMarketingIntake. A "not_marketing"/failed result
+  // falls through unchanged to the existing Sales enquiry classifier
+  // below — this is additive and never alters Sales Executive's own
+  // classification or behavior.
+  const marketingCheck = await classifyMarketingTask(env, text);
+  if (marketingCheck === "marketing") {
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "SM&BD", "Marketing", threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleMarketingRequest(text);
+    return;
+  }
+
   const classification = await classifyNewMessage(env, chatId, text, threadId);
   if (!classification) return; // retrieval failed — Martin already told, nothing further to do.
   if (classification.route === "enquiry") {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
-    // "Sales Executive" is the current single chat-reachable Hat
-    // implementation constraint. It is not an independent governance
-    // source. The canonical Workspace Project Instructions (retrieved
-    // above, governing the route/out_of_scope/ambiguous classification
-    // itself) remain the authority for the routing rule. A future second
-    // chat-reachable Hat requires a proper routing mechanism and separate
-    // architectural change; do not solve that here.
+    // "Sales Executive" and the five Marketing Hats (above) are the
+    // current chat-reachable Hats in this Unit. The canonical Workspace
+    // Project Instructions (retrieved above, governing the
+    // route/out_of_scope/ambiguous classification itself) remain the
+    // authority for the Sales routing rule.
     await stub.init(workId, chatId, "SM&BD", "Sales Executive", threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleIncomingEnquiry(text);

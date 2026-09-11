@@ -81,7 +81,9 @@ export interface WorkState {
     | "value_context_more"
     | "quote_redo_reason"
     | "matter_redo_reason"
-    | "entity_redo_reason";
+    | "entity_redo_reason"
+    | "marketing_feedback"
+    | "marketing_clarification";
   createdAt: string;
   updatedAt: string;
 
@@ -125,6 +127,15 @@ export interface WorkState {
    * session, and lets terminal cleanup clear that topic's active pointer too.
    */
   financeThreadId?: number;
+
+  /** Original task text for a Marketing work item — carried across redo/clarification loops. */
+  marketingTaskText?: string;
+  /** The current Marketing Hat's drafted output, shown to Martin for approval before anything is treated as done. */
+  marketingDraft?: string;
+  /** A proposed transition to another Marketing Hat (routing or escalation), pending Martin's confirmation. */
+  pendingTransition?: { toHat: string; reason: string };
+  /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
+  pendingPaidMediaAction?: { description: string };
 }
 
 export interface SessionSummary {
