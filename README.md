@@ -208,7 +208,13 @@ The runtime is deployed as a Cloudflare Worker.
 
 Deployment credentials and environment secrets must never be committed to the repository or included in source code.
 
-Production deployment should occur only through the approved deployment path.
+Production deployment occurs through an automated GitHub Actions CI/CD pipeline triggered on merge to target branches (`claude/notion-cloudflare-telegram-agents-nsi40m` and `main`).
+
+Required GitHub Repository Secrets for deployment:
+* `CLOUDFLARE_API_TOKEN`
+* `CLOUDFLARE_ACCOUNT_ID`
+
+Following post-merge deployment, the workflow automatically verifies the live Worker health endpoint (`/health`).
 
 A successful deployment does not by itself establish that the architecture is correct. Deployment health and architectural correctness are separate concerns.
 
