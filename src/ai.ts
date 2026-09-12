@@ -1,4 +1,6 @@
 import type { Env } from "./types";
+import { defaultPolicyExecutor, AiPolicyExecutor } from "./ai/policy";
+import type { AiTask } from "./ai/types";
 
 export interface AiJsonOptions {
   system: string;
@@ -12,39 +14,46 @@ export interface AiTextOptions {
   maxTokens?: number;
 }
 
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /**
- * Calls Workers AI and requires a JSON object response. Returns null on any
- * parse failure so callers can fall back to the Universal Role Contract's
- * ambiguity rule (stop and surface) instead of guessing.
+ * Calls AI via policy executor and requires a JSON object response. Returns null
+ * on any infrastructure failure (if no provider succeeds) or on JSON parse failure.
+ * Crucially, malformed model output does NOT trigger provider fallback.
  */
 export async function aiJson<T = Record<string, unknown>>(
   env: Env,
   opts: AiJsonOptions,
+  executor: AiPolicyExecutor = defaultPolicyExecutor,
 ): Promise<T | null> {
-  const model = opts.light ? env.AI_MODEL_LIGHT : env.AI_MODEL_PRIMARY;
-  const messages = [
-    {
-      role: "system",
-      content:
-        `${opts.system}\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.`,
-    },
-    { role: "user", content: opts.user },
-  ];
+  const task: AiTask = {
+    type: "json",
+    messages: [
+      {
+        role: "system",
+        content:
+          `${opts.system}\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.`,
+      },
+      { role: "user", content: opts.user },
+    ],
+    temperature: 0.2,
+    maxTokens: opts.maxTokens ?? 1024,
+    light: opts.light,
+  };
 
-  let raw: string;
-  try {
-    const result = await env.AI.run(
-      model as any,
-      { messages, temperature: 0.2, max_tokens: opts.maxTokens ?? 1024 } as any,
-    );
-    raw = coerceToText(result);
-  } catch (err) {
-    console.error("Workers AI call failed", err);
+  const response = await executor.executeTask(env, task);
+  if (!response) {
     return null;
   }
 
-  const jsonText = extractJson(raw);
-  if (!jsonText) return null;
+  const jsonText = extractJson(response.rawText);
+  if (!jsonText) {
+    return null;
+  }
+
   try {
     return JSON.parse(jsonText) as T;
   } catch {
@@ -52,27 +61,26 @@ export async function aiJson<T = Record<string, unknown>>(
   }
 }
 
-export async function aiText(env: Env, system: string, user: string, options: AiTextOptions = {}): Promise<string> {
-  const model = options.light ? env.AI_MODEL_LIGHT : env.AI_MODEL_PRIMARY;
-  const messages = [
-    { role: "system", content: system },
-    { role: "user", content: user },
-  ];
-  try {
-    const result = await env.AI.run(
-      model as any,
-      { messages, temperature: 0.4, max_tokens: options.maxTokens ?? 1536 } as any,
-    );
-    return coerceToText(result);
-  } catch (err) {
-    console.error("Workers AI call failed", err);
-    return "";
-  }
-}
+export async function aiText(
+  env: Env,
+  system: string,
+  user: string,
+  options: AiTextOptions = {},
+  executor: AiPolicyExecutor = defaultPolicyExecutor,
+): Promise<string> {
+  const task: AiTask = {
+    type: "text",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    temperature: 0.4,
+    maxTokens: options.maxTokens ?? 1536,
+    light: options.light,
+  };
 
-export interface ChatTurn {
-  role: "user" | "assistant";
-  content: string;
+  const response = await executor.executeTask(env, task);
+  return response ? response.rawText : "";
 }
 
 /** Like aiText, but carries prior conversation turns as real message history. */
@@ -82,39 +90,21 @@ export async function aiChat(
   history: ChatTurn[],
   userMessage: string,
   maxTokens = 800,
+  executor: AiPolicyExecutor = defaultPolicyExecutor,
 ): Promise<string> {
-  const messages = [
-    { role: "system", content: system },
-    ...history.map((t) => ({ role: t.role, content: t.content })),
-    { role: "user", content: userMessage },
-  ];
-  try {
-    const result = await env.AI.run(env.AI_MODEL_PRIMARY as any, { messages, temperature: 0.6, max_tokens: maxTokens } as any);
-    return coerceToText(result);
-  } catch (err) {
-    console.error("Workers AI call failed", err);
-    return "";
-  }
-}
+  const task: AiTask = {
+    type: "chat",
+    messages: [
+      { role: "system", content: system },
+      ...history.map((t) => ({ role: t.role, content: t.content })),
+      { role: "user", content: userMessage },
+    ],
+    temperature: 0.6,
+    maxTokens,
+  };
 
-/**
- * Workers AI response shapes vary by model: usually a plain string or
- * { response: string }, but some models return { response: {...} } for
- * structured output, or an array of streamed chunks. Always normalize to a
- * single string so callers never have to guard against non-string values.
- */
-function coerceToText(result: unknown): string {
-  if (typeof result === "string") return result;
-  if (result == null) return "";
-  const response = (result as { response?: unknown }).response;
-  if (typeof response === "string") return response;
-  if (Array.isArray(response)) {
-    return response
-      .map((chunk) => (typeof chunk === "string" ? chunk : coerceToText(chunk)))
-      .join("");
-  }
-  if (response != null) return JSON.stringify(response);
-  return JSON.stringify(result);
+  const response = await executor.executeTask(env, task);
+  return response ? response.rawText : "";
 }
 
 function extractJson(raw: string): string | null {
