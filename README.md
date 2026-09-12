@@ -1,243 +1,283 @@
-# ENIG Agent Runtime — Cloudflare Worker + Telegram
+ENIG Agent Runtime
 
-Runs the ENIG **SM&BD + Finance** vertical slice (per the Build Method in Notion:
-*ENIG HQ → 0. Kernel → Build Method*) as a live Cloudflare Worker instead of a
-Claude Project you paste instructions into. Telegram is the chat interface for
-approvals — the same "shown in chat for approval" mechanic already defined in
-the *Universal Role Contract*, just running on infrastructure instead of a
-manual chat session.
+The ENIG Agent Runtime is the execution layer for ENIG’s AI-assisted business operations.
 
-## What this is (and isn't)
+It runs ENIG’s operational Units and Hats through a Cloudflare Worker, connects execution to Notion as the system of record, and uses Telegram as an operational interface.
 
-- Implements the **Sales Executive** Hat (SM&BD) and **Value-Based Pricing
-  Assessor** Hat (Finance) exactly as defined in Notion under `2. Units & Hats`.
-- **Notion stays the system of record.** The Worker reads/writes the live
-  `Entity`, `Matters`, `Proposals`, `Handoffs`, and `Activity & Decision Log`
-  databases via the Notion API — it does not duplicate or replace them.
-- **Workers AI** (free-tier, `@cf/meta/llama-3.3-70b-instruct-fp8-fast` by
-  default) does the drafting/reasoning — no paid model API calls.
-- One Telegram bot, one chat with you. Multiple work items can be open at
-  once; `/sessions` lists them and switches which one your next message
-  replies to (an "inline Unit switch" — action buttons, not separate bots).
-- Governance carried over from the *Universal Role Contract*: AI drafts are
-  shown in chat for approval before being written to Notion; Handoffs are
-  created directly (no chat gate — per the Contract, transfers aren't content
-  for line-by-line review); every material action is logged to the Activity
-  & Decision Log; anything the model can't resolve confidently stops and
-  surfaces to you rather than guessing.
-- **Simplification from the canonical model**: SM&BD and Finance run as one
-  Worker/one Durable Object per work item, not as two isolated AI Workspaces
-  handing off to each other. The Handoff record in Notion is still real and
-  auditable — Finance's pickup just happens synchronously in the same
-  request instead of through a second, separately-triggered agent. Revisit
-  this if you want stricter Unit isolation later.
-- Research & Intelligence, Strategy, Creative & Design, and Operations are
-  **not built** — out of scope for this slice, per the Build Method.
+The current implementation covers the SM&BD and Finance vertical slice. Other Units are not yet part of the live runtime.
 
-## Architecture
+Current status
 
-```
-Telegram  ──webhook──▶  Worker (src/index.ts)
-                           │
-                           ├─ router.ts        Hat selection / ambiguity guard
-                           ├─ session.ts       Durable Object: one per work item
-                           │    ├─ units/smbd/sales/salesExecutive.ts
-                           │    ├─ units/smbd/marketing/*.ts   (5 Hats)
-                           │    ├─ units/finance/valueBasedPricingAssessor.ts
-                           │    └─ hats/registry.ts            (Hat discovery + Marketing engine)
-                           ├─ notion.ts        Notion API (data sources)
-                           ├─ ai.ts            Workers AI (JSON-mode calls)
-                           ├─ log.ts           Activity & Decision Log writer
-                           └─ telegram.ts      sendMessage / inline keyboards
-```
+Runtime: Cloudflare Worker
+Primary AI provider: Cloudflare Workers AI
+Provider architecture: Provider abstraction implemented; secondary-provider governance is being defined
+System of record: Notion
+Operational interface: Telegram
+Live Units: SM&BD, Finance
+Deployment: Cloudflare Workers
+Repository: martinkpogo/My-repository
 
-A cron trigger (every 15 min) sends a Telegram digest if any Handoff is
-sitting in `Pending` or `Held` — a safety net notification, not an
-auto-executor.
+The provider layer currently isolates provider-specific execution behind a common interface. Workers AI remains the production provider.
 
-## Setup
+Provider redundancy is an architectural requirement, but a secondary provider must not be introduced merely because it is technically available. Provider eligibility, data boundaries, fallback authority, and external-data rules must be established before live fallback is enabled.
 
-### 1. Notion integration
+Runtime architecture
 
-1. Create an internal integration at https://www.notion.so/my-integrations,
-   copy its token.
-2. Share these pages with the integration (Notion sidebar → `...` → Connect
-   to → your integration): **Engagements** (covers Entity, Matters,
-   Proposals) and **Operation Records** (covers Handoffs, Activity &
-   Decision Log).
-3. The data source IDs are already wired up in `wrangler.toml` — they were
-   read directly from your live databases. If you ever recreate those
-   databases, update the IDs there.
+Intake
+  │
+  ▼
+Worker
+  │
+  ▼
+Session / Execution Context
+  │
+  ▼
+Unit / Hat Execution
+  │
+  ▼
+AI Task
+  │
+  ▼
+Data Boundary / Context Transformation
+  │
+  ▼
+Model / Provider Policy
+  │
+  ▼
+Provider Adapter
+  │
+  ▼
+Common AI Response Contract
+  │
+  ▼
+Domain Validation / Resolver
+  │
+  ├──────────────► Notion
+  │
+  └──────────────► Activity & Decision Log
 
-### 2. Telegram bot
+The Data Boundary / Context Transformation stage is an OS-level architectural capability currently being defined. It is not yet a provider-specific sanitization layer and must not be implemented independently inside individual Hats.
 
-1. Message [@BotFather](https://t.me/BotFather), `/newbot`, copy the token.
-2. Message [@userinfobot](https://t.me/userinfobot) (or similar) to get your
-   own numeric Telegram user ID — this is `MARTIN_TELEGRAM_USER_ID`. The bot
-   only responds to this user.
+The runtime should preserve this separation:
 
-### 3. Cloudflare
+AI Task
+    ↓
+Model / Provider Policy
+    ↓
+Provider Adapter
+    ↓
+Common AI Response Contract
+    ↓
+Existing domain validation / resolver
 
-```bash
+Provider selection is infrastructure policy. It is not business authority.
+
+Governance principles
+
+ENIG’s governing architecture remains the authority for the runtime.
+
+The runtime therefore follows these rules:
+
+* Notion is the system of record for ENIG governance and operational state.
+* AI output is never treated as authority by itself.
+* Consequential ambiguity must stop execution rather than be guessed through.
+* Disclosure of uncertainty does not constitute permission to proceed.
+* Provider fallback is policy-controlled, not automatic simply because another provider is reachable.
+* The runtime must fail closed when no eligible execution path exists.
+* A lower data-protection boundary must never be silently substituted for a higher one.
+* Material actions and decisions must remain auditable.
+* Coding agents implement approved architecture. They do not redefine ENIG governance.
+* Business authority remains with the appropriate human or governed business process.
+
+AI provider architecture
+
+Provider-specific implementations are isolated behind the AI provider interface.
+
+The current structure is:
+
+src/ai.ts
+    │
+    ▼
+AiPolicyExecutor
+    │
+    ▼
+AiProvider
+    │
+    └── WorkersAiProvider
+             │
+             ▼
+       Cloudflare Workers AI
+
+The policy layer is responsible for controlled provider execution and infrastructure-error fallback.
+
+The provider adapter is responsible for communicating with a specific AI provider and translating provider-specific failures into the common runtime error model.
+
+The domain layer remains responsible for interpreting and validating AI results.
+
+Provider redundancy
+
+The runtime is being designed for provider redundancy because infrastructure limits such as AI quota exhaustion can interrupt otherwise valid work.
+
+However, redundancy does not mean:
+
+Provider A fails
+      ↓
+send the same context to Provider B
+
+The intended model is:
+
+AI Task
+   ↓
+Determine data boundary
+   ↓
+Determine eligible providers
+   ↓
+Apply provider policy
+   ↓
+Execute eligible provider
+
+If no provider satisfies the required boundary and policy, execution stops or is held for an appropriate human-controlled path.
+
+Repository structure
+
+src/
+├── ai.ts
+├── ai/
+│   ├── types.ts
+│   ├── policy.ts
+│   ├── workersai.ts
+│   └── ...
+├── router.ts
+├── executionEngine.ts
+├── salesExecutive.ts
+├── finance/
+├── marketing/
+├── notion/
+├── telegram/
+├── session/
+├── log/
+└── ...
+tests/
+
+The exact directory structure may evolve as the runtime is developed. Architectural responsibility should remain more stable than file locations.
+
+Operational model
+
+The runtime executes ENIG responsibilities through Units and Hats.
+
+A Hat represents a defined responsibility. An Agent is an execution mechanism. An AI Workspace is the environment in which execution occurs.
+
+The runtime does not treat an AI model, provider, Agent, or code module as a substitute for a Hat’s business authority.
+
+The current live vertical slice includes:
+
+* SM&BD
+* Finance
+
+The remaining ENIG Units are not being implemented merely to complete an organisational diagram. They will be built when real ENIG work requires them.
+
+Data and state
+
+Notion remains the authoritative business system.
+
+The Worker interacts with Notion for governed business objects and operational records rather than maintaining an independent shadow business database.
+
+Telegram provides an operational interface to the runtime. It is not the system of record.
+
+Runtime/session state may be maintained in Cloudflare infrastructure where required for execution, but this does not replace Notion’s authority over governed ENIG records.
+
+Development
+
+Install dependencies:
+
 npm install
-npx wrangler login
 
-npx wrangler kv namespace create STATE_KV
-# copy the returned id into wrangler.toml under [[kv_namespaces]]
+Run the test suite:
 
-npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put TELEGRAM_WEBHOOK_SECRET   # any random string you choose
-npx wrangler secret put MARTIN_TELEGRAM_USER_ID
-npx wrangler secret put NOTION_TOKEN
+npx vitest run
 
-npm run deploy
-```
+Run type checking:
 
-### 4. Register the Telegram webhook
+npx tsc --noEmit
 
-```bash
-curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://<your-worker-subdomain>.workers.dev/telegram/webhook" \
-  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
-```
+Development and deployment configuration should be maintained separately from this README where the instructions become operationally detailed.
 
-### 5. Read.ai (optional — call notes without typing them yourself)
+Deployment
 
-Two independent integrations exist, pick one (or neither and keep typing
-notes manually — that always works, no setup needed):
+The runtime is deployed as a Cloudflare Worker.
 
-**Option A — Webhook (push, fully automatic, needs Pro/Enterprise/Enterprise+):**
+Deployment credentials and environment secrets must never be committed to the repository or included in source code.
 
-1. In Read.ai: **Integrations → Your Integrations → Webhooks**
-   (`app.read.ai/analytics/integrations/user/workflow/webhooks`) — a
-   personal webhook covers your own meetings, which is what you want here.
-2. Set the webhook URL to `https://<your-worker-subdomain>.workers.dev/readai/webhook`
-3. Read.ai shows a signing key once, at creation — copy it, then:
-   ```bash
-   npx wrangler secret put READAI_WEBHOOK_SECRET
-   ```
-4. When a call ends, the Worker checks whether a work item is currently
-   waiting on call notes and feeds the transcript/summary in automatically.
-   If nothing is waiting, it messages you on Telegram instead of guessing
-   which enquiry it belongs to.
+Production deployment should occur only through the approved deployment path.
 
-**Option B — OAuth pull API (on-demand, works on the free plan, open beta):**
+A successful deployment does not by itself establish that the architecture is correct. Deployment health and architectural correctness are separate concerns.
 
-Read.ai's free-plan-compatible pull API requires OAuth 2.1 (browser-based,
-one-time bootstrap; no static API keys yet). Setup:
+Integrations
 
-1. Register an OAuth client (self-service, instant, no approval wait):
-   ```bash
-   curl -X POST https://api.read.ai/oauth/register \
-     -H "Content-Type: application/json" \
-     -d '{
-       "client_name": "ENIG Agent",
-       "redirect_uris": ["https://<your-worker-subdomain>.workers.dev/oauth/readai/callback"],
-       "grant_types": ["authorization_code", "refresh_token"],
-       "response_types": ["code"],
-       "scope": "openid email offline_access profile meeting:read",
-       "token_endpoint_auth_method": "client_secret_basic"
-     }'
-   ```
-   Response includes `client_id` and `client_secret` (shown once).
-2. Set both as Cloudflare secrets:
-   ```bash
-   npx wrangler secret put READAI_OAUTH_CLIENT_ID
-   npx wrangler secret put READAI_OAUTH_CLIENT_SECRET
-   ```
-3. If you're in a Read.ai workspace, enable **Downloads** under
-   **Workspace Settings → Reports & Sharing** — required for API pull access
-   regardless of plan.
-4. Deploy (`npm run deploy`), then authorize once by visiting, in a browser:
-   ```
-   https://<your-worker-subdomain>.workers.dev/oauth/readai/start?key=<your TELEGRAM_WEBHOOK_SECRET>
-   ```
-   Sign in and consent. You should land on a page saying "Read.ai
-   authorized." If Read.ai's consent UI instead shows you a `code=...` and
-   `state=...` to copy rather than redirecting automatically, just visit
-   `.../oauth/readai/callback?code=...&state=...` yourself with those values.
-5. From then on, whenever a work item is waiting on call notes, its Telegram
-   message includes a **"📞 Pull latest Read.ai call"** button — tap it to
-   fetch and apply the transcript instead of typing notes.
+The runtime currently interfaces with:
 
-Access tokens last 10 minutes and refresh automatically (rotating refresh
-tokens, stored in KV). There's no documented hard expiry on the refresh
-chain, but Read.ai's own docs note a broken chain "may require manual
-intervention" — if pulling ever starts failing with an authorization error,
-just redo step 4.
+* Notion
+* Telegram
+* Cloudflare Workers
+* Cloudflare Workers AI
 
-### 6. Telegram Topics (optional — one topic per Unit)
+Additional integrations may be added when required by an approved responsibility.
 
-Simulates "one dedicated AI Workspace per Unit" inside a single Telegram
-Supergroup, closer to the original per-Unit Claude Project model than one
-flat chat:
+Detailed setup instructions for individual integrations should live under repository documentation rather than in this file.
 
-1. Create a Telegram **Group**, then enable **Topics** in its settings
-   (auto-converts it to a Supergroup).
-2. Add the bot to the group and make it an **admin** — required for it to
-   see every message regardless of Telegram's privacy-mode filtering.
-3. Create one topic per Unit: **SM&BD**, **Finance**, **Strategy**,
-   **Research & Intelligence**, **Creative & Design**, **Operations**.
-4. Deploy, keep `wrangler tail` open, then send a test message in each
-   topic — each logs a line like `Message received: chat -100xxxx, thread N`.
-5. Fill in `UNIT_TOPIC_MAP` in `wrangler.toml` with the real thread ids, and
-   `TELEGRAM_GROUP_CHAT_ID` if you want email-sourced enquiries (below) to
-   land in the group rather than your personal DM. Redeploy.
+Extending the runtime
 
-Only SM&BD's topic accepts new enquiries directly — Finance's topic
-explains it only activates via Handoff, and the four unbuilt Units' topics
-say no Hat is available there yet. Unset `UNIT_TOPIC_MAP` entirely to fall
-back to the original flat 1:1 chat behavior.
+When adding a new capability:
 
-### 7. Email intake for enquiries (optional)
+1. Identify the business responsibility.
+2. Identify the existing governing architecture that applies.
+3. Inspect the current execution path before creating new abstractions.
+4. Make the smallest complete implementation.
+5. Preserve the existing AI execution contract.
+6. Add deterministic tests for the changed behavior.
+7. Verify type safety.
+8. Review the resulting diff for unrelated changes.
+9. Deploy only through the approved path.
+10. Verify the live behavior after deployment.
 
-Two options, from no-setup to fully automatic:
+Do not introduce a new Unit, Hat, provider, routing rule, authority boundary, or governance mechanism merely because the code could support one.
 
-- **Manual (works today, no setup):** forward or paste the email content
-  into the SM&BD topic — an enquiry is just text describing a business
-  problem, regardless of source.
-- **Automatic via Gmail:** a free Google Apps Script polls your inbox and
-  forwards labeled emails to the Worker.
-  1. In Gmail, create a filter that applies a label (e.g. `ENIG-Enquiry`)
-     to whatever mail should count as an incoming enquiry.
-  2. Set the secret: `npx wrangler secret put EMAIL_WEBHOOK_SECRET`
-  3. Go to **script.google.com** → **New project**, paste in
-     `scripts/gmail-enquiry-poller.gs` from this repo, fill in the same
-     secret and your Worker URL at the top of the script.
-  4. In the script editor, **Triggers** (clock icon) → **Add Trigger** →
-     run `checkForEnquiries` on a **time-driven** trigger, every 5 minutes.
-  5. It POSTs new labeled emails to `/email/webhook`, which creates a new
-     SM&BD work item exactly as if the enquiry had been typed into Telegram,
-     then labels the thread `ENIG-Enquiry-Sent` so it isn't reprocessed.
-- **Automatic via a custom domain:** if you have a domain on Cloudflare's
-  DNS, Cloudflare Email Routing + an Email Worker can trigger this same
-  Worker directly on inbound mail — ask if you want this built instead.
+Build from demonstrated operational need.
 
-### 8. Local dev
+Current architectural work
 
-```bash
-cp .dev.vars.example .dev.vars   # fill in real values
-npm run dev
-```
+The current provider architecture establishes the infrastructure necessary for provider redundancy.
 
-## Using it
+The next architectural problem is the data boundary of an AI execution:
 
-Message the bot with an incoming enquiry (as if relaying a real one). It
-will walk through: Entity match/create → Matter match/create → sales-call
-prep → (you run the call, send back notes) → qualification → Lead→Prospect
-approval → proposed intervention → automatic Handoff to Finance → Finance
-judges a value-based quote (or holds it and asks for more value context) →
-Draft Proposal presented for your approval/revision → Proposal record
-created in Notion.
+Business / Domain Context
+        ↓
+Data Boundary / Context Transformation
+        ↓
+Provider Eligibility
+        ↓
+Provider Execution
 
-`/sessions` — list and switch between open work items.
+The runtime must determine what information may cross an AI provider boundary before a secondary provider can be safely introduced.
 
-## Extending to the remaining Units
+This work is intentionally separate from adding another provider.
 
-Per the Build Method: prove this slice live on a real quote request first,
-then apply the same pattern — one Hat module under `src/units/<unit>/<specialization>/`
-(or directly under `src/units/<unit>/` where no specialization split exists,
-as with Finance), registered in `src/hats/registry.ts` and wired into
-`session.ts`'s dispatch and `router.ts`'s Hat-selection classifier — to
-Research & Intelligence, Strategy, Creative & Design, and Operations, one at
-a time.
+What is not yet implemented
+
+The following should not be inferred from the existence of the provider abstraction:
+
+* automatic secondary-provider routing
+* approved external-provider eligibility rules
+* automated sanitization of sensitive context
+* universal PII redaction
+* provider-specific business logic inside Hats
+* automatic downgrade to a less-protective provider
+* a completed provider redundancy policy
+
+Those require separate architectural decisions and implementation approval.
+
+Design constraint
+
+The runtime exists to execute ENIG’s governed operating model.
+
+It should become more capable by making existing responsibilities executable, not by accumulating abstractions ahead of demonstrated need.
