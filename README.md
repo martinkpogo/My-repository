@@ -202,21 +202,45 @@ npx tsc --noEmit
 
 Development and deployment configuration should be maintained separately from this README where the instructions become operationally detailed.
 
-Deployment
+Deployment & CI/CD Automation
 
-The runtime is deployed as a Cloudflare Worker.
+The runtime is deployed as a Cloudflare Worker using an automated end-to-end GitHub Actions workflow.
+
+### Continuous Integration & Deployment Lifecycle
+
+1. **Pull Request Submission (`pr-validation.yml`)**:
+   - Triggered when a PR is opened, updated, or reopened against target branches (`claude/notion-cloudflare-telegram-agents-nsi40m` or `main`).
+   - Runs type checks (`npm run typecheck`) and unit tests (`npx tsx --test ...`).
+
+2. **Automated Review & Auto-Merge (`auto-merge.yml`)**:
+   - Triggered on PR events and `PR Validation` workflow completion.
+   - Automatically approves and squashes/merges PRs into the target branch once validation passes.
+
+3. **Cloudflare Deployment (`deploy.yml`)**:
+   - Triggered automatically on push / merge to target branches.
+   - Executes type checks and unit test validations.
+   - Deploys the worker to Cloudflare using `npm run deploy` (`wrangler deploy`).
+   - Runs post-deployment health check verification against `https://enig-agent.martnkpogo.workers.dev/health`.
+
+### Required GitHub Configuration & Setup
+
+To enable fully automated PR checking, merging, and deployment after task submission, configure the following in your GitHub repository:
+
+#### 1. Repository Secrets (`Settings` -> `Secrets and variables` -> `Actions` -> `New repository secret`):
+* `CLOUDFLARE_API_TOKEN`: Cloudflare API token with Workers Deployment permissions.
+* `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Account ID.
+* `WORKER_ADMIN_KEY`: Secret key matching `TELEGRAM_WEBHOOK_SECRET` for scheduled administrative jobs (e.g. Finance Handoff discovery).
+
+#### 2. Repository Settings for Auto-Merge & Actions Permissions:
+* **Allow auto-merge**: Go to `Settings` -> `General` -> `Pull Requests` and check **"Allow auto-merge"**.
+* **Workflow permissions**: Go to `Settings` -> `Actions` -> `General` -> `Workflow permissions` and select:
+  - **Read and write permissions**
+  - Check **"Allow GitHub Actions to create and approve pull requests"**.
+* **Branch Protection Rules (Optional but Recommended)**:
+  - Under `Settings` -> `Branches`, add protection rule for `main` / `claude/notion-cloudflare-telegram-agents-nsi40m`.
+  - Check **"Require status checks to pass before merging"** and select `PR Validation`.
 
 Deployment credentials and environment secrets must never be committed to the repository or included in source code.
-
-Production deployment occurs through an automated GitHub Actions CI/CD pipeline triggered on merge to target branches (`claude/notion-cloudflare-telegram-agents-nsi40m` and `main`).
-
-Required GitHub Repository Secrets for deployment:
-* `CLOUDFLARE_API_TOKEN`
-* `CLOUDFLARE_ACCOUNT_ID`
-
-Following post-merge deployment, the workflow automatically verifies the live Worker health endpoint (`/health`).
-
-A successful deployment does not by itself establish that the architecture is correct. Deployment health and architectural correctness are separate concerns.
 
 Integrations
 
