@@ -1,0 +1,51 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches:
+      - claude/notion-cloudflare-telegram-agents-nsi40m
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare Workers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run test validation
+        run: npx tsx --test src/ai/policy.test.ts src/hats/relationships.test.ts
+
+      - name: Deploy Worker to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Verify post-deployment health endpoint
+        run: |
+          HEALTH_URL="https://enig-agent.martnkpogo.workers.dev/health"
+          RESPONSE=$(curl -sS -w "\n%{http_code}" "$HEALTH_URL")
+          STATUS_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          if [ "$STATUS_CODE" -ne 200 ] || [ "$BODY" != "ok" ]; then
+            echo "Health verification failed with HTTP status $STATUS_CODE"
+            exit 1
+          fi
+          echo "Health verification succeeded with status HTTP $STATUS_CODE"
