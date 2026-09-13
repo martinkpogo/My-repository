@@ -189,3 +189,79 @@ test("7. Verifies audit log entries contain zero prompt or sensitive payload tex
   assert.strictEqual(auditEntry.segmentMetadata[1].provenance, "user_input");
   assert.strictEqual(auditEntry.segmentMetadata[1].sensitivity, "business_sensitive");
 });
+
+test("8. Closed-context Handoff evaluation: sufficient sanitized context executes", () => {
+  const contractInput = {
+    handoffId: "handoff_123",
+    entityToken: "ENT-104",
+    matterToken: "MAT-208",
+    sanitizedContext: "Proposed intervention: System audit. Value context: Operational scaling.",
+    provenance: "notion:handoff:handoff_123",
+  };
+
+  const { evaluateHandoffContext } = require("./policy");
+  const res = evaluateHandoffContext(contractInput, "finance.quote_judgment");
+
+  assert.strictEqual(res.success, true);
+  if (res.success) {
+    assert.strictEqual(res.contract.entityToken, "ENT-104");
+    assert.strictEqual(res.contract.matterToken, "MAT-208");
+    assert.strictEqual(res.boundaryContext.segments.length, 1);
+    assert.ok(res.boundaryContext.segments[0].content.includes("ENT-104"));
+    assert.ok(res.boundaryContext.segments[0].content.includes("Proposed intervention"));
+  }
+});
+
+test("9. Closed-context Handoff evaluation: missing required context blocks execution with category-focused reason", () => {
+  const contractInput = {
+    handoffId: "handoff_456",
+    entityToken: "ENT-105",
+    sanitizedContext: "", // missing
+    requiredCategory: "historical business-impact range",
+  };
+
+  const { evaluateHandoffContext } = require("./policy");
+  const res = evaluateHandoffContext(contractInput, "finance.quote_judgment");
+
+  assert.strictEqual(res.success, false);
+  if (!res.success) {
+    assert.strictEqual(res.insufficientContext.isInsufficient, true);
+    assert.strictEqual(res.insufficientContext.category, "historical business-impact range");
+    assert.ok(res.insufficientContext.reason.includes("historical business-impact range"));
+    // Ensure reason does not expose underlying sensitive databases or queries
+    assert.strictEqual(res.insufficientContext.reason.includes("Notion"), false);
+  }
+});
+
+test("10. Closed-context tokens remain opaque non-resolvable strings", () => {
+  const { evaluateHandoffContext } = require("./policy");
+  const res = evaluateHandoffContext(
+    {
+      handoffId: "h_789",
+      entityToken: "ENT-999",
+      matterToken: "MAT-888",
+      sanitizedContext: "Sanitized scope description",
+    },
+    "sales.proposal_drafting",
+  );
+
+  assert.strictEqual(res.success, true);
+  if (res.success) {
+    // Assert tokens are strings and contain no database page URLs or credentials
+    assert.strictEqual(res.contract.entityToken, "ENT-999");
+    assert.strictEqual(res.contract.matterToken, "MAT-888");
+    assert.strictEqual(res.contract.entityToken.includes("http"), false);
+    assert.strictEqual(res.contract.entityToken.includes("notion.so"), false);
+  }
+});
+
+test("11. Unresolved policy and transformation failure fail closed", () => {
+  const evaluator = new DataBoundaryEvaluator();
+  const dummyContext: BoundaryContext = {
+    segments: [{ type: "user", content: "test", provenance: "test.ts" }],
+  };
+
+  const result = evaluator.evaluate("finance.quote_judgment", "workers-ai", dummyContext);
+  assert.strictEqual(result.allowed, false);
+  assert.strictEqual(result.reasonCode, "UNRESOLVED_POLICY_HOLD");
+});

@@ -74,3 +74,36 @@ export interface BoundaryAuditEntry {
     message: string;
   };
 }
+
+/**
+ * Canonical closed-context Handoff Context Contract representing the sanitized
+ * context explicitly supplied by the controlled environment for runtime execution.
+ * Opaque tokens (entityToken, matterToken, proposalToken) are reference identifiers only
+ * and must NEVER be treated as lookup keys into controlled databases.
+ */
+export interface HandoffContextContract {
+  /** Internal opaque token / reference metadata for session tracking */
+  handoffId: string;
+  workId?: string;
+  entityToken: string;
+  matterToken?: string;
+  proposalToken?: string;
+
+  /** Sanitized business context explicitly authorized for execution */
+  sanitizedContext: string;
+  provenance: string;
+  sensitivity?: SensitivityLevel;
+
+  /** Category of required execution context expected for task completion */
+  requiredCategory?: string;
+}
+
+export interface InsufficientContextResult {
+  isInsufficient: true;
+  category: string;
+  reason: string;
+}
+
+export type HandoffContextEvaluationResult =
+  | { success: true; contract: HandoffContextContract; boundaryContext: BoundaryContext }
+  | { success: false; insufficientContext: InsufficientContextResult };
