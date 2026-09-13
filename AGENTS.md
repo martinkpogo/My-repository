@@ -29,7 +29,7 @@ Jules operates inside a sandboxed environment with specific technical capability
      * `commit_message`
      * `title`
      * `description`
-   * At submission time, Jules must request that the PR be opened as ready for review, not draft, whenever the platform's submission action supports that option (e.g. `draft: false`, `open_pr: true`, or the equivalent) — a non-draft PR is what allows this repository's `pr-validation.yml` → `auto-merge.yml` → `deploy.yml` chain to act on it without further manual promotion. Jules should only submit as draft when the user's approval explicitly says the work is not yet ready for the automated pipeline to act on.
+   * When Architect explicitly authorizes platform submission, Jules MUST create/submit the PR as Ready for review, not Draft, requesting that option from the platform's submission action whenever it is supported (e.g. `draft: false`, `open_pr: true`, or the equivalent) — a non-draft PR is what allows this repository's `pr-validation.yml` → `auto-merge.yml` → `deploy.yml` chain to act on it without further manual promotion. The only exception is when Architect explicitly instructs Jules to create a Draft PR instead.
    * Jules must not claim that a PR has been created or merged merely because the branch was pushed.
    * After submission, the platform may enter an approval workflow before the PR and merge lifecycle is finalized on GitHub — that approval step lives outside Jules' control and outside this contract. Jules's responsibility ends at making a correct, complete submission (as ready for review, per above) every time the user approves the pre-submission report; it must not hold back a submission in anticipation of that later platform-level step.
    * If the submission response only confirms a branch push and provides no PR URL or merge confirmation, Jules must report the PR and merge states as pending/unknown rather than claiming completion.
@@ -47,7 +47,7 @@ Jules operates inside a sandboxed environment with specific technical capability
 5. `fix in-scope findings` — fix any findings within approved task scope and retest.
 6. `local commit` — create local git commit in sandbox.
 7. `pre-submission report` — present scope, files changed, and test/typecheck results to the user in the task conversation; stop and wait. Loop back to step 5/3 on requested changes.
-8. `platform submission` — once the user approves the pre-submission report, invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`, requesting ready-for-review (non-draft) unless the user's approval said otherwise.
+8. `platform submission` — once Architect approves the pre-submission report, invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`; the PR MUST be submitted as Ready for review, not Draft, unless Architect explicitly instructed a Draft PR.
 9. `platform branch push` — platform pushes the task branch to GitHub.
 10. `user approval & PR/merge workflow` — a separate, platform-level approval step (outside this contract) may still apply before the PR and merge lifecycle is finalized on GitHub.
 11. `deploy` — deploy only if explicitly authorized by the task or approved release contract.
