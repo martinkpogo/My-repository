@@ -71,8 +71,11 @@ jobs:
           fi
 
           echo "All merge gate conditions satisfied for PR #$PR_NUM."
-          echo "Executing squash merge..."
-          gh pr merge "$PR_NUM" --squash --delete-branch
+          echo "Executing squash merge with head commit matching..."
+          gh pr merge "$PR_NUM" \
+            --squash \
+            --delete-branch \
+            --match-head-commit "$RUN_SHA"
 
           echo "PR #$PR_NUM merged successfully."
           echo "Explicitly triggering Deploy Worker workflow on branch $TARGET_BRANCH..."
