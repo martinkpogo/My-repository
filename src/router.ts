@@ -98,6 +98,7 @@ export async function classifyNewMessage(
   }
 
   const result = await aiJson<RoutingClassification>(env, {
+    taskId: "routing.enquiry_classification",
     system: `You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. Below is the canonical SM&BD AI Project Instructions, retrieved from Notion — it is authoritative for how incoming work in this workspace is classified and which Hat/specialization it routes to. Follow it exactly.
 
 === SM&BD AI PROJECT INSTRUCTIONS (retrieved from Notion's canonical governance) ===
@@ -130,6 +131,7 @@ Return JSON: {"route": "enquiry" | "out_of_scope" | "ambiguous", "reason": "..."
  */
 async function classifyMarketingTask(env: Env, text: string): Promise<"marketing" | "not_marketing" | null> {
   const result = await aiJson<{ specialization: "marketing" | "not_marketing" }>(env, {
+    taskId: "routing.marketing_specialization_check",
     system: `You classify incoming messages for ENIG, a consultancy. Below are ENIG's five internal Marketing Hats:
 
 ${marketingHatSummaryList()}

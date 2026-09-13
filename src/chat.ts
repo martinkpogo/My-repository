@@ -107,7 +107,7 @@ export async function generalChatReply(
   const history = await getChatHistory(env, chatId, threadId);
   const snapshot = await recentActivitySnapshot(env, unit);
   const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
-  const reply = await aiChat(env, system, history, userMessage);
+  const reply = await aiChat(env, "chat.general_reply", system, history, userMessage);
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
     { role: "assistant", content: reply || "(no response)" },

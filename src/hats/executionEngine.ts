@@ -49,6 +49,7 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
 
   // Stage 1: LLM identifies candidate Hats and establishing context
   const stage1 = await aiJson<Stage1IntakeClassification>(env, {
+    taskId: "marketing.intake_classification",
     system: `You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit. Below are the five Marketing Hats and their purposes. Identify ALL genuinely plausible candidate Hats for the incoming request, and whether establishing foundational strategy/briefs/guidance is required.
 
 ${marketingHatSummaryList()}
@@ -158,6 +159,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   }
 
   const decision = await aiJson<HatActionDecision>(env, {
+    taskId: "marketing.hat_action_decision",
     system: buildHatSystemPrompt(hat, universalRoleContract),
     user: state.marketingTaskText ?? "",
   });

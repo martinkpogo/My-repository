@@ -158,6 +158,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
   });
 
   const extracted = await aiJson<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
+    taskId: "sales.enquiry_extraction",
     system:
       "Extract the sender's identifying details from an incoming business enquiry. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
     user: text,
@@ -296,6 +297,7 @@ export async function handleEntityCreationApproval(env: Env, state: WorkState, a
 export async function handleEntityRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
   const previous = state.entityDraft;
   const extracted = await aiJson<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
+    taskId: "sales.enquiry_extraction",
     system:
       "Extract the sender's identifying details for a business Entity record. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
     user: `Original enquiry: ${state.enquiryText ?? ""}\n\nPrevious draft: ${JSON.stringify(previous ?? {})}\n\nMartin's redo reasoning: ${reasonText}`,
@@ -362,6 +364,7 @@ export async function handleMatterChoice(env: Env, state: WorkState, choice: str
  */
 async function draftNewMatter(env: Env, state: WorkState, guidance: string): Promise<WorkState> {
   const summary = await aiJson<{ name: string; stated_need: string }>(env, {
+    taskId: "sales.matter_summary_drafting",
     system:
       "From the enquiry text, produce a short Matter title (max 8 words) and a one-sentence Stated_need. Return JSON {name, stated_need}.",
     user: guidance,
@@ -470,6 +473,7 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
 
   const brief = await aiText(
     env,
+    "sales.call_prep_briefing",
     buildSalesCallPrepSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
     `Entity: ${state.entityName}\nMatter: ${state.matterName}\nEnquiry: ${state.enquiryText}`,
   );
@@ -524,6 +528,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   }
 
   const qualification = await aiJson<QualificationResult>(env, {
+    taskId: "sales.call_qualification",
     system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
     user: `Enquiry: ${state.enquiryText}\n\nCall notes: ${state.callNotes}`,
   });
@@ -770,6 +775,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
 
   const draft = await aiText(
     env,
+    "sales.proposal_drafting",
     buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
     `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: $${state.quote.price} — rationale: ${state.quote.rationale}`,
     { maxTokens: 3000 },
@@ -858,6 +864,7 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
 
   const revised = await aiText(
     env,
+    "sales.proposal_revision",
     buildProposalRevisionSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
     `Current draft:\n${state.proposalDraft}\n\nMartin's feedback:\n${feedback}`,
     { maxTokens: 3000 },
