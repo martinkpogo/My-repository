@@ -11,6 +11,7 @@ import {
   ProviderId,
 } from "./types";
 import type { Env } from "../types";
+import { DataBoundaryEvaluator } from "../dataBoundary/policy";
 
 class MockProvider implements AiProvider {
   public attempts = 0;
@@ -33,6 +34,18 @@ class MockProvider implements AiProvider {
 
 const fakeEnv = {} as Env;
 
+// Test boundary evaluator granting eligibility for test providers on public chat tasks
+const testBoundaryEvaluator = new DataBoundaryEvaluator({
+  taskSensitivities: {
+    "chat.general_reply": "public",
+  },
+  providerEligibility: {
+    p1: { providerId: "p1", allowedSensitivities: new Set(["public"]) },
+    p2: { providerId: "p2", allowedSensitivities: new Set(["public"]) },
+    p3: { providerId: "p3", allowedSensitivities: new Set(["public"]) },
+  },
+});
+
 test("A. Primary provider succeeds", async () => {
   const primary = new MockProvider("p1", () => ({
     success: true,
@@ -43,8 +56,8 @@ test("A. Primary provider succeeds", async () => {
     response: { rawText: '{"result": "secondary"}' },
   }));
 
-  const executor = new AiPolicyExecutor([primary, secondary]);
-  const res = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
+  const executor = new AiPolicyExecutor([primary, secondary], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
   assert.deepEqual(res, { result: "ok" });
   assert.equal(primary.attempts, 1);
@@ -61,8 +74,8 @@ test("B. Primary infrastructure failure + eligible secondary -> secondary attemp
     response: { rawText: '{"status": "recovered"}' },
   }));
 
-  const executor = new AiPolicyExecutor([primary, secondary]);
-  const res = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
+  const executor = new AiPolicyExecutor([primary, secondary], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
   assert.deepEqual(res, { status: "recovered" });
   assert.equal(primary.attempts, 1);
@@ -79,8 +92,8 @@ test("C. Primary infrastructure failure + no eligible secondary -> safe failure/
     response: { rawText: '{"status": "should_not_run"}' },
   }), false);
 
-  const executor = new AiPolicyExecutor([primary, secondaryIneligible]);
-  const res = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
+  const executor = new AiPolicyExecutor([primary, secondaryIneligible], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
   assert.equal(res, null);
   assert.equal(primary.attempts, 1);
@@ -97,8 +110,8 @@ test("D & Additional: Malformed JSON output does NOT trigger provider fallback",
     response: { rawText: '{"valid": "json"}' },
   }));
 
-  const executor = new AiPolicyExecutor([primary, secondary]);
-  const res = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
+  const executor = new AiPolicyExecutor([primary, secondary], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
   assert.equal(res, null);
   assert.equal(primary.attempts, 1);
@@ -115,8 +128,8 @@ test("E. Secondary infrastructure failure -> safe failure/hold, no infinite loop
     error: new InfrastructureError("p2", "Connection reset", { statusCode: 502 }),
   }));
 
-  const executor = new AiPolicyExecutor([primary, secondary]);
-  const res = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
+  const executor = new AiPolicyExecutor([primary, secondary], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
   assert.equal(res, null);
   assert.equal(primary.attempts, 1);
@@ -129,10 +142,10 @@ test("F. No eligible provider -> fail closed", async () => {
     response: { rawText: "ok" },
   }), false);
 
-  const executor = new AiPolicyExecutor([primary]);
-  const resJson = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
-  const resText = await aiText(fakeEnv, "s", "u", {}, executor);
-  const resChat = await aiChat(fakeEnv, "s", [], "u", 800, executor);
+  const executor = new AiPolicyExecutor([primary], testBoundaryEvaluator);
+  const resJson = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
+  const resText = await aiText(fakeEnv, "chat.general_reply", "s", "u", {}, executor);
+  const resChat = await aiChat(fakeEnv, "chat.general_reply", "s", [], "u", 800, executor);
 
   assert.equal(resJson, null);
   assert.equal(resText, "");
@@ -151,8 +164,8 @@ test("Additional: Fallback attempts each eligible provider at most once", async 
   }));
 
   // Duplicate provider instances in array to test at-most-once execution
-  const executor = new AiPolicyExecutor([p1, p1, p2, p2]);
-  const res = await aiJson(fakeEnv, { system: "s", user: "u" }, executor);
+  const executor = new AiPolicyExecutor([p1, p1, p2, p2], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
   assert.equal(res, null);
   assert.equal(p1.attempts, 1);
@@ -175,8 +188,8 @@ test("Additional: Provider ordering is deterministic", async () => {
     return { success: true, response: { rawText: "hello" } };
   });
 
-  const executor = new AiPolicyExecutor([p1, p2, p3]);
-  const res = await aiText(fakeEnv, "s", "u", {}, executor);
+  const executor = new AiPolicyExecutor([p1, p2, p3], testBoundaryEvaluator);
+  const res = await aiText(fakeEnv, "chat.general_reply", "s", "u", {}, executor);
 
   assert.equal(res, "hello");
   assert.deepEqual(executionOrder, ["p1", "p2", "p3"]);
@@ -188,8 +201,8 @@ test("Additional: Empty text result caused by provider infrastructure failure fa
     error: new InfrastructureError("p1", "Infrastructure failure 500"),
   }));
 
-  const executor = new AiPolicyExecutor([primary]);
-  const resText = await aiText(fakeEnv, "system", "user", {}, executor);
+  const executor = new AiPolicyExecutor([primary], testBoundaryEvaluator);
+  const resText = await aiText(fakeEnv, "chat.general_reply", "system", "user", {}, executor);
 
   assert.equal(resText, "");
 });

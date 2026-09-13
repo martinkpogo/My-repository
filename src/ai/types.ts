@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import type { BoundaryContext, SemanticTaskId } from "../dataBoundary/types";
 
 export type ProviderId = string;
 
@@ -8,6 +9,8 @@ export interface AiMessage {
 }
 
 export interface AiTask {
+  taskId: SemanticTaskId;
+  boundaryContext: BoundaryContext;
   type: "json" | "text" | "chat";
   messages: AiMessage[];
   temperature?: number;

@@ -174,6 +174,7 @@ async function judgeQuote(
   });
 
   const judgement = await aiJson<PriceJudgement>(env, {
+    taskId: "finance.quote_judgment",
     system: buildFinanceSystemPrompt(hatDefinition, universalRoleContract),
     user: `Entity: ${entityName}\nProposed intervention and value context:\n${judgmentContext}`,
   });

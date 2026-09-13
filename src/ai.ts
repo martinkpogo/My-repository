@@ -1,8 +1,10 @@
 import type { Env } from "./types";
 import { defaultPolicyExecutor, AiPolicyExecutor } from "./ai/policy";
 import type { AiTask } from "./ai/types";
+import type { SemanticTaskId, ContextSegment } from "./dataBoundary/types";
 
 export interface AiJsonOptions {
+  taskId: SemanticTaskId;
   system: string;
   user: string;
   light?: boolean;
@@ -22,6 +24,7 @@ export interface ChatTurn {
 /**
  * Calls AI via policy executor and requires a JSON object response. Returns null
  * on any infrastructure failure (if no provider succeeds) or on JSON parse failure.
+ * Mandates explicit SemanticTaskId and constructs structured BoundaryContext.
  * Crucially, malformed model output does NOT trigger provider fallback.
  */
 export async function aiJson<T = Record<string, unknown>>(
@@ -29,14 +32,18 @@ export async function aiJson<T = Record<string, unknown>>(
   opts: AiJsonOptions,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
 ): Promise<T | null> {
+  const systemContent = `${opts.system}\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.`;
+  const segments: ContextSegment[] = [
+    { type: "system", content: systemContent, provenance: `${opts.taskId}:system` },
+    { type: "user", content: opts.user, provenance: `${opts.taskId}:user` },
+  ];
+
   const task: AiTask = {
+    taskId: opts.taskId,
+    boundaryContext: { segments },
     type: "json",
     messages: [
-      {
-        role: "system",
-        content:
-          `${opts.system}\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.`,
-      },
+      { role: "system", content: systemContent },
       { role: "user", content: opts.user },
     ],
     temperature: 0.2,
@@ -63,12 +70,20 @@ export async function aiJson<T = Record<string, unknown>>(
 
 export async function aiText(
   env: Env,
+  taskId: SemanticTaskId,
   system: string,
   user: string,
   options: AiTextOptions = {},
   executor: AiPolicyExecutor = defaultPolicyExecutor,
 ): Promise<string> {
+  const segments: ContextSegment[] = [
+    { type: "system", content: system, provenance: `${taskId}:system` },
+    { type: "user", content: user, provenance: `${taskId}:user` },
+  ];
+
   const task: AiTask = {
+    taskId,
+    boundaryContext: { segments },
     type: "text",
     messages: [
       { role: "system", content: system },
@@ -86,13 +101,26 @@ export async function aiText(
 /** Like aiText, but carries prior conversation turns as real message history. */
 export async function aiChat(
   env: Env,
+  taskId: SemanticTaskId,
   system: string,
   history: ChatTurn[],
   userMessage: string,
   maxTokens = 800,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
 ): Promise<string> {
+  const segments: ContextSegment[] = [
+    { type: "system", content: system, provenance: `${taskId}:system` },
+    ...history.map((t, idx) => ({
+      type: (t.role === "user" ? "user" : "system") as ContextSegment["type"],
+      content: t.content,
+      provenance: `${taskId}:history:${idx}`,
+    })),
+    { type: "user", content: userMessage, provenance: `${taskId}:user_input` },
+  ];
+
   const task: AiTask = {
+    taskId,
+    boundaryContext: { segments },
     type: "chat",
     messages: [
       { role: "system", content: system },
