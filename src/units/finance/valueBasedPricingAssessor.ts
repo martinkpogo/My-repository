@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, relation, relationIds, richText, select, title, uniqueId, updatePage } from "../../notion";
+import { createPage, getPage, plainText, relation, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -39,33 +39,26 @@ interface HandoffBusinessContext {
 
 /**
  * Reconstructs the business context this Hat needs directly from the
- * Handoff's own canonical Notion records (Handoff -> Matter -> Entity),
- * per the Handoff Business Object's context_transfer rule — the receiving
- * Unit must be able to continue from what the Handoff itself carries, not
- * from the sending Unit's session state. Returns null on any failure
- * (missing relation, missing referenced page, or empty required field);
+ * Handoff's own canonical Notion record, per the Handoff Business Object's
+ * context_transfer rule — the receiving Unit must be able to continue from
+ * what the Handoff itself carries, not from the sending Unit's session
+ * state. Returns null on any failure (missing/empty required field);
  * callers must treat null as "cannot proceed," never substitute WorkState
  * in its place.
  *
- * Identity is read as each record's Unique ID token (Entity ID / Matter_ID),
- * never its real Name/title — Finance operates on tokens and plain figures
- * only, per the data-boundary redesign; the real name never enters this
- * Hat's context, an AI prompt, or a Telegram message it sends.
+ * Identity is read as the Entity_Token / Matter_Token the creating Unit
+ * embedded directly on the Handoff, never a real Name/title — this Hat
+ * never reads the Entity or Matter page (and, per the data-boundary
+ * redesign, may not even have Notion access to the Entity database). The
+ * real name never enters this Hat's context, an AI prompt, or a Telegram
+ * message it sends.
  */
 async function resolveHandoffBusinessContext(env: Env, handoffId: string): Promise<HandoffBusinessContext | null> {
   try {
     const handoff = await getPage(env, handoffId);
     const judgmentContext = plainText(handoff.properties["Verified Facts & Sources"]);
-
-    const matterId = relationIds(handoff.properties.Matter)[0];
-    if (!matterId) throw new Error("Handoff has no Matter relation");
-    const matter = await getPage(env, matterId);
-    const matterToken = uniqueId(matter.properties.Matter_ID);
-
-    const entityId = relationIds(matter.properties.Entity)[0];
-    if (!entityId) throw new Error("Matter has no Entity relation");
-    const entity = await getPage(env, entityId);
-    const entityToken = uniqueId(entity.properties["Entity ID"]);
+    const entityToken = plainText(handoff.properties.Entity_Token);
+    const matterToken = plainText(handoff.properties.Matter_Token);
 
     if (!entityToken || !judgmentContext) throw new Error("reconstructed context was empty");
 
@@ -354,6 +347,8 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     Reason: richText(`Value-based quote approved by Martin for ${state.matterName}; ready for Draft Proposal preparation.`),
     "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
     Matter: relation([state.matterId!]),
+    Entity_Token: richText(state.entityName ?? ""),
+    Matter_Token: richText(state.matterName ?? ""),
     "Verified Facts & Sources": richText(
       `Authoritative quote: $${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
     ),
