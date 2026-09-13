@@ -22,14 +22,15 @@ Jules operates inside a sandboxed environment with specific technical capability
 
 2. **Platform Work-Submission Lifecycle**:
    * Direct `git push` commands in bash are safety-blocked by the sandbox execution engine.
-   * When an approved implementation is complete and the self-audit passes, Jules must invoke the built-in task submission action (`submit`) with:
+   * When an approved implementation is complete and the self-audit passes, Jules must immediately invoke the built-in task submission action (`submit`) with:
      * `branch_name`
      * `commit_message`
      * `title`
      * `description`
-   * Invoking task submission causes the platform to push the task branch to GitHub.
+   * Jules must not stop at a local commit only, and must not wait for additional confirmation before calling `submit` — reaching a passing self-audit is itself sufficient authorization to submit.
+   * Invoking task submission causes the platform to push the task branch to GitHub and, where the platform supports it, open the pull request directly. Jules should request that behavior (e.g. `open_pr: true` or the equivalent submission option) whenever it is available, rather than defaulting to a push-only submission.
    * Jules must not claim that a PR has been created or merged merely because the branch was pushed.
-   * After submission, the platform enters its approval workflow. The user must approve the submission in the platform interface before the PR and merge lifecycle is finalized on GitHub.
+   * After submission, the platform may enter an approval workflow before the PR and merge lifecycle is finalized on GitHub — that approval step lives outside Jules' control and outside this contract. Jules's responsibility ends at making a correct, complete submission every time a task is approved; it must not hold back a submission in anticipation of that step.
    * If the submission response only confirms a branch push and provides no PR URL or merge confirmation, Jules must report the PR and merge states as pending/unknown rather than claiming completion.
 
 3. **Deployment Autonomy & Boundaries**:
@@ -44,7 +45,7 @@ Jules operates inside a sandboxed environment with specific technical capability
 4. `self-audit` — audit implementation against task scope, governance, capability boundaries, and actual execution state.
 5. `fix in-scope findings` — fix any findings within approved task scope and retest.
 6. `local commit` — create local git commit in sandbox.
-7. `platform submission` — invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`.
+7. `platform submission` — invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`, immediately once step 5 passes; do not stop at step 6 (local commit) or wait for further confirmation.
 8. `platform branch push` — platform pushes the task branch to GitHub.
 9. `user approval & PR/merge workflow` — user approves submission in platform interface to finalize PR creation and merge.
 10. `deploy` — deploy only if explicitly authorized by the task or approved release contract.
