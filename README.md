@@ -311,3 +311,5 @@ Design constraint
 The runtime exists to execute ENIG’s governed operating model.
 
 It should become more capable by making existing responsibilities executable, not by accumulating abstractions ahead of demonstrated need.
+
+<!-- Jules pipeline test: 2026-09-13 -->
