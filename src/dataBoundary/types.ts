@@ -74,3 +74,55 @@ export interface BoundaryAuditEntry {
     message: string;
   };
 }
+
+/**
+ * Canonical closed-context Handoff Context Contract representing the sanitized
+ * context explicitly supplied by the controlled environment for runtime execution.
+ * Opaque tokens (entityToken, matterToken, proposalToken) are reference identifiers only
+ * and must NEVER be treated as lookup keys into controlled databases.
+ */
+export type TransformationStatus = "authorized" | "unauthorized" | "pending";
+
+/**
+ * Downstream-safe execution package that crosses the controlled -> runtime boundary.
+ * Strictly excludes real Entity/Matter names, emails, phone numbers, and raw notes.
+ */
+export interface DownstreamExecutionPackage {
+  handoffId: string;
+  workId?: string;
+  entityToken: string;
+  matterToken?: string;
+  proposalToken?: string;
+
+  /** Sanitized business context explicitly authorized for execution */
+  sanitizedContext: string;
+
+  /** Explicit machine-readable evidence of authorized boundary transformation */
+  transformationStatus: TransformationStatus;
+  transformationId?: string;
+  transformationProvenance: string;
+
+  /** Sensitivity level of the sanitized context */
+  sensitivity: SensitivityLevel;
+
+  /** Category of required execution context expected for task completion */
+  requiredCategory?: string;
+}
+
+/**
+ * Canonical closed-context Handoff Context Contract representing the sanitized
+ * context explicitly supplied by the controlled environment for runtime execution.
+ * Opaque tokens (entityToken, matterToken, proposalToken) are reference identifiers only
+ * and must NEVER be treated as lookup keys into controlled databases.
+ */
+export interface HandoffContextContract extends DownstreamExecutionPackage {}
+
+export interface InsufficientContextResult {
+  isInsufficient: true;
+  category: string;
+  reason: string;
+}
+
+export type HandoffContextEvaluationResult =
+  | { success: true; contract: HandoffContextContract; boundaryContext: BoundaryContext }
+  | { success: false; insufficientContext: InsufficientContextResult };

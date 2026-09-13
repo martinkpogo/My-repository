@@ -5,6 +5,8 @@ import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
 import { setActiveWorkId, threadIdForUnit } from "../../router";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
+import { evaluateHandoffContext } from "../../dataBoundary/policy";
+import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 
 interface PriceJudgement {
   sufficient: boolean;
@@ -28,23 +30,14 @@ function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: 
     hatDefinition,
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
     'Return JSON: {"sufficient": true, "price": <number>, "rationale": "..."} if you can judge a value-based price responsibly per the Hat Definition above, or {"sufficient": false, "reason_if_insufficient": "..."} if the Hat Definition\'s own rule for insufficient context applies to this case.',
+    "If context is insufficient, state only the missing category of information required (e.g., 'historical business-impact range required for pricing judgment'), without requesting, naming, or attempting to discover specific sensitive records or client entities.",
   ].join("\n\n");
-}
-
-interface HandoffBusinessContext {
-  entityToken: string;
-  matterToken: string;
-  judgmentContext: string;
 }
 
 /**
  * Reconstructs the business context this Hat needs directly from the
- * Handoff's own canonical Notion record, per the Handoff Business Object's
- * context_transfer rule — the receiving Unit must be able to continue from
- * what the Handoff itself carries, not from the sending Unit's session
- * state. Returns null on any failure (missing/empty required field);
- * callers must treat null as "cannot proceed," never substitute WorkState
- * in its place.
+ * Handoff's own canonical Notion record, evaluated through the data boundary
+ * closed-context contract.
  *
  * Identity is read as the Entity_Token / Matter_Token the creating Unit
  * embedded directly on the Handoff, never a real Name/title — this Hat
@@ -53,19 +46,37 @@ interface HandoffBusinessContext {
  * real name never enters this Hat's context, an AI prompt, or a Telegram
  * message it sends.
  */
-async function resolveHandoffBusinessContext(env: Env, handoffId: string): Promise<HandoffBusinessContext | null> {
+export async function resolveHandoffBusinessContext(
+  env: Env,
+  handoffId: string,
+): Promise<HandoffContextEvaluationResult> {
   try {
     const handoff = await getPage(env, handoffId);
     const judgmentContext = plainText(handoff.properties["Verified Facts & Sources"]);
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
 
-    if (!entityToken || !judgmentContext) throw new Error("reconstructed context was empty");
-
-    return { entityToken, matterToken, judgmentContext };
+    return evaluateHandoffContext(
+      {
+        handoffId,
+        entityToken,
+        matterToken,
+        sanitizedContext: judgmentContext,
+        transformationProvenance: `notion:handoff:${handoffId}`,
+        requiredCategory: "historical business-impact range for value-based pricing",
+      },
+      "finance.quote_judgment",
+    );
   } catch (err) {
     console.error(`Handoff business-context reconstruction failed for ${handoffId}`, err);
-    return null;
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category: "handoff record access",
+        reason: `Insufficient execution context: unable to access Handoff record ${handoffId}.`,
+      },
+    };
   }
 }
 
@@ -80,21 +91,20 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   // Picked-up, so a Notion outage leaves it Pending and it's retried
   // automatically on the next discovery cycle, rather than stuck in a
   // Picked-up limbo needing manual recovery.
-  const context = await resolveHandoffBusinessContext(env, state.handoffId!);
-  if (!context) {
-    console.error(`Finance handlePickup: business-context reconstruction failed for handoff ${state.handoffId}`);
+  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!);
+  if (!evalResult.success) {
+    console.error(`Finance handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
     await logActivity(env, {
-      entry: `Finance pickup blocked — could not reconstruct business context from Handoff ${state.handoffId}`,
+      entry: `Finance pickup blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
       type: "Blocker",
       area: "Finance",
-      decisionRationale:
-        "Could not read the required business context from the Handoff's own Notion records (Handoff, Matter, or Entity). Refusing to execute without it; Handoff left Pending for automatic retry.",
+      decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `*Finance couldn't pick up a quote request* (Handoff ${state.handoffId}).\n\nCouldn't reconstruct the business context from the Handoff's Notion records. Not proceeding without it — will retry automatically on the next discovery cycle.`,
+      `*Finance couldn't pick up a quote request* (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
       undefined,
       financeThreadId,
     );
@@ -102,9 +112,9 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   }
 
   return judgeQuote(env, state, {
-    entityToken: context.entityToken,
-    matterToken: context.matterToken,
-    judgmentContext: context.judgmentContext,
+    entityToken: evalResult.contract.entityToken,
+    matterToken: evalResult.contract.matterToken ?? "",
+    judgmentContext: evalResult.contract.sanitizedContext,
     financeThreadId,
     awaitingOnInsufficient: "value_context_more",
     activityLabel: "picked up the quote request",
@@ -262,35 +272,34 @@ async function judgeQuote(
 export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
   const financeThreadId = state.financeThreadId ?? threadIdForUnit(env, "Finance") ?? state.threadId;
 
-  const context = await resolveHandoffBusinessContext(env, state.handoffId!);
-  if (!context) {
-    console.error(`Finance redo blocked — business-context reconstruction failed for handoff ${state.handoffId}`);
+  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!);
+  if (!evalResult.success) {
+    console.error(`Finance redo blocked — context evaluation failed for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Finance redo blocked — could not reconstruct business context: ${state.entityName}`,
+      entry: `Finance redo blocked — insufficient business context: ${state.entityName}`,
       type: "Blocker",
       area: "Finance",
-      decisionRationale:
-        "Could not read the Handoff's own Notion records to apply Martin's redo reasoning. Refusing to proceed without it.",
+      decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `Couldn't read the Handoff record for *${state.entityName}* to apply your reasoning. Please try again once resolved.`,
+      `Couldn't read the Handoff record for *${state.entityName}* to apply your reasoning: ${evalResult.insufficientContext.reason}`,
       undefined,
       financeThreadId,
     );
     return state;
   }
 
-  const augmentedContext = `${context.judgmentContext}\n\nMartin's redo reasoning: ${reasonText}`;
+  const augmentedContext = `${evalResult.contract.sanitizedContext}\n\nMartin's redo reasoning: ${reasonText}`;
   await updatePage(env, state.handoffId!, {
     "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
   });
 
   return judgeQuote(env, state, {
-    entityToken: context.entityToken,
-    matterToken: context.matterToken,
+    entityToken: evalResult.contract.entityToken,
+    matterToken: evalResult.contract.matterToken ?? "",
     judgmentContext: augmentedContext,
     financeThreadId,
     awaitingOnInsufficient: "quote_redo_reason",
@@ -350,7 +359,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     Entity_Token: richText(state.entityName ?? ""),
     Matter_Token: richText(state.matterName ?? ""),
     "Verified Facts & Sources": richText(
-      `Authoritative quote: $${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
+      `[TRANSFORMATION_STATUS: authorized]\n[TRANSFORMATION_PROVENANCE: finance:quote_approval]\nAuthoritative quote: $${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
     ),
   });
   state.handoffId = followUp.id;

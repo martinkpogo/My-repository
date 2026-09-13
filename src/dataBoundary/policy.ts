@@ -6,6 +6,8 @@ import type {
   BoundaryEvaluationResult,
   ContextSegment,
   DataTransformation,
+  HandoffContextContract,
+  HandoffContextEvaluationResult,
   ProviderEligibilityRule,
   SemanticTaskId,
   SensitivityLevel,
@@ -171,4 +173,135 @@ function sanitizeErrorMessage(msg: string): string {
   // Truncate and strip any potential embedded prompt content from error messages
   const clean = msg.replace(/[\r\n]+/g, " ").trim();
   return clean.length > 200 ? `${clean.slice(0, 197)}...` : clean;
+}
+
+/**
+ * Evaluates an incoming Handoff against the canonical closed-context contract.
+ * Ensures entityToken and sanitizedContext are present, keeps tokens opaque,
+ * and fails closed with a non-sensitive category-focused reason when context is missing.
+ */
+import type { DownstreamExecutionPackage } from "./types";
+
+/**
+ * Constructs a downstream-safe execution package for Finance execution from controlled state inputs.
+ * Strictly excludes real Entity name, Matter name, email, phone, and raw call/qualification notes.
+ */
+export function constructDownstreamFinancePackage(input: {
+  workId?: string;
+  entityToken: string;
+  matterToken: string;
+  proposedIntervention: string;
+}): DownstreamExecutionPackage {
+  const provenance = "smbd:intervention_sanitization";
+  const sanitizedContext = `[TRANSFORMATION_STATUS: authorized]\n[TRANSFORMATION_PROVENANCE: ${provenance}]\nProposed intervention: ${input.proposedIntervention}`;
+  return {
+    handoffId: "",
+    workId: input.workId,
+    entityToken: input.entityToken,
+    matterToken: input.matterToken,
+    sanitizedContext,
+    transformationStatus: "authorized",
+    transformationProvenance: provenance,
+    sensitivity: "business_sensitive",
+    requiredCategory: "historical business-impact range for value-based pricing",
+  };
+}
+
+export function evaluateHandoffContext(
+  contract: Partial<HandoffContextContract>,
+  taskId: SemanticTaskId,
+): HandoffContextEvaluationResult {
+  const entityToken = contract.entityToken?.trim();
+  const sanitizedContext = contract.sanitizedContext?.trim();
+  let transformationStatus = contract.transformationStatus;
+  let transformationProvenance = contract.transformationProvenance?.trim();
+
+  // If status/provenance are embedded in sanitizedContext text, parse them
+  if (sanitizedContext) {
+    if (!transformationStatus) {
+      if (sanitizedContext.includes("[TRANSFORMATION_STATUS: authorized]")) {
+        transformationStatus = "authorized";
+      } else if (sanitizedContext.includes("[TRANSFORMATION_STATUS: pending]")) {
+        transformationStatus = "pending";
+      } else if (sanitizedContext.includes("[TRANSFORMATION_STATUS: unauthorized]")) {
+        transformationStatus = "unauthorized";
+      }
+    }
+    if (!transformationProvenance) {
+      const match = sanitizedContext.match(/\[TRANSFORMATION_PROVENANCE:\s*([^\]]+)\]/);
+      if (match) {
+        transformationProvenance = match[1].trim();
+      }
+    }
+  }
+
+  if (!entityToken || !sanitizedContext) {
+    const missingCategory = contract.requiredCategory ?? "sanitized execution context";
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category: missingCategory,
+        reason: `Insufficient execution context: required ${missingCategory} is missing from Handoff.`,
+      },
+    };
+  }
+
+  if (transformationStatus !== "authorized") {
+    const category = "transformation authorization evidence";
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category,
+        reason: `Insufficient execution context: missing or invalid ${category} (status: ${String(transformationStatus)}).`,
+      },
+    };
+  }
+
+  if (!transformationProvenance) {
+    const category = "transformation provenance metadata";
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category,
+        reason: `Insufficient execution context: required ${category} is missing.`,
+      },
+    };
+  }
+
+  const validatedContract: HandoffContextContract = {
+    handoffId: contract.handoffId ?? "unknown_handoff",
+    workId: contract.workId,
+    entityToken,
+    matterToken: contract.matterToken?.trim(),
+    proposalToken: contract.proposalToken?.trim(),
+    sanitizedContext,
+    transformationStatus: "authorized",
+    transformationId: contract.transformationId?.trim(),
+    transformationProvenance,
+    sensitivity: contract.sensitivity ?? "business_sensitive",
+    requiredCategory: contract.requiredCategory,
+  };
+
+  const segments: ContextSegment[] = [
+    {
+      type: "user",
+      content: `Entity Token: ${validatedContract.entityToken}${
+        validatedContract.matterToken ? `\nMatter Token: ${validatedContract.matterToken}` : ""
+      }\nSanitized Context:\n${validatedContract.sanitizedContext}`,
+      provenance: validatedContract.transformationProvenance,
+      sensitivity: validatedContract.sensitivity,
+    },
+  ];
+
+  return {
+    success: true,
+    contract: validatedContract,
+    boundaryContext: {
+      segments,
+      taskSensitivity: validatedContract.sensitivity,
+    },
+  };
 }

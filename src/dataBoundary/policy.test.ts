@@ -189,3 +189,195 @@ test("7. Verifies audit log entries contain zero prompt or sensitive payload tex
   assert.strictEqual(auditEntry.segmentMetadata[1].provenance, "user_input");
   assert.strictEqual(auditEntry.segmentMetadata[1].sensitivity, "business_sensitive");
 });
+
+test("Test A: Real identity never enters downstream package", () => {
+  const { constructDownstreamFinancePackage } = require("./policy");
+
+  const controlledStateInput = {
+    workId: "work_001",
+    entityName: "Acme Corp (John Doe)",
+    matterName: "Commercial Advisory 2025",
+    email: "john.doe@acme.com",
+    phone: "+1-555-0199",
+    rawCallNotes: "Spoke with CEO John regarding $2M budget and internal restructuring.",
+    entityToken: "ENT-104",
+    matterToken: "MAT-208",
+    proposedIntervention: "System transformation and pricing optimization",
+  };
+
+  const downstreamPkg = constructDownstreamFinancePackage({
+    workId: controlledStateInput.workId,
+    entityToken: controlledStateInput.entityToken,
+    matterToken: controlledStateInput.matterToken,
+    proposedIntervention: controlledStateInput.proposedIntervention,
+  });
+
+  const serialized = JSON.stringify(downstreamPkg);
+
+  // Assert required safe tokens & context are present
+  assert.strictEqual(downstreamPkg.entityToken, "ENT-104");
+  assert.strictEqual(downstreamPkg.matterToken, "MAT-208");
+  assert.strictEqual(downstreamPkg.transformationStatus, "authorized");
+  assert.strictEqual(downstreamPkg.transformationProvenance, "smbd:intervention_sanitization");
+
+  // Assert real controlled identity fields are ABSENT from downstream package
+  assert.strictEqual(serialized.includes("Acme Corp"), false);
+  assert.strictEqual(serialized.includes("John Doe"), false);
+  assert.strictEqual(serialized.includes("john.doe@acme.com"), false);
+  assert.strictEqual(serialized.includes("+1-555-0199"), false);
+  assert.strictEqual(serialized.includes("CEO John"), false);
+  assert.strictEqual(serialized.includes("Commercial Advisory 2025"), false);
+});
+
+test("Test B: Missing transformation evidence fails closed", () => {
+  const { evaluateHandoffContext } = require("./policy");
+
+  const unverifiedHandoff = {
+    handoffId: "handoff_no_evidence",
+    entityToken: "ENT-104",
+    matterToken: "MAT-208",
+    sanitizedContext: "Proposed intervention text without evidence headers",
+    // transformationStatus is missing
+    requiredCategory: "historical business-impact range",
+  };
+
+  const evalResult = evaluateHandoffContext(unverifiedHandoff, "finance.quote_judgment");
+
+  assert.strictEqual(evalResult.success, false);
+  if (!evalResult.success) {
+    assert.strictEqual(evalResult.insufficientContext.isInsufficient, true);
+    assert.strictEqual(evalResult.insufficientContext.category, "transformation authorization evidence");
+    assert.ok(evalResult.insufficientContext.reason.includes("missing or invalid transformation authorization evidence"));
+    // Category-focused, non-sensitive reason
+    assert.strictEqual(evalResult.insufficientContext.reason.includes("Acme"), false);
+  }
+});
+
+test("Test C: Invalid transformation evidence fails closed", () => {
+  const { evaluateHandoffContext } = require("./policy");
+
+  const invalidHandoff = {
+    handoffId: "handoff_invalid",
+    entityToken: "ENT-104",
+    matterToken: "MAT-208",
+    sanitizedContext: "Intervention text",
+    transformationStatus: "unauthorized" as const,
+    transformationProvenance: "unauthorized_source",
+    requiredCategory: "historical business-impact range",
+  };
+
+  const evalResult = evaluateHandoffContext(invalidHandoff, "finance.quote_judgment");
+
+  assert.strictEqual(evalResult.success, false);
+  if (!evalResult.success) {
+    assert.strictEqual(evalResult.insufficientContext.category, "transformation authorization evidence");
+    assert.ok(evalResult.insufficientContext.reason.includes("unauthorized"));
+  }
+});
+
+test("Test D: Authorized transformed context succeeds", () => {
+  const { evaluateHandoffContext } = require("./policy");
+
+  const validHandoff = {
+    handoffId: "handoff_valid_123",
+    entityToken: "ENT-104",
+    matterToken: "MAT-208",
+    sanitizedContext: "Proposed intervention: Pricing framework overhaul",
+    transformationStatus: "authorized" as const,
+    transformationProvenance: "smbd:intervention_sanitization",
+    sensitivity: "business_sensitive" as const,
+  };
+
+  const evalResult = evaluateHandoffContext(validHandoff, "finance.quote_judgment");
+
+  assert.strictEqual(evalResult.success, true);
+  if (evalResult.success) {
+    assert.strictEqual(evalResult.contract.entityToken, "ENT-104");
+    assert.strictEqual(evalResult.contract.matterToken, "MAT-208");
+    assert.strictEqual(evalResult.contract.transformationStatus, "authorized");
+    assert.strictEqual(evalResult.boundaryContext.segments.length, 1);
+  }
+});
+
+test("Test E: Token opacity preserved", () => {
+  const { evaluateHandoffContext } = require("./policy");
+
+  const result = evaluateHandoffContext(
+    {
+      handoffId: "h_opaque",
+      entityToken: "ENT-555",
+      matterToken: "MAT-777",
+      sanitizedContext: "Scope context",
+      transformationStatus: "authorized",
+      transformationProvenance: "smbd:intervention_sanitization",
+    },
+    "finance.quote_judgment",
+  );
+
+  assert.strictEqual(result.success, true);
+  if (result.success) {
+    const json = JSON.stringify(result.contract);
+    assert.strictEqual(json.includes("notion.so"), false);
+    assert.strictEqual(json.includes("http"), false);
+    assert.strictEqual(json.includes("3cecb004"), false); // No Notion page UUIDs
+    assert.strictEqual(result.contract.entityToken, "ENT-555");
+    assert.strictEqual(result.contract.matterToken, "MAT-777");
+  }
+});
+
+test("Test F: No Entity/Matter database traversal during Finance pickup", async () => {
+  const origFetch = globalThis.fetch;
+  const fetchedPaths: string[] = [];
+
+  // Mock globalThis.fetch to observe exact Notion API HTTP requests made by Finance
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = String(input);
+    fetchedPaths.push(urlStr);
+
+    if (urlStr.includes("/pages/handoff_page_999")) {
+      return new Response(
+        JSON.stringify({
+          id: "handoff_page_999",
+          url: "https://notion.so/handoff_page_999",
+          properties: {
+            Entity_Token: { rich_text: [{ plain_text: "ENT-104" }] },
+            Matter_Token: { rich_text: [{ plain_text: "MAT-208" }] },
+            "Verified Facts & Sources": {
+              rich_text: [
+                {
+                  plain_text:
+                    "[TRANSFORMATION_STATUS: authorized]\n[TRANSFORMATION_PROVENANCE: smbd:intervention_sanitization]\nProposed intervention: Pricing model review",
+                },
+              ],
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    throw new Error(`Unexpected Notion API request for controlled record: ${urlStr}`);
+  }) as typeof fetch;
+
+  try {
+    const { resolveHandoffBusinessContext } = require("../units/finance/valueBasedPricingAssessor");
+    const mockEnv = { NOTION_TOKEN: "mock_token", NOTION_VERSION: "2025-09-03" };
+
+    const evalResult = await resolveHandoffBusinessContext(mockEnv, "handoff_page_999");
+
+    assert.strictEqual(evalResult.success, true);
+    if (evalResult.success) {
+      assert.strictEqual(evalResult.contract.entityToken, "ENT-104");
+      assert.strictEqual(evalResult.contract.matterToken, "MAT-208");
+    }
+
+    // Assert fetch was called ONLY for the Handoff page itself
+    assert.strictEqual(fetchedPaths.length, 1);
+    assert.ok(fetchedPaths[0].includes("/pages/handoff_page_999"));
+
+    // Assert NO fetch requests to Entity or Matter databases
+    assert.strictEqual(fetchedPaths.some((p) => p.includes("437248f7") || p.includes("0e68feef")), false);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});

@@ -15,6 +15,7 @@ import { aiJson, aiText } from "../../../ai";
 import { logActivity } from "../../../log";
 import { sendMessage } from "../../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governance";
+import { constructDownstreamFinancePackage, evaluateHandoffContext } from "../../../dataBoundary/policy";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -649,23 +650,28 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 
   const identityTokens = await resolveIdentityTokens(env, state.entityId!, state.matterId!);
 
+  const pkg = constructDownstreamFinancePackage({
+    workId: state.workId,
+    entityToken: identityTokens.entityToken,
+    matterToken: identityTokens.matterToken,
+    proposedIntervention: text,
+  });
+
   const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    Handoff: title(`Quote request — ${state.matterName}`),
+    Handoff: title(`Quote request — ${identityTokens.matterToken}`),
     "From Unit": select("SM&BD"),
     "From Hat": richText("Sales Executive"),
     "To Unit": select("Finance"),
     "To Hat": richText("Value-Based Pricing Assessor"),
     Type: select("Work"),
     Status: select("Pending"),
-    Reason: richText(`Value-based quote requested for ${state.matterName}.`),
+    Reason: richText(`Value-based quote requested for ${identityTokens.matterToken}.`),
     "Expected Output": richText("Quoted price (USD) and pricing rationale."),
     Matter: relation([state.matterId!]),
     Entity_Token: richText(identityTokens.entityToken),
     Matter_Token: richText(identityTokens.matterToken),
     Assumptions: richText("No disclosed budget or willingness-to-pay figure has been provided or should be used."),
-    "Verified Facts & Sources": richText(
-      `Proposed intervention: ${text}\n\nValue context (enquiry + call notes):\n${[state.enquiryText, state.callNotes].filter(Boolean).join("\n\n")}`.slice(0, 1900),
-    ),
+    "Verified Facts & Sources": richText(pkg.sanitizedContext.slice(0, 1900)),
   });
 
   state.handoffId = handoff.id;
@@ -720,10 +726,17 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
   // handlePickup (invoked only via independent discovery, never from here)
   // remains the sole authority over sufficiency and the resulting
   // Held/Closed outcome. SM&BD's execution ends here.
+  const identityTokens = await resolveIdentityTokens(env, state.entityId!, state.matterId!);
+
+  const pkg = constructDownstreamFinancePackage({
+    workId: state.workId,
+    entityToken: identityTokens.entityToken,
+    matterToken: identityTokens.matterToken,
+    proposedIntervention: state.proposedIntervention,
+  });
+
   await updatePage(env, state.handoffId!, {
-    "Verified Facts & Sources": richText(
-      `Proposed intervention + value context:\n${state.proposedIntervention}`.slice(0, 1900),
-    ),
+    "Verified Facts & Sources": richText(pkg.sanitizedContext.slice(0, 1900)),
     Status: select("Pending"),
   });
   await sendMessage(
@@ -745,7 +758,42 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
  */
 export async function handleQuoteReceived(env: Env, state: WorkState): Promise<WorkState> {
   const handoff = await getPage(env, state.handoffId!);
-  const quote = parseAuthoritativeQuote(plainText(handoff.properties["Verified Facts & Sources"]));
+  const rawFacts = plainText(handoff.properties["Verified Facts & Sources"]);
+  const entityToken = plainText(handoff.properties.Entity_Token);
+  const matterToken = plainText(handoff.properties.Matter_Token);
+
+  const evalResult = evaluateHandoffContext(
+    {
+      handoffId: state.handoffId!,
+      entityToken,
+      matterToken,
+      sanitizedContext: rawFacts,
+      transformationProvenance: `notion:handoff:${state.handoffId!}`,
+      requiredCategory: "authoritative quote and proposal scope",
+    },
+    "sales.proposal_drafting",
+  );
+
+  if (!evalResult.success) {
+    console.error(`Sales Executive proposal drafting blocked — context evaluation failed for Handoff ${state.handoffId}`);
+    await logActivity(env, {
+      entry: `Draft Proposal blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale: evalResult.insufficientContext.reason,
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't prepare Draft Proposal for *${state.entityName}*: ${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
+      undefined,
+      state.threadId,
+    );
+    return state;
+  }
+
+  const quote = parseAuthoritativeQuote(evalResult.contract.sanitizedContext);
   if (!quote) {
     console.error(`Sales Executive proposal drafting blocked — could not read the authoritative quote from Handoff ${state.handoffId}`);
     await logActivity(env, {
