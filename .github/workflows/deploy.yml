@@ -34,7 +34,7 @@ jobs:
         run: npm run typecheck
 
       - name: Run test validation
-        run: npx tsx --test src/ai/policy.test.ts src/hats/relationships.test.ts
+        run: npx tsx --test
 
       - name: Deploy Worker to Cloudflare
         run: npm run deploy

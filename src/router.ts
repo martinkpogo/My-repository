@@ -11,6 +11,13 @@ import { marketingHatSummaryList } from "./hats/registry";
 // does not restate any Hat's own operating procedure.
 const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d";
 
+// Sales Executive/Business Development intake is paused while it is rebuilt
+// as an isolated, data-controlled environment that tokenizes identity
+// (Entity/Matter Unique ID, never the real name) before anything reaches
+// this system -- see the companion Finance token-only change made
+// alongside this pause. Flip back to false once that rebuild is live.
+export const SALES_EXECUTIVE_PAUSED = true;
+
 export function newWorkId(): string {
   return crypto.randomUUID();
 }
@@ -208,6 +215,17 @@ export async function routeIncomingText(
   const classification = await classifyNewMessage(env, chatId, text, threadId);
   if (!classification) return; // retrieval failed — Martin already told, nothing further to do.
   if (classification.route === "enquiry") {
+    if (SALES_EXECUTIVE_PAUSED) {
+      console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
+      await sendMessage(
+        env,
+        chatId,
+        "Sales Executive intake is temporarily paused while its data-boundary redesign is in progress. This enquiry was not processed — please resend once it's back.",
+        undefined,
+        threadId,
+      );
+      return;
+    }
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
     // "Sales Executive" and the five Marketing Hats (above) are the

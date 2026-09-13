@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId, threadIdForUnit } from "./router";
+import { getActiveWorkId, getSessionStub, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import type { SessionSummary } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
@@ -319,6 +319,13 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
  * does for the opposite direction.
  */
 async function discoverPendingSMBDHandoffs(env: Env): Promise<number> {
+  if (SALES_EXECUTIVE_PAUSED) {
+    // Sales Executive/BD is paused -- leave any Pending Finance->SM&BD
+    // Handoff as-is for automatic pickup once it's back, rather than
+    // routing proposal drafting through the frozen in-Worker code.
+    return 0;
+  }
+
   const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
     and: [
       { property: "Status", select: { equals: "Pending" } },
