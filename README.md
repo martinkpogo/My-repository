@@ -212,12 +212,13 @@ The runtime is deployed as a Cloudflare Worker using an automated end-to-end Git
    - Triggered when a PR is opened, updated, or reopened against target branches (`claude/notion-cloudflare-telegram-agents-nsi40m` or `main`).
    - Runs type checks (`npm run typecheck`) and unit tests (`npx tsx --test ...`).
 
-2. **Automated Review & Auto-Merge (`auto-merge.yml`)**:
-   - Triggered on PR events and `PR Validation` workflow completion.
-   - Automatically approves and squashes/merges PRs into the target branch once validation passes.
+2. **Fail-Closed Automated Merge (`auto-merge.yml`)**:
+   - Triggered strictly by successful completion of the `PR Validation` workflow (`github.event.workflow_run.conclusion == 'success'`).
+   - Verifies the associated PR is open, targets `claude/notion-cloudflare-telegram-agents-nsi40m`, and matches the validated head commit SHA.
+   - Performs a squash merge and deletes the head branch without unconditional fallbacks.
 
-3. **Cloudflare Deployment (`deploy.yml`)**:
-   - Triggered automatically on push / merge to target branches.
+3. **Explicit Deployment Dispatch (`deploy.yml`)**:
+   - Explicitly dispatched by `auto-merge.yml` on `claude/notion-cloudflare-telegram-agents-nsi40m` immediately following a successful merge.
    - Executes type checks and unit test validations.
    - Deploys the worker to Cloudflare using `npm run deploy` (`wrangler deploy`).
    - Runs post-deployment health check verification against `https://enig-agent.martnkpogo.workers.dev/health`.
