@@ -8,6 +8,7 @@ import {
   richText,
   select,
   title,
+  uniqueId,
   updatePage,
 } from "../../../notion";
 import { aiJson, aiText } from "../../../ai";
@@ -646,6 +647,8 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     Next_action: richText("Awaiting Finance value-based quote"),
   });
 
+  const identityTokens = await resolveIdentityTokens(env, state.entityId!, state.matterId!);
+
   const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
     Handoff: title(`Quote request — ${state.matterName}`),
     "From Unit": select("SM&BD"),
@@ -657,6 +660,8 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     Reason: richText(`Value-based quote requested for ${state.matterName}.`),
     "Expected Output": richText("Quoted price (USD) and pricing rationale."),
     Matter: relation([state.matterId!]),
+    Entity_Token: richText(identityTokens.entityToken),
+    Matter_Token: richText(identityTokens.matterToken),
     Assumptions: richText("No disclosed budget or willingness-to-pay figure has been provided or should be used."),
     "Verified Facts & Sources": richText(
       `Proposed intervention: ${text}\n\nValue context (enquiry + call notes):\n${[state.enquiryText, state.callNotes].filter(Boolean).join("\n\n")}`.slice(0, 1900),
@@ -690,6 +695,21 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   state.stage = "awaiting_quote";
   state.awaiting = undefined;
   return state;
+}
+
+/**
+ * Reads the Entity's and Matter's Unique ID tokens (e.g. "E-47", "M-12")
+ * for embedding directly on a Handoff record. This is what lets Finance
+ * (and any other Hat receiving a Handoff) identify the Entity/Matter
+ * without ever reading the Entity or Matter page itself — the token is
+ * carried on the Handoff, not resolved by the receiving Unit.
+ */
+async function resolveIdentityTokens(env: Env, entityId: string, matterId: string): Promise<{ entityToken: string; matterToken: string }> {
+  const [entity, matter] = await Promise.all([getPage(env, entityId), getPage(env, matterId)]);
+  return {
+    entityToken: uniqueId(entity.properties["Entity ID"]),
+    matterToken: uniqueId(matter.properties.Matter_ID),
+  };
 }
 
 export async function handleMoreValueContext(env: Env, state: WorkState, text: string): Promise<WorkState> {
