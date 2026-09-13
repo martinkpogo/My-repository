@@ -114,6 +114,19 @@ export function relationIds(prop: any): string[] {
 }
 
 /**
+ * Reads a Notion auto-incrementing Unique ID property (e.g. "Entity ID",
+ * "Matter_ID") as a display string, honoring a configured prefix if any.
+ * Used as a stable, non-identifying stand-in for a real Name/title
+ * property wherever code must reference an Entity/Matter without
+ * resolving its real name. Returns "" if the property is empty.
+ */
+export function uniqueId(prop: any): string {
+  const value = prop?.unique_id;
+  if (!value || value.number === null || value.number === undefined) return "";
+  return value.prefix ? `${value.prefix}-${value.number}` : String(value.number);
+}
+
+/**
  * Retrieves a Notion page's block-children content as plain text, paginating
  * as needed. Governance pages (Hat Definitions, Universal Role Contract,
  * etc.) are a flat sequence of a `code` block (the machine-readable yaml

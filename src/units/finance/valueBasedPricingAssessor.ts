@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, relation, relationIds, richText, select, title, updatePage } from "../../notion";
+import { createPage, getPage, plainText, relation, relationIds, richText, select, title, uniqueId, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -32,8 +32,8 @@ function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: 
 }
 
 interface HandoffBusinessContext {
-  entityName: string;
-  matterName: string;
+  entityToken: string;
+  matterToken: string;
   judgmentContext: string;
 }
 
@@ -46,6 +46,11 @@ interface HandoffBusinessContext {
  * (missing relation, missing referenced page, or empty required field);
  * callers must treat null as "cannot proceed," never substitute WorkState
  * in its place.
+ *
+ * Identity is read as each record's Unique ID token (Entity ID / Matter_ID),
+ * never its real Name/title — Finance operates on tokens and plain figures
+ * only, per the data-boundary redesign; the real name never enters this
+ * Hat's context, an AI prompt, or a Telegram message it sends.
  */
 async function resolveHandoffBusinessContext(env: Env, handoffId: string): Promise<HandoffBusinessContext | null> {
   try {
@@ -55,16 +60,16 @@ async function resolveHandoffBusinessContext(env: Env, handoffId: string): Promi
     const matterId = relationIds(handoff.properties.Matter)[0];
     if (!matterId) throw new Error("Handoff has no Matter relation");
     const matter = await getPage(env, matterId);
-    const matterName = plainText(matter.properties.Matter);
+    const matterToken = uniqueId(matter.properties.Matter_ID);
 
     const entityId = relationIds(matter.properties.Entity)[0];
     if (!entityId) throw new Error("Matter has no Entity relation");
     const entity = await getPage(env, entityId);
-    const entityName = plainText(entity.properties.Name);
+    const entityToken = uniqueId(entity.properties["Entity ID"]);
 
-    if (!entityName || !judgmentContext) throw new Error("reconstructed context was empty");
+    if (!entityToken || !judgmentContext) throw new Error("reconstructed context was empty");
 
-    return { entityName, matterName, judgmentContext };
+    return { entityToken, matterToken, judgmentContext };
   } catch (err) {
     console.error(`Handoff business-context reconstruction failed for ${handoffId}`, err);
     return null;
@@ -104,8 +109,8 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   }
 
   return judgeQuote(env, state, {
-    entityName: context.entityName,
-    matterName: context.matterName,
+    entityToken: context.entityToken,
+    matterToken: context.matterToken,
     judgmentContext: context.judgmentContext,
     financeThreadId,
     awaitingOnInsufficient: "value_context_more",
@@ -124,15 +129,22 @@ async function judgeQuote(
   env: Env,
   state: WorkState,
   input: {
-    entityName: string;
-    matterName: string;
+    entityToken: string;
+    matterToken: string;
     judgmentContext: string;
     financeThreadId: number | undefined;
     awaitingOnInsufficient: NonNullable<WorkState["awaiting"]>;
     activityLabel: string;
   },
 ): Promise<WorkState> {
-  const { entityName, matterName, judgmentContext, financeThreadId, awaitingOnInsufficient, activityLabel } = input;
+  const { entityToken, matterToken, judgmentContext, financeThreadId, awaitingOnInsufficient, activityLabel } = input;
+
+  // Finance operates on identity tokens only, never the real Entity/Matter
+  // name — overwrite WorkState's copy too, so any later Finance-side
+  // reference (e.g. handleQuoteApproval's own messages, below) also stays
+  // token-only rather than falling back to whatever SM&BD originally set.
+  state.entityName = entityToken;
+  state.matterName = matterToken;
 
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, FINANCE_HAT_DEFINITION_PAGE_ID, "Finance Hat Definition"),
@@ -148,7 +160,7 @@ async function judgeQuote(
       .join(" and ");
     console.error(`Finance judgeQuote: governance retrieval failed (${missing}) for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Finance quote judgment blocked — governance retrieval failed: ${matterName}`,
+      entry: `Finance quote judgment blocked — governance retrieval failed: ${matterToken}`,
       type: "Blocker",
       area: "Finance",
       decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`,
@@ -157,7 +169,7 @@ async function judgeQuote(
     await sendMessage(
       env,
       state.chatId,
-      `Couldn't assess the quote for *${entityName}* — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`,
+      `Couldn't assess the quote for *${entityToken}* — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`,
       undefined,
       financeThreadId,
     );
@@ -166,7 +178,7 @@ async function judgeQuote(
 
   await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
-    entry: `Finance ${activityLabel}: ${matterName}`,
+    entry: `Finance ${activityLabel}: ${matterToken}`,
     type: "Activity",
     area: "Finance",
     activity: `Value-Based Pricing Assessor ${activityLabel}.`,
@@ -176,7 +188,7 @@ async function judgeQuote(
   const judgement = await aiJson<PriceJudgement>(env, {
     taskId: "finance.quote_judgment",
     system: buildFinanceSystemPrompt(hatDefinition, universalRoleContract),
-    user: `Entity: ${entityName}\nProposed intervention and value context:\n${judgmentContext}`,
+    user: `Entity: ${entityToken}\nProposed intervention and value context:\n${judgmentContext}`,
   });
 
   if (!judgement || judgement.sufficient !== true || typeof judgement.price !== "number") {
@@ -186,7 +198,7 @@ async function judgeQuote(
       "Open Questions": richText(reason),
     });
     await logActivity(env, {
-      entry: `Handoff held — insufficient value context: ${matterName}`,
+      entry: `Handoff held — insufficient value context: ${matterToken}`,
       type: "Blocker",
       area: "Finance",
       decisionRationale: reason,
@@ -195,7 +207,7 @@ async function judgeQuote(
     await sendMessage(
       env,
       state.chatId,
-      `*Finance has held the quote request* for *${entityName}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
+      `*Finance has held the quote request* for *${entityToken}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
       undefined,
       financeThreadId,
     );
@@ -213,7 +225,7 @@ async function judgeQuote(
     "Work Completed": richText(`Quoted price: $${judgement.price}. Rationale: ${judgement.rationale ?? ""}`.slice(0, 1900)),
   });
   await logActivity(env, {
-    entry: `Quote judged: $${judgement.price} — ${matterName}`,
+    entry: `Quote judged: $${judgement.price} — ${matterToken}`,
     type: "Decision",
     area: "Finance",
     decisions: `Value-based quote: $${judgement.price}`,
@@ -234,7 +246,7 @@ async function judgeQuote(
   await sendMessage(
     env,
     state.chatId,
-    `*Finance quote ready* for *${entityName}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to SM&BD for the Draft Proposal?`,
+    `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to SM&BD for the Draft Proposal?`,
     [
       [
         { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
@@ -284,8 +296,8 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
   });
 
   return judgeQuote(env, state, {
-    entityName: context.entityName,
-    matterName: context.matterName,
+    entityToken: context.entityToken,
+    matterToken: context.matterToken,
     judgmentContext: augmentedContext,
     financeThreadId,
     awaitingOnInsufficient: "quote_redo_reason",
