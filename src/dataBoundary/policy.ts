@@ -184,6 +184,17 @@ export function evaluateHandoffContext(
   contract: Partial<HandoffContextContract>,
   taskId: SemanticTaskId,
 ): HandoffContextEvaluationResult {
+  if (!isSemanticTaskId(taskId)) {
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category: "task identity",
+        reason: `Insufficient execution context: task ID '${String(taskId)}' is not registered in the canonical semantic task registry.`,
+      },
+    };
+  }
+
   const entityToken = contract.entityToken?.trim();
   const sanitizedContext = contract.sanitizedContext?.trim();
 
