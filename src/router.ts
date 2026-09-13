@@ -15,7 +15,17 @@ const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d"
 // as an isolated, data-controlled environment that tokenizes identity
 // (Entity/Matter Unique ID, never the real name) before anything reaches
 // this system -- see the companion Finance token-only change made
-// alongside this pause. Flip back to false once that rebuild is live.
+// alongside this pause.
+//
+// This is no longer just a routing gate: the Notion integration this Worker
+// authenticates with has had its connection to the Engagement page (Entity,
+// Matters, Proposals) removed entirely, so salesExecutive.ts's own Notion
+// calls will fail (403/404) regardless of this flag. Do NOT flip this back
+// to false until the isolated Sales Executive project (with its own Notion
+// connection to Entity/Matters/Proposals) is live and owns that work --
+// either re-granting this Worker's integration access here would undo the
+// isolation just built, or this flag alone won't matter because the calls
+// still can't reach those databases.
 export const SALES_EXECUTIVE_PAUSED = true;
 
 export function newWorkId(): string {
