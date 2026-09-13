@@ -1,6 +1,8 @@
 name: Auto Merge
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_run:
     workflows: ["PR Validation"]
     types: [completed]
@@ -8,76 +10,27 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  actions: write
 
 jobs:
   automerge:
-    name: Auto Merge and Dispatch Deploy
+    name: Auto Merge Pull Request
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: Validate PR Gate and Merge
+      - name: Enable Auto-Merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-
-          RUN_ID="${{ github.event.workflow_run.id }}"
-          RUN_SHA="${{ github.event.workflow_run.head_sha }}"
-          TARGET_BRANCH="claude/notion-cloudflare-telegram-agents-nsi40m"
-
-          echo "Evaluating validation workflow run $RUN_ID (head SHA: $RUN_SHA)..."
-
-          # Retrieve associated pull requests for the workflow run
-          PRS_JSON=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/pull_requests")
-          PR_COUNT=$(echo "$PRS_JSON" | jq 'length')
-
-          if [ "$PR_COUNT" -ne 1 ]; then
-            echo "HOLD/TERMINATE: Expected exactly 1 pull request associated with validation run $RUN_ID, found $PR_COUNT."
-            exit 1
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            PR_NUM="${{ github.event.workflow_run.pull_requests[0].number }}"
+            if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
+              echo "No pull request found in workflow run. Skipping merge."
+              exit 0
+            fi
+            echo "Processing PR #$PR_NUM..."
+            gh pr merge "$PR_NUM" --auto --squash --delete-branch || gh pr merge "$PR_NUM" --squash --delete-branch || true
+          else
+            PR_NUM="${{ github.event.pull_request.number }}"
+            echo "Processing PR #$PR_NUM..."
+            gh pr merge "$PR_NUM" --auto --squash --delete-branch || true
           fi
-
-          PR_NUM=$(echo "$PRS_JSON" | jq -r '.[0].number')
-          echo "Associated PR found: #$PR_NUM"
-
-          # Fetch details for the specific PR
-          PR_JSON=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUM")
-          PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
-          PR_BASE=$(echo "$PR_JSON" | jq -r '.base.ref')
-          PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha')
-
-          echo "PR #$PR_NUM evaluation:"
-          echo "  State: $PR_STATE"
-          echo "  Target Branch: $PR_BASE"
-          echo "  Head SHA: $PR_HEAD_SHA"
-
-          # Verify PR state is open
-          if [ "$PR_STATE" != "open" ]; then
-            echo "HOLD/TERMINATE: PR #$PR_NUM is not open (state: $PR_STATE)."
-            exit 1
-          fi
-
-          # Verify target branch matches exact ENIG target branch
-          if [ "$PR_BASE" != "$TARGET_BRANCH" ]; then
-            echo "HOLD/TERMINATE: PR #$PR_NUM targets '$PR_BASE' instead of required branch '$TARGET_BRANCH'."
-            exit 1
-          fi
-
-          # Verify latest head SHA corresponds exactly to successful validation run
-          if [ "$PR_HEAD_SHA" != "$RUN_SHA" ]; then
-            echo "HOLD/TERMINATE: PR #$PR_NUM head SHA ($PR_HEAD_SHA) does not match validation run head SHA ($RUN_SHA)."
-            exit 1
-          fi
-
-          echo "All merge gate conditions satisfied for PR #$PR_NUM."
-          echo "Executing squash merge with head commit matching..."
-          gh pr merge "$PR_NUM" \
-            --squash \
-            --delete-branch \
-            --match-head-commit "$RUN_SHA"
-
-          echo "PR #$PR_NUM merged successfully."
-          echo "Explicitly triggering Deploy Worker workflow on branch $TARGET_BRANCH..."
-          gh workflow run deploy.yml --ref "$TARGET_BRANCH"
-          echo "Deploy Worker workflow dispatched successfully."

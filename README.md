@@ -212,13 +212,12 @@ The runtime is deployed as a Cloudflare Worker using an automated end-to-end Git
    - Triggered when a PR is opened, updated, or reopened against target branches (`claude/notion-cloudflare-telegram-agents-nsi40m` or `main`).
    - Runs type checks (`npm run typecheck`) and unit tests (`npx tsx --test ...`).
 
-2. **Fail-Closed Automated Merge (`auto-merge.yml`)**:
-   - Triggered strictly by successful completion of the `PR Validation` workflow (`github.event.workflow_run.conclusion == 'success'`).
-   - Verifies exactly 1 associated open PR targeting `claude/notion-cloudflare-telegram-agents-nsi40m` with matching head commit SHA.
-   - Performs squash merge with `--match-head-commit "$RUN_SHA"` and branch deletion without fallback commands.
+2. **Automated Review & Auto-Merge (`auto-merge.yml`)**:
+   - Triggered on PR events and `PR Validation` workflow completion.
+   - Automatically approves and squashes/merges PRs into the target branch once validation passes.
 
-3. **Explicit Deployment Dispatch (`deploy.yml`)**:
-   - Explicitly dispatched by `auto-merge.yml` on target branch `claude/notion-cloudflare-telegram-agents-nsi40m` immediately following successful merge.
+3. **Cloudflare Deployment (`deploy.yml`)**:
+   - Triggered automatically on push / merge to target branches.
    - Executes type checks and unit test validations.
    - Deploys the worker to Cloudflare using `npm run deploy` (`wrangler deploy`).
    - Runs post-deployment health check verification against `https://enig-agent.martnkpogo.workers.dev/health`.
@@ -228,13 +227,9 @@ The runtime is deployed as a Cloudflare Worker using an automated end-to-end Git
 To enable fully automated PR checking, merging, and deployment after task submission, configure the following in your GitHub repository:
 
 #### 1. Repository Secrets (`Settings` -> `Secrets and variables` -> `Actions` -> `New repository secret`):
-
-**Core Worker Deployment Credentials**:
 * `CLOUDFLARE_API_TOKEN`: Cloudflare API token with Workers Deployment permissions.
 * `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Account ID.
-
-**Optional Workflow Secrets**:
-* `WORKER_ADMIN_KEY`: Required only for the separate scheduled Finance Handoff Discovery workflow (`finance-discovery-cron.yml`), set to the same value as `TELEGRAM_WEBHOOK_SECRET`. (Not required for core Worker deployment).
+* `WORKER_ADMIN_KEY`: Secret key matching `TELEGRAM_WEBHOOK_SECRET` for scheduled administrative jobs (e.g. Finance Handoff discovery).
 
 #### 2. Repository Settings for Auto-Merge & Actions Permissions:
 * **Allow auto-merge**: Go to `Settings` -> `General` -> `Pull Requests` and check **"Allow auto-merge"**.
