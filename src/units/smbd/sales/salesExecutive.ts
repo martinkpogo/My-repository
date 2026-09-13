@@ -15,6 +15,7 @@ import { aiJson, aiText } from "../../../ai";
 import { logActivity } from "../../../log";
 import { sendMessage } from "../../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governance";
+import { evaluateHandoffContext } from "../../../dataBoundary/policy";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -745,7 +746,42 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
  */
 export async function handleQuoteReceived(env: Env, state: WorkState): Promise<WorkState> {
   const handoff = await getPage(env, state.handoffId!);
-  const quote = parseAuthoritativeQuote(plainText(handoff.properties["Verified Facts & Sources"]));
+  const rawFacts = plainText(handoff.properties["Verified Facts & Sources"]);
+  const entityToken = plainText(handoff.properties.Entity_Token);
+  const matterToken = plainText(handoff.properties.Matter_Token);
+
+  const evalResult = evaluateHandoffContext(
+    {
+      handoffId: state.handoffId!,
+      entityToken,
+      matterToken,
+      sanitizedContext: rawFacts,
+      provenance: `notion:handoff:${state.handoffId!}`,
+      requiredCategory: "authoritative quote and proposal scope",
+    },
+    "sales.proposal_drafting",
+  );
+
+  if (!evalResult.success) {
+    console.error(`Sales Executive proposal drafting blocked — context evaluation failed for Handoff ${state.handoffId}`);
+    await logActivity(env, {
+      entry: `Draft Proposal blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
+      type: "Blocker",
+      area: "SM&BD",
+      decisionRationale: evalResult.insufficientContext.reason,
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't prepare Draft Proposal for *${state.entityName}*: ${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
+      undefined,
+      state.threadId,
+    );
+    return state;
+  }
+
+  const quote = parseAuthoritativeQuote(evalResult.contract.sanitizedContext);
   if (!quote) {
     console.error(`Sales Executive proposal drafting blocked — could not read the authoritative quote from Handoff ${state.handoffId}`);
     await logActivity(env, {

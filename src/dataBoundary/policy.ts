@@ -6,6 +6,8 @@ import type {
   BoundaryEvaluationResult,
   ContextSegment,
   DataTransformation,
+  HandoffContextContract,
+  HandoffContextEvaluationResult,
   ProviderEligibilityRule,
   SemanticTaskId,
   SensitivityLevel,
@@ -171,4 +173,61 @@ function sanitizeErrorMessage(msg: string): string {
   // Truncate and strip any potential embedded prompt content from error messages
   const clean = msg.replace(/[\r\n]+/g, " ").trim();
   return clean.length > 200 ? `${clean.slice(0, 197)}...` : clean;
+}
+
+/**
+ * Evaluates an incoming Handoff against the canonical closed-context contract.
+ * Ensures entityToken and sanitizedContext are present, keeps tokens opaque,
+ * and fails closed with a non-sensitive category-focused reason when context is missing.
+ */
+export function evaluateHandoffContext(
+  contract: Partial<HandoffContextContract>,
+  taskId: SemanticTaskId,
+): HandoffContextEvaluationResult {
+  const entityToken = contract.entityToken?.trim();
+  const sanitizedContext = contract.sanitizedContext?.trim();
+
+  if (!entityToken || !sanitizedContext) {
+    const missingCategory = contract.requiredCategory ?? "sanitized execution context";
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category: missingCategory,
+        reason: `Insufficient execution context: required ${missingCategory} is missing from Handoff.`,
+      },
+    };
+  }
+
+  const validatedContract: HandoffContextContract = {
+    handoffId: contract.handoffId ?? "unknown_handoff",
+    workId: contract.workId,
+    entityToken,
+    matterToken: contract.matterToken?.trim(),
+    proposalToken: contract.proposalToken?.trim(),
+    sanitizedContext,
+    provenance: contract.provenance ?? `handoff:${contract.handoffId ?? "unknown"}`,
+    sensitivity: contract.sensitivity ?? "business_sensitive",
+    requiredCategory: contract.requiredCategory,
+  };
+
+  const segments: ContextSegment[] = [
+    {
+      type: "user",
+      content: `Entity Token: ${validatedContract.entityToken}${
+        validatedContract.matterToken ? `\nMatter Token: ${validatedContract.matterToken}` : ""
+      }\nSanitized Context:\n${validatedContract.sanitizedContext}`,
+      provenance: validatedContract.provenance,
+      sensitivity: validatedContract.sensitivity,
+    },
+  ];
+
+  return {
+    success: true,
+    contract: validatedContract,
+    boundaryContext: {
+      segments,
+      taskSensitivity: validatedContract.sensitivity,
+    },
+  };
 }
