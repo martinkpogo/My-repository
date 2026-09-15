@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
+import { getActiveWorkId, getSessionStub, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import type { SessionSummary } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
@@ -424,13 +424,22 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
         await checkStaleHandoffs(env);
-        await sendMessage(
-          env,
-          chatId,
-          `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSMBD} picked up for SM&BD.`,
-          undefined,
-          threadId,
-        );
+        // Discovery itself always runs both directions, same as the cron --
+        // only the reply is scoped to whichever Unit this topic maps to, so
+        // running it in the Finance topic doesn't report SM&BD counts (and
+        // vice versa). Falls back to the combined summary in a DM or a
+        // topic that isn't Finance/SM&BD (the only two discovery directions
+        // that exist today).
+        const unitHere = resolveUnitForThread(env, threadId);
+        let reply: string;
+        if (unitHere === "Finance") {
+          reply = picked > 0 ? `Picked up ${picked} Handoff(s) for Finance.` : "No Handoffs pending for Finance.";
+        } else if (unitHere === "SM&BD") {
+          reply = pickedForSMBD > 0 ? `Picked up ${pickedForSMBD} Handoff(s) for SM&BD.` : "No Handoffs pending for SM&BD.";
+        } else {
+          reply = `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSMBD} picked up for SM&BD.`;
+        }
+        await sendMessage(env, chatId, reply, undefined, threadId);
       } catch (err) {
         console.error("Unhandled error in /checkhandoffs", err);
         await sendMessage(env, chatId, "Handoff discovery failed unexpectedly. Logged for review — will retry next cycle.", undefined, threadId);
