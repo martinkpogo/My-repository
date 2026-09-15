@@ -41,12 +41,15 @@ test("2. Fails closed when task ID is missing or unregistered", () => {
 });
 
 test("3. Fails closed under unresolved production policy maps (UNRESOLVED_POLICY_HOLD)", () => {
-  // Production evaluator uses default empty policy maps
+  // finance.quote_judgment/workers-ai is now Architect-authorized (both
+  // PRODUCTION_TASK_SENSITIVITY and PRODUCTION_PROVIDER_ELIGIBILITY are
+  // populated for this pair), so the fail-closed path is exercised here
+  // against a provider that genuinely has no eligibility entry instead.
   const dummyContext: BoundaryContext = {
     segments: [{ type: "user", content: "test", provenance: "test.ts" }],
   };
 
-  const result = defaultDataBoundaryEvaluator.evaluate("finance.quote_judgment", "workers-ai", dummyContext);
+  const result = defaultDataBoundaryEvaluator.evaluate("finance.quote_judgment", "unconfigured-provider", dummyContext);
   assert.strictEqual(result.allowed, false);
   assert.strictEqual(result.reasonCode, "UNRESOLVED_POLICY_HOLD");
 });
@@ -256,7 +259,12 @@ test("10. Closed-context tokens remain opaque non-resolvable strings", () => {
 });
 
 test("11. Unresolved policy and transformation failure fail closed", () => {
-  const evaluator = new DataBoundaryEvaluator();
+  // DataBoundaryEvaluator's constructor defaults to the populated
+  // PRODUCTION_* tables when no options are passed (same as
+  // defaultDataBoundaryEvaluator), so finance.quote_judgment/workers-ai is
+  // now resolved there too -- pass explicit empty maps to still genuinely
+  // exercise the unresolved-policy fail-closed path this test is for.
+  const evaluator = new DataBoundaryEvaluator({ taskSensitivities: {}, providerEligibility: {} });
   const dummyContext: BoundaryContext = {
     segments: [{ type: "user", content: "test", provenance: "test.ts" }],
   };

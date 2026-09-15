@@ -14,16 +14,57 @@ import type {
 } from "./types";
 
 /**
- * GOVERNANCE HOLD: Production task sensitivities and provider eligibility tables are
- * deliberately empty / unresolved pending explicit Architect authorization.
+ * Architect-authorized production task sensitivity classification.
  *
- * The evaluation engine strictly fails closed for any unresolved policy mapping.
- * No implicit default sensitivity, no automatic public classification, and no
- * default provider authorization exist in production code.
+ * client_confidential marks every task that operates on a real client
+ * identity or client-specific detail -- pre-tokenization enquiry text, an
+ * Entity's real name, call notes about a specific client's situation, or
+ * client-facing proposal content. pii_restricted marks the one task that
+ * explicitly extracts raw contact details (name/email/phone) from an
+ * enquiry. business_sensitive marks ENIG's own internal-operations tasks
+ * (its own marketing planning) and finance.quote_judgment specifically --
+ * lower than its sales.* siblings because the Entity_Token/Matter_Token
+ * data-boundary redesign made this call's context provably identity-free
+ * (opaque tokens + sanitized business text only, never a real name).
  */
-export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId, SensitivityLevel>>> = {};
+export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId, SensitivityLevel>>> = {
+  "routing.enquiry_classification": "client_confidential",
+  "routing.marketing_specialization_check": "client_confidential",
+  "chat.general_reply": "client_confidential",
+  "marketing.intake_classification": "business_sensitive",
+  "marketing.hat_action_decision": "business_sensitive",
+  "sales.enquiry_extraction": "pii_restricted",
+  "sales.matter_summary_drafting": "client_confidential",
+  "sales.call_prep_briefing": "client_confidential",
+  "sales.call_qualification": "client_confidential",
+  "sales.proposal_drafting": "client_confidential",
+  "sales.proposal_revision": "client_confidential",
+  "finance.quote_judgment": "business_sensitive",
+};
 
-export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId, ProviderEligibilityRule>>> = {};
+/**
+ * Architect-authorized production provider eligibility.
+ *
+ * workers-ai (Cloudflare Workers AI) is eligible for business_sensitive,
+ * internal, and public content only -- not client_confidential or
+ * pii_restricted. Cloudflare's training-data policy for this provider has
+ * not been confirmed to exclude personal information, so no task that
+ * could carry a real client identity or contact detail may run on it
+ * until a provider with an acceptable no-training guarantee is added.
+ * This is deliberate, not a placeholder: every sales.* task, both
+ * routing.* classifiers, and chat.general_reply are client_confidential
+ * (see above) and stay unresolved under this rule for exactly that
+ * reason, matching the Sales Executive pause itself. Only
+ * marketing.intake_classification, marketing.hat_action_decision, and
+ * finance.quote_judgment (all business_sensitive) are actually eligible
+ * today.
+ */
+export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId, ProviderEligibilityRule>>> = {
+  "workers-ai": {
+    providerId: "workers-ai",
+    allowedSensitivities: new Set<SensitivityLevel>(["public", "internal", "business_sensitive"]),
+  },
+};
 
 export interface DataBoundaryEvaluatorOptions {
   taskSensitivities?: Partial<Record<SemanticTaskId, SensitivityLevel>>;
