@@ -366,7 +366,12 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(env, chatId, "This bot is private.", undefined, threadId);
       return;
     }
-    const text = update.message.text ?? "";
+    // Telegram appends "@<botusername>" to commands sent in group chats
+    // (to disambiguate which bot, when several might be present) --
+    // e.g. "/clearsessions@enig_hq_ops_bot confirm". Strip it right after
+    // the leading /command token so every exact-string command check
+    // below works the same in a group/topic as it does in a DM.
+    const text = (update.message.text ?? "").replace(/^(\/\w+)@\w+/, "$1");
     if (text === "/start") {
       await sendMessage(
         env,
