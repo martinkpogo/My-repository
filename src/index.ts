@@ -371,7 +371,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched).",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now.",
         undefined,
         threadId,
       );
@@ -406,6 +406,30 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       }
       await Promise.all(keys.map((key) => env.STATE_KV.delete(key)));
       await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
+      return;
+    }
+    if (text === "/checkhandoffs") {
+      // Same discovery logic /admin/run-finance-discovery and the 5-minute
+      // GitHub Actions cron already run -- exposed as a command so it's
+      // triggerable directly from Telegram, without the admin URL/secret,
+      // and entirely outside the AI-gated routeIncomingText path (a plain
+      // command, never routed through generalChatReply).
+      await env.STATE_KV.put("last_cron_run", new Date().toISOString());
+      try {
+        const picked = await discoverPendingFinanceHandoffs(env);
+        const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+        await checkStaleHandoffs(env);
+        await sendMessage(
+          env,
+          chatId,
+          `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSMBD} picked up for SM&BD.`,
+          undefined,
+          threadId,
+        );
+      } catch (err) {
+        console.error("Unhandled error in /checkhandoffs", err);
+        await sendMessage(env, chatId, "Handoff discovery failed unexpectedly. Logged for review — will retry next cycle.", undefined, threadId);
+      }
       return;
     }
     if (text.startsWith("/")) {
