@@ -371,7 +371,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one.",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched).",
         undefined,
         threadId,
       );
@@ -390,6 +390,22 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       const stub = getSessionStub(env, activeId);
       await stub.cancel();
       await sendMessage(env, chatId, "Cancelled the active work item.", undefined, threadId);
+      return;
+    }
+    if (text === "/clearsessions" || text === "/clearsessions confirm") {
+      const keys = await listSessionKvKeys(env);
+      if (text === "/clearsessions") {
+        await sendMessage(
+          env,
+          chatId,
+          `This would delete ${keys.length} KV key(s) (active/chat_history/handoff_workitem/sessions_index routing state) — Notion is never touched, and Read.ai's own credential is left alone. Send /clearsessions confirm to proceed.`,
+          undefined,
+          threadId,
+        );
+        return;
+      }
+      await Promise.all(keys.map((key) => env.STATE_KV.delete(key)));
+      await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
       return;
     }
     if (text.startsWith("/")) {
@@ -559,6 +575,29 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
     },
   ]);
   await sendMessage(env, chatId, "Open work items:", buttons, threadId);
+}
+
+/**
+ * Enumerates every KV key that represents routing/session state --
+ * active/chat_history/handoff_workitem entries plus the sessions_index --
+ * for /clearsessions. Deliberately excludes readai_oauth_tokens (a live
+ * credential, not session state) and the cron/stale-digest bookkeeping
+ * keys (harmless either way, not what "clear sessions" means). Notion is
+ * never touched by this -- KV only holds routing pointers, never business
+ * records.
+ */
+async function listSessionKvKeys(env: Env): Promise<string[]> {
+  const keys: string[] = [];
+  for (const prefix of ["active:", "chat_history:", "handoff_workitem:"]) {
+    let cursor: string | undefined;
+    do {
+      const page = await env.STATE_KV.list({ prefix, cursor });
+      keys.push(...page.keys.map((k) => k.name));
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  }
+  if (await env.STATE_KV.get("sessions_index")) keys.push("sessions_index");
+  return keys;
 }
 
 // A digest only needs to reach Martin when the outstanding set actually
