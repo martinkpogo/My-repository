@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, relation, richText, select, title, updatePage } from "../../notion";
+import { createPage, getPage, plainText, relation, relationIds, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -343,6 +343,21 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     state.stage = "quote_redo_requested";
     state.awaiting = "quote_redo_reason";
     return state;
+  }
+
+  if (!state.matterId && state.handoffId) {
+    // Backfills a matterId this session's WorkState never got at init time --
+    // e.g. a KV handoff_workitem mapping created before the matterId field
+    // existed, or by any path other than discoverPendingFinanceHandoffs.
+    // Reads the Handoff's own Matter relation directly rather than trusting
+    // whatever this session happened to be initialized with.
+    try {
+      const handoff = await getPage(env, state.handoffId);
+      const backfilled = relationIds(handoff.properties.Matter)[0];
+      if (backfilled) state.matterId = backfilled;
+    } catch (err) {
+      console.error(`Finance handleQuoteApproval: matterId backfill failed for handoff ${state.handoffId}`, err);
+    }
   }
 
   if (!state.matterId) {
