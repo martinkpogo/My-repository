@@ -1,8 +1,8 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
-import { plainText, queryDataSource } from "./notion";
+import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
+import { plainText, queryDataSource, relationIds } from "./notion";
 import type { SessionSummary, Unit } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
 import type { ReadAiPayload } from "./readai";
@@ -293,10 +293,32 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
 
   let pickedUp = 0;
   for (const handoff of pending) {
-    const workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
-      console.error(`Pending Finance Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
-      continue;
+      // No live Telegram session behind this Handoff -- e.g. created
+      // directly in Notion by the isolated Sales Executive project, which
+      // has no WorkState of its own in this Worker. Create a fresh
+      // session instead of skipping it, so Finance can still pick it up.
+      // Defaults to the ENIG HQ group's Finance topic (or Martin's DM if
+      // no group chat is configured) since there's no originating chat
+      // to inherit.
+      try {
+        workId = newWorkId();
+        const chatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : Number(env.MARTIN_TELEGRAM_USER_ID);
+        const threadId = threadIdForUnit(env, "Finance");
+        // The later quote-approval step needs the real Matter page ID (to
+        // relate the follow-up Handoff back to it) -- read it off the
+        // Handoff's own Matter relation rather than leaving it unset.
+        const matterId = relationIds(handoff.properties.Matter)[0];
+        const stub = getSessionStub(env, workId);
+        await stub.init(workId, chatId, "Finance", "Value-Based Pricing Assessor", threadId, { handoffId: handoff.id, matterId });
+        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
+      } catch (err) {
+        console.error(`Failed to create a work item for externally-created Finance Handoff ${handoff.id}`, err);
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+        continue;
+      }
     }
     const stub = getSessionStub(env, workId);
     try {
