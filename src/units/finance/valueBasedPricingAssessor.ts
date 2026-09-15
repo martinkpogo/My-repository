@@ -345,6 +345,25 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     return state;
   }
 
+  if (!state.matterId) {
+    console.error(`Finance handleQuoteApproval: state.matterId missing for handoff ${state.handoffId} (${state.matterName})`);
+    await logActivity(env, {
+      entry: `Quote approval blocked — no Matter relation on record: ${state.matterName}`,
+      type: "Blocker",
+      area: "Finance",
+      decisionRationale: "This work item has no Matter relation (state.matterId is unset), so the Finance -> SM&BD follow-up Handoff cannot be linked to a Matter. This happens when the originating Handoff's own Matter relation was empty.",
+      outcome: "Blocked",
+    });
+    await sendMessage(
+      env,
+      state.chatId,
+      `Quote approved, but I can't route it to SM&BD — this work item has no Matter linked (the originating Handoff's Matter relation is empty). Please check the Handoff record for *${state.matterName}* and re-link its Matter, then retry.`,
+      undefined,
+      financeThreadId,
+    );
+    return state;
+  }
+
   const followUp = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
     Handoff: title(`Draft Proposal — ${state.matterName}`),
     "From Unit": select("Finance"),
