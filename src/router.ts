@@ -28,6 +28,16 @@ const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d"
 // still can't reach those databases.
 export const SALES_EXECUTIVE_PAUSED = true;
 
+// generalChatReply's underlying aiChat call returns "" whenever no AI
+// provider is eligible under the current data-boundary policy -- most
+// notably the deliberate governance hold on PRODUCTION_TASK_SENSITIVITY /
+// PRODUCTION_PROVIDER_ELIGIBILITY in dataBoundary/policy.ts (both empty
+// pending explicit Architect authorization). A bare "..." fallback made
+// that look like a mystery bug rather than the known, deliberate hold it
+// actually is.
+const AI_UNAVAILABLE_MESSAGE =
+  "Couldn't generate a reply -- no AI provider is currently eligible under the pending data-boundary policy (PRODUCTION_PROVIDER_ELIGIBILITY is empty pending Architect authorization).";
+
 export function newWorkId(): string {
   return crypto.randomUUID();
 }
@@ -201,7 +211,7 @@ export async function routeIncomingText(
   // there, with memory, rather than a rigid refusal every time.
   if (unitContext !== "dm" && unitContext !== "SM&BD") {
     const reply = await generalChatReply(env, unitContext, chatId, threadId, text);
-    await sendMessage(env, chatId, reply || "...", undefined, threadId);
+    await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
     return;
   }
 
@@ -251,5 +261,5 @@ export async function routeIncomingText(
 
   // Not a new enquiry — hold open conversation instead of a rigid refusal.
   const reply = await generalChatReply(env, "SM&BD", chatId, threadId, text);
-  await sendMessage(env, chatId, reply || "...", undefined, threadId);
+  await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
 }
