@@ -420,26 +420,54 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       // and entirely outside the AI-gated routeIncomingText path (a plain
       // command, never routed through generalChatReply).
       await env.STATE_KV.put("last_cron_run", new Date().toISOString());
+      const unitHere = resolveUnitForThread(env, threadId);
       try {
-        const picked = await discoverPendingFinanceHandoffs(env);
-        const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
-        await checkStaleHandoffs(env);
-        // Discovery itself always runs both directions, same as the cron --
-        // only the reply is scoped to whichever Unit this topic maps to, so
-        // running it in the Finance topic doesn't report SM&BD counts (and
-        // vice versa). Falls back to the combined summary in a DM or a
-        // topic that isn't Finance/SM&BD (the only two discovery directions
-        // that exist today).
-        const unitHere = resolveUnitForThread(env, threadId);
-        let reply: string;
-        if (unitHere === "Finance") {
-          reply = picked > 0 ? `Picked up ${picked} Handoff(s) for Finance.` : "No Handoffs pending for Finance.";
-        } else if (unitHere === "SM&BD") {
-          reply = pickedForSMBD > 0 ? `Picked up ${pickedForSMBD} Handoff(s) for SM&BD.` : "No Handoffs pending for SM&BD.";
+        if (unitHere === "Finance" || unitHere === "SM&BD") {
+          // These two are the only Units with real pickup logic -- run the
+          // actual discovery (both directions, same as the cron) and scope
+          // the reply to just this topic's Unit.
+          const picked = await discoverPendingFinanceHandoffs(env);
+          const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+          await checkStaleHandoffs(env);
+          const reply =
+            unitHere === "Finance"
+              ? picked > 0
+                ? `Picked up ${picked} Handoff(s) for Finance.`
+                : "No Handoffs pending for Finance."
+              : pickedForSMBD > 0
+                ? `Picked up ${pickedForSMBD} Handoff(s) for SM&BD.`
+                : "No Handoffs pending for SM&BD.";
+          await sendMessage(env, chatId, reply, undefined, threadId);
+        } else if (unitHere === "dm" || unitHere === "unmapped") {
+          // No specific Unit to scope to -- fall back to the combined
+          // summary across both real pickup directions.
+          const picked = await discoverPendingFinanceHandoffs(env);
+          const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+          await checkStaleHandoffs(env);
+          await sendMessage(
+            env,
+            chatId,
+            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSMBD} picked up for SM&BD.`,
+            undefined,
+            threadId,
+          );
         } else {
-          reply = `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSMBD} picked up for SM&BD.`;
+          // Strategy / Research & Intelligence / Creative & Design /
+          // Operations -- no Hat exists yet to actually pick these up, so
+          // just report whether anything is queued for this Unit rather
+          // than attempting a pickup that doesn't exist.
+          const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+            and: [
+              { property: "To Unit", select: { equals: unitHere } },
+              { property: "Status", select: { equals: "Pending" } },
+            ],
+          });
+          const reply =
+            pending.length > 0
+              ? `${pending.length} Handoff(s) pending for ${unitHere} — no automated pickup exists yet for this Unit.`
+              : `No Handoffs pending for ${unitHere}.`;
+          await sendMessage(env, chatId, reply, undefined, threadId);
         }
-        await sendMessage(env, chatId, reply, undefined, threadId);
       } catch (err) {
         console.error("Unhandled error in /checkhandoffs", err);
         await sendMessage(env, chatId, "Handoff discovery failed unexpectedly. Logged for review — will retry next cycle.", undefined, threadId);
