@@ -7,7 +7,14 @@ import { sendMessage } from "./telegram";
 import { logActivity } from "./log";
 
 export class WorkSession extends DurableObject<Env> {
-  async init(workId: string, chatId: number, unit: Unit, hat: string, threadId?: number): Promise<void> {
+  async init(
+    workId: string,
+    chatId: number,
+    unit: Unit,
+    hat: string,
+    threadId?: number,
+    extra?: { handoffId?: string; matterId?: string },
+  ): Promise<void> {
     const now = new Date().toISOString();
     const state: WorkState = {
       workId,
@@ -18,6 +25,8 @@ export class WorkSession extends DurableObject<Env> {
       stage: "new",
       createdAt: now,
       updatedAt: now,
+      ...(extra?.handoffId ? { handoffId: extra.handoffId } : {}),
+      ...(extra?.matterId ? { matterId: extra.matterId } : {}),
     };
     await this.save(state);
   }
