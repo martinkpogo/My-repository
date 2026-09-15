@@ -166,10 +166,11 @@ export class WorkSession extends DurableObject<Env> {
       return await this.save(await fn(state));
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
+      const detail = err instanceof Error ? err.message : String(err);
       await sendMessage(
         this.env,
         state.chatId,
-        `⚠️ Something went wrong processing this work item. The error has been logged for review and nothing further was changed — try again, or use /sessions to check its current state.`,
+        `⚠️ Something went wrong processing this work item. The error has been logged for review and nothing further was changed — try again, or use /sessions to check its current state.\n\nDetail: ${detail.slice(0, 500)}`,
         undefined,
         state.threadId,
       ).catch((notifyErr) => console.error(`WorkSession ${state.workId} failure notification also failed`, notifyErr));
