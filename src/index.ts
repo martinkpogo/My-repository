@@ -3,7 +3,7 @@ import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
 import { plainText, queryDataSource } from "./notion";
-import type { SessionSummary } from "./types";
+import type { SessionSummary, Unit } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
 import type { ReadAiPayload } from "./readai";
 import {
@@ -423,20 +423,29 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       const unitHere = resolveUnitForThread(env, threadId);
       try {
         if (unitHere === "Finance" || unitHere === "SM&BD") {
-          // These two are the only Units with real pickup logic -- run the
-          // actual discovery (both directions, same as the cron) and scope
-          // the reply to just this topic's Unit.
+          // These two are the only Units with real pickup logic. Discovery
+          // only counts a Handoff as "picked up" if it has a
+          // handoff_workitem KV mapping (tied to a live Telegram session);
+          // a Handoff created directly in Notion -- e.g. by the isolated
+          // Sales Executive project -- has no such mapping, so discovery
+          // finds it but silently skips it, and picked stays 0 even though
+          // it's genuinely Pending. Query Notion directly too, so the
+          // reply can tell "nothing pending" apart from "pending but stuck
+          // for lack of a work-item mapping" instead of reporting both as
+          // the same "No Handoffs pending" message.
           const picked = await discoverPendingFinanceHandoffs(env);
           const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
           await checkStaleHandoffs(env);
-          const reply =
-            unitHere === "Finance"
-              ? picked > 0
-                ? `Picked up ${picked} Handoff(s) for Finance.`
-                : "No Handoffs pending for Finance."
-              : pickedForSMBD > 0
-                ? `Picked up ${pickedForSMBD} Handoff(s) for SM&BD.`
-                : "No Handoffs pending for SM&BD.";
+          const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
+          const pickedForThisUnit = unitHere === "Finance" ? picked : pickedForSMBD;
+          let reply: string;
+          if (pendingCount === 0) {
+            reply = `No Handoffs pending for ${unitHere}.`;
+          } else if (pickedForThisUnit >= pendingCount) {
+            reply = `Picked up ${pickedForThisUnit} Handoff(s) for ${unitHere}.`;
+          } else {
+            reply = `${pendingCount} Handoff(s) pending for ${unitHere}, but automated pickup couldn't process ${pendingCount - pickedForThisUnit} of them (no handoff_workitem mapping -- likely created outside a live Telegram session, e.g. directly in Notion or by the isolated Sales Executive project). Needs manual follow-up.`;
+          }
           await sendMessage(env, chatId, reply, undefined, threadId);
         } else if (unitHere === "dm" || unitHere === "unmapped") {
           // No specific Unit to scope to -- fall back to the combined
@@ -456,15 +465,10 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           // Operations -- no Hat exists yet to actually pick these up, so
           // just report whether anything is queued for this Unit rather
           // than attempting a pickup that doesn't exist.
-          const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-            and: [
-              { property: "To Unit", select: { equals: unitHere } },
-              { property: "Status", select: { equals: "Pending" } },
-            ],
-          });
+          const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
           const reply =
-            pending.length > 0
-              ? `${pending.length} Handoff(s) pending for ${unitHere} — no automated pickup exists yet for this Unit.`
+            pendingCount > 0
+              ? `${pendingCount} Handoff(s) pending for ${unitHere} — no automated pickup exists yet for this Unit.`
               : `No Handoffs pending for ${unitHere}.`;
           await sendMessage(env, chatId, reply, undefined, threadId);
         }
@@ -623,6 +627,25 @@ async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise
 // them into plain English for display without needing a maintained mapping.
 function humanizeStage(stage: string): string {
   return stage.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+/**
+ * Read-only count of Pending Work Handoffs addressed to a Unit, independent
+ * of whether automated pickup can actually process them (that depends on a
+ * handoff_workitem KV mapping the discovery functions require -- see
+ * /checkhandoffs). Used both for Units with no pickup logic at all and to
+ * detect Finance/SM&BD Handoffs that are genuinely pending but stuck for
+ * lack of that mapping.
+ */
+async function countPendingHandoffsForUnit(env: Env, unit: Unit): Promise<number> {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    and: [
+      { property: "To Unit", select: { equals: unit } },
+      { property: "Status", select: { equals: "Pending" } },
+      { property: "Type", select: { equals: "Work" } },
+    ],
+  });
+  return pending.length;
 }
 
 async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
