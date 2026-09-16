@@ -16,11 +16,21 @@ export interface DimensionEvidence extends ResearchPlanDimension {
 }
 
 const TAVILY_API_URL = "https://api.tavily.com/search";
-const MAX_RESULTS_PER_QUERY = 5;
+// Confirmed live: even after capping each snippet's length (see
+// MAX_SNIPPET_LENGTH below), a full 8 dimensions x 5 results each (40
+// results) still pushed a single synthesis prompt to ~10,000+ requested
+// tokens -- past Groq's fixed 8000 TPM cap and slow enough to add to
+// several providers' 12s timeouts, since synthesis (unlike research-plan
+// generation, split per protocol in a separate fix) is still one
+// combined call across every selected protocol's evidence at once.
+// Lowered from 5 -- still leaves multiple corroborating sources per
+// dimension, just fewer of them, cutting total evidence volume (and so
+// prompt size) by 40% across a full 8-dimension request.
+const MAX_RESULTS_PER_QUERY = 3;
 
 // Confirmed live: Tavily's "content" field is unbounded (some results ran
 // well over a thousand characters), and with up to MAX_DIMENSIONS_PER_
-// REQUEST (8) dimensions x MAX_RESULTS_PER_QUERY (5) results each, the
+// REQUEST (8) dimensions x MAX_RESULTS_PER_QUERY results each, the
 // untruncated total pushed a single synthesis prompt to ~18,000 tokens --
 // past every free-tier provider's context window or rate limit. A snippet
 // is corroborating evidence, not the source itself (the title/url/domain
