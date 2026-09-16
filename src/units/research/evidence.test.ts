@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { validateSynthesis } from "./evidence";
+import { findUnverifiableSources, validateSynthesis } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
 
 function baseSynthesis(overrides: Partial<ResearchSynthesis> = {}): ResearchSynthesis {
@@ -87,6 +87,37 @@ test("a contradicted source's status is preserved through validation, not silent
     }),
   );
   assert.strictEqual(result.valid, true);
+});
+
+test("findUnverifiableSources flags a source whose name and URL never appeared in the supplied context -- the live fabrication case", () => {
+  const synthesis = baseSynthesis({
+    sources: [{ id: "s1", source: "Company A Website", sourceType: "primary", url: "https://www.companya.com", passage: "...", claimSupported: "positioning", validationStatus: "unvalidated" }],
+  });
+  const suppliedContext = "Research our main competitors and how they position themselves.";
+  const unverifiable = findUnverifiableSources(synthesis, suppliedContext);
+  assert.strictEqual(unverifiable.length, 1);
+  assert.strictEqual(unverifiable[0].id, "s1");
+});
+
+test("findUnverifiableSources accepts a source whose name literally appears in the supplied context", () => {
+  const synthesis = baseSynthesis({
+    sources: [{ id: "s1", source: "Acme Corp 2025 Annual Report", sourceType: "primary", passage: "...", claimSupported: "revenue", validationStatus: "validated" }],
+  });
+  const suppliedContext = "Here is the Acme Corp 2025 Annual Report: revenue grew 12% year over year.";
+  assert.strictEqual(findUnverifiableSources(synthesis, suppliedContext).length, 0);
+});
+
+test("findUnverifiableSources accepts a source whose URL literally appears in the supplied context", () => {
+  const synthesis = baseSynthesis({
+    sources: [{ id: "s1", source: "Vendor pricing page", sourceType: "primary", url: "https://example.com/pricing", passage: "...", claimSupported: "price", validationStatus: "unvalidated" }],
+  });
+  const suppliedContext = "Pricing is listed at https://example.com/pricing as $50/mo.";
+  assert.strictEqual(findUnverifiableSources(synthesis, suppliedContext).length, 0);
+});
+
+test("findUnverifiableSources returns nothing for an honest empty-sources synthesis", () => {
+  const synthesis = baseSynthesis({ sources: [], evidence: [], findings: [], implications: [] });
+  assert.strictEqual(findUnverifiableSources(synthesis, "").length, 0);
 });
 
 test("an empty, honest synthesis (no sources available) validates when findings/evidence/implications are all empty", () => {
