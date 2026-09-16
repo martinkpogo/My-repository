@@ -1,6 +1,7 @@
 import type { Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
-import type { ResearchProtocolId } from "./protocols";
+import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
+import type { ResearchPlanDimension } from "./researchPlan";
 
 export interface WebSearchResult {
   title: string;
@@ -9,57 +10,13 @@ export interface WebSearchResult {
   publishedDate?: string;
 }
 
-const TAVILY_API_URL = "https://api.tavily.com/search";
-
-// Cost/latency cap -- at most this many queries fire per research request,
-// each returning at most this many results. Tuned for "enough to ground a
-// synthesis," not exhaustive research.
-export const MAX_QUERIES_PER_REQUEST = 3;
-const MAX_RESULTS_PER_QUERY = 5;
-
-// One short, generic query focus per protocol -- deliberately NOT an AI
-// call. Query text is built entirely from the already-abstracted
-// relevance statement (safe-context-derived, never Martin's raw chat
-// text) plus this fixed phrase, so there is no additional place an
-// identity/proprietary detail could leak into an external query the way
-// a fresh LLM generation call might improvise one. Evidence & Source
-// Validation has no query of its own -- it's a cross-cutting check on
-// results already gathered, not a search topic.
-const PROTOCOL_QUERY_FOCUS: Partial<Record<ResearchProtocolId, string>> = {
-  business_company: "company profile and business situation",
-  market_industry: "market size, demand, and growth trends",
-  competitive: "competitors and market positioning",
-  customer_audience: "customer needs, reviews, and audience feedback",
-  environmental_regulatory: "regulatory, economic, and policy conditions",
-};
-
-/**
- * Builds up to MAX_QUERIES_PER_REQUEST search queries, one per selected
- * protocol that has a query focus, from the actual research question
- * plus the relevance statement (category/geography grounding, derived
- * from the Research-Safe Consultancy Context) -- deterministic and pure
- * so it's directly testable without mocking a search provider or an LLM
- * call.
- *
- * Earlier versions used only the relevance statement, on the theory that
- * the raw question might carry something to protect. Confirmed live to
- * be overcautious: the privacy risk was always specifically the
- * consultancy's own real name/founder (still stripped below via
- * redactIdentityTerms, and never present in the question anyway -- see
- * chat.ts's persona rules), not the question's ordinary specificity.
- * Without the question's own concrete terms, Tavily had nothing to
- * anchor to and returned generic evergreen definition pages ("what is
- * competitive positioning") instead of real market/competitor
- * information. Including the question fixes that while the redaction
- * gate still catches an identity term if one somehow appeared.
- */
-export function buildSearchQueries(question: string, relevance: string, protocols: ResearchProtocolId[]): string[] {
-  return protocols
-    .map((id) => PROTOCOL_QUERY_FOCUS[id])
-    .filter((focus): focus is string => Boolean(focus))
-    .slice(0, MAX_QUERIES_PER_REQUEST)
-    .map((focus) => redactIdentityTerms(`${question} ${relevance} ${focus}`.replace(/\s+/g, " ").trim()));
+/** One research-plan dimension plus whatever the search for it actually turned up. */
+export interface DimensionEvidence extends ResearchPlanDimension {
+  results: WebSearchResult[];
 }
+
+const TAVILY_API_URL = "https://api.tavily.com/search";
+const MAX_RESULTS_PER_QUERY = 5;
 
 export function isWebSearchConfigured(env: Env): boolean {
   return Boolean(env.TAVILY_API_KEY);
@@ -107,10 +64,89 @@ export async function searchWeb(env: Env, query: string): Promise<WebSearchResul
   }
 }
 
-/** Formats fetched results as the "web search results" block of the effective research context -- each with an exact, copy-verbatim URL. */
-export function formatWebResultsForContext(results: WebSearchResult[]): string {
-  if (results.length === 0) return "";
-  return results
-    .map((r) => `- ${r.title} (${r.url})${r.publishedDate ? ` [${r.publishedDate}]` : ""}: ${r.snippet}`)
-    .join("\n");
+/** Best-effort domain extraction for source-quality context -- falls back to the raw URL if parsing fails. */
+export function extractDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Executes the research plan -- one search per dimension, not one per
+ * protocol. This is the fix for the core diagnosed failure: a protocol
+ * used to collapse to a single generic search phrase; now each of its
+ * concrete sub-questions (from researchPlan.ts, grounded in the
+ * protocol's own evidenceRequirements) gets its own query. Each query is
+ * the dimension's sub-question itself, redacted through the identity gate
+ * as defense in depth -- the sub-question was already generated from the
+ * abstracted safe-context category, never Martin's raw identity-bearing
+ * text, but this costs nothing to double-check. Degrades to empty results
+ * per dimension when search isn't configured, exactly like before.
+ */
+export async function gatherDimensionEvidence(env: Env, plan: ResearchPlanDimension[]): Promise<DimensionEvidence[]> {
+  return Promise.all(
+    plan.map(async (dimension) => {
+      const query = redactIdentityTerms(dimension.subQuestion);
+      const results = await searchWeb(env, query);
+      return { ...dimension, results };
+    }),
+  );
+}
+
+export interface DimensionCoverage {
+  covered: DimensionEvidence[];
+  uncovered: DimensionEvidence[];
+}
+
+/**
+ * Deterministic coverage check -- the minimum, mechanically verifiable
+ * form of "adequate vs. insufficient evidence": a dimension with zero
+ * search results has no evidence at all, full stop, regardless of what
+ * the synthesis model might otherwise be tempted to say about it.
+ * Distinguishing "adequate" from "technically present but off-topic"
+ * evidence (e.g. a competitor-analysis how-to article for a market-size
+ * question) is not mechanically checkable without another model call --
+ * that's enforced at the prompt level instead (see the synthesis output
+ * contract's explicit rule against exactly this).
+ */
+export function assessDimensionCoverage(dimensionEvidence: DimensionEvidence[]): DimensionCoverage {
+  return {
+    covered: dimensionEvidence.filter((d) => d.results.length > 0),
+    uncovered: dimensionEvidence.filter((d) => d.results.length === 0),
+  };
+}
+
+/**
+ * Formats gathered evidence grouped by protocol/dimension, with domain
+ * and date retained per result -- structured, not a flat blob, so the
+ * synthesis model (and a human reading the Activity Log) can see which
+ * evidence answers which specific sub-question.
+ */
+export function formatDimensionEvidenceForContext(dimensionEvidence: DimensionEvidence[]): string {
+  const withResults = dimensionEvidence.filter((d) => d.results.length > 0);
+  if (withResults.length === 0) return "";
+  return withResults
+    .map((d) => {
+      const protocolName = RESEARCH_PROTOCOL_REGISTRY[d.protocol].name;
+      const lines = d.results.map(
+        (r) => `  - ${r.title} (${r.url}) [source: ${extractDomain(r.url)}]${r.publishedDate ? ` [${r.publishedDate}]` : ""}: ${r.snippet}`,
+      );
+      return `[${protocolName}] Research dimension: "${d.subQuestion}"\n${lines.join("\n")}`;
+    })
+    .join("\n\n");
+}
+
+/**
+ * Surfaces dimensions that returned zero evidence as an explicit warning
+ * block injected into the synthesis prompt -- the mechanism that turns
+ * "missing evidence" into a required Limitation instead of a silent gap
+ * the model might paper over with inference.
+ */
+export function formatUncoveredDimensionsWarning(uncovered: DimensionEvidence[]): string {
+  if (uncovered.length === 0) return "";
+  return `No search evidence was found for the following research dimension(s) -- these MUST be reported as Limitations, never filled in with inference or generic claims:\n${uncovered
+    .map((d) => `- [${RESEARCH_PROTOCOL_REGISTRY[d.protocol].name}] ${d.subQuestion}`)
+    .join("\n")}`;
 }

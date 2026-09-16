@@ -9,6 +9,7 @@ export type SemanticTaskId =
   | "routing.research_specialization_check"
   | "research.context_relevance"
   | "research.protocol_selection"
+  | "research.plan_generation"
   | "research.synthesis"
   | "sales.enquiry_extraction"
   | "sales.matter_summary_drafting"

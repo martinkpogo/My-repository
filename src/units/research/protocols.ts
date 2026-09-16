@@ -93,3 +93,31 @@ export function researchProtocolDetail(ids: ResearchProtocolId[]): string {
       `- ${RESEARCH_PROTOCOL_REGISTRY[id].name}: ${RESEARCH_PROTOCOL_REGISTRY[id].method}\n  Evidence requirements: ${RESEARCH_PROTOCOL_REGISTRY[id].evidenceRequirements}`,
   ).join("\n");
 }
+
+function normalizeProtocolName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * Maps a model-returned protocol name back to its canonical id, tolerant
+ * of minor phrasing variance (case, partial match) since the model is
+ * asked to return the protocol's display name, not its internal id.
+ * Returns null for anything that doesn't clearly match one of the six
+ * registered protocols -- callers must treat that as "couldn't
+ * determine," never guess a nearest neighbor. Shared by protocol
+ * selection (researchAnalyst.ts) and research-plan generation
+ * (researchPlan.ts), which both need to resolve a model-returned protocol
+ * name the same way.
+ */
+export function nameToProtocolId(name: string): ResearchProtocolId | null {
+  const normalized = normalizeProtocolName(name);
+  if (!normalized) return null;
+  const match = RESEARCH_PROTOCOL_IDS.find((id) => {
+    const canonical = normalizeProtocolName(RESEARCH_PROTOCOL_REGISTRY[id].name);
+    // Substring containment is only trusted once the normalized name is
+    // long enough to be a real match rather than a trivial/empty-string
+    // false positive (every string "contains" "").
+    return canonical === normalized || (normalized.length >= 8 && (canonical.includes(normalized) || normalized.includes(canonical)));
+  });
+  return match ?? null;
+}
