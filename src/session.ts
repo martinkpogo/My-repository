@@ -163,6 +163,8 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handleDraftApproval(this.env, state, value === "approve");
         case "marketpaid":
           return marketing.handlePaidMediaApproval(this.env, state, value === "approve");
+        case "researchhandoff":
+          return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         default:
           return Promise.resolve(state);
       }

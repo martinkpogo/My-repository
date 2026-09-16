@@ -6,8 +6,10 @@ import {
   buildSynthesisSystemPrompt,
   capResearchText,
   formatSynthesisForHandoff,
+  handleResearchHandoffApproval,
   resolveResearchHandoffContext,
 } from "./researchAnalyst";
+import type { WorkState } from "../../types";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
 import { validateSynthesis, findUnverifiableSources } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
@@ -448,4 +450,109 @@ test("28. capResearchText self-heals a previously-bloated value across repeated 
   }
   assert.ok(question.length <= MAX_RESEARCH_TEXT_LENGTH);
   assert.ok(question.includes("round 19"), "the most recent round's content must survive capping");
+});
+
+function fakeApprovalEnv(): any {
+  return {
+    TELEGRAM_BOT_TOKEN: "test-token",
+    NOTION_TOKEN: "test-notion-token",
+    NOTION_VERSION: "2025-09-03",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+  };
+}
+
+function fakeStateWithPendingHandoff(): WorkState {
+  return {
+    workId: "work_200",
+    chatId: 1,
+    unit: "Research & Intelligence",
+    hat: "Research & Intelligence Analyst",
+    stage: "awaiting_research_handoff_approval",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    pendingResearchHandoff: {
+      unit: "Marketing",
+      hat: "Marketing Strategist",
+      reason: "Directly informs marketing positioning.",
+      handoffTitle: "R&I research for Marketing Strategist: test",
+      verifiedFactsAndSources: "Findings:\n- The market is growing.",
+    },
+  };
+}
+
+function mockNotionAndTelegramFetch(notionShouldFail = false): { restore: () => void; notionCallsByDataSource: string[] } {
+  const originalFetch = globalThis.fetch;
+  const notionCallsByDataSource: string[] = [];
+  globalThis.fetch = (async (urlArg: string, init: any) => {
+    const url = String(urlArg);
+    if (url.startsWith("https://api.notion.com")) {
+      if (url.endsWith("/pages") && init?.method === "POST") {
+        const body = JSON.parse(init.body);
+        notionCallsByDataSource.push(body.parent?.data_source_id);
+        if (notionShouldFail && body.parent?.data_source_id === "handoffs-ds") {
+          return new Response("notion error", { status: 500 });
+        }
+      }
+      return new Response(JSON.stringify({ id: "page_1", url: "https://notion.so/page_1", properties: {} }), { status: 200 });
+    }
+    if (url.startsWith("https://api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${url}`);
+  }) as typeof fetch;
+  return {
+    restore: () => {
+      globalThis.fetch = originalFetch;
+    },
+    notionCallsByDataSource,
+  };
+}
+
+test("29. handleResearchHandoffApproval sends nothing to Notion when there's no pending handoff to act on", async () => {
+  const { restore, notionCallsByDataSource } = mockNotionAndTelegramFetch();
+  try {
+    const state = fakeStateWithPendingHandoff();
+    state.pendingResearchHandoff = undefined;
+    await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
+    assert.strictEqual(notionCallsByDataSource.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("30. handleResearchHandoffApproval on reject clears the pending handoff without creating a Handoff record", async () => {
+  const { restore, notionCallsByDataSource } = mockNotionAndTelegramFetch();
+  try {
+    const state = fakeStateWithPendingHandoff();
+    const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, false);
+    assert.strictEqual(result.pendingResearchHandoff, undefined);
+    assert.ok(!notionCallsByDataSource.includes("handoffs-ds"));
+  } finally {
+    restore();
+  }
+});
+
+test("31. handleResearchHandoffApproval on approve creates the Handoff record and clears the pending proposal", async () => {
+  const { restore, notionCallsByDataSource } = mockNotionAndTelegramFetch();
+  try {
+    const state = fakeStateWithPendingHandoff();
+    const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
+    assert.strictEqual(result.pendingResearchHandoff, undefined);
+    assert.ok(notionCallsByDataSource.includes("handoffs-ds"), "a Handoff record must be created on approval");
+  } finally {
+    restore();
+  }
+});
+
+test("32. handleResearchHandoffApproval keeps the pending proposal when Handoff creation fails, so approving again can retry it", async () => {
+  const { restore } = mockNotionAndTelegramFetch(true);
+  try {
+    const state = fakeStateWithPendingHandoff();
+    const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
+    assert.ok(result.pendingResearchHandoff, "a failed creation must not silently discard the proposal");
+    assert.strictEqual(result.pendingResearchHandoff!.hat, "Marketing Strategist");
+  } finally {
+    restore();
+  }
 });
