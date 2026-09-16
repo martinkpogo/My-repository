@@ -58,3 +58,4 @@ TELEGRAM_GROUP_CHAT_ID = "-1004435157576"
 #   OPENROUTER_API_KEY (optional — same, additional fallback)
 #   CEREBRAS_API_KEY (optional — same, additional fallback)
 #   GEMINI_API_KEY (optional — same, additional fallback)
+#   SAMBANOVA_API_KEY (optional — same, additional fallback)

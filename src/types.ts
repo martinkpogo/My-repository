@@ -58,6 +58,8 @@ export interface Env {
   CEREBRAS_API_KEY?: string;
   /** Google AI Studio (Gemini) -- same fallback tier as the other OpenAI-compatible providers above. */
   GEMINI_API_KEY?: string;
+  /** SambaNova Cloud -- same fallback tier as the other OpenAI-compatible providers above. */
+  SAMBANOVA_API_KEY?: string;
 }
 
 export type Unit =
