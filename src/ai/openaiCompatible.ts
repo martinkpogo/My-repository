@@ -4,7 +4,7 @@ import { AiProvider, AiTask, InfrastructureError, ProviderAdapterResult, Provide
 /**
  * Generic adapter for any provider exposing an OpenAI-compatible
  * /chat/completions endpoint -- covers most free-tier inference
- * providers (NVIDIA NIM, Groq, OpenRouter, and others) without a
+ * providers (NVIDIA NIM, Groq, OpenRouter, Cerebras, and others) without a
  * bespoke class per provider. Added as fallback options behind
  * Workers AI so a daily quota exhaustion on one provider doesn't block
  * every AI-driven Hat/Unit at once -- confirmed live as a real failure
@@ -24,7 +24,7 @@ export interface OpenAiCompatibleConfig {
   id: ProviderId;
   baseUrl: string;
   /** Which optional Env field holds this provider's API key -- eligibility is simply "is it set." */
-  apiKeyEnvVar: "NVIDIA_NIM_API_KEY" | "GROQ_API_KEY" | "OPENROUTER_API_KEY";
+  apiKeyEnvVar: "NVIDIA_NIM_API_KEY" | "GROQ_API_KEY" | "OPENROUTER_API_KEY" | "CEREBRAS_API_KEY";
   model: string;
   lightModel?: string;
 }
@@ -102,4 +102,12 @@ export const OPENROUTER_PROVIDER = new OpenAiCompatibleProvider({
   baseUrl: "https://openrouter.ai/api/v1",
   apiKeyEnvVar: "OPENROUTER_API_KEY",
   model: "meta-llama/llama-3.3-70b-instruct:free",
+});
+
+export const CEREBRAS_PROVIDER = new OpenAiCompatibleProvider({
+  id: "cerebras",
+  baseUrl: "https://api.cerebras.ai/v1",
+  apiKeyEnvVar: "CEREBRAS_API_KEY",
+  model: "llama-3.3-70b",
+  lightModel: "llama3.1-8b",
 });

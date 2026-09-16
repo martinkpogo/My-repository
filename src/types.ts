@@ -54,6 +54,8 @@ export interface Env {
   NVIDIA_NIM_API_KEY?: string;
   GROQ_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  /** Cerebras Cloud -- same fallback tier as the other OpenAI-compatible providers above. */
+  CEREBRAS_API_KEY?: string;
 }
 
 export type Unit =

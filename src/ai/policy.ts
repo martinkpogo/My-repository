@@ -3,7 +3,7 @@ import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEva
 import { isSemanticTaskId } from "../dataBoundary/registry";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
-import { GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER } from "./openaiCompatible";
+import { CEREBRAS_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
 import { sendMessage } from "../telegram";
 
@@ -17,6 +17,7 @@ const DEFAULT_PROVIDERS: AiProvider[] = [
   NVIDIA_NIM_PROVIDER,
   GROQ_PROVIDER,
   OPENROUTER_PROVIDER,
+  CEREBRAS_PROVIDER,
 ];
 
 export class AiPolicyExecutor {
