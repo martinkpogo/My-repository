@@ -48,3 +48,34 @@ test("a custom OpenAiCompatibleProvider carries the configured provider id", () 
   });
   assert.strictEqual(provider.id, "custom-provider");
 });
+
+test("a provider whose fetch is aborted (slow/hung upstream) reports a clear timeout error, not a raw AbortError", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = (async (_url: string, init?: { signal?: AbortSignal }) => {
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    });
+  }) as typeof fetch;
+
+  const provider = new OpenAiCompatibleProvider({
+    id: "slow-provider",
+    baseUrl: "https://example.com/v1",
+    apiKeyEnvVar: "GROQ_API_KEY",
+    model: "some-model",
+    timeoutMs: 5,
+  });
+
+  const result = await provider.execute({ GROQ_API_KEY: "key" } as any, dummyTask);
+
+  assert.strictEqual(result.success, false);
+  if (!result.success) {
+    assert.match(result.error.message, /timed out after \d+ms/);
+  }
+});

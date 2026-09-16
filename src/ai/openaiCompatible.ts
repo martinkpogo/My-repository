@@ -33,7 +33,20 @@ export interface OpenAiCompatibleConfig {
     | "SAMBANOVA_API_KEY";
   model: string;
   lightModel?: string;
+  /** Overridable for tests only -- production providers all use DEFAULT_PROVIDER_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
+
+// Confirmed live: nvidia-nim once took long enough to answer that
+// Cloudflare's own edge gave up with a 524 before our fetch would have.
+// With up to 7 providers in the fallback chain and some call sites
+// (e.g. R&I's protocol selection -> plan generation) making more than
+// one AI call per user turn, an unbounded per-provider wait can blow
+// past what Telegram will wait for on its webhook, making the whole
+// reply look like silence rather than a reported failure. Each provider
+// gets a hard timeout so a slow one fails over quickly instead of
+// stalling the whole chain.
+export const DEFAULT_PROVIDER_TIMEOUT_MS = 12_000;
 
 export class OpenAiCompatibleProvider implements AiProvider {
   public readonly id: ProviderId;
@@ -51,6 +64,9 @@ export class OpenAiCompatibleProvider implements AiProvider {
   public async execute(env: Env, task: AiTask): Promise<ProviderAdapterResult> {
     const apiKey = env[this.config.apiKeyEnvVar];
     const model = task.light && this.config.lightModel ? this.config.lightModel : this.config.model;
+    const timeoutMs = this.config.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
+    const timeoutController = new AbortController();
+    const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.config.baseUrl}/chat/completions`, {
         method: "POST",
@@ -64,6 +80,7 @@ export class OpenAiCompatibleProvider implements AiProvider {
           temperature: task.temperature ?? 0.2,
           max_tokens: task.maxTokens ?? 1024,
         }),
+        signal: timeoutController.signal,
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
@@ -76,10 +93,14 @@ export class OpenAiCompatibleProvider implements AiProvider {
       const rawText = data.choices?.[0]?.message?.content ?? "";
       return { success: true, response: { rawText } };
     } catch (err: any) {
+      const message =
+        err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : err?.message || `${this.id} execution failed`;
       return {
         success: false,
-        error: new InfrastructureError(this.id, err?.message || `${this.id} execution failed`),
+        error: new InfrastructureError(this.id, message),
       };
+    } finally {
+      clearTimeout(timeoutHandle);
     }
   }
 }
