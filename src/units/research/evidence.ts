@@ -110,3 +110,27 @@ export function validateSynthesis(synthesis: ResearchSynthesis): SynthesisValida
 
   return { valid: true };
 }
+
+/**
+ * This Hat has no live browsing/search tool -- its only actual source of
+ * facts is whatever text was supplied to it (a Handoff's sanitized
+ * context, or Martin's own direct chat message). validateSynthesis alone
+ * can't catch a model inventing a plausible-sounding source (confirmed
+ * live: asked for competitor research with no supplied context, it
+ * returned fabricated companies, a fabricated "Market Research Report",
+ * and fabricated URLs, each internally well-formed and passing every
+ * validateSynthesis check). This is the second, independent gate: a
+ * Source is only trusted if its name or URL literally appears in the
+ * context the model was actually given -- if it doesn't, this Hat could
+ * not possibly have obtained it honestly, and it's treated as fabricated,
+ * not published, regardless of how well-formed the rest of the synthesis
+ * is.
+ */
+export function findUnverifiableSources(synthesis: ResearchSynthesis, suppliedContext: string): SourceRecord[] {
+  const normalizedContext = suppliedContext.toLowerCase();
+  return synthesis.sources.filter((s) => {
+    const nameMatches = s.source.trim().length > 0 && normalizedContext.includes(s.source.trim().toLowerCase());
+    const urlMatches = Boolean(s.url) && normalizedContext.includes(s.url!.trim().toLowerCase());
+    return !nameMatches && !urlMatches;
+  });
+}

@@ -9,7 +9,7 @@ import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import type { ResearchProtocolId } from "./protocols";
 import { isResearchProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
 import type { ResearchSynthesis } from "./evidence";
-import { validateSynthesis } from "./evidence";
+import { findUnverifiableSources, validateSynthesis } from "./evidence";
 
 /**
  * R&I execution mechanics -- one dedicated runtime for the single active
@@ -308,6 +308,22 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
+  // This Hat has no live browsing/search tool -- the only facts it could
+  // honestly have are whatever was in `context` above. A source that
+  // doesn't appear there could not have been obtained honestly, so it's
+  // treated as fabricated regardless of how well-formed the rest of the
+  // output is (see findUnverifiableSources for why this exists).
+  const unverifiable = findUnverifiableSources(synthesis, context);
+  if (unverifiable.length > 0) {
+    console.error(`R&I synthesis cited unverifiable source(s) for work ${state.workId}: ${unverifiable.map((s) => s.source).join(", ")}`);
+    await handleSynthesisFailure(
+      env,
+      state,
+      `This Hat has no live browsing/search access, so it can only cite sources actually supplied to it — it returned source(s) not present in the supplied context (${unverifiable.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. If you have real source material, paste it in and I'll work from that.`,
+    );
+    return state;
+  }
+
   return deliverSynthesis(env, state, synthesis);
 }
 
@@ -347,6 +363,8 @@ function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract
     researchProtocolDetail(protocols),
     "=== RESEARCH OUTPUT CONTRACT ===",
     "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Implication MUST reference the Finding index/indexes it is based on. If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
+    "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
+    "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"Supplied context\" text below (or the research question itself, if it already states facts). A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
     `Return JSON exactly matching this shape:
 {
@@ -356,7 +374,7 @@ function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract
   "implications": [{"statement": "...", "basedOnFindingIndexes": [0]}],
   "limitations": [{"statement": "...", "relatedTo": "..."}]
 }
-If you have no real sources available to you (no live browsing/search access), state this plainly as a Limitation and keep evidence/findings/implications empty rather than fabricating sources — an empty, honest result is correct; a fabricated one is not.`,
+Every "source" and "url" value you return will be checked against the supplied context text and rejected outright if it doesn't literally appear there — so do not invent one, even a plausible-sounding placeholder.`,
   ].join("\n\n");
 }
 
