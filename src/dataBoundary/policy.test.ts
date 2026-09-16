@@ -4,13 +4,16 @@ import { SEMANTIC_TASK_REGISTRY, isSemanticTaskId } from "./registry";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "./policy";
 import type { BoundaryContext, DataTransformation, SemanticTaskId, TransformationResult } from "./types";
 
-test("1. Validates all 12 semantic task IDs in SEMANTIC_TASK_REGISTRY", () => {
+test("1. Validates all 15 semantic task IDs in SEMANTIC_TASK_REGISTRY", () => {
   const expectedTaskIds: SemanticTaskId[] = [
     "routing.enquiry_classification",
     "routing.marketing_specialization_check",
     "chat.general_reply",
     "marketing.intake_classification",
     "marketing.hat_action_decision",
+    "routing.research_specialization_check",
+    "research.protocol_selection",
+    "research.synthesis",
     "sales.enquiry_extraction",
     "sales.matter_summary_drafting",
     "sales.call_prep_briefing",
@@ -20,7 +23,7 @@ test("1. Validates all 12 semantic task IDs in SEMANTIC_TASK_REGISTRY", () => {
     "finance.quote_judgment",
   ];
 
-  assert.strictEqual(Object.keys(SEMANTIC_TASK_REGISTRY).length, 12);
+  assert.strictEqual(Object.keys(SEMANTIC_TASK_REGISTRY).length, 15);
   for (const id of expectedTaskIds) {
     assert.strictEqual(isSemanticTaskId(id), true);
     assert.ok(SEMANTIC_TASK_REGISTRY[id]);

@@ -4,6 +4,7 @@ import { sendMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
+import { researchProtocolSummaryList } from "./units/research/protocols";
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page
@@ -204,6 +205,34 @@ Return JSON: {"specialization": "marketing"} or {"specialization": "not_marketin
   return result?.specialization ?? null;
 }
 
+/**
+ * Coarse gate for Research & Intelligence, mirroring classifyMarketingTask:
+ * is this a genuine research question (business/market/competitive/
+ * customer/environmental intelligence, or evidence validation), as opposed
+ * to small talk or a general question about the business itself? Only
+ * needed in the R&I topic and the DM fallback -- a genuine research
+ * question still gets its own protocol-selection classification inside
+ * research.handleDirectRequest; this is purely "should this become a work
+ * item at all." Returns null on failure -- callers fall through to
+ * general chat rather than guessing.
+ */
+async function classifyResearchTask(env: Env, text: string): Promise<"research" | "not_research" | null> {
+  const result = await aiJson<{ specialization: "research" | "not_research" }>(env, {
+    taskId: "routing.research_specialization_check",
+    system: `You classify incoming messages for ENIG's Research & Intelligence Unit. Below are the research protocols R&I can execute:
+
+${researchProtocolSummaryList()}
+
+Classify as "research" if Martin is asking for an actual research question to be investigated -- e.g. "what does the market for X look like", "who are our competitors in Y and how do they position", "research this company", "what do customers in this segment care about", "check whether this claim holds up". This includes short or informally-worded requests, as long as they ask for evidence-based investigation into a business, market, competitor, customer/audience, or environmental/regulatory question.
+
+Classify as "not_research" if the message is: (a) general small talk or a question about the business itself unrelated to investigating something external, or (b) a request R&I has no protocol for (e.g. asking it to make a strategic/marketing/sales/pricing decision, rather than research to inform one).
+
+Return JSON: {"specialization": "research"} or {"specialization": "not_research"}.`,
+    user: text,
+  });
+  return result?.specialization ?? null;
+}
+
 // User-facing text for a Sales enquiry that arrives while
 // SALES_EXECUTIVE_PAUSED is true. Kept as one constant so the DM path and
 // the dedicated Sales-topic path can't drift apart.
@@ -294,6 +323,22 @@ export async function routeIncomingText(
     return;
   }
 
+  // The R&I topic already declares its own intent, same as Marketing/Sales.
+  if (unitContext === "Research & Intelligence") {
+    const researchCheck = await classifyResearchTask(env, text);
+    if (researchCheck === "research") {
+      const workId = newWorkId();
+      const stub = getSessionStub(env, workId);
+      await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId);
+      await setActiveWorkId(env, chatId, threadId, workId);
+      await stub.handleResearchRequest(text);
+      return;
+    }
+    const reply = await generalChatReply(env, "Research & Intelligence", chatId, threadId, text);
+    await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
+    return;
+  }
+
   // Finance, Business Development, and the other not-yet-built Units don't
   // take structured work from chat, but the topic isn't dead either — hold
   // open conversation there, with memory, rather than a rigid refusal.
@@ -321,10 +366,21 @@ export async function routeIncomingText(
 
   const handled = await classifyAndGateSalesEnquiry(env, chatId, text, threadId);
   if (handled) return;
-  // Not a new enquiry and not Marketing -- DM is Martin's general front
-  // door, not scoped to one Unit, so it isn't held to Sales's
-  // client_confidential gate just because a genuine sales enquiry was
-  // ruled out above.
+
+  const researchCheck = await classifyResearchTask(env, text);
+  if (researchCheck === "research") {
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleResearchRequest(text);
+    return;
+  }
+
+  // Not a new enquiry, not Marketing, not Research -- DM is Martin's
+  // general front door, not scoped to one Unit, so it isn't held to
+  // Sales's client_confidential gate just because a genuine sales enquiry
+  // was ruled out above.
   const reply = await generalDmReply(env, chatId, threadId, text);
   await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
 }

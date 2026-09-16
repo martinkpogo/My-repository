@@ -3,6 +3,7 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./units/smbd/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
+import * as research from "./units/research/researchAnalyst";
 import { sendMessage } from "./telegram";
 import { logActivity } from "./log";
 
@@ -43,6 +44,10 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => marketing.handleMarketingIntake(this.env, state, text));
   }
 
+  async handleResearchRequest(text: string): Promise<WorkState> {
+    return this.execute((state) => research.handleDirectRequest(this.env, state, text));
+  }
+
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (state.awaiting) {
@@ -64,6 +69,10 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":
           return marketing.handleMarketingClarification(this.env, state, text);
+        case "research_clarification":
+          return research.handleResearchClarification(this.env, state, text);
+        case "research_feedback":
+          return research.handleResearchFeedback(this.env, state, text);
         default:
           return sendMessage(
             this.env,
@@ -84,6 +93,16 @@ export class WorkSession extends DurableObject<Env> {
    */
   async runFinancePickup(): Promise<WorkState> {
     return this.execute((state) => finance.handlePickup(this.env, state));
+  }
+
+  /**
+   * The R&I side of a <Unit> -> Research & Intelligence execution boundary,
+   * invoked independently by index.ts's scheduled Research-Handoff
+   * discovery once a Pending Handoff addressed to Research & Intelligence
+   * is found — mirrors runFinancePickup exactly.
+   */
+  async runResearchPickup(): Promise<WorkState> {
+    return this.execute((state) => research.handlePickup(this.env, state));
   }
 
   /**

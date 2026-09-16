@@ -91,7 +91,9 @@ export interface WorkState {
     | "matter_redo_reason"
     | "entity_redo_reason"
     | "marketing_feedback"
-    | "marketing_clarification";
+    | "marketing_clarification"
+    | "research_clarification"
+    | "research_feedback";
   createdAt: string;
   updatedAt: string;
 
@@ -144,6 +146,13 @@ export interface WorkState {
   pendingTransition?: { toHat: string; reason: string };
   /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
   pendingPaidMediaAction?: { description: string };
+
+  /** The research question a R&I work item is answering -- carried across clarification/feedback loops. */
+  researchQuestion?: string;
+  /** Sanitized supplied context (from a Handoff's own record, or Martin's direct chat request). */
+  researchContext?: string;
+  /** Preserved per the protocol-selection execution record requirement -- which protocol(s) this work item activated. */
+  selectedResearchProtocols?: import("./units/research/protocols").ResearchProtocolId[];
 }
 
 export interface SessionSummary {

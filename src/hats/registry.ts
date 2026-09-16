@@ -33,6 +33,11 @@ export interface HatIdentity {
 
 export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sales", specialization: "Sales" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
+export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
+  name: "Research & Intelligence Analyst",
+  unit: "Research & Intelligence",
+  specialization: "Research Intelligence",
+};
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {
   "Marketing Strategist": MARKETING_STRATEGIST,
@@ -48,6 +53,7 @@ export const MARKETING_HAT_NAMES = Object.keys(MARKETING_HAT_REGISTRY) as Market
 export const ALL_HATS: HatIdentity[] = [
   SALES_EXECUTIVE,
   VALUE_BASED_PRICING_ASSESSOR,
+  RESEARCH_INTELLIGENCE_ANALYST,
   ...MARKETING_HAT_NAMES.map((name) => MARKETING_HAT_REGISTRY[name] as HatIdentity),
 ];
 

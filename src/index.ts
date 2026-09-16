@@ -155,10 +155,12 @@ export default {
       try {
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSales = await discoverPendingSalesHandoffs(env);
+        const pickedForResearch = await discoverPendingResearchHandoffs(env);
         await checkStaleHandoffs(env);
-        return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked, sales_handoffs_picked_up: pickedForSales }), {
-          headers: { "content-type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({ ok: true, handoffs_picked_up: picked, sales_handoffs_picked_up: pickedForSales, research_handoffs_picked_up: pickedForResearch }),
+          { headers: { "content-type": "application/json" } },
+        );
       } catch (err) {
         console.error("Unhandled error in /admin/run-finance-discovery", err);
         await sendMessage(
@@ -230,6 +232,7 @@ export default {
     try {
       await discoverPendingFinanceHandoffs(env);
       await discoverPendingSalesHandoffs(env);
+      await discoverPendingResearchHandoffs(env);
       await checkStaleHandoffs(env);
     } catch (err) {
       console.error("Unhandled error in scheduled discovery run", err);
@@ -376,6 +379,53 @@ async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
   return pickedUp;
 }
 
+/**
+ * The R&I side of a <Unit> -> Research & Intelligence execution boundary,
+ * mirroring discoverPendingFinanceHandoffs exactly -- the creating Unit's
+ * Hat code only ever creates the Handoff (Status: Pending) and returns;
+ * this runs on its own schedule and discovers it independently.
+ */
+async function discoverPendingResearchHandoffs(env: Env): Promise<number> {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    and: [
+      { property: "Status", select: { equals: "Pending" } },
+      { property: "To Unit", select: { equals: "Research & Intelligence" } },
+      { property: "Type", select: { equals: "Work" } },
+    ],
+  });
+
+  let pickedUp = 0;
+  for (const handoff of pending) {
+    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    if (!workId) {
+      // No live Telegram session behind this Handoff -- same
+      // no-prior-session case discoverPendingFinanceHandoffs handles.
+      // Defaults to Martin's DM, his preferred front door.
+      try {
+        workId = newWorkId();
+        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+        const threadId = undefined;
+        const stub = getSessionStub(env, workId);
+        await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId, { handoffId: handoff.id });
+        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        console.log(`Created work item ${workId} for externally-created Research Handoff ${handoff.id} (no prior session)`);
+      } catch (err) {
+        console.error(`Failed to create a work item for externally-created Research Handoff ${handoff.id}`, err);
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+        continue;
+      }
+    }
+    const stub = getSessionStub(env, workId);
+    try {
+      await stub.runResearchPickup();
+      pickedUp++;
+    } catch (err) {
+      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+    }
+  }
+  return pickedUp;
+}
+
 async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
   if (update.message) {
     const chatId = update.message.chat.id;
@@ -452,8 +502,8 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await env.STATE_KV.put("last_cron_run", new Date().toISOString());
       const unitHere = resolveUnitForThread(env, threadId);
       try {
-        if (unitHere === "Finance" || unitHere === "Sales") {
-          // These two are the only Units with real pickup logic. Discovery
+        if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Research & Intelligence") {
+          // These three are the only Units with real pickup logic. Discovery
           // only counts a Handoff as "picked up" if it has a
           // handoff_workitem KV mapping (tied to a live Telegram session);
           // a Handoff created directly in Notion -- e.g. by the isolated
@@ -465,9 +515,10 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           // the same "No Handoffs pending" message.
           const picked = await discoverPendingFinanceHandoffs(env);
           const pickedForSales = await discoverPendingSalesHandoffs(env);
+          const pickedForResearch = await discoverPendingResearchHandoffs(env);
           await checkStaleHandoffs(env);
           const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
-          const pickedForThisUnit = unitHere === "Finance" ? picked : pickedForSales;
+          const pickedForThisUnit = unitHere === "Finance" ? picked : unitHere === "Sales" ? pickedForSales : pickedForResearch;
           let reply: string;
           if (pendingCount === 0) {
             reply = `No Handoffs pending for ${unitHere}.`;
@@ -482,21 +533,21 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           // summary across both real pickup directions.
           const picked = await discoverPendingFinanceHandoffs(env);
           const pickedForSales = await discoverPendingSalesHandoffs(env);
+          const pickedForResearch = await discoverPendingResearchHandoffs(env);
           await checkStaleHandoffs(env);
           await sendMessage(
             env,
             chatId,
-            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales.`,
+            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForResearch} picked up for Research & Intelligence.`,
             undefined,
             threadId,
           );
         } else {
-          // Marketing, Business Development, Strategy, Research &
-          // Intelligence, Creative & Design, and Operations -- no pickup
-          // logic exists for any of these (Marketing only ever receives
-          // work from chat, never a Handoff), so just report whether
-          // anything is queued for this Unit rather than attempting a
-          // pickup that doesn't exist.
+          // Marketing, Business Development, Strategy, Creative & Design,
+          // and Operations -- no pickup logic exists for any of these
+          // (Marketing only ever receives work from chat, never a
+          // Handoff), so just report whether anything is queued for this
+          // Unit rather than attempting a pickup that doesn't exist.
           const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
           const reply =
             pendingCount > 0
