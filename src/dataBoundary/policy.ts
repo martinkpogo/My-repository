@@ -68,10 +68,40 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
  * Martin's own direct chat requests, never a real client name) are
  * actually eligible today.
  */
+/**
+ * The free-tier OpenAI-compatible fallback providers (nvidia-nim, groq,
+ * openrouter, together-ai) get the exact same allowedSensitivities as
+ * workers-ai -- they exist purely as infrastructure fallback for the
+ * same tier Workers AI already serves (added after Cloudflare's daily
+ * quota exhaustion blocked every AI call account-wide), not as a basis
+ * for widening what's allowed at client_confidential. None of their
+ * training-data/retention policies has been independently verified
+ * beyond "free tier, OpenAI-compatible API" -- that verification is
+ * exactly the bar the Sales Executive pause is still waiting on, and
+ * adding these providers here does not clear it.
+ */
+const FALLBACK_PROVIDER_SENSITIVITIES = new Set<SensitivityLevel>(["public", "internal", "business_sensitive"]);
+
 export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId, ProviderEligibilityRule>>> = {
   "workers-ai": {
     providerId: "workers-ai",
-    allowedSensitivities: new Set<SensitivityLevel>(["public", "internal", "business_sensitive"]),
+    allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
+  },
+  "nvidia-nim": {
+    providerId: "nvidia-nim",
+    allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
+  },
+  groq: {
+    providerId: "groq",
+    allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
+  },
+  openrouter: {
+    providerId: "openrouter",
+    allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
+  },
+  "together-ai": {
+    providerId: "together-ai",
+    allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
   },
 };
 
