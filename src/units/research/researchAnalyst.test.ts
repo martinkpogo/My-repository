@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert";
 import {
   MAX_RESEARCH_TEXT_LENGTH,
+  MAX_SUPPLIED_EVIDENCE_LENGTH,
   buildEffectiveResearchContext,
   buildSynthesisSystemPrompt,
   capResearchText,
+  capSuppliedEvidence,
   formatSynthesisForHandoff,
   handleResearchHandoffApproval,
   resolveResearchHandoffContext,
@@ -585,4 +587,17 @@ test("33. routeToConsumingHat proposes nothing for a synthesis with zero Finding
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("34. capSuppliedEvidence leaves short evidence untouched", () => {
+  assert.strictEqual(capSuppliedEvidence("Short evidence blob."), "Short evidence blob.");
+});
+
+test("35. capSuppliedEvidence bounds long evidence to MAX_SUPPLIED_EVIDENCE_LENGTH, keeping the head (Martin's own supplied context matters most) and noting the truncation -- confirmed live root cause: even after every per-item size fix, a full multi-protocol synthesis request still landed right at Groq's flat 8000-token ceiling", () => {
+  const head = "IMPORTANT_HEAD_CONTEXT";
+  const long = head + "x".repeat(MAX_SUPPLIED_EVIDENCE_LENGTH * 2);
+  const capped = capSuppliedEvidence(long);
+  assert.ok(capped.startsWith(head));
+  assert.ok(capped.includes("truncated"));
+  assert.ok(capped.length < long.length);
 });
