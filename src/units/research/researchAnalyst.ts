@@ -416,7 +416,7 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   let webResultCount = 0;
   let webEvidence = "";
   if (isWebSearchConfigured(env)) {
-    const queries = buildSearchQueries(relevance, protocols);
+    const queries = buildSearchQueries(question, relevance, protocols);
     const allResults = (await Promise.all(queries.map((q) => searchWeb(env, q)))).flat();
     webResultCount = allResults.length;
     webEvidence = formatWebResultsForContext(allResults);

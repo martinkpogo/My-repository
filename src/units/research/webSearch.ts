@@ -35,17 +35,30 @@ const PROTOCOL_QUERY_FOCUS: Partial<Record<ResearchProtocolId, string>> = {
 
 /**
  * Builds up to MAX_QUERIES_PER_REQUEST search queries, one per selected
- * protocol that has a query focus, from the relevance statement (already
- * grounded in the Research-Safe Consultancy Context, never raw chat
- * text) -- deterministic and pure so it's directly testable without
- * mocking a search provider or an LLM call.
+ * protocol that has a query focus, from the actual research question
+ * plus the relevance statement (category/geography grounding, derived
+ * from the Research-Safe Consultancy Context) -- deterministic and pure
+ * so it's directly testable without mocking a search provider or an LLM
+ * call.
+ *
+ * Earlier versions used only the relevance statement, on the theory that
+ * the raw question might carry something to protect. Confirmed live to
+ * be overcautious: the privacy risk was always specifically the
+ * consultancy's own real name/founder (still stripped below via
+ * redactIdentityTerms, and never present in the question anyway -- see
+ * chat.ts's persona rules), not the question's ordinary specificity.
+ * Without the question's own concrete terms, Tavily had nothing to
+ * anchor to and returned generic evergreen definition pages ("what is
+ * competitive positioning") instead of real market/competitor
+ * information. Including the question fixes that while the redaction
+ * gate still catches an identity term if one somehow appeared.
  */
-export function buildSearchQueries(relevance: string, protocols: ResearchProtocolId[]): string[] {
+export function buildSearchQueries(question: string, relevance: string, protocols: ResearchProtocolId[]): string[] {
   return protocols
     .map((id) => PROTOCOL_QUERY_FOCUS[id])
     .filter((focus): focus is string => Boolean(focus))
     .slice(0, MAX_QUERIES_PER_REQUEST)
-    .map((focus) => redactIdentityTerms(`${relevance} ${focus}`.trim()));
+    .map((focus) => redactIdentityTerms(`${question} ${relevance} ${focus}`.replace(/\s+/g, " ").trim()));
 }
 
 export function isWebSearchConfigured(env: Env): boolean {

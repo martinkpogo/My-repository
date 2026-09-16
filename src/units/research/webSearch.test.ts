@@ -4,24 +4,33 @@ import { buildSearchQueries, formatWebResultsForContext, isWebSearchConfigured, 
 import type { WebSearchResult } from "./webSearch";
 
 test("buildSearchQueries builds one query per protocol that has a query focus", () => {
-  const queries = buildSearchQueries("Research into the market for strategy consulting in Ghana.", ["market_industry", "competitive"]);
+  const queries = buildSearchQueries(
+    "Who are our main competitors and how do they position?",
+    "This concerns the market for strategy-led consulting in Ghana.",
+    ["market_industry", "competitive"],
+  );
   assert.strictEqual(queries.length, 2);
   assert.ok(queries[0].includes("market size, demand, and growth trends"));
   assert.ok(queries[1].includes("competitors and market positioning"));
 });
 
+test("buildSearchQueries includes the actual question, not just the abstracted relevance framing -- fixes the generic-results regression seen live", () => {
+  const queries = buildSearchQueries("Who are our main competitors and how do they position?", "Category framing only.", ["competitive"]);
+  assert.ok(queries[0].includes("Who are our main competitors and how do they position?"));
+});
+
 test("buildSearchQueries excludes Evidence & Source Validation -- it has no query topic of its own", () => {
-  const queries = buildSearchQueries("Relevance statement.", ["evidence_validation"]);
+  const queries = buildSearchQueries("A question.", "Relevance statement.", ["evidence_validation"]);
   assert.strictEqual(queries.length, 0);
 });
 
 test("buildSearchQueries caps at MAX_QUERIES_PER_REQUEST even with more protocols selected", () => {
-  const queries = buildSearchQueries("Relevance.", ["business_company", "market_industry", "competitive", "customer_audience", "environmental_regulatory"]);
+  const queries = buildSearchQueries("A question.", "Relevance.", ["business_company", "market_industry", "competitive", "customer_audience", "environmental_regulatory"]);
   assert.strictEqual(queries.length, MAX_QUERIES_PER_REQUEST);
 });
 
-test("buildSearchQueries redacts identity terms from the relevance statement -- defense in depth for external queries", () => {
-  const queries = buildSearchQueries("Research ENIG's own market; Martin wants this.", ["market_industry"]);
+test("buildSearchQueries redacts identity terms from both the question and the relevance statement -- defense in depth for external queries", () => {
+  const queries = buildSearchQueries("What is ENIG's position vs competitors?", "Research ENIG's own market; Martin wants this.", ["market_industry"]);
   assert.ok(!queries[0].includes("ENIG"));
   assert.ok(!queries[0].includes("Martin"));
 });
