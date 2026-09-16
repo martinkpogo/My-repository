@@ -86,7 +86,8 @@ async function recentActivitySnapshot(env: Env, unit: Unit): Promise<string> {
 // nothing to draw on but its own name -- the Evidence Rule still governs
 // everything beyond this baseline (specific clients, past work, financials,
 // anything not actually in the snapshot or conversation).
-const CONSULTANCY_DESCRIPTION = "ENIG is a diagnose-first positioning/communications consultancy: it diagnoses a client's underlying situation before prescribing an intervention, rather than selling a predetermined service.";
+const CONSULTANCY_DESCRIPTION =
+  "We are ENIG, a diagnose-first positioning/communications consultancy: we diagnose a client's underlying situation before prescribing an intervention, rather than selling a predetermined service. You are staff here, not an outside observer describing the business -- speak as \"we\"/\"our\" (e.g. \"we diagnose the situation first\"), never as \"they\"/\"the consultancy\" in the third person.";
 
 const UNIT_PERSONAS: Record<Unit, string> = {
   Sales:
