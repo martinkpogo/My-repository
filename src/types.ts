@@ -32,6 +32,15 @@ export interface Env {
 
   /** Shared secret for the Gmail-polling Apps Script -> /email/webhook. */
   EMAIL_WEBHOOK_SECRET?: string;
+
+  /**
+   * Tavily search API key, used only by Research & Intelligence's live
+   * web-search capability (src/units/research/webSearch.ts). Optional --
+   * unset means R&I stays closed-book (reasons only over supplied
+   * context, same as before this capability existed) rather than
+   * failing; never a required secret for the rest of the runtime.
+   */
+  TAVILY_API_KEY?: string;
 }
 
 export type Unit =
