@@ -43,8 +43,15 @@ export const SALES_EXECUTIVE_PAUSED = true;
 // personal information hasn't been confirmed acceptable, the same reason
 // Sales Executive itself is paused. A bare "..." fallback made that look
 // like a mystery bug rather than the known, deliberate policy it is.
+// Sales chat stays classified client_confidential (Martin could paste real
+// enquiry content into that topic's freeform chat), which no eligible
+// provider can serve today -- workers-ai is approved for business_sensitive
+// and below only, pending a provider with an acceptable personal-data/
+// training policy. Every other Unit's chat is business_sensitive (see
+// chatSensitivityForUnit in chat.ts) and should normally succeed, so seeing
+// this message there points to a genuine provider failure, not policy.
 const AI_UNAVAILABLE_MESSAGE =
-  "Couldn't generate a reply -- general chat is classified client_confidential and no AI provider is currently eligible for that sensitivity (workers-ai is approved for business_sensitive and below only, pending a provider with an acceptable personal-data/training policy).";
+  "Couldn't generate a reply -- no AI provider is currently eligible or available for this conversation's classification. If this is the Sales topic, that's expected policy (client_confidential, pending a provider with an acceptable personal-data/training policy); anywhere else, this points to a genuine provider failure.";
 
 export function newWorkId(): string {
   return crypto.randomUUID();

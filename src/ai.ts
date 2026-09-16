@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { defaultPolicyExecutor, AiPolicyExecutor } from "./ai/policy";
 import type { AiTask } from "./ai/types";
-import type { SemanticTaskId, ContextSegment } from "./dataBoundary/types";
+import type { SemanticTaskId, ContextSegment, SensitivityLevel } from "./dataBoundary/types";
 
 export interface AiJsonOptions {
   taskId: SemanticTaskId;
@@ -98,7 +98,18 @@ export async function aiText(
   return response ? response.rawText : "";
 }
 
-/** Like aiText, but carries prior conversation turns as real message history. */
+/**
+ * Like aiText, but carries prior conversation turns as real message history.
+ *
+ * `sensitivity`, when given, is stamped onto every segment built here,
+ * overriding chat.general_reply's default client_confidential
+ * classification for this specific call -- e.g. a Unit chat persona with no
+ * access to any client-identity-bearing database (Entity/Matters/Proposals
+ * are exclusively the isolated Sales Executive project's now) has no way to
+ * actually be discussing real client identity, so it can correctly be
+ * classified business_sensitive instead and run on workers-ai like any
+ * other internal-operations task.
+ */
 export async function aiChat(
   env: Env,
   taskId: SemanticTaskId,
@@ -106,16 +117,18 @@ export async function aiChat(
   history: ChatTurn[],
   userMessage: string,
   maxTokens = 800,
+  sensitivity?: SensitivityLevel,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
 ): Promise<string> {
   const segments: ContextSegment[] = [
-    { type: "system", content: system, provenance: `${taskId}:system` },
+    { type: "system", content: system, provenance: `${taskId}:system`, sensitivity },
     ...history.map((t, idx) => ({
       type: (t.role === "user" ? "user" : "system") as ContextSegment["type"],
       content: t.content,
       provenance: `${taskId}:history:${idx}`,
+      sensitivity,
     })),
-    { type: "user", content: userMessage, provenance: `${taskId}:user_input` },
+    { type: "user", content: userMessage, provenance: `${taskId}:user_input`, sensitivity },
   ];
 
   const task: AiTask = {
