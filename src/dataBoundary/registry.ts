@@ -57,6 +57,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Research Synthesis",
     description: "Executes the selected research protocol(s) and synthesizes source-linked evidence into Evidence/Finding/Implication/Limitation output.",
   },
+  "research.handoff_routing": {
+    id: "research.handoff_routing",
+    name: "Research Handoff Routing",
+    description: "Decides whether completed research should be automatically handed off to another Unit's Hat as direct input to its own work.",
+  },
   "sales.enquiry_extraction": {
     id: "sales.enquiry_extraction",
     name: "Sales Enquiry Detail Extraction",

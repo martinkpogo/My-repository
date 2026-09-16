@@ -1,5 +1,5 @@
-import type { Env, WorkState } from "../../types";
-import { getPage, plainText, richText, select, updatePage } from "../../notion";
+import type { Env, Unit, WorkState } from "../../types";
+import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -587,9 +587,93 @@ async function deliverSynthesis(env: Env, state: WorkState, synthesis: ResearchS
   });
   await sendMessage(env, state.chatId, formatSynthesisForTelegram(synthesis), undefined, state.threadId);
 
+  await routeToConsumingHat(env, state, synthesis);
+
   state.stage = "delivered";
   state.awaiting = "research_feedback";
   return state;
+}
+
+/**
+ * Auto-hands-off research to whichever Hat actually needs it as direct
+ * input to its own work, rather than only reporting it back to Martin --
+ * per Martin's own instruction: "research has to find and feed the
+ * strategist hat that needs it." Marketing Strategist is currently the
+ * only Hat this can target (it already exists and owns marketing
+ * direction/positioning/brand/channel decisions -- Strategy remains a
+ * zero-Hat Unit). Adding a further target later means adding one entry
+ * to HANDOFF_ROUTES and extending the classifier's own instructions, not
+ * restructuring this mechanism.
+ */
+const HANDOFF_ROUTES: Partial<Record<string, { unit: Unit; hat: string }>> = {
+  marketing: { unit: "Marketing", hat: "Marketing Strategist" },
+};
+
+interface HandoffRoutingResult {
+  target?: string;
+  reason?: string;
+}
+
+async function classifyHandoffTarget(env: Env, relevance: string, synthesis: ResearchSynthesis): Promise<HandoffRoutingResult> {
+  const findingsSummary = synthesis.findings.map((f) => f.statement).join("; ");
+  const result = await aiJson<HandoffRoutingResult>(env, {
+    taskId: "research.handoff_routing",
+    system: `You decide whether completed research should be automatically handed off to another team's Hat as direct input to that Hat's own work, or simply reported back with no further routing.
+
+Research relevance: ${relevance}
+Key findings: ${findingsSummary || "(none)"}
+
+The only Hat currently able to receive research automatically is Marketing Strategist, which owns marketing direction, positioning, brand, and channel strategy decisions. Return "marketing" ONLY if this research is genuinely direct input to a marketing-direction decision (e.g. market sizing/demand, competitor positioning, audience/customer insight relevant to marketing strategy). Return "none" for research that isn't marketing-relevant, or that's too general/exploratory to hand off to a specific Hat's decision yet.
+
+Return JSON: {"target": "marketing" | "none", "reason": "..."}`,
+    user: relevance,
+    light: true,
+  });
+  return result ?? { target: "none" };
+}
+
+/** Plain-text serialization of a synthesis for a Handoff record -- structure preserved, no Telegram markdown. */
+export function formatSynthesisForHandoff(synthesis: ResearchSynthesis): string {
+  const lines: string[] = [];
+  if (synthesis.findings.length > 0) lines.push(`Findings:\n${synthesis.findings.map((f) => `- ${f.statement}`).join("\n")}`);
+  if (synthesis.implications.length > 0) lines.push(`Implications:\n${synthesis.implications.map((i) => `- ${i.statement}`).join("\n")}`);
+  if (synthesis.limitations.length > 0) lines.push(`Limitations:\n${synthesis.limitations.map((l) => `- ${l.statement}`).join("\n")}`);
+  if (synthesis.sources.length > 0) lines.push(`Sources:\n${synthesis.sources.map((s) => `- ${s.source}${s.url ? ` (${s.url})` : ""}`).join("\n")}`);
+  return lines.join("\n\n");
+}
+
+async function routeToConsumingHat(env: Env, state: WorkState, synthesis: ResearchSynthesis): Promise<void> {
+  const routing = await classifyHandoffTarget(env, state.researchRelevance ?? "", synthesis);
+  const route = routing.target ? HANDOFF_ROUTES[routing.target] : undefined;
+  if (!route) return;
+
+  try {
+    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
+      Handoff: title(`R&I research for ${route.hat}: ${(state.researchQuestion ?? state.workId).slice(0, 60)}`),
+      "From Unit": select("Research & Intelligence"),
+      "From Hat": richText("Research & Intelligence Analyst"),
+      "To Unit": select(route.unit),
+      "To Hat": richText(route.hat),
+      Type: select("Work"),
+      Status: select("Pending"),
+      Reason: richText((routing.reason ?? `Research completed and judged directly relevant to ${route.hat}'s work.`).slice(0, 1900)),
+      "Expected Output": richText(`${route.hat} to use this research as direct input to its own work.`),
+      "Verified Facts & Sources": richText(formatSynthesisForHandoff(synthesis).slice(0, 1900)),
+    });
+    await logActivity(env, {
+      entry: `R&I research handed off to ${route.hat}`,
+      type: "Activity",
+      area: "Research & Intelligence",
+      activity: `Handoff ${handoff.id} created for ${route.unit}/${route.hat}.`,
+      nextActions: `${route.hat} to pick up and act on this research.`,
+      outcome: "Complete",
+    });
+    await sendMessage(env, state.chatId, `This research has also been handed off to *${route.hat}* to inform their work.`, undefined, state.threadId);
+  } catch (err) {
+    // Not fatal to delivering the research itself -- Martin already has
+    // the findings; a failed handoff just means it wasn't auto-routed.
+    console.error(`R&I: failed to create handoff to ${route.unit}/${route.hat} for work ${state.workId}`, err);
+  }
 }
 
 /** Ambiguity loop: re-runs protocol selection with the added detail. */

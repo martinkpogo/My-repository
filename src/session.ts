@@ -106,6 +106,16 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * The Marketing side of the Research & Intelligence -> Marketing
+   * execution boundary, invoked independently by index.ts's scheduled
+   * Marketing-Handoff discovery once a Pending Handoff addressed to
+   * Marketing is found — mirrors runFinancePickup/runResearchPickup.
+   */
+  async runMarketingHandoffPickup(): Promise<WorkState> {
+    return this.execute((state) => marketing.handleHandoffPickup(this.env, state));
+  }
+
+  /**
    * The return-leg mirror of runFinancePickup: invoked independently by
    * index.ts's scheduled Sales-Handoff discovery (never by Finance
    * directly) once a Pending Handoff addressed to Sales is found — the

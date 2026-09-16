@@ -11,6 +11,7 @@ export type SemanticTaskId =
   | "research.protocol_selection"
   | "research.plan_generation"
   | "research.synthesis"
+  | "research.handoff_routing"
   | "sales.enquiry_extraction"
   | "sales.matter_summary_drafting"
   | "sales.call_prep_briefing"

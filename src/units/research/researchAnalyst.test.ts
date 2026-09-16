@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { buildEffectiveResearchContext, buildSynthesisSystemPrompt, resolveResearchHandoffContext } from "./researchAnalyst";
+import { buildEffectiveResearchContext, buildSynthesisSystemPrompt, formatSynthesisForHandoff, resolveResearchHandoffContext } from "./researchAnalyst";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
 import { validateSynthesis, findUnverifiableSources } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
@@ -380,4 +380,37 @@ test("23. Regression -- the representative failed live request: a Ghana market/i
   // does not by itself satisfy the Market / Industry evidence requirement.
   const synthesisPrompt = buildSynthesisSystemPrompt("Hat definition text.", "Universal Role Contract text.", ["market_industry", "competitive", "customer_audience"], true);
   assert.ok(synthesisPrompt.toLowerCase().includes("generic"));
+});
+
+// --- R&I auto-handoff to the Hat that needs the research (currently Marketing Strategist) ---
+
+test("24. formatSynthesisForHandoff preserves Evidence -> Finding -> Implication -> Limitation -> Source structure as plain text for a Notion Handoff record", () => {
+  const synthesis: ResearchSynthesis = {
+    protocolsUsed: ["market_industry"],
+    sources: [{ id: "s1", source: "GSO", sourceType: "primary", url: "https://gso.gov.gh", passage: "...", claimSupported: "growth", validationStatus: "validated" }],
+    evidence: [{ id: "e1", statement: "Market grew 8%", sourceIds: ["s1"] }],
+    findings: [{ statement: "The market is growing", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Continued investment in this category may be warranted", basedOnFindingIndexes: [0] }],
+    limitations: [{ statement: "Single source." }],
+  };
+  const formatted = formatSynthesisForHandoff(synthesis);
+  assert.ok(formatted.includes("The market is growing"));
+  assert.ok(formatted.includes("Continued investment"));
+  assert.ok(formatted.includes("Single source."));
+  assert.ok(formatted.includes("https://gso.gov.gh"));
+});
+
+test("25. formatSynthesisForHandoff omits empty sections rather than printing blank headers", () => {
+  const synthesis: ResearchSynthesis = {
+    protocolsUsed: ["market_industry"],
+    sources: [],
+    evidence: [],
+    findings: [],
+    implications: [],
+    limitations: [{ statement: "No evidence was available." }],
+  };
+  const formatted = formatSynthesisForHandoff(synthesis);
+  assert.ok(!formatted.includes("Findings:"));
+  assert.ok(!formatted.includes("Sources:"));
+  assert.ok(formatted.includes("No evidence was available."));
 });

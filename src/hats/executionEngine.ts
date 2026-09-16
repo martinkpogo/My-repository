@@ -3,6 +3,7 @@ import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendMessage } from "../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
+import { getPage, plainText, richText, select, updatePage } from "../notion";
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from "./registry";
 import {
@@ -36,6 +37,45 @@ interface HatActionDecision {
   target_hat?: string;
   reason?: string;
   involves_spend?: boolean;
+}
+
+/**
+ * Entry point for a Handoff addressed directly to Marketing Strategist --
+ * currently only ever created by Research & Intelligence's own
+ * auto-routing (see researchAnalyst.ts's routeToConsumingHat). Skips the
+ * two-stage intake classification handleMarketingIntake runs for chat-
+ * originated work, since the sender already determined which Hat this
+ * belongs to; reads the Handoff's own Reason/Verified Facts & Sources as
+ * the task text, the same shape runMarketingHat already expects from
+ * state.marketingTaskText.
+ */
+export async function handleHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
+  const handoff = await getPage(env, state.handoffId!);
+  const taskText = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
+  if (!taskText.trim()) {
+    console.error(`Marketing handleHandoffPickup: empty task text for handoff ${state.handoffId}`);
+    await sendMessage(
+      env,
+      state.chatId,
+      `Couldn't pick up a Handoff for Marketing Strategist (Handoff ${state.handoffId}) — it had no readable content.`,
+      undefined,
+      state.threadId,
+    );
+    return state;
+  }
+
+  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
+  state.hat = "Marketing Strategist";
+  state.marketingTaskText = taskText;
+  await logActivity(env, {
+    entry: `Marketing Strategist picked up a Handoff`,
+    type: "Activity",
+    area: "Marketing",
+    activity: `Handoff ${state.handoffId} picked up.`,
+    outcome: "Active",
+  });
+
+  return runMarketingHat(env, state);
 }
 
 /**
@@ -352,6 +392,16 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     );
     state.awaiting = "marketing_feedback";
     return state;
+  }
+
+  // If this work item arrived via a Handoff (currently only from R&I's
+  // auto-routing to Marketing Strategist), close it out as the
+  // completion signal -- same pattern Finance/Sales/R&I already use.
+  if (state.handoffId) {
+    await updatePage(env, state.handoffId, {
+      Status: select("Closed"),
+      "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
+    }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
   }
 
   await logActivity(env, {
