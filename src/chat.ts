@@ -49,7 +49,14 @@ const EVIDENCE_RULE =
 // that don't exist (see EVIDENCE_RULE above) when asked what roles are
 // available -- the real answer was cheap and already known in code; there
 // was no reason for the model to have guessed.
-const REAL_STRUCTURE_FACTS = `ENIG's real Units are: Sales, Marketing, Business Development, Finance, Strategy, Research & Intelligence, Creative & Design, Operations. A "Hat" is an AI-executed role inside this system, not a human employee or job opening -- only Sales and Marketing currently have any defined Hats; every other Unit has none yet and is open conversation only, with no structured work. Marketing's five real Hats:\n${marketingHatSummaryList()}\nSales' one real Hat is Sales Executive, whose structured intake is currently paused by standing policy. Never invent, rename, add to, or guess at a Hat, role, or job title beyond this exact list. Since these are AI execution roles, never suggest applying for one, contacting a "lead" as if they were a person, or imply there's a hiring process of any kind.`;
+const REAL_STRUCTURE_FACTS = `=== AUTHORITATIVE FACTS -- READ THIS BEFORE ANSWERING ANY QUESTION ABOUT ROLES, HATS, JOB TITLES, OR TEAM STRUCTURE ===
+ENIG's real Units are exactly these eight: Sales, Marketing, Business Development, Finance, Strategy, Research & Intelligence, Creative & Design, Operations.
+A "Hat" is an AI-executed role inside this system, not a human employee or job opening. Only Sales and Marketing currently have any defined Hats. Every other Unit (Business Development, Finance, Strategy, Research & Intelligence, Creative & Design, Operations) has ZERO Hats -- open conversation only, no structured roles of any kind.
+Marketing's Hats are EXACTLY these five, no others exist under any name:
+${marketingHatSummaryList()}
+Sales has exactly one Hat: Sales Executive (structured intake currently paused by standing policy).
+If asked what roles/Hats/positions exist anywhere, your answer must use ONLY the names listed above, copied exactly -- never add, combine, rename, pluralize into new variants, or supplement with anything that sounds like a typical department role (e.g. "Marketing Lead," "Social Media Manager," "SEO Specialist," "Marketing Coordinator," "Marketing Analyst" -- these and anything like them DO NOT EXIST here, no matter how plausible they sound). If earlier turns in this conversation named different or additional roles, that was a mistake -- correct it plainly rather than repeating or extending it. Since these are AI execution roles, never suggest applying for one, contacting a "lead" as if they were a person, or imply there's a hiring process of any kind.
+=== END AUTHORITATIVE FACTS ===`;
 
 // Confirmed necessary live, second occurrence: given a message that reads
 // like an instruction to run/test the workflow ("post that, run it
@@ -164,7 +171,7 @@ export async function generalChatReply(
   userMessage: string,
 ): Promise<string> {
   const snapshot = await recentActivitySnapshot(env, unit);
-  const system = `${UNIT_PERSONAS[unit]}\n\n${REAL_STRUCTURE_FACTS}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
+  const system = `${REAL_STRUCTURE_FACTS}\n\n${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
   return runChatTurn(env, chatId, threadId, system, userMessage, chatSensitivityForUnit(unit));
 }
 
@@ -185,6 +192,6 @@ const DM_PERSONA = `You are ENIG's general staff AI for direct-message conversat
  * the business, anything not tied to one Unit's live work).
  */
 export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
-  const system = `${DM_PERSONA}\n\n${REAL_STRUCTURE_FACTS}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
+  const system = `${REAL_STRUCTURE_FACTS}\n\n${DM_PERSONA}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
   return runChatTurn(env, chatId, threadId, system, userMessage, "business_sensitive");
 }
