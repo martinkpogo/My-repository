@@ -419,9 +419,15 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(env, chatId, "Cancelled the active work item.", undefined, threadId);
       return;
     }
-    if (text === "/clearsessions" || text === "/clearsessions confirm") {
+    // Matches "/clearsessions", "/clearsessions confirm", and (since a
+    // BotFather-registered command name can't contain a space, so the
+    // confirm variant may get registered as one word) "/clearsessionsconfirm"
+    // -- with or without the leading slash, case-insensitively, since a
+    // phone keyboard may also auto-capitalize the first letter.
+    const clearSessionsMatch = text.trim().match(/^\/?clearsessions\s*(confirm)?$/i);
+    if (clearSessionsMatch) {
       const keys = await listSessionKvKeys(env);
-      if (text === "/clearsessions") {
+      if (!clearSessionsMatch[1]) {
         await sendMessage(
           env,
           chatId,
