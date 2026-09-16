@@ -4,8 +4,8 @@ import { AiProvider, AiTask, InfrastructureError, ProviderAdapterResult, Provide
 /**
  * Generic adapter for any provider exposing an OpenAI-compatible
  * /chat/completions endpoint -- covers most free-tier inference
- * providers (NVIDIA NIM, Groq, OpenRouter, Together AI, and others)
- * without a bespoke class per provider. Added as fallback options behind
+ * providers (NVIDIA NIM, Groq, OpenRouter, and others) without a
+ * bespoke class per provider. Added as fallback options behind
  * Workers AI so a daily quota exhaustion on one provider doesn't block
  * every AI-driven Hat/Unit at once -- confirmed live as a real failure
  * mode (Cloudflare's free-tier 10,000 neuron/day cap).
@@ -24,7 +24,7 @@ export interface OpenAiCompatibleConfig {
   id: ProviderId;
   baseUrl: string;
   /** Which optional Env field holds this provider's API key -- eligibility is simply "is it set." */
-  apiKeyEnvVar: "NVIDIA_NIM_API_KEY" | "GROQ_API_KEY" | "OPENROUTER_API_KEY" | "TOGETHER_API_KEY";
+  apiKeyEnvVar: "NVIDIA_NIM_API_KEY" | "GROQ_API_KEY" | "OPENROUTER_API_KEY";
   model: string;
   lightModel?: string;
 }
@@ -102,11 +102,4 @@ export const OPENROUTER_PROVIDER = new OpenAiCompatibleProvider({
   baseUrl: "https://openrouter.ai/api/v1",
   apiKeyEnvVar: "OPENROUTER_API_KEY",
   model: "meta-llama/llama-3.3-70b-instruct:free",
-});
-
-export const TOGETHER_AI_PROVIDER = new OpenAiCompatibleProvider({
-  id: "together-ai",
-  baseUrl: "https://api.together.xyz/v1",
-  apiKeyEnvVar: "TOGETHER_API_KEY",
-  model: "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
 });
