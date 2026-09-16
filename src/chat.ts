@@ -2,6 +2,23 @@ import type { Env, Unit } from "./types";
 import { aiChat } from "./ai";
 import type { ChatTurn } from "./ai";
 import { plainText, queryDataSource } from "./notion";
+import type { SensitivityLevel } from "./dataBoundary/types";
+
+// Every Unit's own database access is scoped by its Notion integration --
+// Entity/Matters/Proposals (the only place real client identity lives) are
+// exclusively the isolated Sales Executive project's now, so no Unit chat
+// persona other than Sales can be handed a real client name or contact
+// detail to begin with, whatever its casual conversation touches on. Sales
+// stays client_confidential (chat.general_reply's task-level default,
+// applied by passing undefined here) since Martin could still paste real
+// enquiry content into that topic's freeform chat. Every other Unit is
+// business_sensitive -- ENIG's own internal-operations tier, already
+// eligible for workers-ai -- so they behave like a normal LLM for ordinary
+// conversation instead of hitting the client_confidential gate meant for
+// the one Unit that can actually see client identity.
+function chatSensitivityForUnit(unit: Unit): SensitivityLevel | undefined {
+  return unit === "Sales" ? undefined : "business_sensitive";
+}
 
 const MAX_HISTORY_TURNS = 20;
 
@@ -111,7 +128,7 @@ export async function generalChatReply(
   const history = await getChatHistory(env, chatId, threadId);
   const snapshot = await recentActivitySnapshot(env, unit);
   const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
-  const reply = await aiChat(env, "chat.general_reply", system, history, userMessage);
+  const reply = await aiChat(env, "chat.general_reply", system, history, userMessage, 800, chatSensitivityForUnit(unit));
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
     { role: "assistant", content: reply || "(no response)" },

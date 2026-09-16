@@ -145,7 +145,7 @@ test("F. No eligible provider -> fail closed", async () => {
   const executor = new AiPolicyExecutor([primary], testBoundaryEvaluator);
   const resJson = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
   const resText = await aiText(fakeEnv, "chat.general_reply", "s", "u", {}, executor);
-  const resChat = await aiChat(fakeEnv, "chat.general_reply", "s", [], "u", 800, executor);
+  const resChat = await aiChat(fakeEnv, "chat.general_reply", "s", [], "u", 800, undefined, executor);
 
   assert.equal(resJson, null);
   assert.equal(resText, "");
