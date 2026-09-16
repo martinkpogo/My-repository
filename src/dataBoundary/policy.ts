@@ -38,6 +38,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "research.protocol_selection": "business_sensitive",
   "research.plan_generation": "business_sensitive",
   "research.synthesis": "business_sensitive",
+  "research.handoff_routing": "business_sensitive",
   "sales.enquiry_extraction": "pii_restricted",
   "sales.matter_summary_drafting": "client_confidential",
   "sales.call_prep_briefing": "client_confidential",
