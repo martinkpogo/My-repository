@@ -85,45 +85,55 @@ export class OpenAiCompatibleProvider implements AiProvider {
 }
 
 // Reasonable free-tier defaults as of this writing -- each provider's
-// free model lineup changes over time, so these are the starting point,
-// not guaranteed to stay current. Update the model string here if a
-// provider retires or renames its free-tier model.
+// free model lineup changes over time (confirmed live: every model
+// below except Gemini's had gone stale -- retired, renamed, or dropped
+// from this specific account's access list -- within about a month of
+// being set), so these are the starting point, not guaranteed to stay
+// current. When a provider starts failing with a 404/410 "model not
+// found"/"end of life" error, query that provider's own /models list
+// endpoint with the live key to find a currently accessible replacement
+// rather than guessing a name.
 export const NVIDIA_NIM_PROVIDER = new OpenAiCompatibleProvider({
   id: "nvidia-nim",
   baseUrl: "https://integrate.api.nvidia.com/v1",
   apiKeyEnvVar: "NVIDIA_NIM_API_KEY",
-  model: "meta/llama-3.3-70b-instruct",
+  model: "openai/gpt-oss-20b",
 });
 
 export const GROQ_PROVIDER = new OpenAiCompatibleProvider({
   id: "groq",
   baseUrl: "https://api.groq.com/openai/v1",
   apiKeyEnvVar: "GROQ_API_KEY",
-  model: "llama-3.3-70b-versatile",
-  lightModel: "llama-3.1-8b-instant",
+  model: "openai/gpt-oss-120b",
+  lightModel: "openai/gpt-oss-20b",
 });
 
 export const OPENROUTER_PROVIDER = new OpenAiCompatibleProvider({
   id: "openrouter",
   baseUrl: "https://openrouter.ai/api/v1",
   apiKeyEnvVar: "OPENROUTER_API_KEY",
-  model: "meta-llama/llama-3.3-70b-instruct:free",
+  model: "nvidia/nemotron-3-super-120b-a12b:free",
+  lightModel: "liquid/lfm-2.5-2.6b:free",
 });
 
 export const CEREBRAS_PROVIDER = new OpenAiCompatibleProvider({
   id: "cerebras",
   baseUrl: "https://api.cerebras.ai/v1",
   apiKeyEnvVar: "CEREBRAS_API_KEY",
-  model: "llama-3.3-70b",
-  lightModel: "llama3.1-8b",
+  model: "gpt-oss-120b",
+  lightModel: "qwen-3.8-27b",
 });
 
+// Google keeps these two alias names pointed at its current default and
+// lite Gemini models, unlike a pinned version string (e.g. gemini-2.0-
+// flash) which Google retires outright -- confirmed live as the exact
+// failure mode that broke the pinned names below within weeks.
 export const GEMINI_PROVIDER = new OpenAiCompatibleProvider({
   id: "gemini",
   baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
   apiKeyEnvVar: "GEMINI_API_KEY",
-  model: "gemini-2.0-flash",
-  lightModel: "gemini-1.5-flash",
+  model: "gemini-flash-latest",
+  lightModel: "gemini-flash-lite-latest",
 });
 
 export const SAMBANOVA_PROVIDER = new OpenAiCompatibleProvider({
