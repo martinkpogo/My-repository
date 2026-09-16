@@ -32,7 +32,7 @@ const MAX_HISTORY_TURNS = 20;
 // slice, not full database access, so the rule against inventing beyond
 // what it was actually given still applies.
 const EVIDENCE_RULE =
-  "Below is a snapshot of this Unit's most recent real Activity & Decision Log entries — use it to answer factual questions about recent activity. It is not the full history and you have no other live connection to Notion or any record system beyond what's listed. Never invent specifics — past enquiries, entities, matters, deals, numbers, dates — that aren't in that snapshot or this conversation's own messages. If asked about something not covered by the snapshot given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example.";
+  "If a snapshot of recent real Activity & Decision Log entries is provided below, use it to answer factual questions about recent activity — it is not the full history, and you have no other live connection to Notion or any record system beyond what's listed there (or nothing, if no snapshot is provided at all). Never invent specifics — past enquiries, entities, matters, deals, numbers, dates — that aren't in that snapshot or this conversation's own messages. If asked about something not covered, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example.";
 
 // Confirmed necessary live, second occurrence: given a message that reads
 // like an instruction to run/test the workflow ("post that, run it
@@ -123,6 +123,16 @@ async function appendChatHistory(env: Env, chatId: number, threadId: number | un
   await env.STATE_KV.put(historyKey(chatId, threadId), JSON.stringify(updated));
 }
 
+async function runChatTurn(env: Env, chatId: number, threadId: number | undefined, system: string, userMessage: string, sensitivity: SensitivityLevel | undefined): Promise<string> {
+  const history = await getChatHistory(env, chatId, threadId);
+  const reply = await aiChat(env, "chat.general_reply", system, history, userMessage, 800, sensitivity);
+  await appendChatHistory(env, chatId, threadId, [
+    { role: "user", content: userMessage },
+    { role: "assistant", content: reply || "(no response)" },
+  ]);
+  return reply;
+}
+
 /**
  * Free-form conversation for a Unit's topic, with rolling memory — used
  * whenever a message isn't a structured work-item reply or a new Sales
@@ -136,13 +146,28 @@ export async function generalChatReply(
   threadId: number | undefined,
   userMessage: string,
 ): Promise<string> {
-  const history = await getChatHistory(env, chatId, threadId);
   const snapshot = await recentActivitySnapshot(env, unit);
   const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
-  const reply = await aiChat(env, "chat.general_reply", system, history, userMessage, 800, chatSensitivityForUnit(unit));
-  await appendChatHistory(env, chatId, threadId, [
-    { role: "user", content: userMessage },
-    { role: "assistant", content: reply || "(no response)" },
-  ]);
-  return reply;
+  return runChatTurn(env, chatId, threadId, system, userMessage, chatSensitivityForUnit(unit));
+}
+
+// Martin's default, no-topic-required front door -- DM isn't scoped to one
+// Unit, so it has no single Activity Log to snapshot and no reason to sit
+// behind Sales's client_confidential gate just because it happens to be the
+// fallback once Marketing classification and a genuine sales enquiry have
+// both been ruled out (classifyMarketingTask and classifyNewMessage in
+// router.ts still run first and still handle those cases on their own
+// terms). Ordinary DM conversation is business_sensitive, same as every
+// other Unit's chat.
+const DM_PERSONA = `You are ENIG's general staff AI for direct-message conversation with Martin — not scoped to any one Unit. ${CONSULTANCY_DESCRIPTION} Chat naturally and helpfully about the business, its Units, and general questions. You have no live Activity Log snapshot here (that's per-Unit); for anything specific to a particular Unit's recent activity, say so and point to that Unit's Telegram topic or Notion directly rather than guessing. You are staff, not the final authority — Martin decides.`;
+
+/**
+ * DM counterpart to generalChatReply: used once routeIncomingText's DM
+ * fallback has already ruled out Marketing classification and a genuine
+ * Sales enquiry, for whatever's left (small talk, general questions about
+ * the business, anything not tied to one Unit's live work).
+ */
+export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
+  const system = `${DM_PERSONA}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
+  return runChatTurn(env, chatId, threadId, system, userMessage, "business_sensitive");
 }
