@@ -153,6 +153,10 @@ export interface WorkState {
   researchContext?: string;
   /** Preserved per the protocol-selection execution record requirement -- which protocol(s) this work item activated. */
   selectedResearchProtocols?: import("./units/research/protocols").ResearchProtocolId[];
+  /** The canonical Research-Safe Consultancy Context, cached per work item once retrieved+validated so it isn't re-fetched on every clarification/feedback turn. */
+  researchSafeContext?: string;
+  /** What the current research question means in relation to the authorized safe-context category -- re-derived whenever the question changes. */
+  researchRelevance?: string;
 }
 
 export interface SessionSummary {

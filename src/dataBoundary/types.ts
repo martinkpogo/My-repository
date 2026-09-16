@@ -7,6 +7,7 @@ export type SemanticTaskId =
   | "marketing.intake_classification"
   | "marketing.hat_action_decision"
   | "routing.research_specialization_check"
+  | "research.context_relevance"
   | "research.protocol_selection"
   | "research.synthesis"
   | "sales.enquiry_extraction"

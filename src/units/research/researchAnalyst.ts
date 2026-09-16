@@ -10,6 +10,7 @@ import type { ResearchProtocolId } from "./protocols";
 import { isResearchProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
 import type { ResearchSynthesis } from "./evidence";
 import { findUnverifiableSources, validateSynthesis } from "./evidence";
+import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
 
 /**
  * R&I execution mechanics -- one dedicated runtime for the single active
@@ -25,10 +26,21 @@ import { findUnverifiableSources, validateSynthesis } from "./evidence";
 // Pricing Assessor -- explicit page ID, not title search.
 const RESEARCH_HAT_DEFINITION_PAGE_ID = "3ddcb004-e583-8161-96ba-cdec357c5b5b";
 
+// Canonical governance source for the abstracted consultancy category R&I
+// is authorized to reason from -- see safeContext.ts. Established after
+// the first live ENIG market-research test showed the runtime had no
+// grounding at all for what kind of consultancy it was researching for
+// (see Notion Activity & Decision Log entry LOG-325).
+const RESEARCH_SAFE_CONTEXT_PAGE_ID = "3ddcb004-e583-81e5-b30a-db8cba543823";
+
 interface ProtocolSelectionResult {
   protocols?: string[];
   ambiguous?: boolean;
   reason?: string;
+}
+
+interface RelevanceResult {
+  relevance?: string;
 }
 
 /**
@@ -69,6 +81,82 @@ export async function resolveResearchHandoffContext(env: Env, handoffId: string)
       },
     };
   }
+}
+
+/**
+ * Retrieves and structurally validates the canonical Research-Safe
+ * Consultancy Context before R&I interprets any research question, per
+ * the governing Notion contract's required execution order (safe context
+ * -> relevance -> protocol selection). Fails closed on missing or
+ * malformed context -- this is a governance/infrastructure failure, not
+ * something Martin can resolve by clarifying in chat, so it is never
+ * treated as an ambiguous question and never falls back to a generic
+ * assumption about what market is being researched. Cached on WorkState
+ * once resolved so a clarification/feedback loop doesn't re-fetch it on
+ * every turn (getGovernance's own KV cache makes this cheap regardless,
+ * but the validated text is what stays stable for a given work item).
+ */
+async function requireSafeContext(env: Env, state: WorkState): Promise<string | null> {
+  if (state.researchSafeContext) return state.researchSafeContext;
+
+  const raw = await getGovernance(env, RESEARCH_SAFE_CONTEXT_PAGE_ID, "Research-Safe Consultancy Context");
+  if (!isValidSafeContext(raw)) {
+    console.error(`R&I: Research-Safe Consultancy Context missing or structurally invalid for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `R&I research blocked — Research-Safe Consultancy Context unavailable or invalid`,
+      type: "Blocker",
+      area: "Research & Intelligence",
+      decisionRationale:
+        "Could not retrieve or structurally validate the canonical Research-Safe Consultancy Context from Notion. Refusing to interpret or research this question without it -- never substituting a generic assumption about the consultancy's market.",
+      outcome: "Blocked",
+    });
+    if (state.handoffId) {
+      await updatePage(env, state.handoffId, {
+        Status: select("Held"),
+        "Open Questions": richText("Research-Safe Consultancy Context unavailable or invalid in Notion -- blocked pending resolution."),
+      }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
+    }
+    await sendMessage(
+      env,
+      state.chatId,
+      `*Research & Intelligence*: couldn't retrieve or validate the governed Research-Safe Consultancy Context from Notion. Not proceeding without it — this isn't something to clarify in chat, the Notion page itself needs checking. Will retry automatically once resolved.`,
+      undefined,
+      state.threadId,
+    );
+    state.stage = "research_blocked";
+    state.awaiting = undefined;
+    return null;
+  }
+
+  state.researchSafeContext = raw;
+  return raw;
+}
+
+/**
+ * Semantic stage between the raw research question and protocol
+ * selection: Research Question -> Safe Consultancy Context -> Research
+ * Relevance -> Protocol Selection. Establishes what the question means in
+ * relation to the authorized category only -- never a strategic,
+ * positioning, marketing, sales, finance, creative, or operational
+ * decision. Feeding this (rather than the bare question) into protocol
+ * selection is what fixes the earlier failure mode where losing business
+ * meaning caused selection to default to the wrong protocol.
+ */
+async function deriveResearchRelevance(env: Env, categorySummary: string, question: string): Promise<string | null> {
+  const result = await aiJson<RelevanceResult>(env, {
+    taskId: "research.context_relevance",
+    system: `Below is the ONLY authorized description of the consultancy this research concerns -- an abstracted category, not the consultancy's real identity. Never assume, infer, or introduce any specific company name, person name, proprietary detail, or information beyond what's written here.
+
+${categorySummary}
+
+Given a research question, state in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This stage only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
+
+Return JSON: {"relevance": "<1-3 sentence reframing>"}`,
+    user: question,
+    light: true,
+  });
+  const relevance = result?.relevance?.trim();
+  return relevance && relevance.length > 0 ? relevance : null;
 }
 
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
@@ -138,15 +226,39 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
  * execution record) per that same contract.
  */
 async function selectProtocolsAndRun(env: Env, state: WorkState): Promise<WorkState> {
+  const safeContext = await requireSafeContext(env, state);
+  if (!safeContext) return state; // already blocked + messaged inside requireSafeContext
+
   const question = state.researchQuestion ?? "";
+  const categorySummary = extractAuthorizedContextSummary(safeContext);
+
+  const relevance = await deriveResearchRelevance(env, categorySummary, question);
+  if (!relevance) {
+    console.error(`R&I relevance derivation failed for work ${state.workId}`);
+    await handleBlockedOrAmbiguous(
+      env,
+      state,
+      "Couldn't interpret what this research question means for the authorized consultancy category — classification failed.",
+      "RELEVANCE_DERIVATION_FAILED",
+    );
+    return state;
+  }
+  state.researchRelevance = relevance;
 
   const stage1 = await aiJson<ProtocolSelectionResult>(env, {
     taskId: "research.protocol_selection",
-    system: `You select research protocol(s) for ENIG's Research & Intelligence Unit. Below are the six available protocols and what each investigates:
+    system: `You select research protocol(s) for a strategy-led consultancy's Research & Intelligence Unit. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:
+
+${categorySummary}
+
+This research question has been interpreted, in relation to that authorized category, as:
+"${relevance}"
+
+Below are the six available protocols and what each investigates:
 
 ${researchProtocolSummaryList()}
 
-A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another protocol. Select ALL genuinely applicable protocols -- do not force a mixed question into a single category merely to simplify selection, and do not select based on keyword matching alone; consider what the question actually requires.
+Select protocol(s) based on what the question genuinely requires, using the interpretation above for grounding -- never based on keyword matching alone. A broad question about the size, demand, growth, or structure of the market/industry for the consultancy's own authorized service domains and geography should select Market / Industry Intelligence as the PRIMARY protocol -- do not default to Competitive Intelligence for a broad market question; only add Competitive Intelligence when the question specifically concerns named or observable competitors, substitutes, or positioning relative to others. A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another -- do not force a mixed question into a single category merely to simplify selection.
 
 If the question is ambiguous and protocol selection would materially change what research is done, set ambiguous true and explain what's unclear rather than guessing.
 
@@ -259,9 +371,14 @@ export function nameToProtocolId(name: string): ResearchProtocolId | null {
  * anyway.
  */
 async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
+  const safeContext = await requireSafeContext(env, state);
+  if (!safeContext) return state; // already blocked + messaged inside requireSafeContext
+
   const protocols = state.selectedResearchProtocols ?? [];
   const question = state.researchQuestion ?? "";
   const context = state.researchContext ?? "";
+  const relevance = state.researchRelevance ?? "";
+  const categorySummary = extractAuthorizedContextSummary(safeContext);
 
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, RESEARCH_HAT_DEFINITION_PAGE_ID, "Research & Intelligence Analyst Hat Definition"),
@@ -288,10 +405,17 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
+  // Per the "Research execution boundary" contract: the research-facing
+  // content receives only the minimum safe context required (the
+  // Authorized Context category summary, never the full governed page or
+  // the entire Hat/Universal Role Contract governance) plus the
+  // relevance framing, the question, and whatever was actually supplied.
+  const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, context);
+
   const synthesis = await aiJson<ResearchSynthesis>(env, {
     taskId: "research.synthesis",
     system: buildSynthesisSystemPrompt(hatDefinition, universalRoleContract, protocols),
-    user: `Research question: ${question}\n\nSupplied context:\n${context}`,
+    user: effectiveResearchContext,
     maxTokens: 2048,
   });
 
@@ -313,7 +437,7 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   // doesn't appear there could not have been obtained honestly, so it's
   // treated as fabricated regardless of how well-formed the rest of the
   // output is (see findUnverifiableSources for why this exists).
-  const unverifiable = findUnverifiableSources(synthesis, context);
+  const unverifiable = findUnverifiableSources(synthesis, effectiveResearchContext);
   if (unverifiable.length > 0) {
     console.error(`R&I synthesis cited unverifiable source(s) for work ${state.workId}: ${unverifiable.map((s) => s.source).join(", ")}`);
     await handleSynthesisFailure(
@@ -352,6 +476,28 @@ async function handleSynthesisFailure(env: Env, state: WorkState, reasonText: st
   state.awaiting = "research_feedback";
 }
 
+/**
+ * The minimal research-facing context per the "Research execution
+ * boundary" contract -- the authorized category summary (never the full
+ * safe-context page, which also carries meta/policy sections irrelevant
+ * to the research itself), the relevance framing, the actual question,
+ * and whatever evidence/context was actually supplied. Deliberately does
+ * NOT include the Hat Definition or Universal Role Contract (those stay
+ * system-side governance, unchanged) or any unrelated Handoff record.
+ */
+export function buildEffectiveResearchContext(categorySummary: string, relevance: string, question: string, supplied: string): string {
+  return [
+    "=== AUTHORIZED RESEARCH CATEGORY (abstracted -- not the consultancy's real identity) ===",
+    categorySummary,
+    "=== RESEARCH RELEVANCE (what this question means for this category) ===",
+    relevance,
+    "=== RESEARCH QUESTION ===",
+    question,
+    "=== SUPPLIED CONTEXT/EVIDENCE ===",
+    supplied || "(none supplied)",
+  ].join("\n\n");
+}
+
 function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[]): string {
   return [
     "You are executing the Research & Intelligence Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, and stop conditions — follow them exactly.",
@@ -364,7 +510,7 @@ function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract
     "=== RESEARCH OUTPUT CONTRACT ===",
     "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Implication MUST reference the Finding index/indexes it is based on. If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
     "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
-    "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"Supplied context\" text below (or the research question itself, if it already states facts). A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
+    "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section below (or the research question itself, if it already states facts). The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
     `Return JSON exactly matching this shape:
 {
