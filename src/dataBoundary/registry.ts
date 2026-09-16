@@ -47,6 +47,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Research Protocol Selection",
     description: "Identifies which R&I research protocol(s) a research question requires, or surfaces ambiguity rather than guessing.",
   },
+  "research.plan_generation": {
+    id: "research.plan_generation",
+    name: "Research Plan Generation",
+    description: "Generates a bounded, protocol-specific set of research sub-questions grounded in each selected protocol's own method and evidence requirements.",
+  },
   "research.synthesis": {
     id: "research.synthesis",
     name: "Research Synthesis",

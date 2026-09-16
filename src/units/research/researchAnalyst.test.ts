@@ -1,12 +1,16 @@
 import test from "node:test";
 import assert from "node:assert";
-import { buildEffectiveResearchContext, nameToProtocolId, resolveResearchHandoffContext } from "./researchAnalyst";
-import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId } from "./protocols";
+import { buildEffectiveResearchContext, buildSynthesisSystemPrompt, resolveResearchHandoffContext } from "./researchAnalyst";
+import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
 import { validateSynthesis, findUnverifiableSources } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
+import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
+import { capResearchPlan } from "./researchPlan";
+import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning } from "./webSearch";
+import type { DimensionEvidence } from "./webSearch";
 
 test("1. Protocol Coverage: resolves all six approved protocol names to internal IDs", () => {
   for (const id of RESEARCH_PROTOCOL_IDS) {
@@ -310,4 +314,70 @@ test("20. Research quality: an honest result grounded in real supplied evidence 
   };
   assert.strictEqual(validateSynthesis(honestSynthesis).valid, true);
   assert.strictEqual(findUnverifiableSources(honestSynthesis, effectiveContext).length, 0);
+});
+
+// --- Architectural correction: protocol-specific research planning, not "protocol -> generic search suffix -> synthesis" ---
+
+test("21. buildSynthesisSystemPrompt forbids generic business advice as a Finding/Implication -- the exact bad live output ('businesses should conduct regular competitor analysis')", () => {
+  const prompt = buildSynthesisSystemPrompt("Hat definition text.", "Universal Role Contract text.", ["market_industry"], true);
+  assert.ok(prompt.includes("businesses should conduct regular competitor analysis"));
+  assert.ok(prompt.toLowerCase().includes("never produce generic business advice"));
+});
+
+test("22. buildSynthesisSystemPrompt requires evidence to actually address the dimension it's cited for -- a methodology article does not become market evidence", () => {
+  const prompt = buildSynthesisSystemPrompt("Hat definition text.", "Universal Role Contract text.", ["market_industry"], true);
+  assert.ok(prompt.includes("how to conduct competitor analysis"));
+  assert.ok(prompt.toLowerCase().includes("does not by itself establish"));
+});
+
+test("23. Regression -- the representative failed live request: a Ghana market/industry question with a competitor and audience component", () => {
+  const question =
+    "What is the market structure, demand, size, and growth for strategy, brand, and communications consulting in Ghana and Africa, including named competitors, their positioning, public pricing, and what buyers/customers actually need?";
+
+  // Stage: AI protocol selection reproduced the live bug -- Market / Industry omitted entirely.
+  const aiSelected: ("competitive" | "customer_audience")[] = ["competitive", "customer_audience"];
+  const corrected = applyProtocolSelectionGuardrails(question, [...aiSelected]);
+  assert.strictEqual(corrected[0], "market_industry", "Market / Industry Intelligence must be primary, not omitted");
+  assert.ok(corrected.includes("competitive"));
+  assert.ok(corrected.includes("customer_audience"));
+
+  // Stage: research plan must be protocol-specific and bounded, not one generic phrase per protocol.
+  const plan = [
+    { protocol: "market_industry" as const, subQuestion: "What is the size and growth rate of the strategy/brand consulting market in Ghana?" },
+    { protocol: "market_industry" as const, subQuestion: "What are the demand conditions for communications consulting services in Accra?" },
+    { protocol: "competitive" as const, subQuestion: "Which named firms offer strategy or brand consulting services in Ghana?" },
+    { protocol: "customer_audience" as const, subQuestion: "What do businesses in Ghana say they need from a strategy consultancy?" },
+  ];
+  const capped = capResearchPlan(plan);
+  assert.strictEqual(capped.length, 4);
+  assert.ok(capped.some((d) => d.protocol === "market_industry" && d.subQuestion.includes("Ghana")));
+
+  // Stage: a dimension with zero search results must surface as an explicit
+  // limitation signal, not silently vanish -- and the generic-methodology-
+  // article case (the actual live failure) must never be treated as
+  // adequate evidence for a market-growth dimension.
+  const dimensionEvidence: DimensionEvidence[] = [
+    { ...plan[0], results: [] }, // no real market data found -- the actual live outcome
+    { ...plan[1], results: [] },
+    {
+      ...plan[2],
+      results: [{ title: "How to Do Competitor Analysis", url: "https://example.com/how-to", snippet: "A generic guide to competitor analysis methodology.", publishedDate: "2025-01-01" }],
+    },
+    { ...plan[3], results: [] },
+  ];
+  const { covered, uncovered } = assessDimensionCoverage(dimensionEvidence);
+  assert.strictEqual(uncovered.length, 3);
+  assert.strictEqual(covered.length, 1);
+
+  const warning = formatUncoveredDimensionsWarning(uncovered);
+  assert.ok(warning.includes("size and growth rate"));
+  assert.ok(warning.toLowerCase().includes("limitation"));
+
+  const formatted = formatDimensionEvidenceForContext(dimensionEvidence);
+  assert.ok(formatted.includes("How to Do Competitor Analysis"));
+
+  // The synthesis prompt must explicitly instruct that this generic result
+  // does not by itself satisfy the Market / Industry evidence requirement.
+  const synthesisPrompt = buildSynthesisSystemPrompt("Hat definition text.", "Universal Role Contract text.", ["market_industry", "competitive", "customer_audience"], true);
+  assert.ok(synthesisPrompt.toLowerCase().includes("generic"));
 });

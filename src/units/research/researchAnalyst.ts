@@ -7,11 +7,13 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import type { ResearchProtocolId } from "./protocols";
-import { isResearchProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
+import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
 import type { ResearchSynthesis } from "./evidence";
 import { findUnverifiableSources, validateSynthesis } from "./evidence";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
-import { buildSearchQueries, formatWebResultsForContext, isWebSearchConfigured, searchWeb } from "./webSearch";
+import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
+import { generateResearchPlan } from "./researchPlan";
+import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
 
 /**
  * R&I execution mechanics -- one dedicated runtime for the single active
@@ -289,9 +291,18 @@ Return JSON:
     return state;
   }
 
-  state.selectedResearchProtocols = selected;
+  // Deterministic insurance against the diagnosed failure mode: the AI
+  // selection is only corrected once it's non-ambiguous, and only ever
+  // additively (see protocolGuardrails.ts) -- never overriding a genuine
+  // ambiguity call, never removing a protocol the AI legitimately picked.
+  const guardedSelected = applyProtocolSelectionGuardrails(question, selected);
+  if (guardedSelected.length !== selected.length || guardedSelected[0] !== selected[0]) {
+    console.log(`R&I protocol-selection guardrail adjusted selection for work ${state.workId}: [${selected.join(", ")}] -> [${guardedSelected.join(", ")}]`);
+  }
+
+  state.selectedResearchProtocols = guardedSelected;
   await logActivity(env, {
-    entry: `R&I protocol(s) selected: ${selected.map((id) => id).join(", ")}`,
+    entry: `R&I protocol(s) selected: ${guardedSelected.map((id) => id).join(", ")}`,
     type: "Decision",
     area: "Research & Intelligence",
     decisionRationale: stage1.reason ?? "",
@@ -324,43 +335,6 @@ async function handleBlockedOrAmbiguous(env: Env, state: WorkState, reasonText: 
   );
   state.stage = "research_ambiguous";
   state.awaiting = "research_clarification";
-}
-
-const PROTOCOL_CANONICAL_NAMES: Record<ResearchProtocolId, string> = {
-  business_company: "Business / Company Intelligence",
-  market_industry: "Market / Industry Intelligence",
-  competitive: "Competitive Intelligence",
-  customer_audience: "Customer / Audience Intelligence",
-  environmental_regulatory: "Environmental / Regulatory Intelligence",
-  evidence_validation: "Evidence & Source Validation",
-};
-
-/**
- * Maps a model-returned protocol name back to its canonical id, tolerant
- * of minor phrasing variance (case, partial match) since the model is
- * asked to return the protocol's display name, not its internal id.
- * Returns null for anything that doesn't clearly match one of the six
- * registered protocols -- callers must treat that as "couldn't
- * determine," never guess a nearest neighbor. Exported for direct testing
- * (this is the one piece of protocol-selection genuinely testable as pure
- * logic; the AI classification call itself is exercised live, the same as
- * every other Hat's aiJson-driven decision in this codebase).
- */
-function normalizeProtocolName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-export function nameToProtocolId(name: string): ResearchProtocolId | null {
-  const normalized = normalizeProtocolName(name);
-  if (!normalized) return null;
-  const match = (Object.keys(PROTOCOL_CANONICAL_NAMES) as ResearchProtocolId[]).find((id) => {
-    const canonical = normalizeProtocolName(PROTOCOL_CANONICAL_NAMES[id]);
-    // Substring containment is only trusted once the normalized name is
-    // long enough to be a real match rather than a trivial/empty-string
-    // false positive (every string "contains" "").
-    return canonical === normalized || (normalized.length >= 8 && (canonical.includes(normalized) || normalized.includes(canonical)));
-  });
-  return match && isResearchProtocolId(match) ? match : null;
 }
 
 /**
@@ -406,29 +380,39 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
-  // Live web search, if configured -- queries are built entirely from
-  // the already-abstracted relevance statement (never Martin's raw text
-  // or anything ENIG-identifying), capped per request, and degrade
-  // silently to no results on any failure (see webSearch.ts). Real
+  // Protocol-specific research plan: turns each selected protocol into a
+  // bounded set of concrete, searchable sub-questions grounded in that
+  // protocol's own registered method/evidenceRequirements -- the layer
+  // that was missing entirely before (a protocol used to collapse to one
+  // generic search suffix with no real operational consequence). This
+  // stage is load-bearing -- without it there's nothing to search beyond
+  // the bare question, so a failure here fails the whole request closed.
+  const plan = await generateResearchPlan(env, categorySummary, relevance, question, protocols);
+  if (!plan || plan.length === 0) {
+    console.error(`R&I research plan generation failed for work ${state.workId}`);
+    await handleSynthesisFailure(env, state, "Couldn't generate a research plan for the selected protocol(s) — planning failed.");
+    return state;
+  }
+
+  // Evidence gathering executes the plan -- one search per dimension, not
+  // per protocol -- and degrades to empty results per dimension when no
+  // search provider is configured, exactly like the old behavior. Real
   // fetched URLs/snippets become part of the supplied evidence below, so
-  // findUnverifiableSources naturally extends to verify against them --
-  // no change needed there.
-  let webResultCount = 0;
-  let webEvidence = "";
-  if (isWebSearchConfigured(env)) {
-    const queries = buildSearchQueries(question, relevance, protocols);
-    const allResults = (await Promise.all(queries.map((q) => searchWeb(env, q)))).flat();
-    webResultCount = allResults.length;
-    webEvidence = formatWebResultsForContext(allResults);
-    if (webResultCount > 0) {
-      await logActivity(env, {
-        entry: `R&I gathered ${webResultCount} live web search result(s)`,
-        type: "Activity",
-        area: "Research & Intelligence",
-        activity: queries.join(" | "),
-        outcome: "Active",
-      });
-    }
+  // findUnverifiableSources naturally extends to verify against them.
+  const dimensionEvidence = await gatherDimensionEvidence(env, plan);
+  const { covered, uncovered } = assessDimensionCoverage(dimensionEvidence);
+  const webResultCount = covered.reduce((sum, d) => sum + d.results.length, 0);
+  const webEvidence = formatDimensionEvidenceForContext(dimensionEvidence);
+  const uncoveredWarning = formatUncoveredDimensionsWarning(uncovered);
+
+  if (webResultCount > 0) {
+    await logActivity(env, {
+      entry: `R&I gathered ${webResultCount} live web search result(s) across ${covered.length}/${plan.length} research dimension(s)`,
+      type: "Activity",
+      area: "Research & Intelligence",
+      activity: plan.map((d) => d.subQuestion).join(" | "),
+      outcome: "Active",
+    });
   }
 
   // Per the "Research execution boundary" contract: the research-facing
@@ -436,8 +420,10 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   // Authorized Context category summary, never the full governed page or
   // the entire Hat/Universal Role Contract governance) plus the
   // relevance framing, the question, and whatever was actually supplied
-  // (Martin's/Handoff's own context plus any live web search results).
-  const suppliedEvidence = [context, webEvidence].filter(Boolean).join("\n\n");
+  // (Martin's/Handoff's own context, any live web search results grouped
+  // by research dimension, and an explicit warning for dimensions that
+  // returned no evidence at all).
+  const suppliedEvidence = [context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n");
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
   const synthesis = await aiJson<ResearchSynthesis>(env, {
@@ -526,7 +512,7 @@ export function buildEffectiveResearchContext(categorySummary: string, relevance
   ].join("\n\n");
 }
 
-function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): string {
+export function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): string {
   return [
     "You are executing the Research & Intelligence Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, and stop conditions — follow them exactly.",
     "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
@@ -537,6 +523,8 @@ function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract
     researchProtocolDetail(protocols),
     "=== RESEARCH OUTPUT CONTRACT ===",
     "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Implication MUST reference the Finding index/indexes it is based on. If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
+    "=== HARD RULE: EVIDENCE MUST ACTUALLY ANSWER THE RESEARCH DIMENSION IT'S CITED FOR ===",
+    "Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic \"businesses should analyze their competitors\" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. \"businesses should conduct regular competitor analysis\") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the \"SUPPLIED CONTEXT/EVIDENCE\" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.",
     hasWebResults
       ? "=== HARD RULE: YOU ONLY HAVE THE LIVE WEB SEARCH RESULTS SUPPLIED BELOW -- NO OTHER BROWSING ACCESS ==="
       : "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
@@ -558,7 +546,7 @@ Every "source" and "url" value you return will be checked against the supplied c
 
 function formatSynthesisForTelegram(synthesis: ResearchSynthesis): string {
   const lines: string[] = [];
-  lines.push(`*Protocol(s) used*: ${synthesis.protocolsUsed.map((id) => PROTOCOL_CANONICAL_NAMES[id]).join(", ")}`);
+  lines.push(`*Protocol(s) used*: ${synthesis.protocolsUsed.map((id) => RESEARCH_PROTOCOL_REGISTRY[id].name).join(", ")}`);
   if (synthesis.findings.length > 0) {
     lines.push(`\n*Findings*:\n${synthesis.findings.map((f) => `• ${f.statement}`).join("\n")}`);
   }
