@@ -58,6 +58,29 @@ export function capResearchText(text: string): string {
 }
 
 /**
+ * Confirmed live: even after every per-item size fix on the evidence
+ * pipeline (snippet length, results-per-query), the synthesis request
+ * still landed right at Groq's flat 8000-token ceiling (8247 requested)
+ * -- close enough that a single extra protocol or a slightly longer
+ * snippet tips it back over. Rather than keep shaving individual caps
+ * and hoping their sum stays under budget, this bounds the whole
+ * variable-size evidence blob (Martin's/Handoff's own supplied context +
+ * gathered web evidence + uncovered-dimension warning) to one fixed
+ * budget directly, so total request size no longer depends on how many
+ * protocols or dimensions a given request happens to activate. Keeps
+ * the head (the request's own supplied context comes first and matters
+ * most) and truncates trailing web evidence, which degrades to "less
+ * corroborating detail" rather than losing the actual research context.
+ */
+export const MAX_SUPPLIED_EVIDENCE_LENGTH = 4000;
+
+export function capSuppliedEvidence(text: string): string {
+  return text.length > MAX_SUPPLIED_EVIDENCE_LENGTH
+    ? `${text.slice(0, MAX_SUPPLIED_EVIDENCE_LENGTH)}\n\n[Additional evidence truncated to keep this request within provider size limits.]`
+    : text;
+}
+
+/**
  * Sent immediately, before any AI call, at every entry point that's
  * about to run the multi-stage pipeline (relevance -> protocol selection
  * -> per-protocol plan generation -> evidence gathering -> synthesis).
@@ -498,7 +521,7 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   // (Martin's/Handoff's own context, any live web search results grouped
   // by research dimension, and an explicit warning for dimensions that
   // returned no evidence at all).
-  const suppliedEvidence = [context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n");
+  const suppliedEvidence = capSuppliedEvidence([context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
   const synthesis = await aiJson<ResearchSynthesis>(env, {
