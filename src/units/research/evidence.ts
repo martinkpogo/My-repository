@@ -30,6 +30,7 @@ export interface EvidenceItem {
 }
 
 export interface Finding {
+  id: string;
   statement: string;
   /** Must reference at least one real EvidenceItem id -- enforced by validateSynthesis, never left to the model's discretion. */
   evidenceIds: string[];
@@ -37,7 +38,17 @@ export interface Finding {
 
 export interface Implication {
   statement: string;
-  basedOnFindingIndexes: number[];
+  /**
+   * References Finding.id, not a positional array index. Confirmed live
+   * as a real failure mode: an Implication generated with a positional
+   * index (e.g. basedOnFindingIndexes: [2]) goes stale the moment the
+   * model omits or reorders a Finding while assembling the JSON -- an
+   * off-by-one the model has no way to self-correct once it's writing
+   * later array elements. Evidence->Source and Finding->Evidence already
+   * used stable string ids for exactly this reason; Implication->Finding
+   * was the one place still using a fragile index.
+   */
+  basedOnFindingIds: string[];
 }
 
 export interface Limitation {
@@ -97,13 +108,14 @@ export function validateSynthesis(synthesis: ResearchSynthesis): SynthesisValida
     }
   }
 
+  const findingIds = new Set(synthesis.findings.map((f) => f.id));
   for (const implication of synthesis.implications) {
-    if (implication.basedOnFindingIndexes.length === 0) {
+    if (implication.basedOnFindingIds.length === 0) {
       return { valid: false, reason: `Implication "${implication.statement.slice(0, 80)}" cites no underlying finding.` };
     }
-    for (const idx of implication.basedOnFindingIndexes) {
-      if (idx < 0 || idx >= synthesis.findings.length) {
-        return { valid: false, reason: `Implication "${implication.statement.slice(0, 80)}" references a finding index that doesn't exist.` };
+    for (const findingId of implication.basedOnFindingIds) {
+      if (!findingIds.has(findingId)) {
+        return { valid: false, reason: `Implication "${implication.statement.slice(0, 80)}" references unknown finding id "${findingId}".` };
       }
     }
   }
