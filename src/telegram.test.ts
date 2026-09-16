@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { editMessageText, sendMessage } from "./telegram";
+import { editHatMessage, editMessageText, sendHatMessage, sendMessage } from "./telegram";
 import type { Env } from "./types";
 
 const fakeEnv = { TELEGRAM_BOT_TOKEN: "test-token" } as Env;
@@ -57,6 +57,39 @@ test("editMessageText fails silently (logged, not thrown) when Telegram rejects 
 
   try {
     await assert.doesNotReject(editMessageText(fakeEnv, 1, 4242, "updated status"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sendHatMessage labels the message with the Hat name before the content", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledBody: any;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    calledBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await sendHatMessage(fakeEnv, { chatId: 1, threadId: 10, hat: "Marketing Strategist" }, "The market is growing.");
+    assert.strictEqual(calledBody.text, "Hat: Marketing Strategist.\n\nThe market is growing.");
+    assert.strictEqual(calledBody.message_thread_id, 10);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("editHatMessage re-applies the same Hat label an edited bubble started with", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledBody: any;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    calledBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await editHatMessage(fakeEnv, { chatId: 1, hat: "Research & Intelligence Analyst" }, 4242, "Gathering evidence...");
+    assert.strictEqual(calledBody.text, "Hat: Research & Intelligence Analyst.\n\nGathering evidence...");
   } finally {
     globalThis.fetch = originalFetch;
   }

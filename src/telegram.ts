@@ -94,6 +94,34 @@ export async function editMessageText(env: Env, chatId: number, messageId: numbe
   }
 }
 
+/** Shape every WorkState already satisfies -- chatId/threadId/hat -- so callers can pass state directly. */
+export interface HatMessageTarget {
+  chatId: number;
+  threadId?: number;
+  hat: string;
+}
+
+function withHatLabel(target: HatMessageTarget, text: string): string {
+  return `Hat: ${target.hat}.\n\n${text}`;
+}
+
+/**
+ * Like sendMessage, but labels the chat bubble with which Hat is
+ * speaking -- "Hat: <name>." on its own line before the content -- so
+ * it's visually clear which Hat produced a given message, especially
+ * once a work item has moved through more than one Hat (e.g. a Handoff
+ * pickup). Prefer this over sendMessage directly for any message
+ * originating from Hat logic.
+ */
+export async function sendHatMessage(env: Env, target: HatMessageTarget, text: string, buttons?: InlineButton[][]): Promise<number | undefined> {
+  return sendMessage(env, target.chatId, withHatLabel(target, text), buttons, target.threadId);
+}
+
+/** Like editMessageText, but re-applies the same "Hat: <name>." label sendHatMessage used, so an edited bubble doesn't drop it. */
+export async function editHatMessage(env: Env, target: HatMessageTarget, messageId: number, text: string): Promise<void> {
+  return editMessageText(env, target.chatId, messageId, withHatLabel(target, text));
+}
+
 async function extractMessageId(res: Response): Promise<number | undefined> {
   try {
     const data = (await res.json()) as { result?: { message_id?: number } };
