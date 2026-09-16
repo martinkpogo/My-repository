@@ -1,7 +1,7 @@
 import type { Env } from "../../types";
 import { aiJson } from "../../ai";
 import type { ResearchProtocolId } from "./protocols";
-import { nameToProtocolId, researchProtocolDetail } from "./protocols";
+import { researchProtocolDetail } from "./protocols";
 
 /**
  * Protocol-specific research planning -- the layer that was missing
@@ -90,11 +90,60 @@ Each dimension should be phrased as a concrete, searchable research sub-question
 }
 
 /**
- * Generates and bounds the research plan. Returns null if the model
- * failed or returned nothing usable -- callers must fail closed (this
- * stage is load-bearing: without it, evidence gathering has nothing to
- * search for beyond the bare question, which is the exact gap this stage
- * exists to close).
+ * Generates one protocol's dimensions in isolation -- confirmed live as
+ * the fix for multi-protocol requests (the guardrail can select up to
+ * five at once) blowing past free-tier size limits: a single combined
+ * call asking for every selected protocol's dimensions at once scaled
+ * its prompt with protocol count, and a 5-protocol request measured at
+ * ~10-11K tokens even after every other size fix in this file's history
+ * -- still over Groq's fixed 8000 TPM cap and slow enough to trip
+ * several providers' 12s timeout. One call per protocol keeps every
+ * individual request small regardless of how many protocols a request
+ * activates, and each protocol's own eligible-provider fallback runs
+ * independently, so one protocol's failure no longer takes the whole
+ * plan down with it. Returns [] (never throws or fails the whole plan)
+ * if this protocol's call didn't produce anything usable -- the caller
+ * treats a partial plan across protocols as success.
+ */
+async function generateProtocolPlan(
+  env: Env,
+  categorySummary: string,
+  relevance: string,
+  question: string,
+  protocol: ResearchProtocolId,
+): Promise<ResearchPlanDimension[]> {
+  const result = await aiJson<PlanResult>(env, {
+    taskId: "research.plan_generation",
+    system: buildResearchPlanPrompt(categorySummary, relevance, [protocol]),
+    user: question,
+    maxTokens: 1536,
+  });
+
+  if (!result?.dimensions || result.dimensions.length === 0) return [];
+
+  // This call was scoped to exactly one protocol, so that protocol is
+  // used directly rather than trusting whatever the model echoes back
+  // in each dimension's "protocol" field -- a model that gets that
+  // field wrong or omits it no longer silently drops an otherwise-good
+  // dimension the way the combined-call version could.
+  return result.dimensions
+    .map((d): ResearchPlanDimension | null => {
+      const subQuestion = d.subQuestion?.trim();
+      return subQuestion ? { protocol, subQuestion } : null;
+    })
+    .filter((d): d is ResearchPlanDimension => d !== null);
+}
+
+/**
+ * Generates and bounds the research plan across every selected protocol,
+ * one independent (and independently fallback-eligible) AI call per
+ * protocol -- see generateProtocolPlan. Returns null only if every
+ * protocol's call failed and there is nothing at all to search for;
+ * callers must fail closed in that case (this stage is load-bearing --
+ * without it, evidence gathering has nothing to search for beyond the
+ * bare question, which is the exact gap this stage exists to close). A
+ * partial result (some but not all protocols produced dimensions) is
+ * treated as success, not a failure -- some evidence beats none.
  */
 export async function generateResearchPlan(
   env: Env,
@@ -103,27 +152,10 @@ export async function generateResearchPlan(
   question: string,
   protocols: ResearchProtocolId[],
 ): Promise<ResearchPlanDimension[] | null> {
-  const result = await aiJson<PlanResult>(env, {
-    taskId: "research.plan_generation",
-    system: buildResearchPlanPrompt(categorySummary, relevance, protocols),
-    user: question,
-    // Confirmed live: reasoning-model providers in the fallback chain
-    // (see aiJson's own maxTokens comment) returned malformed/empty
-    // output for this task at 1536 -- its schema is the largest of the
-    // aiJson call sites (up to MAX_DIMENSIONS_PER_REQUEST entries), so
-    // it needs more headroom than the shared default.
-    maxTokens: 2560,
-  });
-
-  if (!result?.dimensions || result.dimensions.length === 0) return null;
-
-  const mapped = result.dimensions
-    .map((d): ResearchPlanDimension | null => {
-      const protocol = d.protocol ? nameToProtocolId(d.protocol) : null;
-      const subQuestion = d.subQuestion?.trim();
-      return protocol && subQuestion ? { protocol, subQuestion } : null;
-    })
-    .filter((d): d is ResearchPlanDimension => d !== null);
+  const perProtocol = await Promise.all(
+    protocols.map((protocol) => generateProtocolPlan(env, categorySummary, relevance, question, protocol)),
+  );
+  const mapped = perProtocol.flat();
 
   if (mapped.length === 0) return null;
   return capResearchPlan(mapped);
