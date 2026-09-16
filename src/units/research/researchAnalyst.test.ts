@@ -63,8 +63,8 @@ test("5. Conflicting evidence → surfaced in limitations, not silently resolved
       { id: "s2", source: "Market Review", sourceType: "secondary", passage: "Reports $150/mo", claimSupported: "pricing", validationStatus: "contradicted" },
     ],
     evidence: [{ id: "e1", statement: "Conflicting price reports ($100 vs $150)", sourceIds: ["s1", "s2"] }],
-    findings: [{ statement: "Competitor pricing has conflicting source data", evidenceIds: ["e1"] }],
-    implications: [{ statement: "Pricing tier remains unconfirmed", basedOnFindingIndexes: [0] }],
+    findings: [{ id: "f1", statement: "Competitor pricing has conflicting source data", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Pricing tier remains unconfirmed", basedOnFindingIds: ["f1"] }],
     limitations: [{ statement: "Source conflict on pricing; requires primary verification." }],
   };
 
@@ -79,7 +79,7 @@ test("6. Unsupported claim → rejected by validateSynthesis", () => {
     sources: [{ id: "s1", source: "Press release", sourceType: "primary", passage: "New launch", claimSupported: "launch", validationStatus: "validated" }],
     evidence: [{ id: "e1", statement: "Company launched product X", sourceIds: ["s1"] }],
     findings: [
-      { statement: "Company will double revenue next year", evidenceIds: [] }, // UNSUPPORTED CLAIM
+      { id: "f1", statement: "Company will double revenue next year", evidenceIds: [] }, // UNSUPPORTED CLAIM
     ],
     implications: [],
     limitations: [],
@@ -155,8 +155,8 @@ test("10. Complete valid Handoff → structured source-linked result", () => {
       protocolsUsed: ["market_industry"],
       sources: [{ id: "s1", source: "APAC Market Study 2024", sourceType: "secondary", passage: "APAC market growing 12% YoY", claimSupported: "growth rate", validationStatus: "validated" }],
       evidence: [{ id: "e1", statement: "APAC market exhibits 12% YoY growth", sourceIds: ["s1"] }],
-      findings: [{ statement: "APAC region represents strong growth potential", evidenceIds: ["e1"] }],
-      implications: [{ statement: "Feasibility study warrants further detailed entry modeling", basedOnFindingIndexes: [0] }],
+      findings: [{ id: "f1", statement: "APAC region represents strong growth potential", evidenceIds: ["e1"] }],
+      implications: [{ statement: "Feasibility study warrants further detailed entry modeling", basedOnFindingIds: ["f1"] }],
       limitations: [],
     };
     const val = validateSynthesis(validSynthesis);
@@ -287,8 +287,8 @@ test("19. Research quality: the previously-failed live case (fabricated competit
       { id: "s2", source: "Market Research Report", sourceType: "secondary", passage: "...", claimSupported: "market sizing", validationStatus: "unvalidated" },
     ],
     evidence: [{ id: "e1", statement: "Competitor A positions as premium", sourceIds: ["s1", "s2"] }],
-    findings: [{ statement: "Main competitors are Company A, B, and C", evidenceIds: ["e1"] }],
-    implications: [{ statement: "Consider differentiating from Company A", basedOnFindingIndexes: [0] }],
+    findings: [{ id: "f1", statement: "Main competitors are Company A, B, and C", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Consider differentiating from Company A", basedOnFindingIds: ["f1"] }],
     limitations: [],
   };
   const unverifiable = findUnverifiableSources(fabricatedSynthesis, effectiveContext);
@@ -308,8 +308,8 @@ test("20. Research quality: an honest result grounded in real supplied evidence 
     protocolsUsed: ["market_industry"],
     sources: [{ id: "s1", source: "GhanaStrategyWatch", sourceType: "secondary", url: "https://ghanastrategywatch.example/report", passage: "8% YoY growth", claimSupported: "market growth", validationStatus: "unvalidated" }],
     evidence: [{ id: "e1", statement: "Demand for brand/communications consulting in Accra grew 8% YoY", sourceIds: ["s1"] }],
-    findings: [{ statement: "The Accra market for this service category is growing", evidenceIds: ["e1"] }],
-    implications: [{ statement: "Growing demand may warrant continued investment in this category", basedOnFindingIndexes: [0] }],
+    findings: [{ id: "f1", statement: "The Accra market for this service category is growing", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Growing demand may warrant continued investment in this category", basedOnFindingIds: ["f1"] }],
     limitations: [{ statement: "Single source, not independently cross-checked." }],
   };
   assert.strictEqual(validateSynthesis(honestSynthesis).valid, true);
@@ -395,8 +395,8 @@ test("24. formatSynthesisForHandoff preserves Evidence -> Finding -> Implication
     protocolsUsed: ["market_industry"],
     sources: [{ id: "s1", source: "GSO", sourceType: "primary", url: "https://gso.gov.gh", passage: "...", claimSupported: "growth", validationStatus: "validated" }],
     evidence: [{ id: "e1", statement: "Market grew 8%", sourceIds: ["s1"] }],
-    findings: [{ statement: "The market is growing", evidenceIds: ["e1"] }],
-    implications: [{ statement: "Continued investment in this category may be warranted", basedOnFindingIndexes: [0] }],
+    findings: [{ id: "f1", statement: "The market is growing", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Continued investment in this category may be warranted", basedOnFindingIds: ["f1"] }],
     limitations: [{ statement: "Single source." }],
   };
   const formatted = formatSynthesisForHandoff(synthesis);

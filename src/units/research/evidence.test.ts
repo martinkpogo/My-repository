@@ -8,8 +8,8 @@ function baseSynthesis(overrides: Partial<ResearchSynthesis> = {}): ResearchSynt
     protocolsUsed: ["competitive"],
     sources: [{ id: "s1", source: "Company website", sourceType: "primary", passage: "...", claimSupported: "pricing tier", validationStatus: "validated" }],
     evidence: [{ id: "e1", statement: "Competitor X prices at $50/mo", sourceIds: ["s1"] }],
-    findings: [{ statement: "Competitor X undercuts our entry tier", evidenceIds: ["e1"] }],
-    implications: [{ statement: "Consider entry-tier repricing", basedOnFindingIndexes: [0] }],
+    findings: [{ id: "f1", statement: "Competitor X undercuts our entry tier", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Consider entry-tier repricing", basedOnFindingIds: ["f1"] }],
     limitations: [],
     ...overrides,
   };
@@ -27,7 +27,7 @@ test("no protocol recorded fails closed", () => {
 
 test("a Finding with no supporting Evidence is rejected -- never silently turn an inference into a finding", () => {
   const result = validateSynthesis(
-    baseSynthesis({ findings: [{ statement: "Unsupported conclusion", evidenceIds: [] }] }),
+    baseSynthesis({ findings: [{ id: "f1", statement: "Unsupported conclusion", evidenceIds: [] }] }),
   );
   assert.strictEqual(result.valid, false);
   assert.ok(result.reason?.includes("cites no evidence"));
@@ -35,7 +35,7 @@ test("a Finding with no supporting Evidence is rejected -- never silently turn a
 
 test("a Finding citing a nonexistent evidence id is rejected -- prevents fabricated citations", () => {
   const result = validateSynthesis(
-    baseSynthesis({ findings: [{ statement: "Conclusion", evidenceIds: ["nonexistent"] }] }),
+    baseSynthesis({ findings: [{ id: "f1", statement: "Conclusion", evidenceIds: ["nonexistent"] }] }),
   );
   assert.strictEqual(result.valid, false);
   assert.ok(result.reason?.includes("unknown evidence id"));
@@ -59,18 +59,18 @@ test("an Evidence item citing a nonexistent source id is rejected", () => {
 
 test("an Implication with no underlying Finding is rejected", () => {
   const result = validateSynthesis(
-    baseSynthesis({ implications: [{ statement: "Unsupported implication", basedOnFindingIndexes: [] }] }),
+    baseSynthesis({ implications: [{ statement: "Unsupported implication", basedOnFindingIds: [] }] }),
   );
   assert.strictEqual(result.valid, false);
   assert.ok(result.reason?.includes("cites no underlying finding"));
 });
 
-test("an Implication referencing an out-of-range Finding index is rejected", () => {
+test("an Implication referencing a nonexistent Finding id is rejected -- immune to positional drift when findings are omitted/reordered", () => {
   const result = validateSynthesis(
-    baseSynthesis({ implications: [{ statement: "Implication", basedOnFindingIndexes: [5] }] }),
+    baseSynthesis({ implications: [{ statement: "Implication", basedOnFindingIds: ["nonexistent"] }] }),
   );
   assert.strictEqual(result.valid, false);
-  assert.ok(result.reason?.includes("references a finding index that doesn't exist"));
+  assert.ok(result.reason?.includes("references unknown finding id"));
 });
 
 test("a contradicted source's status is preserved through validation, not silently resolved to a convenient one", () => {
@@ -81,7 +81,7 @@ test("a contradicted source's status is preserved through validation, not silent
         { id: "s2", source: "Third-party review", sourceType: "secondary", passage: "reports $75/mo", claimSupported: "price", validationStatus: "contradicted" },
       ],
       evidence: [{ id: "e1", statement: "Sources disagree on Competitor X's price ($50 vs $75/mo)", sourceIds: ["s1", "s2"] }],
-      findings: [{ statement: "Competitor X's pricing could not be confirmed with confidence", evidenceIds: ["e1"] }],
+      findings: [{ id: "f1", statement: "Competitor X's pricing could not be confirmed with confidence", evidenceIds: ["e1"] }],
       implications: [],
       limitations: [{ statement: "Conflicting source data on pricing -- treat as unconfirmed." }],
     }),
