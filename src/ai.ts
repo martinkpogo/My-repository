@@ -49,7 +49,17 @@ export async function aiJson<T = Record<string, unknown>>(
       { role: "user", content: opts.user },
     ],
     temperature: 0.2,
-    maxTokens: opts.maxTokens ?? 1024,
+    // Confirmed live: several fallback providers' free-tier models
+    // (the gpt-oss family on groq/nvidia-nim, among others) are
+    // "reasoning" models that spend part of their output budget on an
+    // invisible chain-of-thought field before emitting the requested
+    // JSON in "content" -- too tight a budget lets the reasoning eat
+    // the whole allowance and leaves content empty, which then reports
+    // as a malformed response and burns a fallback attempt for nothing.
+    // 1024 was too tight for this class of model; raised as a shared
+    // safety margin for every aiJson caller, not a license to request
+    // more than a JSON object actually needs.
+    maxTokens: opts.maxTokens ?? 2048,
     light: opts.light,
     validateResponse: isParsableJson,
   };
