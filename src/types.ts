@@ -54,7 +54,6 @@ export interface Env {
   NVIDIA_NIM_API_KEY?: string;
   GROQ_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
-  TOGETHER_API_KEY?: string;
 }
 
 export type Unit =

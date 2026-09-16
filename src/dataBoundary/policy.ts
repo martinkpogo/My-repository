@@ -70,7 +70,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
  */
 /**
  * The free-tier OpenAI-compatible fallback providers (nvidia-nim, groq,
- * openrouter, together-ai) get the exact same allowedSensitivities as
+ * openrouter) get the exact same allowedSensitivities as
  * workers-ai -- they exist purely as infrastructure fallback for the
  * same tier Workers AI already serves (added after Cloudflare's daily
  * quota exhaustion blocked every AI call account-wide), not as a basis
@@ -97,10 +97,6 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
   },
   openrouter: {
     providerId: "openrouter",
-    allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
-  },
-  "together-ai": {
-    providerId: "together-ai",
     allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
   },
 };

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, OpenAiCompatibleProvider, TOGETHER_AI_PROVIDER } from "./openaiCompatible";
+import { GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, OpenAiCompatibleProvider } from "./openaiCompatible";
 import type { AiTask } from "./types";
 
 const dummyTask: AiTask = {
@@ -14,7 +14,6 @@ test("each fallback provider is ineligible when its own API key isn't configured
   assert.strictEqual(NVIDIA_NIM_PROVIDER.isEligible({} as any, dummyTask), false);
   assert.strictEqual(GROQ_PROVIDER.isEligible({} as any, dummyTask), false);
   assert.strictEqual(OPENROUTER_PROVIDER.isEligible({} as any, dummyTask), false);
-  assert.strictEqual(TOGETHER_AI_PROVIDER.isEligible({} as any, dummyTask), false);
 });
 
 test("each fallback provider becomes eligible once its own API key is set -- unrelated providers stay ineligible", () => {
