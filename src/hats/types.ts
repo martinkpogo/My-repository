@@ -20,7 +20,7 @@ export type MarketingHatName =
  */
 export interface MarketingHatDefinition {
   name: MarketingHatName;
-  unit: "SM&BD";
+  unit: "Marketing";
   specialization: "Marketing";
   purpose: string;
   owns: string[];

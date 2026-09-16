@@ -31,7 +31,7 @@ export interface HatIdentity {
   specialization?: string;
 }
 
-export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "SM&BD", specialization: "Sales" };
+export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sales", specialization: "Sales" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {

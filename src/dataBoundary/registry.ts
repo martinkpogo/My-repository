@@ -15,7 +15,7 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
   "routing.marketing_specialization_check": {
     id: "routing.marketing_specialization_check",
     name: "Routing Marketing Specialization Check",
-    description: "Checks if a request requires Marketing specialization within SM&BD.",
+    description: "Checks if a request requires Marketing specialization, as opposed to Sales, when no dedicated topic already signals which.",
   },
   "chat.general_reply": {
     id: "chat.general_reply",
