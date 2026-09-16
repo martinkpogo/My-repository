@@ -100,7 +100,7 @@ test("C. Primary infrastructure failure + no eligible secondary -> safe failure/
   assert.equal(secondaryIneligible.attempts, 0);
 });
 
-test("D & Additional: Malformed JSON output does NOT trigger provider fallback", async () => {
+test("D. Malformed JSON output DOES trigger provider fallback -- a garbled answer is no better than no answer", async () => {
   const primary = new MockProvider("p1", () => ({
     success: true,
     response: { rawText: "INVALID_NOT_JSON" },
@@ -113,9 +113,27 @@ test("D & Additional: Malformed JSON output does NOT trigger provider fallback",
   const executor = new AiPolicyExecutor([primary, secondary], testBoundaryEvaluator);
   const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
 
+  assert.deepEqual(res, { valid: "json" });
+  assert.equal(primary.attempts, 1);
+  assert.equal(secondary.attempts, 1, "Secondary provider must be attempted after primary's malformed output");
+});
+
+test("D2. Every eligible provider returning malformed JSON -> safe failure/hold, no infinite loop", async () => {
+  const primary = new MockProvider("p1", () => ({
+    success: true,
+    response: { rawText: "INVALID_NOT_JSON" },
+  }));
+  const secondary = new MockProvider("p2", () => ({
+    success: true,
+    response: { rawText: "also not json" },
+  }));
+
+  const executor = new AiPolicyExecutor([primary, secondary], testBoundaryEvaluator);
+  const res = await aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
+
   assert.equal(res, null);
   assert.equal(primary.attempts, 1);
-  assert.equal(secondary.attempts, 0, "Secondary provider must NOT be attempted on malformed output");
+  assert.equal(secondary.attempts, 1);
 });
 
 test("E. Secondary infrastructure failure -> safe failure/hold, no infinite loop", async () => {
