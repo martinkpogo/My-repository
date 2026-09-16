@@ -48,6 +48,42 @@ export interface OpenAiCompatibleConfig {
 // stalling the whole chain.
 export const DEFAULT_PROVIDER_TIMEOUT_MS = 12_000;
 
+/**
+ * Confirmed live: several fallback providers' 429 rate-limit responses
+ * name the exact wait before the SAME request would succeed -- Groq:
+ * "Please try again in 4.335s"; Gemini: "Please retry in
+ * 5.813790504s" -- often just a few seconds, well within reach of one
+ * short wait-and-retry, rather than immediately giving up on this
+ * provider and falling through to the next one in the chain, which is
+ * frequently ALSO rate-limited or exhausted from the same burst of
+ * calls (protocol selection, N per-protocol plan calls, and synthesis
+ * can all land on the same provider within the same minute). Capped
+ * well under DEFAULT_PROVIDER_TIMEOUT_MS so a wait-and-retry can never
+ * itself become the reason a request looks stalled.
+ */
+const MAX_RETRY_AFTER_WAIT_MS = 6_000;
+
+function parseRetryAfterMs(res: Response, bodyText: string): number | undefined {
+  const header = res.headers.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  }
+  // Provider-worded fallback: Groq's "Please try again in 4.335s", Gemini's
+  // "Please retry in 5.813790504s" -- no standard Retry-After header, but
+  // the same wait is spelled out in the error body text.
+  const match = bodyText.match(/(?:try again|retry) in (\d+(?:\.\d+)?)\s*s/i);
+  if (match) {
+    const seconds = parseFloat(match[1]);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  }
+  return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class OpenAiCompatibleProvider implements AiProvider {
   public readonly id: ProviderId;
   private readonly config: OpenAiCompatibleConfig;
@@ -61,7 +97,23 @@ export class OpenAiCompatibleProvider implements AiProvider {
     return Boolean(env[this.config.apiKeyEnvVar]);
   }
 
+  /**
+   * Makes one attempt, then -- only for a 429 whose body/header names a
+   * short, parseable wait -- waits that long (capped) and retries once
+   * more before giving up. Every other failure (non-429 errors, a 429
+   * with no parseable wait, or a second consecutive failure) returns
+   * immediately so the policy executor's own fallback loop can move on
+   * to the next eligible provider without delay.
+   */
   public async execute(env: Env, task: AiTask): Promise<ProviderAdapterResult> {
+    const first = await this.attempt(env, task);
+    if (first.result.success || first.retryAfterMs === undefined) return first.result;
+
+    await sleep(Math.min(first.retryAfterMs, MAX_RETRY_AFTER_WAIT_MS));
+    return (await this.attempt(env, task)).result;
+  }
+
+  private async attempt(env: Env, task: AiTask): Promise<{ result: ProviderAdapterResult; retryAfterMs?: number }> {
     const apiKey = env[this.config.apiKeyEnvVar];
     const model = task.light && this.config.lightModel ? this.config.lightModel : this.config.model;
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
@@ -85,20 +137,20 @@ export class OpenAiCompatibleProvider implements AiProvider {
       if (!res.ok) {
         const body = await res.text().catch(() => "");
         return {
-          success: false,
-          error: new InfrastructureError(this.id, `${res.status} ${body}`.slice(0, 500), { statusCode: res.status }),
+          result: {
+            success: false,
+            error: new InfrastructureError(this.id, `${res.status} ${body}`.slice(0, 500), { statusCode: res.status }),
+          },
+          retryAfterMs: res.status === 429 ? parseRetryAfterMs(res, body) : undefined,
         };
       }
       const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const rawText = data.choices?.[0]?.message?.content ?? "";
-      return { success: true, response: { rawText } };
+      return { result: { success: true, response: { rawText } } };
     } catch (err: any) {
       const message =
         err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : err?.message || `${this.id} execution failed`;
-      return {
-        success: false,
-        error: new InfrastructureError(this.id, message),
-      };
+      return { result: { success: false, error: new InfrastructureError(this.id, message) } };
     } finally {
       clearTimeout(timeoutHandle);
     }
