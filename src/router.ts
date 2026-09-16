@@ -11,21 +11,26 @@ import { marketingHatSummaryList } from "./hats/registry";
 // does not restate any Hat's own operating procedure.
 const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d";
 
-// Sales Executive/Business Development intake is paused while it is rebuilt
-// as an isolated, data-controlled environment that tokenizes identity
-// (Entity/Matter Unique ID, never the real name) before anything reaches
-// this system -- see the companion Finance token-only change made
-// alongside this pause.
+// Sales Executive/Business Development intake is paused by deliberate,
+// standing policy, not as a temporary state pending a rebuild. Real client
+// identity (Entity/Matter, names, contact details) is confirmed-sensitive
+// data that this Worker's AI provider (Cloudflare Workers AI) is not
+// approved to process -- Workers AI's training-data policy for personal
+// information hasn't been confirmed acceptable, the same reason
+// chat.general_reply is gated in dataBoundary/policy.ts. That work now
+// lives entirely in an isolated Sales Executive Claude project with its own
+// Notion (Entity/Matters/Proposals) and Gmail access, where Martin reviews
+// and approves every client-facing action (e.g. an email) directly -- it is
+// live and working, exchanging only opaque Entity_Token/Matter_Token values
+// with this Worker via the shared Handoffs database.
 //
-// This is no longer just a routing gate: the Notion integration this Worker
-// authenticates with has had its connection to the Engagement page (Entity,
-// Matters, Proposals) removed entirely, so salesExecutive.ts's own Notion
-// calls will fail (403/404) regardless of this flag. Do NOT flip this back
-// to false until the isolated Sales Executive project (with its own Notion
-// connection to Entity/Matters/Proposals) is live and owns that work --
-// either re-granting this Worker's integration access here would undo the
-// isolation just built, or this flag alone won't matter because the calls
-// still can't reach those databases.
+// This flag stays true until an AI provider with a confirmed acceptable
+// personal-data/training policy is available for this Worker to use --
+// not until the isolated project exists (it already does). This Worker's
+// own Notion integration has also had its connection to the Engagement
+// page (Entity, Matters, Proposals) removed entirely, so salesExecutive.ts's
+// Notion calls fail regardless of this flag; re-granting that access to
+// bring this code back would undo the isolation this pause protects.
 export const SALES_EXECUTIVE_PAUSED = true;
 
 // generalChatReply's underlying aiChat call returns "" whenever no AI
