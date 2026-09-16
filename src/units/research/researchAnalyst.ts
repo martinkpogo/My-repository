@@ -648,12 +648,17 @@ function formatSynthesisForTelegram(synthesis: ResearchSynthesis): string {
 }
 
 /**
- * Delivers the validated synthesis. No approval gate — intelligence is
- * informational, not an action requiring Martin's authorization, per the
- * Unit's own contract ("R&I does not make downstream decisions"). Closes
- * the Handoff (if one exists) as the completion signal, and leaves the
- * work item open for a free-text follow-up rather than a button — Martin
- * can simply reply to dig further, handled by handleResearchFeedback.
+ * Delivers the validated synthesis. No approval gate on the delivery
+ * itself — intelligence is informational, not an action requiring
+ * Martin's authorization, per the Unit's own contract ("R&I does not
+ * make downstream decisions"). The separate downstream handoff to
+ * another Hat (see routeToConsumingHat) DOES gate on Martin's approval,
+ * per his own request — the two are independent: he always sees the
+ * research immediately, and separately decides whether it gets routed
+ * onward. Closes the Handoff (if one exists) as the completion signal,
+ * and leaves the work item open for a free-text follow-up rather than a
+ * button — Martin can simply reply to dig further, handled by
+ * handleResearchFeedback.
  */
 async function deliverSynthesis(env: Env, state: WorkState, synthesis: ResearchSynthesis): Promise<WorkState> {
   if (state.handoffId) {
@@ -680,15 +685,20 @@ async function deliverSynthesis(env: Env, state: WorkState, synthesis: ResearchS
 }
 
 /**
- * Auto-hands-off research to whichever Hat actually needs it as direct
- * input to its own work, rather than only reporting it back to Martin --
- * per Martin's own instruction: "research has to find and feed the
- * strategist hat that needs it." Marketing Strategist is currently the
- * only Hat this can target (it already exists and owns marketing
+ * Proposes handing off research to whichever Hat actually needs it as
+ * direct input to its own work, rather than only reporting it back to
+ * Martin -- per Martin's own instruction: "research has to find and feed
+ * the strategist hat that needs it." Marketing Strategist is currently
+ * the only Hat this can target (it already exists and owns marketing
  * direction/positioning/brand/channel decisions -- Strategy remains a
  * zero-Hat Unit). Adding a further target later means adding one entry
  * to HANDOFF_ROUTES and extending the classifier's own instructions, not
  * restructuring this mechanism.
+ *
+ * This shipped fully automatic at first; Martin asked for a preview and
+ * an explicit approval gate before anything is actually sent, so the
+ * Handoff record is only created once he approves (see
+ * handleResearchHandoffApproval) -- never on classification alone.
  */
 const HANDOFF_ROUTES: Partial<Record<string, { unit: Unit; hat: string }>> = {
   marketing: { unit: "Marketing", hat: "Marketing Strategist" },
@@ -732,33 +742,97 @@ async function routeToConsumingHat(env: Env, state: WorkState, synthesis: Resear
   const route = routing.target ? HANDOFF_ROUTES[routing.target] : undefined;
   if (!route) return;
 
-  try {
-    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-      Handoff: title(`R&I research for ${route.hat}: ${(state.researchQuestion ?? state.workId).slice(0, 60)}`),
-      "From Unit": select("Research & Intelligence"),
-      "From Hat": richText("Research & Intelligence Analyst"),
-      "To Unit": select(route.unit),
-      "To Hat": richText(route.hat),
-      Type: select("Work"),
-      Status: select("Pending"),
-      Reason: richText((routing.reason ?? `Research completed and judged directly relevant to ${route.hat}'s work.`).slice(0, 1900)),
-      "Expected Output": richText(`${route.hat} to use this research as direct input to its own work.`),
-      "Verified Facts & Sources": richText(formatSynthesisForHandoff(synthesis).slice(0, 1900)),
-    });
+  const reason = (routing.reason ?? `Research completed and judged directly relevant to ${route.hat}'s work.`).slice(0, 1900);
+  const verifiedFactsAndSources = formatSynthesisForHandoff(synthesis).slice(0, 1900);
+  state.pendingResearchHandoff = {
+    unit: route.unit,
+    hat: route.hat,
+    reason,
+    handoffTitle: `R&I research for ${route.hat}: ${(state.researchQuestion ?? state.workId).slice(0, 60)}`,
+    verifiedFactsAndSources,
+  };
+
+  await logActivity(env, {
+    entry: `R&I proposed handoff to ${route.hat} -- pending approval`,
+    type: "Decision",
+    area: "Research & Intelligence",
+    decisionRationale: reason,
+    outcome: "Blocked",
+  });
+
+  await sendMessage(
+    env,
+    state.chatId,
+    `This research looks directly relevant to *${route.hat}*'s work: ${reason}\n\n*Preview of what would be sent:*\n${verifiedFactsAndSources.slice(0, 1200)}\n\nSend this to ${route.hat}?`,
+    [
+      [
+        { text: "✅ Send handoff", callback_data: `researchhandoff:${state.workId}:approve` },
+        { text: "🚫 Don't send", callback_data: `researchhandoff:${state.workId}:reject` },
+      ],
+    ],
+    state.threadId,
+  );
+}
+
+/**
+ * Creates the actual Handoff record only once Martin approves the
+ * preview sent by routeToConsumingHat -- see pendingResearchHandoff on
+ * WorkState. A reject, or a successful approval, clears the pending
+ * proposal so a stale one can't be actioned by a later, unrelated button
+ * press -- but a failed creation attempt deliberately leaves it in place
+ * so approving again actually retries the same handoff instead of
+ * silently having nothing left to act on.
+ */
+export async function handleResearchHandoffApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const pending = state.pendingResearchHandoff;
+
+  if (!pending) {
+    await sendMessage(env, state.chatId, "There's no pending handoff to act on.", undefined, state.threadId);
+    return state;
+  }
+
+  if (!approved) {
+    state.pendingResearchHandoff = undefined;
     await logActivity(env, {
-      entry: `R&I research handed off to ${route.hat}`,
-      type: "Activity",
+      entry: `R&I handoff to ${pending.hat} declined by Martin`,
+      type: "Decision",
       area: "Research & Intelligence",
-      activity: `Handoff ${handoff.id} created for ${route.unit}/${route.hat}.`,
-      nextActions: `${route.hat} to pick up and act on this research.`,
+      decisionRationale: "Martin chose not to send this research to the proposed Hat.",
       outcome: "Complete",
     });
-    await sendMessage(env, state.chatId, `This research has also been handed off to *${route.hat}* to inform their work.`, undefined, state.threadId);
-  } catch (err) {
-    // Not fatal to delivering the research itself -- Martin already has
-    // the findings; a failed handoff just means it wasn't auto-routed.
-    console.error(`R&I: failed to create handoff to ${route.unit}/${route.hat} for work ${state.workId}`, err);
+    await sendMessage(env, state.chatId, `Okay -- this research wasn't sent to *${pending.hat}*.`, undefined, state.threadId);
+    return state;
   }
+
+  try {
+    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
+      Handoff: title(pending.handoffTitle),
+      "From Unit": select("Research & Intelligence"),
+      "From Hat": richText("Research & Intelligence Analyst"),
+      "To Unit": select(pending.unit),
+      "To Hat": richText(pending.hat),
+      Type: select("Work"),
+      Status: select("Pending"),
+      Reason: richText(pending.reason),
+      "Expected Output": richText(`${pending.hat} to use this research as direct input to its own work.`),
+      "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
+    });
+    state.pendingResearchHandoff = undefined;
+    await logActivity(env, {
+      entry: `R&I research handed off to ${pending.hat}`,
+      type: "Activity",
+      area: "Research & Intelligence",
+      activity: `Handoff ${handoff.id} created for ${pending.unit}/${pending.hat}.`,
+      nextActions: `${pending.hat} to pick up and act on this research.`,
+      outcome: "Complete",
+    });
+    await sendMessage(env, state.chatId, `Sent -- this research has been handed off to *${pending.hat}* to inform their work.`, undefined, state.threadId);
+  } catch (err) {
+    console.error(`R&I: failed to create approved handoff to ${pending.unit}/${pending.hat} for work ${state.workId}`, err);
+    await sendMessage(env, state.chatId, `Couldn't create the handoff to *${pending.hat}* -- please try approving again.`, undefined, state.threadId);
+  }
+
+  return state;
 }
 
 /** Ambiguity loop: re-runs protocol selection with the added detail. */

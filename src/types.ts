@@ -187,6 +187,19 @@ export interface WorkState {
   researchRelevance?: string;
   /** The Telegram message id of the "researching this now" acknowledgment, edited in place at each pipeline stage rather than sending a new message per stage. */
   researchProgressMessageId?: number;
+  /**
+   * A proposed R&I -> consuming-Hat handoff, pending Martin's explicit
+   * approval before the Handoff record is created -- per Martin's
+   * request for a preview/approval gate rather than the fully automatic
+   * routing this originally shipped with.
+   */
+  pendingResearchHandoff?: {
+    unit: Unit;
+    hat: string;
+    reason: string;
+    handoffTitle: string;
+    verifiedFactsAndSources: string;
+  };
 }
 
 export interface SessionSummary {
