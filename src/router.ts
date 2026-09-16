@@ -52,7 +52,7 @@ export const SALES_EXECUTIVE_PAUSED = true;
 // Sales (the Sales topic itself, or the DM fallback once it's decided the
 // message is Sales-relevant), so the reason is always the same one.
 const SALES_CHAT_UNAVAILABLE_MESSAGE =
-  "This Unit is unavailable for general chat right now. Sales conversations are classified client_confidential, and no AI provider is currently approved for that sensitivity -- pending one with an acceptable personal-data/training policy. Structured Sales enquiries are paused for the same reason; the isolated Sales Executive project handles this work in the meantime.";
+  "This Unit is unavailable for general chat right now. Sales conversations are classified client_confidential, and no AI provider is currently approved for that sensitivity -- pending one with an acceptable personal-data/training policy. Structured Sales intake is paused here in this runtime for the same reason, but the Sales Executive Hat itself is not inactive -- it is present and actively working as an isolated Sales Executive project in Claude, with its own Notion and Gmail access, where Martin reviews and approves every client-facing action directly.";
 
 // Every other Unit's chat is business_sensitive (see chatSensitivityForUnit
 // in chat.ts) and should normally succeed, so seeing this message there
@@ -208,7 +208,7 @@ Return JSON: {"specialization": "marketing"} or {"specialization": "not_marketin
 // SALES_EXECUTIVE_PAUSED is true. Kept as one constant so the DM path and
 // the dedicated Sales-topic path can't drift apart.
 const SALES_PAUSED_MESSAGE =
-  "Sales Executive intake is paused by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here — the isolated Sales Executive project (with its own Notion and Gmail access) owns this work now.";
+  "Sales Executive intake is paused here in this runtime by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here -- it is being handled by the isolated Sales Executive project in Claude (with its own Notion and Gmail access), which owns and actively works this domain now.";
 
 /**
  * Classifies a message as enquiry/out_of_scope/ambiguous and, if it's a
