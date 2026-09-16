@@ -419,16 +419,49 @@ export async function handleResearchClarification(env: Env, state: WorkState, te
  * Free-text follow-up loop, used both after a delivered synthesis (dig
  * further / refine) and after a failed synthesis (redo with more
  * direction) -- no Approve/Redo buttons, per the "R&I provides
- * intelligence, it doesn't gate on approval" design. Re-runs synthesis
- * with the already-selected protocol(s) plus Martin's follow-up appended;
- * a follow-up that clearly needs a different protocol still gets caught by
- * the next runSynthesis call's own governance-grounded reasoning.
+ * intelligence, it doesn't gate on approval" design.
+ * If a follow-up materially changes the research question, scope, or
+ * research need, it re-enters question/scope validation and protocol selection.
+ * Minor refinements or clarifications within existing scope continue with the
+ * currently selected protocols.
  */
 export async function handleResearchFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.researchContext = `${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`;
   if (!state.selectedResearchProtocols || state.selectedResearchProtocols.length === 0) {
     state.researchQuestion = `${state.researchQuestion ?? ""}\n\nMartin's follow-up: ${text}`;
+    state.researchContext = `${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`;
     return selectProtocolsAndRun(env, state);
   }
+
+  const changeCheck = await aiJson<{ materiallyChanged: boolean; reason?: string }>(env, {
+    taskId: "research.protocol_selection",
+    system: `You evaluate whether a follow-up request materially changes the research question, scope, or research need compared to the original research task.
+
+Original Question: ${state.researchQuestion ?? ""}
+Active Protocols: ${state.selectedResearchProtocols.join(", ")}
+
+Evaluate the follow-up text:
+- Set materiallyChanged to true if the follow-up introduces a fundamentally new entity, market, competitor, regulatory domain, or materially alters the research question/scope such that protocol selection must be re-evaluated.
+- Set materiallyChanged to false if the follow-up is a minor refinement, clarification, or continuation within the existing research scope and active protocols.
+
+Return JSON: {"materiallyChanged": true | false, "reason": "..."}`,
+    user: text,
+    light: true,
+  });
+
+  if (changeCheck?.materiallyChanged) {
+    await logActivity(env, {
+      entry: `R&I follow-up materially changed research scope/question — re-entering protocol selection`,
+      type: "Activity",
+      area: "Research & Intelligence",
+      decisionRationale: changeCheck.reason ?? "Follow-up materially alters research scope or question.",
+      outcome: "Active",
+    });
+    state.researchQuestion = `${state.researchQuestion ?? ""}\n\nMaterially changed follow-up: ${text}`;
+    state.researchContext = `${state.researchContext ?? ""}\n\nFollow-up: ${text}`;
+    state.selectedResearchProtocols = undefined;
+    return selectProtocolsAndRun(env, state);
+  }
+
+  state.researchContext = `${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`;
   return runSynthesis(env, state);
 }
