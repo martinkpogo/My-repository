@@ -8,17 +8,27 @@ import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedactio
 import { sendMessage } from "../telegram";
 
 // Fallback order: Workers AI first (it's the free baseline until its
-// daily quota is hit), then the free-tier OpenAI-compatible providers in
-// this order. Each is a no-op in the fallback loop below unless its own
-// API key secret is actually configured (see OpenAiCompatibleProvider.
+// daily quota is hit), then the free-tier OpenAI-compatible providers.
+// nvidia-nim is ordered last among the working providers -- confirmed
+// live to reliably eat its full DEFAULT_PROVIDER_TIMEOUT_MS (12s) with
+// zero observed successes on this account's only accessible model
+// (openai/gpt-oss-20b), and with several sequential AI calls per user
+// turn (R&I alone makes up to four), paying that latency tax early in
+// the chain compounds badly. groq goes first among the fallbacks since
+// it has been the fastest and most often successful. cerebras/sambanova
+// stay last since both currently 402 outright (exhausted quota / no
+// payment method) -- essentially free to try (fails instantly) but
+// never worth ordering ahead of a provider that might actually answer.
+// Each is a no-op in the fallback loop below unless its own API key
+// secret is actually configured (see OpenAiCompatibleProvider.
 // isEligible) -- adding a key later needs no code change here.
 const DEFAULT_PROVIDERS: AiProvider[] = [
   new WorkersAiProvider(),
-  NVIDIA_NIM_PROVIDER,
   GROQ_PROVIDER,
   OPENROUTER_PROVIDER,
-  CEREBRAS_PROVIDER,
   GEMINI_PROVIDER,
+  NVIDIA_NIM_PROVIDER,
+  CEREBRAS_PROVIDER,
   SAMBANOVA_PROVIDER,
 ];
 

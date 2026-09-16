@@ -107,7 +107,12 @@ export async function generateResearchPlan(
     taskId: "research.plan_generation",
     system: buildResearchPlanPrompt(categorySummary, relevance, protocols),
     user: question,
-    maxTokens: 1536,
+    // Confirmed live: reasoning-model providers in the fallback chain
+    // (see aiJson's own maxTokens comment) returned malformed/empty
+    // output for this task at 1536 -- its schema is the largest of the
+    // aiJson call sites (up to MAX_DIMENSIONS_PER_REQUEST entries), so
+    // it needs more headroom than the shared default.
+    maxTokens: 2560,
   });
 
   if (!result?.dimensions || result.dimensions.length === 0) return null;
