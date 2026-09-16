@@ -3,6 +3,7 @@ import { aiChat } from "./ai";
 import type { ChatTurn } from "./ai";
 import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
+import { marketingHatSummaryList } from "./hats/registry";
 
 // Every Unit's own database access is scoped by its Notion integration --
 // Entity/Matters/Proposals (the only place real client identity lives) are
@@ -24,15 +25,31 @@ const MAX_HISTORY_TURNS = 20;
 
 // Universal Role Contract, evidence rule: consequential claims must be
 // attributable to a specific source; unsupported material claims are
-// unverified until sourced. Confirmed necessary live: asked "do you
-// remember any enquiries," this chat invented three entirely fictional
-// ones with plausible specifics instead of saying it couldn't check.
-// Below, it's handed a real snapshot of this Unit's recent Activity &
-// Decision Log entries as grounding — but that's still only a recent
-// slice, not full database access, so the rule against inventing beyond
-// what it was actually given still applies.
+// unverified until sourced. Confirmed necessary live, twice: (1) asked "do
+// you remember any enquiries," this chat invented three entirely fictional
+// ones with plausible specifics instead of saying it couldn't check; (2)
+// asked about ENIG's process and Marketing's roles, it invented a detailed
+// 5-step workflow and six job titles (Marketing Lead, Social Media
+// Manager, etc.) that don't exist -- the real Marketing Hats are named in
+// REAL_STRUCTURE_FACTS below, and none of the invented ones matched. The
+// first version of this rule only named "past enquiries, entities,
+// matters, deals, numbers, dates" as off-limits to invent; process steps,
+// job titles/roles, and org structure are just as fabricatable and are
+// named explicitly now. Below, it's handed a real snapshot of this Unit's
+// recent Activity & Decision Log entries as grounding where one exists --
+// but that's still only a recent slice, not full database access, so the
+// rule against inventing beyond what it was actually given still applies.
 const EVIDENCE_RULE =
-  "If a snapshot of recent real Activity & Decision Log entries is provided below, use it to answer factual questions about recent activity — it is not the full history, and you have no other live connection to Notion or any record system beyond what's listed there (or nothing, if no snapshot is provided at all). Never invent specifics — past enquiries, entities, matters, deals, numbers, dates — that aren't in that snapshot or this conversation's own messages. If asked about something not covered, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example.";
+  "If a snapshot of recent real Activity & Decision Log entries is provided below, use it to answer factual questions about recent activity — it is not the full history, and you have no other live connection to Notion or any record system beyond what's listed there (or nothing, if no snapshot is provided at all). Never invent specifics that aren't in that snapshot, in REAL_STRUCTURE_FACTS below, or in this conversation's own messages -- this includes but is not limited to: past enquiries, entities, matters, deals, numbers, dates, internal process steps or workflow stages, job titles or roles, team members, or org structure. If asked about something not covered by what you were actually given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example, even a generic-sounding one (a job title or process step can sound completely ordinary and still be entirely fabricated).";
+
+// The only roles/Hats that actually exist in this system, computed from
+// the same registry the runtime itself uses (hats/registry.ts) so this can
+// never drift out of sync with reality the way a hand-written list would.
+// Exists specifically because the chat invented six Marketing job titles
+// that don't exist (see EVIDENCE_RULE above) when asked what roles are
+// available -- the real answer was cheap and already known in code; there
+// was no reason for the model to have guessed.
+const REAL_STRUCTURE_FACTS = `ENIG's real Units are: Sales, Marketing, Business Development, Finance, Strategy, Research & Intelligence, Creative & Design, Operations. A "Hat" is an AI-executed role inside this system, not a human employee or job opening -- only Sales and Marketing currently have any defined Hats; every other Unit has none yet and is open conversation only, with no structured work. Marketing's five real Hats:\n${marketingHatSummaryList()}\nSales' one real Hat is Sales Executive, whose structured intake is currently paused by standing policy. Never invent, rename, add to, or guess at a Hat, role, or job title beyond this exact list. Since these are AI execution roles, never suggest applying for one, contacting a "lead" as if they were a person, or imply there's a hiring process of any kind.`;
 
 // Confirmed necessary live, second occurrence: given a message that reads
 // like an instruction to run/test the workflow ("post that, run it
@@ -147,7 +164,7 @@ export async function generalChatReply(
   userMessage: string,
 ): Promise<string> {
   const snapshot = await recentActivitySnapshot(env, unit);
-  const system = `${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
+  const system = `${UNIT_PERSONAS[unit]}\n\n${REAL_STRUCTURE_FACTS}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
   return runChatTurn(env, chatId, threadId, system, userMessage, chatSensitivityForUnit(unit));
 }
 
@@ -168,6 +185,6 @@ const DM_PERSONA = `You are ENIG's general staff AI for direct-message conversat
  * the business, anything not tied to one Unit's live work).
  */
 export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
-  const system = `${DM_PERSONA}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
+  const system = `${DM_PERSONA}\n\n${REAL_STRUCTURE_FACTS}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
   return runChatTurn(env, chatId, threadId, system, userMessage, "business_sensitive");
 }
