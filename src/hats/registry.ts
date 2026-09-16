@@ -32,6 +32,10 @@ export interface HatIdentity {
 }
 
 export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sales", specialization: "Sales" };
+// Distinct from Sales Executive: runs in the shared Worker (not isolated),
+// closed-context, and only ever produces Lead records -- never an Entity,
+// never a qualification, never a proposal/quote. See leadDiscovery.ts.
+export const LEAD_DISCOVERY: HatIdentity = { name: "Lead Discovery", unit: "Sales", specialization: "Lead Discovery" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
 export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
   name: "Research & Intelligence Analyst",
@@ -52,6 +56,7 @@ export const MARKETING_HAT_NAMES = Object.keys(MARKETING_HAT_REGISTRY) as Market
 /** One canonical registration per active Hat, across every Unit. */
 export const ALL_HATS: HatIdentity[] = [
   SALES_EXECUTIVE,
+  LEAD_DISCOVERY,
   VALUE_BASED_PRICING_ASSESSOR,
   RESEARCH_INTELLIGENCE_ANALYST,
   ...MARKETING_HAT_NAMES.map((name) => MARKETING_HAT_REGISTRY[name] as HatIdentity),

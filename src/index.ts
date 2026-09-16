@@ -3,6 +3,7 @@ import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
+import { handleLeadDiscoverySignal } from "./units/smbd/sales/leadDiscovery";
 import type { SessionSummary, Unit } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
 import type { ReadAiPayload } from "./readai";
@@ -505,7 +506,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now.",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format).",
         undefined,
         threadId,
       );
@@ -546,6 +547,16 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       }
       await Promise.all(keys.map((key) => env.STATE_KV.delete(key)));
       await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
+      return;
+    }
+    // Lead Discovery's own entry point -- deliberately outside
+    // routeIncomingText/SALES_EXECUTIVE_PAUSED. Sales is active and Lead
+    // Discovery runs in this shared Worker regardless of whether Sales
+    // Executive's isolated, client-facing pipeline is paused; the two are
+    // independent by design (see leadDiscovery.ts).
+    if (/^\/lead(@\w+)?(\s|$)/i.test(text)) {
+      const body = text.replace(/^\/lead(@\w+)?\s*/i, "");
+      await handleLeadDiscoverySignal(env, chatId, threadId, body);
       return;
     }
     if (text === "/checkhandoffs") {
