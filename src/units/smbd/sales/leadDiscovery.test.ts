@@ -105,6 +105,53 @@ test("handleLeadDiscoverySignal refuses a signal with an unverifiable Source rat
   assert.ok(sentText.includes("checkable URL"));
 });
 
+test("handleLeadDiscoverySignal still records the Lead when Entity access is disconnected -- a real Notion condition, not just a theoretical one", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let leadCreated = false;
+  let sentText = "";
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (typeof url === "string" && url.includes("entity-ds")) {
+      // This Worker's Notion integration has had Entity access revoked --
+      // Notion's API returns a non-2xx here in production, which
+      // notionFetch turns into a thrown Error. Reproduce that exactly.
+      return new Response("Not found", { status: 404 });
+    }
+    if (typeof url === "string" && url.includes("leads-ds") && method !== "POST") {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (typeof url === "string" && url.includes("/pages") && method === "POST") {
+      leadCreated = true;
+      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
+    }
+    if (typeof url === "string" && url.includes("/blocks/")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
+    }
+    if (typeof url === "string" && url.includes("api.telegram.org")) {
+      sentText = JSON.parse(init.body).text;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"genuine": true, "category": "consulting", "reason": "clear need stated"}' } }] }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv({ GROQ_API_KEY: "key" });
+
+  await handleLeadDiscoverySignal(
+    env,
+    1,
+    undefined,
+    "Name: Acme Corp\nSource: https://example.com/post\nEvidence: Posted looking for consulting help",
+  );
+
+  assert.strictEqual(leadCreated, true, "the Entity-side duplicate-check failing must not block Lead creation");
+  assert.ok(sentText.includes("Lead recorded"));
+});
+
 test("handleLeadDiscoverySignal never writes to ENTITY_DATA_SOURCE_ID -- only reads it for duplicate-check", async (t) => {
   const originalFetch = globalThis.fetch;
   const writesToEntity: string[] = [];
