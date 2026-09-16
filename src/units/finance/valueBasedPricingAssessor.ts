@@ -3,7 +3,7 @@ import { createPage, getPage, plainText, richText, select, title, updatePage } f
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
-import { setActiveWorkId, threadIdForUnit } from "../../router";
+import { setActiveWorkId } from "../../router";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
@@ -81,11 +81,11 @@ export async function resolveHandoffBusinessContext(
 }
 
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
-  // Finance is its own Unit with its own topic/workspace - it speaks there,
-  // not wherever the enquiry happened to originate (state.threadId, usually
-  // Sales's topic). Falls back to state.threadId if Finance has no topic
-  // configured, so this is a no-op when UNIT_TOPIC_MAP is unset.
-  const financeThreadId = threadIdForUnit(env, "Finance") ?? state.threadId;
+  // Follows wherever this session's home chat/thread already is (Martin's
+  // DM by default -- see discoverPendingFinanceHandoffs) rather than
+  // forcing Finance's own topic, so every Unit/Hat's work reaches him in
+  // one place if that's where he's working from.
+  const financeThreadId = state.threadId;
 
   // Business context is reconstructed BEFORE the Handoff is marked
   // Picked-up, so a Notion outage leaves it Pending and it's retried
@@ -270,7 +270,7 @@ async function judgeQuote(
  * to re-pick-up asynchronously; no Unit boundary is being crossed.
  */
 export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
-  const financeThreadId = state.financeThreadId ?? threadIdForUnit(env, "Finance") ?? state.threadId;
+  const financeThreadId = state.financeThreadId ?? state.threadId;
 
   const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!);
   if (!evalResult.success) {
@@ -315,11 +315,11 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
  * in-process to Sales (that would repeat the same in-process cross-Unit
  * call the Sales -> Finance boundary was corrected away from): it creates a
  * new Handoff, Finance -> Sales, and returns. Sales's own independent
- * discovery (discoverPendingSMBDHandoffs in index.ts) picks it up, the same
+ * discovery (discoverPendingSalesHandoffs in index.ts) picks it up, the same
  * way Finance discovers Handoffs addressed to it.
  */
 export async function handleQuoteApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  const financeThreadId = state.financeThreadId ?? threadIdForUnit(env, "Finance") ?? state.threadId;
+  const financeThreadId = state.financeThreadId ?? state.threadId;
 
   if (!approved) {
     await updatePage(env, state.handoffId!, {

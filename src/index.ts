@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId, threadIdForUnit } from "./router";
+import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import type { SessionSummary, Unit } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
@@ -75,8 +75,12 @@ export default {
       const body = (await request.json()) as { from?: string; subject?: string; text?: string };
       if (!body.text) return new Response("Missing text", { status: 400 });
 
-      const chatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : Number(env.MARTIN_TELEGRAM_USER_ID);
-      const threadId = threadIdForUnit(env, "Sales");
+      // Martin's preferred front door is DM (see routeIncomingText's DM
+      // fallback and generalDmReply) -- an email-sourced enquiry lands
+      // there too, rather than a Unit topic, so every Unit/Hat's work
+      // reaches him in one place.
+      const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+      const threadId = undefined;
       const enquiryText = `Email enquiry${body.from ? ` from ${body.from}` : ""}${body.subject ? ` — "${body.subject}"` : ""}:\n\n${body.text}`;
       await routeIncomingText(env, chatId, enquiryText, threadId, { forceNewEnquiry: true });
       return new Response("ok");
@@ -299,13 +303,12 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
       // directly in Notion by the isolated Sales Executive project, which
       // has no WorkState of its own in this Worker. Create a fresh
       // session instead of skipping it, so Finance can still pick it up.
-      // Defaults to the ENIG HQ group's Finance topic (or Martin's DM if
-      // no group chat is configured) since there's no originating chat
-      // to inherit.
+      // Defaults to Martin's DM, his preferred front door for every
+      // Unit/Hat's work, since there's no originating chat to inherit.
       try {
         workId = newWorkId();
-        const chatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = threadIdForUnit(env, "Finance");
+        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+        const threadId = undefined;
         // The later quote-approval step resolves the real Matter page ID
         // itself (via Matter_Token, the Handoffs schema no longer carries a
         // Matter relation) -- nothing to seed here.
