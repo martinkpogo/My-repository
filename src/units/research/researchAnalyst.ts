@@ -11,6 +11,7 @@ import { isResearchProtocolId, researchProtocolDetail, researchProtocolSummaryLi
 import type { ResearchSynthesis } from "./evidence";
 import { findUnverifiableSources, validateSynthesis } from "./evidence";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
+import { buildSearchQueries, formatWebResultsForContext, isWebSearchConfigured, searchWeb } from "./webSearch";
 
 /**
  * R&I execution mechanics -- one dedicated runtime for the single active
@@ -405,16 +406,43 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
+  // Live web search, if configured -- queries are built entirely from
+  // the already-abstracted relevance statement (never Martin's raw text
+  // or anything ENIG-identifying), capped per request, and degrade
+  // silently to no results on any failure (see webSearch.ts). Real
+  // fetched URLs/snippets become part of the supplied evidence below, so
+  // findUnverifiableSources naturally extends to verify against them --
+  // no change needed there.
+  let webResultCount = 0;
+  let webEvidence = "";
+  if (isWebSearchConfigured(env)) {
+    const queries = buildSearchQueries(relevance, protocols);
+    const allResults = (await Promise.all(queries.map((q) => searchWeb(env, q)))).flat();
+    webResultCount = allResults.length;
+    webEvidence = formatWebResultsForContext(allResults);
+    if (webResultCount > 0) {
+      await logActivity(env, {
+        entry: `R&I gathered ${webResultCount} live web search result(s)`,
+        type: "Activity",
+        area: "Research & Intelligence",
+        activity: queries.join(" | "),
+        outcome: "Active",
+      });
+    }
+  }
+
   // Per the "Research execution boundary" contract: the research-facing
   // content receives only the minimum safe context required (the
   // Authorized Context category summary, never the full governed page or
   // the entire Hat/Universal Role Contract governance) plus the
-  // relevance framing, the question, and whatever was actually supplied.
-  const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, context);
+  // relevance framing, the question, and whatever was actually supplied
+  // (Martin's/Handoff's own context plus any live web search results).
+  const suppliedEvidence = [context, webEvidence].filter(Boolean).join("\n\n");
+  const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
   const synthesis = await aiJson<ResearchSynthesis>(env, {
     taskId: "research.synthesis",
-    system: buildSynthesisSystemPrompt(hatDefinition, universalRoleContract, protocols),
+    system: buildSynthesisSystemPrompt(hatDefinition, universalRoleContract, protocols, webResultCount > 0),
     user: effectiveResearchContext,
     maxTokens: 2048,
   });
@@ -498,7 +526,7 @@ export function buildEffectiveResearchContext(categorySummary: string, relevance
   ].join("\n\n");
 }
 
-function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[]): string {
+function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): string {
   return [
     "You are executing the Research & Intelligence Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, and stop conditions — follow them exactly.",
     "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
@@ -509,8 +537,12 @@ function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract
     researchProtocolDetail(protocols),
     "=== RESEARCH OUTPUT CONTRACT ===",
     "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Implication MUST reference the Finding index/indexes it is based on. If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
-    "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
-    "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section below (or the research question itself, if it already states facts). The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
+    hasWebResults
+      ? "=== HARD RULE: YOU ONLY HAVE THE LIVE WEB SEARCH RESULTS SUPPLIED BELOW -- NO OTHER BROWSING ACCESS ==="
+      : "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
+    hasWebResults
+      ? "You do not have your own independent browsing beyond what has already been fetched for you below. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section (which includes real web search results, each with an exact title, URL, and snippet) or the research question itself. When citing a source, copy its \"url\" field EXACTLY as given below -- never paraphrase, shorten, or invent a URL. The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, statistic, or claim that is NOT grounded in the supplied search results is something you are making up, even if it sounds ordinary. If the fetched results don't contain enough to answer the question, return empty sources/evidence/findings/implications arrays and a Limitation stating plainly that the search results available didn't cover this -- never fill the gap with an invented example."
+      : "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section below (or the research question itself, if it already states facts). The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
     `Return JSON exactly matching this shape:
 {

@@ -52,3 +52,4 @@ TELEGRAM_GROUP_CHAT_ID = "-1004435157576"
 #   NOTION_TOKEN
 #   READAI_WEBHOOK_SECRET (optional — only needed if you wire up Read.ai)
 #   EMAIL_WEBHOOK_SECRET (optional — only needed if you wire up Gmail intake)
+#   TAVILY_API_KEY (optional — only needed for R&I's live web-search capability; unset means R&I stays closed-book)
