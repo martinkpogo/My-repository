@@ -1,7 +1,7 @@
 import type { Env, Unit } from "./types";
 import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
-import { generalChatReply } from "./chat";
+import { generalChatReply, generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 
@@ -211,33 +211,33 @@ const SALES_PAUSED_MESSAGE =
   "Sales Executive intake is paused by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here — the isolated Sales Executive project (with its own Notion and Gmail access) owns this work now.";
 
 /**
- * Classifies and, if it's a genuine enquiry, starts a Sales Executive work
- * item -- shared by the dedicated Sales topic (which already knows the
- * message is Sales-relevant) and the DM/no-topic-configured fallback
- * (which doesn't, and still needs the enquiry/out_of_scope/ambiguous
- * classification this performs). Always ends by replying in `threadId`,
- * so the caller can simply return afterward.
+ * Classifies a message as enquiry/out_of_scope/ambiguous and, if it's a
+ * genuine enquiry, starts (or blocks, per SALES_EXECUTIVE_PAUSED) a Sales
+ * Executive work item -- shared by the dedicated Sales topic (which already
+ * knows the message is Sales-relevant) and the DM/no-topic-configured
+ * fallback (which doesn't, and still needs this same classification).
+ * Returns true if the message was a genuine enquiry and has already been
+ * fully handled (including replying, where applicable) -- the caller
+ * should do nothing further. Returns false if it wasn't an enquiry, so the
+ * caller should fall back to its own general-chat behavior (which differs:
+ * the Sales topic stays client_confidential-gated, DM does not).
  */
-async function handleSalesIntake(env: Env, chatId: number, text: string, threadId: number | undefined): Promise<void> {
+async function classifyAndGateSalesEnquiry(env: Env, chatId: number, text: string, threadId: number | undefined): Promise<boolean> {
   const classification = await classifyNewMessage(env, chatId, text, threadId);
-  if (!classification) return; // retrieval failed — Martin already told, nothing further to do.
-  if (classification.route === "enquiry") {
-    if (SALES_EXECUTIVE_PAUSED) {
-      console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
-      await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
-      return;
-    }
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Sales", "Sales Executive", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleIncomingEnquiry(text);
-    return;
-  }
+  if (!classification) return true; // retrieval failed — Martin already told, nothing further to do.
+  if (classification.route !== "enquiry") return false;
 
-  // Not a new enquiry — hold open conversation instead of a rigid refusal.
-  const reply = await generalChatReply(env, "Sales", chatId, threadId, text);
-  await sendMessage(env, chatId, reply || SALES_CHAT_UNAVAILABLE_MESSAGE, undefined, threadId);
+  if (SALES_EXECUTIVE_PAUSED) {
+    console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
+    await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
+    return true;
+  }
+  const workId = newWorkId();
+  const stub = getSessionStub(env, workId);
+  await stub.init(workId, chatId, "Sales", "Sales Executive", threadId);
+  await setActiveWorkId(env, chatId, threadId, workId);
+  await stub.handleIncomingEnquiry(text);
+  return true;
 }
 
 export async function routeIncomingText(
@@ -284,7 +284,13 @@ export async function routeIncomingText(
 
   // Likewise, the Sales topic already declares its own intent.
   if (unitContext === "Sales") {
-    await handleSalesIntake(env, chatId, text, threadId);
+    const handled = await classifyAndGateSalesEnquiry(env, chatId, text, threadId);
+    if (handled) return;
+    // Not a new enquiry — hold open conversation instead of a rigid
+    // refusal, staying client_confidential-gated since this is the
+    // dedicated Sales topic (Martin could paste real enquiry content here).
+    const reply = await generalChatReply(env, "Sales", chatId, threadId, text);
+    await sendMessage(env, chatId, reply || SALES_CHAT_UNAVAILABLE_MESSAGE, undefined, threadId);
     return;
   }
 
@@ -313,5 +319,12 @@ export async function routeIncomingText(
     return;
   }
 
-  await handleSalesIntake(env, chatId, text, threadId);
+  const handled = await classifyAndGateSalesEnquiry(env, chatId, text, threadId);
+  if (handled) return;
+  // Not a new enquiry and not Marketing -- DM is Martin's general front
+  // door, not scoped to one Unit, so it isn't held to Sales's
+  // client_confidential gate just because a genuine sales enquiry was
+  // ruled out above.
+  const reply = await generalDmReply(env, chatId, threadId, text);
+  await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
 }
