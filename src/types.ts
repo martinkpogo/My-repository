@@ -56,6 +56,8 @@ export interface Env {
   OPENROUTER_API_KEY?: string;
   /** Cerebras Cloud -- same fallback tier as the other OpenAI-compatible providers above. */
   CEREBRAS_API_KEY?: string;
+  /** Google AI Studio (Gemini) -- same fallback tier as the other OpenAI-compatible providers above. */
+  GEMINI_API_KEY?: string;
 }
 
 export type Unit =

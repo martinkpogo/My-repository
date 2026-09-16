@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { CEREBRAS_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, OpenAiCompatibleProvider } from "./openaiCompatible";
+import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, OpenAiCompatibleProvider } from "./openaiCompatible";
 import type { AiTask } from "./types";
 
 const dummyTask: AiTask = {
@@ -15,6 +15,7 @@ test("each fallback provider is ineligible when its own API key isn't configured
   assert.strictEqual(GROQ_PROVIDER.isEligible({} as any, dummyTask), false);
   assert.strictEqual(OPENROUTER_PROVIDER.isEligible({} as any, dummyTask), false);
   assert.strictEqual(CEREBRAS_PROVIDER.isEligible({} as any, dummyTask), false);
+  assert.strictEqual(GEMINI_PROVIDER.isEligible({} as any, dummyTask), false);
 });
 
 test("each fallback provider becomes eligible once its own API key is set -- unrelated providers stay ineligible", () => {
@@ -23,6 +24,8 @@ test("each fallback provider becomes eligible once its own API key is set -- unr
   assert.strictEqual(GROQ_PROVIDER.isEligible({ GROQ_API_KEY: "key" } as any, dummyTask), true);
   assert.strictEqual(CEREBRAS_PROVIDER.isEligible({ GROQ_API_KEY: "key" } as any, dummyTask), false);
   assert.strictEqual(CEREBRAS_PROVIDER.isEligible({ CEREBRAS_API_KEY: "key" } as any, dummyTask), true);
+  assert.strictEqual(GEMINI_PROVIDER.isEligible({ CEREBRAS_API_KEY: "key" } as any, dummyTask), false);
+  assert.strictEqual(GEMINI_PROVIDER.isEligible({ GEMINI_API_KEY: "key" } as any, dummyTask), true);
 });
 
 test("a custom OpenAiCompatibleProvider carries the configured provider id", () => {
