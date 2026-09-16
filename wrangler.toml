@@ -56,3 +56,4 @@ TELEGRAM_GROUP_CHAT_ID = "-1004435157576"
 #   NVIDIA_NIM_API_KEY (optional — free-tier AI provider fallback if Workers AI's daily quota is exhausted)
 #   GROQ_API_KEY (optional — same, additional fallback)
 #   OPENROUTER_API_KEY (optional — same, additional fallback)
+#   CEREBRAS_API_KEY (optional — same, additional fallback)
