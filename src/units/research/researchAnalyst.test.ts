@@ -330,6 +330,12 @@ test("22. buildSynthesisSystemPrompt requires evidence to actually address the d
   assert.ok(prompt.toLowerCase().includes("does not by itself establish"));
 });
 
+test("22b. buildSynthesisSystemPrompt instructs citing selectively rather than enumerating every fetched result -- fixes the 'synthesis generation failed' truncation regression from wider search breadth", () => {
+  const prompt = buildSynthesisSystemPrompt("Hat definition text.", "Universal Role Contract text.", ["market_industry"], true);
+  assert.ok(prompt.toLowerCase().includes("do not include every single one as a source"));
+  assert.ok(prompt.toLowerCase().includes("cut off mid-generation"));
+});
+
 test("23. Regression -- the representative failed live request: a Ghana market/industry question with a competitor and audience component", () => {
   const question =
     "What is the market structure, demand, size, and growth for strategy, brand, and communications consulting in Ghana and Africa, including named competitors, their positioning, public pricing, and what buyers/customers actually need?";

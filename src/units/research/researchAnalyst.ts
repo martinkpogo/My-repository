@@ -430,7 +430,16 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
     taskId: "research.synthesis",
     system: buildSynthesisSystemPrompt(hatDefinition, universalRoleContract, protocols, webResultCount > 0),
     user: effectiveResearchContext,
-    maxTokens: 2048,
+    // Raised from 2048 after live failures ("synthesis generation
+    // failed") that started once evidence breadth grew to up to 8
+    // dimensions x 5 results -- the fuller structured JSON output
+    // (sources/evidence/findings/implications, one per dimension) can
+    // need more than 2048 tokens to complete, and a truncated response
+    // fails to parse entirely rather than degrading gracefully. Paired
+    // with an explicit "cite selectively, don't enumerate everything"
+    // instruction above so this is a safety margin, not a license to
+    // pad the response.
+    maxTokens: 4096,
   });
 
   if (!synthesis) {
@@ -540,7 +549,8 @@ export function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleC
   "implications": [{"statement": "...", "basedOnFindingIndexes": [0]}],
   "limitations": [{"statement": "...", "relatedTo": "..."}]
 }
-Every "source" and "url" value you return will be checked against the supplied context text and rejected outright if it doesn't literally appear there — so do not invent one, even a plausible-sounding placeholder.`,
+Every "source" and "url" value you return will be checked against the supplied context text and rejected outright if it doesn't literally appear there — so do not invent one, even a plausible-sounding placeholder.
+You may be given many search results across several research dimensions -- do NOT include every single one as a Source. Select and cite only the sources that materially support a real Finding; quietly omit redundant, weak, or unused ones. Keep passage/claimSupported/limitations fields concise (one sentence each). This keeps the response focused and, critically, lets it finish completely rather than being cut off mid-generation -- an incomplete/truncated response fails entirely, so a smaller, complete, well-cited synthesis is always better than an exhaustive one that doesn't finish.`,
   ].join("\n\n");
 }
 
