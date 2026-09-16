@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert";
-import { nameToProtocolId, resolveResearchHandoffContext } from "./researchAnalyst";
+import { buildEffectiveResearchContext, nameToProtocolId, resolveResearchHandoffContext } from "./researchAnalyst";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId } from "./protocols";
-import { validateSynthesis } from "./evidence";
+import { validateSynthesis, findUnverifiableSources } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
+import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
+import { redactIdentityTerms } from "../../ai/identityRedaction";
 
 test("1. Protocol Coverage: resolves all six approved protocol names to internal IDs", () => {
   for (const id of RESEARCH_PROTOCOL_IDS) {
@@ -188,4 +190,124 @@ test("12. Materially changed follow-up → re-enters protocol/scope selection", 
 
   assert.strictEqual(state.selectedResearchProtocols, undefined);
   assert.ok(state.researchQuestion.includes("regulatory compliance requirements in EU"));
+});
+
+// --- Research-Safe Consultancy Context: retrieval, grounding, and privacy enforcement ---
+
+const REAL_SAFE_CONTEXT_PAGE = `## Purpose
+A controlled, sanitized description of the consultancy.
+## Authorized Context
+### Business Category
+- Strategy-led consultancy.
+### Service Domains
+- Business strategy
+- Positioning
+- Brand
+- Communications
+### General Client Type
+- Organisations
+- Businesses
+### Problem Domain
+- Perception
+- Positioning
+### Geographic Context
+- Primary: Ghana
+- Secondary: Africa
+## Identity Protection
+The R&I runtime must not be given or infer from this context:
+- Consultancy name: ENIG
+- Founder name: Martin
+- Client identities
+- Proprietary methodologies
+## External Research Boundary
+- Do not include the organization's identity in external research queries.
+## Governance Boundary
+This page is the canonical source.`;
+
+test("13. Safe-context retrieval: canonical safe context validates successfully", () => {
+  assert.strictEqual(isValidSafeContext(REAL_SAFE_CONTEXT_PAGE), true);
+});
+
+test("14. Safe-context retrieval: malformed/missing safe context fails closed (no generic-assumption fallback exists to fall back to)", () => {
+  assert.strictEqual(isValidSafeContext(null), false);
+  assert.strictEqual(isValidSafeContext("some unrelated short text"), false);
+});
+
+test("15. Context grounding: a broad market-research question is interpreted against the strategy-led consultancy category", () => {
+  const categorySummary = extractAuthorizedContextSummary(REAL_SAFE_CONTEXT_PAGE);
+  assert.ok(categorySummary.includes("Strategy-led consultancy"));
+  assert.ok(categorySummary.includes("Ghana"));
+  const relevance = "This asks about the size and structure of the market for strategy, brand, and communications consulting in Ghana/Africa.";
+  const effectiveContext = buildEffectiveResearchContext(categorySummary, relevance, "What is the market for strategy consulting like?", "");
+  assert.ok(effectiveContext.includes("Strategy-led consultancy"));
+  assert.ok(effectiveContext.includes(relevance));
+});
+
+test("16. Privacy enforcement: consultancy identity and founder name are absent from the authorized category summary reaching the research prompt", () => {
+  const categorySummary = extractAuthorizedContextSummary(REAL_SAFE_CONTEXT_PAGE);
+  // The Identity Protection section (which even names what must stay
+  // excluded) is itself excluded from the extracted summary -- the
+  // literal strings "ENIG" and "Martin" only appear in that excluded
+  // section of the fixture, never in Authorized Context.
+  assert.ok(!categorySummary.includes("ENIG"));
+  assert.ok(!categorySummary.includes("Martin"));
+});
+
+test("17. Privacy enforcement: excluded fields cannot be reconstructed from the effective research context object", () => {
+  const categorySummary = extractAuthorizedContextSummary(REAL_SAFE_CONTEXT_PAGE);
+  const effectiveContext = buildEffectiveResearchContext(categorySummary, "A relevance statement.", "A question.", "Supplied evidence.");
+  assert.ok(!effectiveContext.includes("ENIG"));
+  assert.ok(!effectiveContext.includes("Martin"));
+  assert.ok(!effectiveContext.includes("Proprietary methodologies"));
+});
+
+test("18. Privacy enforcement: even if identity leaked into the effective context, the universal redaction gate (applied to every provider call) still strips it before reaching a provider", () => {
+  const leaked = "Research ENIG's own market position; Martin wants a quick answer.";
+  const redacted = redactIdentityTerms(leaked);
+  assert.ok(!redacted.includes("ENIG"));
+  assert.ok(!redacted.includes("Martin"));
+});
+
+test("19. Research quality: the previously-failed live case (fabricated competitors/report/URLs with no supplied context) is now rejected by findUnverifiableSources", () => {
+  const categorySummary = extractAuthorizedContextSummary(REAL_SAFE_CONTEXT_PAGE);
+  const effectiveContext = buildEffectiveResearchContext(
+    categorySummary,
+    "This asks about competitors in the strategy/brand/communications consulting market.",
+    "Who are our main competitors and how do they position?",
+    "",
+  );
+  const fabricatedSynthesis: ResearchSynthesis = {
+    protocolsUsed: ["competitive"],
+    sources: [
+      { id: "s1", source: "Company A Website", sourceType: "primary", url: "https://www.companya.com", passage: "...", claimSupported: "positioning", validationStatus: "unvalidated" },
+      { id: "s2", source: "Market Research Report", sourceType: "secondary", passage: "...", claimSupported: "market sizing", validationStatus: "unvalidated" },
+    ],
+    evidence: [{ id: "e1", statement: "Competitor A positions as premium", sourceIds: ["s1", "s2"] }],
+    findings: [{ statement: "Main competitors are Company A, B, and C", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Consider differentiating from Company A", basedOnFindingIndexes: [0] }],
+    limitations: [],
+  };
+  const unverifiable = findUnverifiableSources(fabricatedSynthesis, effectiveContext);
+  assert.strictEqual(unverifiable.length, 2);
+});
+
+test("20. Research quality: an honest result grounded in real supplied evidence is accepted", () => {
+  const categorySummary = extractAuthorizedContextSummary(REAL_SAFE_CONTEXT_PAGE);
+  const supplied = "Client-shared note: GhanaStrategyWatch (https://ghanastrategywatch.example/report) reports 8% YoY growth in demand for brand/communications consulting in Accra.";
+  const effectiveContext = buildEffectiveResearchContext(
+    categorySummary,
+    "This asks about market growth for the consultancy's own service category in Ghana.",
+    "What does the market for our services look like in Ghana?",
+    supplied,
+  );
+  const honestSynthesis: ResearchSynthesis = {
+    protocolsUsed: ["market_industry"],
+    sources: [{ id: "s1", source: "GhanaStrategyWatch", sourceType: "secondary", url: "https://ghanastrategywatch.example/report", passage: "8% YoY growth", claimSupported: "market growth", validationStatus: "unvalidated" }],
+    evidence: [{ id: "e1", statement: "Demand for brand/communications consulting in Accra grew 8% YoY", sourceIds: ["s1"] }],
+    findings: [{ statement: "The Accra market for this service category is growing", evidenceIds: ["e1"] }],
+    implications: [{ statement: "Growing demand may warrant continued investment in this category", basedOnFindingIndexes: [0] }],
+    limitations: [{ statement: "Single source, not independently cross-checked." }],
+  };
+  assert.strictEqual(validateSynthesis(honestSynthesis).valid, true);
+  assert.strictEqual(findUnverifiableSources(honestSynthesis, effectiveContext).length, 0);
 });

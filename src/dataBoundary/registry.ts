@@ -37,6 +37,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Routing Research Specialization Check",
     description: "Checks if a request is a genuine Research & Intelligence research question, as opposed to general chat, when no dedicated topic already signals which.",
   },
+  "research.context_relevance": {
+    id: "research.context_relevance",
+    name: "Research Context Relevance",
+    description: "Interprets what a research question means in relation to the authorized Research-Safe Consultancy Context category, before protocol selection. Establishes relevance only -- never a strategic, diagnostic, or downstream decision.",
+  },
   "research.protocol_selection": {
     id: "research.protocol_selection",
     name: "Research Protocol Selection",
