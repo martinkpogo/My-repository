@@ -16,6 +16,15 @@ export interface AiTask {
   temperature?: number;
   maxTokens?: number;
   light?: boolean;
+  /**
+   * Optional response-shape check, independent of provider infrastructure
+   * health. When set and a provider's response fails it (e.g. aiJson's
+   * requested-but-unparsable JSON), the executor treats that provider as
+   * exhausted for this task and tries the next eligible one, the same as
+   * an infrastructure failure -- a provider that answered with garbage is
+   * no more useful than one that didn't answer at all.
+   */
+  validateResponse?: (rawText: string) => boolean;
 }
 
 export interface CommonAiResponse {

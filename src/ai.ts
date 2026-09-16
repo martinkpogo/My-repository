@@ -22,10 +22,12 @@ export interface ChatTurn {
 }
 
 /**
- * Calls AI via policy executor and requires a JSON object response. Returns null
- * on any infrastructure failure (if no provider succeeds) or on JSON parse failure.
+ * Calls AI via policy executor and requires a JSON object response. Returns
+ * null only once every eligible provider has either failed infrastructurally
+ * or returned unparsable output -- a provider whose response doesn't parse
+ * as JSON is treated the same as one that errored, and the executor moves on
+ * to the next eligible provider rather than failing the whole call.
  * Mandates explicit SemanticTaskId and constructs structured BoundaryContext.
- * Crucially, malformed model output does NOT trigger provider fallback.
  */
 export async function aiJson<T = Record<string, unknown>>(
   env: Env,
@@ -49,6 +51,7 @@ export async function aiJson<T = Record<string, unknown>>(
     temperature: 0.2,
     maxTokens: opts.maxTokens ?? 1024,
     light: opts.light,
+    validateResponse: isParsableJson,
   };
 
   const response = await executor.executeTask(env, task);
@@ -146,6 +149,17 @@ export async function aiChat(
 
   const response = await executor.executeTask(env, task);
   return response ? response.rawText : "";
+}
+
+function isParsableJson(rawText: string): boolean {
+  const jsonText = extractJson(rawText);
+  if (!jsonText) return false;
+  try {
+    JSON.parse(jsonText);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function extractJson(raw: string): string | null {

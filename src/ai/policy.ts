@@ -125,6 +125,18 @@ export class AiPolicyExecutor {
 
       const result = await provider.execute(env, effectiveTask);
       if (result.success) {
+        if (task.validateResponse && !task.validateResponse(result.response.rawText)) {
+          const invalidAudit = createBoundaryAuditEntry(task.taskId, provider.id, "MATERIAL_PROVIDER_FAILURE", {
+            reasonCode: "MALFORMED_RESPONSE",
+            context: task.boundaryContext,
+          });
+          console.error(
+            `AiPolicyExecutor: Provider ${provider.id} returned a response that failed shape validation for task ${task.taskId} [${invalidAudit.reasonCode}] -- trying next eligible provider.`,
+          );
+          // Fallback loop continues to next eligible provider -- a
+          // malformed response is no more useful than no response.
+          continue;
+        }
         return result.response;
       }
 
