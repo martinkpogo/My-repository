@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, queryDataSource, relation, relationIds, richText, select, title, updatePage } from "../../notion";
+import { createPage, getPage, plainText, queryDataSource, relation, relationIds, richText, select, title, uniqueId, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -369,17 +369,18 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     // Matter_Token (e.g. "MAT-19") is a display string of -- this token
     // is not identity-revealing, so looking it up this way stays within
     // the same boundary the token itself was designed for.
-    const tokenNumber = Number(state.matterName.match(/(\d+)$/)?.[1]);
-    if (Number.isFinite(tokenNumber)) {
-      try {
-        const matches = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
-          property: "Matter_ID",
-          unique_id: { equals: tokenNumber },
-        });
-        if (matches[0]) state.matterId = matches[0].id;
-      } catch (err) {
-        console.error(`Finance handleQuoteApproval: matterId lookup by Matter_Token failed for ${state.matterName}`, err);
-      }
+    //
+    // Matched client-side with the same uniqueId() helper already used
+    // elsewhere to read this property, rather than a server-side Notion
+    // filter on the unique_id property type -- whose exact filter syntax
+    // isn't confirmed against this API version, and a rejected filter
+    // would otherwise fail silently here.
+    try {
+      const matters = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, undefined, { pageSize: 100 });
+      const match = matters.find((m) => uniqueId(m.properties.Matter_ID) === state.matterName);
+      if (match) state.matterId = match.id;
+    } catch (err) {
+      console.error(`Finance handleQuoteApproval: matterId lookup by Matter_Token failed for ${state.matterName}`, err);
     }
   }
 
