@@ -21,6 +21,26 @@ test("searchWeb returns [] without throwing when no API key is configured -- gra
   assert.deepStrictEqual(results, []);
 });
 
+test("searchWeb caps an oversized result snippet -- confirmed live root cause: Tavily's unbounded content field, across up to 8 dimensions x 5 results, pushed a single synthesis prompt to ~18,000 tokens", async () => {
+  const originalFetch = globalThis.fetch;
+  const oversized = "x".repeat(5000);
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        results: [{ title: "T", url: "https://example.com", content: oversized, published_date: "2026-01-01" }],
+      }),
+      { status: 200 },
+    )) as typeof fetch;
+  try {
+    const results = await searchWeb({ TAVILY_API_KEY: "key" } as any, "some query");
+    assert.strictEqual(results.length, 1);
+    assert.ok(results[0].snippet.length < oversized.length);
+    assert.ok(results[0].snippet.endsWith("..."));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("extractDomain strips the protocol and www prefix", () => {
   assert.strictEqual(extractDomain("https://www.example.com/report?x=1"), "example.com");
   assert.strictEqual(extractDomain("https://gso.gov.gh/stats"), "gso.gov.gh");

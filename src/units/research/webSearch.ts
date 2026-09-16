@@ -18,6 +18,20 @@ export interface DimensionEvidence extends ResearchPlanDimension {
 const TAVILY_API_URL = "https://api.tavily.com/search";
 const MAX_RESULTS_PER_QUERY = 5;
 
+// Confirmed live: Tavily's "content" field is unbounded (some results ran
+// well over a thousand characters), and with up to MAX_DIMENSIONS_PER_
+// REQUEST (8) dimensions x MAX_RESULTS_PER_QUERY (5) results each, the
+// untruncated total pushed a single synthesis prompt to ~18,000 tokens --
+// past every free-tier provider's context window or rate limit. A snippet
+// is corroborating evidence, not the source itself (the title/url/domain
+// stay intact for citation and for findUnverifiableSources's verification
+// against the literal supplied text), so it's safe to bound.
+const MAX_SNIPPET_LENGTH = 400;
+
+function capSnippet(snippet: string): string {
+  return snippet.length > MAX_SNIPPET_LENGTH ? `${snippet.slice(0, MAX_SNIPPET_LENGTH)}...` : snippet;
+}
+
 export function isWebSearchConfigured(env: Env): boolean {
   return Boolean(env.TAVILY_API_KEY);
 }
@@ -55,7 +69,7 @@ export async function searchWeb(env: Env, query: string): Promise<WebSearchResul
       .map((r) => ({
         title: r.title ?? "",
         url: r.url!,
-        snippet: r.content ?? "",
+        snippet: capSnippet(r.content ?? ""),
         publishedDate: r.published_date,
       }));
   } catch (err) {
