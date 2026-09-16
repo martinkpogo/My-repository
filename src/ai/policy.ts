@@ -3,15 +3,29 @@ import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEva
 import { isSemanticTaskId } from "../dataBoundary/registry";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
+import { GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, TOGETHER_AI_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
 import { sendMessage } from "../telegram";
+
+// Fallback order: Workers AI first (it's the free baseline until its
+// daily quota is hit), then the free-tier OpenAI-compatible providers in
+// this order. Each is a no-op in the fallback loop below unless its own
+// API key secret is actually configured (see OpenAiCompatibleProvider.
+// isEligible) -- adding a key later needs no code change here.
+const DEFAULT_PROVIDERS: AiProvider[] = [
+  new WorkersAiProvider(),
+  NVIDIA_NIM_PROVIDER,
+  GROQ_PROVIDER,
+  OPENROUTER_PROVIDER,
+  TOGETHER_AI_PROVIDER,
+];
 
 export class AiPolicyExecutor {
   private providers: AiProvider[];
   private dataBoundaryEvaluator: DataBoundaryEvaluator;
 
   constructor(providers?: AiProvider[], dataBoundaryEvaluator?: DataBoundaryEvaluator) {
-    this.providers = providers ?? [new WorkersAiProvider()];
+    this.providers = providers ?? DEFAULT_PROVIDERS;
     this.dataBoundaryEvaluator = dataBoundaryEvaluator ?? defaultDataBoundaryEvaluator;
   }
 

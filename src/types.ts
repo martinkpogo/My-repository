@@ -41,6 +41,20 @@ export interface Env {
    * failing; never a required secret for the rest of the runtime.
    */
   TAVILY_API_KEY?: string;
+
+  /**
+   * Free-tier AI provider fallback keys (src/ai/openaiCompatible.ts),
+   * all optional -- added after Cloudflare Workers AI's daily quota
+   * exhaustion blocked every AI-driven Hat/Unit at once. Each is a no-op
+   * in the provider fallback chain unless its own key is set; none
+   * widens what's allowed at client_confidential (see dataBoundary/
+   * policy.ts) -- they're fallback for the same business_sensitive-and-
+   * below tier Workers AI already serves.
+   */
+  NVIDIA_NIM_API_KEY?: string;
+  GROQ_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  TOGETHER_API_KEY?: string;
 }
 
 export type Unit =

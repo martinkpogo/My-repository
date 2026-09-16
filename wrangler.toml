@@ -53,3 +53,7 @@ TELEGRAM_GROUP_CHAT_ID = "-1004435157576"
 #   READAI_WEBHOOK_SECRET (optional — only needed if you wire up Read.ai)
 #   EMAIL_WEBHOOK_SECRET (optional — only needed if you wire up Gmail intake)
 #   TAVILY_API_KEY (optional — only needed for R&I's live web-search capability; unset means R&I stays closed-book)
+#   NVIDIA_NIM_API_KEY (optional — free-tier AI provider fallback if Workers AI's daily quota is exhausted)
+#   GROQ_API_KEY (optional — same, additional fallback)
+#   OPENROUTER_API_KEY (optional — same, additional fallback)
+#   TOGETHER_API_KEY (optional — same, additional fallback)
