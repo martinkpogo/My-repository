@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, queryDataSource, relation, relationIds, richText, select, title, uniqueId, updatePage } from "../../notion";
+import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -345,58 +345,19 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     return state;
   }
 
-  if (!state.matterId && state.handoffId) {
-    // Backfills a matterId this session's WorkState never got at init time --
-    // e.g. a KV handoff_workitem mapping created before the matterId field
-    // existed, or by any path other than discoverPendingFinanceHandoffs.
-    // Reads the Handoff's own Matter relation directly rather than trusting
-    // whatever this session happened to be initialized with.
-    try {
-      const handoff = await getPage(env, state.handoffId);
-      const backfilled = relationIds(handoff.properties.Matter)[0];
-      if (backfilled) state.matterId = backfilled;
-    } catch (err) {
-      console.error(`Finance handleQuoteApproval: matterId backfill failed for handoff ${state.handoffId}`, err);
-    }
-  }
-
-  if (!state.matterId && state.matterName) {
-    // Second fallback: the Handoff's Matter relation was never set at all
-    // (not just missing from this session's WorkState) -- e.g. an
-    // externally-created Handoff that only populated Matter_Token, the
-    // opaque text token, without also linking the relation. Resolve the
-    // real Matter page by its own Matter_ID unique-id property, which
-    // Matter_Token (e.g. "MAT-19") is a display string of -- this token
-    // is not identity-revealing, so looking it up this way stays within
-    // the same boundary the token itself was designed for.
-    //
-    // Matched client-side with the same uniqueId() helper already used
-    // elsewhere to read this property, rather than a server-side Notion
-    // filter on the unique_id property type -- whose exact filter syntax
-    // isn't confirmed against this API version, and a rejected filter
-    // would otherwise fail silently here.
-    try {
-      const matters = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, undefined, { pageSize: 100 });
-      const match = matters.find((m) => uniqueId(m.properties.Matter_ID) === state.matterName);
-      if (match) state.matterId = match.id;
-    } catch (err) {
-      console.error(`Finance handleQuoteApproval: matterId lookup by Matter_Token failed for ${state.matterName}`, err);
-    }
-  }
-
-  if (!state.matterId) {
-    console.error(`Finance handleQuoteApproval: state.matterId missing for handoff ${state.handoffId} (${state.matterName})`);
+  if (!state.matterName) {
+    console.error(`Finance handleQuoteApproval: state.matterName missing for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Quote approval blocked — no Matter relation on record: ${state.matterName}`,
+      entry: `Quote approval blocked — no Matter_Token on record: ${state.entityName ?? state.handoffId}`,
       type: "Blocker",
       area: "Finance",
-      decisionRationale: "This work item has no Matter relation (state.matterId is unset), so the Finance -> SM&BD follow-up Handoff cannot be linked to a Matter. This happens when the originating Handoff's own Matter relation was empty.",
+      decisionRationale: "This work item has no Matter_Token, so the Finance -> SM&BD follow-up Handoff can't identify which Matter it's for.",
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `Quote approved, but I can't route it to SM&BD — this work item has no Matter linked (the originating Handoff's Matter relation is empty). Please check the Handoff record for *${state.matterName}* and re-link its Matter, then retry.`,
+      `Quote approved, but I can't route it to SM&BD — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, then retry.`,
       undefined,
       financeThreadId,
     );
@@ -413,7 +374,6 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     Status: select("Pending"),
     Reason: richText(`Value-based quote approved by Martin for ${state.matterName}; ready for Draft Proposal preparation.`),
     "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
-    Matter: relation([state.matterId!]),
     Entity_Token: richText(state.entityName ?? ""),
     Matter_Token: richText(state.matterName ?? ""),
     "Verified Facts & Sources": richText(

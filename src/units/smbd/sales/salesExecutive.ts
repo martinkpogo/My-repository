@@ -660,7 +660,6 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     Status: select("Pending"),
     Reason: richText(`Value-based quote requested for ${state.matterName}.`),
     "Expected Output": richText("Quoted price (USD) and pricing rationale."),
-    Matter: relation([state.matterId!]),
     Entity_Token: richText(identityTokens.entityToken),
     Matter_Token: richText(identityTokens.matterToken),
     Assumptions: richText("No disclosed budget or willingness-to-pay figure has been provided or should be used."),
