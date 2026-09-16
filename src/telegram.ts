@@ -34,14 +34,23 @@ function call(env: Env, method: string, payload: Record<string, unknown>) {
 
 const TELEGRAM_MAX_LEN = 4000;
 
+/**
+ * Returns the sent message's message_id (of the last chunk, if the text
+ * was split) so a caller can later edit it in place via editMessageText
+ * -- e.g. a single "researching this now" progress message updated at
+ * each pipeline stage instead of a new message per stage. Returns
+ * undefined if every send attempt failed; callers that don't need the
+ * id can simply ignore the return value, as before.
+ */
 export async function sendMessage(
   env: Env,
   chatId: number,
   text: string,
   buttons?: InlineButton[][],
   threadId?: number,
-): Promise<void> {
+): Promise<number | undefined> {
   const chunks = splitText(text);
+  let lastMessageId: number | undefined;
   for (let i = 0; i < chunks.length; i++) {
     const isLast = i === chunks.length - 1;
     const payload: Record<string, unknown> = {
@@ -53,11 +62,44 @@ export async function sendMessage(
     if (isLast && buttons) {
       payload.reply_markup = { inline_keyboard: buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.callback_data }))) };
     }
-    const res = await call(env, "sendMessage", payload);
+    let res = await call(env, "sendMessage", payload);
     if (!res.ok) {
-      const plain = await call(env, "sendMessage", { ...payload, parse_mode: undefined });
-      if (!plain.ok) console.error("telegram sendMessage failed", await plain.text());
+      res = await call(env, "sendMessage", { ...payload, parse_mode: undefined });
+      if (!res.ok) {
+        console.error("telegram sendMessage failed", await res.text());
+        continue;
+      }
     }
+    lastMessageId = await extractMessageId(res);
+  }
+  return lastMessageId;
+}
+
+/**
+ * Edits a previously sent message's text in place -- used for
+ * live-updating progress messages rather than spamming a new message
+ * per stage. Best-effort: fails silently (logged, not thrown) since a
+ * failed edit (e.g. the message is too old, or was deleted) should never
+ * block the pipeline it's reporting progress on.
+ */
+export async function editMessageText(env: Env, chatId: number, messageId: number, text: string): Promise<void> {
+  const res = await call(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "Markdown",
+  });
+  if (!res.ok) {
+    console.error("telegram editMessageText failed", await res.text());
+  }
+}
+
+async function extractMessageId(res: Response): Promise<number | undefined> {
+  try {
+    const data = (await res.json()) as { result?: { message_id?: number } };
+    return data.result?.message_id;
+  } catch {
+    return undefined;
   }
 }
 
