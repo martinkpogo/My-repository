@@ -57,6 +57,28 @@ export function capResearchText(text: string): string {
   return text.length > MAX_RESEARCH_TEXT_LENGTH ? text.slice(-MAX_RESEARCH_TEXT_LENGTH) : text;
 }
 
+/**
+ * Sent immediately, before any AI call, at every entry point that's
+ * about to run the multi-stage pipeline (relevance -> protocol selection
+ * -> per-protocol plan generation -> evidence gathering -> synthesis).
+ * Confirmed live as a real gap: with several sequential/parallel AI
+ * calls per request across up to 7 fallback providers, total processing
+ * time can run well past what feels instant, and with nothing sent
+ * until the very end, a slow-but-working request was indistinguishable
+ * from the bot having silently failed. This costs one Telegram message
+ * and needs no AI call itself, so it can't fail for the same reasons
+ * the research pipeline can.
+ */
+async function sendResearchInProgressAck(env: Env, state: WorkState): Promise<void> {
+  await sendMessage(
+    env,
+    state.chatId,
+    "🔍 Researching this now -- with several sources to check, it can take a bit. I'll follow up here once it's done.",
+    undefined,
+    state.threadId,
+  );
+}
+
 interface ProtocolSelectionResult {
   protocols?: string[];
   ambiguous?: boolean;
@@ -218,6 +240,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     outcome: "Active",
   });
 
+  await sendResearchInProgressAck(env, state);
   return selectProtocolsAndRun(env, state);
 }
 
@@ -238,6 +261,7 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
     activity: text.slice(0, 500),
     outcome: "Active",
   });
+  await sendResearchInProgressAck(env, state);
   return selectProtocolsAndRun(env, state);
 }
 
@@ -711,6 +735,7 @@ async function routeToConsumingHat(env: Env, state: WorkState, synthesis: Resear
 export async function handleResearchClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.researchQuestion = capResearchText(`${state.researchQuestion ?? ""}\n\nAdditional detail: ${text}`);
   state.researchContext = capResearchText(`${state.researchContext ?? ""}\n\nAdditional detail: ${text}`);
+  await sendResearchInProgressAck(env, state);
   return selectProtocolsAndRun(env, state);
 }
 
@@ -725,6 +750,8 @@ export async function handleResearchClarification(env: Env, state: WorkState, te
  * currently selected protocols.
  */
 export async function handleResearchFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  await sendResearchInProgressAck(env, state);
+
   if (!state.selectedResearchProtocols || state.selectedResearchProtocols.length === 0) {
     state.researchQuestion = capResearchText(`${state.researchQuestion ?? ""}\n\nMartin's follow-up: ${text}`);
     state.researchContext = capResearchText(`${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`);
