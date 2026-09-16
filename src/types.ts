@@ -185,6 +185,8 @@ export interface WorkState {
   researchSafeContext?: string;
   /** What the current research question means in relation to the authorized safe-context category -- re-derived whenever the question changes. */
   researchRelevance?: string;
+  /** The Telegram message id of the "researching this now" acknowledgment, edited in place at each pipeline stage rather than sending a new message per stage. */
+  researchProgressMessageId?: number;
 }
 
 export interface SessionSummary {

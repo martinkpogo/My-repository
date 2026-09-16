@@ -2,7 +2,7 @@ import type { Env, Unit, WorkState } from "../../types";
 import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
-import { sendMessage } from "../../telegram";
+import { editMessageText, sendMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
@@ -68,15 +68,34 @@ export function capResearchText(text: string): string {
  * from the bot having silently failed. This costs one Telegram message
  * and needs no AI call itself, so it can't fail for the same reasons
  * the research pipeline can.
+ *
+ * The sent message's id is stashed on state so advanceResearchProgress
+ * below can edit this same message in place at each later stage,
+ * mirroring a live status line rather than sending a new message per
+ * stage.
  */
 async function sendResearchInProgressAck(env: Env, state: WorkState): Promise<void> {
-  await sendMessage(
+  state.researchProgressMessageId = await sendMessage(
     env,
     state.chatId,
     "🔍 Researching this now -- with several sources to check, it can take a bit. I'll follow up here once it's done.",
     undefined,
     state.threadId,
   );
+}
+
+/**
+ * Edits the in-progress message (see sendResearchInProgressAck) to
+ * reflect the current pipeline stage, giving a live status line instead
+ * of silence between the initial acknowledgment and the final result.
+ * A no-op if there's no progress message to edit (e.g. the ack itself
+ * failed to send) -- never blocks or fails the pipeline it's reporting
+ * on, since the actual research result is what matters, not this
+ * cosmetic status line.
+ */
+async function advanceResearchProgress(env: Env, state: WorkState, stageText: string): Promise<void> {
+  if (state.researchProgressMessageId === undefined) return;
+  await editMessageText(env, state.chatId, state.researchProgressMessageId, `🔍 ${stageText}`);
 }
 
 interface ProtocolSelectionResult {
@@ -354,6 +373,9 @@ Return JSON:
     outcome: "Active",
   });
 
+  const protocolNames = guardedSelected.map((id) => RESEARCH_PROTOCOL_REGISTRY[id].name).join(", ");
+  await advanceResearchProgress(env, state, `Using: ${protocolNames} -- building a research plan and gathering evidence...`);
+
   return runSynthesis(env, state);
 }
 
@@ -459,6 +481,14 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
       outcome: "Active",
     });
   }
+
+  await advanceResearchProgress(
+    env,
+    state,
+    webResultCount > 0
+      ? `Gathered ${webResultCount} source(s) across ${covered.length}/${plan.length} research dimension(s) -- synthesizing findings now...`
+      : "No live search results came back -- synthesizing from what's available now...",
+  );
 
   // Per the "Research execution boundary" contract: the research-facing
   // content receives only the minimum safe context required (the
