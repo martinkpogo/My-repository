@@ -10,12 +10,25 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governa
  * search, per the Universal Role Contract's evidence rule -- mirrors every
  * other Hat's own SALES_EXECUTIVE_HAT_DEFINITION_PAGE_ID-style constant
  * (see salesExecutive.ts). This is the authoritative source for Lead
- * Discovery's purpose, responsibilities, authority limits, and operating
- * boundary -- never restated as hardcoded rules in this file.
+ * Generation Specialist's purpose, responsibilities, authority limits, and
+ * operating boundary -- never restated as hardcoded rules in this file.
+ *
+ * Same page as before this Hat was renamed from "Lead Discovery" to "Lead
+ * Generation Specialist" (Notion page id unchanged; only its title and
+ * Specialization field changed -- Lead Discovery is now the specialization
+ * name, not the Hat name, per the current ENIG - Sales Project
+ * Instructions' routing.proactive_lead_discovery block).
  */
-const LEAD_DISCOVERY_HAT_DEFINITION_PAGE_ID = "3ddcb004-e583-8160-b090-c0441ba32279";
+const LEAD_GENERATION_SPECIALIST_HAT_DEFINITION_PAGE_ID = "3ddcb004-e583-8160-b090-c0441ba32279";
 
-const HAT_TARGET_NAME = "Lead Discovery";
+const HAT_TARGET_NAME = "Lead Generation Specialist";
+
+/**
+ * Single source of truth for what counts as a /lead command, shared with
+ * index.ts's command dispatch -- avoids a second, driftable copy of this
+ * pattern living in two files.
+ */
+export const LEAD_COMMAND_PATTERN = /^\/lead(@\w+)?(\s|$)/i;
 
 export const LEAD_SIGNAL_USAGE = [
   "Send a discovered lead signal as:",
@@ -26,7 +39,7 @@ export const LEAD_SIGNAL_USAGE = [
   "Contact: <optional -- email/phone, only if publicly listed>",
   "Entity: <optional -- a Notion Entity page URL/ID, only if you already know this Lead belongs to an existing Entity>",
   "",
-  "Name, Source, and Evidence are required. Source must be a real, checkable URL -- Lead Discovery never fabricates a source. Entity, if given, is verified against the referenced record, never searched for -- Lead Discovery does not traverse Notion to resolve identity on its own.",
+  "Name, Source, and Evidence are required. Source must be a real, checkable URL -- Lead Generation Specialist never fabricates a source. Entity, if given, is verified against the referenced record, never searched for -- Lead Generation Specialist does not traverse Notion to resolve identity on its own.",
 ].join("\n");
 
 export interface ParsedLeadSignal {
@@ -98,7 +111,7 @@ interface LeadDiscoveryGovernance {
  */
 async function getLeadDiscoveryGovernance(env: Env): Promise<LeadDiscoveryGovernance | null> {
   const [hatDefinition, universalRoleContract] = await Promise.all([
-    getGovernance(env, LEAD_DISCOVERY_HAT_DEFINITION_PAGE_ID, "Sales -- Lead Discovery Hat Definition"),
+    getGovernance(env, LEAD_GENERATION_SPECIALIST_HAT_DEFINITION_PAGE_ID, "Sales -- Lead Generation Specialist Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
   ]);
   if (!hatDefinition || !universalRoleContract) return null;
@@ -114,7 +127,7 @@ interface LeadClassification {
 async function classifyLeadSignal(env: Env, redactedSignal: string): Promise<LeadClassification | null> {
   const governance = await getLeadDiscoveryGovernance(env);
   if (!governance) {
-    console.error("Lead Discovery classification blocked -- governance retrieval failed");
+    console.error("Lead Generation Specialist classification blocked -- governance retrieval failed");
     return null;
   }
 
@@ -141,7 +154,7 @@ interface LeadDuplicateMatch {
 }
 
 /**
- * Mechanical, code-only duplicate check against Lead Discovery's own
+ * Mechanical, code-only duplicate check against Lead Generation Specialist's own
  * authoritative acquisition record (the Leads database) -- never an AI
  * call, and never a query against Entity. Checking the Leads database for
  * a possible duplicate Lead is explicitly authorized ("Check available
@@ -230,7 +243,7 @@ async function resolveExplicitEntity(env: Env, entityRef: string, leadName: stri
     }
     return { status: "matched", entityId: page.id, entityName };
   } catch (err) {
-    console.error("Lead Discovery: explicit Entity reference could not be verified", err);
+    console.error("Lead Generation Specialist: explicit Entity reference could not be verified", err);
     return { status: "unresolvable", note: "Entity access is currently unavailable to verify the explicitly provided reference -- Entity relation not set." };
   }
 }
@@ -238,12 +251,12 @@ async function resolveExplicitEntity(env: Env, entityRef: string, leadName: stri
 /**
  * Entry point for a Martin-supplied discovery signal (Telegram /lead
  * command, wired independently of SALES_EXECUTIVE_PAUSED in router.ts/
- * index.ts -- Lead Discovery runs in the shared Worker regardless of
+ * index.ts -- Lead Generation Specialist runs in the shared Worker regardless of
  * whether the isolated Sales Executive project's client-facing pipeline
  * is paused). Never creates or modifies an Entity, never qualifies
  * Lead-to-Prospect, never drafts a proposal or quote -- those remain
  * exclusively Sales Executive's authority, per the Hat Definition's
- * Operating Boundary: Lead Discovery owns proactive discovery -> Lead
+ * Operating Boundary: Lead Generation Specialist owns proactive discovery -> Lead
  * only; Sales Executive owns everything from a response or expression of
  * interest onward.
  */
@@ -260,7 +273,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
     await sendHatMessage(
       env,
       target,
-      `Couldn't record this as a Lead -- Source must be a real, checkable URL (http/https). Got: "${signal.source}". Lead Discovery never fabricates or accepts an unverifiable source.`,
+      `Couldn't record this as a Lead -- Source must be a real, checkable URL (http/https). Got: "${signal.source}". Lead Generation Specialist never fabricates or accepts an unverifiable source.`,
     );
     return;
   }
@@ -268,10 +281,10 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
   const classification = await classifyLeadSignal(env, redactSignalForClassification(signal));
   if (!classification) {
     await logActivity(env, {
-      entry: `Lead Discovery blocked -- classification unavailable: ${signal.name}`,
+      entry: `Lead Generation Specialist blocked -- classification unavailable: ${signal.name}`,
       type: "Blocker",
       area: "Sales",
-      decisionRationale: "Could not retrieve canonical Lead Discovery governance and/or no AI provider was eligible/available. Refusing to record the Lead without it.",
+      decisionRationale: "Could not retrieve canonical Lead Generation Specialist governance and/or no AI provider was eligible/available. Refusing to record the Lead without it.",
       outcome: "Blocked",
     });
     await sendHatMessage(
@@ -311,7 +324,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
       // reconciles to today -- see the Architect-facing note in this
       // module's PR/report about the Leads database Status schema not
       // yet having New/Ready for Outreach/Outreach/Responded/Converted/
-      // Closed as distinct options. Lead Discovery only ever sets this
+      // Closed as distinct options. Lead Generation Specialist only ever sets this
       // one value (its own initial/owned state); it never attempts
       // "Ready for Outreach" or any later-lifecycle value, both because
       // those aren't real options yet and because most of them belong to
@@ -321,9 +334,9 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`Lead Discovery: Leads database write/query failed for ${signal.name}`, err);
+    console.error(`Lead Generation Specialist: Leads database write/query failed for ${signal.name}`, err);
     await logActivity(env, {
-      entry: `Lead Discovery blocked -- Leads database unavailable: ${signal.name}`,
+      entry: `Lead Generation Specialist blocked -- Leads database unavailable: ${signal.name}`,
       type: "Blocker",
       area: "Sales",
       decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${message}`,

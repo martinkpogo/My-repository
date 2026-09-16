@@ -31,11 +31,16 @@ export interface HatIdentity {
   specialization?: string;
 }
 
-export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sales", specialization: "Sales" };
+// Specialization values match the current canonical Notion routing table
+// (ENIG - Sales Project Instructions' routing.incoming_enquiry/
+// routing.proactive_lead_discovery blocks) exactly -- Sales Progression and
+// Lead Discovery are the two specializations the Sales workspace routes to,
+// each owned by its own Hat below.
+export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sales", specialization: "Sales Progression" };
 // Distinct from Sales Executive: runs in the shared Worker (not isolated),
 // closed-context, and only ever produces Lead records -- never an Entity,
 // never a qualification, never a proposal/quote. See leadDiscovery.ts.
-export const LEAD_DISCOVERY: HatIdentity = { name: "Lead Discovery", unit: "Sales", specialization: "Sales" };
+export const LEAD_GENERATION_SPECIALIST: HatIdentity = { name: "Lead Generation Specialist", unit: "Sales", specialization: "Lead Discovery" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
 export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
   name: "Research & Intelligence Analyst",
@@ -56,7 +61,7 @@ export const MARKETING_HAT_NAMES = Object.keys(MARKETING_HAT_REGISTRY) as Market
 /** One canonical registration per active Hat, across every Unit. */
 export const ALL_HATS: HatIdentity[] = [
   SALES_EXECUTIVE,
-  LEAD_DISCOVERY,
+  LEAD_GENERATION_SPECIALIST,
   VALUE_BASED_PRICING_ASSESSOR,
   RESEARCH_INTELLIGENCE_ANALYST,
   ...MARKETING_HAT_NAMES.map((name) => MARKETING_HAT_REGISTRY[name] as HatIdentity),
