@@ -8,6 +8,7 @@ import {
   formatSynthesisForHandoff,
   handleResearchHandoffApproval,
   resolveResearchHandoffContext,
+  routeToConsumingHat,
 } from "./researchAnalyst";
 import type { WorkState } from "../../types";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
@@ -554,5 +555,34 @@ test("32. handleResearchHandoffApproval keeps the pending proposal when Handoff 
     assert.strictEqual(result.pendingResearchHandoff!.hat, "Marketing Strategist");
   } finally {
     restore();
+  }
+});
+
+test("33. routeToConsumingHat proposes nothing for a synthesis with zero Findings -- an all-Limitations 'we found nothing' result has nothing for a consuming Hat to act on", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCallCount = 0;
+  globalThis.fetch = (async () => {
+    fetchCallCount++;
+    throw new Error("routeToConsumingHat must not make any AI or Notion call when there are no Findings");
+  }) as typeof fetch;
+
+  try {
+    const state = fakeStateWithPendingHandoff();
+    state.pendingResearchHandoff = undefined;
+    const synthesis: ResearchSynthesis = {
+      protocolsUsed: ["market_industry"],
+      sources: [],
+      evidence: [],
+      findings: [],
+      implications: [],
+      limitations: [{ statement: "No evidence was available for this question." }],
+    };
+
+    await routeToConsumingHat(fakeApprovalEnv(), state, synthesis);
+
+    assert.strictEqual(fetchCallCount, 0, "no classification call should happen for an empty-findings synthesis");
+    assert.strictEqual(state.pendingResearchHandoff, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
