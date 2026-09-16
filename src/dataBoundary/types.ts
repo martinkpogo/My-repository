@@ -18,12 +18,26 @@ export type SemanticTaskId =
   | "sales.call_qualification"
   | "sales.proposal_drafting"
   | "sales.proposal_revision"
-  | "finance.quote_judgment";
+  | "finance.quote_judgment"
+  | "lead.discovery_classification";
 
+/**
+ * public_sourced marks data Lead Discovery can attribute to a genuinely
+ * public source (a live URL, a public listing) -- distinct from
+ * client_confidential, which is reserved for anything disclosed to ENIG in
+ * confidence (an enquiry, call notes, negotiation). It sits alongside
+ * business_sensitive in provider eligibility (see FALLBACK_PROVIDER_
+ * SENSITIVITIES in dataBoundary/policy.ts): the risk of feeding a
+ * provider without a confirmed training-data policy is real even for
+ * already-public identity, but materially lower than for information a
+ * client specifically kept off the internet -- which is what
+ * client_confidential exists to protect and stays fully gated for.
+ */
 export type SensitivityLevel =
   | "public"
   | "internal"
   | "business_sensitive"
+  | "public_sourced"
   | "client_confidential"
   | "pii_restricted";
 

@@ -46,6 +46,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "sales.proposal_drafting": "client_confidential",
   "sales.proposal_revision": "client_confidential",
   "finance.quote_judgment": "business_sensitive",
+  // public_sourced, not business_sensitive -- Lead Discovery's evidence
+  // originates from the open web, not from ENIG's own internal
+  // operations. Never sees the discovered identity/contact itself (see
+  // leadDiscovery.ts's redaction step): only a sanitized description of
+  // the signal, plus its public source, reaches this call.
+  "lead.discovery_classification": "public_sourced",
 };
 
 /**
@@ -80,7 +86,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
  * exactly the bar the Sales Executive pause is still waiting on, and
  * adding these providers here does not clear it.
  */
-const FALLBACK_PROVIDER_SENSITIVITIES = new Set<SensitivityLevel>(["public", "internal", "business_sensitive"]);
+const FALLBACK_PROVIDER_SENSITIVITIES = new Set<SensitivityLevel>([
+  "public",
+  "internal",
+  "business_sensitive",
+  "public_sourced",
+]);
 
 export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId, ProviderEligibilityRule>>> = {
   "workers-ai": {

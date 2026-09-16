@@ -38,6 +38,12 @@ MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
 HANDOFFS_DATA_SOURCE_ID = "935cff62-de01-4920-9743-782c7d210455"
 ACTIVITY_LOG_DATA_SOURCE_ID = "423e7f93-5f9d-435d-856a-e183120d3d8f"
+# The Leads database (Engagements page) -- the pre-Entity acquisition/
+# prospecting record Lead Discovery writes to. Distinct from
+# ENTITY_DATA_SOURCE_ID per the canonical Lead Business Object page: a Lead
+# is created here on discovery alone; an Entity is only created/matched
+# once a response or expression of interest demonstrates real engagement.
+LEADS_DATA_SOURCE_ID = "6c202c4b-6b24-45e2-b2c3-b6907a8db687"
 # Maps each Unit to its Telegram forum topic's message_thread_id in the
 # ENIG HQ Supergroup, simulating one dedicated AI Workspace per Unit.
 UNIT_TOPIC_MAP = '{"Marketing": 393, "Business Development": 397, "Sales": 399, "Finance": 6, "Strategy": 8, "Research & Intelligence": 10, "Creative & Design": 12, "Operations": 14}'

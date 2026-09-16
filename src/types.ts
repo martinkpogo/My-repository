@@ -11,6 +11,14 @@ export interface Env {
   PROPOSALS_DATA_SOURCE_ID: string;
   HANDOFFS_DATA_SOURCE_ID: string;
   ACTIVITY_LOG_DATA_SOURCE_ID: string;
+  /**
+   * The Leads database -- the pre-Entity acquisition/prospecting record
+   * Lead Discovery writes to. A Lead is created here on discovery alone;
+   * an Entity is only created/matched once a response or expression of
+   * interest demonstrates real engagement (see the canonical Lead
+   * Business Object page). Distinct data source from ENTITY_DATA_SOURCE_ID.
+   */
+  LEADS_DATA_SOURCE_ID: string;
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;

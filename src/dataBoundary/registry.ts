@@ -97,6 +97,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Finance Quote Judgment",
     description: "Judges value-based price and pricing rationale from intervention context.",
   },
+  "lead.discovery_classification": {
+    id: "lead.discovery_classification",
+    name: "Lead Discovery Signal Classification",
+    description:
+      "Screens a redacted, source-attributed discovery signal for whether it describes a genuine, in-scope lead -- never sees the discovered identity/contact itself, only the sanitized evidence description.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
