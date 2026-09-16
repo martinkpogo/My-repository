@@ -35,7 +35,7 @@ export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sa
 // Distinct from Sales Executive: runs in the shared Worker (not isolated),
 // closed-context, and only ever produces Lead records -- never an Entity,
 // never a qualification, never a proposal/quote. See leadDiscovery.ts.
-export const LEAD_DISCOVERY: HatIdentity = { name: "Lead Discovery", unit: "Sales", specialization: "Lead Discovery" };
+export const LEAD_DISCOVERY: HatIdentity = { name: "Lead Discovery", unit: "Sales", specialization: "Sales" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
 export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
   name: "Research & Intelligence Analyst",
