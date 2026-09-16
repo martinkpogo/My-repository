@@ -737,7 +737,16 @@ export function formatSynthesisForHandoff(synthesis: ResearchSynthesis): string 
   return lines.join("\n\n");
 }
 
-async function routeToConsumingHat(env: Env, state: WorkState, synthesis: ResearchSynthesis): Promise<void> {
+export async function routeToConsumingHat(env: Env, state: WorkState, synthesis: ResearchSynthesis): Promise<void> {
+  // A synthesis with no Findings has nothing for a consuming Hat to act
+  // on -- confirmed live: the classifier judges topical relevance only
+  // (is this the kind of question Marketing would care about?), not
+  // whether the research actually produced anything, so an
+  // all-Limitations "we found nothing" result was still proposed as a
+  // handoff. Skip the classification call entirely rather than propose
+  // an empty handoff for Martin to have to decline.
+  if (synthesis.findings.length === 0) return;
+
   const routing = await classifyHandoffTarget(env, state.researchRelevance ?? "", synthesis);
   const route = routing.target ? HANDOFF_ROUTES[routing.target] : undefined;
   if (!route) return;
