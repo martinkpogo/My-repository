@@ -42,16 +42,23 @@ export const SALES_EXECUTIVE_PAUSED = true;
 // business_sensitive and below -- Cloudflare's training-data policy for
 // personal information hasn't been confirmed acceptable, the same reason
 // Sales Executive itself is paused. A bare "..." fallback made that look
-// like a mystery bug rather than the known, deliberate policy it is.
-// Sales chat stays classified client_confidential (Martin could paste real
+// like a mystery bug rather than the known, deliberate policy it is. Sales
+// chat stays classified client_confidential (Martin could paste real
 // enquiry content into that topic's freeform chat), which no eligible
 // provider can serve today -- workers-ai is approved for business_sensitive
 // and below only, pending a provider with an acceptable personal-data/
-// training policy. Every other Unit's chat is business_sensitive (see
-// chatSensitivityForUnit in chat.ts) and should normally succeed, so seeing
-// this message there points to a genuine provider failure, not policy.
+// training policy. State this directly rather than hedging with "if this
+// is Sales... anywhere else...": handleSalesIntake only ever runs for
+// Sales (the Sales topic itself, or the DM fallback once it's decided the
+// message is Sales-relevant), so the reason is always the same one.
+const SALES_CHAT_UNAVAILABLE_MESSAGE =
+  "This Unit is unavailable for general chat right now. Sales conversations are classified client_confidential, and no AI provider is currently approved for that sensitivity -- pending one with an acceptable personal-data/training policy. Structured Sales enquiries are paused for the same reason; the isolated Sales Executive project handles this work in the meantime.";
+
+// Every other Unit's chat is business_sensitive (see chatSensitivityForUnit
+// in chat.ts) and should normally succeed, so seeing this message there
+// points to a genuine provider failure, not policy.
 const AI_UNAVAILABLE_MESSAGE =
-  "Couldn't generate a reply -- no AI provider is currently eligible or available for this conversation's classification. If this is the Sales topic, that's expected policy (client_confidential, pending a provider with an acceptable personal-data/training policy); anywhere else, this points to a genuine provider failure.";
+  "Couldn't generate a reply -- no AI provider is currently available. This points to a genuine provider failure, not an access restriction; please try again shortly.";
 
 export function newWorkId(): string {
   return crypto.randomUUID();
@@ -230,7 +237,7 @@ async function handleSalesIntake(env: Env, chatId: number, text: string, threadI
 
   // Not a new enquiry — hold open conversation instead of a rigid refusal.
   const reply = await generalChatReply(env, "Sales", chatId, threadId, text);
-  await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
+  await sendMessage(env, chatId, reply || SALES_CHAT_UNAVAILABLE_MESSAGE, undefined, threadId);
 }
 
 export async function routeIncomingText(
