@@ -150,12 +150,25 @@ async function findLeadDuplicates(env: Env, name: string, contact: string): Prom
   // duplicate against an existing Entity, but per the Lead Business
   // Object's boundary_rule ("identity or discovery evidence alone does
   // not create an Entity") it never writes to ENTITY_DATA_SOURCE_ID.
-  const existingEntities = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
-    property: "Name",
-    title: { contains: name },
-  });
-  for (const p of existingEntities) {
-    matches.push({ id: p.id, name: plainText(p.properties.Name), kind: "Entity" });
+  //
+  // This is explicitly best-effort, not required: this Worker's own
+  // Notion integration has had its connection to Entity/Matters/Proposals
+  // removed entirely (see SALES_EXECUTIVE_PAUSED's comment in router.ts),
+  // so this query is expected to fail in the current deployment. The Lead
+  // Business Object's own authority list says Lead Discovery may
+  // "identify possible duplicates" -- not that it must -- so a failure
+  // here degrades to "no Entity duplicate-check available" rather than
+  // blocking Lead creation, which the Leads-only check below still covers.
+  try {
+    const existingEntities = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
+      property: "Name",
+      title: { contains: name },
+    });
+    for (const p of existingEntities) {
+      matches.push({ id: p.id, name: plainText(p.properties.Name), kind: "Entity" });
+    }
+  } catch (err) {
+    console.error("Lead Discovery: Entity duplicate-check unavailable (expected if Entity access is disconnected)", err);
   }
 
   return matches.slice(0, 5);
@@ -217,22 +230,41 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
     return;
   }
 
-  const duplicates = await findLeadDuplicates(env, signal.name, signal.contact);
-
-  const page = await createPage(env, env.LEADS_DATA_SOURCE_ID, {
-    Lead: title(signal.name),
-    Organisation: richText(signal.name),
-    Contact: richText(signal.name),
-    "Contact Details": richText(signal.contact),
-    Source: richText(signal.source),
-    "Discovery Evidence": richText(signal.evidence),
-    Status: { status: { name: "Not started" } },
-    // Entity relation deliberately left unset -- per the Lead Business
-    // Object's boundary_rule, discovery evidence alone never creates or
-    // links an Entity. That relation is only ever populated later, by
-    // the inbound-enquiry or Sales Executive flow once a response
-    // demonstrates real engagement.
-  });
+  let duplicates: LeadDuplicateMatch[];
+  let page: { url: string };
+  try {
+    duplicates = await findLeadDuplicates(env, signal.name, signal.contact);
+    page = await createPage(env, env.LEADS_DATA_SOURCE_ID, {
+      Lead: title(signal.name),
+      Organisation: richText(signal.name),
+      Contact: richText(signal.name),
+      "Contact Details": richText(signal.contact),
+      Source: richText(signal.source),
+      "Discovery Evidence": richText(signal.evidence),
+      Status: { status: { name: "Not started" } },
+      // Entity relation deliberately left unset -- per the Lead Business
+      // Object's boundary_rule, discovery evidence alone never creates or
+      // links an Entity. That relation is only ever populated later, by
+      // the inbound-enquiry or Sales Executive flow once a response
+      // demonstrates real engagement.
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Lead Discovery: Leads database write/query failed for ${signal.name}`, err);
+    await logActivity(env, {
+      entry: `Lead Discovery blocked -- Leads database unavailable: ${signal.name}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${message}`,
+      outcome: "Blocked",
+    });
+    await sendHatMessage(
+      env,
+      target,
+      `Couldn't record this Lead for *${signal.name}* -- the Leads database call failed: ${message}. Not recorded. This likely means the Worker's Notion integration isn't connected to the Leads database yet -- check its sharing settings.`,
+    );
+    return;
+  }
 
   await logActivity(env, {
     entry: `Lead recorded: ${signal.name}`,
