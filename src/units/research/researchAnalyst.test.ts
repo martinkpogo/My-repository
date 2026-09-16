@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert";
-import { buildEffectiveResearchContext, buildSynthesisSystemPrompt, formatSynthesisForHandoff, resolveResearchHandoffContext } from "./researchAnalyst";
+import {
+  MAX_RESEARCH_TEXT_LENGTH,
+  buildEffectiveResearchContext,
+  buildSynthesisSystemPrompt,
+  capResearchText,
+  formatSynthesisForHandoff,
+  resolveResearchHandoffContext,
+} from "./researchAnalyst";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
 import { validateSynthesis, findUnverifiableSources } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
@@ -419,4 +426,26 @@ test("25. formatSynthesisForHandoff omits empty sections rather than printing bl
   assert.ok(!formatted.includes("Findings:"));
   assert.ok(!formatted.includes("Sources:"));
   assert.ok(formatted.includes("No evidence was available."));
+});
+
+test("26. capResearchText leaves short text untouched", () => {
+  assert.strictEqual(capResearchText("A short research question."), "A short research question.");
+});
+
+test("27. capResearchText bounds long text to MAX_RESEARCH_TEXT_LENGTH, keeping the most recent content", () => {
+  const long = "x".repeat(MAX_RESEARCH_TEXT_LENGTH * 3) + "MOST_RECENT_TAIL";
+  const capped = capResearchText(long);
+  assert.strictEqual(capped.length, MAX_RESEARCH_TEXT_LENGTH);
+  assert.ok(capped.endsWith("MOST_RECENT_TAIL"));
+});
+
+test("28. capResearchText self-heals a previously-bloated value across repeated appends -- confirmed live root cause: unbounded accumulation across clarification/feedback rounds (compounded by Telegram-retry double-appends) grew a research question past 28,000 tokens, which every fallback provider then rejected or timed out on", () => {
+  // Simulate the exact accumulation pattern in handleResearchClarification:
+  // each round appends to whatever was already stored, uncapped.
+  let question = "Original question.";
+  for (let round = 0; round < 20; round++) {
+    question = capResearchText(`${question}\n\nAdditional detail: ${"detail ".repeat(50)}round ${round}`);
+  }
+  assert.ok(question.length <= MAX_RESEARCH_TEXT_LENGTH);
+  assert.ok(question.includes("round 19"), "the most recent round's content must survive capping");
 });

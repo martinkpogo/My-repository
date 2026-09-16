@@ -36,6 +36,27 @@ const RESEARCH_HAT_DEFINITION_PAGE_ID = "3ddcb004-e583-8161-96ba-cdec357c5b5b";
 // (see Notion Activity & Decision Log entry LOG-325).
 const RESEARCH_SAFE_CONTEXT_PAGE_ID = "3ddcb004-e583-81e5-b30a-db8cba543823";
 
+/**
+ * Confirmed live: state.researchQuestion/researchContext accumulate by
+ * appending on every clarification/feedback round (see
+ * handleResearchClarification/handleResearchFeedback below), with no
+ * bound -- and a slow provider response can trigger a Telegram-side
+ * webhook retry that reprocesses the same message, appending again. A
+ * few rounds of that grew a research question past 28,000 tokens,
+ * which every fallback provider then rejected outright (context window)
+ * or rate-limited (tokens-per-minute), or simply took too long to
+ * process within the per-provider timeout -- turning a slow request
+ * into a permanently-stuck one that kept getting slower with each
+ * retry. Every write to these two fields goes through this cap so a
+ * bloated stored value also self-heals on the very next write, not
+ * just future growth.
+ */
+export const MAX_RESEARCH_TEXT_LENGTH = 3000;
+
+export function capResearchText(text: string): string {
+  return text.length > MAX_RESEARCH_TEXT_LENGTH ? text.slice(-MAX_RESEARCH_TEXT_LENGTH) : text;
+}
+
 interface ProtocolSelectionResult {
   protocols?: string[];
   ambiguous?: boolean;
@@ -185,8 +206,8 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
 
   state.entityName = evalResult.contract.entityToken;
   state.matterName = evalResult.contract.matterToken;
-  state.researchQuestion = evalResult.contract.sanitizedContext;
-  state.researchContext = evalResult.contract.sanitizedContext;
+  state.researchQuestion = capResearchText(evalResult.contract.sanitizedContext);
+  state.researchContext = capResearchText(evalResult.contract.sanitizedContext);
 
   await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
@@ -208,8 +229,8 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
  * not client-identity-bearing Handoff data.
  */
 export async function handleDirectRequest(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.researchQuestion = text;
-  state.researchContext = text;
+  state.researchQuestion = capResearchText(text);
+  state.researchContext = capResearchText(text);
   await logActivity(env, {
     entry: `R&I research request received directly from chat`,
     type: "Activity",
@@ -688,8 +709,8 @@ async function routeToConsumingHat(env: Env, state: WorkState, synthesis: Resear
 
 /** Ambiguity loop: re-runs protocol selection with the added detail. */
 export async function handleResearchClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.researchQuestion = `${state.researchQuestion ?? ""}\n\nAdditional detail: ${text}`;
-  state.researchContext = `${state.researchContext ?? ""}\n\nAdditional detail: ${text}`;
+  state.researchQuestion = capResearchText(`${state.researchQuestion ?? ""}\n\nAdditional detail: ${text}`);
+  state.researchContext = capResearchText(`${state.researchContext ?? ""}\n\nAdditional detail: ${text}`);
   return selectProtocolsAndRun(env, state);
 }
 
@@ -705,8 +726,8 @@ export async function handleResearchClarification(env: Env, state: WorkState, te
  */
 export async function handleResearchFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
   if (!state.selectedResearchProtocols || state.selectedResearchProtocols.length === 0) {
-    state.researchQuestion = `${state.researchQuestion ?? ""}\n\nMartin's follow-up: ${text}`;
-    state.researchContext = `${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`;
+    state.researchQuestion = capResearchText(`${state.researchQuestion ?? ""}\n\nMartin's follow-up: ${text}`);
+    state.researchContext = capResearchText(`${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`);
     return selectProtocolsAndRun(env, state);
   }
 
@@ -734,12 +755,12 @@ Return JSON: {"materiallyChanged": true | false, "reason": "..."}`,
       decisionRationale: changeCheck.reason ?? "Follow-up materially alters research scope or question.",
       outcome: "Active",
     });
-    state.researchQuestion = `${state.researchQuestion ?? ""}\n\nMaterially changed follow-up: ${text}`;
-    state.researchContext = `${state.researchContext ?? ""}\n\nFollow-up: ${text}`;
+    state.researchQuestion = capResearchText(`${state.researchQuestion ?? ""}\n\nMaterially changed follow-up: ${text}`);
+    state.researchContext = capResearchText(`${state.researchContext ?? ""}\n\nFollow-up: ${text}`);
     state.selectedResearchProtocols = undefined;
     return selectProtocolsAndRun(env, state);
   }
 
-  state.researchContext = `${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`;
+  state.researchContext = capResearchText(`${state.researchContext ?? ""}\n\nMartin's follow-up: ${text}`);
   return runSynthesis(env, state);
 }
