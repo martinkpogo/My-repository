@@ -32,6 +32,21 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Marketing Hat Action Decision",
     description: "Determines whether to draft, route, or clarify within a Marketing Hat.",
   },
+  "routing.research_specialization_check": {
+    id: "routing.research_specialization_check",
+    name: "Routing Research Specialization Check",
+    description: "Checks if a request is a genuine Research & Intelligence research question, as opposed to general chat, when no dedicated topic already signals which.",
+  },
+  "research.protocol_selection": {
+    id: "research.protocol_selection",
+    name: "Research Protocol Selection",
+    description: "Identifies which R&I research protocol(s) a research question requires, or surfaces ambiguity rather than guessing.",
+  },
+  "research.synthesis": {
+    id: "research.synthesis",
+    name: "Research Synthesis",
+    description: "Executes the selected research protocol(s) and synthesizes source-linked evidence into Evidence/Finding/Implication/Limitation output.",
+  },
   "sales.enquiry_extraction": {
     id: "sales.enquiry_extraction",
     name: "Sales Enquiry Detail Extraction",

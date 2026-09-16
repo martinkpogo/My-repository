@@ -33,6 +33,9 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "chat.general_reply": "client_confidential",
   "marketing.intake_classification": "business_sensitive",
   "marketing.hat_action_decision": "business_sensitive",
+  "routing.research_specialization_check": "business_sensitive",
+  "research.protocol_selection": "business_sensitive",
+  "research.synthesis": "business_sensitive",
   "sales.enquiry_extraction": "pii_restricted",
   "sales.matter_summary_drafting": "client_confidential",
   "sales.call_prep_briefing": "client_confidential",
@@ -55,9 +58,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
  * routing.* classifiers, and chat.general_reply are client_confidential
  * (see above) and stay unresolved under this rule for exactly that
  * reason, matching the Sales Executive pause itself. Only
- * marketing.intake_classification, marketing.hat_action_decision, and
- * finance.quote_judgment (all business_sensitive) are actually eligible
- * today.
+ * marketing.intake_classification, marketing.hat_action_decision,
+ * finance.quote_judgment, and the routing.research_specialization_check /
+ * research.protocol_selection / research.synthesis trio (all
+ * business_sensitive -- R&I operates on Entity_Token/Matter_Token and
+ * Martin's own direct chat requests, never a real client name) are
+ * actually eligible today.
  */
 export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId, ProviderEligibilityRule>>> = {
   "workers-ai": {
