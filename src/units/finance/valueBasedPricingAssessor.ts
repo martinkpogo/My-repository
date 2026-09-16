@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, relation, relationIds, richText, select, title, updatePage } from "../../notion";
+import { createPage, getPage, plainText, queryDataSource, relation, relationIds, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendMessage } from "../../telegram";
@@ -357,6 +357,29 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       if (backfilled) state.matterId = backfilled;
     } catch (err) {
       console.error(`Finance handleQuoteApproval: matterId backfill failed for handoff ${state.handoffId}`, err);
+    }
+  }
+
+  if (!state.matterId && state.matterName) {
+    // Second fallback: the Handoff's Matter relation was never set at all
+    // (not just missing from this session's WorkState) -- e.g. an
+    // externally-created Handoff that only populated Matter_Token, the
+    // opaque text token, without also linking the relation. Resolve the
+    // real Matter page by its own Matter_ID unique-id property, which
+    // Matter_Token (e.g. "MAT-19") is a display string of -- this token
+    // is not identity-revealing, so looking it up this way stays within
+    // the same boundary the token itself was designed for.
+    const tokenNumber = Number(state.matterName.match(/(\d+)$/)?.[1]);
+    if (Number.isFinite(tokenNumber)) {
+      try {
+        const matches = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
+          property: "Matter_ID",
+          unique_id: { equals: tokenNumber },
+        });
+        if (matches[0]) state.matterId = matches[0].id;
+      } catch (err) {
+        console.error(`Finance handleQuoteApproval: matterId lookup by Matter_Token failed for ${state.matterName}`, err);
+      }
     }
   }
 
