@@ -3,6 +3,8 @@ import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEva
 import { isSemanticTaskId } from "../dataBoundary/registry";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
+import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
+import { sendMessage } from "../telegram";
 
 export class AiPolicyExecutor {
   private providers: AiProvider[];
@@ -77,6 +79,33 @@ export class AiPolicyExecutor {
           messages: transformedMessages,
         };
       }
+
+      // Mandatory identity-redaction gate: applies to every provider, not
+      // just workers-ai -- redacting the business name and Martin's name
+      // costs nothing against a fully trusted provider, and the guarantee
+      // is stronger for having no provider-conditional bypass. Redaction
+      // is best-effort (a plain substitution can miss an unusual phrasing
+      // in live-fetched Notion governance text), so it is never trusted
+      // alone: the redacted messages are re-scanned immediately after, and
+      // any leftover match is a hard stop, not a residual leak sent anyway.
+      const redactedMessages: AiMessage[] = effectiveTask.messages.map((m) => ({
+        ...m,
+        content: redactIdentityTerms(m.content),
+      }));
+      const leftoverTerms = redactedMessages.flatMap((m) => findLeftoverBannedTerms(m.content));
+      if (leftoverTerms.length > 0) {
+        const uniqueTerms = [...new Set(leftoverTerms)];
+        console.error(
+          `AiPolicyExecutor: identity redaction verification failed for task ${task.taskId} on provider ${provider.id} -- leftover term(s): ${uniqueTerms.join(", ")}. Call blocked, not sent.`,
+        );
+        await sendMessage(
+          env,
+          Number(env.MARTIN_TELEGRAM_USER_ID),
+          `⚠️ AI call blocked: identity redaction missed ${uniqueTerms.join(", ")} for task "${task.taskId}" (provider ${provider.id}). The prompt was NOT sent. This is a redaction-pattern gap in code, not a one-off -- it will keep blocking this task until fixed.`,
+        ).catch((notifyErr) => console.error("Failed to notify Martin of identity redaction failure", notifyErr));
+        return null;
+      }
+      effectiveTask = { ...effectiveTask, messages: redactedMessages };
 
       const result = await provider.execute(env, effectiveTask);
       if (result.success) {
