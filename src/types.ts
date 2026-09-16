@@ -22,7 +22,7 @@ export interface Env {
 
   /**
    * JSON object mapping Unit name -> Telegram forum topic message_thread_id,
-   * e.g. {"SM&BD": 2, "Finance": 4}. Optional — when unset, the bot behaves
+   * e.g. {"Sales": 2, "Finance": 4}. Optional — when unset, the bot behaves
    * as a plain 1:1 chat with no topic awareness (legacy/DM mode).
    */
   UNIT_TOPIC_MAP?: string;
@@ -34,7 +34,15 @@ export interface Env {
   EMAIL_WEBHOOK_SECRET?: string;
 }
 
-export type Unit = "SM&BD" | "Finance" | "Strategy" | "Research & Intelligence" | "Creative & Design" | "Operations";
+export type Unit =
+  | "Sales"
+  | "Marketing"
+  | "Business Development"
+  | "Finance"
+  | "Strategy"
+  | "Research & Intelligence"
+  | "Creative & Design"
+  | "Operations";
 
 export type QualificationAssessment = "Satisfied" | "Not Satisfied" | "Insufficient Evidence";
 
@@ -106,7 +114,7 @@ export interface WorkState {
 
   /**
    * A proposed new Matter's drafted title + stated need, shown to Martin
-   * for approval before the record is created — per the SM&BD AI Project
+   * for approval before the record is created — per the Sales AI Project
    * Instructions' Matter identification rule ("pass through the applicable
    * creation authorization gate before creating the Matter record").
    */

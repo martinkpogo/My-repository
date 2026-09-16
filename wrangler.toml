@@ -40,7 +40,7 @@ HANDOFFS_DATA_SOURCE_ID = "935cff62-de01-4920-9743-782c7d210455"
 ACTIVITY_LOG_DATA_SOURCE_ID = "423e7f93-5f9d-435d-856a-e183120d3d8f"
 # Maps each Unit to its Telegram forum topic's message_thread_id in the
 # ENIG HQ Supergroup, simulating one dedicated AI Workspace per Unit.
-UNIT_TOPIC_MAP = '{"SM&BD": 4, "Finance": 6, "Strategy": 8, "Research & Intelligence": 10, "Creative & Design": 12, "Operations": 14}'
+UNIT_TOPIC_MAP = '{"Marketing": 393, "Business Development": 397, "Sales": 399, "Finance": 6, "Strategy": 8, "Research & Intelligence": 10, "Creative & Design": 12, "Operations": 14}'
 # The ENIG HQ Supergroup's chat id — where email-sourced enquiries (and
 # any other session-less notification we choose to send there) land.
 TELEGRAM_GROUP_CHAT_ID = "-1004435157576"

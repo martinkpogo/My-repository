@@ -1,7 +1,7 @@
 import type { MarketingHatDefinition } from "../../../hats/types";
 
 /**
- * Marketing Strategist — Unit: SM&BD, Specialization: Marketing.
+ * Marketing Strategist — Unit: Marketing, Specialization: Marketing.
  * Transcribed one-time from the canonical, Martin-approved Hat Definition
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Marketing Strategist"; see Activity Log "Marketing
@@ -9,7 +9,7 @@ import type { MarketingHatDefinition } from "../../../hats/types";
  */
 export const MARKETING_STRATEGIST: MarketingHatDefinition = {
   name: "Marketing Strategist",
-  unit: "SM&BD",
+  unit: "Marketing",
   specialization: "Marketing",
   purpose:
     "Own ENIG's marketing direction: who marketing must reach, what it must achieve, and the strategic approach required, while coordinating the specialist Marketing Hats without absorbing their distinct responsibilities.",

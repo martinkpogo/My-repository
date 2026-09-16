@@ -66,7 +66,7 @@ export default {
 
     // Fed by a Gmail-polling Apps Script (or any other email source) —
     // treats the email body as a new incoming enquiry, exactly as if it had
-    // been typed into the SM&BD topic. Shared-secret gated.
+    // been typed into the Sales topic. Shared-secret gated.
     if (url.pathname === "/email/webhook" && request.method === "POST") {
       const secret = request.headers.get("X-Email-Webhook-Secret");
       if (!env.EMAIL_WEBHOOK_SECRET || secret !== env.EMAIL_WEBHOOK_SECRET) {
@@ -76,7 +76,7 @@ export default {
       if (!body.text) return new Response("Missing text", { status: 400 });
 
       const chatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : Number(env.MARTIN_TELEGRAM_USER_ID);
-      const threadId = threadIdForUnit(env, "SM&BD");
+      const threadId = threadIdForUnit(env, "Sales");
       const enquiryText = `Email enquiry${body.from ? ` from ${body.from}` : ""}${body.subject ? ` — "${body.subject}"` : ""}:\n\n${body.text}`;
       await routeIncomingText(env, chatId, enquiryText, threadId, { forceNewEnquiry: true });
       return new Response("ok");
@@ -150,9 +150,9 @@ export default {
       await env.STATE_KV.put("last_cron_run", new Date().toISOString());
       try {
         const picked = await discoverPendingFinanceHandoffs(env);
-        const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+        const pickedForSales = await discoverPendingSalesHandoffs(env);
         await checkStaleHandoffs(env);
-        return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked, smbd_handoffs_picked_up: pickedForSMBD }), {
+        return new Response(JSON.stringify({ ok: true, handoffs_picked_up: picked, sales_handoffs_picked_up: pickedForSales }), {
           headers: { "content-type": "application/json" },
         });
       } catch (err) {
@@ -225,7 +225,7 @@ export default {
     await env.STATE_KV.put("last_cron_run", new Date().toISOString());
     try {
       await discoverPendingFinanceHandoffs(env);
-      await discoverPendingSMBDHandoffs(env);
+      await discoverPendingSalesHandoffs(env);
       await checkStaleHandoffs(env);
     } catch (err) {
       console.error("Unhandled error in scheduled discovery run", err);
@@ -276,7 +276,7 @@ async function notifyMartinOfFailure(env: Env, update: TelegramUpdate): Promise<
 }
 
 /**
- * The Finance side of the SM&BD -> Finance execution boundary. SM&BD's Hat
+ * The Finance side of the Sales -> Finance execution boundary. Sales's Hat
  * code only ever creates the Handoff (Status: Pending) and records the
  * handoff_workitem mapping, then returns - it never calls into Finance
  * directly. This runs on its own schedule and discovers that Handoff
@@ -331,17 +331,17 @@ async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
 }
 
 /**
- * The SM&BD side of the Finance -> SM&BD execution boundary — the return
+ * The Sales side of the Finance -> Sales execution boundary — the return
  * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
  * Finance's own approval handler only ever creates this Handoff (Status:
  * Pending) and records the handoff_workitem mapping, then returns — it
- * never calls into SM&BD directly. This runs on its own schedule and
+ * never calls into Sales directly. This runs on its own schedule and
  * discovers that Handoff independently, the same way discoverPendingFinanceHandoffs
  * does for the opposite direction.
  */
-async function discoverPendingSMBDHandoffs(env: Env): Promise<number> {
+async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
   if (SALES_EXECUTIVE_PAUSED) {
-    // Sales Executive/BD is paused -- leave any Pending Finance->SM&BD
+    // Sales Executive is paused -- leave any Pending Finance->Sales
     // Handoff as-is for automatic pickup once it's back, rather than
     // routing proposal drafting through the frozen in-Worker code.
     return 0;
@@ -350,7 +350,7 @@ async function discoverPendingSMBDHandoffs(env: Env): Promise<number> {
   const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
     and: [
       { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "SM&BD" } },
+      { property: "To Unit", select: { equals: "Sales" } },
       { property: "Type", select: { equals: "Work" } },
     ],
   });
@@ -359,7 +359,7 @@ async function discoverPendingSMBDHandoffs(env: Env): Promise<number> {
   for (const handoff of pending) {
     const workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
-      console.error(`Pending SM&BD Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
+      console.error(`Pending Sales Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
       continue;
     }
     const stub = getSessionStub(env, workId);
@@ -449,7 +449,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await env.STATE_KV.put("last_cron_run", new Date().toISOString());
       const unitHere = resolveUnitForThread(env, threadId);
       try {
-        if (unitHere === "Finance" || unitHere === "SM&BD") {
+        if (unitHere === "Finance" || unitHere === "Sales") {
           // These two are the only Units with real pickup logic. Discovery
           // only counts a Handoff as "picked up" if it has a
           // handoff_workitem KV mapping (tied to a live Telegram session);
@@ -461,10 +461,10 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           // for lack of a work-item mapping" instead of reporting both as
           // the same "No Handoffs pending" message.
           const picked = await discoverPendingFinanceHandoffs(env);
-          const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+          const pickedForSales = await discoverPendingSalesHandoffs(env);
           await checkStaleHandoffs(env);
           const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
-          const pickedForThisUnit = unitHere === "Finance" ? picked : pickedForSMBD;
+          const pickedForThisUnit = unitHere === "Finance" ? picked : pickedForSales;
           let reply: string;
           if (pendingCount === 0) {
             reply = `No Handoffs pending for ${unitHere}.`;
@@ -478,20 +478,22 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           // No specific Unit to scope to -- fall back to the combined
           // summary across both real pickup directions.
           const picked = await discoverPendingFinanceHandoffs(env);
-          const pickedForSMBD = await discoverPendingSMBDHandoffs(env);
+          const pickedForSales = await discoverPendingSalesHandoffs(env);
           await checkStaleHandoffs(env);
           await sendMessage(
             env,
             chatId,
-            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSMBD} picked up for SM&BD.`,
+            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales.`,
             undefined,
             threadId,
           );
         } else {
-          // Strategy / Research & Intelligence / Creative & Design /
-          // Operations -- no Hat exists yet to actually pick these up, so
-          // just report whether anything is queued for this Unit rather
-          // than attempting a pickup that doesn't exist.
+          // Marketing, Business Development, Strategy, Research &
+          // Intelligence, Creative & Design, and Operations -- no pickup
+          // logic exists for any of these (Marketing only ever receives
+          // work from chat, never a Handoff), so just report whether
+          // anything is queued for this Unit rather than attempting a
+          // pickup that doesn't exist.
           const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
           const reply =
             pendingCount > 0
@@ -661,7 +663,7 @@ function humanizeStage(stage: string): string {
  * of whether automated pickup can actually process them (that depends on a
  * handoff_workitem KV mapping the discovery functions require -- see
  * /checkhandoffs). Used both for Units with no pickup logic at all and to
- * detect Finance/SM&BD Handoffs that are genuinely pending but stuck for
+ * detect Finance/Sales Handoffs that are genuinely pending but stuck for
  * lack of that mapping.
  */
 async function countPendingHandoffsForUnit(env: Env, unit: Unit): Promise<number> {

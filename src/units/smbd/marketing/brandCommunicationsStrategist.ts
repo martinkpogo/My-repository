@@ -1,7 +1,7 @@
 import type { MarketingHatDefinition } from "../../../hats/types";
 
 /**
- * Brand & Communications Strategist — Unit: SM&BD, Specialization: Marketing.
+ * Brand & Communications Strategist — Unit: Marketing, Specialization: Marketing.
  * Transcribed one-time from the canonical, Martin-approved Hat Definition
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Brand & Communications Strategist"). Not fetched
@@ -9,7 +9,7 @@ import type { MarketingHatDefinition } from "../../../hats/types";
  */
 export const BRAND_COMMUNICATIONS_STRATEGIST: MarketingHatDefinition = {
   name: "Brand & Communications Strategist",
-  unit: "SM&BD",
+  unit: "Marketing",
   specialization: "Marketing",
   purpose:
     "Own ENIG's practical brand and communications expression: translating established positioning and marketing direction into consistent messaging, tone, and communication guidance across public-facing channels.",

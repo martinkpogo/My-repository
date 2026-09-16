@@ -48,7 +48,7 @@ function formatQualificationEvidence(conditions: QualificationConditionResult[])
 }
 
 /**
- * Reads the authoritative quote back off the Finance -> SM&BD Handoff's own
+ * Reads the authoritative quote back off the Finance -> Sales Handoff's own
  * "Verified Facts & Sources" field, per the same context_transfer discipline
  * Finance's own resolveHandoffBusinessContext applies in the other
  * direction — the receiving Unit reconstructs from the Handoff record
@@ -154,7 +154,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
   await logActivity(env, {
     entry: `Incoming enquiry — work ${state.workId}`,
     type: "Activity",
-    area: "SM&BD",
+    area: "Sales",
     activity: text,
     outcome: "Active",
   });
@@ -174,7 +174,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
   const match = await findEntityMatch(env, name, email, phone);
 
   // one_determinate_match: use existing Entity directly — a clean email or
-  // phone match doesn't need a confirmation click per the SM&BD AI Project
+  // phone match doesn't need a confirmation click per the Sales AI Project
   // Instructions' entity_identification outcomes.
   if (match.determinate) {
     const page = await getPage(env, match.determinate.id);
@@ -183,7 +183,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
     await logActivity(env, {
       entry: `Entity matched: ${state.entityName}`,
       type: "Activity",
-      area: "SM&BD",
+      area: "Sales",
       activity: `Determinate match (email/phone) for incoming enquiry — using existing Entity.`,
       outcome: "Active",
     });
@@ -287,7 +287,7 @@ export async function handleEntityCreationApproval(env: Env, state: WorkState, a
   await logActivity(env, {
     entry: `Entity created: ${draft.name}`,
     type: "Decision",
-    area: "SM&BD",
+    area: "Sales",
     decisions: `Created new Entity for work ${state.workId}`,
     decisionRationale: "No existing Entity record matched the incoming enquiry. Approved by Martin.",
     outcome: "Complete",
@@ -359,7 +359,7 @@ export async function handleMatterChoice(env: Env, state: WorkState, choice: str
 
 /**
  * Drafts a new Matter's title + stated need and presents it to Martin for
- * approval — per the SM&BD AI Project Instructions' Matter identification
+ * approval — per the Sales AI Project Instructions' Matter identification
  * rule ("pass through the applicable creation authorization gate before
  * creating the Matter record"). Nothing is written to Notion until
  * handleMatterCreationApproval confirms it.
@@ -422,7 +422,7 @@ export async function handleMatterCreationApproval(env: Env, state: WorkState, a
   await logActivity(env, {
     entry: `Matter created: ${draft.name}`,
     type: "Decision",
-    area: "SM&BD",
+    area: "Sales",
     decisions: `New distinct unit of commercial work identified for ${state.entityName}.`,
     decisionRationale: "Approved by Martin.",
     outcome: "Complete",
@@ -455,7 +455,7 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
     await logActivity(env, {
       entry: `Sales-call preparation blocked — governance retrieval failed: ${state.entityName}`,
       type: "Blocker",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale:
         "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to prepare the call brief without it.",
       outcome: "Blocked",
@@ -490,7 +490,7 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
   await logActivity(env, {
     entry: `Sales call prep sent for ${state.entityName}`,
     type: "Activity",
-    area: "SM&BD",
+    area: "Sales",
     activity: brief,
     nextActions: "Awaiting Martin's sales call notes.",
     outcome: "Active",
@@ -513,7 +513,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     await logActivity(env, {
       entry: `Qualification blocked — governance retrieval failed: ${state.entityName}`,
       type: "Blocker",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale:
         "Could not retrieve canonical Sales Executive Hat Definition, Universal Role Contract, and/or Entity Business Object specification from Notion. Refusing to evaluate qualification without it.",
       outcome: "Blocked",
@@ -552,7 +552,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   await logActivity(env, {
     entry: `Qualification evaluated: ${qualification.overall}`,
     type: "Decision",
-    area: "SM&BD",
+    area: "Sales",
     decisionRationale: qualification.conditions.map((c) => `${c.condition}: ${c.assessment} — ${c.evidence}`).join("\n"),
     outcome: qualification.overall === "Qualified" ? "Active" : "Complete",
   });
@@ -589,7 +589,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     await logActivity(env, {
       entry: `Work item closed — Not Qualified: ${state.entityName}`,
       type: "Activity",
-      area: "SM&BD",
+      area: "Sales",
       outcome: "Complete",
     });
     state.stage = "closed_not_qualified";
@@ -610,7 +610,7 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
     await logActivity(env, {
       entry: `Lead→Prospect redo requested: ${state.entityName}`,
       type: "Decision",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale: "Martin requested a redo of the qualification assessment.",
       outcome: "Blocked",
     });
@@ -624,7 +624,7 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
   await logActivity(env, {
     entry: `Entity progressed to Prospect: ${state.entityName}`,
     type: "Decision",
-    area: "SM&BD",
+    area: "Sales",
     decisions: "Lead→Prospect approved by Martin.",
     outcome: "Complete",
   });
@@ -652,7 +652,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 
   const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
     Handoff: title(`Quote request — ${state.matterName}`),
-    "From Unit": select("SM&BD"),
+    "From Unit": select("Sales"),
     "From Hat": richText("Sales Executive"),
     "To Unit": select("Finance"),
     "To Hat": richText("Value-Based Pricing Assessor"),
@@ -669,7 +669,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   });
 
   state.handoffId = handoff.id;
-  // SM&BD's execution ends here. Finance is a separate Unit and must
+  // Sales's execution ends here. Finance is a separate Unit and must
   // discover and pick up this Handoff independently (see the scheduled
   // discoverPendingFinanceHandoffs run in index.ts) rather than being
   // invoked in-process from this call. This mapping is how that later,
@@ -678,7 +678,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   await logActivity(env, {
     entry: `Handoff to Finance created: ${state.matterName}`,
     type: "Activity",
-    area: "SM&BD",
+    area: "Sales",
     activity: `Handoff ${handoff.id} — quote requested.`,
     nextActions: "Finance to pick up and judge value-based price.",
     outcome: "Active",
@@ -714,12 +714,12 @@ async function resolveIdentityTokens(env: Env, entityId: string, matterId: strin
 
 export async function handleMoreValueContext(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.proposedIntervention = `${state.proposedIntervention}\n\nAdditional value context: ${text}`;
-  // SM&BD's authority here is mechanical only: record the new content and
+  // Sales's authority here is mechanical only: record the new content and
   // make the Handoff queue-eligible again. This is not a determination that
   // Finance's Hold gate is resolved -- Finance's own judgment in
   // handlePickup (invoked only via independent discovery, never from here)
   // remains the sole authority over sufficiency and the resulting
-  // Held/Closed outcome. SM&BD's execution ends here.
+  // Held/Closed outcome. Sales's execution ends here.
   await updatePage(env, state.handoffId!, {
     "Verified Facts & Sources": richText(
       `Proposed intervention + value context:\n${state.proposedIntervention}`.slice(0, 1900),
@@ -737,10 +737,10 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
 }
 
 /**
- * The SM&BD side of the Finance -> SM&BD execution boundary. Invoked only
+ * The Sales side of the Finance -> Sales execution boundary. Invoked only
  * via runProposalDrafting, itself only invoked by index.ts's scheduled
- * SM&BD-Handoff discovery once a Pending Handoff (the quote Martin
- * approved) addressed to SM&BD is found — never called in-process from
+ * Sales-Handoff discovery once a Pending Handoff (the quote Martin
+ * approved) addressed to Sales is found — never called in-process from
  * Finance's own approval handler.
  */
 export async function handleQuoteReceived(env: Env, state: WorkState): Promise<WorkState> {
@@ -766,7 +766,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
     await logActivity(env, {
       entry: `Draft Proposal blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
       type: "Blocker",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
@@ -786,7 +786,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
     await logActivity(env, {
       entry: `Draft Proposal blocked — quote unreadable from Handoff: ${state.entityName}`,
       type: "Blocker",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale:
         "Could not read the authoritative Finance quote from the Handoff's own Notion record. Refusing to proceed without it; Handoff left Pending for automatic retry.",
       outcome: "Blocked",
@@ -807,7 +807,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
     await logActivity(env, {
       entry: `Proposal drafting blocked — governance retrieval failed: ${state.entityName}`,
       type: "Blocker",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale:
         "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to draft the Proposal without it; Handoff left Pending for automatic retry.",
       outcome: "Blocked",
@@ -883,7 +883,7 @@ export async function handleProposalApproval(env: Env, state: WorkState, approve
   await logActivity(env, {
     entry: `Proposal authorized and created (Draft): ${state.matterName}`,
     type: "Decision",
-    area: "SM&BD",
+    area: "Sales",
     decisions: "Martin authorized the complete Draft Proposal.",
     outcome: "Complete",
   });
@@ -901,7 +901,7 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
     await logActivity(env, {
       entry: `Proposal revision blocked — governance retrieval failed: ${state.entityName}`,
       type: "Blocker",
-      area: "SM&BD",
+      area: "Sales",
       decisionRationale:
         "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to revise the Proposal without it.",
       outcome: "Blocked",

@@ -78,8 +78,8 @@ export class WorkSession extends DurableObject<Env> {
 
   /**
    * Invoked independently by index.ts's scheduled Finance-Handoff discovery
-   * (never by SM&BD directly) once a Pending Handoff addressed to Finance is
-   * found. This is the actual cross-Unit execution boundary: SM&BD's own
+   * (never by Sales directly) once a Pending Handoff addressed to Finance is
+   * found. This is the actual cross-Unit execution boundary: Sales's own
    * call already returned before this ever runs.
    */
   async runFinancePickup(): Promise<WorkState> {
@@ -88,8 +88,8 @@ export class WorkSession extends DurableObject<Env> {
 
   /**
    * The return-leg mirror of runFinancePickup: invoked independently by
-   * index.ts's scheduled SM&BD-Handoff discovery (never by Finance
-   * directly) once a Pending Handoff addressed to SM&BD is found — the
+   * index.ts's scheduled Sales-Handoff discovery (never by Finance
+   * directly) once a Pending Handoff addressed to Sales is found — the
    * approved quote queued by finance.handleQuoteApproval. Finance's own
    * call already returned before this ever runs.
    */

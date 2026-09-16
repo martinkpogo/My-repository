@@ -1,7 +1,7 @@
 import type { MarketingHatDefinition } from "../../../hats/types";
 
 /**
- * Digital Marketer — Unit: SM&BD, Specialization: Marketing.
+ * Digital Marketer — Unit: Marketing, Specialization: Marketing.
  * Transcribed one-time from the canonical, Martin-approved Hat Definition
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Digital Marketer"; see Activity Log "Digital
@@ -10,7 +10,7 @@ import type { MarketingHatDefinition } from "../../../hats/types";
  */
 export const DIGITAL_MARKETER: MarketingHatDefinition = {
   name: "Digital Marketer",
-  unit: "SM&BD",
+  unit: "Marketing",
   specialization: "Marketing",
   purpose:
     "Execute ENIG's approved digital marketing strategy: manage digital campaigns and distribution, and use performance evidence to optimize digital activity, without taking ownership of marketing strategy, brand messaging, content strategy, or human production.",

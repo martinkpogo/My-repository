@@ -83,7 +83,7 @@ export async function resolveHandoffBusinessContext(
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
   // Finance is its own Unit with its own topic/workspace - it speaks there,
   // not wherever the enquiry happened to originate (state.threadId, usually
-  // SM&BD's topic). Falls back to state.threadId if Finance has no topic
+  // Sales's topic). Falls back to state.threadId if Finance has no topic
   // configured, so this is a no-op when UNIT_TOPIC_MAP is unset.
   const financeThreadId = threadIdForUnit(env, "Finance") ?? state.threadId;
 
@@ -145,7 +145,7 @@ async function judgeQuote(
   // Finance operates on identity tokens only, never the real Entity/Matter
   // name — overwrite WorkState's copy too, so any later Finance-side
   // reference (e.g. handleQuoteApproval's own messages, below) also stays
-  // token-only rather than falling back to whatever SM&BD originally set.
+  // token-only rather than falling back to whatever Sales originally set.
   state.entityName = entityToken;
   state.matterName = matterToken;
 
@@ -238,7 +238,7 @@ async function judgeQuote(
 
   // The quote is a judgment call, not final authority (per the Finance Hat
   // Definition's authority_limits) — it goes to Martin for review before it
-  // becomes the authoritative quote SM&BD is allowed to build a proposal on.
+  // becomes the authoritative quote Sales is allowed to build a proposal on.
   state.quote = { price: judgement.price, rationale: judgement.rationale ?? "" };
   state.stage = "awaiting_quote_approval";
   state.awaiting = undefined;
@@ -249,7 +249,7 @@ async function judgeQuote(
   await sendMessage(
     env,
     state.chatId,
-    `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to SM&BD for the Draft Proposal?`,
+    `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`,
     [
       [
         { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
@@ -264,7 +264,7 @@ async function judgeQuote(
 /**
  * Handles Martin's reasoning after he clicks Redo on a computed quote.
  * This stays entirely within Finance — Martin is critiquing Finance's own
- * judgment, not supplying business facts SM&BD owns (contrast
+ * judgment, not supplying business facts Sales owns (contrast
  * sales.handleMoreValueContext, used for the latter) — so it acts
  * immediately rather than requeuing the Handoff Pending for cron discovery
  * to re-pick-up asynchronously; no Unit boundary is being crossed.
@@ -312,9 +312,9 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
  * Proposal review gate later — per the Finance Hat Definition's
  * authority_limits ("The quote is a judgment call, not final authority —
  * subject to Martin's direct authorization"). Approval does NOT hand off
- * in-process to SM&BD (that would repeat the same in-process cross-Unit
- * call the SM&BD -> Finance boundary was corrected away from): it creates a
- * new Handoff, Finance -> SM&BD, and returns. SM&BD's own independent
+ * in-process to Sales (that would repeat the same in-process cross-Unit
+ * call the Sales -> Finance boundary was corrected away from): it creates a
+ * new Handoff, Finance -> Sales, and returns. Sales's own independent
  * discovery (discoverPendingSMBDHandoffs in index.ts) picks it up, the same
  * way Finance discovers Handoffs addressed to it.
  */
@@ -351,13 +351,13 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       entry: `Quote approval blocked — no Matter_Token on record: ${state.entityName ?? state.handoffId}`,
       type: "Blocker",
       area: "Finance",
-      decisionRationale: "This work item has no Matter_Token, so the Finance -> SM&BD follow-up Handoff can't identify which Matter it's for.",
+      decisionRationale: "This work item has no Matter_Token, so the Finance -> Sales follow-up Handoff can't identify which Matter it's for.",
       outcome: "Blocked",
     });
     await sendMessage(
       env,
       state.chatId,
-      `Quote approved, but I can't route it to SM&BD — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, then retry.`,
+      `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, then retry.`,
       undefined,
       financeThreadId,
     );
@@ -368,7 +368,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     Handoff: title(`Draft Proposal — ${state.matterName}`),
     "From Unit": select("Finance"),
     "From Hat": richText("Value-Based Pricing Assessor"),
-    "To Unit": select("SM&BD"),
+    "To Unit": select("Sales"),
     "To Hat": richText("Sales Executive"),
     Type: select("Work"),
     Status: select("Pending"),
@@ -384,17 +384,17 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   await env.STATE_KV.put(`handoff_workitem:${followUp.id}`, state.workId);
 
   await logActivity(env, {
-    entry: `Quote approved — routed to SM&BD for Draft Proposal: ${state.matterName}`,
+    entry: `Quote approved — routed to Sales for Draft Proposal: ${state.matterName}`,
     type: "Activity",
     area: "Finance",
-    activity: `Handoff ${followUp.id} — quote approved and queued for SM&BD.`,
-    nextActions: "SM&BD to pick up and prepare the Draft Proposal.",
+    activity: `Handoff ${followUp.id} — quote approved and queued for Sales.`,
+    nextActions: "Sales to pick up and prepare the Draft Proposal.",
     outcome: "Complete",
   });
   await sendMessage(
     env,
     state.chatId,
-    `Quote approved — queued for SM&BD to prepare the Draft Proposal for *${state.entityName}*.`,
+    `Quote approved — queued for Sales to prepare the Draft Proposal for *${state.entityName}*.`,
     undefined,
     financeThreadId,
   );

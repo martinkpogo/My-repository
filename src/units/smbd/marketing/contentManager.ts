@@ -1,7 +1,7 @@
 import type { MarketingHatDefinition } from "../../../hats/types";
 
 /**
- * Content Manager — Unit: SM&BD, Specialization: Marketing.
+ * Content Manager — Unit: Marketing, Specialization: Marketing.
  * Transcribed one-time from the canonical, Martin-approved Hat Definition
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Content Manager"). Not fetched live — see
@@ -9,7 +9,7 @@ import type { MarketingHatDefinition } from "../../../hats/types";
  */
 export const CONTENT_MANAGER: MarketingHatDefinition = {
   name: "Content Manager",
-  unit: "SM&BD",
+  unit: "Marketing",
   specialization: "Marketing",
   purpose:
     "Own the operational management of ENIG's content workflow: converting approved content strategy and briefs into an executable workflow, coordinating production through review, approval, and publication.",

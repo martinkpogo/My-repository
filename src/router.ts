@@ -67,8 +67,9 @@ export function getSessionStub(env: Env, workId: string) {
  * Resolves a Telegram forum topic's message_thread_id to the Unit it
  * represents, per UNIT_TOPIC_MAP. "dm" means no topic context at all (plain
  * 1:1 chat, or UNIT_TOPIC_MAP unset) — treated as the legacy default,
- * routable like the SM&BD topic. "unmapped" means a real thread id was
- * given but doesn't match any configured Unit.
+ * routable like the old combined SM&BD topic used to be, before Sales,
+ * Marketing, and Business Development each got their own. "unmapped" means
+ * a real thread id was given but doesn't match any configured Unit.
  */
 export function resolveUnitForThread(env: Env, threadId?: number): Unit | "unmapped" | "dm" {
   if (threadId === undefined || !env.UNIT_TOPIC_MAP) return "dm";
@@ -100,11 +101,14 @@ interface RoutingClassification {
 
 /**
  * Workspace-level routing decision for a genuinely new work item. Governed
- * by the canonical SM&BD AI Project Instructions (retrieved live, not
+ * by the canonical Sales AI Project Instructions (retrieved live, not
  * restated in code) — this is the "Workspace matches the incoming request
  * against the Hats belonging to that Unit" step the Universal Role Contract
  * describes (Value-Based Pricing Assessor/Finance only ever activates via a
- * Handoff, never directly from chat, so it's never a candidate here).
+ * Handoff, never directly from chat, so it's never a candidate here). The
+ * underlying Notion page (SMBD_PROJECT_INSTRUCTIONS_PAGE_ID) still covers
+ * the combined Sales/Marketing/Business Development governance from before
+ * the Unit split — only its label here has been renamed to match.
  * Returns null if that governance can't be retrieved; the caller must not
  * classify or route without it (Martin is told directly, per the
  * fail-closed rule — no hardcoded fallback, no queued retry).
@@ -118,10 +122,10 @@ export async function classifyNewMessage(
   const projectInstructions = await getGovernance(
     env,
     SMBD_PROJECT_INSTRUCTIONS_PAGE_ID,
-    "SM&BD AI Project Instructions",
+    "Sales AI Project Instructions",
   );
   if (!projectInstructions) {
-    console.error("classifyNewMessage: SM&BD Project Instructions retrieval failed — refusing to classify/route");
+    console.error("classifyNewMessage: Sales Project Instructions retrieval failed — refusing to classify/route");
     await sendMessage(
       env,
       chatId,
@@ -134,9 +138,9 @@ export async function classifyNewMessage(
 
   const result = await aiJson<RoutingClassification>(env, {
     taskId: "routing.enquiry_classification",
-    system: `You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. Below is the canonical SM&BD AI Project Instructions, retrieved from Notion — it is authoritative for how incoming work in this workspace is classified and which Hat/specialization it routes to. Follow it exactly.
+    system: `You route incoming Telegram messages for ENIG, a diagnose-first positioning/communications consultancy. Below is the canonical Sales AI Project Instructions, retrieved from Notion — it is authoritative for how incoming work in this workspace is classified and which Hat/specialization it routes to. Follow it exactly.
 
-=== SM&BD AI PROJECT INSTRUCTIONS (retrieved from Notion's canonical governance) ===
+=== SALES AI PROJECT INSTRUCTIONS (retrieved from Notion's canonical governance) ===
 ${projectInstructions}
 
 === CLASSIFICATION TASK (execution mechanics — not part of the governance above) ===
@@ -152,17 +156,19 @@ Return JSON: {"route": "enquiry" | "out_of_scope" | "ambiguous", "reason": "..."
 }
 
 /**
- * Coarse specialization check, run before the existing Sales enquiry
- * classifier: is this an internal Marketing-specialization task (owned by
- * one of the five Marketing Hats), as opposed to a client-facing sales
- * enquiry or general conversation? Per the SM&BD Unit's own Notion
- * definition, Marketing is one of three specializations this Unit covers
- * (Sales, Marketing, Business Development) — this is the specialization
- * step; which of the five Marketing Hats owns it is decided separately,
- * inside marketing.handleMarketingIntake, using only that Hat's own
- * short purpose per Hat (progressive context, not the full definitions).
- * Returns null on failure — callers fall through to the existing Sales
- * path unchanged rather than guessing.
+ * Coarse specialization check, only needed in the DM/no-topic-configured
+ * fallback (Sales and Marketing each have their own dedicated topic now,
+ * which already declares which specialization a message belongs to): is
+ * this an internal Marketing-specialization task (owned by one of the five
+ * Marketing Hats), as opposed to a client-facing sales enquiry or general
+ * conversation? Per the original combined SM&BD Unit's Notion definition,
+ * Marketing was one of three specializations that Unit covered (Sales,
+ * Marketing, Business Development) — this is the specialization step;
+ * which of the five Marketing Hats owns it is decided separately, inside
+ * marketing.handleMarketingIntake, using only that Hat's own short purpose
+ * per Hat (progressive context, not the full definitions). Returns null on
+ * failure — callers fall through to the existing Sales path unchanged
+ * rather than guessing.
  */
 async function classifyMarketingTask(env: Env, text: string): Promise<"marketing" | "not_marketing" | null> {
   const result = await aiJson<{ specialization: "marketing" | "not_marketing" }>(env, {
@@ -182,6 +188,42 @@ Return JSON: {"specialization": "marketing"} or {"specialization": "not_marketin
     user: text,
   });
   return result?.specialization ?? null;
+}
+
+// User-facing text for a Sales enquiry that arrives while
+// SALES_EXECUTIVE_PAUSED is true. Kept as one constant so the DM path and
+// the dedicated Sales-topic path can't drift apart.
+const SALES_PAUSED_MESSAGE =
+  "Sales Executive intake is paused by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here — the isolated Sales Executive project (with its own Notion and Gmail access) owns this work now.";
+
+/**
+ * Classifies and, if it's a genuine enquiry, starts a Sales Executive work
+ * item -- shared by the dedicated Sales topic (which already knows the
+ * message is Sales-relevant) and the DM/no-topic-configured fallback
+ * (which doesn't, and still needs the enquiry/out_of_scope/ambiguous
+ * classification this performs). Always ends by replying in `threadId`,
+ * so the caller can simply return afterward.
+ */
+async function handleSalesIntake(env: Env, chatId: number, text: string, threadId: number | undefined): Promise<void> {
+  const classification = await classifyNewMessage(env, chatId, text, threadId);
+  if (!classification) return; // retrieval failed — Martin already told, nothing further to do.
+  if (classification.route === "enquiry") {
+    if (SALES_EXECUTIVE_PAUSED) {
+      console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
+      await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
+      return;
+    }
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "Sales", "Sales Executive", threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleIncomingEnquiry(text);
+    return;
+  }
+
+  // Not a new enquiry — hold open conversation instead of a rigid refusal.
+  const reply = await generalChatReply(env, "Sales", chatId, threadId, text);
+  await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
 }
 
 export async function routeIncomingText(
@@ -214,60 +256,48 @@ export async function routeIncomingText(
     return;
   }
 
-  // Finance and the four not-yet-built Units don't take structured work
-  // from chat, but the topic isn't dead either — hold open conversation
-  // there, with memory, rather than a rigid refusal every time.
-  if (unitContext !== "dm" && unitContext !== "SM&BD") {
-    const reply = await generalChatReply(env, unitContext, chatId, threadId, text);
-    await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
-    return;
-  }
-
-  // Specialization check first: Marketing is a distinct specialization
-  // within this same SM&BD Unit (per the Unit's own Notion definition),
-  // with its own five-Hat classification handled inside
-  // marketing.handleMarketingIntake. A "not_marketing"/failed result
-  // falls through unchanged to the existing Sales enquiry classifier
-  // below — this is additive and never alters Sales Executive's own
-  // classification or behavior.
-  const marketingCheck = await classifyMarketingTask(env, text);
-  if (marketingCheck === "marketing") {
+  // The Marketing topic already declares its own intent -- no need for the
+  // DM path's specialization classifier, straight to the five-Hat
+  // classification inside marketing.handleMarketingIntake.
+  if (unitContext === "Marketing") {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "SM&BD", "Marketing", threadId);
+    await stub.init(workId, chatId, "Marketing", "Marketing", threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleMarketingRequest(text);
     return;
   }
 
-  const classification = await classifyNewMessage(env, chatId, text, threadId);
-  if (!classification) return; // retrieval failed — Martin already told, nothing further to do.
-  if (classification.route === "enquiry") {
-    if (SALES_EXECUTIVE_PAUSED) {
-      console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
-      await sendMessage(
-        env,
-        chatId,
-        "Sales Executive intake is temporarily paused while its data-boundary redesign is in progress. This enquiry was not processed — please resend once it's back.",
-        undefined,
-        threadId,
-      );
-      return;
-    }
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    // "Sales Executive" and the five Marketing Hats (above) are the
-    // current chat-reachable Hats in this Unit. The canonical Workspace
-    // Project Instructions (retrieved above, governing the
-    // route/out_of_scope/ambiguous classification itself) remain the
-    // authority for the Sales routing rule.
-    await stub.init(workId, chatId, "SM&BD", "Sales Executive", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleIncomingEnquiry(text);
+  // Likewise, the Sales topic already declares its own intent.
+  if (unitContext === "Sales") {
+    await handleSalesIntake(env, chatId, text, threadId);
     return;
   }
 
-  // Not a new enquiry — hold open conversation instead of a rigid refusal.
-  const reply = await generalChatReply(env, "SM&BD", chatId, threadId, text);
-  await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
+  // Finance, Business Development, and the other not-yet-built Units don't
+  // take structured work from chat, but the topic isn't dead either — hold
+  // open conversation there, with memory, rather than a rigid refusal.
+  if (unitContext !== "dm") {
+    const reply = await generalChatReply(env, unitContext, chatId, threadId, text);
+    await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
+    return;
+  }
+
+  // DM / no UNIT_TOPIC_MAP configured: there's no dedicated topic to signal
+  // intent, so both specializations that used to share the old combined
+  // SM&BD topic still need classifying here. Marketing first, per the
+  // Unit's own Notion definition of Sales/Marketing/Business Development as
+  // three specializations under one umbrella; a "not_marketing"/failed
+  // result falls through unchanged to the Sales classifier.
+  const marketingCheck = await classifyMarketingTask(env, text);
+  if (marketingCheck === "marketing") {
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "Marketing", "Marketing", threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleMarketingRequest(text);
+    return;
+  }
+
+  await handleSalesIntake(env, chatId, text, threadId);
 }
