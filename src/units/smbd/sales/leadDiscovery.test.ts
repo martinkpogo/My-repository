@@ -286,7 +286,7 @@ test("handleLeadDiscoverySignal still records the Lead when the explicit Entity 
  * end-to-end slice, not just a pointer to other tests:
  *
  *  1. No Entity created solely from discovery       -> asserted below (no entity-ds write call at all)
- *  2. No Lead promoted to Prospect                   -> asserted below (Status stays "Not started"; no "Prospect"/qualification field anywhere written)
+ *  2. No Lead promoted to Prospect                   -> asserted below (Status stays "New"; no "Prospect"/qualification field anywhere written)
  *  3. No autonomous client-facing Sales Executive activity -> asserted below (module source never references salesExecutive)
  *  4. Ambiguous identity fails safely                -> see "surfaces a conflict instead of linking" test above
  *  5. Insufficient context fails closed               -> see "classification unavailable" blocked-path test above
@@ -365,10 +365,11 @@ test("VERTICAL SLICE: authorized proactive discovery -> Lead Generation Speciali
   assert.strictEqual(leadsCreateBody.properties["Contact Details"].rich_text[0].text.content, "hello@acme.com");
 
   // (2) The Lead remains a Lead: Status is Lead Generation Specialist's own
-  // owned initial state (the only option the live schema actually has for
-  // it), and no Entity relation and no Prospect/qualification field was ever
+  // owned initial state ("New", the first of the live select-type schema's
+  // New/Ready for Outreach/Outreach/Responded/Converted/Closed options),
+  // and no Entity relation and no Prospect/qualification field was ever
   // written -- promotion to Prospect is Sales Executive's authority alone.
-  assert.deepStrictEqual(leadsCreateBody.properties.Status, { status: { name: "Not started" } });
+  assert.deepStrictEqual(leadsCreateBody.properties.Status, { select: { name: "New" } });
   assert.strictEqual(leadsCreateBody.properties.Entity, undefined, "no Entity relation without an explicit, verified reference");
   for (const call of calls) {
     const propKeys = call.body?.properties ? Object.keys(call.body.properties) : [];

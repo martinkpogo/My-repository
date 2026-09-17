@@ -1,5 +1,5 @@
 import type { Env } from "../../../types";
-import { createPage, getPage, plainText, queryDataSource, relation, richText, title } from "../../../notion";
+import { createPage, getPage, plainText, queryDataSource, relation, richText, select, title } from "../../../notion";
 import { aiJson } from "../../../ai";
 import { logActivity } from "../../../log";
 import { sendHatMessage } from "../../../telegram";
@@ -320,16 +320,14 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
       "Contact Details": richText(signal.contact),
       Source: richText(signal.source),
       "Discovery Evidence": richText(signal.evidence),
-      // "Not started" is the only pre-existing Status option this
-      // reconciles to today -- see the Architect-facing note in this
-      // module's PR/report about the Leads database Status schema not
-      // yet having New/Ready for Outreach/Outreach/Responded/Converted/
-      // Closed as distinct options. Lead Generation Specialist only ever sets this
-      // one value (its own initial/owned state); it never attempts
-      // "Ready for Outreach" or any later-lifecycle value, both because
-      // those aren't real options yet and because most of them belong to
-      // Sales Executive's own authority regardless.
-      Status: { status: { name: "Not started" } },
+      // Status is a `select` property (converted from Notion's native
+      // `status` type by Architect decision -- the status type's options
+      // can't be set via the API at all, confirmed live; select can). Its
+      // options are exactly New/Ready for Outreach/Outreach/Responded/
+      // Converted/Closed. Lead Generation Specialist only ever writes
+      // "New" -- its own owned initial state; every later-lifecycle value
+      // belongs to Sales Executive's own authority to set, not this Hat's.
+      Status: select("New"),
       ...(entityResolution.status === "matched" ? { Entity: relation([entityResolution.entityId]) } : {}),
     });
   } catch (err) {
