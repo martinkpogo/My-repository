@@ -52,6 +52,9 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // leadDiscovery.ts's redaction step): only a sanitized description of
   // the signal, plus its public source, reaches this call.
   "lead.discovery_classification": "public_sourced",
+  // Same rationale as lead.discovery_classification -- the search results
+  // this evaluates are all attributed to a real, public source URL.
+  "lead.discovery_signal_evaluation": "public_sourced",
 };
 
 /**

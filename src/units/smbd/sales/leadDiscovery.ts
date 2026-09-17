@@ -98,7 +98,7 @@ export function redactSignalForClassification(signal: ParsedLeadSignal): string 
   return `Source: ${signal.source}\nEvidence: ${evidence}`;
 }
 
-interface LeadDiscoveryGovernance {
+export interface LeadDiscoveryGovernance {
   hatDefinition: string;
   universalRoleContract: string;
 }
@@ -109,7 +109,7 @@ interface LeadDiscoveryGovernance {
  * proceed," never substitute hardcoded text in its place -- mirrors
  * salesExecutive.ts's getSalesExecutiveGovernance contract exactly.
  */
-async function getLeadDiscoveryGovernance(env: Env): Promise<LeadDiscoveryGovernance | null> {
+export async function getLeadDiscoveryGovernance(env: Env): Promise<LeadDiscoveryGovernance | null> {
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, LEAD_GENERATION_SPECIALIST_HAT_DEFINITION_PAGE_ID, "Sales -- Lead Generation Specialist Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
@@ -148,7 +148,7 @@ async function classifyLeadSignal(env: Env, redactedSignal: string): Promise<Lea
   });
 }
 
-interface LeadDuplicateMatch {
+export interface LeadDuplicateMatch {
   id: string;
   name: string;
 }
@@ -166,7 +166,7 @@ interface LeadDuplicateMatch {
  * auto-merges; every candidate is surfaced to Martin, per the Universal
  * Role Contract's "never auto-select" rule.
  */
-async function findDuplicateLeads(env: Env, name: string, contact: string): Promise<LeadDuplicateMatch[]> {
+export async function findDuplicateLeads(env: Env, name: string, contact: string): Promise<LeadDuplicateMatch[]> {
   const matches: LeadDuplicateMatch[] = [];
 
   const existingLeads = await queryDataSource(env, env.LEADS_DATA_SOURCE_ID, {

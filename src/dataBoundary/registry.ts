@@ -103,6 +103,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Screens a redacted, source-attributed discovery signal for whether it describes a genuine, in-scope lead -- never sees the discovered identity/contact itself, only the sanitized evidence description.",
   },
+  "lead.discovery_signal_evaluation": {
+    id: "lead.discovery_signal_evaluation",
+    name: "Autonomous Lead Discovery Signal Evaluation",
+    description:
+      "Evaluates web-search results found by scheduled proactive discovery against the canonical Acquisition Criteria (operating business, problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, evidence threshold). Operates only on public, source-attributed search result content -- never fabricates a decision-maker, contact, or fact not present in that content.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
