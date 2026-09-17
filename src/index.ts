@@ -3,7 +3,7 @@ import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
-import { handleLeadDiscoverySignal } from "./units/smbd/sales/leadDiscovery";
+import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/smbd/sales/leadDiscovery";
 import type { SessionSummary, Unit } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
 import type { ReadAiPayload } from "./readai";
@@ -549,13 +549,14 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
       return;
     }
-    // Lead Discovery's own entry point -- deliberately outside
+    // Lead Generation Specialist's own entry point (Sales Unit's Lead
+    // Discovery specialization) -- deliberately outside
     // routeIncomingText/SALES_EXECUTIVE_PAUSED. Sales is active and Lead
-    // Discovery runs in this shared Worker regardless of whether Sales
-    // Executive's isolated, client-facing pipeline is paused; the two are
-    // independent by design (see leadDiscovery.ts).
-    if (/^\/lead(@\w+)?(\s|$)/i.test(text)) {
-      const body = text.replace(/^\/lead(@\w+)?\s*/i, "");
+    // Discovery runs in this shared "ENIG - Sales runtime" Worker regardless
+    // of whether Sales Executive's isolated Sales Progression pipeline is
+    // paused; the two are independent by design (see leadDiscovery.ts).
+    if (LEAD_COMMAND_PATTERN.test(text)) {
+      const body = text.replace(LEAD_COMMAND_PATTERN, "");
       await handleLeadDiscoverySignal(env, chatId, threadId, body);
       return;
     }
