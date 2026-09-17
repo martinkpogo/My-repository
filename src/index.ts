@@ -4,6 +4,7 @@ import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/smbd/sales/leadDiscovery";
+import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/smbd/sales/leadGenerationDiscovery";
 import type { SessionSummary, Unit } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
 import type { ReadAiPayload } from "./readai";
@@ -176,6 +177,38 @@ export default {
           Number(env.MARTIN_TELEGRAM_USER_ID),
           `⚠️ The Handoff discovery run failed unexpectedly. Logged for review — will retry next cycle.`,
         ).catch((notifyErr) => console.error("Failed to notify Martin of discovery-route failure", notifyErr));
+        return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
+    // Autonomous Lead Generation Specialist discovery -- same
+    // external-cron-hits-an-admin-endpoint pattern as
+    // /admin/run-finance-discovery above (the native Cloudflare Cron
+    // Trigger has never reliably fired on this account). Meant to be hit
+    // three times a day by an external scheduler (cron-job.org), not by
+    // the native trigger. Independent of SALES_EXECUTIVE_PAUSED -- Lead
+    // Generation Specialist runs in this shared Worker regardless of
+    // whether Sales Executive's isolated pipeline is paused, same as the
+    // /lead command.
+    if (url.pathname === "/admin/run-lead-discovery" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      try {
+        const summary = await runAutonomousLeadDiscovery(env);
+        await notifyDiscoveryRunSummary(env, Number(env.MARTIN_TELEGRAM_USER_ID), undefined, summary);
+        return new Response(JSON.stringify({ ok: true, ...summary }), { headers: { "content-type": "application/json" } });
+      } catch (err) {
+        console.error("Unhandled error in /admin/run-lead-discovery", err);
+        await sendMessage(
+          env,
+          Number(env.MARTIN_TELEGRAM_USER_ID),
+          `⚠️ The scheduled Lead discovery run failed unexpectedly. Logged for review — will retry next cycle.`,
+        ).catch((notifyErr) => console.error("Failed to notify Martin of lead-discovery failure", notifyErr));
         return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
           status: 500,
           headers: { "content-type": "application/json" },
