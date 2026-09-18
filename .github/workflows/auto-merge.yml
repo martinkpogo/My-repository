@@ -1,8 +1,6 @@
 name: Auto Merge
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_run:
     workflows: ["PR Validation"]
     types: [completed]
@@ -15,52 +13,39 @@ jobs:
   automerge:
     name: Auto Merge Pull Request
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Enable Auto-Merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
-            if [ "$CONCLUSION" != "success" ]; then
-              echo "PR Validation workflow did not succeed (conclusion: $CONCLUSION). Skipping auto-merge."
-              exit 0
-            fi
-
-            HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
-            if [ -z "$HEAD_BRANCH" ] || [ "$HEAD_BRANCH" = "null" ]; then
-              echo "No head_branch found in workflow run event. Skipping auto-merge."
-              exit 0
-            fi
-
-            echo "Resolving open PR for branch '$HEAD_BRANCH'..."
-            PR_INFO=$(gh pr list --head "$HEAD_BRANCH" --state open --json number,isDraft,state --jq '.[0]')
-            if [ -z "$PR_INFO" ] || [ "$PR_INFO" = "null" ]; then
-              echo "No open PR found for head branch '$HEAD_BRANCH'. Skipping auto-merge."
-              exit 0
-            fi
-
-            PR_NUM=$(echo "$PR_INFO" | jq -r '.number')
-            IS_DRAFT=$(echo "$PR_INFO" | jq -r '.isDraft')
-
-            if [ "$IS_DRAFT" = "true" ]; then
-              echo "PR #$PR_NUM is currently in Draft state. Skipping auto-merge."
-              exit 0
-            fi
-
-            echo "Enabling auto-merge for PR #$PR_NUM (state: open, isDraft: false)..."
-            gh pr merge "$PR_NUM" --auto --squash --delete-branch
-          else
-            PR_NUM="${{ github.event.pull_request.number }}"
-            IS_DRAFT="${{ github.event.pull_request.draft }}"
-
-            if [ "$IS_DRAFT" = "true" ]; then
-              echo "PR #$PR_NUM is currently in Draft state. Skipping auto-merge."
-              exit 0
-            fi
-
-            echo "Enabling auto-merge for PR #$PR_NUM..."
-            gh pr merge "$PR_NUM" --auto --squash --delete-branch
+          CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "PR Validation workflow did not succeed (conclusion: $CONCLUSION). Skipping auto-merge."
+            exit 0
           fi
+
+          HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
+          if [ -z "$HEAD_BRANCH" ] || [ "$HEAD_BRANCH" = "null" ]; then
+            echo "No head_branch found in workflow run event. Skipping auto-merge."
+            exit 0
+          fi
+
+          echo "Resolving open PR for branch '$HEAD_BRANCH'..."
+          PR_INFO=$(gh pr list --head "$HEAD_BRANCH" --state open --json number,isDraft,state --jq '.[0]')
+          if [ -z "$PR_INFO" ] || [ "$PR_INFO" = "null" ]; then
+            echo "No open PR found for head branch '$HEAD_BRANCH'. Skipping auto-merge."
+            exit 0
+          fi
+
+          PR_NUM=$(echo "$PR_INFO" | jq -r '.number')
+          IS_DRAFT=$(echo "$PR_INFO" | jq -r '.isDraft')
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "PR #$PR_NUM is currently in Draft state. Skipping auto-merge."
+            exit 0
+          fi
+
+          echo "Enabling auto-merge for PR #$PR_NUM (state: open, isDraft: false)..."
+          gh pr merge "$PR_NUM" --auto --squash --delete-branch
