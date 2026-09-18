@@ -1,7 +1,7 @@
 import type { Env, Unit } from "./types";
 import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
-import { generalChatReply, generalDmReply } from "./chat";
+import { generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 import { researchProtocolSummaryList } from "./units/research/protocols";
@@ -34,26 +34,6 @@ const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d"
 // bring this code back would undo the isolation this pause protects.
 export const SALES_EXECUTIVE_PAUSED = true;
 
-// generalChatReply's underlying aiChat call returns "" whenever no AI
-// provider is eligible under the current data-boundary policy. As of the
-// PRODUCTION_TASK_SENSITIVITY / PRODUCTION_PROVIDER_ELIGIBILITY tables in
-// dataBoundary/policy.ts, this is deliberate for chat.general_reply
-// specifically: it's classified client_confidential (you can reference
-// any real client by name in it), and workers-ai is only eligible for
-// business_sensitive and below -- Cloudflare's training-data policy for
-// personal information hasn't been confirmed acceptable, the same reason
-// Sales Executive itself is paused. A bare "..." fallback made that look
-// like a mystery bug rather than the known, deliberate policy it is. Sales
-// chat stays classified client_confidential (Martin could paste real
-// enquiry content into that topic's freeform chat), which no eligible
-// provider can serve today -- workers-ai is approved for business_sensitive
-// and below only, pending a provider with an acceptable personal-data/
-// training policy. State this directly rather than hedging with "if this
-// is Sales... anywhere else...": handleSalesIntake only ever runs for
-// Sales (the Sales topic itself, or the DM fallback once it's decided the
-// message is Sales-relevant), so the reason is always the same one.
-const SALES_CHAT_UNAVAILABLE_MESSAGE =
-  "This Unit is unavailable for general chat right now. Sales conversations are classified client_confidential, and no AI provider is currently approved for that sensitivity -- pending one with an acceptable personal-data/training policy. Structured Sales intake is paused here in this runtime for the same reason, but the Sales Executive Hat itself is not inactive -- it is present and actively working as an isolated Sales Executive project in Claude, with its own Notion and Gmail access, where Martin reviews and approves every client-facing action directly.";
 
 // Every other Unit's chat is business_sensitive (see chatSensitivityForUnit
 // in chat.ts) and should normally succeed, so seeing this message there

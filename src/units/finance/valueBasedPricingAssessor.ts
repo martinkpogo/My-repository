@@ -310,8 +310,6 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
  * way Finance discovers Handoffs addressed to it.
  */
 export async function handleQuoteApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  const financeThreadId = state.financeThreadId ?? state.threadId;
-
   if (!approved) {
     await updatePage(env, state.handoffId!, {
       Status: select("Held"),
