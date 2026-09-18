@@ -25,7 +25,9 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
     MARTIN_TELEGRAM_USER_ID: "123456",
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
-    UNIT_TOPIC_MAP: '{"Marketing": 393, "Sales": 399, "Operations": 14}',
+    CONVERSATION_TOPIC_ID: "100",
+    OPERATIONS_TOPIC_ID: "14",
+    UNIT_TOPIC_MAP: '{"Conversation": 100, "Operations": 14}',
     TELEGRAM_BOT_TOKEN: "test-token",
     NOTION_TOKEN: "test-token",
     NOTION_VERSION: "2025-09-03",
@@ -37,12 +39,24 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
 test("1. Stream target helpers resolve correct Conversation and Operations targets", () => {
   const env = fakeEnv();
   const conv = getConversationTarget(env);
-  assert.strictEqual(conv.chatId, 123456);
-  assert.strictEqual(conv.threadId, undefined);
+  assert.ok(conv !== null);
+  assert.strictEqual(conv.chatId, -1004435157576);
+  assert.strictEqual(conv.threadId, 100);
 
   const ops = getOperationsTarget(env);
+  assert.ok(ops !== null);
   assert.strictEqual(ops.chatId, -1004435157576);
   assert.strictEqual(ops.threadId, 14);
+});
+
+test("1b. Stream target helpers fail closed when configuration is missing without cross-stream fallback", async () => {
+  const unconfiguredEnv = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: undefined, CONVERSATION_TOPIC_ID: undefined, OPERATIONS_TOPIC_ID: undefined, UNIT_TOPIC_MAP: undefined });
+
+  assert.strictEqual(getConversationTarget(unconfiguredEnv), null);
+  assert.strictEqual(getOperationsTarget(unconfiguredEnv), null);
+
+  const opsResult = await sendOperationsMessage(unconfiguredEnv, "test telemetry");
+  assert.strictEqual(opsResult, undefined, "unconfigured operations stream must fail closed returning undefined");
 });
 
 test("2. reply_msg KV helper sets and retrieves reply message workId mappings", async () => {

@@ -37,8 +37,14 @@ export interface Env {
    */
   UNIT_TOPIC_MAP?: string;
 
-  /** The ENIG HQ Supergroup's chat id (negative number). Only needed if using Telegram topics. */
+  /** The ENIG HQ Supergroup's chat id (negative number). Required for two-stream architecture. */
   TELEGRAM_GROUP_CHAT_ID?: string;
+
+  /** The Conversation stream topic message_thread_id in ENIG HQ Supergroup. */
+  CONVERSATION_TOPIC_ID?: string;
+
+  /** The Operations stream topic message_thread_id in ENIG HQ Supergroup. */
+  OPERATIONS_TOPIC_ID?: string;
 
   /** Shared secret for the Gmail-polling Apps Script -> /email/webhook. */
   EMAIL_WEBHOOK_SECRET?: string;

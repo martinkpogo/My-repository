@@ -2,7 +2,7 @@ import type { Env } from "../../../types";
 import { createPage, getPage, plainText, queryDataSource, relation, richText, select, title } from "../../../notion";
 import { aiJson } from "../../../ai";
 import { logActivity } from "../../../log";
-import { sendHatMessage } from "../../../telegram";
+import { sendConversationHatMessage } from "../../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governance";
 
 /**
@@ -265,12 +265,12 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
 
   const signal = parseLeadSignal(body);
   if (!signal) {
-    await sendHatMessage(env, target, LEAD_SIGNAL_USAGE);
+    await sendConversationHatMessage(env, target, LEAD_SIGNAL_USAGE);
     return;
   }
 
   if (!isCheckableUrl(signal.source)) {
-    await sendHatMessage(
+    await sendConversationHatMessage(
       env,
       target,
       `Couldn't record this as a Lead -- Source must be a real, checkable URL (http/https). Got: "${signal.source}". Lead Generation Specialist never fabricates or accepts an unverifiable source.`,
@@ -287,7 +287,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
       decisionRationale: "Could not retrieve canonical Lead Generation Specialist governance and/or no AI provider was eligible/available. Refusing to record the Lead without it.",
       outcome: "Blocked",
     });
-    await sendHatMessage(
+    await sendConversationHatMessage(
       env,
       target,
       `Couldn't screen this signal for *${signal.name}* -- governance retrieval or AI classification failed. Not recorded. Please resend once resolved.`,
@@ -303,7 +303,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
       decisionRationale: classification.reason,
       outcome: "Complete",
     });
-    await sendHatMessage(env, target, `Screened out, not recorded as a Lead: ${classification.reason}`);
+    await sendConversationHatMessage(env, target, `Screened out, not recorded as a Lead: ${classification.reason}`);
     return;
   }
 
@@ -340,7 +340,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
       decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${message}`,
       outcome: "Blocked",
     });
-    await sendHatMessage(
+    await sendConversationHatMessage(
       env,
       target,
       `Couldn't record this Lead for *${signal.name}* -- the Leads database call failed: ${message}. Not recorded. This likely means the Worker's Notion integration isn't connected to the Leads database yet -- check its sharing settings.`,
@@ -381,7 +381,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
   // Sales Executive discovers prepared Leads directly from the Leads
   // database (its own environment has full Entity/Matters/Proposals
   // access), the same way it's described as already operating there.
-  await sendHatMessage(
+  await sendConversationHatMessage(
     env,
     target,
     `Lead recorded: *${signal.name}*\nCategory: ${classification.category || "unclassified"}\nSource: ${signal.source}\n${page.url}${entityNote}${duplicateNote}\n\nThis is a Lead only -- no Entity created, no qualification performed. Prepared for the isolated Sales Executive environment to pick up from here.`,

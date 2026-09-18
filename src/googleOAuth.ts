@@ -209,31 +209,6 @@ export function base64url(bytes: Uint8Array): string {
   return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export async function handleGoogleOAuthStart(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  const key = url.searchParams.get("key");
-  if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
-    return new Response("forbidden", { status: 403 });
-  }
-  const state = generateState();
-  const verifier = generateCodeVerifier();
-  const challenge = await codeChallengeFromVerifier(verifier);
-  await env.STATE_KV.put(`google_oauth_state:${state}`, verifier, { expirationTtl: 1800 });
-  const redirectUri = `${url.origin}/oauth/google/callback`;
-  const promptParam = url.searchParams.get("prompt") ?? undefined;
-  const authorizeUrl = buildGoogleAuthorizeUrl(env, redirectUri, state, challenge, promptParam);
-
-  await logActivity(env, {
-    entry: "Google OAuth initiated",
-    type: "Activity",
-    area: "Operations",
-    activity: `Google Workspace OAuth authorization initiated for callback ${redirectUri}`,
-    outcome: "Active",
-  });
-
-  return Response.redirect(authorizeUrl, 302);
-}
-
 export interface GoogleDriveConnectivityResult {
   ok: boolean;
   accountIdentifier: string;
@@ -334,6 +309,31 @@ export async function handleTestGoogleDriveConnection(request: Request, env: Env
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+export async function handleGoogleOAuthStart(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+  if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+    return new Response("forbidden", { status: 403 });
+  }
+  const state = generateState();
+  const verifier = generateCodeVerifier();
+  const challenge = await codeChallengeFromVerifier(verifier);
+  await env.STATE_KV.put(`google_oauth_state:${state}`, verifier, { expirationTtl: 1800 });
+  const redirectUri = `${url.origin}/oauth/google/callback`;
+  const promptParam = url.searchParams.get("prompt") ?? undefined;
+  const authorizeUrl = buildGoogleAuthorizeUrl(env, redirectUri, state, challenge, promptParam);
+
+  await logActivity(env, {
+    entry: "Google OAuth initiated",
+    type: "Activity",
+    area: "Operations",
+    activity: `Google Workspace OAuth authorization initiated for callback ${redirectUri}`,
+    outcome: "Active",
+  });
+
+  return Response.redirect(authorizeUrl, 302);
 }
 
 export async function handleGoogleOAuthCallback(request: Request, env: Env): Promise<Response> {

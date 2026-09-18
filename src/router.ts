@@ -1,7 +1,7 @@
 import type { Env, Unit } from "./types";
 import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
-import { generalChatReply, generalDmReply } from "./chat";
+import { generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 import { researchProtocolSummaryList } from "./units/research/protocols";
@@ -34,26 +34,6 @@ const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d"
 // bring this code back would undo the isolation this pause protects.
 export const SALES_EXECUTIVE_PAUSED = true;
 
-// generalChatReply's underlying aiChat call returns "" whenever no AI
-// provider is eligible under the current data-boundary policy. As of the
-// PRODUCTION_TASK_SENSITIVITY / PRODUCTION_PROVIDER_ELIGIBILITY tables in
-// dataBoundary/policy.ts, this is deliberate for chat.general_reply
-// specifically: it's classified client_confidential (you can reference
-// any real client by name in it), and workers-ai is only eligible for
-// business_sensitive and below -- Cloudflare's training-data policy for
-// personal information hasn't been confirmed acceptable, the same reason
-// Sales Executive itself is paused. A bare "..." fallback made that look
-// like a mystery bug rather than the known, deliberate policy it is. Sales
-// chat stays classified client_confidential (Martin could paste real
-// enquiry content into that topic's freeform chat), which no eligible
-// provider can serve today -- workers-ai is approved for business_sensitive
-// and below only, pending a provider with an acceptable personal-data/
-// training policy. State this directly rather than hedging with "if this
-// is Sales... anywhere else...": handleSalesIntake only ever runs for
-// Sales (the Sales topic itself, or the DM fallback once it's decided the
-// message is Sales-relevant), so the reason is always the same one.
-const SALES_CHAT_UNAVAILABLE_MESSAGE =
-  "This Unit is unavailable for general chat right now. Sales conversations are classified client_confidential, and no AI provider is currently approved for that sensitivity -- pending one with an acceptable personal-data/training policy. Structured Sales intake is paused here in this runtime for the same reason, but the Sales Executive Hat itself is not inactive -- it is present and actively working as an isolated Sales Executive project in Claude, with its own Notion and Gmail access, where Martin reviews and approves every client-facing action directly.";
 
 // Every other Unit's chat is business_sensitive (see chatSensitivityForUnit
 // in chat.ts) and should normally succeed, so seeing this message there
@@ -86,35 +66,59 @@ export function getSessionStub(env: Env, workId: string) {
   return env.WORK_SESSION.get(id) as any;
 }
 
+export type StreamType = "conversation" | "operations" | "dm" | "unmapped";
+
 /**
- * Resolves a Telegram forum topic's message_thread_id to the Unit it
- * represents, per UNIT_TOPIC_MAP. "dm" means no topic context at all (plain
- * 1:1 chat, or UNIT_TOPIC_MAP unset) — treated as the legacy default,
- * routable like the old combined SM&BD topic used to be, before Sales,
- * Marketing, and Business Development each got their own. "unmapped" means
- * a real thread id was given but doesn't match any configured Unit.
+ * Resolves a Telegram message_thread_id to its Telegram Stream ("conversation" | "operations" | "dm" | "unmapped").
+ * Thread IDs indicate Telegram stream identity only, never Unit ownership.
  */
-export function resolveUnitForThread(env: Env, threadId?: number): Unit | "unmapped" | "dm" {
-  if (threadId === undefined || !env.UNIT_TOPIC_MAP) return "dm";
-  let map: Record<string, number>;
-  try {
-    map = JSON.parse(env.UNIT_TOPIC_MAP);
-  } catch {
-    return "unmapped";
+export function resolveStreamForThread(env: Env, threadId?: number): StreamType {
+  if (threadId === undefined) return "dm";
+
+  if (env.CONVERSATION_TOPIC_ID && threadId === Number(env.CONVERSATION_TOPIC_ID)) {
+    return "conversation";
   }
-  const entry = Object.entries(map).find(([, id]) => id === threadId);
-  return entry ? (entry[0] as Unit) : "unmapped";
+  if (env.OPERATIONS_TOPIC_ID && threadId === Number(env.OPERATIONS_TOPIC_ID)) {
+    return "operations";
+  }
+
+  if (env.UNIT_TOPIC_MAP) {
+    try {
+      const map: Record<string, number> = JSON.parse(env.UNIT_TOPIC_MAP);
+      if (map["Conversation"] !== undefined && Number(map["Conversation"]) === threadId) {
+        return "conversation";
+      }
+      if (map["Operations"] !== undefined && Number(map["Operations"]) === threadId) {
+        return "operations";
+      }
+      const isLegacyUnit = Object.values(map).some((id) => Number(id) === threadId);
+      if (isLegacyUnit) return "conversation";
+    } catch {
+      // JSON parse error
+    }
+  }
+
+  return "unmapped";
 }
 
-/** Reverse of resolveUnitForThread: the topic thread id configured for a Unit, if any. */
-export function threadIdForUnit(env: Env, unit: Unit): number | undefined {
-  if (!env.UNIT_TOPIC_MAP) return undefined;
-  try {
-    const map: Record<string, number> = JSON.parse(env.UNIT_TOPIC_MAP);
-    return map[unit];
-  } catch {
-    return undefined;
+export function resolveUnitForThread(env: Env, threadId?: number): Unit | "unmapped" | "dm" {
+  if (threadId === undefined) return "dm";
+  if (env.UNIT_TOPIC_MAP) {
+    try {
+      const map: Record<string, number> = JSON.parse(env.UNIT_TOPIC_MAP);
+      const entry = Object.entries(map).find(([, id]) => Number(id) === threadId);
+      if (entry && entry[0] !== "Conversation" && entry[0] !== "Operations") {
+        return entry[0] as Unit;
+      }
+    } catch {
+      // JSON parse error
+    }
   }
+  return "dm";
+}
+
+export function threadIdForUnit(_env: Env, _unit: Unit): number | undefined {
+  return undefined;
 }
 
 interface RoutingClassification {
@@ -287,7 +291,7 @@ export async function routeIncomingText(
   if (text.startsWith("/")) return; // commands handled by caller
 
   if (!options.forceNewEnquiry) {
-    // 1. Explicit reply-to-message association
+    // 1. Explicit reply-to-message association (reply_msg:<messageId> -> workId)
     if (options.replyToMessageId) {
       const matchedWorkId = await getReplyMessageWorkId(env, options.replyToMessageId);
       if (matchedWorkId) {
@@ -300,9 +304,9 @@ export async function routeIncomingText(
       }
     }
 
-    // 2. Topic-level legacy active pointer check (only in non-DM Unit topics)
-    const unitContext = resolveUnitForThread(env, threadId);
-    if (unitContext !== "dm") {
+    // 2. Active pointer check for non-DM topic streams
+    const streamType = resolveStreamForThread(env, threadId);
+    if (streamType !== "dm") {
       const activeId = await getActiveWorkId(env, chatId, threadId);
       if (activeId) {
         const stub = getSessionStub(env, activeId);
@@ -315,67 +319,24 @@ export async function routeIncomingText(
     }
   }
 
-  const unitContext = resolveUnitForThread(env, threadId);
-  if (unitContext === "unmapped") {
-    await sendMessage(env, chatId, "This topic isn't mapped to a Unit yet.", undefined, threadId);
+  const streamType = resolveStreamForThread(env, threadId);
+  if (streamType === "unmapped") {
+    await sendMessage(env, chatId, "This topic isn't mapped to a Stream yet.", undefined, threadId);
     return;
   }
 
-  // The Marketing topic already declares its own intent -- no need for the
-  // DM path's specialization classifier, straight to the five-Hat
-  // classification inside marketing.handleMarketingIntake.
-  if (unitContext === "Marketing") {
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Marketing", "Marketing", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleMarketingRequest(text);
+  if (streamType === "operations") {
+    await sendMessage(
+      env,
+      chatId,
+      "The Operations topic is reserved for background operational telemetry and system reporting. Interactive requests should be sent in the Conversation topic.",
+      undefined,
+      threadId,
+    );
     return;
   }
 
-  // Likewise, the Sales topic already declares its own intent.
-  if (unitContext === "Sales") {
-    const handled = await classifyAndGateSalesEnquiry(env, chatId, text, threadId);
-    if (handled) return;
-    // Not a new enquiry — hold open conversation instead of a rigid
-    // refusal, staying client_confidential-gated since this is the
-    // dedicated Sales topic (Martin could paste real enquiry content here).
-    const reply = await generalChatReply(env, "Sales", chatId, threadId, text);
-    await sendMessage(env, chatId, reply || SALES_CHAT_UNAVAILABLE_MESSAGE, undefined, threadId);
-    return;
-  }
-
-  // The R&I topic already declares its own intent, same as Marketing/Sales.
-  if (unitContext === "Research & Intelligence") {
-    const researchCheck = await classifyResearchTask(env, text);
-    if (researchCheck === "research") {
-      const workId = newWorkId();
-      const stub = getSessionStub(env, workId);
-      await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId);
-      await setActiveWorkId(env, chatId, threadId, workId);
-      await stub.handleResearchRequest(text);
-      return;
-    }
-    const reply = await generalChatReply(env, "Research & Intelligence", chatId, threadId, text);
-    await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
-    return;
-  }
-
-  // Finance, Business Development, and the other not-yet-built Units don't
-  // take structured work from chat, but the topic isn't dead either — hold
-  // open conversation there, with memory, rather than a rigid refusal.
-  if (unitContext !== "dm") {
-    const reply = await generalChatReply(env, unitContext, chatId, threadId, text);
-    await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
-    return;
-  }
-
-  // DM / no UNIT_TOPIC_MAP configured: there's no dedicated topic to signal
-  // intent, so both specializations that used to share the old combined
-  // SM&BD topic still need classifying here. Marketing first, per the
-  // Unit's own Notion definition of Sales/Marketing/Business Development as
-  // three specializations under one umbrella; a "not_marketing"/failed
-  // result falls through unchanged to the Sales classifier.
+  // Conversation stream or DM: classify task dynamically across specializations
   const marketingCheck = await classifyMarketingTask(env, text);
   if (marketingCheck === "marketing") {
     const workId = newWorkId();
@@ -399,10 +360,6 @@ export async function routeIncomingText(
     return;
   }
 
-  // Not a new enquiry, not Marketing, not Research -- DM is Martin's
-  // general front door, not scoped to one Unit, so it isn't held to
-  // Sales's client_confidential gate just because a genuine sales enquiry
-  // was ruled out above.
   const reply = await generalDmReply(env, chatId, threadId, text);
   await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
 }
