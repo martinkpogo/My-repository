@@ -27,6 +27,8 @@ export interface Env {
   READAI_WEBHOOK_SECRET?: string;
   READAI_OAUTH_CLIENT_ID?: string;
   READAI_OAUTH_CLIENT_SECRET?: string;
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
 
   /**
    * JSON object mapping Unit name -> Telegram forum topic message_thread_id,
