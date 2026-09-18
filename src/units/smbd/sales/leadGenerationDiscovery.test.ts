@@ -10,6 +10,9 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     NOTION_TOKEN: "test-token",
     NOTION_VERSION: "2025-09-03",
     TELEGRAM_BOT_TOKEN: "test-token",
+    TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
+    OPERATIONS_TOPIC_ID: "14",
+    CONVERSATION_TOPIC_ID: "100",
     STATE_KV: {
       get: async () => null,
       put: async () => {},
