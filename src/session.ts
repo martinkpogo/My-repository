@@ -4,7 +4,7 @@ import * as sales from "./units/smbd/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
-import { sendMessage } from "./telegram";
+import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
 
 export class WorkSession extends DurableObject<Env> {
@@ -198,12 +198,9 @@ export class WorkSession extends DurableObject<Env> {
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);
-      await sendMessage(
+      await sendOperationsMessage(
         this.env,
-        state.chatId,
-        `⚠️ Something went wrong processing this work item. The error has been logged for review and nothing further was changed — try again, or use /sessions to check its current state.\n\nDetail: ${detail.slice(0, 500)}`,
-        undefined,
-        state.threadId,
+        `⚠️ WorkSession ${state.workId} (${state.unit}/${state.hat}) execution failed: ${detail.slice(0, 500)}`,
       ).catch((notifyErr) => console.error(`WorkSession ${state.workId} failure notification also failed`, notifyErr));
       return state;
     }

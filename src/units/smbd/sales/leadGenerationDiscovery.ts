@@ -4,7 +4,7 @@ import type { WebSearchResult } from "../../research/webSearch";
 import { createPage, plainText, queryDataSource, richText, select, title } from "../../../notion";
 import { aiJson } from "../../../ai";
 import { logActivity } from "../../../log";
-import { sendHatMessage } from "../../../telegram";
+import { sendHatMessage, sendOperationsHatMessage } from "../../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
 
 /**
@@ -400,25 +400,34 @@ export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRun
 }
 
 /**
- * Sends the one-per-run Telegram digest (never one message per Lead, to
- * avoid spamming three times a day) and returns whether anything material
- * happened, for the caller's own logging.
+ * Sends the one-per-run Telegram digest to the Operations Stream
+ * (never one message per Lead) and returns whether the notification succeeded.
  */
-export async function notifyDiscoveryRunSummary(env: Env, chatId: number, threadId: number | undefined, summary: DiscoveryRunSummary): Promise<void> {
+export async function notifyDiscoveryRunSummary(env: Env, chatId: number, threadId: number | undefined, summary: DiscoveryRunSummary): Promise<boolean> {
   const target = { chatId, threadId, hat: HAT_TARGET_NAME };
 
-  if (summary.evaluated === 0) {
-    await sendHatMessage(env, target, "Scheduled discovery run: no web search results to evaluate this cycle (search unconfigured, or nothing returned).");
-    return;
-  }
+  try {
+    if (summary.evaluated === 0) {
+      const msgId = await sendOperationsHatMessage(
+        env,
+        target,
+        "Scheduled discovery run: no web search results to evaluate this cycle (search unconfigured, or nothing returned)."
+      );
+      return msgId !== undefined;
+    }
 
-  const lines = [
-    `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.handoffsCreated} R&I research handoff(s) created, ${summary.recorded.length} recorded as Lead(s), ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.`,
-  ];
-  if (summary.recorded.length > 0) {
-    lines.push("", ...summary.recorded.map((r) => `• ${r.organisation} -- ${r.url}`));
-    lines.push("", "These are Leads only -- no Entity created, no qualification performed. Prepared for the isolated Sales Executive environment to pick up from here.");
-  }
+    const lines = [
+      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.handoffsCreated} R&I research handoff(s) created, ${summary.recorded.length} recorded as Lead(s), ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.`,
+    ];
+    if (summary.recorded.length > 0) {
+      lines.push("", ...summary.recorded.map((r) => `• ${r.organisation} -- ${r.url}`));
+      lines.push("", "These are Leads only -- no Entity created, no qualification performed. Prepared for the isolated Sales Executive environment to pick up from here.");
+    }
 
-  await sendHatMessage(env, target, lines.join("\n"));
+    const msgId = await sendOperationsHatMessage(env, target, lines.join("\n"));
+    return msgId !== undefined;
+  } catch (err) {
+    console.error("notifyDiscoveryRunSummary: Telegram notification failed", err);
+    return false;
+  }
 }

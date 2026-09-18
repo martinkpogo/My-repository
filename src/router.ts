@@ -73,6 +73,14 @@ export async function setActiveWorkId(env: Env, chatId: number, threadId: number
   await env.STATE_KV.put(`active:${chatId}:${threadId ?? "dm"}`, workId);
 }
 
+export async function setReplyMessageWorkId(env: Env, messageId: number, workId: string): Promise<void> {
+  await env.STATE_KV.put(`reply_msg:${messageId}`, workId, { expirationTtl: 60 * 60 * 24 * 7 });
+}
+
+export async function getReplyMessageWorkId(env: Env, messageId: number): Promise<string | null> {
+  return env.STATE_KV.get(`reply_msg:${messageId}`);
+}
+
 export function getSessionStub(env: Env, workId: string) {
   const id = env.WORK_SESSION.idFromName(workId);
   return env.WORK_SESSION.get(id) as any;
@@ -274,21 +282,35 @@ export async function routeIncomingText(
   chatId: number,
   text: string,
   threadId?: number,
-  options: { forceNewEnquiry?: boolean } = {},
+  options: { forceNewEnquiry?: boolean; replyToMessageId?: number } = {},
 ): Promise<void> {
   if (text.startsWith("/")) return; // commands handled by caller
 
-  // A brand-new contact (e.g. an email) is never a reply to whatever work
-  // item happens to be active in this topic — only a Telegram-typed message
-  // can plausibly continue an in-progress conversation.
   if (!options.forceNewEnquiry) {
-    const activeId = await getActiveWorkId(env, chatId, threadId);
-    if (activeId) {
-      const stub = getSessionStub(env, activeId);
-      const state = await stub.getState();
-      if (state && state.awaiting) {
-        await stub.handleTextReply(text);
-        return;
+    // 1. Explicit reply-to-message association
+    if (options.replyToMessageId) {
+      const matchedWorkId = await getReplyMessageWorkId(env, options.replyToMessageId);
+      if (matchedWorkId) {
+        const stub = getSessionStub(env, matchedWorkId);
+        const state = await stub.getState();
+        if (state && state.awaiting) {
+          await stub.handleTextReply(text);
+          return;
+        }
+      }
+    }
+
+    // 2. Topic-level legacy active pointer check (only in non-DM Unit topics)
+    const unitContext = resolveUnitForThread(env, threadId);
+    if (unitContext !== "dm") {
+      const activeId = await getActiveWorkId(env, chatId, threadId);
+      if (activeId) {
+        const stub = getSessionStub(env, activeId);
+        const state = await stub.getState();
+        if (state && state.awaiting) {
+          await stub.handleTextReply(text);
+          return;
+        }
       }
     }
   }
