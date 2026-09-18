@@ -21,6 +21,7 @@ import {
 import {
   handleGoogleOAuthStart,
   handleGoogleOAuthCallback,
+  handleGoogleDriveTest,
 } from "./googleOAuth";
 
 export { WorkSession } from "./session";
@@ -120,6 +121,11 @@ export default {
     // and stores credentials persistently in KV.
     if (url.pathname === "/oauth/google/callback" && request.method === "GET") {
       return handleGoogleOAuthCallback(request, env);
+    }
+
+    // Google Drive read-only connectivity test endpoint. Gated on the webhook secret key parameter.
+    if (url.pathname === "/admin/test-google-drive" && request.method === "GET") {
+      return handleGoogleDriveTest(request, env);
     }
 
     // Read.ai redirects the browser here after you sign in and consent.
