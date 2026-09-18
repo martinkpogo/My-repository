@@ -30,9 +30,9 @@ Jules operates inside a sandboxed environment with specific technical capability
      * `commit_message`
      * `title`
      * `description`
-   * When submission is authorized, Jules MUST create the PR as Ready for review. Jules must not create Draft PRs, and must not choose or offer the PR state as a decision of its own — Ready for review is the only outcome of an authorized submission.
+   * When submission is authorized, Jules MUST create the PR as a Draft PR. Jules must not mark the PR as Ready for review, and must not choose or offer the PR state as a decision of its own — Draft PR is the only outcome of an authorized submission.
+   * Martin is the human review gate. After Martin reviews and marks the Draft PR Ready for review, the repository's configured GitHub Actions (`pr-validation.yml` → `auto-merge.yml` → `deploy.yml`) take over for validation, merge, and deployment according to their configured rules.
    * Jules must not independently alter the approved implementation during submission, except for a submission-specific issue explicitly within the approved scope (e.g. a mechanical fix needed to complete the push/PR itself).
-   * Once the Ready-for-review PR exists, the repository's configured GitHub Actions (`pr-validation.yml` → `auto-merge.yml` → `deploy.yml`) take over for validation, merge, and deployment according to their configured rules. Jules must not bypass, replace, or reinterpret that workflow.
    * Jules must not claim that a PR has been created or merged merely because the branch was pushed.
    * If the submission response only confirms a branch push and provides no PR URL or merge confirmation, Jules must report the PR and merge states as pending/unknown rather than claiming completion.
 
@@ -49,8 +49,8 @@ Jules operates inside a sandboxed environment with specific technical capability
 5. `fix in-scope findings` — fix any findings within approved task scope and retest.
 6. `local commit` — create local git commit in sandbox.
 7. `pre-submission report` — present scope, files changed, and test/typecheck results to Architect/the session; stop and wait. Loop back to step 5/3 on requested changes as the implementation is reviewed and refined — this is where drafting and reviewing happen, not after submission.
-8. `platform submission` — once Martin explicitly approves the implementation for submission, push the approved commit and invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`. The PR MUST be created as Ready for review — Jules must not create a Draft PR.
-9. `automated validation, merge & deployment` — the repository's configured GitHub Actions (`pr-validation.yml` → `auto-merge.yml` → `deploy.yml`) take over from the Ready-for-review PR according to their configured rules; Jules must not bypass, replace, or reinterpret this workflow.
+8. `platform submission` — once Martin explicitly approves the implementation for submission, push the approved commit and invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`. The PR MUST be created as a Draft PR — Jules must not mark the PR as Ready for review.
+9. `human review & automated validation` — Martin reviews and marks the Draft PR Ready for review. The repository's configured GitHub Actions (`pr-validation.yml` → `auto-merge.yml` → `deploy.yml`) then take over according to their configured rules; Jules must not bypass, replace, or reinterpret this workflow.
 10. `smoke-test` — execute post-deployment verification if deployed.
 11. `final evidence report` — deliver the final report stating exact completion states without assuming unconfirmed PR, merge, or deployment actions.
 
