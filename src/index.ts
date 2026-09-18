@@ -18,6 +18,11 @@ import {
   isAuthorized,
   listRecentMeetings,
 } from "./readaiOAuth";
+import {
+  handleGoogleOAuthStart,
+  handleGoogleOAuthCallback,
+  handleTestGoogleDriveConnection,
+} from "./googleOAuth";
 
 export { WorkSession } from "./session";
 
@@ -103,6 +108,25 @@ export default {
       const redirectUri = `${url.origin}/oauth/readai/callback`;
       const authorizeUrl = buildAuthorizeUrl(env, redirectUri, state, challenge);
       return Response.redirect(authorizeUrl, 302);
+    }
+
+    // Google Workspace OAuth start endpoint. Gated on the webhook secret key parameter.
+    // PKCE verifier and state are saved in KV (1800s TTL) for callback consumption.
+    if (url.pathname === "/oauth/google/start" && request.method === "GET") {
+      return handleGoogleOAuthStart(request, env);
+    }
+
+    // Google Workspace OAuth callback endpoint.
+    // Consumes single-use state, exchanges authorization code with PKCE verifier for tokens,
+    // and stores credentials persistently in KV.
+    if (url.pathname === "/oauth/google/callback" && request.method === "GET") {
+      return handleGoogleOAuthCallback(request, env);
+    }
+
+    // Protected connectivity test endpoint for Google Workspace API read capabilities.
+    // Gated on TELEGRAM_WEBHOOK_SECRET key parameter.
+    if (url.pathname === "/admin/test-google-drive" && request.method === "GET") {
+      return handleTestGoogleDriveConnection(request, env);
     }
 
     // Read.ai redirects the browser here after you sign in and consent.
