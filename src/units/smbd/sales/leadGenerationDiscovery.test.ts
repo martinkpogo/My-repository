@@ -408,7 +408,8 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
     globalThis.fetch = originalFetch;
   });
 
-  await notifyDiscoveryRunSummary(fakeEnv(), 1, undefined, {
+  const env = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" });
+  const success = await notifyDiscoveryRunSummary(env, 1, undefined, {
     evaluated: 12,
     handoffsCreated: 1,
     recorded: [{ organisation: "Acme Corp", url: "https://notion.so/lead-page-1" }],
@@ -417,9 +418,118 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
     skippedAsInsufficient: 1,
   });
 
+  assert.strictEqual(success, true, "notifyDiscoveryRunSummary should return true when message succeeds");
   assert.strictEqual(sentTexts.length, 1, "exactly one digest message per run, never one per Lead");
   assert.ok(sentTexts[0].startsWith("Hat: Lead Generation Specialist."));
   assert.ok(sentTexts[0].includes("12 candidate(s) evaluated"));
   assert.ok(sentTexts[0].includes("Acme Corp"));
   assert.ok(sentTexts[0].includes("no Entity created, no qualification performed"));
+});
+
+test("notifyDiscoveryRunSummary catches Telegram errors gracefully without throwing", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("Telegram API connection timeout");
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const success = await notifyDiscoveryRunSummary(fakeEnv(), 12345, undefined, {
+    evaluated: 5,
+    handoffsCreated: 1,
+    recorded: [],
+    screenedOut: 4,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+  });
+
+  assert.strictEqual(success, false, "notifyDiscoveryRunSummary should return false when Telegram fetch throws");
+});
+
+test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly without throwing", async () => {
+  const success1 = await notifyDiscoveryRunSummary(fakeEnv(), NaN, undefined, {
+    evaluated: 1,
+    handoffsCreated: 0,
+    recorded: [],
+    screenedOut: 1,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+  });
+  assert.strictEqual(success1, false);
+
+  const success2 = await notifyDiscoveryRunSummary(fakeEnv(), 0, undefined, {
+    evaluated: 1,
+    handoffsCreated: 0,
+    recorded: [],
+    screenedOut: 1,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+  });
+  assert.strictEqual(success2, false);
+});
+
+test("Requirement 1 & 2: Successful discovery with failed notification still returns successful processing summary and records notification failure", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url.includes("api.telegram.org")) {
+      throw new Error("Telegram HTTP request timed out");
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv({ MARTIN_TELEGRAM_USER_ID: "9999" });
+  const summary = await runAutonomousLeadDiscovery(env); // returns summary with 0 evaluated when unconfigured
+
+  let notificationSent = false;
+  let notificationError: string | null = null;
+  try {
+    const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+    notificationSent = await notifyDiscoveryRunSummary(env, chatId, undefined, summary);
+    if (!notificationSent) {
+      notificationError = "Telegram notification returned unconfirmed or failed status";
+    }
+  } catch (err: any) {
+    notificationError = err?.message || String(err);
+  }
+
+  assert.strictEqual(summary.evaluated, 0, "discovery summary is produced successfully");
+  assert.strictEqual(notificationSent, false, "notificationSent is false when Telegram fails");
+  assert.strictEqual(notificationError, "Telegram notification returned unconfirmed or failed status");
+});
+
+test("Requirement 1: Successful discovery with successful notification records notificationSent: true", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv({ MARTIN_TELEGRAM_USER_ID: "9999" });
+  const summary = await runAutonomousLeadDiscovery(env);
+
+  let notificationSent = false;
+  let notificationError: string | null = null;
+  try {
+    const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+    notificationSent = await notifyDiscoveryRunSummary(env, chatId, undefined, summary);
+    if (!notificationSent) {
+      notificationError = "Telegram notification returned unconfirmed or failed status";
+    }
+  } catch (err: any) {
+    notificationError = err?.message || String(err);
+  }
+
+  assert.strictEqual(notificationSent, true);
+  assert.strictEqual(notificationError, null);
 });

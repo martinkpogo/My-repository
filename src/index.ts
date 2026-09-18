@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
-import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
+import { answerCallbackQuery, sendMessage, sendOperationsMessage, setWebhook } from "./telegram";
 import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId } from "./router";
 import { plainText, queryDataSource } from "./notion";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/smbd/sales/leadDiscovery";
@@ -200,8 +200,28 @@ export default {
       }
       try {
         const summary = await runAutonomousLeadDiscovery(env);
-        await notifyDiscoveryRunSummary(env, Number(env.MARTIN_TELEGRAM_USER_ID), undefined, summary);
-        return new Response(JSON.stringify({ ok: true, ...summary }), { headers: { "content-type": "application/json" } });
+        let notificationSent = false;
+        let notificationError: string | null = null;
+        try {
+          const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+          notificationSent = await notifyDiscoveryRunSummary(env, chatId, undefined, summary);
+          if (!notificationSent) {
+            notificationError = "Telegram notification returned unconfirmed or failed status";
+          }
+        } catch (notifyErr) {
+          notificationError = notifyErr instanceof Error ? notifyErr.message : String(notifyErr);
+          console.error("Failed to deliver discovery run notification digest", notifyErr);
+        }
+
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            ...summary,
+            notificationSent,
+            notificationError,
+          }),
+          { headers: { "content-type": "application/json" } }
+        );
       } catch (err) {
         console.error("Unhandled error in /admin/run-lead-discovery", err);
         await sendMessage(
@@ -669,7 +689,8 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(env, chatId, "Unknown command. Try /sessions.", undefined, threadId);
       return;
     }
-    await routeIncomingText(env, chatId, text, threadId);
+      const replyToMessageId = update.message.reply_to_message?.message_id;
+      await routeIncomingText(env, chatId, text, threadId, { replyToMessageId });
     return;
   }
 
@@ -707,7 +728,6 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(env, chatId, "That work item no longer exists.", undefined, threadId);
       return;
     }
-    await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleCallback(action, value);
     return;
   }
@@ -920,9 +940,8 @@ async function checkStaleHandoffs(env: Env): Promise<void> {
     const name = plainText(p.properties.Handoff);
     return `• [${status}] ${name} → ${toUnit}`;
   });
-  await sendMessage(
+  await sendOperationsMessage(
     env,
-    Number(env.MARTIN_TELEGRAM_USER_ID),
     `*Handoff check-in* — ${results.length} item(s) not Closed:\n\n${lines.join("\n")}`,
   );
   await env.STATE_KV.put(lastSentKey, String(Date.now()));

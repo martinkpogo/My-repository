@@ -15,6 +15,10 @@ export interface TelegramUpdate {
     from?: { id: number };
     text?: string;
     message_thread_id?: number;
+    reply_to_message?: {
+      message_id: number;
+      text?: string;
+    };
   };
   callback_query?: {
     id: string;
@@ -22,6 +26,81 @@ export interface TelegramUpdate {
     message?: { chat: { id: number }; message_thread_id?: number };
     data?: string;
   };
+}
+
+export type MessageStream = "conversation" | "operations";
+
+/**
+ * Returns the target chatId/threadId for Martin's 1:1 Telegram DM (Conversation Stream).
+ */
+export function getConversationTarget(env: Env): { chatId: number; threadId?: number } {
+  return {
+    chatId: Number(env.MARTIN_TELEGRAM_USER_ID),
+    threadId: undefined,
+  };
+}
+
+/**
+ * Returns the target chatId/threadId for the Operations Stream
+ * (Operations topic in ENIG HQ Supergroup, falling back to Martin's DM if group chat is unconfigured).
+ */
+export function getOperationsTarget(env: Env): { chatId: number; threadId?: number } {
+  if (env.TELEGRAM_GROUP_CHAT_ID) {
+    const groupChatId = Number(env.TELEGRAM_GROUP_CHAT_ID);
+    let operationsThreadId = 14;
+    if (env.UNIT_TOPIC_MAP) {
+      try {
+        const map = JSON.parse(env.UNIT_TOPIC_MAP);
+        if (map["Operations"] !== undefined) operationsThreadId = map["Operations"];
+      } catch {
+        // Fall back to default
+      }
+    }
+    return { chatId: groupChatId, threadId: operationsThreadId };
+  }
+  return getConversationTarget(env);
+}
+
+/** Sends an operational telemetry/digest message directly to the Operations Stream. */
+export async function sendOperationsMessage(
+  env: Env,
+  text: string,
+  buttons?: InlineButton[][],
+): Promise<number | undefined> {
+  const target = getOperationsTarget(env);
+  return sendMessage(env, target.chatId, text, buttons, target.threadId);
+}
+
+/** Sends a Hat-labeled operational message directly to the Operations Stream. */
+export async function sendOperationsHatMessage(
+  env: Env,
+  target: HatMessageTarget,
+  text: string,
+  buttons?: InlineButton[][],
+): Promise<number | undefined> {
+  const opsTarget = getOperationsTarget(env);
+  return sendHatMessage(
+    env,
+    { ...target, chatId: opsTarget.chatId, threadId: opsTarget.threadId },
+    text,
+    buttons,
+  );
+}
+
+/** Sends a user-facing decision prompt or conversational message directly to Martin's 1:1 DM (Conversation Stream). */
+export async function sendConversationHatMessage(
+  env: Env,
+  target: HatMessageTarget,
+  text: string,
+  buttons?: InlineButton[][],
+): Promise<number | undefined> {
+  const convTarget = getConversationTarget(env);
+  return sendHatMessage(
+    env,
+    { ...target, chatId: convTarget.chatId, threadId: convTarget.threadId },
+    text,
+    buttons,
+  );
 }
 
 function call(env: Env, method: string, payload: Record<string, unknown>) {
@@ -99,6 +178,7 @@ export interface HatMessageTarget {
   chatId: number;
   threadId?: number;
   hat: string;
+  workId?: string;
 }
 
 function withHatLabel(target: HatMessageTarget, text: string): string {
@@ -114,7 +194,13 @@ function withHatLabel(target: HatMessageTarget, text: string): string {
  * originating from Hat logic.
  */
 export async function sendHatMessage(env: Env, target: HatMessageTarget, text: string, buttons?: InlineButton[][]): Promise<number | undefined> {
-  return sendMessage(env, target.chatId, withHatLabel(target, text), buttons, target.threadId);
+  const msgId = await sendMessage(env, target.chatId, withHatLabel(target, text), buttons, target.threadId);
+  if (msgId && target.workId && env?.STATE_KV) {
+    await env.STATE_KV.put(`reply_msg:${msgId}`, target.workId, { expirationTtl: 60 * 60 * 24 * 7 }).catch((err) =>
+      console.error("sendHatMessage: failed to put reply_msg in KV", err),
+    );
+  }
+  return msgId;
 }
 
 /** Like editMessageText, but re-applies the same "Hat: <name>." label sendHatMessage used, so an edited bubble doesn't drop it. */
