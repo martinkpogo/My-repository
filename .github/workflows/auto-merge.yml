@@ -15,6 +15,7 @@ jobs:
   automerge:
     name: Auto Merge Pull Request
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Enable Auto-Merge
         env:
@@ -22,15 +23,20 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+            if [ "$CONCLUSION" != "success" ]; then
+              echo "PR Validation workflow did not succeed (conclusion: $CONCLUSION). Skipping merge."
+              exit 0
+            fi
             PR_NUM="${{ github.event.workflow_run.pull_requests[0].number }}"
             if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
               echo "No pull request found in workflow run. Skipping merge."
               exit 0
             fi
-            echo "Processing PR #$PR_NUM..."
-            gh pr merge "$PR_NUM" --auto --squash --delete-branch || gh pr merge "$PR_NUM" --squash --delete-branch || true
+            echo "PR Validation succeeded for PR #$PR_NUM. Merging PR..."
+            gh pr merge "$PR_NUM" --auto --squash --delete-branch || gh pr merge "$PR_NUM" --squash --delete-branch
           else
             PR_NUM="${{ github.event.pull_request.number }}"
-            echo "Processing PR #$PR_NUM..."
+            echo "Enabling auto-merge for PR #$PR_NUM..."
             gh pr merge "$PR_NUM" --auto --squash --delete-branch || true
           fi
