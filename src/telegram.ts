@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { logActivity } from "./log";
 
 const API = "https://api.telegram.org/bot";
 
@@ -30,35 +31,61 @@ export interface TelegramUpdate {
 
 export type MessageStream = "conversation" | "operations";
 
+export interface StreamTarget {
+  chatId: number;
+  threadId: number;
+}
+
 /**
- * Returns the target chatId/threadId for Martin's 1:1 Telegram DM (Conversation Stream).
+ * Returns the target chatId/threadId for the Conversation Stream
+ * (Conversation topic in ENIG HQ Supergroup). Fails closed (returns null) if unconfigured.
  */
-export function getConversationTarget(env: Env): { chatId: number; threadId?: number } {
-  return {
-    chatId: Number(env.MARTIN_TELEGRAM_USER_ID),
-    threadId: undefined,
-  };
+export function getConversationTarget(env: Env): StreamTarget | null {
+  if (!env.TELEGRAM_GROUP_CHAT_ID) return null;
+  const chatId = Number(env.TELEGRAM_GROUP_CHAT_ID);
+  if (!Number.isFinite(chatId)) return null;
+
+  let threadId: number | undefined;
+  if (env.CONVERSATION_TOPIC_ID) {
+    threadId = Number(env.CONVERSATION_TOPIC_ID);
+  } else if (env.UNIT_TOPIC_MAP) {
+    try {
+      const map = JSON.parse(env.UNIT_TOPIC_MAP);
+      if (map["Conversation"] !== undefined) threadId = Number(map["Conversation"]);
+    } catch {
+      // JSON parse error
+    }
+  }
+
+  if (threadId === undefined || !Number.isFinite(threadId)) return null;
+  return { chatId, threadId };
 }
 
 /**
  * Returns the target chatId/threadId for the Operations Stream
- * (Operations topic in ENIG HQ Supergroup, falling back to Martin's DM if group chat is unconfigured).
+ * (Operations topic in ENIG HQ Supergroup). Fails closed (returns null) if unconfigured.
  */
-export function getOperationsTarget(env: Env): { chatId: number; threadId?: number } {
-  if (env.TELEGRAM_GROUP_CHAT_ID) {
-    const groupChatId = Number(env.TELEGRAM_GROUP_CHAT_ID);
-    let operationsThreadId = 14;
-    if (env.UNIT_TOPIC_MAP) {
-      try {
-        const map = JSON.parse(env.UNIT_TOPIC_MAP);
-        if (map["Operations"] !== undefined) operationsThreadId = map["Operations"];
-      } catch {
-        // Fall back to default
-      }
+export function getOperationsTarget(env: Env): StreamTarget | null {
+  if (!env.TELEGRAM_GROUP_CHAT_ID) return null;
+  const chatId = Number(env.TELEGRAM_GROUP_CHAT_ID);
+  if (!Number.isFinite(chatId)) return null;
+
+  let threadId: number | undefined;
+  if (env.OPERATIONS_TOPIC_ID) {
+    threadId = Number(env.OPERATIONS_TOPIC_ID);
+  } else if (env.UNIT_TOPIC_MAP) {
+    try {
+      const map = JSON.parse(env.UNIT_TOPIC_MAP);
+      if (map["Operations"] !== undefined) threadId = Number(map["Operations"]);
+    } catch {
+      // JSON parse error
     }
-    return { chatId: groupChatId, threadId: operationsThreadId };
   }
-  return getConversationTarget(env);
+  if (threadId === undefined || !Number.isFinite(threadId)) {
+    threadId = 14; // Default Operations thread ID when group chat ID is provided
+  }
+
+  return { chatId, threadId };
 }
 
 /** Sends an operational telemetry/digest message directly to the Operations Stream. */
@@ -68,6 +95,17 @@ export async function sendOperationsMessage(
   buttons?: InlineButton[][],
 ): Promise<number | undefined> {
   const target = getOperationsTarget(env);
+  if (!target) {
+    console.error("sendOperationsMessage: Operations stream unconfigured (TELEGRAM_GROUP_CHAT_ID or OPERATIONS_TOPIC_ID missing)");
+    await logActivity(env, {
+      entry: "Operations stream dispatch blocked [Stream Target Unconfigured]",
+      type: "Blocker",
+      area: "Operations",
+      decisionRationale: "TELEGRAM_GROUP_CHAT_ID or OPERATIONS_TOPIC_ID missing from environment bindings. Refusing to send operational message.",
+      outcome: "Blocked",
+    }).catch(() => {});
+    return undefined;
+  }
   return sendMessage(env, target.chatId, text, buttons, target.threadId);
 }
 
@@ -79,6 +117,17 @@ export async function sendOperationsHatMessage(
   buttons?: InlineButton[][],
 ): Promise<number | undefined> {
   const opsTarget = getOperationsTarget(env);
+  if (!opsTarget) {
+    console.error(`sendOperationsHatMessage: Operations stream unconfigured for ${target.hat}`);
+    await logActivity(env, {
+      entry: `Operations stream dispatch blocked for ${target.hat} [Stream Target Unconfigured]`,
+      type: "Blocker",
+      area: "Operations",
+      decisionRationale: "TELEGRAM_GROUP_CHAT_ID or OPERATIONS_TOPIC_ID missing from environment bindings. Refusing to send operational Hat message.",
+      outcome: "Blocked",
+    }).catch(() => {});
+    return undefined;
+  }
   return sendHatMessage(
     env,
     { ...target, chatId: opsTarget.chatId, threadId: opsTarget.threadId },
@@ -87,7 +136,7 @@ export async function sendOperationsHatMessage(
   );
 }
 
-/** Sends a user-facing decision prompt or conversational message directly to Martin's 1:1 DM (Conversation Stream). */
+/** Sends a user-facing decision prompt or conversational message directly to the Conversation Stream. */
 export async function sendConversationHatMessage(
   env: Env,
   target: HatMessageTarget,
@@ -95,6 +144,17 @@ export async function sendConversationHatMessage(
   buttons?: InlineButton[][],
 ): Promise<number | undefined> {
   const convTarget = getConversationTarget(env);
+  if (!convTarget) {
+    console.error(`sendConversationHatMessage: Conversation stream unconfigured for ${target.hat}`);
+    await logActivity(env, {
+      entry: `Conversation stream dispatch blocked for ${target.hat} [Stream Target Unconfigured]`,
+      type: "Blocker",
+      area: target.hat,
+      decisionRationale: "TELEGRAM_GROUP_CHAT_ID or CONVERSATION_TOPIC_ID missing from environment bindings. Refusing to send conversation message.",
+      outcome: "Blocked",
+    }).catch(() => {});
+    return undefined;
+  }
   return sendHatMessage(
     env,
     { ...target, chatId: convTarget.chatId, threadId: convTarget.threadId },

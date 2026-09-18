@@ -13,7 +13,7 @@ import {
 } from "../../../notion";
 import { aiJson, aiText } from "../../../ai";
 import { logActivity } from "../../../log";
-import { sendMessage } from "../../../telegram";
+import { sendConversationHatMessage } from "../../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governance";
 import { evaluateHandoffContext } from "../../../dataBoundary/policy";
 
@@ -200,12 +200,11 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
 
   state.entityDraft = { name: name || "New contact", email, phone, type: extracted?.organisation ? "Organisation" : "Individual" };
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
-    `*New enquiry — Sales Executive*\n\n${text}\n\nIs this an existing Entity, or should I create a new one?`,
+    { ...state, hat: "Sales Executive" },
+    `*New enquiry*\n\n${text}\n\nIs this an existing Entity, or should I create a new one?`,
     buttons,
-    state.threadId,
   );
   state.stage = "awaiting_entity_pick";
   state.awaiting = "entity_pick";
@@ -242,9 +241,9 @@ async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState
     .filter(Boolean)
     .join("\n");
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `*Proposed new Entity*\n\n${details}\n\nCreate this Entity?`,
     [
       [
@@ -252,7 +251,6 @@ async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState
         { text: "🔁 Redo", callback_data: `entitynew:${state.workId}:redo` },
       ],
     ],
-    state.threadId,
   );
   state.stage = "awaiting_entity_creation_approval";
   state.awaiting = undefined;
@@ -261,12 +259,10 @@ async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState
 
 export async function handleEntityCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       "Got it — what should change about this Entity? Tell me what's off or what to take into account, and I'll redraft it.",
-      undefined,
-      state.threadId,
     );
     state.stage = "entity_redo_requested";
     state.awaiting = "entity_redo_reason";
@@ -333,12 +329,11 @@ async function proceedToMatterIdentification(env: Env, state: WorkState): Promis
     [{ text: "➕ New Matter (distinct commercial work)", callback_data: `matter:${state.workId}:new` }],
   ];
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `Entity: *${state.entityName}*.\n\nIs this enquiry part of existing commercial work, or a new Matter?`,
     buttons,
-    state.threadId,
   );
   state.stage = "awaiting_matter_pick";
   state.awaiting = "matter_pick";
@@ -376,9 +371,9 @@ async function draftNewMatter(env: Env, state: WorkState, guidance: string): Pro
   const statedNeed = summary?.stated_need || state.enquiryText || "";
   state.matterDraft = { name, statedNeed };
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `*Proposed new Matter*\n\n*${name}*\n${statedNeed}\n\nCreate this Matter?`,
     [
       [
@@ -386,7 +381,6 @@ async function draftNewMatter(env: Env, state: WorkState, guidance: string): Pro
         { text: "🔁 Redo", callback_data: `matternew:${state.workId}:redo` },
       ],
     ],
-    state.threadId,
   );
   state.stage = "awaiting_matter_creation_approval";
   state.awaiting = undefined;
@@ -395,12 +389,10 @@ async function draftNewMatter(env: Env, state: WorkState, guidance: string): Pro
 
 export async function handleMatterCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       "Got it — what should change about this Matter? Tell me what's off or what to take into account, and I'll redraft it.",
-      undefined,
-      state.threadId,
     );
     state.stage = "matter_redo_requested";
     state.awaiting = "matter_redo_reason";
@@ -463,12 +455,10 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
     // No automatic retry trigger exists at this point in the flow (unlike
     // call notes or proposal feedback, nothing the user sends re-invokes
     // this step) — documented as a known limitation, not solved here.
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Couldn't prepare the sales-call brief for *${state.entityName}* — couldn't retrieve canonical governance from Notion. There's no automatic retry for this step; please try again once resolved.`,
-      undefined,
-      state.threadId,
     );
     return state;
   }
@@ -480,12 +470,11 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
     `Entity: ${state.entityName}\nMatter: ${state.matterName}\nEnquiry: ${state.enquiryText}`,
   );
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `*Sales call prep — ${state.entityName}*\n\n${brief}\n\nWhen the call is done, send me the call notes / insights as a message and I'll process qualification.`,
     [[{ text: "📞 Pull latest Read.ai call", callback_data: `pullcall:${state.workId}:` }]],
-    state.threadId,
   );
   await logActivity(env, {
     entry: `Sales call prep sent for ${state.entityName}`,
@@ -518,12 +507,10 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
         "Could not retrieve canonical Sales Executive Hat Definition, Universal Role Contract, and/or Entity Business Object specification from Notion. Refusing to evaluate qualification without it.",
       outcome: "Blocked",
     });
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Couldn't evaluate qualification for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Not proceeding without it. Send the call notes again once resolved and I'll re-evaluate.`,
-      undefined,
-      state.threadId,
     );
     state.awaiting = "call_notes";
     return state;
@@ -536,12 +523,10 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   });
 
   if (!qualification || !Array.isArray(qualification.conditions) || qualification.conditions.length !== 4) {
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       "I couldn't determine qualification from the evidence given — the assessment was inconclusive. Please send additional call notes or clarification.",
-      undefined,
-      state.threadId,
     );
     state.awaiting = "call_notes";
     state.stage = "awaiting_call_clarification";
@@ -560,9 +545,9 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   const evidenceText = formatQualificationEvidence(qualification.conditions);
 
   if (qualification.overall === "Qualified") {
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `*Qualification: Qualified* — all four conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`,
       [
         [
@@ -570,22 +555,23 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
           { text: "🔁 Redo", callback_data: `qualify:${state.workId}:redo` },
         ],
       ],
-      state.threadId,
     );
     state.stage = "awaiting_qualification_approval";
     state.awaiting = undefined;
   } else if (qualification.overall === "More Information Required") {
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `*Qualification: More Information Required*\n\n${evidenceText}\n\nSend the missing information and I'll re-evaluate.`,
-      undefined,
-      state.threadId,
     );
     state.stage = "awaiting_more_info";
     state.awaiting = "call_notes";
   } else {
-    await sendMessage(env, state.chatId, `*Qualification: Not Qualified*\n\n${evidenceText}`, undefined, state.threadId);
+    await sendConversationHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      `*Qualification: Not Qualified*\n\n${evidenceText}`,
+    );
     await logActivity(env, {
       entry: `Work item closed — Not Qualified: ${state.entityName}`,
       type: "Activity",
@@ -600,12 +586,10 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
 
 export async function handleLeadToProspectApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Got it — why isn't *${state.entityName}* ready to progress yet? Send what's missing or what to reconsider, and I'll re-evaluate qualification.`,
-      undefined,
-      state.threadId,
     );
     await logActivity(env, {
       entry: `Lead→Prospect redo requested: ${state.entityName}`,
@@ -629,12 +613,10 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
     outcome: "Complete",
   });
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `*${state.entityName}* is now a Prospect. What's the proposed intervention (what ENIG would actually do)? Send it as a message — no pricing/budget figures, just the scope.`,
-    undefined,
-    state.threadId,
   );
   state.stage = "awaiting_intervention";
   state.awaiting = "intervention";
@@ -684,12 +666,10 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     outcome: "Active",
   });
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `Got it — routing *${state.matterName}* to Finance for a value-based quote. I'll let you know here once Finance responds.`,
-    undefined,
-    state.threadId,
   );
 
   state.stage = "awaiting_quote";
@@ -726,12 +706,10 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
     ),
     Status: select("Pending"),
   });
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `Got it — added to the Handoff for *${state.entityName}* and queued for Finance to reassess. I'll let you know here once Finance responds.`,
-    undefined,
-    state.financeThreadId ?? state.threadId,
   );
   return state;
 }
@@ -770,12 +748,10 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Couldn't prepare Draft Proposal for *${state.entityName}*: ${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
-      undefined,
-      state.threadId,
     );
     return state;
   }
@@ -791,12 +767,10 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
         "Could not read the authoritative Finance quote from the Handoff's own Notion record. Refusing to proceed without it; Handoff left Pending for automatic retry.",
       outcome: "Blocked",
     });
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Couldn't read the Finance quote for *${state.entityName}* from its Handoff record. Not proceeding without it — will retry automatically on the next discovery cycle.`,
-      undefined,
-      state.threadId,
     );
     return state;
   }
@@ -812,12 +786,10 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
         "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to draft the Proposal without it; Handoff left Pending for automatic retry.",
       outcome: "Blocked",
     });
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Couldn't prepare the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Will retry automatically on the next discovery cycle.`,
-      undefined,
-      state.threadId,
     );
     return state;
   }
@@ -844,9 +816,9 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
     "Work Completed": richText("Draft Proposal prepared and presented to Martin for review."),
   });
 
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `*Draft Proposal — ${state.entityName}*\n\n${draft}`,
     [
       [
@@ -854,7 +826,6 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
         { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
       ],
     ],
-    state.threadId,
   );
   state.stage = "awaiting_proposal_approval";
   state.awaiting = undefined;
@@ -863,7 +834,11 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
 
 export async function handleProposalApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendMessage(env, state.chatId, "What should change in the draft? Send your feedback as a message.", undefined, state.threadId);
+    await sendConversationHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      "What should change in the draft? Send your feedback as a message.",
+    );
     state.stage = "awaiting_proposal_revision";
     state.awaiting = "proposal_feedback";
     return state;
@@ -888,7 +863,11 @@ export async function handleProposalApproval(env: Env, state: WorkState, approve
     outcome: "Complete",
   });
 
-  await sendMessage(env, state.chatId, `Proposal created in Draft status: ${page.url}`, undefined, state.threadId);
+  await sendConversationHatMessage(
+    env,
+    { ...state, hat: "Sales Executive" },
+    `Proposal created in Draft status: ${page.url}`,
+  );
   state.stage = "complete";
   state.awaiting = undefined;
   return state;
@@ -906,12 +885,10 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
         "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to revise the Proposal without it.",
       outcome: "Blocked",
     });
-    await sendMessage(
+    await sendConversationHatMessage(
       env,
-      state.chatId,
+      { ...state, hat: "Sales Executive" },
       `Couldn't revise the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Send your feedback again once resolved and I'll re-apply it.`,
-      undefined,
-      state.threadId,
     );
     state.awaiting = "proposal_feedback";
     return state;
@@ -926,9 +903,9 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
   );
   state.proposalDraft = revised;
   state.proposalRevisionCount = (state.proposalRevisionCount ?? 0) + 1;
-  await sendMessage(
+  await sendConversationHatMessage(
     env,
-    state.chatId,
+    { ...state, hat: "Sales Executive" },
     `*Revised Draft Proposal*\n\n${revised}`,
     [
       [
@@ -936,7 +913,6 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
         { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
       ],
     ],
-    state.threadId,
   );
   state.stage = "awaiting_proposal_approval";
   state.awaiting = undefined;
