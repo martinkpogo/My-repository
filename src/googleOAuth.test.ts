@@ -13,6 +13,8 @@ import {
   loadGoogleTokens,
   parseAccountIdentifierFromIdToken,
   persistGoogleTokens,
+  testGoogleDriveConnection,
+  handleGoogleDriveTest,
 } from "./googleOAuth";
 
 function createMockKv() {
@@ -425,5 +427,154 @@ test("Assurance that sensitive credential material is NEVER written to logs or a
     globalThis.fetch = originalFetch;
     console.log = originalConsoleLog;
     console.error = originalConsoleError;
+  }
+});
+
+test("testGoogleDriveConnection returns status 401 when tokens are missing or invalid", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const res = await testGoogleDriveConnection(fakeEnv, "unauthorized-account@enig.com");
+
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.status, 401);
+  assert.strictEqual(res.error, "Google Workspace authorization missing or invalid");
+});
+
+test("testGoogleDriveConnection succeeds when valid access token exists and Google Drive API returns 200", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "valid-drive-access-token",
+      refresh_token: "valid-drive-refresh-token",
+      expires_in: 3600,
+    },
+    "user@enig.com",
+  );
+
+  let driveApiCalled = false;
+  let authHeaderUsed = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url) === "https://www.googleapis.com/drive/v3/files?pageSize=1") {
+      driveApiCalled = true;
+      const headers = init?.headers as Record<string, string> | undefined;
+      authHeaderUsed = headers ? headers["Authorization"] || "" : "";
+      return new Response(
+        JSON.stringify({
+          kind: "drive#fileList",
+          incompleteSearch: false,
+          files: [{ id: "file-123", name: "Sample Document" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const res = await testGoogleDriveConnection(fakeEnv, "user@enig.com");
+    assert.strictEqual(driveApiCalled, true);
+    assert.strictEqual(authHeaderUsed, "Bearer valid-drive-access-token");
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("testGoogleDriveConnection fails closed on upstream Google Drive API error or network failure", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "valid-access-token",
+      refresh_token: "valid-refresh-token",
+      expires_in: 3600,
+    },
+    "user@enig.com",
+  );
+
+  // 1. Upstream 401 Unauthorized from Google Drive API
+  globalThis.fetch = (async (url: string) => {
+    if (String(url) === "https://www.googleapis.com/drive/v3/files?pageSize=1") {
+      return new Response(JSON.stringify({ error: { code: 401, message: "Invalid Credentials" } }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const res401 = await testGoogleDriveConnection(fakeEnv, "user@enig.com");
+    assert.strictEqual(res401.ok, false);
+    assert.strictEqual(res401.status, 401);
+    assert.strictEqual(res401.error, "Google Drive API request failed");
+
+    // 2. Network / Transport error when fetching Google Drive API
+    globalThis.fetch = (async (url: string) => {
+      if (String(url) === "https://www.googleapis.com/drive/v3/files?pageSize=1") {
+        throw new TypeError("Failed to fetch");
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const resNetErr = await testGoogleDriveConnection(fakeEnv, "user@enig.com");
+    assert.strictEqual(resNetErr.ok, false);
+    assert.strictEqual(resNetErr.status, 502);
+    assert.strictEqual(resNetErr.error, "Network error reaching Google Drive API");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GET /admin/test-google-drive handles authorization key parameter and returns json response", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "admin-access-token",
+      refresh_token: "admin-refresh-token",
+      expires_in: 3600,
+    },
+    "default",
+  );
+
+  globalThis.fetch = (async (url: string) => {
+    if (String(url) === "https://www.googleapis.com/drive/v3/files?pageSize=1") {
+      return new Response(
+        JSON.stringify({
+          kind: "drive#fileList",
+          files: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // 1. Missing secret key -> 403 Forbidden
+    const reqNoKey = new Request("https://enig-agent.martnkpogo.workers.dev/admin/test-google-drive");
+    const resNoKey = await handleGoogleDriveTest(reqNoKey, fakeEnv);
+    assert.strictEqual(resNoKey.status, 403);
+
+    // 2. Valid secret key -> 200 OK with {"ok": true, "connected": true}
+    const reqAuth = new Request(
+      `https://enig-agent.martnkpogo.workers.dev/admin/test-google-drive?key=${fakeEnv.TELEGRAM_WEBHOOK_SECRET}`,
+    );
+    const resAuth = await handleGoogleDriveTest(reqAuth, fakeEnv);
+    assert.strictEqual(resAuth.status, 200);
+
+    const json = (await resAuth.json()) as { ok: boolean; connected?: boolean };
+    assert.deepStrictEqual(json, { ok: true, connected: true });
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

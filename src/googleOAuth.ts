@@ -305,3 +305,84 @@ export async function handleGoogleOAuthCallback(request: Request, env: Env): Pro
     return new Response(`Token exchange failed: ${errMessage}`, { status: 502 });
   }
 }
+
+export async function testGoogleDriveConnection(
+  env: Env,
+  accountIdentifier = "default",
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) {
+    await logActivity(env, {
+      entry: "Google Drive connectivity test failed: missing or invalid credentials",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive API test failed for account '${accountIdentifier}': no valid access token available`,
+      outcome: "Blocked",
+    });
+    return { ok: false, status: 401, error: "Google Workspace authorization missing or invalid" };
+  }
+
+  let res: Response;
+  try {
+    res = await fetch("https://www.googleapis.com/drive/v3/files?pageSize=1", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Drive connectivity test failed: network error",
+      type: "Activity",
+      area: "Operations",
+      activity: "Google Drive API test failed due to network or transport error",
+      outcome: "Blocked",
+    });
+    return { ok: false, status: 502, error: "Network error reaching Google Drive API" };
+  }
+
+  if (!res.ok) {
+    await logActivity(env, {
+      entry: "Google Drive connectivity test failed: upstream error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive API test failed with HTTP ${res.status}`,
+      outcome: "Blocked",
+    });
+    const status = res.status === 401 || res.status === 403 ? 401 : 502;
+    return { ok: false, status, error: "Google Drive API request failed" };
+  }
+
+  await logActivity(env, {
+    entry: "Google Drive connectivity test succeeded",
+    type: "Activity",
+    area: "Operations",
+    activity: `Google Drive API read-only connectivity test succeeded for account '${accountIdentifier}'`,
+    outcome: "Complete",
+  });
+
+  return { ok: true, status: 200 };
+}
+
+export async function handleGoogleDriveTest(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+  if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+    return new Response("forbidden", { status: 403 });
+  }
+
+  const accountIdentifier = url.searchParams.get("account") || "default";
+  const result = await testGoogleDriveConnection(env, accountIdentifier);
+
+  if (result.ok) {
+    return new Response(JSON.stringify({ ok: true, connected: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  return new Response(JSON.stringify({ ok: false, error: result.error }), {
+    status: result.status,
+    headers: { "content-type": "application/json" },
+  });
+}
