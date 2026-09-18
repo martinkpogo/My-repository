@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import { getReplyMessageWorkId, routeIncomingText, setReplyMessageWorkId } from "./router";
-import { getConversationTarget, getOperationsTarget, sendConversationHatMessage, sendHatMessage, sendOperationsHatMessage, sendOperationsMessage } from "./telegram";
+import { getConversationTarget, getOperationsTarget, sendHatMessage, sendOperationsMessage } from "./telegram";
 import type { Env } from "./types";
 
 function createMockKv() {
@@ -52,17 +52,16 @@ test("2. reply_msg KV helper sets and retrieves reply message workId mappings", 
   assert.strictEqual(retrieved, "work-uuid-123");
 });
 
-test("3. reply-to-message routing in DM routes to the specific WorkSession matched in KV", async (t) => {
+test("3. reply-to-message routing in DM routes to the specific WorkSession matched in KV", async () => {
   const env = fakeEnv();
   await setReplyMessageWorkId(env, 555, "session-abc");
 
   let handledReplyWorkId: string | null = null;
-  const originalGetSessionStub = (env.WORK_SESSION as any);
   (env as any).WORK_SESSION = {
     idFromName: (id: string) => id,
     get: (id: string) => ({
       getState: async () => ({ workId: id, awaiting: "call_notes", stage: "awaiting_call_notes" }),
-      handleTextReply: async (text: string) => {
+      handleTextReply: async (_text: string) => {
         handledReplyWorkId = id;
         return { workId: id, stage: "completed" };
       },
@@ -107,7 +106,7 @@ test("4. Ordinary DM conversation without reply-to-message is NEVER hijacked by 
   assert.strictEqual(interceptedByWorkSession, false, "Ordinary DM message must NEVER be hijacked by an awaiting WorkSession");
 });
 
-test("5. Multi-session concurrency: two simultaneous awaiting WorkSessions in DM route independently via reply_to_message", async (t) => {
+test("5. Multi-session concurrency: two simultaneous awaiting WorkSessions in DM route independently via reply_to_message", async () => {
   const env = fakeEnv();
   await setReplyMessageWorkId(env, 101, "work-session-1");
   await setReplyMessageWorkId(env, 102, "work-session-2");
@@ -132,7 +131,7 @@ test("5. Multi-session concurrency: two simultaneous awaiting WorkSessions in DM
   assert.strictEqual(routedSessions[1], "work-session-1");
 });
 
-test("6. Legacy WorkSession compatibility: non-DM Unit topic active pointers are preserved for backward compatibility", async (t) => {
+test("6. Legacy WorkSession compatibility: non-DM Unit topic active pointers are preserved for backward compatibility", async () => {
   const env = fakeEnv();
   // Legacy active pointer in Marketing topic (393)
   await env.STATE_KV.put("active:123456:393", "legacy-marketing-session");

@@ -4,7 +4,7 @@ import type { WebSearchResult } from "../../research/webSearch";
 import { createPage, plainText, queryDataSource, richText, select, title } from "../../../notion";
 import { aiJson } from "../../../ai";
 import { logActivity } from "../../../log";
-import { sendHatMessage, sendOperationsHatMessage } from "../../../telegram";
+import { sendOperationsHatMessage } from "../../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
 
 /**
