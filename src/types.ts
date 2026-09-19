@@ -216,6 +216,11 @@ export interface WorkState {
     handoffTitle: string;
     verifiedFactsAndSources: string;
   };
+
+  /**
+   * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.
+   */
+  pendingGoogleAction?: import("./googleOAuth").PendingGoogleAction;
 }
 
 export interface SessionSummary {

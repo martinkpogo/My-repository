@@ -1,6 +1,6 @@
-import type { Env } from "./types";
+import type { Env, WorkState } from "./types";
 import { logActivity } from "./log";
-import { sendOperationsMessage } from "./telegram";
+import { HatMessageTarget, sendConversationHatMessage, sendOperationsMessage } from "./telegram";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -9,6 +9,8 @@ export const GOOGLE_OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/documents.readonly",
   "https://www.googleapis.com/auth/spreadsheets.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/documents",
 ].join(" ");
 
 export interface StoredGoogleTokens {
@@ -385,4 +387,380 @@ export async function handleGoogleDriveTest(request: Request, env: Env): Promise
     status: result.status,
     headers: { "content-type": "application/json" },
   });
+}
+
+export interface PendingGoogleAction {
+  type: "create_doc";
+  title: string;
+  content: string;
+  folderId: string;
+  accountIdentifier: string;
+}
+
+export interface CreateGoogleDocResult {
+  ok: boolean;
+  documentId?: string;
+  documentUrl?: string;
+  error?: string;
+  stage?: "auth" | "validation" | "creation" | "insertion" | "verification";
+}
+
+/**
+ * Extracts plain text content from a Google Docs API Document resource.
+ */
+function extractDocText(docData: any): string {
+  if (!docData || !docData.body || !Array.isArray(docData.body.content)) {
+    return "";
+  }
+  const textParts: string[] = [];
+  for (const structuralElement of docData.body.content) {
+    if (structuralElement.paragraph && Array.isArray(structuralElement.paragraph.elements)) {
+      for (const element of structuralElement.paragraph.elements) {
+        if (element.textRun && typeof element.textRun.content === "string") {
+          textParts.push(element.textRun.content);
+        }
+      }
+    }
+  }
+  return textParts.join("");
+}
+
+export async function createGoogleDoc(
+  env: Env,
+  action: PendingGoogleAction,
+): Promise<CreateGoogleDocResult> {
+  // 1. Validation
+  if (
+    !action ||
+    action.type !== "create_doc" ||
+    !action.title?.trim() ||
+    !action.content?.trim() ||
+    !action.folderId?.trim() ||
+    !action.accountIdentifier?.trim()
+  ) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: invalid parameters",
+      type: "Activity",
+      area: "Operations",
+      activity: "Google Doc creation rejected due to missing or invalid action parameters (title, content, folderId, or accountIdentifier)",
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "validation", error: "Missing or invalid Google Doc creation parameters" };
+  }
+
+  const title = action.title.trim();
+  const content = action.content.trim();
+  const folderId = action.folderId.trim();
+  const accountIdentifier = action.accountIdentifier.trim();
+
+  // 2. Authorization check
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: missing or invalid credentials",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Doc creation failed for account '${accountIdentifier}': no valid access token available`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "auth", error: "Google Workspace authorization missing or invalid" };
+  }
+
+  // 3. Stage 1: Document Creation via Drive API (files.create)
+  let createRes: Response;
+  try {
+    createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: title,
+        mimeType: "application/vnd.google-apps.document",
+        parents: [folderId],
+      }),
+    });
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: creation network error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create failed due to network error for document '${title}' in folder '${folderId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: "Network error during Google Doc creation" };
+  }
+
+  if (!createRes.ok) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: document creation error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create failed with HTTP ${createRes.status} for document '${title}' in folder '${folderId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: `Google Drive file creation failed (HTTP ${createRes.status})` };
+  }
+
+  let createData: { id?: string };
+  try {
+    createData = (await createRes.json()) as { id?: string };
+  } catch {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: invalid creation response JSON",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create returned non-JSON response for document '${title}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: "Invalid JSON response from Google Drive file creation" };
+  }
+
+  const documentId = createData.id;
+  if (!documentId) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: missing document ID in response",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create response missing document ID for '${title}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: "Google Drive creation succeeded but no document ID was returned" };
+  }
+
+  // 4. Stage 2: Content Insertion via Docs API (documents.batchUpdate)
+  let insertRes: Response;
+  try {
+    insertRes = await fetch(`https://www.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            insertText: {
+              location: { index: 1 },
+              text: content,
+            },
+          },
+        ],
+      }),
+    });
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: content insertion network error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Docs batchUpdate network error for document ID '${documentId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, documentId, stage: "insertion", error: "Network error during content insertion" };
+  }
+
+  if (!insertRes.ok) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: content insertion error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Docs batchUpdate failed with HTTP ${insertRes.status} for document ID '${documentId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, documentId, stage: "insertion", error: `Google Docs content insertion failed (HTTP ${insertRes.status})` };
+  }
+
+  // 5. Stage 3: Verification Read-Back via Docs API (documents.get)
+  let verifyRes: Response;
+  try {
+    verifyRes = await fetch(`https://www.googleapis.com/v1/documents/${documentId}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: verification network error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Docs verification get network error for document ID '${documentId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, documentId, stage: "verification", error: "Network error during document verification" };
+  }
+
+  if (!verifyRes.ok) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: verification read-back error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Docs verification get failed with HTTP ${verifyRes.status} for document ID '${documentId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, documentId, stage: "verification", error: `Google Docs verification read-back failed (HTTP ${verifyRes.status})` };
+  }
+
+  let docData: any;
+  try {
+    docData = await verifyRes.json();
+  } catch {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: invalid verification response JSON",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Docs verification get returned invalid JSON for document ID '${documentId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, documentId, stage: "verification", error: "Invalid JSON response during document verification" };
+  }
+
+  const verifiedTitle = (docData.title ?? "").trim();
+  const extractedText = extractDocText(docData);
+
+  if (verifiedTitle !== title || !extractedText.includes(content)) {
+    await logActivity(env, {
+      entry: "Google Doc creation failed: verification content mismatch",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Doc verification failed for document ID '${documentId}': title or inserted content mismatch`,
+      outcome: "Blocked",
+    });
+    return { ok: false, documentId, stage: "verification", error: "Document verification failed: title or content mismatch" };
+  }
+
+  // Success
+  const documentUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+
+  await logActivity(env, {
+    entry: "Google Doc creation succeeded",
+    type: "Activity",
+    area: "Operations",
+    activity: `Google Doc '${title}' created and verified in folder '${folderId}' (ID: ${documentId})`,
+    outcome: "Complete",
+  });
+
+  return { ok: true, documentId, documentUrl };
+}
+
+export async function proposeGoogleDocCreation(
+  env: Env,
+  state: WorkState,
+  input: { title: string; content: string; folderId: string; accountIdentifier: string },
+): Promise<WorkState> {
+  const title = input.title?.trim();
+  const content = input.content?.trim();
+  const folderId = input.folderId?.trim();
+  const accountIdentifier = input.accountIdentifier?.trim();
+
+  const target: HatMessageTarget = {
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    workId: state.workId,
+  };
+
+  if (!title || !content || !folderId || !accountIdentifier) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      "⚠️ Cannot propose Google Doc creation: missing title, content, folder ID, or account identifier.",
+    );
+    return state;
+  }
+
+  const pendingAction: PendingGoogleAction = {
+    type: "create_doc",
+    title,
+    content,
+    folderId,
+    accountIdentifier,
+  };
+
+  state.pendingGoogleAction = pendingAction;
+
+  const preview = content.length > 300 ? `${content.slice(0, 300)}...` : content;
+  const messageText = `*Proposed Action*: Create Google Doc\n\n*Title*: ${title}\n*Folder ID*: ${folderId}\n*Account*: ${accountIdentifier}\n\n*Content Preview*:\n${preview}`;
+
+  const buttons = [
+    [
+      { text: "✅ Approve Document Creation", callback_data: `googleaction:${state.workId}:approve` },
+      { text: "❌ Reject", callback_data: `googleaction:${state.workId}:reject` },
+    ],
+  ];
+
+  await sendConversationHatMessage(env, target, messageText, buttons);
+
+  await logActivity(env, {
+    entry: "Google Doc creation proposed",
+    type: "Activity",
+    area: "Operations",
+    activity: `Google Doc creation proposed: '${title}' in folder '${folderId}' for account '${accountIdentifier}'`,
+    outcome: "Active",
+  });
+
+  return state;
+}
+
+export async function handleGoogleActionApproval(
+  env: Env,
+  state: WorkState,
+  approved: boolean,
+): Promise<WorkState> {
+  const action = state.pendingGoogleAction;
+  state.pendingGoogleAction = undefined;
+
+  const target: HatMessageTarget = {
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    workId: state.workId,
+  };
+
+  if (!action || action.type !== "create_doc") {
+    await sendConversationHatMessage(
+      env,
+      target,
+      "No valid pending Google action found for this work item.",
+    );
+    return state;
+  }
+
+  if (!approved) {
+    await logActivity(env, {
+      entry: "Google Doc creation rejected",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Doc creation rejected by user for '${action.title}'`,
+      outcome: "Blocked",
+    });
+
+    await sendConversationHatMessage(
+      env,
+      target,
+      `Google Doc creation rejected for *${action.title}*. No document was created.`,
+    );
+
+    return state;
+  }
+
+  const result = await createGoogleDoc(env, action);
+
+  if (!result.ok) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ Google Doc creation failed during ${result.stage} stage: ${result.error}`,
+    );
+    return state;
+  }
+
+  await sendConversationHatMessage(
+    env,
+    target,
+    `✅ Google Doc created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.documentUrl}`,
+  );
+
+  return state;
 }

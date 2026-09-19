@@ -4,6 +4,7 @@ import type { Env } from "./types";
 import {
   buildGoogleAuthorizeUrl,
   codeChallengeFromVerifier,
+  createGoogleDoc,
   generateCodeVerifier,
   generateState,
   getValidGoogleAccessToken,
@@ -12,10 +13,14 @@ import {
   handleGoogleOAuthStart,
   loadGoogleTokens,
   parseAccountIdentifierFromIdToken,
+  PendingGoogleAction,
   persistGoogleTokens,
+  proposeGoogleDocCreation,
+  handleGoogleActionApproval,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
 } from "./googleOAuth";
+import type { WorkState } from "./types";
 
 function createMockKv() {
   const store = new Map<string, { value: string; expirationTtl?: number }>();
@@ -50,6 +55,8 @@ function createFakeEnv() {
     TELEGRAM_BOT_TOKEN: "mock-bot-token",
     MARTIN_TELEGRAM_USER_ID: "123456789",
     NOTION_TOKEN: "mock-notion-token",
+    TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
+    CONVERSATION_TOPIC_ID: "1",
   } as Env;
   return { fakeEnv, mockKv };
 }
@@ -100,7 +107,7 @@ test("Google Authorize URL construction includes exact required parameters and m
   // Verify exact minimum scopes
   assert.strictEqual(
     GOOGLE_OAUTH_SCOPES,
-    "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents",
   );
   assert.strictEqual(url.searchParams.get("scope"), GOOGLE_OAUTH_SCOPES);
 });
@@ -142,6 +149,359 @@ test("GET /oauth/google/start requires key parameter matching TELEGRAM_WEBHOOK_S
     assert.ok(stateEntry);
     assert.strictEqual(stateEntry.expirationTtl, 1800);
     assert.ok(stateEntry.value.length > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-bound parameter immutability", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  let sentTelegramText = "";
+  let sentButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    // Telegram sendMessage mock
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }
+
+    // Drive files.create mock
+    if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      return new Response(JSON.stringify({ id: "doc-id-state-bound-100" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Docs batchUpdate mock
+    if (urlStr.endsWith(":batchUpdate")) {
+      return new Response(JSON.stringify({ documentId: "doc-id-state-bound-100" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Docs get mock
+    if (urlStr === "https://www.googleapis.com/v1/documents/doc-id-state-bound-100") {
+      return new Response(
+        JSON.stringify({
+          title: "Approved Strategy Doc",
+          body: {
+            content: [{ paragraph: { elements: [{ textRun: { content: "Confidential Strategy Content" } }] } }],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "doc-access-token-bound",
+      refresh_token: "doc-refresh-token-bound",
+      expires_in: 3600,
+    },
+    "owner@enig.com",
+  );
+
+  const state: WorkState = {
+    workId: "work-123",
+    chatId: 987654321,
+    unit: "Operations",
+    hat: "Operations Lead",
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    // 1. Propose action
+    await proposeGoogleDocCreation(fakeEnv, state, {
+      title: "Approved Strategy Doc",
+      content: "Confidential Strategy Content",
+      folderId: "folder-immutable-1",
+      accountIdentifier: "owner@enig.com",
+    });
+
+    assert.ok(state.pendingGoogleAction);
+    assert.strictEqual(state.pendingGoogleAction.title, "Approved Strategy Doc");
+    assert.strictEqual(state.pendingGoogleAction.folderId, "folder-immutable-1");
+
+    // Telegram button callback data contains ONLY workId and action type (no parameters)
+    assert.ok(sentButtons.length > 0);
+    assert.strictEqual(sentButtons[0][0].callback_data, "googleaction:work-123:approve");
+    assert.strictEqual(sentButtons[0][1].callback_data, "googleaction:work-123:reject");
+
+    // 2. Execute approval callback
+    const updatedState = await handleGoogleActionApproval(fakeEnv, state, true);
+
+    // State pending action cleared after execution
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined);
+    assert.match(sentTelegramText, /Google Doc created and verified successfully/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handleGoogleActionApproval fails closed when no pending action exists", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  let sentTelegramText = "";
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const state: WorkState = {
+    workId: "work-empty-999",
+    chatId: 987654321,
+    unit: "Operations",
+    hat: "Operations Lead",
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    pendingGoogleAction: undefined, // No action pending
+  };
+
+  try {
+    const resState = await handleGoogleActionApproval(fakeEnv, state, true);
+    assert.strictEqual(resState.pendingGoogleAction, undefined);
+    assert.match(sentTelegramText, /No valid pending Google action found/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createGoogleDoc validates action parameters and fails closed on missing input", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  // Missing title
+  const invalidAction = {
+    type: "create_doc",
+    title: "",
+    content: "Sample text content",
+    folderId: "folder-123",
+    accountIdentifier: "admin@enig.com",
+  } as PendingGoogleAction;
+
+  const res = await createGoogleDoc(fakeEnv, invalidAction);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.stage, "validation");
+  assert.strictEqual(res.error, "Missing or invalid Google Doc creation parameters");
+});
+
+test("createGoogleDoc fails closed when authorization is missing", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  const action: PendingGoogleAction = {
+    type: "create_doc",
+    title: "Test Proposal Doc",
+    content: "Content of proposal",
+    folderId: "folder-456",
+    accountIdentifier: "unauthorized@enig.com",
+  };
+
+  const res = await createGoogleDoc(fakeEnv, action);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.stage, "auth");
+  assert.strictEqual(res.error, "Google Workspace authorization missing or invalid");
+});
+
+test("createGoogleDoc executes 3-stage creation pipeline and verifies title and content", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "doc-access-token-001",
+      refresh_token: "doc-refresh-token-001",
+      expires_in: 3600,
+    },
+    "doc-creator@enig.com",
+  );
+
+  let driveCreated = false;
+  let docBatchUpdated = false;
+  let docVerified = false;
+
+  const docTitle = "Client Proposal - ACME Corp";
+  const docContent = "Detailed scope of works for ACME Corp.";
+  const folderId = "target-folder-777";
+  const createdDocId = "new-doc-id-999";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    // Stage 1: Drive files.create
+    if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      driveCreated = true;
+      assert.strictEqual(init?.method, "POST");
+      const body = JSON.parse(String(init?.body));
+      assert.strictEqual(body.name, docTitle);
+      assert.strictEqual(body.mimeType, "application/vnd.google-apps.document");
+      assert.deepStrictEqual(body.parents, [folderId]);
+
+      return new Response(JSON.stringify({ id: createdDocId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Stage 2: Docs batchUpdate
+    if (urlStr === `https://www.googleapis.com/v1/documents/${createdDocId}:batchUpdate`) {
+      docBatchUpdated = true;
+      assert.strictEqual(init?.method, "POST");
+      const body = JSON.parse(String(init?.body));
+      assert.strictEqual(body.requests[0].insertText.text, docContent);
+
+      return new Response(JSON.stringify({ documentId: createdDocId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Stage 3: Docs get verification
+    if (urlStr === `https://www.googleapis.com/v1/documents/${createdDocId}`) {
+      docVerified = true;
+      assert.strictEqual(init?.method, "GET");
+
+      return new Response(
+        JSON.stringify({
+          title: docTitle,
+          body: {
+            content: [
+              {
+                paragraph: {
+                  elements: [
+                    {
+                      textRun: {
+                        content: docContent,
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const action: PendingGoogleAction = {
+      type: "create_doc",
+      title: docTitle,
+      content: docContent,
+      folderId,
+      accountIdentifier: "doc-creator@enig.com",
+    };
+
+    const res = await createGoogleDoc(fakeEnv, action);
+
+    assert.strictEqual(driveCreated, true);
+    assert.strictEqual(docBatchUpdated, true);
+    assert.strictEqual(docVerified, true);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.documentId, createdDocId);
+    assert.strictEqual(res.documentUrl, `https://docs.google.com/document/d/${createdDocId}/edit`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createGoogleDoc fails closed when creation, insertion, or verification stage fails", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "doc-access-token-002",
+      refresh_token: "doc-refresh-token-002",
+      expires_in: 3600,
+    },
+    "doc-creator-2@enig.com",
+  );
+
+  const action: PendingGoogleAction = {
+    type: "create_doc",
+    title: "Test Doc Failure",
+    content: "Some content",
+    folderId: "folder-id-888",
+    accountIdentifier: "doc-creator-2@enig.com",
+  };
+
+  // 1. Creation failure (HTTP 403 from Drive)
+  globalThis.fetch = (async (url: string) => {
+    if (String(url) === "https://www.googleapis.com/drive/v3/files") {
+      return new Response("Permission denied", { status: 403 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const resCreateFail = await createGoogleDoc(fakeEnv, action);
+    assert.strictEqual(resCreateFail.ok, false);
+    assert.strictEqual(resCreateFail.stage, "creation");
+
+    // 2. Insertion failure (HTTP 500 from Docs)
+    globalThis.fetch = (async (url: string) => {
+      if (String(url) === "https://www.googleapis.com/drive/v3/files") {
+        return new Response(JSON.stringify({ id: "doc-id-123" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (String(url).endsWith(":batchUpdate")) {
+        return new Response("Internal error", { status: 500 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const resInsertFail = await createGoogleDoc(fakeEnv, action);
+    assert.strictEqual(resInsertFail.ok, false);
+    assert.strictEqual(resInsertFail.stage, "insertion");
+
+    // 3. Verification mismatch failure (mismatched title)
+    globalThis.fetch = (async (url: string) => {
+      const urlStr = String(url);
+      if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+        return new Response(JSON.stringify({ id: "doc-id-123" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (urlStr.endsWith(":batchUpdate")) {
+        return new Response(JSON.stringify({ documentId: "doc-id-123" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (urlStr === "https://www.googleapis.com/v1/documents/doc-id-123") {
+        return new Response(
+          JSON.stringify({
+            title: "Wrong Title Returned",
+            body: { content: [] },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const resVerifyFail = await createGoogleDoc(fakeEnv, action);
+    assert.strictEqual(resVerifyFail.ok, false);
+    assert.strictEqual(resVerifyFail.stage, "verification");
   } finally {
     globalThis.fetch = originalFetch;
   }
