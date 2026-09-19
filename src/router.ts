@@ -5,10 +5,7 @@ import { generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 import { researchProtocolSummaryList } from "./units/research/protocols";
-import { registerActionCapability, routeWorkspaceCapabilityAction } from "./actions/registry";
-import { GoogleDocCreationCapability } from "./googleOAuth";
-
-registerActionCapability(GoogleDocCreationCapability);
+import { routeWorkspaceCapabilityAction } from "./actions/registry";
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page

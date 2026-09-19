@@ -9,7 +9,6 @@ import { logActivity } from "./log";
 import {
   handleGoogleAccountSelection,
   handleGoogleFolderSelection,
-  handleGoogleFolderPage,
   handleGoogleActionApproval,
 } from "./googleOAuth";
 
@@ -175,8 +174,6 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleAccountSelection(this.env, state, value);
         case "googlefolder":
           return handleGoogleFolderSelection(this.env, state, value);
-        case "googlefolderpage":
-          return handleGoogleFolderPage(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
         default:

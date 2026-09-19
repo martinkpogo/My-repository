@@ -1,24 +1,9 @@
-import type { Env, Unit, WorkState } from "./types";
+import type { Env, WorkState } from "./types";
 import { logActivity } from "./log";
 import { HatMessageTarget, sendConversationHatMessage, sendOperationsMessage } from "./telegram";
 import { aiJson } from "./ai";
 import { ActionCapability, registerActionCapability } from "./actions/registry";
-function newWorkId(): string {
-  return crypto.randomUUID();
-}
-
-async function getActiveWorkId(env: Env, chatId: number, threadId?: number): Promise<string | null> {
-  return env.STATE_KV.get(`active:${chatId}:${threadId ?? "dm"}`);
-}
-
-async function setActiveWorkId(env: Env, chatId: number, threadId: number | undefined, workId: string): Promise<void> {
-  await env.STATE_KV.put(`active:${chatId}:${threadId ?? "dm"}`, workId);
-}
-
-function getSessionStub(env: Env, workId: string) {
-  const id = env.WORK_SESSION.idFromName(workId);
-  return env.WORK_SESSION.get(id) as any;
-}
+import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -728,16 +713,13 @@ export async function listAuthorizedGoogleAccounts(env: Env): Promise<string[]> 
     const page = await env.STATE_KV.list({ prefix: "google_oauth_tokens:", cursor });
     for (const key of page.keys) {
       const accountIdentifier = key.name.replace(/^google_oauth_tokens:/, "");
-      if (accountIdentifier) {
-        const token = await getValidGoogleAccessToken(env, accountIdentifier);
-        if (token) {
-          accounts.push(accountIdentifier);
-        }
+      if (accountIdentifier && (await loadGoogleTokens(env, accountIdentifier))) {
+        accounts.push(accountIdentifier);
       }
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
-  return accounts.sort();
+  return accounts;
 }
 
 export async function saveOpaqueOption(
@@ -812,22 +794,9 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
       return true;
     }
 
-    const activeWorkId = await getActiveWorkId(env, chatId, threadId);
-    let activeUnit: Unit | undefined;
-    let activeHat: string | undefined;
-
-    if (activeWorkId) {
-      const activeStub = getSessionStub(env, activeWorkId);
-      const activeState = (await activeStub.getState()) as WorkState | null;
-      if (activeState) {
-        activeUnit = activeState.unit;
-        activeHat = activeState.hat;
-      }
-    }
-
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, activeUnit, activeHat, threadId);
+    await stub.init(workId, chatId, undefined, undefined, threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
 
     const buttons = [];
@@ -857,194 +826,6 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
 
 registerActionCapability(GoogleDocCreationCapability);
 
-export interface DriveFolderItem {
-  id: string;
-  name: string;
-  capabilities?: {
-    canAddChildren?: boolean;
-  };
-}
-
-export async function listDriveFoldersPage(
-  env: Env,
-  accountIdentifier: string,
-  pageToken?: string,
-): Promise<{ folders: DriveFolderItem[]; nextPageToken?: string }> {
-  const token = await getValidGoogleAccessToken(env, accountIdentifier);
-  if (!token) {
-    throw new Error(`Google Workspace authorization missing or invalid for account '${accountIdentifier}'`);
-  }
-
-  const query = encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false");
-  const fields = encodeURIComponent("nextPageToken,files(id,name,mimeType,parents,capabilities)");
-  let url = `https://www.googleapis.com/drive/v3/files?q=${query}&fields=${fields}&pageSize=50`;
-  if (pageToken) {
-    url += `&pageToken=${encodeURIComponent(pageToken)}`;
-  }
-
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Google Drive API files.list failed (HTTP ${res.status})`);
-  }
-
-  const data = (await res.json()) as { nextPageToken?: string; files?: DriveFolderItem[] };
-  const writableFolders = (data.files || []).filter(
-    (f) => f.capabilities && f.capabilities.canAddChildren === true,
-  );
-
-  return {
-    folders: writableFolders.sort((a, b) => a.name.localeCompare(b.name)),
-    nextPageToken: data.nextPageToken,
-  };
-}
-
-export async function presentGoogleFolderPickerPage(
-  env: Env,
-  state: WorkState,
-  params: {
-    accountIdentifier: string;
-    title: string;
-    content: string;
-    accumulatedFolders: Array<{ id: string; name: string }>;
-    driveNextPageToken?: string;
-    pageIndex: number;
-  },
-): Promise<WorkState> {
-  const target: HatMessageTarget = {
-    chatId: state.chatId,
-    threadId: state.threadId,
-    hat: state.hat,
-    workId: state.workId,
-  };
-
-  const pageSize = 10;
-  let { accountIdentifier, title, content, accumulatedFolders, driveNextPageToken, pageIndex } = params;
-
-  while (
-    (pageIndex + 1) * pageSize > accumulatedFolders.length &&
-    driveNextPageToken
-  ) {
-    try {
-      const pageRes = await listDriveFoldersPage(env, accountIdentifier, driveNextPageToken);
-      accumulatedFolders = [...accumulatedFolders, ...pageRes.folders];
-      driveNextPageToken = pageRes.nextPageToken;
-    } catch (err) {
-      console.error("Error fetching next Drive page:", err);
-      break;
-    }
-  }
-
-  if (accumulatedFolders.length === 0) {
-    await sendConversationHatMessage(
-      env,
-      target,
-      `⚠️ No writable Google Drive folders were found for account '${accountIdentifier}'.`,
-    );
-    return state;
-  }
-
-  const totalFolders = accumulatedFolders.length;
-  const totalPages = Math.ceil(totalFolders / pageSize);
-  const currentPageIndex = Math.max(0, Math.min(pageIndex, totalPages - 1));
-  const pageSlice = accumulatedFolders.slice(currentPageIndex * pageSize, (currentPageIndex + 1) * pageSize);
-
-  const buttons = [];
-
-  for (const folder of pageSlice) {
-    const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
-      kind: "folder",
-      accountIdentifier,
-      title,
-      content,
-      folderId: folder.id,
-      folderName: folder.name,
-    });
-    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
-  }
-
-  const hasNextPage = (currentPageIndex + 1) * pageSize < totalFolders || Boolean(driveNextPageToken);
-  const hasPrevPage = currentPageIndex > 0;
-
-  if (hasPrevPage || hasNextPage) {
-    const navRow = [];
-    if (hasPrevPage) {
-      const opaquePrevId = await saveOpaqueOption(env, state.workId, {
-        kind: "folder_page",
-        accountIdentifier,
-        title,
-        content,
-        accumulatedFolders,
-        driveNextPageToken,
-        pageIndex: currentPageIndex - 1,
-      });
-      navRow.push({ text: "⬅️ Previous", callback_data: `googlefolderpage:${state.workId}:${opaquePrevId}` });
-    }
-    if (hasNextPage) {
-      const opaqueNextId = await saveOpaqueOption(env, state.workId, {
-        kind: "folder_page",
-        accountIdentifier,
-        title,
-        content,
-        accumulatedFolders,
-        driveNextPageToken,
-        pageIndex: currentPageIndex + 1,
-      });
-      navRow.push({ text: "Next ➡️", callback_data: `googlefolderpage:${state.workId}:${opaqueNextId}` });
-    }
-    buttons.push(navRow);
-  }
-
-  const pageInfo = totalPages > 1 || driveNextPageToken ? ` (Page ${currentPageIndex + 1})` : "";
-  const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder${pageInfo}:`;
-
-  await sendConversationHatMessage(env, target, messageText, buttons);
-
-  await logActivity(env, {
-    entry: "Google Drive folders presented",
-    type: "Activity",
-    activity: `Drive folder picker page ${currentPageIndex + 1} presented for account '${accountIdentifier}'`,
-    outcome: "Active",
-  });
-
-  return state;
-}
-
-export async function handleGoogleFolderPage(
-  env: Env,
-  state: WorkState,
-  opaqueOptionId: string,
-): Promise<WorkState> {
-  const target: HatMessageTarget = {
-    chatId: state.chatId,
-    threadId: state.threadId,
-    hat: state.hat,
-    workId: state.workId,
-  };
-
-  const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
-  if (!option || option.kind !== "folder_page") {
-    await sendConversationHatMessage(
-      env,
-      target,
-      "⚠️ That page navigation option is invalid or expired.",
-    );
-    return state;
-  }
-
-  return presentGoogleFolderPickerPage(env, state, {
-    accountIdentifier: option.accountIdentifier,
-    title: option.title,
-    content: option.content,
-    accumulatedFolders: option.accumulatedFolders || [],
-    driveNextPageToken: option.driveNextPageToken,
-    pageIndex: option.pageIndex ?? 0,
-  });
-}
-
 export async function handleGoogleAccountSelection(
   env: Env,
   state: WorkState,
@@ -1069,27 +850,91 @@ export async function handleGoogleAccountSelection(
 
   const { accountIdentifier, title, content } = option;
 
-  let drivePage: { folders: DriveFolderItem[]; nextPageToken?: string };
-  try {
-    drivePage = await listDriveFoldersPage(env, accountIdentifier);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) {
     await sendConversationHatMessage(
       env,
       target,
-      `⚠️ Could not list Google Drive folders for account '${accountIdentifier}': ${detail}`,
+      `⚠️ Could not retrieve valid credentials for account '${accountIdentifier}'. Please re-authorize via /oauth/google/start.`,
     );
     return state;
   }
 
-  return presentGoogleFolderPickerPage(env, state, {
-    accountIdentifier,
-    title,
-    content,
-    accumulatedFolders: drivePage.folders.map((f) => ({ id: f.id, name: f.name })),
-    driveNextPageToken: drivePage.nextPageToken,
-    pageIndex: 0,
+  let folderRes: Response;
+  try {
+    folderRes = await fetch(
+      "https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities)&pageSize=50",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+  } catch (err) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ Network error listing Google Drive folders for account '${accountIdentifier}'.`,
+    );
+    return state;
+  }
+
+  if (!folderRes.ok) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
+    );
+    return state;
+  }
+
+  let folderData: { files?: Array<{ id: string; name: string }> };
+  try {
+    folderData = await folderRes.json();
+  } catch {
+    await sendConversationHatMessage(
+      env,
+      target,
+      "⚠️ Invalid JSON response from Google Drive folder query.",
+    );
+    return state;
+  }
+
+  const folders = (folderData.files ?? []).sort((a, b) => a.name.localeCompare(b.name));
+  if (folders.length === 0) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ No accessible Drive folders found for account '${accountIdentifier}'.`,
+    );
+    return state;
+  }
+
+  const buttons = [];
+  for (const folder of folders) {
+    const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
+      kind: "folder",
+      accountIdentifier,
+      title,
+      content,
+      folderId: folder.id,
+      folderName: folder.name,
+    });
+    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
+  }
+
+  const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
+  await sendConversationHatMessage(env, target, messageText, buttons);
+
+  await logActivity(env, {
+    entry: "Google Drive folders presented",
+    type: "Activity",
+    activity: `Drive folder picker presented for account '${accountIdentifier}'`,
+    outcome: "Active",
   });
+
+  return state;
 }
 
 export async function handleGoogleFolderSelection(
