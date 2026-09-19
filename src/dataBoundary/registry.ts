@@ -7,6 +7,11 @@ export interface SemanticTaskDefinition {
 }
 
 export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTaskDefinition>> = {
+  "routing.workspace_capability_check": {
+    id: "routing.workspace_capability_check",
+    name: "Routing Workspace Capability Check",
+    description: "Checks if an incoming natural language request is asking to execute a Workspace capability like Google Doc creation.",
+  },
   "routing.enquiry_classification": {
     id: "routing.enquiry_classification",
     name: "Routing Enquiry Classification",

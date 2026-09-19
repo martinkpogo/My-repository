@@ -147,9 +147,9 @@ export async function sendConversationHatMessage(
   if (!convTarget) {
     console.error(`sendConversationHatMessage: Conversation stream unconfigured for ${target.hat}`);
     await logActivity(env, {
-      entry: `Conversation stream dispatch blocked for ${target.hat} [Stream Target Unconfigured]`,
+      entry: `Conversation stream dispatch blocked for ${target.hat ?? "Workspace Action"} [Stream Target Unconfigured]`,
       type: "Blocker",
-      area: target.hat,
+      ...(target.hat ? { area: target.hat } : { area: "Operations" }),
       decisionRationale: "TELEGRAM_GROUP_CHAT_ID or CONVERSATION_TOPIC_ID missing from environment bindings. Refusing to send conversation message.",
       outcome: "Blocked",
     }).catch(() => {});
@@ -237,11 +237,12 @@ export async function editMessageText(env: Env, chatId: number, messageId: numbe
 export interface HatMessageTarget {
   chatId: number;
   threadId?: number;
-  hat: string;
+  hat?: string;
   workId?: string;
 }
 
 function withHatLabel(target: HatMessageTarget, text: string): string {
+  if (!target.hat) return text;
   return `Hat: ${target.hat}.\n\n${text}`;
 }
 

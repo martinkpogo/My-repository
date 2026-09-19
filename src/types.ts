@@ -121,8 +121,8 @@ export interface WorkState {
   workId: string;
   chatId: number;
   threadId?: number;
-  unit: Unit;
-  hat: string;
+  unit?: Unit;
+  hat?: string;
   stage: string;
   awaiting?:
     | "call_notes"
@@ -137,7 +137,8 @@ export interface WorkState {
     | "marketing_feedback"
     | "marketing_clarification"
     | "research_clarification"
-    | "research_feedback";
+    | "research_feedback"
+    | "google_doc_input";
   createdAt: string;
   updatedAt: string;
 
@@ -225,8 +226,8 @@ export interface WorkState {
 
 export interface SessionSummary {
   workId: string;
-  unit: Unit;
-  hat: string;
+  unit?: Unit;
+  hat?: string;
   stage: string;
   label: string;
   updatedAt: string;

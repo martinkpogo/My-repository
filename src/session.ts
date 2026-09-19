@@ -6,14 +6,20 @@ import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
-import { handleGoogleActionApproval } from "./googleOAuth";
+import {
+  handleGoogleActionApproval,
+  handleGoogleAccountSelection,
+  handleGoogleFolderPage,
+  handleGoogleFolderSelection,
+} from "./googleOAuth";
+import { handleGoogleDocInputReply } from "./workspaceCapability";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
     workId: string,
     chatId: number,
-    unit: Unit,
-    hat: string,
+    unit?: Unit,
+    hat?: string,
     threadId?: number,
     extra?: { handoffId?: string; matterId?: string },
   ): Promise<void> {
@@ -74,6 +80,8 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchClarification(this.env, state, text);
         case "research_feedback":
           return research.handleResearchFeedback(this.env, state, text);
+        case "google_doc_input":
+          return handleGoogleDocInputReply(this.env, state, text);
         default:
           return sendMessage(
             this.env,
@@ -134,7 +142,7 @@ export class WorkSession extends DurableObject<Env> {
       await logActivity(this.env, {
         entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
         type: "Activity",
-        area: state.unit,
+        ...(state.unit ? { area: state.unit } : { area: "Operations" }),
         outcome: "Complete",
       });
       return state;
@@ -166,6 +174,12 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handlePaidMediaApproval(this.env, state, value === "approve");
         case "researchhandoff":
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
+        case "googleaccount":
+          return handleGoogleAccountSelection(this.env, state, value);
+        case "googlefolder":
+          return handleGoogleFolderSelection(this.env, state, value);
+        case "googlefolderpage":
+          return handleGoogleFolderPage(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
         default:
@@ -201,9 +215,10 @@ export class WorkSession extends DurableObject<Env> {
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);
+      const unitHatLabel = state.unit || state.hat ? `${state.unit ?? "Standalone"}/${state.hat ?? "Workspace Action"}` : "Standalone";
       await sendOperationsMessage(
         this.env,
-        `⚠️ WorkSession ${state.workId} (${state.unit}/${state.hat}) execution failed: ${detail.slice(0, 500)}`,
+        `⚠️ WorkSession ${state.workId} (${unitHatLabel}) execution failed: ${detail.slice(0, 500)}`,
       ).catch((notifyErr) => console.error(`WorkSession ${state.workId} failure notification also failed`, notifyErr));
       return state;
     }
