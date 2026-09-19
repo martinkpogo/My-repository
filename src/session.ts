@@ -6,6 +6,7 @@ import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
+import { handleGoogleActionApproval } from "./googleOAuth";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -165,6 +166,8 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handlePaidMediaApproval(this.env, state, value === "approve");
         case "researchhandoff":
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
+        case "googleaction":
+          return handleGoogleActionApproval(this.env, state, value === "approve");
         default:
           return Promise.resolve(state);
       }
