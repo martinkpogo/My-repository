@@ -1,6 +1,9 @@
 import type { Env, WorkState } from "./types";
 import { logActivity } from "./log";
 import { HatMessageTarget, sendConversationHatMessage, sendOperationsMessage } from "./telegram";
+import { aiJson } from "./ai";
+import { ActionCapability, registerActionCapability } from "./actions/registry";
+import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -697,6 +700,291 @@ export async function proposeGoogleDocCreation(
     type: "Activity",
     area: "Operations",
     activity: `Google Doc creation proposed: '${title}' in folder '${folderId}' for account '${accountIdentifier}'`,
+    outcome: "Active",
+  });
+
+  return state;
+}
+
+export async function listAuthorizedGoogleAccounts(env: Env): Promise<string[]> {
+  const accounts: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.STATE_KV.list({ prefix: "google_oauth_tokens:", cursor });
+    for (const key of page.keys) {
+      const accountIdentifier = key.name.replace(/^google_oauth_tokens:/, "");
+      if (accountIdentifier && (await loadGoogleTokens(env, accountIdentifier))) {
+        accounts.push(accountIdentifier);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return accounts;
+}
+
+export async function saveOpaqueOption(
+  env: Env,
+  workId: string,
+  optionData: Record<string, unknown>,
+  ttl = 600,
+): Promise<string> {
+  const opaqueId = crypto.randomUUID().slice(0, 8);
+  const key = `google_option:${workId}:${opaqueId}`;
+  await env.STATE_KV.put(key, JSON.stringify(optionData), { expirationTtl: ttl });
+  return opaqueId;
+}
+
+export async function consumeOpaqueOption(
+  env: Env,
+  workId: string,
+  opaqueId: string,
+): Promise<Record<string, any> | null> {
+  const key = `google_option:${workId}:${opaqueId}`;
+  const raw = await env.STATE_KV.get(key);
+  if (!raw) return null;
+  await env.STATE_KV.delete(key);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export const GoogleDocCreationCapability: ActionCapability = {
+  id: "workspace.google_doc_creation",
+  name: "Google Doc Creation Capability",
+  description: "Creates Google Docs in Google Drive with user-selected account, folder, and explicit approval.",
+  async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
+    const classification = await aiJson<{ isGoogleDocRequest: boolean; title?: string; content?: string }>(env, {
+      taskId: "action.google_doc_intake",
+      system: `You classify incoming messages for ENIG's Google Doc creation capability.
+Check if the message requests creating a Google Doc / Document.
+If yes, set isGoogleDocRequest to true and extract the document title and content text if present.
+If title or content is missing, leave them empty/undefined.
+Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..."}`,
+      user: text,
+      light: true,
+    });
+
+    if (!classification || !classification.isGoogleDocRequest) {
+      return false;
+    }
+
+    const title = classification.title?.trim();
+    const content = classification.content?.trim();
+
+    const target: HatMessageTarget = { chatId, threadId };
+
+    if (!title || !content) {
+      await sendConversationHatMessage(
+        env,
+        target,
+        "⚠️ I recognized a request to create a Google Doc, but the document Title or Content is missing. Please specify both the Title and Content.",
+      );
+      return true;
+    }
+
+    const authorizedAccounts = await listAuthorizedGoogleAccounts(env);
+    if (authorizedAccounts.length === 0) {
+      await sendConversationHatMessage(
+        env,
+        target,
+        "⚠️ Cannot create Google Doc: no authorized Google Workspace account found. Please visit `/oauth/google/start?key=...` in your browser to authorize an account first.",
+      );
+      return true;
+    }
+
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, undefined, undefined, threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+
+    const buttons = [];
+    for (const account of authorizedAccounts) {
+      const opaqueId = await saveOpaqueOption(env, workId, {
+        kind: "account",
+        accountIdentifier: account,
+        title,
+        content,
+      });
+      buttons.push([{ text: `👤 ${account}`, callback_data: `googleaccount:${workId}:${opaqueId}` }]);
+    }
+
+    const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Title*: ${title}\n\nSelect the authorized Google account to use:`;
+    await sendConversationHatMessage(env, { chatId, threadId, workId }, messageText, buttons);
+
+    await logActivity(env, {
+      entry: "Google Doc intake initiated",
+      type: "Activity",
+      activity: `Google Doc intake started for '${title}' (workId: ${workId})`,
+      outcome: "Active",
+    });
+
+    return true;
+  },
+};
+
+registerActionCapability(GoogleDocCreationCapability);
+
+export async function handleGoogleAccountSelection(
+  env: Env,
+  state: WorkState,
+  opaqueOptionId: string,
+): Promise<WorkState> {
+  const target: HatMessageTarget = {
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    workId: state.workId,
+  };
+
+  const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
+  if (!option || option.kind !== "account" || !option.accountIdentifier) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      "⚠️ That account selection option is invalid or expired. Please submit the request again.",
+    );
+    return state;
+  }
+
+  const { accountIdentifier, title, content } = option;
+
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ Could not retrieve valid credentials for account '${accountIdentifier}'. Please re-authorize via /oauth/google/start.`,
+    );
+    return state;
+  }
+
+  let folderRes: Response;
+  try {
+    folderRes = await fetch(
+      "https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities)&pageSize=50",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+  } catch (err) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ Network error listing Google Drive folders for account '${accountIdentifier}'.`,
+    );
+    return state;
+  }
+
+  if (!folderRes.ok) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
+    );
+    return state;
+  }
+
+  let folderData: { files?: Array<{ id: string; name: string }> };
+  try {
+    folderData = await folderRes.json();
+  } catch {
+    await sendConversationHatMessage(
+      env,
+      target,
+      "⚠️ Invalid JSON response from Google Drive folder query.",
+    );
+    return state;
+  }
+
+  const folders = (folderData.files ?? []).sort((a, b) => a.name.localeCompare(b.name));
+  if (folders.length === 0) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      `⚠️ No accessible Drive folders found for account '${accountIdentifier}'.`,
+    );
+    return state;
+  }
+
+  const buttons = [];
+  for (const folder of folders) {
+    const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
+      kind: "folder",
+      accountIdentifier,
+      title,
+      content,
+      folderId: folder.id,
+      folderName: folder.name,
+    });
+    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
+  }
+
+  const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
+  await sendConversationHatMessage(env, target, messageText, buttons);
+
+  await logActivity(env, {
+    entry: "Google Drive folders presented",
+    type: "Activity",
+    activity: `Drive folder picker presented for account '${accountIdentifier}'`,
+    outcome: "Active",
+  });
+
+  return state;
+}
+
+export async function handleGoogleFolderSelection(
+  env: Env,
+  state: WorkState,
+  opaqueOptionId: string,
+): Promise<WorkState> {
+  const target: HatMessageTarget = {
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    workId: state.workId,
+  };
+
+  const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
+  if (!option || option.kind !== "folder" || !option.folderId) {
+    await sendConversationHatMessage(
+      env,
+      target,
+      "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
+    );
+    return state;
+  }
+
+  const { accountIdentifier, title, content, folderId, folderName } = option;
+
+  state.pendingGoogleAction = {
+    type: "create_doc",
+    title,
+    content,
+    folderId,
+    accountIdentifier,
+  };
+
+  const preview = content.length > 300 ? `${content.slice(0, 300)}...` : content;
+  const messageText = `*Proposed Action*: Create Google Doc\n\n*Title*: ${title}\n*Account*: ${accountIdentifier}\n*Folder*: ${folderName}\n\n*Content Preview*:\n${preview}\n\nCreation has NOT executed yet. Approve this action?`;
+
+  const buttons = [
+    [
+      { text: "✅ Approve Document Creation", callback_data: `googleaction:${state.workId}:approve` },
+      { text: "❌ Reject", callback_data: `googleaction:${state.workId}:reject` },
+    ],
+  ];
+
+  await sendConversationHatMessage(env, target, messageText, buttons);
+
+  await logActivity(env, {
+    entry: "Google Doc creation proposed",
+    type: "Activity",
+    activity: `Google Doc creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
     outcome: "Active",
   });
 

@@ -121,8 +121,8 @@ export interface WorkState {
   workId: string;
   chatId: number;
   threadId?: number;
-  unit: Unit;
-  hat: string;
+  unit?: Unit;
+  hat?: string;
   stage: string;
   awaiting?:
     | "call_notes"
@@ -225,8 +225,8 @@ export interface WorkState {
 
 export interface SessionSummary {
   workId: string;
-  unit: Unit;
-  hat: string;
+  unit?: Unit;
+  hat?: string;
   stage: string;
   label: string;
   updatedAt: string;

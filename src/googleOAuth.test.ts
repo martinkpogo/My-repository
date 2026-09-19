@@ -4,19 +4,25 @@ import type { Env } from "./types";
 import {
   buildGoogleAuthorizeUrl,
   codeChallengeFromVerifier,
+  consumeOpaqueOption,
   createGoogleDoc,
   generateCodeVerifier,
   generateState,
   getValidGoogleAccessToken,
   GOOGLE_OAUTH_SCOPES,
+  GoogleDocCreationCapability,
+  handleGoogleAccountSelection,
+  handleGoogleFolderSelection,
   handleGoogleOAuthCallback,
   handleGoogleOAuthStart,
+  listAuthorizedGoogleAccounts,
   loadGoogleTokens,
   parseAccountIdentifierFromIdToken,
   PendingGoogleAction,
   persistGoogleTokens,
   proposeGoogleDocCreation,
   handleGoogleActionApproval,
+  saveOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
 } from "./googleOAuth";
@@ -46,7 +52,25 @@ function createMockKv() {
 
 function createFakeEnv() {
   const mockKv = createMockKv();
+  const mockAi = {
+    run: async () => ({
+      response: JSON.stringify({
+        isGoogleDocRequest: true,
+        title: "Test doc",
+        content: "Sample text content",
+      }),
+    }),
+  };
+  const mockWorkSession = {
+    idFromName: (name: string) => name,
+    get: (_id: any) => ({
+      init: async () => {},
+      getState: async () => null,
+    }),
+  };
   const fakeEnv: Env = {
+    AI: mockAi as unknown as Ai,
+    WORK_SESSION: mockWorkSession as unknown as DurableObjectNamespace,
     STATE_KV: mockKv as unknown as KVNamespace,
     TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret-999",
     GOOGLE_OAUTH_CLIENT_ID: "mock-google-client-id.apps.googleusercontent.com",
@@ -149,6 +173,181 @@ test("GET /oauth/google/start requires key parameter matching TELEGRAM_WEBHOOK_S
     assert.ok(stateEntry);
     assert.strictEqual(stateEntry.expirationTtl, 1800);
     assert.ok(stateEntry.value.length > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Account picker lists authorized accounts and uses opaque option IDs in callback buttons", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token1", refresh_token: "refresh1", expires_in: 3600 },
+    "account1@enig.com",
+  );
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token2", refresh_token: "refresh2", expires_in: 3600 },
+    "account2@enig.com",
+  );
+
+  const accounts = await listAuthorizedGoogleAccounts(fakeEnv);
+  assert.strictEqual(accounts.length, 2);
+  assert.ok(accounts.includes("account1@enig.com"));
+  assert.ok(accounts.includes("account2@enig.com"));
+
+  let sentButtons: any[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const handled = await GoogleDocCreationCapability.handleIntake(
+      fakeEnv,
+      12345,
+      "Create a document titled Test doc with this content: Sample text content",
+    );
+
+    assert.strictEqual(handled, true);
+    assert.ok(sentButtons.length >= 2);
+
+    // Verify callback data contains ONLY opaque option IDs (no email or tokens)
+    const callbackData1 = sentButtons[0][0].callback_data;
+    assert.match(callbackData1, /^googleaccount:[a-f0-9-]+:[a-f0-9-]+$/);
+    assert.strictEqual(callbackData1.includes("account1@enig.com"), false);
+    assert.strictEqual(callbackData1.includes("token1"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Folder picker queries drive folders using selected account and uses opaque folder callback IDs", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  const workId = "work-picker-100";
+  const opaqueOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "user@enig.com",
+    title: "Project Strategy",
+    content: "Content of strategy document",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let driveQueryCalled = false;
+  let sentButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      driveQueryCalled = true;
+      assert.ok(urlStr.includes("mimeType%3D%27application%2Fvnd.google-apps.folder%27"));
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: "folder-id-abc", name: "Client Proposals" },
+            { id: "folder-id-xyz", name: "Internal Notes" },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    assert.strictEqual(driveQueryCalled, true);
+    assert.ok(sentButtons.length >= 2);
+
+    // Verify callback data contains ONLY opaque folder option IDs (no raw folder ID)
+    const folderCallback = sentButtons[0][0].callback_data;
+    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+$/);
+    assert.strictEqual(folderCallback.includes("folder-id-abc"), false);
+
+    // Verify option is consumed / single-use
+    const replayOption = await consumeOpaqueOption(fakeEnv, workId, opaqueOptionId);
+    assert.strictEqual(replayOption, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Folder selection sets pending action and emits proposal with approve/reject buttons", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-proposal-200";
+  const opaqueFolderId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folder",
+    accountIdentifier: "selected@enig.com",
+    title: "Brand Guidelines",
+    content: "Guidelines for ENIG brand assets.",
+    folderId: "folder-999",
+    folderName: "Brand Assets",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentButtons: any[] = [];
+  let sentText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentText = body.text || "";
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, opaqueFolderId);
+
+    assert.ok(updatedState.pendingGoogleAction);
+    assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");
+    assert.strictEqual(updatedState.pendingGoogleAction.accountIdentifier, "selected@enig.com");
+    assert.strictEqual(updatedState.pendingGoogleAction.folderId, "folder-999");
+
+    assert.match(sentText, /Brand Assets/);
+    assert.match(sentText, /selected@enig.com/);
+    assert.strictEqual(sentButtons[0][0].callback_data, `googleaction:${workId}:approve`);
+    assert.strictEqual(sentButtons[0][1].callback_data, `googleaction:${workId}:reject`);
   } finally {
     globalThis.fetch = originalFetch;
   }
