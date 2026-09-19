@@ -5,6 +5,7 @@ import { generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 import { researchProtocolSummaryList } from "./units/research/protocols";
+import { routeWorkspaceCapabilityAction } from "./actions/registry";
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page
@@ -335,6 +336,10 @@ export async function routeIncomingText(
     );
     return;
   }
+
+  // Conversation stream or DM: check generic workspace capability actions first
+  const capabilityHandled = await routeWorkspaceCapabilityAction(env, chatId, text, threadId);
+  if (capabilityHandled) return;
 
   // Conversation stream or DM: classify task dynamically across specializations
   const marketingCheck = await classifyMarketingTask(env, text);

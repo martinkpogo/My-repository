@@ -55,6 +55,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // Same rationale as lead.discovery_classification -- the search results
   // this evaluates are all attributed to a real, public source URL.
   "lead.discovery_signal_evaluation": "public_sourced",
+  "action.google_doc_intake": "business_sensitive",
 };
 
 /**

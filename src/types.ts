@@ -121,8 +121,8 @@ export interface WorkState {
   workId: string;
   chatId: number;
   threadId?: number;
-  unit: Unit;
-  hat: string;
+  unit?: Unit;
+  hat?: string;
   stage: string;
   awaiting?:
     | "call_notes"
@@ -216,12 +216,17 @@ export interface WorkState {
     handoffTitle: string;
     verifiedFactsAndSources: string;
   };
+
+  /**
+   * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.
+   */
+  pendingGoogleAction?: import("./googleOAuth").PendingGoogleAction;
 }
 
 export interface SessionSummary {
   workId: string;
-  unit: Unit;
-  hat: string;
+  unit?: Unit;
+  hat?: string;
   stage: string;
   label: string;
   updatedAt: string;
