@@ -94,34 +94,17 @@ function createFakeEnv() {
 
 test("1. Natural-language Google Doc request reaches the generic Workspace capability seam", async () => {
   const { fakeEnv } = createFakeEnv();
-  const originalFetch = globalThis.fetch;
 
-  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
-    return new Response(
-      JSON.stringify({
-        is_capability_request: true,
-        capability_type: "google_doc",
-        title: "Test doc",
-        content: "This is a controlled ENIG Google Docs write test.",
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
-  }) as typeof fetch;
+  const res = await classifyWorkspaceCapability(
+    fakeEnv,
+    "Create a document titled Test doc with this content: This is a controlled ENIG Google Docs write test.",
+  );
 
-  try {
-    const res = await classifyWorkspaceCapability(
-      fakeEnv,
-      "Create a document titled Test doc with this content: This is a controlled ENIG Google Docs write test.",
-    );
-
-    assert.strictEqual(res.isCapability, true);
-    assert.strictEqual(res.capability, "google_doc");
-    assert.strictEqual(res.title, "Test doc");
-    assert.strictEqual(res.content, "This is a controlled ENIG Google Docs write test.");
-    assert.strictEqual(res.missingField, undefined);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.strictEqual(res.isCapability, true);
+  assert.strictEqual(res.capability, "google_doc");
+  assert.strictEqual(res.title, "Test doc");
+  assert.strictEqual(res.content, "This is a controlled ENIG Google Docs write test.");
+  assert.strictEqual(res.missingField, undefined);
 });
 
 test("2. Existing Unit/Hat context is preserved when request originates inside an active session", async () => {
@@ -184,7 +167,11 @@ test("5, 7, 8. Authorized Google accounts presented as explicit options with opa
 
   let sentButtons: any[] = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).includes("api.telegram.org")) {
+    const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
+    if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(String(init?.body));
       sentButtons = body.reply_markup?.inline_keyboard || [];
     }
@@ -218,7 +205,11 @@ test("6. No authorized account fails closed and reports blocker without exposing
 
   let sentTelegramText = "";
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).includes("api.telegram.org")) {
+    const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
+    if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(String(init?.body));
       sentTelegramText = body.text || "";
     }
@@ -286,6 +277,9 @@ test("11, 13, 14, 15, 16, 17, 21. Folder listing occurs after account selection,
 
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
     if (urlStr.includes("googleapis.com/drive/v3/files")) {
       driveQueryUrl = urlStr;
       return new Response(
@@ -353,7 +347,11 @@ test("18, 19, 20. Invalid or expired folder option fails closed; valid option bi
 
   let sentButtons: any[] = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).includes("api.telegram.org")) {
+    const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
+    if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(String(init?.body));
       sentButtons = body.reply_markup?.inline_keyboard || [];
     }
@@ -424,6 +422,9 @@ test("22. Pagination uses opaque server-side state without exposing raw Drive ID
   let sentButtons: any[] = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
     if (urlStr.includes("googleapis.com/drive/v3/files")) {
       return new Response(JSON.stringify({ files: fakeFolders }), {
         status: 200,
@@ -481,7 +482,11 @@ test("35. handleWorkspaceCapabilityRequest routes directly to handleTextReply wh
 
   let sentButtons: any[] = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
-    if (String(url).includes("api.telegram.org")) {
+    const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
+    if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(String(init?.body));
       sentButtons = body.reply_markup?.inline_keyboard || [];
     }
@@ -530,6 +535,9 @@ test("26, 27, 28. Approval consumes pending action before execution; reject perf
 
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
+    if (!urlStr.includes("api.telegram.org") && !urlStr.includes("googleapis.com")) {
+      return originalFetch(url, init);
+    }
     if (urlStr.includes("googleapis.com/drive/v3/files")) {
       driveCreated = true;
       return new Response(JSON.stringify({ id: "created-doc-123" }), {
