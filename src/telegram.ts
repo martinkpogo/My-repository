@@ -118,9 +118,9 @@ export async function sendOperationsHatMessage(
 ): Promise<number | undefined> {
   const opsTarget = getOperationsTarget(env);
   if (!opsTarget) {
-    console.error(`sendOperationsHatMessage: Operations stream unconfigured for ${target.hat}`);
+    console.error(`sendOperationsHatMessage: Operations stream unconfigured${target.hat ? ` for ${target.hat}` : ""}`);
     await logActivity(env, {
-      entry: `Operations stream dispatch blocked for ${target.hat} [Stream Target Unconfigured]`,
+      entry: `Operations stream dispatch blocked${target.hat ? ` for ${target.hat}` : ""} [Stream Target Unconfigured]`,
       type: "Blocker",
       area: "Operations",
       decisionRationale: "TELEGRAM_GROUP_CHAT_ID or OPERATIONS_TOPIC_ID missing from environment bindings. Refusing to send operational Hat message.",
@@ -145,11 +145,11 @@ export async function sendConversationHatMessage(
 ): Promise<number | undefined> {
   const convTarget = getConversationTarget(env);
   if (!convTarget) {
-    console.error(`sendConversationHatMessage: Conversation stream unconfigured for ${target.hat}`);
+    console.error(`sendConversationHatMessage: Conversation stream unconfigured${target.hat ? ` for ${target.hat}` : ""}`);
     await logActivity(env, {
-      entry: `Conversation stream dispatch blocked for ${target.hat ?? "Workspace Action"} [Stream Target Unconfigured]`,
+      entry: `Conversation stream dispatch blocked${target.hat ? ` for ${target.hat}` : ""} [Stream Target Unconfigured]`,
       type: "Blocker",
-      ...(target.hat ? { area: target.hat } : { area: "Operations" }),
+      area: target.hat,
       decisionRationale: "TELEGRAM_GROUP_CHAT_ID or CONVERSATION_TOPIC_ID missing from environment bindings. Refusing to send conversation message.",
       outcome: "Blocked",
     }).catch(() => {});
@@ -242,8 +242,7 @@ export interface HatMessageTarget {
 }
 
 function withHatLabel(target: HatMessageTarget, text: string): string {
-  if (!target.hat) return text;
-  return `Hat: ${target.hat}.\n\n${text}`;
+  return target.hat ? `Hat: ${target.hat}.\n\n${text}` : text;
 }
 
 /**

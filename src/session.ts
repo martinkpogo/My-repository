@@ -7,12 +7,11 @@ import * as research from "./units/research/researchAnalyst";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
 import {
-  handleGoogleActionApproval,
   handleGoogleAccountSelection,
-  handleGoogleFolderPage,
   handleGoogleFolderSelection,
+  handleGoogleFolderPage,
+  handleGoogleActionApproval,
 } from "./googleOAuth";
-import { handleGoogleDocInputReply } from "./workspaceCapability";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -80,8 +79,6 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchClarification(this.env, state, text);
         case "research_feedback":
           return research.handleResearchFeedback(this.env, state, text);
-        case "google_doc_input":
-          return handleGoogleDocInputReply(this.env, state, text);
         default:
           return sendMessage(
             this.env,
@@ -142,7 +139,7 @@ export class WorkSession extends DurableObject<Env> {
       await logActivity(this.env, {
         entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
         type: "Activity",
-        ...(state.unit ? { area: state.unit } : { area: "Operations" }),
+        area: state.unit ?? "Operations",
         outcome: "Complete",
       });
       return state;
@@ -215,10 +212,9 @@ export class WorkSession extends DurableObject<Env> {
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);
-      const unitHatLabel = state.unit || state.hat ? `${state.unit ?? "Standalone"}/${state.hat ?? "Workspace Action"}` : "Standalone";
       await sendOperationsMessage(
         this.env,
-        `⚠️ WorkSession ${state.workId} (${unitHatLabel}) execution failed: ${detail.slice(0, 500)}`,
+        `⚠️ WorkSession ${state.workId} (${state.unit ? `${state.unit}/${state.hat}` : "Standalone Capability"}) execution failed: ${detail.slice(0, 500)}`,
       ).catch((notifyErr) => console.error(`WorkSession ${state.workId} failure notification also failed`, notifyErr));
       return state;
     }

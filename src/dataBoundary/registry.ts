@@ -7,11 +7,6 @@ export interface SemanticTaskDefinition {
 }
 
 export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTaskDefinition>> = {
-  "routing.workspace_capability_check": {
-    id: "routing.workspace_capability_check",
-    name: "Routing Workspace Capability Check",
-    description: "Checks if an incoming natural language request is asking to execute a Workspace capability like Google Doc creation.",
-  },
   "routing.enquiry_classification": {
     id: "routing.enquiry_classification",
     name: "Routing Enquiry Classification",
@@ -113,6 +108,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Autonomous Lead Discovery Signal Evaluation",
     description:
       "Evaluates web-search results found by scheduled proactive discovery against the canonical Acquisition Criteria (operating business, problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, evidence threshold). Operates only on public, source-attributed search result content -- never fabricates a decision-maker, contact, or fact not present in that content.",
+  },
+  "action.google_doc_intake": {
+    id: "action.google_doc_intake",
+    name: "Google Doc Intake Classification & Parameter Extraction",
+    description: "Extracts document title and content parameters from natural-language requests for controlled Google Doc creation.",
   },
 };
 

@@ -1,7 +1,6 @@
 import type { ProviderId } from "../ai/types";
 
 export type SemanticTaskId =
-  | "routing.workspace_capability_check"
   | "routing.enquiry_classification"
   | "routing.marketing_specialization_check"
   | "chat.general_reply"
@@ -21,7 +20,8 @@ export type SemanticTaskId =
   | "sales.proposal_revision"
   | "finance.quote_judgment"
   | "lead.discovery_classification"
-  | "lead.discovery_signal_evaluation";
+  | "lead.discovery_signal_evaluation"
+  | "action.google_doc_intake";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

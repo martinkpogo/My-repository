@@ -4,19 +4,25 @@ import type { Env } from "./types";
 import {
   buildGoogleAuthorizeUrl,
   codeChallengeFromVerifier,
+  consumeOpaqueOption,
   createGoogleDoc,
   generateCodeVerifier,
   generateState,
   getValidGoogleAccessToken,
   GOOGLE_OAUTH_SCOPES,
+  GoogleDocCreationCapability,
+  handleGoogleAccountSelection,
+  handleGoogleFolderSelection,
   handleGoogleOAuthCallback,
   handleGoogleOAuthStart,
+  listAuthorizedGoogleAccounts,
   loadGoogleTokens,
   parseAccountIdentifierFromIdToken,
   PendingGoogleAction,
   persistGoogleTokens,
   proposeGoogleDocCreation,
   handleGoogleActionApproval,
+  saveOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
 } from "./googleOAuth";
@@ -46,7 +52,25 @@ function createMockKv() {
 
 function createFakeEnv() {
   const mockKv = createMockKv();
+  const mockAi = {
+    run: async () => ({
+      response: JSON.stringify({
+        isGoogleDocRequest: true,
+        title: "Test doc",
+        content: "Sample text content",
+      }),
+    }),
+  };
+  const mockWorkSession = {
+    idFromName: (name: string) => name,
+    get: (_id: any) => ({
+      init: async () => {},
+      getState: async () => null,
+    }),
+  };
   const fakeEnv: Env = {
+    AI: mockAi as unknown as Ai,
+    WORK_SESSION: mockWorkSession as unknown as DurableObjectNamespace,
     STATE_KV: mockKv as unknown as KVNamespace,
     TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret-999",
     GOOGLE_OAUTH_CLIENT_ID: "mock-google-client-id.apps.googleusercontent.com",
@@ -149,6 +173,449 @@ test("GET /oauth/google/start requires key parameter matching TELEGRAM_WEBHOOK_S
     assert.ok(stateEntry);
     assert.strictEqual(stateEntry.expirationTtl, 1800);
     assert.ok(stateEntry.value.length > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GoogleDocCreationCapability.handleIntake preserves active Unit and Hat context when active session exists", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token1", refresh_token: "refresh1", expires_in: 3600 },
+    "unituser@enig.com",
+  );
+
+  const activeWorkId = "work-active-marketing-99";
+  await fakeEnv.STATE_KV.put("active:12345:1", activeWorkId);
+
+  let initializedUnit: string | undefined;
+  let initializedHat: string | undefined;
+
+  (fakeEnv.WORK_SESSION as any).get = (id: any) => ({
+    init: async (_workId: string, _chatId: number, unit?: string, hat?: string) => {
+      initializedUnit = unit;
+      initializedHat = hat;
+    },
+    getState: async () => {
+      if (id === activeWorkId) {
+        return {
+          workId: activeWorkId,
+          chatId: 12345,
+          unit: "Marketing",
+          hat: "Marketing Strategist",
+          stage: "active",
+        };
+      }
+      return null;
+    },
+  });
+
+  globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
+
+  try {
+    const handled = await GoogleDocCreationCapability.handleIntake(
+      fakeEnv,
+      12345,
+      "Create a document titled Marketing Strategy with content: Full strategy text",
+      1,
+    );
+
+    assert.strictEqual(handled, true);
+    assert.strictEqual(initializedUnit, "Marketing");
+    assert.strictEqual(initializedHat, "Marketing Strategist");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Account picker lists authorized accounts and uses opaque option IDs in callback buttons", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token1", refresh_token: "refresh1", expires_in: 3600 },
+    "account1@enig.com",
+  );
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token2", refresh_token: "refresh2", expires_in: 3600 },
+    "account2@enig.com",
+  );
+
+  const accounts = await listAuthorizedGoogleAccounts(fakeEnv);
+  assert.strictEqual(accounts.length, 2);
+  assert.ok(accounts.includes("account1@enig.com"));
+  assert.ok(accounts.includes("account2@enig.com"));
+
+  let sentButtons: any[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const handled = await GoogleDocCreationCapability.handleIntake(
+      fakeEnv,
+      12345,
+      "Create a document titled Test doc with this content: Sample text content",
+    );
+
+    assert.strictEqual(handled, true);
+    assert.ok(sentButtons.length >= 2);
+
+    // Verify callback data contains ONLY opaque option IDs (no email or tokens)
+    const callbackData1 = sentButtons[0][0].callback_data;
+    assert.match(callbackData1, /^googleaccount:[a-f0-9-]+:[a-f0-9-]+$/);
+    assert.strictEqual(callbackData1.includes("account1@enig.com"), false);
+    assert.strictEqual(callbackData1.includes("token1"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("listAuthorizedGoogleAccounts excludes expired or unusable OAuth records", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  // Valid account token
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "valid-at", refresh_token: "valid-rt", expires_in: 3600 },
+    "active-user@enig.com",
+  );
+
+  // Expired account token without valid refresh capability
+  await fakeEnv.STATE_KV.put(
+    "google_oauth_tokens:expired-user@enig.com",
+    JSON.stringify({
+      access_token: "expired-at",
+      refresh_token: "invalid-rt",
+      expires_at: Date.now() - 100000,
+    }),
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (String(url) === "https://oauth2.googleapis.com/token") {
+      return new Response("Invalid grant", { status: 400 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const usableAccounts = await listAuthorizedGoogleAccounts(fakeEnv);
+    assert.strictEqual(usableAccounts.length, 1);
+    assert.strictEqual(usableAccounts[0], "active-user@enig.com");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Drive folder listing filters out read-only folders lacking write capability (canAddChildren !== true)", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-writer-1", refresh_token: "refresh-writer-1", expires_in: 3600 },
+    "writer@enig.com",
+  );
+
+  const workId = "work-capability-check";
+  const opaqueOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "writer@enig.com",
+    title: "Writable Brief",
+    content: "Content of brief",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: "folder-writable", name: "Writable Projects", capabilities: { canAddChildren: true } },
+            { id: "folder-readonly", name: "Readonly Archive", capabilities: { canAddChildren: false } },
+            { id: "folder-nocaps", name: "Unknown Caps Folder" },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      if (body.reply_markup?.inline_keyboard?.length && String(body.text).includes("writer@enig.com")) {
+        sentButtons = body.reply_markup.inline_keyboard;
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 123 } }), { status: 200 });
+    }
+
+    if (urlStr.includes("api.notion.com")) {
+      return new Response(JSON.stringify({ object: "page", id: "mock-page-id" }), { status: 200 });
+    }
+
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+
+    // Only Writable Projects should be presented (Readonly Archive and Unknown Caps filtered out)
+    assert.strictEqual(sentButtons.length, 1);
+    assert.strictEqual(sentButtons[0][0].text, "📁 Writable Projects");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Folder picker handles Drive API nextPageToken and paginates folders in 10-item Telegram pages", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-page-1", refresh_token: "refresh-page-1", expires_in: 3600 },
+    "pager@enig.com",
+  );
+
+  const workId = "work-pagination-check";
+  const opaqueOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "pager@enig.com",
+    title: "Paginated Brief",
+    content: "Content of brief",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentButtons: any[] = [];
+  let driveFetchCount = 0;
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      driveFetchCount++;
+      const isPage2 = urlStr.includes("pageToken=drive-page-2-token");
+      if (!isPage2) {
+        return new Response(
+          JSON.stringify({
+            nextPageToken: "drive-page-2-token",
+            files: Array.from({ length: 12 }, (_, i) => ({
+              id: `folder-p1-${i}`,
+              name: `Folder P1-${i}`,
+              capabilities: { canAddChildren: true },
+            })),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      } else {
+        return new Response(
+          JSON.stringify({
+            files: Array.from({ length: 5 }, (_, i) => ({
+              id: `folder-p2-${i}`,
+              name: `Folder P2-${i}`,
+              capabilities: { canAddChildren: true },
+            })),
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      if (body.reply_markup?.inline_keyboard?.length) {
+        sentButtons = body.reply_markup.inline_keyboard;
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 123 } }), { status: 200 });
+    }
+
+    if (urlStr.includes("api.notion.com")) {
+      return new Response(JSON.stringify({ object: "page", id: "mock-page-id" }), { status: 200 });
+    }
+
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // 1. Initial account selection (fetches Page 1 from Drive, presents first 10 items)
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    assert.strictEqual(driveFetchCount, 1);
+
+    // 10 folder rows + 1 navigation row ("Next ➡️")
+    assert.strictEqual(sentButtons.length, 11);
+    const navRow = sentButtons[10];
+    assert.strictEqual(navRow[0].text, "Next ➡️");
+
+    const pageNavCallback = navRow[0].callback_data;
+    assert.match(pageNavCallback, /^googlefolderpage:work-pagination-check:[a-f0-9-]+$/);
+
+    // 2. Click "Next ➡️"
+    const opaquePageId = pageNavCallback.split(":")[2];
+    const { handleGoogleFolderPage } = require("./googleOAuth");
+    await handleGoogleFolderPage(fakeEnv, state, opaquePageId);
+
+    // Shows page 2 (7 remaining folders + 1 Prev button)
+    assert.strictEqual(sentButtons.length, 8);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Folder picker queries drive folders using selected account and uses opaque folder callback IDs", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  const workId = "work-picker-100";
+  const opaqueOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "user@enig.com",
+    title: "Project Strategy",
+    content: "Content of strategy document",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let driveQueryCalled = false;
+  let sentButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      driveQueryCalled = true;
+      assert.ok(urlStr.includes("mimeType"));
+      assert.ok(urlStr.includes("application%2Fvnd.google-apps.folder"));
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: "folder-id-abc", name: "Client Proposals", capabilities: { canAddChildren: true } },
+            { id: "folder-id-xyz", name: "Internal Notes", capabilities: { canAddChildren: true } },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      if (body.reply_markup?.inline_keyboard?.length) {
+        sentButtons = body.reply_markup.inline_keyboard;
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 123 } }), { status: 200 });
+    }
+
+    if (urlStr.includes("api.notion.com")) {
+      return new Response(JSON.stringify({ object: "page", id: "mock-page-id" }), { status: 200 });
+    }
+
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    assert.strictEqual(driveQueryCalled, true);
+    assert.ok(sentButtons.length >= 2);
+
+    // Verify callback data contains ONLY opaque folder option IDs (no raw folder ID)
+    const folderCallback = sentButtons[0][0].callback_data;
+    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+$/);
+    assert.strictEqual(folderCallback.includes("folder-id-abc"), false);
+
+    // Verify option is consumed / single-use
+    const replayOption = await consumeOpaqueOption(fakeEnv, workId, opaqueOptionId);
+    assert.strictEqual(replayOption, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Folder selection sets pending action and emits proposal with approve/reject buttons", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-proposal-200";
+  const opaqueFolderId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folder",
+    accountIdentifier: "selected@enig.com",
+    title: "Brand Guidelines",
+    content: "Guidelines for ENIG brand assets.",
+    folderId: "folder-999",
+    folderName: "Brand Assets",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentButtons: any[] = [];
+  let sentText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentText = body.text || "";
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, opaqueFolderId);
+
+    assert.ok(updatedState.pendingGoogleAction);
+    assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");
+    assert.strictEqual(updatedState.pendingGoogleAction.accountIdentifier, "selected@enig.com");
+    assert.strictEqual(updatedState.pendingGoogleAction.folderId, "folder-999");
+
+    assert.match(sentText, /Brand Assets/);
+    assert.match(sentText, /selected@enig.com/);
+    assert.strictEqual(sentButtons[0][0].callback_data, `googleaction:${workId}:approve`);
+    assert.strictEqual(sentButtons[0][1].callback_data, `googleaction:${workId}:reject`);
   } finally {
     globalThis.fetch = originalFetch;
   }

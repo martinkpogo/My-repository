@@ -5,7 +5,10 @@ import { generalDmReply } from "./chat";
 import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 import { researchProtocolSummaryList } from "./units/research/protocols";
-import { handleWorkspaceCapabilityRequest } from "./workspaceCapability";
+import { registerActionCapability, routeWorkspaceCapabilityAction } from "./actions/registry";
+import { GoogleDocCreationCapability } from "./googleOAuth";
+
+registerActionCapability(GoogleDocCreationCapability);
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page
@@ -337,9 +340,9 @@ export async function routeIncomingText(
     return;
   }
 
-  // Generic Workspace capability intake seam (e.g. Google Doc creation)
-  const handledCap = await handleWorkspaceCapabilityRequest(env, chatId, text, threadId);
-  if (handledCap) return;
+  // Conversation stream or DM: check generic workspace capability actions first
+  const capabilityHandled = await routeWorkspaceCapabilityAction(env, chatId, text, threadId);
+  if (capabilityHandled) return;
 
   // Conversation stream or DM: classify task dynamically across specializations
   const marketingCheck = await classifyMarketingTask(env, text);

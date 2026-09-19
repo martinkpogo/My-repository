@@ -28,7 +28,6 @@ import type {
  * (opaque tokens + sanitized business text only, never a real name).
  */
 export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId, SensitivityLevel>>> = {
-  "routing.workspace_capability_check": "business_sensitive",
   "routing.enquiry_classification": "client_confidential",
   "routing.marketing_specialization_check": "client_confidential",
   "chat.general_reply": "client_confidential",
@@ -56,6 +55,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // Same rationale as lead.discovery_classification -- the search results
   // this evaluates are all attributed to a real, public source URL.
   "lead.discovery_signal_evaluation": "public_sourced",
+  "action.google_doc_intake": "business_sensitive",
 };
 
 /**

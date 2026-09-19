@@ -137,8 +137,7 @@ export interface WorkState {
     | "marketing_feedback"
     | "marketing_clarification"
     | "research_clarification"
-    | "research_feedback"
-    | "google_doc_input";
+    | "research_feedback";
   createdAt: string;
   updatedAt: string;
 

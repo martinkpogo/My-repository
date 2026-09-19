@@ -67,8 +67,8 @@ export const ALL_HATS: HatIdentity[] = [
   ...MARKETING_HAT_NAMES.map((name) => MARKETING_HAT_REGISTRY[name] as HatIdentity),
 ];
 
-export function isMarketingHat(hat: string): hat is MarketingHatName {
-  return (MARKETING_HAT_NAMES as string[]).includes(hat);
+export function isMarketingHat(hat?: string): hat is MarketingHatName {
+  return typeof hat === "string" && (MARKETING_HAT_NAMES as string[]).includes(hat);
 }
 
 /** Short, flat summary of every Marketing Hat — used for intake classification, never the full per-Hat detail. */

@@ -395,7 +395,7 @@ export async function handleMarketingFeedback(env: Env, state: WorkState, text: 
 /** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
 export async function handleMarketingClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const augmented = `${state.marketingTaskText ?? ""}\n\nAdditional detail: ${text}`;
-  if (state.hat && isMarketingHat(state.hat)) {
+  if (isMarketingHat(state.hat)) {
     state.marketingTaskText = augmented;
     return runMarketingHat(env, state);
   }
