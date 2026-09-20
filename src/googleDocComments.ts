@@ -13,7 +13,14 @@ const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
 interface DriveCommentAuthor {
   displayName?: string;
-  emailAddress?: string;
+  // Google Drive's Comments API frequently omits emailAddress for privacy
+  // (confirmed live: real comments came back with no emailAddress at all,
+  // even from the doc's own authorized account) -- "me" is the reliable
+  // signal instead: true iff this comment was authored by the same
+  // identity as whoever's access token was used to fetch it, which is
+  // exactly "was this the doc's own authorized account" in this
+  // single-account-per-doc design, without depending on email visibility.
+  me?: boolean;
 }
 
 interface DriveComment {
@@ -27,7 +34,7 @@ interface DriveComment {
 async function fetchComments(token: string, documentId: string): Promise<DriveComment[]> {
   const url =
     `https://www.googleapis.com/drive/v3/files/${documentId}/comments` +
-    `?fields=comments(id,content,resolved,author(displayName,emailAddress),quotedFileContent(value))` +
+    `?fields=comments(id,content,resolved,author(displayName,me),quotedFileContent(value))` +
     `&pageSize=100&includeDeleted=false`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
@@ -131,13 +138,16 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   // Access control: only the doc's own authorized Google identity may
   // trigger an edit via comment -- any other commenter's request is
   // ignored (marked processed so it isn't re-checked forever, but never
-  // acted on or replied to).
-  if (comment.author?.emailAddress !== doc.accountIdentifier) {
+  // acted on or replied to). "me" (not emailAddress, which Drive's
+  // Comments API frequently omits) is the reliable signal: true iff this
+  // comment's author is the same identity as the access token used to
+  // fetch it, i.e. the doc's own authorized account.
+  if (comment.author?.me !== true) {
     await markProcessed(env, comment.id);
     return {
       handled: false,
       outcome: "unauthorized_author",
-      detail: `comment author '${comment.author?.emailAddress ?? "unknown"}' !== watched account '${doc.accountIdentifier}'`,
+      detail: `comment author.me=${comment.author?.me ?? "undefined"} (displayName='${comment.author?.displayName ?? "unknown"}')`,
     };
   }
 
