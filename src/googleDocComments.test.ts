@@ -61,7 +61,6 @@ function createFakeEnv() {
 
 const DOC_ID = "watched-doc-1";
 const OWNER_EMAIL = "owner@enig.com";
-const OTHER_EMAIL = "someone-else@example.com";
 
 async function setUpWatchedDoc(fakeEnv: Env) {
   await persistGoogleTokens(
@@ -168,7 +167,7 @@ test("applies a comment-anchored edit from the doc's own authorized account, rep
         id: "comment-1",
         content: 'change to "Monday"',
         resolved: false,
-        author: { emailAddress: OWNER_EMAIL, displayName: "Owner" },
+        author: { me: true, displayName: "Owner" },
         quotedFileContent: { value: "Friday" },
       },
     ],
@@ -217,7 +216,7 @@ test("ignores a comment from anyone other than the doc's own authorized account 
         id: "comment-2",
         content: 'change to "Monday"',
         resolved: false,
-        author: { emailAddress: OTHER_EMAIL, displayName: "Someone Else" },
+        author: { me: false, displayName: "Someone Else" },
         quotedFileContent: { value: "Friday" },
       },
     ],
@@ -258,7 +257,7 @@ test("asks for clarification when the comment has no anchored selection, without
         id: "comment-3",
         content: "please fix the date",
         resolved: false,
-        author: { emailAddress: OWNER_EMAIL },
+        author: { me: true },
         // no quotedFileContent -- a general, unanchored comment
       },
     ],
@@ -295,7 +294,7 @@ test("fails closed and asks for a unique selection when the anchored text appear
         id: "comment-4",
         content: 'change to "Monday"',
         resolved: false,
-        author: { emailAddress: OWNER_EMAIL },
+        author: { me: true },
         quotedFileContent: { value: "Friday" },
       },
     ],
@@ -335,7 +334,7 @@ test("asks for clarification when the AI cannot determine a specific replacement
         id: "comment-5",
         content: "hmm not sure about this",
         resolved: false,
-        author: { emailAddress: OWNER_EMAIL },
+        author: { me: true },
         quotedFileContent: { value: "Friday" },
       },
     ],
@@ -372,7 +371,7 @@ test("skips an already-resolved comment without replying or editing", async (t) 
         id: "comment-6",
         content: 'change to "Monday"',
         resolved: true,
-        author: { emailAddress: OWNER_EMAIL },
+        author: { me: true },
         quotedFileContent: { value: "Friday" },
       },
     ],
@@ -410,7 +409,7 @@ test("a comment already marked processed is never re-executed on a later poll", 
         id: "comment-7",
         content: 'change to "Monday"',
         resolved: false,
-        author: { emailAddress: OWNER_EMAIL },
+        author: { me: true },
         quotedFileContent: { value: "Friday" },
       },
     ],
