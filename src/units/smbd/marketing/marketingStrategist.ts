@@ -5,7 +5,8 @@ import type { MarketingHatDefinition } from "../../../hats/types";
  * Transcribed one-time from the canonical, Martin-approved Hat Definition
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Marketing Strategist"; see Activity Log "Marketing
- * Strategist Hat defined"). Not fetched live — see marketingEngine.ts for why.
+ * Strategist Hat defined"). Not fetched live — see ../../../hats/registry.ts
+ * for why.
  */
 export const MARKETING_STRATEGIST: MarketingHatDefinition = {
   name: "Marketing Strategist",
