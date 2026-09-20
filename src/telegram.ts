@@ -48,13 +48,6 @@ export function getConversationTarget(env: Env): StreamTarget | null {
   let threadId: number | undefined;
   if (env.CONVERSATION_TOPIC_ID) {
     threadId = Number(env.CONVERSATION_TOPIC_ID);
-  } else if (env.UNIT_TOPIC_MAP) {
-    try {
-      const map = JSON.parse(env.UNIT_TOPIC_MAP);
-      if (map["Conversation"] !== undefined) threadId = Number(map["Conversation"]);
-    } catch {
-      // JSON parse error
-    }
   }
 
   if (threadId === undefined || !Number.isFinite(threadId)) return null;
@@ -73,18 +66,9 @@ export function getOperationsTarget(env: Env): StreamTarget | null {
   let threadId: number | undefined;
   if (env.OPERATIONS_TOPIC_ID) {
     threadId = Number(env.OPERATIONS_TOPIC_ID);
-  } else if (env.UNIT_TOPIC_MAP) {
-    try {
-      const map = JSON.parse(env.UNIT_TOPIC_MAP);
-      if (map["Operations"] !== undefined) threadId = Number(map["Operations"]);
-    } catch {
-      // JSON parse error
-    }
-  }
-  if (threadId === undefined || !Number.isFinite(threadId)) {
-    threadId = 14; // Default Operations thread ID when group chat ID is provided
   }
 
+  if (threadId === undefined || !Number.isFinite(threadId)) return null;
   return { chatId, threadId };
 }
 

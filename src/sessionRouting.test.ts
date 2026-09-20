@@ -20,14 +20,15 @@ function createMockKv() {
   };
 }
 
+import { resolveStreamForThread } from "./router";
+
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   const kv = createMockKv();
   return {
     MARTIN_TELEGRAM_USER_ID: "123456",
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
-    CONVERSATION_TOPIC_ID: "100",
-    OPERATIONS_TOPIC_ID: "14",
-    UNIT_TOPIC_MAP: '{"Conversation": 100, "Operations": 14}',
+    CONVERSATION_TOPIC_ID: "604",
+    OPERATIONS_TOPIC_ID: "588",
     TELEGRAM_BOT_TOKEN: "test-token",
     NOTION_TOKEN: "test-token",
     NOTION_VERSION: "2025-09-03",
@@ -36,27 +37,60 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   } as Env;
 }
 
-test("1. Stream target helpers resolve correct Conversation and Operations targets", () => {
+test("1. Stream target helpers resolve correct Conversation (604) and Operations (588) targets", () => {
   const env = fakeEnv();
   const conv = getConversationTarget(env);
   assert.ok(conv !== null);
   assert.strictEqual(conv.chatId, -1004435157576);
-  assert.strictEqual(conv.threadId, 100);
+  assert.strictEqual(conv.threadId, 604);
 
   const ops = getOperationsTarget(env);
   assert.ok(ops !== null);
   assert.strictEqual(ops.chatId, -1004435157576);
-  assert.strictEqual(ops.threadId, 14);
+  assert.strictEqual(ops.threadId, 588);
 });
 
-test("1b. Stream target helpers fail closed when configuration is missing without cross-stream fallback", async () => {
-  const unconfiguredEnv = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: undefined, CONVERSATION_TOPIC_ID: undefined, OPERATIONS_TOPIC_ID: undefined, UNIT_TOPIC_MAP: undefined });
+test("1b. Stream target helpers fail closed when configuration is missing without cross-stream or topic 14 fallback", async () => {
+  const unconfiguredEnv = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576", CONVERSATION_TOPIC_ID: undefined, OPERATIONS_TOPIC_ID: undefined });
 
   assert.strictEqual(getConversationTarget(unconfiguredEnv), null);
-  assert.strictEqual(getOperationsTarget(unconfiguredEnv), null);
+  assert.strictEqual(getOperationsTarget(unconfiguredEnv), null, "missing Operations configuration must fail closed and return null rather than defaulting to 14");
 
   const opsResult = await sendOperationsMessage(unconfiguredEnv, "test telemetry");
   assert.strictEqual(opsResult, undefined, "unconfigured operations stream must fail closed returning undefined");
+});
+
+test("1c. resolveStreamForThread strictly resolves 604 -> conversation, 588 -> operations, and legacy/other IDs -> unmapped", () => {
+  const env = fakeEnv();
+
+  assert.strictEqual(resolveStreamForThread(env, 604), "conversation");
+  assert.strictEqual(resolveStreamForThread(env, 588), "operations");
+  assert.strictEqual(resolveStreamForThread(env, 14), "unmapped", "legacy topic 14 must resolve to unmapped");
+  assert.strictEqual(resolveStreamForThread(env, 393), "unmapped", "legacy topic 393 must resolve to unmapped");
+  assert.strictEqual(resolveStreamForThread(env, 399), "unmapped", "legacy topic 399 must resolve to unmapped");
+  assert.strictEqual(resolveStreamForThread(env, 999), "unmapped");
+});
+
+test("1d. Supergroup main chat (undefined message_thread_id) and private DMs do NOT trigger Hat execution", async () => {
+  const env = fakeEnv();
+  let hatTriggered = false;
+
+  (env as any).WORK_SESSION = {
+    idFromName: (id: string) => id,
+    get: (_id: string) => ({
+      getState: async () => null,
+      handleMarketingRequest: async () => { hatTriggered = true; },
+      handleIncomingEnquiry: async () => { hatTriggered = true; },
+    }),
+  };
+
+  // 1. Supergroup General/main chat (chatId === groupChatId, threadId === undefined)
+  await routeIncomingText(env, -1004435157576, "We are a bakery chain needing marketing strategy", undefined);
+  assert.strictEqual(hatTriggered, false, "General supergroup chat must NOT trigger Hat execution");
+
+  // 2. Private DM (chatId !== groupChatId, threadId === undefined)
+  await routeIncomingText(env, 123456, "Define our Q2 marketing objectives", undefined);
+  assert.strictEqual(hatTriggered, false, "Private DM must NOT trigger Hat execution");
 });
 
 test("2. reply_msg KV helper sets and retrieves reply message workId mappings", async () => {
@@ -145,34 +179,34 @@ test("5. Multi-session concurrency: two simultaneous awaiting WorkSessions in DM
   assert.strictEqual(routedSessions[1], "work-session-1");
 });
 
-test("6. Legacy WorkSession compatibility: non-DM Unit topic active pointers are preserved for backward compatibility", async () => {
-  const env = fakeEnv();
-  // Legacy active pointer in Marketing topic (393)
-  await env.STATE_KV.put("active:123456:393", "legacy-marketing-session");
-
-  let routedLegacySession: string | null = null;
-  (env as any).WORK_SESSION = {
-    idFromName: (id: string) => id,
-    get: (id: string) => ({
-      getState: async () => ({ workId: id, awaiting: "marketing_feedback" }),
-      handleTextReply: async () => {
-        routedLegacySession = id;
-      },
-    }),
-  };
-
-  // Message sent directly in the legacy Marketing topic thread without reply-to
-  await routeIncomingText(env, 123456, "Marketing feedback in legacy topic", 393);
-  assert.strictEqual(routedLegacySession, "legacy-marketing-session", "legacy non-DM topic active pointer is preserved for backward compatibility");
-});
-
-test("7. Operations stream messages emit to Operations topic without touching DM or conversation active pointers", async (t) => {
+test("6. Unmapped topics (e.g. legacy topics 393, 14) block Hat execution and inform user", async (t) => {
   const env = fakeEnv();
   const sentPayloads: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_url: string, init: any) => {
-    sentPayloads.push(JSON.parse(init.body));
+    if (init?.body) sentPayloads.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 888 } }), { status: 200 });
+  }) as typeof fetch;
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // Message sent in legacy topic thread 393
+  await routeIncomingText(env, -1004435157576, "Marketing feedback in legacy topic", 393);
+
+  assert.strictEqual(sentPayloads.length, 1);
+  assert.strictEqual(sentPayloads[0].text, "This topic isn't mapped to a Stream yet.");
+});
+
+test("7. Operations stream messages emit to Operations topic 588 without touching DM or conversation active pointers", async (t) => {
+  const env = fakeEnv();
+  const sentPayloads: any[] = [];
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    if (init?.body) sentPayloads.push(JSON.parse(init.body));
     return new Response(JSON.stringify({ ok: true, result: { message_id: 888 } }), { status: 200 });
   }) as typeof fetch;
 
@@ -184,7 +218,7 @@ test("7. Operations stream messages emit to Operations topic without touching DM
 
   assert.strictEqual(sentPayloads.length, 1);
   assert.strictEqual(sentPayloads[0].chat_id, -1004435157576, "must route to Operations group chat ID");
-  assert.strictEqual(sentPayloads[0].message_thread_id, 14, "must route to Operations thread ID (14)");
+  assert.strictEqual(sentPayloads[0].message_thread_id, 588, "must route to Operations thread ID (588)");
 });
 
 test("8. sendHatMessage automatically registers reply_msg mapping in KV when target has workId", async (t) => {
