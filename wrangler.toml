@@ -50,6 +50,16 @@ UNIT_TOPIC_MAP = '{"Marketing": 393, "Business Development": 397, "Sales": 399, 
 # The ENIG HQ Supergroup's chat id — where email-sourced enquiries (and
 # any other session-less notification we choose to send there) land.
 TELEGRAM_GROUP_CHAT_ID = "-1004435157576"
+# The Workspace stream topic (interactive Hat/decision requests) in the
+# ENIG HQ Supergroup. Set live in the Cloudflare dashboard when the
+# two-stream architecture shipped; declared here to keep this file in
+# sync with the deployed configuration.
+WORKSPACE_TOPIC_ID = "604"
+# The Operations stream topic (background operational telemetry/system
+# reporting) in the ENIG HQ Supergroup. Set live in the Cloudflare
+# dashboard when the two-stream architecture shipped; declared here to
+# keep this file in sync with the deployed configuration.
+OPERATIONS_TOPIC_ID = "588"
 
 # Secrets (set with `wrangler secret put <NAME>`, never committed):
 #   TELEGRAM_BOT_TOKEN
