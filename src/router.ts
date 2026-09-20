@@ -83,22 +83,6 @@ export function resolveStreamForThread(env: Env, threadId?: number): StreamType 
     return "operations";
   }
 
-  if (env.UNIT_TOPIC_MAP) {
-    try {
-      const map: Record<string, number> = JSON.parse(env.UNIT_TOPIC_MAP);
-      if (map["Conversation"] !== undefined && Number(map["Conversation"]) === threadId) {
-        return "conversation";
-      }
-      if (map["Operations"] !== undefined && Number(map["Operations"]) === threadId) {
-        return "operations";
-      }
-      const isLegacyUnit = Object.values(map).some((id) => Number(id) === threadId);
-      if (isLegacyUnit) return "conversation";
-    } catch {
-      // JSON parse error
-    }
-  }
-
   return "unmapped";
 }
 
@@ -320,6 +304,17 @@ export async function routeIncomingText(
     }
   }
 
+  const groupChatId = env.TELEGRAM_GROUP_CHAT_ID ? Number(env.TELEGRAM_GROUP_CHAT_ID) : undefined;
+  if (groupChatId !== undefined && chatId === groupChatId && threadId === undefined) {
+    // General/main chat in supergroup: not an interactive Hat workspace. Fail closed.
+    return;
+  }
+
+  if (threadId === undefined) {
+    // Private DM: not an ENIG interactive workspace. Fail closed.
+    return;
+  }
+
   const streamType = resolveStreamForThread(env, threadId);
   if (streamType === "unmapped") {
     await sendMessage(env, chatId, "This topic isn't mapped to a Stream yet.", undefined, threadId);
@@ -337,11 +332,11 @@ export async function routeIncomingText(
     return;
   }
 
-  // Conversation stream or DM: check generic workspace capability actions first
+  // Conversation stream: check generic workspace capability actions first
   const capabilityHandled = await routeWorkspaceCapabilityAction(env, chatId, text, threadId);
   if (capabilityHandled) return;
 
-  // Conversation stream or DM: classify task dynamically across specializations
+  // Conversation stream: classify task dynamically across specializations
   const marketingCheck = await classifyMarketingTask(env, text);
   if (marketingCheck === "marketing") {
     const workId = newWorkId();
