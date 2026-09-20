@@ -22,6 +22,7 @@ import {
   handleGoogleOAuthStart,
   handleGoogleOAuthCallback,
   handleGoogleDriveTest,
+  cleanupDefaultGoogleAccount,
 } from "./googleOAuth";
 import { pollGoogleDocComments } from "./googleDocComments";
 
@@ -127,6 +128,30 @@ export default {
     // Google Drive read-only connectivity test endpoint. Gated on the webhook secret key parameter.
     if (url.pathname === "/admin/test-google-drive" && request.method === "GET") {
       return handleGoogleDriveTest(request, env);
+    }
+
+    // One-time cleanup for the "default"-keyed Google account left behind
+    // by authorizations that predate GOOGLE_OAUTH_SCOPES including
+    // "openid"/"email" -- see cleanupDefaultGoogleAccount's own doc
+    // comment. Safe to call repeatedly: a no-op once the "default" token
+    // is gone.
+    if (url.pathname === "/admin/cleanup-default-google-account" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      try {
+        const result = await cleanupDefaultGoogleAccount(env);
+        return new Response(JSON.stringify({ ok: true, ...result }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        console.error("Unhandled error in /admin/cleanup-default-google-account", err);
+        return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
     }
 
     // Read.ai redirects the browser here after you sign in and consent.
