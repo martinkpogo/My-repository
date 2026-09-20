@@ -461,7 +461,7 @@ function fakeApprovalEnv(): any {
     NOTION_TOKEN: "test-notion-token",
     NOTION_VERSION: "2025-09-03",
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
-    CONVERSATION_TOPIC_ID: "100",
+    WORKSPACE_TOPIC_ID: "100",
     OPERATIONS_TOPIC_ID: "14",
     HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
     ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",

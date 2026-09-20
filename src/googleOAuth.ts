@@ -1,6 +1,6 @@
 import type { Env, WorkState } from "./types";
 import { logActivity } from "./log";
-import { HatMessageTarget, sendConversationHatMessage, sendOperationsMessage } from "./telegram";
+import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from "./telegram";
 import { aiJson } from "./ai";
 import { ActionCapability, registerActionCapability } from "./actions/registry";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
@@ -665,7 +665,7 @@ export async function proposeGoogleDocCreation(
   };
 
   if (!title || !content || !folderId || !accountIdentifier) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       "⚠️ Cannot propose Google Doc creation: missing title, content, folder ID, or account identifier.",
@@ -693,7 +693,7 @@ export async function proposeGoogleDocCreation(
     ],
   ];
 
-  await sendConversationHatMessage(env, target, messageText, buttons);
+  await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
     entry: "Google Doc creation proposed",
@@ -776,7 +776,7 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
     const target: HatMessageTarget = { chatId, threadId };
 
     if (!title || !content) {
-      await sendConversationHatMessage(
+      await sendWorkspaceHatMessage(
         env,
         target,
         "⚠️ I recognized a request to create a Google Doc, but the document Title or Content is missing. Please specify both the Title and Content.",
@@ -786,7 +786,7 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
 
     const authorizedAccounts = await listAuthorizedGoogleAccounts(env);
     if (authorizedAccounts.length === 0) {
-      await sendConversationHatMessage(
+      await sendWorkspaceHatMessage(
         env,
         target,
         "⚠️ Cannot create Google Doc: no authorized Google Workspace account found. Please visit `/oauth/google/start?key=...` in your browser to authorize an account first.",
@@ -811,7 +811,7 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
     }
 
     const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Title*: ${title}\n\nSelect the authorized Google account to use:`;
-    await sendConversationHatMessage(env, { chatId, threadId, workId }, messageText, buttons);
+    await sendWorkspaceHatMessage(env, { chatId, threadId, workId }, messageText, buttons);
 
     await logActivity(env, {
       entry: "Google Doc intake initiated",
@@ -840,7 +840,7 @@ export async function handleGoogleAccountSelection(
 
   const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
   if (!option || option.kind !== "account" || !option.accountIdentifier) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       "⚠️ That account selection option is invalid or expired. Please submit the request again.",
@@ -852,7 +852,7 @@ export async function handleGoogleAccountSelection(
 
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       `⚠️ Could not retrieve valid credentials for account '${accountIdentifier}'. Please re-authorize via /oauth/google/start.`,
@@ -872,7 +872,7 @@ export async function handleGoogleAccountSelection(
       },
     );
   } catch (err) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       `⚠️ Network error listing Google Drive folders for account '${accountIdentifier}'.`,
@@ -881,7 +881,7 @@ export async function handleGoogleAccountSelection(
   }
 
   if (!folderRes.ok) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
@@ -893,7 +893,7 @@ export async function handleGoogleAccountSelection(
   try {
     folderData = await folderRes.json();
   } catch {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       "⚠️ Invalid JSON response from Google Drive folder query.",
@@ -903,7 +903,7 @@ export async function handleGoogleAccountSelection(
 
   const folders = (folderData.files ?? []).sort((a, b) => a.name.localeCompare(b.name));
   if (folders.length === 0) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       `⚠️ No accessible Drive folders found for account '${accountIdentifier}'.`,
@@ -925,7 +925,7 @@ export async function handleGoogleAccountSelection(
   }
 
   const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
-  await sendConversationHatMessage(env, target, messageText, buttons);
+  await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
     entry: "Google Drive folders presented",
@@ -951,7 +951,7 @@ export async function handleGoogleFolderSelection(
 
   const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
   if (!option || option.kind !== "folder" || !option.folderId) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
@@ -979,7 +979,7 @@ export async function handleGoogleFolderSelection(
     ],
   ];
 
-  await sendConversationHatMessage(env, target, messageText, buttons);
+  await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
     entry: "Google Doc creation proposed",
@@ -1007,7 +1007,7 @@ export async function handleGoogleActionApproval(
   };
 
   if (!action || action.type !== "create_doc") {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       "No valid pending Google action found for this work item.",
@@ -1024,7 +1024,7 @@ export async function handleGoogleActionApproval(
       outcome: "Blocked",
     });
 
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       `Google Doc creation rejected for *${action.title}*. No document was created.`,
@@ -1036,7 +1036,7 @@ export async function handleGoogleActionApproval(
   const result = await createGoogleDoc(env, action);
 
   if (!result.ok) {
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       target,
       `⚠️ Google Doc creation failed during ${result.stage} stage: ${result.error}`,
@@ -1044,7 +1044,7 @@ export async function handleGoogleActionApproval(
     return state;
   }
 
-  await sendConversationHatMessage(
+  await sendWorkspaceHatMessage(
     env,
     target,
     `✅ Google Doc created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.documentUrl}`,
