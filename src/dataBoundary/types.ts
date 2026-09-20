@@ -21,7 +21,8 @@ export type SemanticTaskId =
   | "finance.quote_judgment"
   | "lead.discovery_classification"
   | "lead.discovery_signal_evaluation"
-  | "action.google_doc_intake";
+  | "action.google_doc_intake"
+  | "action.google_doc_comment_edit";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

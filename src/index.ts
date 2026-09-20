@@ -23,6 +23,7 @@ import {
   handleGoogleOAuthCallback,
   handleGoogleDriveTest,
 } from "./googleOAuth";
+import { pollGoogleDocComments } from "./googleDocComments";
 
 export { WorkSession } from "./session";
 
@@ -252,6 +253,34 @@ export default {
           Number(env.MARTIN_TELEGRAM_USER_ID),
           `⚠️ The scheduled Lead discovery run failed unexpectedly. Logged for review — will retry next cycle.`,
         ).catch((notifyErr) => console.error("Failed to notify Martin of lead-discovery failure", notifyErr));
+        return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
+    // Comment-triggered Google Doc editing -- same external-cron-hits-an-
+    // admin-endpoint pattern as /admin/run-finance-discovery and
+    // /admin/run-lead-discovery above. Meant to be hit every 30-60s by an
+    // external scheduler (cron-job.org): Google Drive has no push
+    // notification for comment events (the X-Goog-Changed header's
+    // tracked change types are content/properties/parents/children/
+    // permissions -- comments are not among them, verified against
+    // Drive's own API docs), so polling is the only option here, not a
+    // fallback for a push mechanism that doesn't exist.
+    if (url.pathname === "/admin/poll-google-doc-comments" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      try {
+        const result = await pollGoogleDocComments(env);
+        return new Response(JSON.stringify({ ok: true, ...result }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        console.error("Unhandled error in /admin/poll-google-doc-comments", err);
         return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
           status: 500,
           headers: { "content-type": "application/json" },

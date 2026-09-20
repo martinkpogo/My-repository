@@ -114,6 +114,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Google Doc Intake Classification & Parameter Extraction",
     description: "Extracts document title and content parameters from natural-language requests for controlled Google Doc creation.",
   },
+  "action.google_doc_comment_edit": {
+    id: "action.google_doc_comment_edit",
+    name: "Google Doc Comment-Triggered Edit Interpretation",
+    description:
+      "Given the exact text a Google Docs comment is anchored to and the comment's own instruction, determines the specific replacement text -- never which text to target (that comes from the comment's own anchor, not the AI), and never invents content beyond what the comment reasonably implies.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
