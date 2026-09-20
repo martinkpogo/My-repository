@@ -126,6 +126,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Extracts a sheet title and initial header/data rows from natural-language requests for controlled Google Sheet creation (e.g. a content calendar).",
   },
+  "action.google_sheet_comment_edit": {
+    id: "action.google_sheet_comment_edit",
+    name: "Google Sheet Comment-Triggered Edit Interpretation",
+    description:
+      "Given the exact cell content a Google Sheets comment is anchored to and the comment's own instruction, determines the specific replacement value for that cell -- never which cell to target (that comes from the comment's own anchor, not the AI), and never invents content beyond what the comment reasonably implies.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
