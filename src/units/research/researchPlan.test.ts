@@ -73,11 +73,14 @@ function mockChatCompletion(dimensions: Array<{ protocol: string; subQuestion: s
 test("generateResearchPlan makes one independent AI call per selected protocol, not one combined call -- the fix for multi-protocol requests blowing past free-tier size limits", async () => {
   const originalFetch = globalThis.fetch;
   const requestBodies: any[] = [];
-  globalThis.fetch = (async (_url: string, init: any) => {
-    const body = JSON.parse(init.body);
-    requestBodies.push(body);
-    const protocol = body.messages[0].content.includes("Industry research reports, benchmark data") ? "market_industry" : "competitive";
-    return mockChatCompletion([{ protocol, subQuestion: `Sub-question for ${protocol}` }]);
+  globalThis.fetch = (async (url: string | URL | Request, init: any) => {
+    if (String(url) === "https://api.groq.com/openai/v1/chat/completions") {
+      const body = JSON.parse(init.body);
+      requestBodies.push(body);
+      const protocol = body.messages[0].content.includes("Industry research reports, benchmark data") ? "market_industry" : "competitive";
+      return mockChatCompletion([{ protocol, subQuestion: `Sub-question for ${protocol}` }]);
+    }
+    return originalFetch(url, init);
   }) as typeof fetch;
 
   try {
@@ -96,14 +99,17 @@ test("generateResearchPlan makes one independent AI call per selected protocol, 
 
 test("generateResearchPlan returns a partial plan when only some protocols' calls succeed -- one protocol's failure no longer fails the whole plan", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (_url: string, init: any) => {
-    const body = JSON.parse(init.body);
-    const isMarket = body.messages[0].content.includes("Industry research reports, benchmark data");
-    if (!isMarket) {
-      // Simulates a provider returning unparsable output for this one protocol's call.
-      return new Response("not valid json", { status: 200 });
+  globalThis.fetch = (async (url: string | URL | Request, init: any) => {
+    if (String(url) === "https://api.groq.com/openai/v1/chat/completions") {
+      const body = JSON.parse(init.body);
+      const isMarket = body.messages[0].content.includes("Industry research reports, benchmark data");
+      if (!isMarket) {
+        // Simulates a provider returning unparsable output for this one protocol's call.
+        return new Response("not valid json", { status: 200 });
+      }
+      return mockChatCompletion([{ protocol: "market_industry", subQuestion: "What is the market size?" }]);
     }
-    return mockChatCompletion([{ protocol: "market_industry", subQuestion: "What is the market size?" }]);
+    return originalFetch(url, init);
   }) as typeof fetch;
 
   try {
@@ -120,7 +126,12 @@ test("generateResearchPlan returns a partial plan when only some protocols' call
 
 test("generateResearchPlan returns null only when every protocol's call fails", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response("not valid json", { status: 200 })) as typeof fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init: any) => {
+    if (String(url) === "https://api.groq.com/openai/v1/chat/completions") {
+      return new Response("not valid json", { status: 200 });
+    }
+    return originalFetch(url, init);
+  }) as typeof fetch;
 
   try {
     const env = { GROQ_API_KEY: "key" } as any;
@@ -133,10 +144,14 @@ test("generateResearchPlan returns null only when every protocol's call fails", 
 
 test("generateResearchPlan scopes each dimension to the protocol its call was made for, regardless of what the model echoes back", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () =>
-    // Every call returns a dimension claiming a wrong/unrelated protocol name -- the
-    // real protocol comes from which call this is, not from trusting this field.
-    mockChatCompletion([{ protocol: "totally-not-a-real-protocol", subQuestion: "Some sub-question" }])) as typeof fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init: any) => {
+    if (String(url) === "https://api.groq.com/openai/v1/chat/completions") {
+      // Every call returns a dimension claiming a wrong/unrelated protocol name -- the
+      // real protocol comes from which call this is, not from trusting this field.
+      return mockChatCompletion([{ protocol: "totally-not-a-real-protocol", subQuestion: "Some sub-question" }]);
+    }
+    return originalFetch(url, init);
+  }) as typeof fetch;
 
   try {
     const env = { GROQ_API_KEY: "key" } as any;
