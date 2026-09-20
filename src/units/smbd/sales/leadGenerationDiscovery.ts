@@ -263,7 +263,20 @@ export async function processCompletedLGSResearchHandoffs(env: Env, summary: Dis
         continue;
       }
 
-      const duplicates = await findDuplicateLeads(env, evalResult.organisation, "");
+      let duplicates: Awaited<ReturnType<typeof findDuplicateLeads>>;
+      try {
+        duplicates = await findDuplicateLeads(env, evalResult.organisation, "");
+      } catch (err) {
+        console.error(`Autonomous Lead Discovery: duplicate check failed for ${evalResult.organisation}`, err);
+        await logActivity(env, {
+          entry: `Autonomous discovery blocked -- duplicate check failed: ${evalResult.organisation}`,
+          type: "Blocker",
+          area: "Sales",
+          decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${err instanceof Error ? err.message : String(err)}`,
+          outcome: "Blocked",
+        });
+        continue;
+      }
       if (duplicates.length > 0) {
         summary.skippedAsDuplicate++;
         await logActivity(env, {
@@ -353,7 +366,20 @@ export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRun
         continue;
       }
 
-      const duplicateLead = await findDuplicateLeads(env, evaluation.organisation, "");
+      let duplicateLead: Awaited<ReturnType<typeof findDuplicateLeads>>;
+      try {
+        duplicateLead = await findDuplicateLeads(env, evaluation.organisation, "");
+      } catch (err) {
+        console.error(`Autonomous Lead Discovery: duplicate check failed for ${evaluation.organisation}`, err);
+        await logActivity(env, {
+          entry: `Autonomous discovery blocked -- duplicate check failed: ${evaluation.organisation}`,
+          type: "Blocker",
+          area: "Sales",
+          decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${err instanceof Error ? err.message : String(err)}`,
+          outcome: "Blocked",
+        });
+        continue;
+      }
       if (duplicateLead.length > 0) {
         summary.skippedAsDuplicate++;
         continue;
