@@ -227,6 +227,14 @@ export interface PollGoogleDocCommentsResult {
  * option, not a fallback for a push mechanism that doesn't exist.
  */
 export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocCommentsResult> {
+  // Records that the external scheduler actually fired, independent of
+  // whether there was anything to do -- read back via
+  // /admin/last-google-doc-comment-poll to verify cron-job.org is really
+  // hitting this on schedule (Cloudflare's basic Workers analytics doesn't
+  // break requests down by path, so there's no other way to tell this
+  // endpoint's traffic apart from any other route's).
+  await env.STATE_KV.put("last_google_doc_comment_poll_run", new Date().toISOString());
+
   const docs = await listWatchedGoogleDocs(env);
   let commentsProcessed = 0;
 

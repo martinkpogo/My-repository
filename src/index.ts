@@ -301,6 +301,22 @@ export default {
       });
     }
 
+    // Same diagnostic as /admin/last-cron-run above, for the separate
+    // cron-job.org schedule hitting /admin/poll-google-doc-comments --
+    // Cloudflare's basic Workers analytics doesn't break requests down by
+    // path, so this KV record is the only way to confirm that scheduler
+    // is actually firing.
+    if (url.pathname === "/admin/last-google-doc-comment-poll" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const lastRun = await env.STATE_KV.get("last_google_doc_comment_poll_run");
+      return new Response(JSON.stringify({ last_google_doc_comment_poll_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
     // Independent watchdog: meant to be pinged by a SECOND, separate external
     // scheduler (different provider than the one hitting
     // /admin/run-finance-discovery). If the discovery trigger has gone
