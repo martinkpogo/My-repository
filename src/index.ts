@@ -203,7 +203,14 @@ export default {
       if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
         return new Response("forbidden", { status: 403 });
       }
-      await env.STATE_KV.put("last_cron_run", new Date().toISOString());
+      // Best-effort diagnostic timestamp for /admin/last-cron-run and the
+      // watchdog -- must never take down the actual discovery run below it
+      // (e.g. if this key's write rate is briefly exceeded, now that it's
+      // written by GitHub Actions every 5 min, cron-job.org, the native
+      // Cron Trigger, and /checkhandoffs, all landing on the same key).
+      await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
+        console.error("Failed to record last_cron_run", err),
+      );
       try {
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSales = await discoverPendingSalesHandoffs(env);
@@ -420,7 +427,9 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await env.STATE_KV.put("last_cron_run", new Date().toISOString());
+    await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
+      console.error("Failed to record last_cron_run", err),
+    );
     try {
       await discoverPendingFinanceHandoffs(env);
       await discoverPendingSalesHandoffs(env);
@@ -750,7 +759,9 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       // triggerable directly from Telegram, without the admin URL/secret,
       // and entirely outside the AI-gated routeIncomingText path (a plain
       // command, never routed through generalChatReply).
-      await env.STATE_KV.put("last_cron_run", new Date().toISOString());
+      await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
+        console.error("Failed to record last_cron_run", err),
+      );
       const unitHere = resolveUnitForThread(env, threadId);
       try {
         if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Research & Intelligence" || unitHere === "Marketing") {
