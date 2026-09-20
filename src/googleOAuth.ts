@@ -411,7 +411,7 @@ export interface CreateGoogleDocResult {
 /**
  * Extracts plain text content from a Google Docs API Document resource.
  */
-function extractDocText(docData: any): string {
+export function extractDocText(docData: any): string {
   if (!docData || !docData.body || !Array.isArray(docData.body.content)) {
     return "";
   }
@@ -720,6 +720,44 @@ export async function listAuthorizedGoogleAccounts(env: Env): Promise<string[]> 
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return accounts;
+}
+
+export interface WatchedGoogleDoc {
+  documentId: string;
+  accountIdentifier: string;
+  title: string;
+  chatId?: number;
+  threadId?: number;
+  createdAt: string;
+}
+
+/**
+ * Registers a created Google Doc for comment-triggered editing (see
+ * googleDocComments.ts). Watching is opt-in-by-creation: only docs this
+ * system itself created are watched, never arbitrary pre-existing files.
+ */
+export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc): Promise<void> {
+  await env.STATE_KV.put(`google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
+}
+
+export async function listWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[]> {
+  const docs: WatchedGoogleDoc[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.STATE_KV.list({ prefix: "google_doc_watch:", cursor });
+    for (const key of page.keys) {
+      const raw = await env.STATE_KV.get(key.name);
+      if (raw) {
+        try {
+          docs.push(JSON.parse(raw) as WatchedGoogleDoc);
+        } catch {
+          // corrupt entry -- skip rather than fail the whole poll
+        }
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return docs;
 }
 
 export async function saveOpaqueOption(
@@ -1044,10 +1082,21 @@ export async function handleGoogleActionApproval(
     return state;
   }
 
+  if (result.documentId) {
+    await registerWatchedGoogleDoc(env, {
+      documentId: result.documentId,
+      accountIdentifier: action.accountIdentifier,
+      title: action.title,
+      chatId: state.chatId,
+      threadId: state.threadId,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
   await sendWorkspaceHatMessage(
     env,
     target,
-    `✅ Google Doc created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.documentUrl}`,
+    `✅ Google Doc created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.documentUrl}\n\nTip: select text in the doc, leave a comment describing the change, and it'll be applied automatically within about a minute.`,
   );
 
   return state;
