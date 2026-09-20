@@ -19,35 +19,47 @@ import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "
 
 const HAT_TARGET_NAME = "Lead Generation Specialist";
 
-// Fixed queries structured around 5 observable business situation categories:
-// (1) Repositioning and strategic brand change, (2) Market and customer expansion,
-// (3) Offering and business-model change, (4) Growth and strategic change, and
-// (5) Communication and positioning signals.
+// Fixed queries structured around the 5 problem-signal categories named
+// explicitly in the Hat Definition's Acquisition Criteria (criterion 2,
+// "the strongest criterion"): unclear/inconsistent positioning and
+// difficulty explaining the offer; market/model change without a
+// corresponding positioning update; stagnant growth or a major strategic
+// direction change; rebrand without evident strategic clarity; and
+// fragmented messaging / a perceived market position weaker than actual
+// capability. Earlier versions of this list searched for neutral
+// situational-change announcements (a rebrand announcement, a market-entry
+// press release) rather than the problem itself -- evaluateCandidates()
+// still judges every result against the full Acquisition Criteria either
+// way, but a search feed of press-release announcements rarely surfaces
+// the kind of candidate that criterion actually describes, so the queries
+// themselves needed to search for the problem, not just the event around it.
 //
-// These search for observable evidence, announcements, or statements without
+// These search for observable evidence, statements, or commentary without
 // presupposing a negative diagnosis (avoiding terms like "bad branding" or
-// "ineffective marketing"). Deliberately problem-signal-driven and not industry-scoped.
+// "ineffective marketing") -- same discipline the Hat Definition itself
+// requires of the evaluation step. Deliberately problem-signal-driven and
+// not industry-scoped.
 export const DISCOVERY_QUERIES = [
-  // Category 1: Repositioning and strategic brand change
-  "company announces brand repositioning",
-  "strategic rebrand announcement",
-  "market positioning change strategy",
-  // Category 2: Market and customer expansion
-  "company expanding into new geographic markets",
-  "expansion into enterprise customer segment",
-  "moving upmarket product expansion",
-  // Category 3: Offering and business-model change
-  "company launches new service offering",
-  "business model transition announcement",
-  "offering portfolio diversification",
-  // Category 4: Growth and strategic change
-  "company scaling funding expansion initiative",
-  "strategic acquisition market entry",
-  "strategic leadership changes growth strategy",
-  // Category 5: Communication and positioning signals
-  "company clarifies value proposition",
-  "brand messaging update announcement",
-  "market positioning public statement",
+  // Category 1: Unclear/inconsistent positioning, difficulty explaining the offer
+  "customers unsure what company actually offers",
+  "startup struggles to explain what it does",
+  "brand identity doesn't match business direction",
+  // Category 2: Market or business-model change without a positioning update
+  "company expands into new market same branding",
+  "business pivots to new model brand unchanged",
+  "growing company still using old messaging",
+  // Category 3: Stagnant growth or a major strategic direction change
+  "growth stalls despite new product launch",
+  "flat sales growth strategic shift announced",
+  "leadership change signals new direction",
+  // Category 4: Rebrand without evident strategic clarity
+  "rebrand backlash unclear direction",
+  "new brand identity criticized by customers",
+  "company rebrands again within a few years",
+  // Category 5: Fragmented messaging, weak differentiation, or a perception gap vs. capability
+  "inconsistent messaging across marketing channels",
+  "hard to tell company apart from competitors",
+  "brand perception lags behind product quality",
 ];
 
 // Bounds total AI-evaluation volume per run (queries x this) -- same
