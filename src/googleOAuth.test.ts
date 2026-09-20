@@ -3,6 +3,7 @@ import assert from "node:assert";
 import type { Env } from "./types";
 import {
   buildGoogleAuthorizeUrl,
+  cleanupDefaultGoogleAccount,
   codeChallengeFromVerifier,
   consumeOpaqueOption,
   createGoogleDoc,
@@ -16,12 +17,14 @@ import {
   handleGoogleOAuthCallback,
   handleGoogleOAuthStart,
   listAuthorizedGoogleAccounts,
+  listWatchedGoogleDocs,
   loadGoogleTokens,
   parseAccountIdentifierFromIdToken,
   PendingGoogleAction,
   persistGoogleTokens,
   proposeGoogleDocCreation,
   handleGoogleActionApproval,
+  registerWatchedGoogleDoc,
   saveOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
@@ -1138,4 +1141,57 @@ test("GET /admin/test-google-drive handles authorization key parameter and retur
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("cleanupDefaultGoogleAccount is a no-op when no 'default' account exists", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const result = await cleanupDefaultGoogleAccount(fakeEnv);
+  assert.deepStrictEqual(result, { tokenDeleted: false, docsRepointedTo: null, docsRepointed: [], docsOrphaned: [] });
+});
+
+test("cleanupDefaultGoogleAccount deletes the 'default' token and re-points its watched docs when exactly one other account exists", async () => {
+  const { fakeEnv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "default-tok", refresh_token: "default-refresh", expires_in: 3600 }, "default");
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "real-tok", refresh_token: "real-refresh", expires_in: 3600 },
+    "martinkpogo3@gmail.com",
+  );
+  await registerWatchedGoogleDoc(fakeEnv, {
+    documentId: "doc-under-default",
+    accountIdentifier: "default",
+    title: "Test Doc",
+    createdAt: new Date().toISOString(),
+  });
+
+  const result = await cleanupDefaultGoogleAccount(fakeEnv);
+
+  assert.strictEqual(result.tokenDeleted, true);
+  assert.strictEqual(result.docsRepointedTo, "martinkpogo3@gmail.com");
+  assert.deepStrictEqual(result.docsRepointed, ["doc-under-default"]);
+  assert.deepStrictEqual(result.docsOrphaned, []);
+
+  assert.strictEqual(await loadGoogleTokens(fakeEnv, "default"), null);
+  const docs = await listWatchedGoogleDocs(fakeEnv);
+  assert.strictEqual(docs.find((d) => d.documentId === "doc-under-default")?.accountIdentifier, "martinkpogo3@gmail.com");
+});
+
+test("cleanupDefaultGoogleAccount never guesses which account to re-point to when zero or multiple other accounts exist", async () => {
+  const { fakeEnv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "default-tok", refresh_token: "default-refresh", expires_in: 3600 }, "default");
+  await registerWatchedGoogleDoc(fakeEnv, {
+    documentId: "doc-under-default-2",
+    accountIdentifier: "default",
+    title: "Test Doc",
+    createdAt: new Date().toISOString(),
+  });
+
+  // Zero other accounts -- deletes the stale token, but reports the doc as
+  // orphaned rather than guessing where to send it.
+  const result = await cleanupDefaultGoogleAccount(fakeEnv);
+  assert.strictEqual(result.tokenDeleted, true);
+  assert.strictEqual(result.docsRepointedTo, null);
+  assert.deepStrictEqual(result.docsOrphaned, ["doc-under-default-2"]);
+  const docs = await listWatchedGoogleDocs(fakeEnv);
+  assert.strictEqual(docs.find((d) => d.documentId === "doc-under-default-2")?.accountIdentifier, "default");
 });

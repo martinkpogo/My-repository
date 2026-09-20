@@ -769,6 +769,51 @@ export async function listWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[
   return docs;
 }
 
+export interface CleanupDefaultGoogleAccountResult {
+  tokenDeleted: boolean;
+  docsRepointedTo: string | null;
+  docsRepointed: string[];
+  docsOrphaned: string[];
+}
+
+/**
+ * One-time cleanup for accounts authorized before GOOGLE_OAUTH_SCOPES
+ * included "openid"/"email" (see that commit), which were always stored
+ * under the literal identifier "default" rather than a real email.
+ * Deletes that stale token and, only when exactly one other authorized
+ * account exists (the unambiguous common case), re-points any doc still
+ * watched under "default" to it -- so nothing already relying on the
+ * "default" identity silently stops working. Never guesses when zero or
+ * more than one other account exists; those docs are reported as
+ * orphaned (still watched, but their token is gone) rather than acted on.
+ */
+export async function cleanupDefaultGoogleAccount(env: Env): Promise<CleanupDefaultGoogleAccountResult> {
+  const defaultToken = await loadGoogleTokens(env, "default");
+  if (!defaultToken) {
+    return { tokenDeleted: false, docsRepointedTo: null, docsRepointed: [], docsOrphaned: [] };
+  }
+
+  const otherAccounts = (await listAuthorizedGoogleAccounts(env)).filter((id) => id !== "default");
+  const target = otherAccounts.length === 1 ? otherAccounts[0] : null;
+
+  const docsRepointed: string[] = [];
+  const docsOrphaned: string[] = [];
+  const watchedDocs = await listWatchedGoogleDocs(env);
+  for (const doc of watchedDocs) {
+    if (doc.accountIdentifier !== "default") continue;
+    if (target) {
+      await registerWatchedGoogleDoc(env, { ...doc, accountIdentifier: target });
+      docsRepointed.push(doc.documentId);
+    } else {
+      docsOrphaned.push(doc.documentId);
+    }
+  }
+
+  await env.STATE_KV.delete(getGoogleTokensKvKey("default"));
+
+  return { tokenDeleted: true, docsRepointedTo: target, docsRepointed, docsOrphaned };
+}
+
 export async function saveOpaqueOption(
   env: Env,
   workId: string,
