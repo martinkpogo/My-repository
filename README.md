@@ -204,7 +204,7 @@ Development and deployment configuration should be maintained separately from th
 
 Deployment & CI/CD Automation
 
-The runtime is deployed as a Cloudflare Worker using an automated end-to-end GitHub Actions workflow.
+The runtime is deployed as a Cloudflare Worker. PR validation and merge are automated through GitHub Actions; the actual production deploy is handled by **Cloudflare Workers Builds** (its native Git integration, connected directly to this repo in the Cloudflare dashboard), not by the `deploy.yml` GitHub Actions workflow below — `deploy.yml` exists as a secondary/backup path and is not currently what ships code to production.
 
 ### Continuous Integration & Deployment Lifecycle
 
@@ -216,11 +216,17 @@ The runtime is deployed as a Cloudflare Worker using an automated end-to-end Git
    - Triggered on PR events and `PR Validation` workflow completion.
    - Automatically approves and squashes/merges PRs into the target branch once validation passes.
 
-3. **Cloudflare Deployment (`deploy.yml`)**:
+3. **Production deploy (Cloudflare Workers Builds — dashboard-configured, not a file in this repo)**:
+   - Triggered automatically by Cloudflare on every push to the connected branch, independently of the GitHub Actions workflows above.
+   - Its **Build command** (Cloudflare dashboard → Workers & Pages → `enig-agent` → Settings → Build) is set to `npm run typecheck && npm test`, so a push that fails either check is not deployed.
+   - Its Deploy command is `npx wrangler deploy` directly, not `npm run deploy` — so `package.json`'s `deploy` script (which chains `typecheck`/`test` before `wrangler deploy`) does not gate this path; the Build command above is what does.
+   - Not version-controlled: this configuration lives only in the Cloudflare dashboard and won't show up in a diff if changed.
+
+4. **Cloudflare Deployment (`deploy.yml`, GitHub Actions — secondary/backup, not currently exercised)**:
    - Triggered automatically on push / merge to target branches.
-   - Executes type checks and unit test validations.
-   - Deploys the worker to Cloudflare using `npm run deploy` (`wrangler deploy`).
+   - Executes type checks and unit test validations (via `npm run deploy`, which itself now runs `npm run typecheck && npm test` before `wrangler deploy`).
    - Runs post-deployment health check verification against `https://enig-agent.martnkpogo.workers.dev/health`.
+   - Its own run history has been empty since Workers Builds took over deploys; kept as a fallback, but Workers Builds' dashboard settings are the ones that actually gate what reaches production.
 
 ### Required GitHub Configuration & Setup
 
