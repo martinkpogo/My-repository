@@ -60,6 +60,16 @@ WORKSPACE_TOPIC_ID = "604"
 # dashboard when the two-stream architecture shipped; declared here to
 # keep this file in sync with the deployed configuration.
 OPERATIONS_TOPIC_ID = "588"
+# Google OAuth client ID. Not confidential -- Google treats this as a
+# public identifier (visible in redirect URLs and front-end apps), unlike
+# the client secret, which stays a Cloudflare Secret (see below) and is
+# never committed here. Declared as a plain var here, not just in the
+# Cloudflare dashboard, because `wrangler deploy` treats [vars] as the
+# complete set of plain-text environment variables and silently deletes
+# any dashboard-added var not declared here on every deploy -- this was
+# wiping the dashboard-only value on every push once Workers Builds
+# started deploying on every merge.
+GOOGLE_OAUTH_CLIENT_ID = "495614288300-5k7fd812fk86jutgamtbhs5s1kbjvved.apps.googleusercontent.com"
 
 # Secrets (set with `wrangler secret put <NAME>`, never committed):
 #   TELEGRAM_BOT_TOKEN
@@ -75,3 +85,4 @@ OPERATIONS_TOPIC_ID = "588"
 #   CEREBRAS_API_KEY (optional — same, additional fallback)
 #   GEMINI_API_KEY (optional — same, additional fallback)
 #   SAMBANOVA_API_KEY (optional — same, additional fallback)
+#   GOOGLE_OAUTH_CLIENT_SECRET (required for Google Workspace OAuth -- confidential, unlike GOOGLE_OAUTH_CLIENT_ID above, which is a plain var)
