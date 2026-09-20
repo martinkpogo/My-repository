@@ -332,11 +332,11 @@ export async function routeIncomingText(
     return;
   }
 
-  // Workspace stream: check generic workspace capability actions first
+  // Conversation stream: check generic workspace capability actions first
   const capabilityHandled = await routeWorkspaceCapabilityAction(env, chatId, text, threadId);
   if (capabilityHandled) return;
 
-  // Conversation stream or DM: classify task dynamically across specializations
+  // Conversation stream: classify task dynamically across specializations
   const marketingCheck = await classifyMarketingTask(env, text);
   if (marketingCheck === "marketing") {
     const workId = newWorkId();

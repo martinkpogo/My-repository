@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
 import { getReplyMessageWorkId, routeIncomingText, setReplyMessageWorkId } from "./router";
-import { resolveStreamForThread } from "./router";
 import { getOperationsTarget, getWorkspaceTarget, sendHatMessage, sendOperationsMessage } from "./telegram";
 import type { Env } from "./types";
 
@@ -21,6 +20,8 @@ function createMockKv() {
   };
 }
 
+import { resolveStreamForThread } from "./router";
+
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   const kv = createMockKv();
   return {
@@ -28,7 +29,6 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
     WORKSPACE_TOPIC_ID: "604",
     OPERATIONS_TOPIC_ID: "588",
-    UNIT_TOPIC_MAP: '{"Conversation": 100, "Operations": 14}',
     TELEGRAM_BOT_TOKEN: "test-token",
     NOTION_TOKEN: "test-token",
     NOTION_VERSION: "2025-09-03",
@@ -200,7 +200,7 @@ test("6. Unmapped topics (e.g. legacy topics 393, 14) block Hat execution and in
   assert.strictEqual(sentPayloads[0].text, "This topic isn't mapped to a Stream yet.");
 });
 
-test("7. System Operations stream messages emit to System Operations topic 588 without touching DM or workspace active pointers", async (t) => {
+test("7. Operations stream messages emit to Operations topic 588 without touching DM or conversation active pointers", async (t) => {
   const env = fakeEnv();
   const sentPayloads: any[] = [];
 
@@ -218,7 +218,7 @@ test("7. System Operations stream messages emit to System Operations topic 588 w
 
   assert.strictEqual(sentPayloads.length, 1);
   assert.strictEqual(sentPayloads[0].chat_id, -1004435157576, "must route to Operations group chat ID");
-  assert.strictEqual(sentPayloads[0].message_thread_id, 588, "must route to System Operations thread ID (588)");
+  assert.strictEqual(sentPayloads[0].message_thread_id, 588, "must route to Operations thread ID (588)");
 });
 
 test("8. sendHatMessage automatically registers reply_msg mapping in KV when target has workId", async (t) => {
