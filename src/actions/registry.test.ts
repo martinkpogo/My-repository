@@ -35,7 +35,7 @@ function createFakeEnv(): Env {
   return {
     STATE_KV: mockKv as unknown as KVNamespace,
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
-    CONVERSATION_TOPIC_ID: "1",
+    WORKSPACE_TOPIC_ID: "1",
     TELEGRAM_BOT_TOKEN: "mock-token",
   } as Env;
 }

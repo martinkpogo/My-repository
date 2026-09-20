@@ -2,7 +2,7 @@ import type { Env, Unit, WorkState } from "../../types";
 import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
-import { editHatMessage, sendConversationHatMessage } from "../../telegram";
+import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
@@ -98,7 +98,7 @@ export function capSuppliedEvidence(text: string): string {
  * stage.
  */
 async function sendResearchInProgressAck(env: Env, state: WorkState): Promise<void> {
-  state.researchProgressMessageId = await sendConversationHatMessage(
+  state.researchProgressMessageId = await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Research & Intelligence Analyst" },
     "🔍 Researching this now -- with several sources to check, it can take a bit. I'll follow up here once it's done.",
@@ -202,7 +202,7 @@ async function requireSafeContext(env: Env, state: WorkState): Promise<string | 
         "Open Questions": richText("Research-Safe Consultancy Context unavailable or invalid in Notion -- blocked pending resolution."),
       }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
     }
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Research & Intelligence Analyst" },
       `Couldn't retrieve or validate the governed Research-Safe Consultancy Context from Notion. Not proceeding without it — this isn't something to clarify in chat, the Notion page itself needs checking. Will retry automatically once resolved.`,
@@ -254,7 +254,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Research & Intelligence Analyst" },
       `Couldn't pick up a research request (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
@@ -410,7 +410,7 @@ async function handleBlockedOrAmbiguous(env: Env, state: WorkState, reasonText: 
       "Open Questions": richText(reasonText.slice(0, 1900)),
     }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
   }
-  await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `${reasonText}\n\nCan you clarify what's needed?`);
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `${reasonText}\n\nCan you clarify what's needed?`);
   state.stage = "research_ambiguous";
   state.awaiting = "research_clarification";
 }
@@ -448,7 +448,7 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Couldn't run this research — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`);
+    await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Couldn't run this research — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`);
     return state;
   }
 
@@ -568,7 +568,7 @@ async function handleSynthesisFailure(env: Env, state: WorkState, reasonText: st
       "Open Questions": richText(reasonText.slice(0, 1900)),
     }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
   }
-  await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `${reasonText}\n\nTell me more about what's needed and I'll try again.`);
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `${reasonText}\n\nTell me more about what's needed and I'll try again.`);
   state.stage = "research_synthesis_failed";
   state.awaiting = "research_feedback";
 }
@@ -674,7 +674,7 @@ async function deliverSynthesis(env: Env, state: WorkState, synthesis: ResearchS
     decisionRationale: `Protocol(s): ${synthesis.protocolsUsed.join(", ")}`,
     outcome: "Complete",
   });
-  await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, formatSynthesisForTelegram(synthesis));
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, formatSynthesisForTelegram(synthesis));
 
   await routeToConsumingHat(env, state, synthesis);
 
@@ -768,7 +768,7 @@ export async function routeToConsumingHat(env: Env, state: WorkState, synthesis:
     outcome: "Blocked",
   });
 
-  await sendConversationHatMessage(
+  await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Research & Intelligence Analyst" },
     `This research looks directly relevant to *${route.hat}*'s work: ${reason}\n\n*Preview of what would be sent:*\n${verifiedFactsAndSources.slice(0, 1200)}\n\nSend this to ${route.hat}?`,
@@ -794,7 +794,7 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
   const pending = state.pendingResearchHandoff;
 
   if (!pending) {
-    await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, "There's no pending handoff to act on.");
+    await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, "There's no pending handoff to act on.");
     return state;
   }
 
@@ -807,7 +807,7 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
       decisionRationale: "Martin chose not to send this research to the proposed Hat.",
       outcome: "Complete",
     });
-    await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Okay -- this research wasn't sent to *${pending.hat}*.`);
+    await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Okay -- this research wasn't sent to *${pending.hat}*.`);
     return state;
   }
 
@@ -833,10 +833,10 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
       nextActions: `${pending.hat} to pick up and act on this research.`,
       outcome: "Complete",
     });
-    await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Sent -- this research has been handed off to *${pending.hat}* to inform their work.`);
+    await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Sent -- this research has been handed off to *${pending.hat}* to inform their work.`);
   } catch (err) {
     console.error(`R&I: failed to create approved handoff to ${pending.unit}/${pending.hat} for work ${state.workId}`, err);
-    await sendConversationHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Couldn't create the handoff to *${pending.hat}* -- please try approving again.`);
+    await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Couldn't create the handoff to *${pending.hat}* -- please try approving again.`);
   }
 
   return state;
