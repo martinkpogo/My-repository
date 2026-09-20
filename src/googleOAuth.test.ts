@@ -128,10 +128,12 @@ test("Google Authorize URL construction includes exact required parameters and m
   assert.strictEqual(url.searchParams.get("include_granted_scopes"), "true");
   assert.strictEqual(url.searchParams.get("prompt"), "consent");
 
-  // Verify exact minimum scopes
+  // Verify exact minimum scopes -- "openid email" is required for Google
+  // to return an id_token, which parseAccountIdentifierFromIdToken needs
+  // to resolve a real email instead of falling back to "default".
   assert.strictEqual(
     GOOGLE_OAUTH_SCOPES,
-    "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents",
+    "openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents",
   );
   assert.strictEqual(url.searchParams.get("scope"), GOOGLE_OAUTH_SCOPES);
 });
