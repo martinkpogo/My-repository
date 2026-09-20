@@ -535,7 +535,7 @@ export async function createGoogleDoc(
   // 4. Stage 2: Content Insertion via Docs API (documents.batchUpdate)
   let insertRes: Response;
   try {
-    insertRes = await fetch(`https://www.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
+    insertRes = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -577,7 +577,7 @@ export async function createGoogleDoc(
   // 5. Stage 3: Verification Read-Back via Docs API (documents.get)
   let verifyRes: Response;
   try {
-    verifyRes = await fetch(`https://www.googleapis.com/v1/documents/${documentId}`, {
+    verifyRes = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${token}`,
