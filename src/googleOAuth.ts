@@ -20,9 +20,9 @@ export const GOOGLE_OAUTH_SCOPES = [
   "email",
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/documents.readonly",
-  "https://www.googleapis.com/auth/spreadsheets.readonly",
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/spreadsheets",
 ].join(" ");
 
 export interface StoredGoogleTokens {
@@ -401,7 +401,7 @@ export async function handleGoogleDriveTest(request: Request, env: Env): Promise
   });
 }
 
-export interface PendingGoogleAction {
+export interface CreateGoogleDocAction {
   type: "create_doc";
   title: string;
   content: string;
@@ -409,12 +409,43 @@ export interface PendingGoogleAction {
   accountIdentifier: string;
 }
 
+export interface CreateGoogleSheetAction {
+  type: "create_sheet";
+  title: string;
+  /** First row is treated as column headers; the rest are starting data rows. */
+  rows: string[][];
+  folderId: string;
+  accountIdentifier: string;
+}
+
+export type PendingGoogleAction = CreateGoogleDocAction | CreateGoogleSheetAction;
+
 export interface CreateGoogleDocResult {
   ok: boolean;
   documentId?: string;
   documentUrl?: string;
   error?: string;
   stage?: "auth" | "validation" | "creation" | "insertion" | "verification";
+}
+
+export interface CreateGoogleSheetResult {
+  ok: boolean;
+  spreadsheetId?: string;
+  spreadsheetUrl?: string;
+  error?: string;
+  stage?: "auth" | "validation" | "creation" | "insertion" | "verification";
+}
+
+/** Converts a 1-based column index to its A1-notation letter(s), e.g. 1 -> "A", 27 -> "AA". */
+export function columnLetter(index: number): string {
+  let n = index;
+  let letters = "";
+  while (n > 0) {
+    const remainder = (n - 1) % 26;
+    letters = String.fromCharCode(65 + remainder) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
 }
 
 /**
@@ -654,6 +685,227 @@ export async function createGoogleDoc(
   });
 
   return { ok: true, documentId, documentUrl };
+}
+
+export async function createGoogleSheet(
+  env: Env,
+  action: CreateGoogleSheetAction,
+): Promise<CreateGoogleSheetResult> {
+  // 1. Validation
+  if (
+    !action ||
+    action.type !== "create_sheet" ||
+    !action.title?.trim() ||
+    !Array.isArray(action.rows) ||
+    action.rows.length === 0 ||
+    !action.folderId?.trim() ||
+    !action.accountIdentifier?.trim()
+  ) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: invalid parameters",
+      type: "Activity",
+      area: "Operations",
+      activity: "Google Sheet creation rejected due to missing or invalid action parameters (title, rows, folderId, or accountIdentifier)",
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "validation", error: "Missing or invalid Google Sheet creation parameters" };
+  }
+
+  const title = action.title.trim();
+  const rows = action.rows;
+  const folderId = action.folderId.trim();
+  const accountIdentifier = action.accountIdentifier.trim();
+  const numCols = Math.max(...rows.map((r) => r.length));
+  const range = `A1:${columnLetter(numCols)}${rows.length}`;
+
+  // 2. Authorization check
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: missing or invalid credentials",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheet creation failed for account '${accountIdentifier}': no valid access token available`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "auth", error: "Google Workspace authorization missing or invalid" };
+  }
+
+  // 3. Stage 1: Spreadsheet Creation via Drive API (files.create)
+  let createRes: Response;
+  try {
+    createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: title,
+        mimeType: "application/vnd.google-apps.spreadsheet",
+        parents: [folderId],
+      }),
+    });
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: creation network error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create failed due to network error for spreadsheet '${title}' in folder '${folderId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: "Network error during Google Sheet creation" };
+  }
+
+  if (!createRes.ok) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: spreadsheet creation error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create failed with HTTP ${createRes.status} for spreadsheet '${title}' in folder '${folderId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: `Google Drive file creation failed (HTTP ${createRes.status})` };
+  }
+
+  let createData: { id?: string };
+  try {
+    createData = (await createRes.json()) as { id?: string };
+  } catch {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: invalid creation response JSON",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create returned non-JSON response for spreadsheet '${title}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: "Invalid JSON response from Google Drive file creation" };
+  }
+
+  const spreadsheetId = createData.id;
+  if (!spreadsheetId) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: missing spreadsheet ID in response",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Drive files.create response missing spreadsheet ID for '${title}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, stage: "creation", error: "Google Drive creation succeeded but no spreadsheet ID was returned" };
+  }
+
+  // 4. Stage 2: Row Insertion via Sheets API (values.update)
+  let insertRes: Response;
+  try {
+    insertRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ range, values: rows }),
+      },
+    );
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: row insertion network error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheets values.update network error for spreadsheet ID '${spreadsheetId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, spreadsheetId, stage: "insertion", error: "Network error during row insertion" };
+  }
+
+  if (!insertRes.ok) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: row insertion error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheets values.update failed with HTTP ${insertRes.status} for spreadsheet ID '${spreadsheetId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, spreadsheetId, stage: "insertion", error: `Google Sheets row insertion failed (HTTP ${insertRes.status})` };
+  }
+
+  // 5. Stage 3: Verification Read-Back via Sheets API (values.get)
+  let verifyRes: Response;
+  try {
+    verifyRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+  } catch (err) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: verification network error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheets verification get network error for spreadsheet ID '${spreadsheetId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, spreadsheetId, stage: "verification", error: "Network error during spreadsheet verification" };
+  }
+
+  if (!verifyRes.ok) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: verification read-back error",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheets verification get failed with HTTP ${verifyRes.status} for spreadsheet ID '${spreadsheetId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, spreadsheetId, stage: "verification", error: `Google Sheets verification read-back failed (HTTP ${verifyRes.status})` };
+  }
+
+  let valuesData: { values?: string[][] };
+  try {
+    valuesData = await verifyRes.json();
+  } catch {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: invalid verification response JSON",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheets verification get returned invalid JSON for spreadsheet ID '${spreadsheetId}'`,
+      outcome: "Blocked",
+    });
+    return { ok: false, spreadsheetId, stage: "verification", error: "Invalid JSON response during spreadsheet verification" };
+  }
+
+  const verifiedRows = valuesData.values ?? [];
+  const rowsMatch =
+    verifiedRows.length === rows.length &&
+    rows.every((row, i) => row.every((cell, j) => (verifiedRows[i]?.[j] ?? "") === cell));
+
+  if (!rowsMatch) {
+    await logActivity(env, {
+      entry: "Google Sheet creation failed: verification content mismatch",
+      type: "Activity",
+      area: "Operations",
+      activity: `Google Sheet verification failed for spreadsheet ID '${spreadsheetId}': inserted row content mismatch`,
+      outcome: "Blocked",
+    });
+    return { ok: false, spreadsheetId, stage: "verification", error: "Spreadsheet verification failed: row content mismatch" };
+  }
+
+  // Success
+  const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
+
+  await logActivity(env, {
+    entry: "Google Sheet creation succeeded",
+    type: "Activity",
+    area: "Operations",
+    activity: `Google Sheet '${title}' created and verified in folder '${folderId}' (ID: ${spreadsheetId})`,
+    outcome: "Complete",
+  });
+
+  return { ok: true, spreadsheetId, spreadsheetUrl };
 }
 
 export async function proposeGoogleDocCreation(
@@ -918,6 +1170,92 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
 
 registerActionCapability(GoogleDocCreationCapability);
 
+export const GoogleSheetCreationCapability: ActionCapability = {
+  id: "workspace.google_sheet_creation",
+  name: "Google Sheet Creation Capability",
+  description:
+    "Creates Google Sheets (e.g. content calendars, trackers) in Google Drive with user-selected account, folder, and explicit approval.",
+  async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
+    const classification = await aiJson<{
+      isGoogleSheetRequest: boolean;
+      title?: string;
+      rows?: string[][];
+    }>(env, {
+      taskId: "action.google_sheet_intake",
+      system: `You classify incoming messages for ENIG's Google Sheet creation capability.
+Check if the message requests creating a Google Sheet / spreadsheet / content calendar / tracker.
+If yes, set isGoogleSheetRequest to true, extract a sheet title, and produce an initial 2D array of rows: the FIRST row must be column headers, and any subsequent rows are starting data (use just the header row if no data rows were given).
+If the request is a content calendar with no explicit columns specified, default the header row to: ["Date", "Content Piece", "Channel", "Status", "Owner"].
+If title is missing, leave it empty/undefined.
+Return JSON: {"isGoogleSheetRequest": true | false, "title": "...", "rows": [["Date","Content Piece","Channel","Status","Owner"]]}`,
+      user: text,
+      light: true,
+    });
+
+    if (!classification || !classification.isGoogleSheetRequest) {
+      return false;
+    }
+
+    const title = classification.title?.trim();
+    const rows =
+      Array.isArray(classification.rows) && classification.rows.length > 0
+        ? classification.rows
+        : undefined;
+
+    const target: HatMessageTarget = { chatId, threadId };
+
+    if (!title || !rows) {
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        "⚠️ I recognized a request to create a Google Sheet, but the sheet Title or column structure is missing. Please specify a title (e.g. 'Q4 Content Calendar').",
+      );
+      return true;
+    }
+
+    const authorizedAccounts = await listAuthorizedGoogleAccounts(env);
+    if (authorizedAccounts.length === 0) {
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        "⚠️ Cannot create Google Sheet: no authorized Google Workspace account found. Please visit `/oauth/google/start?key=...` in your browser to authorize an account first.",
+      );
+      return true;
+    }
+
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, undefined, undefined, threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+
+    const buttons = [];
+    for (const account of authorizedAccounts) {
+      const opaqueId = await saveOpaqueOption(env, workId, {
+        kind: "account",
+        docType: "sheet",
+        accountIdentifier: account,
+        title,
+        rows,
+      });
+      buttons.push([{ text: `👤 ${account}`, callback_data: `googleaccount:${workId}:${opaqueId}` }]);
+    }
+
+    const messageText = `*Google Workspace Action*: Create Google Sheet\n\n*Title*: ${title}\n\nSelect the authorized Google account to use:`;
+    await sendWorkspaceHatMessage(env, { chatId, threadId, workId }, messageText, buttons);
+
+    await logActivity(env, {
+      entry: "Google Sheet intake initiated",
+      type: "Activity",
+      activity: `Google Sheet intake started for '${title}' (workId: ${workId})`,
+      outcome: "Active",
+    });
+
+    return true;
+  },
+};
+
+registerActionCapability(GoogleSheetCreationCapability);
+
 export async function handleGoogleAccountSelection(
   env: Env,
   state: WorkState,
@@ -940,7 +1278,8 @@ export async function handleGoogleAccountSelection(
     return state;
   }
 
-  const { accountIdentifier, title, content } = option;
+  const { accountIdentifier, title, content, rows } = option;
+  const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
 
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) {
@@ -1007,16 +1346,19 @@ export async function handleGoogleAccountSelection(
   for (const folder of folders) {
     const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
       kind: "folder",
+      docType,
       accountIdentifier,
       title,
       content,
+      rows,
       folderId: folder.id,
       folderName: folder.name,
     });
     buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
   }
 
-  const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
+  const actionLabel = docType === "sheet" ? "Create Google Sheet" : "Create Google Doc";
+  const messageText = `*Google Workspace Action*: ${actionLabel}\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
@@ -1051,7 +1393,41 @@ export async function handleGoogleFolderSelection(
     return state;
   }
 
-  const { accountIdentifier, title, content, folderId, folderName } = option;
+  const { accountIdentifier, title, content, rows, folderId, folderName } = option;
+  const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
+
+  const buttons = [
+    [
+      { text: docType === "sheet" ? "✅ Approve Sheet Creation" : "✅ Approve Document Creation", callback_data: `googleaction:${state.workId}:approve` },
+      { text: "❌ Reject", callback_data: `googleaction:${state.workId}:reject` },
+    ],
+  ];
+
+  if (docType === "sheet") {
+    state.pendingGoogleAction = {
+      type: "create_sheet",
+      title,
+      rows,
+      folderId,
+      accountIdentifier,
+    };
+
+    const previewRows = (rows as string[][]).slice(0, 5);
+    const preview = previewRows.map((r) => r.join(" | ")).join("\n");
+    const truncated = (rows as string[][]).length > previewRows.length ? "\n..." : "";
+    const messageText = `*Proposed Action*: Create Google Sheet\n\n*Title*: ${title}\n*Account*: ${accountIdentifier}\n*Folder*: ${folderName}\n\n*Preview*:\n${preview}${truncated}\n\nCreation has NOT executed yet. Approve this action?`;
+
+    await sendWorkspaceHatMessage(env, target, messageText, buttons);
+
+    await logActivity(env, {
+      entry: "Google Sheet creation proposed",
+      type: "Activity",
+      activity: `Google Sheet creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
+      outcome: "Active",
+    });
+
+    return state;
+  }
 
   state.pendingGoogleAction = {
     type: "create_doc",
@@ -1063,13 +1439,6 @@ export async function handleGoogleFolderSelection(
 
   const preview = content.length > 300 ? `${content.slice(0, 300)}...` : content;
   const messageText = `*Proposed Action*: Create Google Doc\n\n*Title*: ${title}\n*Account*: ${accountIdentifier}\n*Folder*: ${folderName}\n\n*Content Preview*:\n${preview}\n\nCreation has NOT executed yet. Approve this action?`;
-
-  const buttons = [
-    [
-      { text: "✅ Approve Document Creation", callback_data: `googleaction:${state.workId}:approve` },
-      { text: "❌ Reject", callback_data: `googleaction:${state.workId}:reject` },
-    ],
-  ];
 
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
@@ -1098,7 +1467,7 @@ export async function handleGoogleActionApproval(
     workId: state.workId,
   };
 
-  if (!action || action.type !== "create_doc") {
+  if (!action || (action.type !== "create_doc" && action.type !== "create_sheet")) {
     await sendWorkspaceHatMessage(
       env,
       target,
@@ -1107,19 +1476,42 @@ export async function handleGoogleActionApproval(
     return state;
   }
 
+  const kindLabel = action.type === "create_sheet" ? "Google Sheet" : "Google Doc";
+
   if (!approved) {
     await logActivity(env, {
-      entry: "Google Doc creation rejected",
+      entry: `${kindLabel} creation rejected`,
       type: "Activity",
       area: "Operations",
-      activity: `Google Doc creation rejected by user for '${action.title}'`,
+      activity: `${kindLabel} creation rejected by user for '${action.title}'`,
       outcome: "Blocked",
     });
 
     await sendWorkspaceHatMessage(
       env,
       target,
-      `Google Doc creation rejected for *${action.title}*. No document was created.`,
+      `${kindLabel} creation rejected for *${action.title}*. Nothing was created.`,
+    );
+
+    return state;
+  }
+
+  if (action.type === "create_sheet") {
+    const result = await createGoogleSheet(env, action);
+
+    if (!result.ok) {
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        `⚠️ Google Sheet creation failed during ${result.stage} stage: ${result.error}`,
+      );
+      return state;
+    }
+
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      `✅ Google Sheet created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.spreadsheetUrl}`,
     );
 
     return state;

@@ -120,6 +120,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Given the exact text a Google Docs comment is anchored to and the comment's own instruction, determines the specific replacement text -- never which text to target (that comes from the comment's own anchor, not the AI), and never invents content beyond what the comment reasonably implies.",
   },
+  "action.google_sheet_intake": {
+    id: "action.google_sheet_intake",
+    name: "Google Sheet Intake Classification & Parameter Extraction",
+    description:
+      "Extracts a sheet title and initial header/data rows from natural-language requests for controlled Google Sheet creation (e.g. a content calendar).",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
