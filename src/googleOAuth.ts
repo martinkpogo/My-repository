@@ -9,6 +9,15 @@ const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
 export const GOOGLE_OAUTH_SCOPES = [
+  // Google only returns an id_token (needed by
+  // parseAccountIdentifierFromIdToken to resolve a real email instead of
+  // falling back to the literal string "default") when the token exchange
+  // request includes "openid" -- confirmed live: every account authorized
+  // before this scope was added is stored under key "default" in KV and
+  // in every Activity Log entry, since tokenData.id_token was always
+  // undefined without it.
+  "openid",
+  "email",
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/documents.readonly",
   "https://www.googleapis.com/auth/spreadsheets.readonly",
