@@ -2,7 +2,7 @@ import type { Env, WorkState } from "../../types";
 import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
-import { sendConversationHatMessage } from "../../telegram";
+import { sendWorkspaceHatMessage } from "../../telegram";
 import { setActiveWorkId } from "../../router";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -101,7 +101,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `*Finance couldn't pick up a quote request* (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
@@ -167,7 +167,7 @@ async function judgeQuote(
       decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `Couldn't assess the quote for *${entityToken}* — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`,
@@ -203,7 +203,7 @@ async function judgeQuote(
       decisionRationale: reason,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `*Finance has held the quote request* for *${entityToken}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
@@ -240,7 +240,7 @@ async function judgeQuote(
   if (financeThreadId !== undefined) {
     await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
   }
-  await sendConversationHatMessage(
+  await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Value-Based Pricing Assessor" },
     `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`,
@@ -275,7 +275,7 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `Couldn't read the Handoff record for *${state.entityName}* to apply your reasoning: ${evalResult.insufficientContext.reason}`,
@@ -322,7 +322,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       decisionRationale: "Martin requested a redo of the computed quote.",
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `Got it — why are you requesting a redo for *${state.entityName}*? Tell me what's off or what to take into account, and I'll reassess and get you a new quote to review.`,
@@ -341,7 +341,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       decisionRationale: "This work item has no Matter_Token, so the Finance -> Sales follow-up Handoff can't identify which Matter it's for.",
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, then retry.`,
@@ -376,7 +376,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     nextActions: "Sales to pick up and prepare the Draft Proposal.",
     outcome: "Complete",
   });
-  await sendConversationHatMessage(
+  await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Value-Based Pricing Assessor" },
     `Quote approved — queued for Sales to prepare the Draft Proposal for *${state.entityName}*.`,

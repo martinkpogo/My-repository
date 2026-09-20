@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import { getReplyMessageWorkId, routeIncomingText, setReplyMessageWorkId } from "./router";
-import { getConversationTarget, getOperationsTarget, sendHatMessage, sendOperationsMessage } from "./telegram";
+import { getWorkspaceTarget, getOperationsTarget, sendHatMessage, sendOperationsMessage } from "./telegram";
 import type { Env } from "./types";
 
 function createMockKv() {
@@ -27,7 +27,7 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
     MARTIN_TELEGRAM_USER_ID: "123456",
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
-    CONVERSATION_TOPIC_ID: "604",
+    WORKSPACE_TOPIC_ID: "604",
     OPERATIONS_TOPIC_ID: "588",
     TELEGRAM_BOT_TOKEN: "test-token",
     NOTION_TOKEN: "test-token",
@@ -37,12 +37,12 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   } as Env;
 }
 
-test("1. Stream target helpers resolve correct Conversation (604) and Operations (588) targets", () => {
+test("1. Stream target helpers resolve correct Workspace (604) and Operations (588) targets", () => {
   const env = fakeEnv();
-  const conv = getConversationTarget(env);
-  assert.ok(conv !== null);
-  assert.strictEqual(conv.chatId, -1004435157576);
-  assert.strictEqual(conv.threadId, 604);
+  const workspace = getWorkspaceTarget(env);
+  assert.ok(workspace !== null);
+  assert.strictEqual(workspace.chatId, -1004435157576);
+  assert.strictEqual(workspace.threadId, 604);
 
   const ops = getOperationsTarget(env);
   assert.ok(ops !== null);
@@ -51,19 +51,19 @@ test("1. Stream target helpers resolve correct Conversation (604) and Operations
 });
 
 test("1b. Stream target helpers fail closed when configuration is missing without cross-stream or topic 14 fallback", async () => {
-  const unconfiguredEnv = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576", CONVERSATION_TOPIC_ID: undefined, OPERATIONS_TOPIC_ID: undefined });
+  const unconfiguredEnv = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576", WORKSPACE_TOPIC_ID: undefined, OPERATIONS_TOPIC_ID: undefined });
 
-  assert.strictEqual(getConversationTarget(unconfiguredEnv), null);
+  assert.strictEqual(getWorkspaceTarget(unconfiguredEnv), null);
   assert.strictEqual(getOperationsTarget(unconfiguredEnv), null, "missing Operations configuration must fail closed and return null rather than defaulting to 14");
 
   const opsResult = await sendOperationsMessage(unconfiguredEnv, "test telemetry");
   assert.strictEqual(opsResult, undefined, "unconfigured operations stream must fail closed returning undefined");
 });
 
-test("1c. resolveStreamForThread strictly resolves 604 -> conversation, 588 -> operations, and legacy/other IDs -> unmapped", () => {
+test("1c. resolveStreamForThread strictly resolves 604 -> workspace, 588 -> operations, and legacy/other IDs -> unmapped", () => {
   const env = fakeEnv();
 
-  assert.strictEqual(resolveStreamForThread(env, 604), "conversation");
+  assert.strictEqual(resolveStreamForThread(env, 604), "workspace");
   assert.strictEqual(resolveStreamForThread(env, 588), "operations");
   assert.strictEqual(resolveStreamForThread(env, 14), "unmapped", "legacy topic 14 must resolve to unmapped");
   assert.strictEqual(resolveStreamForThread(env, 393), "unmapped", "legacy topic 393 must resolve to unmapped");
@@ -200,7 +200,7 @@ test("6. Unmapped topics (e.g. legacy topics 393, 14) block Hat execution and in
   assert.strictEqual(sentPayloads[0].text, "This topic isn't mapped to a Stream yet.");
 });
 
-test("7. Operations stream messages emit to Operations topic 588 without touching DM or conversation active pointers", async (t) => {
+test("7. Operations stream messages emit to Operations topic 588 without touching DM or workspace active pointers", async (t) => {
   const env = fakeEnv();
   const sentPayloads: any[] = [];
 

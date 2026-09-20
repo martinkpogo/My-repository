@@ -1,7 +1,7 @@
 import type { Env, WorkState } from "../types";
 import { aiJson } from "../ai";
 import { logActivity } from "../log";
-import { sendConversationHatMessage } from "../telegram";
+import { sendWorkspaceHatMessage } from "../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 import { getPage, plainText, richText, select, updatePage } from "../notion";
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
@@ -54,7 +54,7 @@ export async function handleHandoffPickup(env: Env, state: WorkState): Promise<W
   const taskText = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
   if (!taskText.trim()) {
     console.error(`Marketing handleHandoffPickup: empty task text for handoff ${state.handoffId}`);
-    await sendConversationHatMessage(env, state, `Couldn't pick up a Handoff for Marketing Strategist (Handoff ${state.handoffId}) — it had no readable content.`);
+    await sendWorkspaceHatMessage(env, state, `Couldn't pick up a Handoff for Marketing Strategist (Handoff ${state.handoffId}) — it had no readable content.`);
     return state;
   }
 
@@ -110,7 +110,7 @@ Return JSON:
       decisionRationale: `Could not classify Marketing candidates for this request. Refusing to guess. Reason code: ${reasonCode}`,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(env, state, "Couldn't determine which Marketing Hat this belongs to — classification failed. Please resend or rephrase.");
+    await sendWorkspaceHatMessage(env, state, "Couldn't determine which Marketing Hat this belongs to — classification failed. Please resend or rephrase.");
     return state;
   }
 
@@ -129,7 +129,7 @@ Return JSON:
       decisionRationale: `${reasonText} (Reason code: ${reasonCode})`,
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(env, state, `I'm not sure which Marketing Hat this belongs to — ${reasonText}. Can you clarify what's needed?`);
+    await sendWorkspaceHatMessage(env, state, `I'm not sure which Marketing Hat this belongs to — ${reasonText}. Can you clarify what's needed?`);
     state.stage = "marketing_ambiguous";
     state.awaiting = "marketing_clarification";
     return state;
@@ -170,7 +170,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: "Could not retrieve the Universal Role Contract from Notion. Refusing to execute without it.",
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(env, state, `Couldn't process this task — couldn't retrieve canonical governance from Notion. Please try again once resolved.`);
+    await sendWorkspaceHatMessage(env, state, `Couldn't process this task — couldn't retrieve canonical governance from Notion. Please try again once resolved.`);
     return state;
   }
 
@@ -189,7 +189,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: "Could not determine how to proceed. Refusing to guess.",
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(env, state, `Couldn't determine how to handle this. Please try again or rephrase.`);
+    await sendWorkspaceHatMessage(env, state, `Couldn't determine how to handle this. Please try again or rephrase.`);
     return state;
   }
 
@@ -201,7 +201,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: decision.reason ?? "Insufficient information to proceed.",
       outcome: "Blocked",
     });
-    await sendConversationHatMessage(env, state, decision.reason ?? "I need more information before I can proceed.");
+    await sendWorkspaceHatMessage(env, state, decision.reason ?? "I need more information before I can proceed.");
     state.stage = "marketing_ambiguous";
     state.awaiting = "marketing_clarification";
     return state;
@@ -221,7 +221,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
         decisionRationale: `Proposed target "${decision.target_hat}" is not in ${hatName}'s authorized routing list. Refusing to route.`,
         outcome: "Blocked",
       });
-      await sendConversationHatMessage(env, state, `Couldn't determine a valid next step for this — please clarify what's needed.`);
+      await sendWorkspaceHatMessage(env, state, `Couldn't determine a valid next step for this — please clarify what's needed.`);
       state.stage = "marketing_ambiguous";
       state.awaiting = "marketing_clarification";
       return state;
@@ -236,7 +236,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       outcome: "Blocked",
     });
     const verb = target === "Marketing Strategist" ? "escalate to" : "route to";
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       state,
       `This needs to ${verb} *${target}* — ${decision.reason ?? "outside this Hat's ownership."}\n\nConfirm the transition?`,
@@ -258,7 +258,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
 
   if (isPaidMedia) {
     state.pendingPaidMediaAction = { description: decision.draft ?? "" };
-    await sendConversationHatMessage(
+    await sendWorkspaceHatMessage(
       env,
       state,
       `*Paid media action*\n\n${decision.draft}\n\nThis involves spend and requires your explicit approval before anything runs. Approve this budget/spend?`,
@@ -274,7 +274,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
-  await sendConversationHatMessage(
+  await sendWorkspaceHatMessage(
     env,
     state,
     `${decision.draft}\n\nApprove this?`,
@@ -308,7 +308,7 @@ function buildHatSystemPrompt(hat: MarketingHatDefinition, universalRoleContract
 export async function handleTransitionApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const pending = state.pendingTransition;
   if (!approved || !pending) {
-    await sendConversationHatMessage(env, state, "Got it — what should change? Tell me what to reconsider and I'll take another look.");
+    await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what to reconsider and I'll take another look.");
     state.pendingTransition = undefined;
     state.awaiting = "marketing_feedback";
     return state;
@@ -325,14 +325,14 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
     decisionRationale: pending.reason,
     outcome: "Active",
   });
-  await sendConversationHatMessage(env, state, `Routed to *${pending.toHat}*.`);
+  await sendWorkspaceHatMessage(env, state, `Routed to *${pending.toHat}*.`);
 
   return runMarketingHat(env, state);
 }
 
 export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendConversationHatMessage(env, state, "Got it — what should change? Tell me what's off or what to take into account, and I'll redo it.");
+    await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what's off or what to take into account, and I'll redo it.");
     state.awaiting = "marketing_feedback";
     return state;
   }
@@ -355,7 +355,7 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     decisionRationale: "Approved by Martin.",
     outcome: "Complete",
   });
-  await sendConversationHatMessage(env, state, `Approved.`);
+  await sendWorkspaceHatMessage(env, state, `Approved.`);
   state.marketingDraft = undefined;
   state.stage = "complete";
   state.awaiting = undefined;
@@ -364,7 +364,7 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
 
 export async function handlePaidMediaApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!approved) {
-    await sendConversationHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
+    await sendWorkspaceHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
     state.pendingPaidMediaAction = undefined;
     state.awaiting = "marketing_feedback";
     return state;
@@ -378,7 +378,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
     decisionRationale: "Budget/spend approved by Martin.",
     outcome: "Complete",
   });
-  await sendConversationHatMessage(env, state, `Spend approved.`);
+  await sendWorkspaceHatMessage(env, state, `Spend approved.`);
   state.pendingPaidMediaAction = undefined;
   state.marketingDraft = undefined;
   state.stage = "complete";

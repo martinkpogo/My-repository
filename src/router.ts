@@ -67,17 +67,17 @@ export function getSessionStub(env: Env, workId: string) {
   return env.WORK_SESSION.get(id) as any;
 }
 
-export type StreamType = "conversation" | "operations" | "dm" | "unmapped";
+export type StreamType = "workspace" | "operations" | "dm" | "unmapped";
 
 /**
- * Resolves a Telegram message_thread_id to its Telegram Stream ("conversation" | "operations" | "dm" | "unmapped").
+ * Resolves a Telegram message_thread_id to its Telegram Stream ("workspace" | "operations" | "dm" | "unmapped").
  * Thread IDs indicate Telegram stream identity only, never Unit ownership.
  */
 export function resolveStreamForThread(env: Env, threadId?: number): StreamType {
   if (threadId === undefined) return "dm";
 
-  if (env.CONVERSATION_TOPIC_ID && threadId === Number(env.CONVERSATION_TOPIC_ID)) {
-    return "conversation";
+  if (env.WORKSPACE_TOPIC_ID && threadId === Number(env.WORKSPACE_TOPIC_ID)) {
+    return "workspace";
   }
   if (env.OPERATIONS_TOPIC_ID && threadId === Number(env.OPERATIONS_TOPIC_ID)) {
     return "operations";
@@ -325,18 +325,18 @@ export async function routeIncomingText(
     await sendMessage(
       env,
       chatId,
-      "The Operations topic is reserved for background operational telemetry and system reporting. Interactive requests should be sent in the Conversation topic.",
+      "The Operations topic is reserved for background operational telemetry and system reporting. Interactive requests should be sent in the Workspace topic.",
       undefined,
       threadId,
     );
     return;
   }
 
-  // Conversation stream: check generic workspace capability actions first
+  // Workspace stream: check generic workspace capability actions first
   const capabilityHandled = await routeWorkspaceCapabilityAction(env, chatId, text, threadId);
   if (capabilityHandled) return;
 
-  // Conversation stream: classify task dynamically across specializations
+  // Workspace stream: classify task dynamically across specializations
   const marketingCheck = await classifyMarketingTask(env, text);
   if (marketingCheck === "marketing") {
     const workId = newWorkId();

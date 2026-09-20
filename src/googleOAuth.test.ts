@@ -80,7 +80,7 @@ function createFakeEnv() {
     MARTIN_TELEGRAM_USER_ID: "123456789",
     NOTION_TOKEN: "mock-notion-token",
     TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
-    CONVERSATION_TOPIC_ID: "1",
+    WORKSPACE_TOPIC_ID: "1",
   } as Env;
   return { fakeEnv, mockKv };
 }

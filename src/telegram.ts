@@ -29,7 +29,7 @@ export interface TelegramUpdate {
   };
 }
 
-export type MessageStream = "conversation" | "operations";
+export type MessageStream = "workspace" | "operations";
 
 export interface StreamTarget {
   chatId: number;
@@ -37,17 +37,17 @@ export interface StreamTarget {
 }
 
 /**
- * Returns the target chatId/threadId for the Conversation Stream
- * (Conversation topic in ENIG HQ Supergroup). Fails closed (returns null) if unconfigured.
+ * Returns the target chatId/threadId for the Workspace Stream
+ * (Workspace topic in ENIG HQ Supergroup). Fails closed (returns null) if unconfigured.
  */
-export function getConversationTarget(env: Env): StreamTarget | null {
+export function getWorkspaceTarget(env: Env): StreamTarget | null {
   if (!env.TELEGRAM_GROUP_CHAT_ID) return null;
   const chatId = Number(env.TELEGRAM_GROUP_CHAT_ID);
   if (!Number.isFinite(chatId)) return null;
 
   let threadId: number | undefined;
-  if (env.CONVERSATION_TOPIC_ID) {
-    threadId = Number(env.CONVERSATION_TOPIC_ID);
+  if (env.WORKSPACE_TOPIC_ID) {
+    threadId = Number(env.WORKSPACE_TOPIC_ID);
   }
 
   if (threadId === undefined || !Number.isFinite(threadId)) return null;
@@ -120,28 +120,28 @@ export async function sendOperationsHatMessage(
   );
 }
 
-/** Sends a user-facing decision prompt or conversational message directly to the Conversation Stream. */
-export async function sendConversationHatMessage(
+/** Sends a user-facing decision prompt or conversational message directly to the Workspace Stream. */
+export async function sendWorkspaceHatMessage(
   env: Env,
   target: HatMessageTarget,
   text: string,
   buttons?: InlineButton[][],
 ): Promise<number | undefined> {
-  const convTarget = getConversationTarget(env);
-  if (!convTarget) {
-    console.error(`sendConversationHatMessage: Conversation stream unconfigured${target.hat ? ` for ${target.hat}` : ""}`);
+  const workspaceTarget = getWorkspaceTarget(env);
+  if (!workspaceTarget) {
+    console.error(`sendWorkspaceHatMessage: Workspace stream unconfigured${target.hat ? ` for ${target.hat}` : ""}`);
     await logActivity(env, {
-      entry: `Conversation stream dispatch blocked${target.hat ? ` for ${target.hat}` : ""} [Stream Target Unconfigured]`,
+      entry: `Workspace stream dispatch blocked${target.hat ? ` for ${target.hat}` : ""} [Stream Target Unconfigured]`,
       type: "Blocker",
       area: target.hat,
-      decisionRationale: "TELEGRAM_GROUP_CHAT_ID or CONVERSATION_TOPIC_ID missing from environment bindings. Refusing to send conversation message.",
+      decisionRationale: "TELEGRAM_GROUP_CHAT_ID or WORKSPACE_TOPIC_ID missing from environment bindings. Refusing to send workspace message.",
       outcome: "Blocked",
     }).catch(() => {});
     return undefined;
   }
   return sendHatMessage(
     env,
-    { ...target, chatId: convTarget.chatId, threadId: convTarget.threadId },
+    { ...target, chatId: workspaceTarget.chatId, threadId: workspaceTarget.threadId },
     text,
     buttons,
   );
