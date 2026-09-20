@@ -5,7 +5,7 @@
   "description": "ENIG AI agent runtime: Cloudflare Worker + Workers AI, Telegram as chat/approval interface, Notion as system of record.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "npm run typecheck && npm test && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test",
     "tail": "wrangler tail"
