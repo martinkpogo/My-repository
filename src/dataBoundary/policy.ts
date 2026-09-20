@@ -57,6 +57,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "lead.discovery_signal_evaluation": "public_sourced",
   "action.google_doc_intake": "business_sensitive",
   "action.google_doc_comment_edit": "business_sensitive",
+  "action.google_sheet_intake": "business_sensitive",
 };
 
 /**

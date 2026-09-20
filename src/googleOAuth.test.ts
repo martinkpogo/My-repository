@@ -5,13 +5,16 @@ import {
   buildGoogleAuthorizeUrl,
   cleanupDefaultGoogleAccount,
   codeChallengeFromVerifier,
+  columnLetter,
   consumeOpaqueOption,
   createGoogleDoc,
+  createGoogleSheet,
   generateCodeVerifier,
   generateState,
   getValidGoogleAccessToken,
   GOOGLE_OAUTH_SCOPES,
   GoogleDocCreationCapability,
+  GoogleSheetCreationCapability,
   handleGoogleAccountSelection,
   handleGoogleFolderSelection,
   handleGoogleOAuthCallback,
@@ -136,7 +139,7 @@ test("Google Authorize URL construction includes exact required parameters and m
   // to resolve a real email instead of falling back to "default".
   assert.strictEqual(
     GOOGLE_OAUTH_SCOPES,
-    "openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents",
+    "openid email https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets",
   );
   assert.strictEqual(url.searchParams.get("scope"), GOOGLE_OAUTH_SCOPES);
 });
@@ -1194,4 +1197,259 @@ test("cleanupDefaultGoogleAccount never guesses which account to re-point to whe
   assert.deepStrictEqual(result.docsOrphaned, ["doc-under-default-2"]);
   const docs = await listWatchedGoogleDocs(fakeEnv);
   assert.strictEqual(docs.find((d) => d.documentId === "doc-under-default-2")?.accountIdentifier, "default");
+});
+
+test("columnLetter converts 1-based column indices to A1-notation letters", () => {
+  assert.strictEqual(columnLetter(1), "A");
+  assert.strictEqual(columnLetter(5), "E");
+  assert.strictEqual(columnLetter(26), "Z");
+  assert.strictEqual(columnLetter(27), "AA");
+  assert.strictEqual(columnLetter(52), "AZ");
+});
+
+test("createGoogleSheet validates action parameters and fails closed on missing input", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  const invalidAction = {
+    type: "create_sheet",
+    title: "",
+    rows: [["Date", "Content Piece"]],
+    folderId: "folder-123",
+    accountIdentifier: "admin@enig.com",
+  } as PendingGoogleAction;
+
+  const res = await createGoogleSheet(fakeEnv, invalidAction as any);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.stage, "validation");
+  assert.strictEqual(res.error, "Missing or invalid Google Sheet creation parameters");
+});
+
+test("createGoogleSheet fails closed when authorization is missing", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  const action = {
+    type: "create_sheet",
+    title: "Content Calendar",
+    rows: [["Date", "Content Piece", "Channel", "Status", "Owner"]],
+    folderId: "folder-456",
+    accountIdentifier: "unauthorized@enig.com",
+  } as PendingGoogleAction;
+
+  const res = await createGoogleSheet(fakeEnv, action as any);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.stage, "auth");
+  assert.strictEqual(res.error, "Google Workspace authorization missing or invalid");
+});
+
+test("createGoogleSheet executes 3-stage creation pipeline and verifies header/data rows", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "sheet-access-token-001",
+      refresh_token: "sheet-refresh-token-001",
+      expires_in: 3600,
+    },
+    "sheet-creator@enig.com",
+  );
+
+  let driveCreated = false;
+  let valuesUpdated = false;
+  let valuesVerified = false;
+
+  const sheetTitle = "Q4 Content Calendar";
+  const rows = [
+    ["Date", "Content Piece", "Channel", "Status", "Owner"],
+    ["2026-10-01", "Launch post", "LinkedIn", "Planned", "Content Manager"],
+  ];
+  const folderId = "target-folder-calendar";
+  const createdSheetId = "new-sheet-id-999";
+  const range = "A1:E2";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      driveCreated = true;
+      assert.strictEqual(init?.method, "POST");
+      const body = JSON.parse(String(init?.body));
+      assert.strictEqual(body.name, sheetTitle);
+      assert.strictEqual(body.mimeType, "application/vnd.google-apps.spreadsheet");
+      assert.deepStrictEqual(body.parents, [folderId]);
+
+      return new Response(JSON.stringify({ id: createdSheetId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (
+      urlStr ===
+      `https://sheets.googleapis.com/v4/spreadsheets/${createdSheetId}/values/${range}?valueInputOption=USER_ENTERED`
+    ) {
+      valuesUpdated = true;
+      assert.strictEqual(init?.method, "PUT");
+      const body = JSON.parse(String(init?.body));
+      assert.deepStrictEqual(body.values, rows);
+
+      return new Response(JSON.stringify({ updatedRange: range }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (urlStr === `https://sheets.googleapis.com/v4/spreadsheets/${createdSheetId}/values/${range}`) {
+      valuesVerified = true;
+      assert.strictEqual(init?.method, "GET");
+
+      return new Response(JSON.stringify({ values: rows }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const action = {
+      type: "create_sheet",
+      title: sheetTitle,
+      rows,
+      folderId,
+      accountIdentifier: "sheet-creator@enig.com",
+    } as PendingGoogleAction;
+
+    const res = await createGoogleSheet(fakeEnv, action as any);
+
+    assert.strictEqual(driveCreated, true);
+    assert.strictEqual(valuesUpdated, true);
+    assert.strictEqual(valuesVerified, true);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.spreadsheetId, createdSheetId);
+    assert.strictEqual(res.spreadsheetUrl, `https://docs.google.com/spreadsheets/d/${createdSheetId}/edit`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createGoogleSheet fails closed on creation, insertion, or verification mismatch", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "sheet-access-token-002",
+      refresh_token: "sheet-refresh-token-002",
+      expires_in: 3600,
+    },
+    "sheet-creator-2@enig.com",
+  );
+
+  const action = {
+    type: "create_sheet",
+    title: "Test Sheet Failure",
+    rows: [["Date", "Content Piece"]],
+    folderId: "folder-id-888",
+    accountIdentifier: "sheet-creator-2@enig.com",
+  } as PendingGoogleAction;
+
+  // 1. Creation failure
+  globalThis.fetch = (async (url: string) => {
+    if (String(url) === "https://www.googleapis.com/drive/v3/files") {
+      return new Response("Permission denied", { status: 403 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const resCreateFail = await createGoogleSheet(fakeEnv, action as any);
+    assert.strictEqual(resCreateFail.ok, false);
+    assert.strictEqual(resCreateFail.stage, "creation");
+
+    // 2. Insertion failure
+    globalThis.fetch = (async (url: string) => {
+      if (String(url) === "https://www.googleapis.com/drive/v3/files") {
+        return new Response(JSON.stringify({ id: "sheet-id-123" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (String(url).includes("/values/")) {
+        return new Response("Internal error", { status: 500 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const resInsertFail = await createGoogleSheet(fakeEnv, action as any);
+    assert.strictEqual(resInsertFail.ok, false);
+    assert.strictEqual(resInsertFail.stage, "insertion");
+
+    // 3. Verification mismatch (rows differ from what was inserted)
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+        return new Response(JSON.stringify({ id: "sheet-id-123" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (init?.method === "PUT" && urlStr.includes("/values/")) {
+        return new Response(JSON.stringify({ updatedRange: "A1:B1" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (init?.method === "GET" && urlStr.includes("/values/")) {
+        return new Response(JSON.stringify({ values: [["Wrong", "Header"]] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const resVerifyFail = await createGoogleSheet(fakeEnv, action as any);
+    assert.strictEqual(resVerifyFail.ok, false);
+    assert.strictEqual(resVerifyFail.stage, "verification");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GoogleSheetCreationCapability ignores non-sheet requests and proposes account picker for content calendar requests", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  // Override the AI mock to classify as a sheet (content calendar) request.
+  fakeEnv.AI = {
+    run: async () => ({
+      response: JSON.stringify({
+        isGoogleSheetRequest: true,
+        title: "November Content Calendar",
+        rows: [["Date", "Content Piece", "Channel", "Status", "Owner"]],
+      }),
+    }),
+  } as unknown as Ai;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "cal-token", refresh_token: "cal-refresh", expires_in: 3600 },
+    "calendar-owner@enig.com",
+  );
+
+  let sentButtons: any[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const handled = await GoogleSheetCreationCapability.handleIntake(
+      fakeEnv,
+      12345,
+      "Set up a content calendar for November",
+    );
+
+    assert.strictEqual(handled, true);
+    assert.ok(sentButtons.length >= 1);
+    assert.match(sentButtons[0][0].callback_data, /^googleaccount:[a-f0-9-]+:[a-f0-9-]+$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

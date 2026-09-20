@@ -22,7 +22,8 @@ export type SemanticTaskId =
   | "lead.discovery_classification"
   | "lead.discovery_signal_evaluation"
   | "action.google_doc_intake"
-  | "action.google_doc_comment_edit";
+  | "action.google_doc_comment_edit"
+  | "action.google_sheet_intake";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely
