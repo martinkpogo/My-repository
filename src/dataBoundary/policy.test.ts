@@ -29,9 +29,10 @@ test("1. Validates all 22 semantic task IDs in SEMANTIC_TASK_REGISTRY", () => {
     "action.google_doc_intake",
     "action.google_doc_comment_edit",
     "action.google_sheet_intake",
+    "action.google_sheet_comment_edit",
   ];
 
-  assert.strictEqual(Object.keys(SEMANTIC_TASK_REGISTRY).length, 23);
+  assert.strictEqual(Object.keys(SEMANTIC_TASK_REGISTRY).length, 24);
   for (const id of expectedTaskIds) {
     assert.strictEqual(isSemanticTaskId(id), true);
     assert.ok(SEMANTIC_TASK_REGISTRY[id]);

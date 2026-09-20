@@ -21,6 +21,7 @@ import {
   handleGoogleOAuthStart,
   listAuthorizedGoogleAccounts,
   listWatchedGoogleDocs,
+  listWatchedGoogleSheets,
   loadGoogleTokens,
   parseAccountIdentifierFromIdToken,
   PendingGoogleAction,
@@ -28,6 +29,7 @@ import {
   proposeGoogleDocCreation,
   handleGoogleActionApproval,
   registerWatchedGoogleDoc,
+  registerWatchedGoogleSheet,
   saveOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
@@ -1452,4 +1454,90 @@ test("GoogleSheetCreationCapability ignores non-sheet requests and proposes acco
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("registerWatchedGoogleSheet and listWatchedGoogleSheets round-trip", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  assert.deepStrictEqual(await listWatchedGoogleSheets(fakeEnv), []);
+
+  await registerWatchedGoogleSheet(fakeEnv, {
+    spreadsheetId: "sheet-abc",
+    accountIdentifier: "owner@enig.com",
+    title: "Content Calendar",
+    chatId: 111,
+    threadId: 604,
+    createdAt: new Date().toISOString(),
+  });
+
+  const sheets = await listWatchedGoogleSheets(fakeEnv);
+  assert.strictEqual(sheets.length, 1);
+  assert.strictEqual(sheets[0].spreadsheetId, "sheet-abc");
+  assert.strictEqual(sheets[0].title, "Content Calendar");
+});
+
+test("handleGoogleActionApproval registers the created sheet for comment-triggered editing and tips about it", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "sheet-tok", refresh_token: "sheet-refresh", expires_in: 3600 },
+    "owner@enig.com",
+  );
+
+  let sentTelegramText = "";
+  const createdSheetId = "sheet-watch-target";
+  const rows = [["Date", "Content Piece", "Channel", "Status", "Owner"]];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      return new Response(JSON.stringify({ id: createdSheetId }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (urlStr.includes("/values/") && init?.method === "PUT") {
+      return new Response(JSON.stringify({ updatedRange: "A1:E1" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (urlStr.includes("/values/") && (!init || init.method === undefined || init.method === "GET")) {
+      return new Response(JSON.stringify({ values: rows }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const state: WorkState = {
+    workId: "work-sheet-watch-1",
+    chatId: 987654321,
+    threadId: 604,
+    unit: "Operations",
+    hat: "Content Manager",
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    pendingGoogleAction: {
+      type: "create_sheet",
+      title: "Watched Content Calendar",
+      rows,
+      folderId: "folder-1",
+      accountIdentifier: "owner@enig.com",
+    },
+  };
+
+  const updatedState = await handleGoogleActionApproval(fakeEnv, state, true);
+
+  assert.strictEqual(updatedState.pendingGoogleAction, undefined);
+  assert.match(sentTelegramText, /Google Sheet created and verified successfully/);
+  assert.match(sentTelegramText, /select a cell.*comment/i);
+
+  const watched = await listWatchedGoogleSheets(fakeEnv);
+  assert.strictEqual(watched.length, 1);
+  assert.strictEqual(watched[0].spreadsheetId, createdSheetId);
+  assert.strictEqual(watched[0].accountIdentifier, "owner@enig.com");
 });

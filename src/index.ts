@@ -25,6 +25,7 @@ import {
   cleanupDefaultGoogleAccount,
 } from "./googleOAuth";
 import { pollGoogleDocComments } from "./googleDocComments";
+import { pollGoogleSheetComments } from "./googleSheetComments";
 
 export { WorkSession } from "./session";
 
@@ -338,6 +339,43 @@ export default {
       }
       const lastRun = await env.STATE_KV.get("last_google_doc_comment_poll_run");
       return new Response(JSON.stringify({ last_google_doc_comment_poll_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Comment-triggered Google Sheet editing -- same pattern and same
+    // rationale (no Drive push notification for comment events) as
+    // /admin/poll-google-doc-comments above. Meant to be hit every 30-60s
+    // by a second cron-job.org schedule.
+    if (url.pathname === "/admin/poll-google-sheet-comments" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      try {
+        const result = await pollGoogleSheetComments(env);
+        return new Response(JSON.stringify({ ok: true, ...result }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        console.error("Unhandled error in /admin/poll-google-sheet-comments", err);
+        return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
+    // Same diagnostic as /admin/last-google-doc-comment-poll above, for
+    // the separate cron-job.org schedule hitting
+    // /admin/poll-google-sheet-comments.
+    if (url.pathname === "/admin/last-google-sheet-comment-poll" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const lastRun = await env.STATE_KV.get("last_google_sheet_comment_poll_run");
+      return new Response(JSON.stringify({ last_google_sheet_comment_poll_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
         headers: { "content-type": "application/json" },
       });
     }

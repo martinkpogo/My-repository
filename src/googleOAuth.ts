@@ -1021,6 +1021,45 @@ export async function listWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[
   return docs;
 }
 
+export interface WatchedGoogleSheet {
+  spreadsheetId: string;
+  accountIdentifier: string;
+  title: string;
+  chatId?: number;
+  threadId?: number;
+  createdAt: string;
+}
+
+/**
+ * Registers a created Google Sheet for comment-triggered editing (see
+ * googleSheetComments.ts). Same opt-in-by-creation rule as
+ * registerWatchedGoogleDoc: only sheets this system itself created are
+ * watched, never arbitrary pre-existing files.
+ */
+export async function registerWatchedGoogleSheet(env: Env, sheet: WatchedGoogleSheet): Promise<void> {
+  await env.STATE_KV.put(`google_sheet_watch:${sheet.spreadsheetId}`, JSON.stringify(sheet));
+}
+
+export async function listWatchedGoogleSheets(env: Env): Promise<WatchedGoogleSheet[]> {
+  const sheets: WatchedGoogleSheet[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.STATE_KV.list({ prefix: "google_sheet_watch:", cursor });
+    for (const key of page.keys) {
+      const raw = await env.STATE_KV.get(key.name);
+      if (raw) {
+        try {
+          sheets.push(JSON.parse(raw) as WatchedGoogleSheet);
+        } catch {
+          // corrupt entry -- skip rather than fail the whole poll
+        }
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return sheets;
+}
+
 export interface CleanupDefaultGoogleAccountResult {
   tokenDeleted: boolean;
   docsRepointedTo: string | null;
@@ -1508,10 +1547,21 @@ export async function handleGoogleActionApproval(
       return state;
     }
 
+    if (result.spreadsheetId) {
+      await registerWatchedGoogleSheet(env, {
+        spreadsheetId: result.spreadsheetId,
+        accountIdentifier: action.accountIdentifier,
+        title: action.title,
+        chatId: state.chatId,
+        threadId: state.threadId,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
     await sendWorkspaceHatMessage(
       env,
       target,
-      `✅ Google Sheet created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.spreadsheetUrl}`,
+      `✅ Google Sheet created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.spreadsheetUrl}\n\nTip: select a cell, leave a comment describing the change, and it'll be applied automatically within about a minute.`,
     );
 
     return state;
