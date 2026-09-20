@@ -94,6 +94,23 @@ async function markProcessed(env: Env, commentId: string): Promise<void> {
   });
 }
 
+export type CommentOutcome =
+  | "already_processed"
+  | "resolved_skip"
+  | "unauthorized_author"
+  | "no_anchor"
+  | "doc_read_failed"
+  | "anchor_not_unique"
+  | "ai_not_understood"
+  | "batch_update_failed"
+  | "applied";
+
+interface ProcessCommentResult {
+  handled: boolean;
+  outcome: CommentOutcome;
+  detail?: string;
+}
+
 /**
  * Processes a single comment on a watched doc. Never guesses WHICH text to
  * change -- that comes only from the comment's own anchor (quotedFileContent),
@@ -102,13 +119,13 @@ async function markProcessed(env: Env, commentId: string): Promise<void> {
  * anchored text is verified unique in the doc's current content, so a
  * misfire can't silently clobber the wrong occurrence.
  */
-async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<boolean> {
+async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
   const alreadyProcessed = await env.STATE_KV.get(`google_comment_processed:${comment.id}`);
-  if (alreadyProcessed) return false;
+  if (alreadyProcessed) return { handled: false, outcome: "already_processed" };
 
   if (comment.resolved) {
     await markProcessed(env, comment.id);
-    return false;
+    return { handled: false, outcome: "resolved_skip" };
   }
 
   // Access control: only the doc's own authorized Google identity may
@@ -117,7 +134,11 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   // acted on or replied to).
   if (comment.author?.emailAddress !== doc.accountIdentifier) {
     await markProcessed(env, comment.id);
-    return false;
+    return {
+      handled: false,
+      outcome: "unauthorized_author",
+      detail: `comment author '${comment.author?.emailAddress ?? "unknown"}' !== watched account '${doc.accountIdentifier}'`,
+    };
   }
 
   const quoted = comment.quotedFileContent?.value?.trim();
@@ -129,14 +150,14 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
       "I can only execute edits anchored to specific selected text right now — please select the text you want changed, then comment on that selection.",
     );
     await markProcessed(env, comment.id);
-    return true;
+    return { handled: true, outcome: "no_anchor" };
   }
 
   const fullText = await fetchDocText(token, doc.documentId);
   if (fullText === null) {
     // Transient read failure -- retry on the next poll rather than
     // treating this as the human's problem.
-    return false;
+    return { handled: false, outcome: "doc_read_failed" };
   }
 
   const occurrences = fullText.split(quoted).length - 1;
@@ -150,7 +171,7 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
         : `The selected text appears ${occurrences} times in the document, so I can't safely target just this one — please select a longer, unique snippet and comment again.`,
     );
     await markProcessed(env, comment.id);
-    return true;
+    return { handled: true, outcome: "anchor_not_unique", detail: `quoted="${quoted}" occurrences=${occurrences}` };
   }
 
   const instruction = await aiJson<{ understood: boolean; replacementText?: string }>(env, {
@@ -168,7 +189,7 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
       "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what the selected text should become?",
     );
     await markProcessed(env, comment.id);
-    return true;
+    return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "aiJson returned null" };
   }
 
   const replacementText = instruction.replacementText.trim();
@@ -183,7 +204,7 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
       outcome: "Blocked",
     });
     // Leave unprocessed -- retry next poll; may be transient.
-    return false;
+    return { handled: false, outcome: "batch_update_failed" };
   }
 
   await replyToComment(token, doc.documentId, comment.id, `Done — changed to: "${replacementText}"`);
@@ -206,12 +227,18 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
     );
   }
 
-  return true;
+  return { handled: true, outcome: "applied", detail: `"${quoted}" -> "${replacementText}"` };
 }
 
 export interface PollGoogleDocCommentsResult {
   docsChecked: number;
   commentsProcessed: number;
+  diagnostics: {
+    documentId: string;
+    commentId: string | null;
+    outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "unhandled_exception";
+    detail?: string;
+  }[];
 }
 
 /**
@@ -237,27 +264,47 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
 
   const docs = await listWatchedGoogleDocs(env);
   let commentsProcessed = 0;
+  const diagnostics: PollGoogleDocCommentsResult["diagnostics"] = [];
 
   for (const doc of docs) {
     const token = await getValidGoogleAccessToken(env, doc.accountIdentifier);
-    if (!token) continue; // re-authorization needed -- surfaced elsewhere via existing OAuth failure paths
+    if (!token) {
+      diagnostics.push({ documentId: doc.documentId, commentId: null, outcome: "token_unavailable" });
+      continue; // re-authorization needed -- surfaced elsewhere via existing OAuth failure paths
+    }
 
     let comments: DriveComment[];
     try {
       comments = await fetchComments(token, doc.documentId);
     } catch (err) {
       console.error(`pollGoogleDocComments: failed to list comments for ${doc.documentId}`, err);
+      diagnostics.push({
+        documentId: doc.documentId,
+        commentId: null,
+        outcome: "comments_list_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
       continue;
     }
 
+    diagnostics.push({ documentId: doc.documentId, commentId: null, outcome: "comments_fetched", detail: `${comments.length} comment(s) found` });
+
     for (const comment of comments) {
       try {
-        if (await processComment(env, doc, comment, token)) commentsProcessed++;
+        const result = await processComment(env, doc, comment, token);
+        diagnostics.push({ documentId: doc.documentId, commentId: comment.id, outcome: result.outcome, detail: result.detail });
+        if (result.handled) commentsProcessed++;
       } catch (err) {
         console.error(`pollGoogleDocComments: error processing comment ${comment.id} on ${doc.documentId}`, err);
+        diagnostics.push({
+          documentId: doc.documentId,
+          commentId: comment.id,
+          outcome: "unhandled_exception",
+          detail: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   }
 
-  return { docsChecked: docs.length, commentsProcessed };
+  return { docsChecked: docs.length, commentsProcessed, diagnostics };
 }
