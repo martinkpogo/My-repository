@@ -388,7 +388,7 @@ test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-boun
     }
 
     // Docs get mock
-    if (urlStr === "https://www.googleapis.com/v1/documents/doc-id-state-bound-100") {
+    if (urlStr === "https://docs.googleapis.com/v1/documents/doc-id-state-bound-100") {
       return new Response(
         JSON.stringify({
           title: "Approved Strategy Doc",
@@ -562,7 +562,7 @@ test("createGoogleDoc executes 3-stage creation pipeline and verifies title and 
     }
 
     // Stage 2: Docs batchUpdate
-    if (urlStr === `https://www.googleapis.com/v1/documents/${createdDocId}:batchUpdate`) {
+    if (urlStr === `https://docs.googleapis.com/v1/documents/${createdDocId}:batchUpdate`) {
       docBatchUpdated = true;
       assert.strictEqual(init?.method, "POST");
       const body = JSON.parse(String(init?.body));
@@ -575,7 +575,7 @@ test("createGoogleDoc executes 3-stage creation pipeline and verifies title and 
     }
 
     // Stage 3: Docs get verification
-    if (urlStr === `https://www.googleapis.com/v1/documents/${createdDocId}`) {
+    if (urlStr === `https://docs.googleapis.com/v1/documents/${createdDocId}`) {
       docVerified = true;
       assert.strictEqual(init?.method, "GET");
 
@@ -686,7 +686,7 @@ test("createGoogleDoc fails closed when creation, insertion, or verification sta
       if (urlStr.endsWith(":batchUpdate")) {
         return new Response(JSON.stringify({ documentId: "doc-id-123" }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (urlStr === "https://www.googleapis.com/v1/documents/doc-id-123") {
+      if (urlStr === "https://docs.googleapis.com/v1/documents/doc-id-123") {
         return new Response(
           JSON.stringify({
             title: "Wrong Title Returned",
