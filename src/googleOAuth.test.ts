@@ -463,6 +463,7 @@ test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-boun
     // State pending action cleared after execution
     assert.strictEqual(updatedState.pendingGoogleAction, undefined);
     assert.strictEqual(updatedState.pendingActionSummary, undefined);
+    assert.strictEqual(updatedState.stage, "complete", "a resolved Google action must be marked terminal, not linger as '(new)' in /sessions forever");
     assert.match(sentTelegramText, /Google Doc created and verified successfully/);
     assert.strictEqual(filesCreateCallCount, 1);
 
