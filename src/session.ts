@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
-import * as sales from "./units/smbd/sales/salesExecutive";
+import * as sales from "./units/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
@@ -11,8 +11,8 @@ import {
   handleGoogleFolderSelection,
   handleGoogleActionApproval,
 } from "./googleOAuth";
-import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/smbd/sales/leadGenerationDiscovery";
-import type { PendingLeadOpportunity } from "./units/smbd/sales/leadGenerationDiscovery";
+import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/sales/leadGenerationDiscovery";
+import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 
 export class WorkSession extends DurableObject<Env> {

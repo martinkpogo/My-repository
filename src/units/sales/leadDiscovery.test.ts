@@ -8,7 +8,7 @@ import {
   parseLeadSignal,
   redactSignalForClassification,
 } from "./leadDiscovery";
-import type { Env } from "../../../types";
+import type { Env } from "../../types";
 
 test("LEAD_COMMAND_PATTERN matches only an actual /lead command, never ordinary enquiry text -- this is what keeps inbound enquiries out of the Lead Generation Specialist path", () => {
   assert.strictEqual(LEAD_COMMAND_PATTERN.test("/lead"), true);

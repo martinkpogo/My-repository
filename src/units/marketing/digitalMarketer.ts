@@ -1,4 +1,4 @@
-import type { MarketingHatDefinition } from "../../../hats/types";
+import type { MarketingHatDefinition } from "../../hats/types";
 
 /**
  * Digital Marketer — Unit: Marketing, Specialization: Marketing.

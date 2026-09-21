@@ -8,7 +8,7 @@ import {
   proposeLeadOpportunity,
   runAutonomousLeadDiscovery,
 } from "./leadGenerationDiscovery";
-import type { Env, WorkState } from "../../../types";
+import type { Env, WorkState } from "../../types";
 
 function createMockWorkSession() {
   const calls: { init: any[][]; proposeLeadOpportunity: any[][] } = { init: [], proposeLeadOpportunity: [] };

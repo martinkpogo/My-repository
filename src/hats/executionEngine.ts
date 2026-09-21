@@ -14,7 +14,7 @@ import {
 /**
  * Shared Marketing execution mechanics only — not a Hat registry, and not
  * a Hat-definition file. Each Marketing Hat remains independently defined
- * in its own file under src/units/smbd/marketing/ (purpose, owns,
+ * in its own file under src/units/marketing/ (purpose, owns,
  * doesNotOwn, routesTo); src/hats/registry.ts remains the one canonical
  * place every Hat is registered. This file contains only the runtime
  * lifecycle every one of the five Marketing Hats shares identically —

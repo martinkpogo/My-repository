@@ -1,9 +1,9 @@
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
-import { MARKETING_STRATEGIST } from "../units/smbd/marketing/marketingStrategist";
-import { BRAND_COMMUNICATIONS_STRATEGIST } from "../units/smbd/marketing/brandCommunicationsStrategist";
-import { CONTENT_STRATEGIST } from "../units/smbd/marketing/contentStrategist";
-import { CONTENT_MANAGER } from "../units/smbd/marketing/contentManager";
-import { DIGITAL_MARKETER } from "../units/smbd/marketing/digitalMarketer";
+import { MARKETING_STRATEGIST } from "../units/marketing/marketingStrategist";
+import { BRAND_COMMUNICATIONS_STRATEGIST } from "../units/marketing/brandCommunicationsStrategist";
+import { CONTENT_STRATEGIST } from "../units/marketing/contentStrategist";
+import { CONTENT_MANAGER } from "../units/marketing/contentManager";
+import { DIGITAL_MARKETER } from "../units/marketing/digitalMarketer";
 
 /**
  * Canonical Hat registration/discovery — the metadata needed to locate

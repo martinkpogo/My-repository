@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handleInterventionText, handleQuoteReceived } from "./salesExecutive";
-import type { WorkState, Env } from "../../../types";
+import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {
   return {

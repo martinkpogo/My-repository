@@ -1,4 +1,4 @@
-import type { MarketingHatDefinition } from "../../../hats/types";
+import type { MarketingHatDefinition } from "../../hats/types";
 
 /**
  * Brand & Communications Strategist — Unit: Marketing, Specialization: Marketing.
