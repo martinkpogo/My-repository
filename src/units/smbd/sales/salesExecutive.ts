@@ -151,6 +151,7 @@ function buildProposalRevisionSystemPrompt(hatDefinition: string, universalRoleC
 
 export async function handleIncomingEnquiry(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.enquiryText = text;
+  state.entryType = "inbound_enquiry";
   await logActivity(env, {
     entry: `Incoming enquiry — work ${state.workId}`,
     type: "Activity",
@@ -663,7 +664,66 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
 }
 
 export async function handleInterventionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.proposedIntervention = text;
+  const trimmedIntervention = text.trim();
+  state.proposedIntervention = trimmedIntervention;
+
+  // Fail-closed gate 1: entry_type is required on the Handoff and must never
+  // be invented or defaulted. In this Worker's current code paths it's set
+  // by handleIncomingEnquiry (inbound_enquiry) -- if it's missing, that's a
+  // code-path defect, not something Martin can fix by sending a message, so
+  // this is logged as a Blocker rather than treated as an awaiting-reply gap.
+  if (!state.entryType) {
+    console.error(`Sales Executive Handoff blocked -- missing entry_type for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Sales -> Finance Handoff blocked -- missing entry_type: ${state.matterName ?? state.workId}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale:
+        "entry_type (inbound_enquiry | outbound_outreach) was not set on this work item before Handoff creation was attempted -- refusing to invent one.",
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      `Couldn't route *${state.matterName}* to Finance -- this work item is missing its entry type (how it originated). Not proceeding without it.`,
+    );
+    return state;
+  }
+
+  // Fail-closed gate 2: proposed intervention is a required Finance input
+  // (per the Sales Executive boundary) -- an empty/whitespace-only message
+  // must not produce a Handoff with nothing for Finance to price against.
+  if (!trimmedIntervention) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      "That looked empty -- what's the proposed intervention (what ENIG would actually do)? Send it as a message — no pricing/budget figures, just the scope.",
+    );
+    return state;
+  }
+
+  // Fail-closed gate 3: value-relevant context (the other required Finance
+  // input) must exist in some form -- enquiry text, call notes, or both.
+  // Without it there is nothing for Finance to judge a value-based quote
+  // against, and Sales must not substitute or invent context to fill the gap.
+  const valueContext = [state.enquiryText, state.callNotes].filter((v) => v && v.trim().length > 0).join("\n\n");
+  if (!valueContext) {
+    console.error(`Sales Executive Handoff blocked -- no value-relevant context for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Sales -> Finance Handoff blocked -- no value-relevant context: ${state.matterName ?? state.workId}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale: "Neither enquiry text nor call notes are present -- Finance has nothing to judge a value-based quote against.",
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      `Couldn't route *${state.matterName}* to Finance -- there's no value-relevant context on record (no enquiry text or call notes). Send call notes first, then I'll route it.`,
+    );
+    return state;
+  }
+
   await updatePage(env, state.matterId!, {
     Status: select("Commercial Development"),
     Next_action: richText("Awaiting Finance value-based quote"),
@@ -679,13 +739,21 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     "To Hat": richText("Value-Based Pricing Assessor"),
     Type: select("Work"),
     Status: select("Pending"),
-    Reason: richText(`Value-based quote requested for ${state.matterName}.`),
+    Reason: richText(`Value-based quote requested for ${state.matterName}. Entry type: ${state.entryType}.`),
     "Expected Output": richText("Quoted price (USD) and pricing rationale."),
+    "Required Next Action": richText(
+      "Judge a value-based quote and either approve it (routes back to Sales for Draft Proposal preparation) or hold it with a specific open question.",
+    ),
+    "Acceptance Criteria": richText(
+      "A quoted price (USD) with clear value-based rationale, or an explicit Held status naming the specific question blocking judgment.",
+    ),
     Entity_Token: richText(identityTokens.entityToken),
     Matter_Token: richText(identityTokens.matterToken),
-    Assumptions: richText("No disclosed budget or willingness-to-pay figure has been provided or should be used."),
+    Assumptions: richText(
+      "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a Finance pricing input.",
+    ),
     "Verified Facts & Sources": richText(
-      `Proposed intervention: ${text}\n\nValue context (enquiry + call notes):\n${[state.enquiryText, state.callNotes].filter(Boolean).join("\n\n")}`.slice(0, 1900),
+      `Proposed intervention: ${trimmedIntervention}\n\nValue context (enquiry + call notes):\n${valueContext}`.slice(0, 1900),
     ),
   });
 
