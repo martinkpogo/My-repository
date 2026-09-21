@@ -15,6 +15,7 @@ export type SemanticTaskId =
   | "sales.enquiry_extraction"
   | "sales.matter_summary_drafting"
   | "sales.call_prep_briefing"
+  | "sales.commercial_evidence_extraction"
   | "sales.call_qualification"
   | "sales.proposal_drafting"
   | "sales.proposal_revision"

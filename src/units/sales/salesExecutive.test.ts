@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handleInterventionText, handleQuoteReceived } from "./salesExecutive";
+import { handleInterventionText, handleQuoteReceived, handleLeadToProspectApproval } from "./salesExecutive";
 import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {
@@ -303,4 +303,283 @@ test("9. Finance quote authority remains unchanged -- Sales reads the quote verb
   assert.ok(result.quote, "the parsed quote must be attached to state");
   assert.strictEqual(result.quote!.price, 18500, "the quote price must be read verbatim -- never modified, converted, or reinterpreted");
   assert.strictEqual(result.quote!.rationale, "Value-based on projected revenue lift.");
+});
+
+// ============================================================================
+// Commercial Value & Pricing Operating Model
+//
+// NOTE ON TEST STRATEGY: handleCallNotes's two AI calls (commercial-value
+// extraction, then qualification) run through the production
+// AiPolicyExecutor/data-boundary evaluator exactly like every other sales.*
+// task. Per dataBoundary/policy.ts's own documented "Sales Executive pause"
+// (see PRODUCTION_PROVIDER_ELIGIBILITY's comment), every sales.* task is
+// client_confidential and, as of today, has ZERO eligible provider in
+// production -- a pre-existing gap unrelated to this change (it already
+// applied to the four original qualification conditions before this task).
+// aiJson therefore returns null for both calls in this environment, exactly
+// as it would in production today, so a test that mocked env.AI.run would
+// never actually reach it -- it would just be exercising dead code that
+// can't run outside a test process. Since fixing that provider-eligibility
+// gate is an explicitly out-of-scope architectural change (see AGENTS.md's
+// Provider and Data-Boundary Constraints and this task's own "no additional
+// architectural changes" instruction), these tests instead exercise the
+// deterministic evidence-gate logic directly, and the Handoff/Matter
+// carry-forward logic that doesn't require an AI call to succeed -- both
+// exported from salesExecutive.ts for this purpose (see the "Exported for
+// unit testing only" block at the end of that file).
+// ============================================================================
+
+import {
+  normalizeCommercialEvidence,
+  normalizeInvestmentToleranceContext,
+  evaluateCommercialValueEvidence,
+  computeOverallQualification,
+  buildMeasurementBaseline,
+  formatCommercialEvidenceForHandoff,
+} from "./salesExecutive";
+
+test("A. Sufficient commercial evidence (numerical affected opportunity/value, source, period, desired outcome) -> commercial_value_evidence can be Satisfied", () => {
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { low: 8000000, high: 12000000, currency: "GHS", period: "annual", evidence_type: "client_estimated", source: "Client-stated on call" },
+    affected_revenue_or_opportunity: "Larger-account sales opportunities",
+    desired_measurable_outcome: "Number/value of qualified larger-account opportunities progressed",
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Satisfied");
+
+  // And the qualification-level splice/override + overall recomputation
+  // wires correctly once this deterministic result is available -- the
+  // rest of handleCallNotes's integration.
+  const conditions = [
+    { condition: "within_specialization" as const, evidence: "Fits our specialization.", assessment: "Satisfied" as const },
+    { condition: "allows_diagnosis_first" as const, evidence: "Open to diagnosis.", assessment: "Satisfied" as const },
+    { condition: "open_to_ballpark_amount_and_time" as const, evidence: "Open to discussing scope.", assessment: "Satisfied" as const },
+    { condition: "ready_to_commit_required_resources" as const, evidence: "Ready to commit resources.", assessment: "Satisfied" as const },
+    { condition: "commercial_value_evidence" as const, evidence: result.evidenceText, assessment: result.assessment },
+  ];
+  assert.strictEqual(computeOverallQualification(conditions), "Qualified");
+});
+
+test("B. Turnover-only (no value connected to the problem) -> insufficient commercial evidence", () => {
+  // The extraction prompt is instructed not to populate value_at_stake from
+  // bare turnover -- this is what that discipline holding looks like: no
+  // value_at_stake or cost_of_inaction extracted at all, even though a
+  // number (GHS 28M) appeared in the source text.
+  const evidence = normalizeCommercialEvidence({ affected_revenue_or_opportunity: undefined });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+  assert.match(result.evidenceText, /no numerical value/i);
+});
+
+test("C. Budget-only (disclosed budget, no business-value evidence) -> insufficient commercial evidence", () => {
+  const evidence = normalizeCommercialEvidence({});
+  const investmentTolerance = normalizeInvestmentToleranceContext({ investment_tolerance_context: { low: 30000, high: 60000, currency: "GHS" } });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+  // Investment tolerance is captured separately -- and must never leak into
+  // the deterministic evidence assessment itself as if it satisfied it.
+  assert.strictEqual(investmentTolerance?.low, 30000);
+});
+
+test("D. Willingness-to-pay-only -> insufficient commercial evidence", () => {
+  const evidence = normalizeCommercialEvidence({});
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+});
+
+test("E. Unsupported AI inference (X% of revenue) -> blocked/fail-closed", () => {
+  // Even if extraction itself misbehaves and reports a number, an AI
+  // inference with no real attribution must self-report (per the
+  // extraction prompt's own instruction) as evidence_type "assumption" --
+  // and the deterministic gate must reject an assumption-only figure
+  // regardless of what any downstream AI qualification call might conclude.
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { value: 2800000, currency: "GHS", period: "annual", evidence_type: "assumption", source: "AI-inferred percentage of stated turnover" },
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+  assert.match(result.evidenceText, /assumption/i);
+});
+
+test("F. Client-estimated range, explicitly identified as an estimate -> accepted as client-estimated, not measured fact", () => {
+  const evidence = normalizeCommercialEvidence({
+    cost_of_inaction: {
+      low: 1000000,
+      high: 3000000,
+      currency: "GHS",
+      period: "6-12 months",
+      evidence_type: "client_estimated",
+      source: "Client management estimate, not measured loss",
+    },
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Satisfied");
+  assert.match(result.evidenceText, /client_estimated/);
+});
+
+test("G. Derived value (mathematically derived from attributable supplied figures) -> accepted as derived, with derivation preserved", () => {
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: {
+      value: 500000,
+      currency: "GHS",
+      period: "annual",
+      evidence_type: "derived",
+      source: "Derived: 10 accounts x GHS 50,000 average stated deal value",
+      assumptions: "Derived from client-stated average deal value x client-stated pipeline count.",
+    },
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Satisfied");
+  assert.match(result.evidenceText, /derived/);
+  assert.strictEqual(evidence.valueAtStake?.assumptions, "Derived from client-stated average deal value x client-stated pipeline count.");
+});
+
+test("H. Assumption-only value -> cannot satisfy the required evidence gate by itself", () => {
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { value: 100000, currency: "GHS", period: "annual", evidence_type: "assumption", source: "Unattributed internal guess" },
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+});
+
+test("I. Missing period (numerical value exists, applicable period unknown) -> flagged insufficient", () => {
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { value: 500000, currency: "GHS", evidence_type: "client_estimated", source: "Client-stated on call" },
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+  assert.match(result.evidenceText, /period/i);
+});
+
+test("J. Missing source (numerical value exists, attribution absent) -> insufficient evidence", () => {
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { value: 500000, currency: "GHS", period: "annual", evidence_type: "client_estimated" },
+  });
+
+  const result = evaluateCommercialValueEvidence(evidence);
+  assert.strictEqual(result.assessment, "Insufficient Evidence");
+  assert.match(result.evidenceText, /source/i);
+});
+
+test("Q. Measurement baseline carries forward from qualification onto the Matter record", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let matterUpdateBody: any = null;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
+      matterUpdateBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", properties: {} }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "PATCH") {
+      return new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: {} }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { low: 8000000, high: 12000000, currency: "GHS", period: "annual", evidence_type: "client_estimated", source: "Client-stated on call" },
+    affected_revenue_or_opportunity: "Larger-account sales opportunities",
+    desired_measurable_outcome: "Progression rate of qualified larger-account opportunities",
+  });
+  const baseline = buildMeasurementBaseline(evidence);
+  assert.ok(baseline, "measurement baseline must be derivable from sufficient commercial evidence");
+  assert.strictEqual(baseline!.baselinePeriod, "annual");
+
+  // Carry-forward onto the Matter record is exercised end-to-end --
+  // handleLeadToProspectApproval doesn't call AI, so this part of the
+  // pipeline isn't affected by the provider-eligibility gap noted above.
+  const state = fakeState({ stage: "awaiting_qualification_approval", measurementBaseline: baseline });
+  const afterApproval = await handleLeadToProspectApproval(fakeEnv(), state, true);
+
+  assert.strictEqual(afterApproval.stage, "awaiting_intervention");
+  assert.ok(matterUpdateBody, "Matter record must be updated on Lead->Prospect approval");
+  const understanding = matterUpdateBody.properties.Current_understanding?.rich_text?.[0]?.text?.content ?? "";
+  assert.match(understanding, /Commercial baseline/);
+  assert.match(understanding, /8000000-12000000|GHS/);
+});
+
+test("R. Existing approval behavior is preserved -- redo on qualification still routes to call_notes, no Matter/Entity mutation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let matterUpdateBody: any = null;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
+      matterUpdateBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", properties: {} }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv();
+  const state = fakeState({ stage: "awaiting_qualification_approval" });
+
+  const result = await handleLeadToProspectApproval(env, state, false);
+
+  assert.strictEqual(result.stage, "qualification_hold");
+  assert.strictEqual(result.awaiting, "call_notes");
+  assert.strictEqual(matterUpdateBody, null, "a redo must not mutate the Matter record");
+});
+
+test("Handoff evidence formatting keeps investment tolerance in a clearly separate, labeled context-only block", () => {
+  const evidence = normalizeCommercialEvidence({
+    value_at_stake: { low: 8000000, high: 12000000, currency: "GHS", period: "annual", evidence_type: "client_estimated", source: "Client-stated on call" },
+    desired_measurable_outcome: "Qualified opportunity progression rate",
+  });
+  const tolerance = normalizeInvestmentToleranceContext({ investment_tolerance_context: { low: 30000, high: 60000, currency: "GHS" } });
+
+  const text = formatCommercialEvidenceForHandoff(evidence, tolerance);
+
+  assert.match(text, /Commercial-value evidence \(pricing basis\)/);
+  assert.match(text, /Investment tolerance \(CONTEXT ONLY/);
+  // Investment tolerance section must appear strictly after the pricing-
+  // basis section, never interleaved into it.
+  assert.ok(text.indexOf("CONTEXT ONLY") > text.indexOf("pricing basis"));
+});
+
+test("S. Opaque-token boundary holds even with commercial evidence attached -- Handoff still carries only Entity_Token/Matter_Token, never real names", async (t) => {
+  const log = mockFetch(t, { entityUniqueId: 47, matterUniqueId: 12 });
+  const state = fakeState({
+    commercialEvidence: {
+      valueAtStake: { low: 8000000, high: 12000000, currency: "GHS", period: "annual", evidenceType: "client_estimated", source: "Client-stated" },
+    },
+    investmentToleranceContext: { low: 30000, high: 60000, currency: "GHS" },
+  });
+
+  await handleInterventionText(fakeEnv(), state, "Diagnostic engagement to identify positioning gaps.");
+
+  const props = handoffProps(log);
+  assert.strictEqual(richTextValue(props.Entity_Token), "E-47");
+  assert.strictEqual(richTextValue(props.Matter_Token), "M-12");
+  const factsText = richTextValue(props["Verified Facts & Sources"]);
+  assert.match(factsText, /Commercial-value evidence/);
+  assert.match(factsText, /Investment tolerance/);
+  assert.ok(!factsText.includes("Acme"), "structured evidence carry-forward must not reintroduce the real Entity name");
 });

@@ -42,6 +42,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "sales.enquiry_extraction": "pii_restricted",
   "sales.matter_summary_drafting": "client_confidential",
   "sales.call_prep_briefing": "client_confidential",
+  "sales.commercial_evidence_extraction": "client_confidential",
   "sales.call_qualification": "client_confidential",
   "sales.proposal_drafting": "client_confidential",
   "sales.proposal_revision": "client_confidential",

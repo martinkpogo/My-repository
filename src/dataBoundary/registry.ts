@@ -77,10 +77,16 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Sales Call Prep Briefing",
     description: "Drafts a sales call prep briefing based on governance and enquiry context.",
   },
+  "sales.commercial_evidence_extraction": {
+    id: "sales.commercial_evidence_extraction",
+    name: "Sales Commercial-Value Evidence Extraction",
+    description:
+      "Extracts structured commercial-value evidence (financial consequence, value at stake, cost of inaction, desired measurable outcome, evidence source/type/quality) from enquiry text and call notes, per the Commercial Value & Pricing Operating Model. Never infers a value not attributable to the supplied text.",
+  },
   "sales.call_qualification": {
     id: "sales.call_qualification",
     name: "Sales Call Qualification Assessment",
-    description: "Evaluates the four canonical qualification conditions from call notes.",
+    description: "Evaluates the five canonical qualification conditions from call notes.",
   },
   "sales.proposal_drafting": {
     id: "sales.proposal_drafting",
