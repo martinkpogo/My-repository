@@ -116,7 +116,7 @@ function richTextValue(prop: any): string {
   return prop?.rich_text?.[0]?.text?.content ?? "";
 }
 
-test("1. Inbound enquiry -> valid Sales -> Finance Handoff via the existing queue", async (t) => {
+test("1. Inbound enquiry -> valid Sales -> Strategy Handoff via the existing queue", async (t) => {
   const log = mockFetch(t);
   const state = fakeState({ entryType: "inbound_enquiry" });
 
@@ -126,23 +126,35 @@ test("1. Inbound enquiry -> valid Sales -> Finance Handoff via the existing queu
   const props = handoffProps(log);
   assert.strictEqual(props["From Unit"].select.name, "Sales");
   assert.strictEqual(props["From Hat"].rich_text[0].text.content, "Sales Executive");
-  assert.strictEqual(props["To Unit"].select.name, "Finance");
-  assert.strictEqual(props["To Hat"].rich_text[0].text.content, "Value-Based Pricing Assessor");
+  assert.strictEqual(props["To Unit"].select.name, "Strategy");
+  assert.strictEqual(props["To Hat"].rich_text[0].text.content, "Strategy Analyst");
   assert.strictEqual(props.Type.select.name, "Work");
   assert.strictEqual(props.Status.select.name, "Pending");
   assert.match(richTextValue(props.Reason), /inbound_enquiry/);
   assert.ok(props.Entity_Token, "Entity_Token must be present");
   assert.ok(props.Matter_Token, "Matter_Token must be present");
   assert.ok(props["Required Next Action"], "Required Next Action must be carried");
+  assert.match(richTextValue(props["Required Next Action"]), /diagnose/i);
   assert.ok(props["Acceptance Criteria"], "Acceptance Criteria must be carried");
   assert.ok(props["Expected Output"]);
   assert.ok(props.Assumptions);
   assert.ok(props["Verified Facts & Sources"]);
   assert.strictEqual(result.handoffId, "handoff-page-1");
-  assert.strictEqual(result.stage, "awaiting_quote");
+  assert.strictEqual(result.stage, "awaiting_strategy");
 });
 
-test("2. Outbound outreach -> valid Sales -> Finance Handoff carrying entry_type", async (t) => {
+test("1b. Sales does not create a Sales -> Finance Handoff -- the obsolete direct entry point is gone", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry" });
+
+  await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  const props = handoffProps(log);
+  assert.notStrictEqual(props["To Unit"].select.name, "Finance");
+  assert.notStrictEqual(props["To Hat"].rich_text[0].text.content, "Value-Based Pricing Assessor");
+});
+
+test("2. Outbound outreach -> valid Sales -> Strategy Handoff carrying entry_type", async (t) => {
   const log = mockFetch(t);
   const state = fakeState({ entryType: "outbound_outreach", enquiryText: undefined, callNotes: "Proactive outreach call: prospect confirmed a positioning gap and wants a scoped engagement." });
 
@@ -170,8 +182,8 @@ test("4. Missing proposed intervention (empty/whitespace text) fails closed", as
 
   const result = await handleInterventionText(fakeEnv(), state, "   ");
 
-  assert.strictEqual(log.handoffCreateBody, null, "must not create a Handoff with no proposed intervention");
-  assert.ok(log.sentTexts.some((t) => /what's the proposed intervention/i.test(t)));
+  assert.strictEqual(log.handoffCreateBody, null, "must not create a Handoff with no described commercial situation");
+  assert.ok(log.sentTexts.some((t) => /commercial situation/i.test(t)));
   assert.strictEqual(result.handoffId, undefined);
 });
 
@@ -181,12 +193,12 @@ test("5. Missing required value-relevant context (no enquiry text, no call notes
 
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
-  assert.strictEqual(log.handoffCreateBody, null, "must not create a Handoff with no value-relevant context for Finance to judge against");
+  assert.strictEqual(log.handoffCreateBody, null, "must not create a Handoff with no value-relevant context for Strategy to diagnose against");
   assert.ok(log.sentTexts.some((t) => /no value-relevant context/i.test(t)));
   assert.strictEqual(result.handoffId, undefined);
 });
 
-test("6. Disclosed budget/willingness-to-pay is never transferred as a Finance pricing input", async (t) => {
+test("6. Disclosed budget/willingness-to-pay is never transferred as a downstream pricing input", async (t) => {
   const log = mockFetch(t);
   const state = fakeState({
     callNotes: "Client mentioned they have roughly $50,000 budgeted and are willing to pay up to $60k for the right partner.",
@@ -198,7 +210,7 @@ test("6. Disclosed budget/willingness-to-pay is never transferred as a Finance p
   // The explicit anti-leak declaration must be present and must not itself
   // echo the disclosed figure as something Finance should use.
   const assumptions = richTextValue(props.Assumptions);
-  assert.match(assumptions, /should be used as a Finance pricing input/i);
+  assert.match(assumptions, /should be used as a pricing input/i);
   assert.ok(!/\$\d/.test(assumptions), "Assumptions must not restate the disclosed figure");
   // No dedicated pricing-input field of any kind exists on the payload --
   // the schema has no such property, and none is invented here.

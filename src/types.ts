@@ -227,7 +227,8 @@ export interface WorkState {
     | "research_clarification"
     | "research_feedback"
     | "strategy_clarification"
-    | "strategy_feedback";
+    | "strategy_feedback"
+    | "strategy_refinement_reason";
   createdAt: string;
   updatedAt: string;
 
@@ -364,6 +365,20 @@ export interface WorkState {
     verifiedFactsAndSources: string;
     assumptions: string;
     openQuestions: string;
+  };
+
+  /**
+   * A Strategy-proposed intervention awaiting Martin's explicit
+   * Approve/Refine decision, per the canonical commercial flow (Sales ->
+   * Strategy -> Finance). proposalId is a fresh token minted on every new
+   * or revised proposal -- the approval callback must match it exactly, so
+   * a stale button referencing an earlier or superseded proposal can never
+   * approve a different/later one. Only an Approve whose proposalId
+   * matches this field may create the Strategy -> Finance Handoff.
+   */
+  pendingIntervention?: {
+    proposalId: string;
+    interventionSummary: string;
   };
 
   /**

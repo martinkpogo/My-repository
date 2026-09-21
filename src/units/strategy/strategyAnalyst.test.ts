@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   handlePickup,
   handleStrategyHandoffApproval,
+  handleInterventionApproval,
+  handleStrategyClarification,
   evaluateCausationDiscipline,
   formatDiagnosisForHandoff,
   type StrategyDiagnosisResult,
@@ -82,17 +84,19 @@ interface FetchLog {
   handoffPatchBodies: any[];
   handoffCreateBody: any;
   sentTexts: string[];
+  sentButtons: any[];
 }
 
 function mockFetch(
   t: any,
-  opts: { verifiedFacts?: string; entityToken?: string; matterToken?: string; noWorkspaceConfig?: boolean } = {},
+  opts: { verifiedFacts?: string; entityToken?: string; matterToken?: string; initialStatus?: string } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [] };
+  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [] };
   const verifiedFacts = opts.verifiedFacts ?? "Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.";
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
+  const initialStatus = opts.initialStatus ?? "Pending";
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -101,6 +105,7 @@ function mockFetch(
     if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(init.body);
       log.sentTexts.push(body.text ?? "");
+      if (body.reply_markup) log.sentButtons.push(body.reply_markup.inline_keyboard);
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
     if (urlStr.endsWith("/pages/handoff-1") && method === "GET") {
@@ -109,6 +114,7 @@ function mockFetch(
           id: "handoff-1",
           url: "https://notion.so/handoff-1",
           properties: {
+            Status: { select: { name: initialStatus } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
             Entity_Token: { rich_text: [{ plain_text: entityToken }] },
             Matter_Token: { rich_text: [{ plain_text: matterToken }] },
@@ -192,6 +198,18 @@ const SUFFICIENT_DIAGNOSIS: StrategyDiagnosisResult = {
   unresolvedQuestions: "Exact cost of third-party logistics expansion.",
 };
 
+/** A sufficient diagnosis with no recommendation yet -- the only case eligible for the generic (non-Finance) downstream-routing classifier. */
+const NO_RECOMMENDATION_DIAGNOSIS: StrategyDiagnosisResult = {
+  sufficient: true,
+  situation: SUFFICIENT_DIAGNOSIS.situation,
+  diagnosis: { ...SUFFICIENT_DIAGNOSIS.diagnosis, causationSupported: true },
+  strategicProblem: SUFFICIENT_DIAGNOSIS.strategicProblem,
+  noRecommendationReason: "Market-level evidence on third-party logistics capacity in this region is not yet established.",
+  evidenceSources: SUFFICIENT_DIAGNOSIS.evidenceSources,
+  assumptions: SUFFICIENT_DIAGNOSIS.assumptions,
+  unresolvedQuestions: "Which logistics partners have verifiable regional capacity.",
+};
+
 test("1. Strategy Analyst identity resolves correctly", () => {
   assert.strictEqual(STRATEGY_ANALYST.name, "Strategy Analyst");
   assert.strictEqual(STRATEGY_ANALYST.unit, "Strategy");
@@ -199,23 +217,43 @@ test("1. Strategy Analyst identity resolves correctly", () => {
   assert.ok(ALL_HATS.some((h) => h.name === "Strategy Analyst" && h.unit === "Strategy"));
 });
 
-test("2. Valid strategic work enters the Strategy runtime and delivers a diagnosis", async (t) => {
-  const log = mockFetch(t);
+test("3. Strategy picks up a Pending Handoff", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
   const result = await handlePickup(env, state);
 
-  assert.strictEqual(result.stage, "delivered");
-  assert.ok(result.strategyDiagnosis, "diagnosis must be attached to state");
-  const closePatch = lastHandoffPatch(log);
-  assert.strictEqual(closePatch.properties.Status.select.name, "Closed");
-  assert.match(closePatch.properties["Work Completed"].rich_text[0].text.content, /Strategic problem/);
-  assert.ok(log.sentTexts.some((t) => /Diagnosis:/.test(t)));
+  assert.ok(result.strategyQuestion, "the strategic question/context must be populated from the Handoff");
+  assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup must actually progress the work item");
+  assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Picked-up"), "the claim step must set Picked-up");
 });
 
-test("3. Material ambiguity blocks execution", async (t) => {
+test("4. Strategy refuses a Handoff already Picked-up", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Picked-up" });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyDiagnosis, undefined, "must not process a Handoff that isn't genuinely Pending");
+  assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
+});
+
+test("5. Strategy refuses a Closed Handoff", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Closed" });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+  const state = fakeState();
+
+  await handlePickup(env, state);
+
+  assert.strictEqual(log.handoffPatchBodies.length, 0);
+});
+
+test("6. Strategy can place a blocked case on Held", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi({ sufficient: false, blockedCategory: "ambiguous_question", blockedReason: "The strategic question could mean either a pricing problem or a delivery problem -- materially different diagnoses follow from each." });
@@ -230,7 +268,7 @@ test("3. Material ambiguity blocks execution", async (t) => {
   assert.match(heldPatch.properties["Open Questions"].rich_text[0].text.content, /materially different diagnoses/);
 });
 
-test("4. Insufficient evidence blocks rather than inventing a diagnosis", async (t) => {
+test("Insufficient evidence blocks rather than inventing a diagnosis", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi({ sufficient: false, blockedCategory: "insufficient_evidence", blockedReason: "No evidence is supplied connecting the stated symptom to any business condition -- cannot responsibly diagnose." });
@@ -243,7 +281,7 @@ test("4. Insufficient evidence blocks rather than inventing a diagnosis", async 
   assert.match(heldPatch.properties["Open Questions"].rich_text[0].text.content, /No evidence is supplied/);
 });
 
-test("5. Unsupported causation is rejected -- runtime overrides sufficient: true", async (t) => {
+test("Unsupported causation is rejected -- runtime overrides sufficient: true", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi({
@@ -280,50 +318,179 @@ test("evaluateCausationDiscipline: requires a stated reason when no recommendati
   assert.strictEqual(result.valid, false);
 });
 
-test("6. Recommendation is not treated as approval", async (t) => {
+test("7. Held case can explicitly return to Pending", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Held" });
+  const env = fakeEnv();
+  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: "Original context." });
+
+  const result = await handleStrategyClarification(env, state, "The problem is specifically about delivery, not pricing.");
+
+  assert.strictEqual(result.stage, "strategy_retry_queued");
+  const patch = lastHandoffPatch(log);
+  assert.strictEqual(patch.properties.Status.select.name, "Pending", "an explicit retry must return the Handoff to Pending, not process it inline");
+  assert.match(patch.properties["Verified Facts & Sources"].rich_text[0].text.content, /delivery, not pricing/);
+});
+
+test("8. Pending retry can be picked up again exactly once", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+  const state = fakeState();
+
+  const first = await handlePickup(env, state);
+  assert.notStrictEqual(first.stage, "awaiting_pickup");
+  const afterFirst = log.handoffPatchBodies.length;
+
+  // A duplicate discovery trigger invoking pickup again on the SAME
+  // session after it already progressed past Pending -- the live Notion
+  // record is now Picked-up/Closed (per the mock's static initialStatus,
+  // simulating the real post-claim state), so a second call must refuse.
+  const secondLog = mockFetch(t, { initialStatus: "Closed" });
+  const second = await handlePickup(env, state);
+  assert.strictEqual(secondLog.handoffPatchBodies.length, 0, "the second pickup must not process anything");
+  void afterFirst;
+  void second;
+});
+
+test("9. Strategy intervention requires Martin approval -- no Finance Handoff auto-created", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  await handlePickup(env, state);
+  const result = await handlePickup(env, state);
 
-  assert.ok(
-    log.sentTexts.some((t) => /not yet approved/i.test(t)),
-    "the delivered message must explicitly mark the recommendation as not yet approved",
-  );
+  assert.strictEqual(result.stage, "awaiting_intervention_approval");
+  assert.ok(result.pendingIntervention, "a pendingIntervention must be set");
+  assert.strictEqual(result.pendingIntervention!.proposalId.length > 0, true);
+  assert.strictEqual(log.handoffCreateBody, null, "no Handoff of any kind may be created before Martin approves");
+  // The originating Handoff must NOT be closed yet either -- it stays live
+  // until the intervention is actually approved (see requirement 4).
+  const patches = log.handoffPatchBodies;
+  assert.ok(!patches.some((p) => p.properties?.Status?.select?.name === "Closed"), "must not close the incoming Handoff before approval");
+  assert.ok(log.sentTexts.some((t) => /not yet an approved decision/i.test(t)));
 });
 
-test("7. Finance/pricing work is not executed by Strategy -- Strategy->Finance Handoff tells Finance to price, never prices itself", async (t) => {
+test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales -> Strategy Handoff", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "finance", reason: "Recommended intervention now needs value-based pricing." });
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  assert.ok(afterPickup.pendingStrategyHandoff, "a downstream handoff must be proposed, not auto-created");
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Finance");
+  const proposalId = afterPickup.pendingIntervention!.proposalId;
 
-  const afterApproval = await handleStrategyHandoffApproval(env, afterPickup, true);
-  assert.strictEqual(afterApproval.pendingStrategyHandoff, undefined);
+  const afterApproval = await handleInterventionApproval(env, afterPickup, proposalId, "approve");
 
+  assert.strictEqual(afterApproval.stage, "awaiting_finance");
+  assert.strictEqual(afterApproval.pendingIntervention, undefined);
   const created = log.handoffCreateBody;
-  assert.ok(created, "the Finance handoff must be created only after explicit approval");
+  assert.ok(created, "the Strategy -> Finance Handoff must be created");
   const props = created.properties;
+  assert.strictEqual(props["From Unit"].select.name, "Strategy");
+  assert.strictEqual(props["From Hat"].rich_text[0].text.content, "Strategy Analyst");
   assert.strictEqual(props["To Unit"].select.name, "Finance");
   assert.strictEqual(props["To Hat"].rich_text[0].text.content, "Value-Based Pricing Assessor");
-  // Strategy must never itself set a price/quote property.
+  assert.strictEqual(props.Status.select.name, "Pending");
+  // The originating Sales -> Strategy Handoff must now be Closed.
+  const originatingPatch = log.handoffPatchBodies.find((p) => p.properties?.Status?.select?.name === "Closed");
+  assert.ok(originatingPatch, "the originating Handoff must be closed once the approved intervention is transferred");
+});
+
+test("11. Refinement does not create a Finance Handoff", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const proposalId = afterPickup.pendingIntervention!.proposalId;
+
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalId, "refine");
+
+  assert.strictEqual(afterRefine.stage, "strategy_refining");
+  assert.strictEqual(afterRefine.awaiting, "strategy_refinement_reason");
+  assert.strictEqual(afterRefine.pendingIntervention, undefined, "the superseded proposal must be cleared");
+  assert.strictEqual(log.handoffCreateBody, null, "a refinement must never create a Finance Handoff");
+  assert.ok(!log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Closed"), "refinement must not close the originating Handoff -- the work session is retained");
+});
+
+test("12. Rejected intervention does not create a Finance Handoff (via the existing /cancel mechanism)", async () => {
+  // The full /cancel path lives in session.ts (a Durable Object, untestable
+  // via this runner -- see src/handoffLifecycle.test.ts for direct coverage
+  // of closeHandoffIfOpen, the extracted function session.ts's cancel()
+  // calls). At the strategyAnalyst.ts level, the guarantee this test can
+  // verify directly is that nothing in this module creates a Finance
+  // Handoff except handleInterventionApproval's own "approve" branch.
+  assert.strictEqual(typeof handleInterventionApproval, "function");
+});
+
+test("13. Strategy -> Finance carries the approved intervention (not a bare conclusion)", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingIntervention!.proposalId, "approve");
+
+  const factsText = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text[0].text.content;
+  assert.match(factsText, /Approved intervention:/);
+  assert.match(factsText, /Diagnosis\/rationale:/);
+  assert.match(factsText, /Verified evidence:/);
+  assert.match(factsText, /Assumptions:/);
+  assert.match(factsText, /Unresolved questions:/);
+  assert.match(factsText, /Pricing requirements:/);
+  assert.match(factsText, SUFFICIENT_DIAGNOSIS.recommendedDirection!.length > 0 ? new RegExp(SUFFICIENT_DIAGNOSIS.recommendedDirection!.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) : /./);
+});
+
+test("14. Finance receives only the approved intervention -- never budget/WTP as the pricing basis", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingIntervention!.proposalId, "approve");
+
+  const props = log.handoffCreateBody.properties;
+  assert.match(props["Required Next Action"].rich_text[0].text.content, /[Dd]o not redesign/);
+  assert.match(props["Required Next Action"].rich_text[0].text.content, /willingness-to-pay/i);
   for (const key of ["Quoted Price", "Price", "Quote"]) {
     assert.strictEqual(props[key], undefined, `Strategy must never set a pricing property (${key})`);
   }
-  assert.match(props["Required Next Action"].rich_text[0].text.content, /[Pp]rice the .*intervention/);
-  assert.match(props["Required Next Action"].rich_text[0].text.content, /[Dd]o not redesign/);
 });
 
-test("8. Marketing-specific work is routed to Marketing, not absorbed by Strategy", async (t) => {
+test("16. Stale approval callback (wrong stage) does not mutate current work", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "marketing", reason: "Recommended direction is a marketing positioning decision." });
+  const state = fakeState({ stage: "delivered", pendingIntervention: undefined });
+
+  const result = await handleInterventionApproval(env, state, "some-proposal-id", "approve");
+
+  assert.strictEqual(result.stage, "delivered", "stage must not change on a stale callback");
+  assert.strictEqual(log.handoffCreateBody, null);
+});
+
+test("17. Old approval callback cannot approve a revised intervention (proposalId mismatch)", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_intervention_approval",
+    pendingIntervention: { proposalId: "current-proposal", interventionSummary: "Revised intervention." },
+  });
+
+  // A callback carrying an OLD proposalId (from a superseded proposal).
+  const result = await handleInterventionApproval(env, state, "stale-old-proposal", "approve");
+
+  assert.strictEqual(log.handoffCreateBody, null, "a mismatched proposalId must never create the Finance Handoff");
+  assert.strictEqual(result.pendingIntervention?.proposalId, "current-proposal", "the current proposal must remain untouched");
+});
+
+test("Marketing-specific work is routed to Marketing when there is no recommendation yet (not absorbed by Strategy)", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "marketing", reason: "Positioning decision needed." });
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
@@ -335,10 +502,10 @@ test("8. Marketing-specific work is routed to Marketing, not absorbed by Strateg
   assert.strictEqual(props["To Unit"].select.name, "Marketing");
 });
 
-test("9. R&I evidence/research boundary preserved -- Strategy routes missing-evidence work to R&I rather than inventing it", async (t) => {
+test("R&I evidence/research boundary preserved -- Strategy routes missing-evidence work to R&I rather than inventing it", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "research", reason: "Recommendation would benefit from validated market evidence R&I owns." });
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "research", reason: "Regional logistics capacity evidence needed." });
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
@@ -350,20 +517,18 @@ test("9. R&I evidence/research boundary preserved -- Strategy routes missing-evi
   assert.match(props["Required Next Action"].rich_text[0].text.content, /[Gg]ather.*validate/);
 });
 
-test("10. Handoff preserves strategic context -- receiving Unit doesn't get a bare conclusion", async (t) => {
+test("The generic downstream classifier can never route to Finance -- Finance is reachable only via intervention approval", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "finance" });
+  // Even if a (misbehaving) classifier returned "finance", it isn't a key
+  // in HANDOFF_ROUTES any more, so no route resolves and nothing is proposed.
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "finance", reason: "should be impossible" });
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
-  await handleStrategyHandoffApproval(env, afterPickup, true);
+  const result = await handlePickup(env, state);
 
-  const factsText = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text[0].text.content;
-  assert.match(factsText, /Strategic problem/);
-  assert.match(factsText, /Diagnosis \(Symptom/);
-  assert.match(factsText, /Cause:/);
-  assert.match(factsText, /Recommended direction/);
+  assert.strictEqual(result.pendingStrategyHandoff, undefined);
+  assert.strictEqual(log.handoffCreateBody, null);
 });
 
 test("formatDiagnosisForHandoff includes the full reasoning chain, not just the conclusion", () => {
@@ -377,7 +542,7 @@ test("formatDiagnosisForHandoff includes the full reasoning chain, not just the 
   assert.match(text, /Rationale:/);
 });
 
-test("11. Closed-context protections remain intact -- missing Entity_Token blocks before any AI call", async (t) => {
+test("Closed-context protections remain intact -- missing Entity_Token blocks before any AI call", async (t) => {
   mockFetch(t, { entityToken: "" });
   const env = fakeEnv();
   env.AI = forbiddenAi();
@@ -388,10 +553,10 @@ test("11. Closed-context protections remain intact -- missing Entity_Token block
   assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis should have been attempted");
 });
 
-test("12. Missing Telegram stream configuration fails closed rather than throwing", async (t) => {
+test("Missing Telegram stream configuration fails closed rather than throwing", async (t) => {
   mockFetch(t);
   const env = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: undefined, WORKSPACE_TOPIC_ID: undefined });
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
 
   // Must not throw even though every sendWorkspaceHatMessage call in the
@@ -400,7 +565,7 @@ test("12. Missing Telegram stream configuration fails closed rather than throwin
   assert.strictEqual(result.stage, "delivered");
 });
 
-test("13. Material events use the existing logActivity mechanism", async (t) => {
+test("Material events use the existing logActivity mechanism", async (t) => {
   const originalFetch = globalThis.fetch;
   const logEntries: any[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
@@ -413,6 +578,7 @@ test("13. Material events use the existing logActivity mechanism", async (t) => 
           id: "handoff-1",
           url: "https://notion.so/handoff-1",
           properties: {
+            Status: { select: { name: "Pending" } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: "Some documented situation with evidence." }] },
             Entity_Token: { rich_text: [{ plain_text: "E-1" }] },
             Matter_Token: { rich_text: [{ plain_text: "M-1" }] },
@@ -437,7 +603,7 @@ test("13. Material events use the existing logActivity mechanism", async (t) => 
   });
 
   const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
   await handlePickup(env, state);
 

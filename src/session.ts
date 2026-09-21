@@ -15,6 +15,7 @@ import {
 import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/sales/leadGenerationDiscovery";
 import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
+import { closeHandoffIfOpen } from "./handoffLifecycle";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -86,6 +87,8 @@ export class WorkSession extends DurableObject<Env> {
           return strategy.handleStrategyClarification(this.env, state, text);
         case "strategy_feedback":
           return strategy.handleStrategyFeedback(this.env, state, text);
+        case "strategy_refinement_reason":
+          return strategy.handleStrategyRefinement(this.env, state, text);
         default:
           return sendMessage(
             this.env,
@@ -160,15 +163,44 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => proposeLeadOpportunity(this.env, state, opportunity));
   }
 
+  /**
+   * The existing, generic terminal action for any work item -- this is
+   * also the runtime's existing mechanism for "explicit rejection with no
+   * further direction" (e.g. declining a Strategy intervention outright):
+   * no dedicated per-domain reject button exists anywhere in this Worker
+   * (every approval gate offers Approve + a revise/redo action, never a
+   * third terminal-reject button), so per the instruction not to invent a
+   * new user-facing action without inspecting the existing mechanism
+   * first, /cancel is that action. Enhanced here (not overridden per-Hat)
+   * to also close whatever Handoff is currently in play, if any and if it
+   * isn't already terminal -- previously a silent gap: cancelling left the
+   * Handoff dangling at Pending/Picked-up/Held indefinitely. A materially
+   * new attempt after this must use a new Handoff, per the existing
+   * Closed-Handoff-is-terminal discipline every pickup already enforces.
+   */
   async cancel(): Promise<WorkState> {
     return this.execute(async (state) => {
+      if (state.handoffId) {
+        try {
+          await closeHandoffIfOpen(
+            this.env,
+            state.handoffId,
+            "Work item cancelled by Martin -- rejected with no further direction. A materially new attempt requires a new Handoff.",
+          );
+        } catch (err) {
+          console.error(`WorkSession ${state.workId} cancel: failed to close Handoff ${state.handoffId}`, err);
+        }
+      }
       state.stage = "cancelled";
       state.awaiting = undefined;
       state.pendingActionSummary = undefined;
+      state.pendingIntervention = undefined;
+      state.pendingStrategyHandoff = undefined;
       await logActivity(this.env, {
         entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
         type: "Activity",
         area: state.unit ?? "Operations",
+        decisionRationale: state.handoffId ? `Handoff ${state.handoffId} closed with the cancellation recorded, if not already terminal.` : undefined,
         outcome: "Complete",
       });
       return state;
@@ -202,6 +234,18 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
+        case "strategyintervention": {
+          // value is "<proposalId>.<approve|refine>" -- joined with "." (not
+          // ":") specifically so it survives index.ts's plain
+          // data.split(":") destructure into [action, workId, value]
+          // unchanged. strategy.handleInterventionApproval verifies this
+          // proposalId against the current pendingIntervention itself.
+          const dot = value.lastIndexOf(".");
+          const proposalId = dot === -1 ? "" : value.slice(0, dot);
+          const decision = dot === -1 ? "" : value.slice(dot + 1);
+          if (decision !== "approve" && decision !== "refine") return Promise.resolve(state);
+          return strategy.handleInterventionApproval(this.env, state, proposalId, decision);
+        }
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);
         case "googlefolder":

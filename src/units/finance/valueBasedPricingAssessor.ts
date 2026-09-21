@@ -7,6 +7,7 @@ import { setActiveWorkId } from "../../router";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
+import { claimPendingHandoff } from "../../handoffLifecycle";
 
 interface RawValueAtStakeJudgement {
   value?: number;
@@ -186,10 +187,29 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   // one place if that's where he's working from.
   const financeThreadId = state.threadId;
 
-  // Business context is reconstructed BEFORE the Handoff is marked
-  // Picked-up, so a Notion outage leaves it Pending and it's retried
-  // automatically on the next discovery cycle, rather than stuck in a
-  // Picked-up limbo needing manual recovery.
+  // Idempotency guard: re-verifies the Handoff's live Status and claims it
+  // (Pending -> Picked-up) at the actual processing boundary, not just
+  // trusting the discovery query's Pending filter from moments earlier.
+  // This is the fresh-pickup entry point only -- handleQuoteRedoReason
+  // re-invokes judgeQuote directly against an already Picked-up/Held
+  // Handoff from an in-session redo, which correctly bypasses this guard.
+  const claim = await claimPendingHandoff(env, state.handoffId!);
+  if (!claim.claimed) {
+    console.error(`Finance handlePickup: refused -- ${claim.reason}`);
+    await logActivity(env, {
+      entry: `Finance pickup rejected — invalid Handoff state`,
+      type: "Blocker",
+      area: "Finance",
+      decisionRationale: claim.reason,
+      outcome: "Blocked",
+    });
+    return state;
+  }
+
+  // Business context is reconstructed BEFORE judgeQuote's own logic, so a
+  // Notion outage during context read fails closed with the Handoff
+  // already claimed (Picked-up) rather than reprocessed by a later
+  // duplicate trigger while still nominally Pending.
   const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!);
   if (!evalResult.success) {
     console.error(`Finance handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
@@ -200,11 +220,21 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
+    // Already claimed (Picked-up) above -- move to Held rather than leaving
+    // it stuck at Picked-up, so the existing Held->Pending retry path
+    // (handleMoreValueContext) can bring it back for exactly one more
+    // pickup once the missing context is supplied.
+    await updatePage(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
+    }).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `*Finance couldn't pick up a quote request* (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
+      `*Finance couldn't pick up a quote request* (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — send the missing detail and I'll retry.`,
     );
+    state.stage = "handoff_held";
+    state.awaiting = "value_context_more";
     return state;
   }
 
@@ -266,11 +296,25 @@ async function judgeQuote(
       decisionRationale: `Could not retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`,
       outcome: "Blocked",
     });
+    // On the fresh-pickup path the Handoff was already claimed (Picked-up)
+    // by handlePickup's idempotency guard before this ever ran -- move it
+    // to Held rather than leaving it stuck, so the existing Held->Pending
+    // retry path can bring it back. The redo path (awaitingOnInsufficient
+    // "quote_redo_reason") started at Held and never left it, so it's
+    // already in a recoverable state and needs no extra transition here.
+    if (awaitingOnInsufficient === "value_context_more") {
+      await updatePage(env, state.handoffId!, {
+        Status: select("Held"),
+        "Open Questions": richText(`Governance retrieval failed (${missing}).`),
+      }).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
+    }
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
       `Couldn't assess the quote for *${entityToken}* — couldn't retrieve canonical governance from Notion (${missing}). Please try again once resolved.`,
     );
+    state.stage = "handoff_held";
+    state.awaiting = awaitingOnInsufficient;
     return state;
   }
 

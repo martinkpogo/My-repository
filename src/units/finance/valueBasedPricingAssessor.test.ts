@@ -63,6 +63,7 @@ function mockFetch(
     verifiedFacts?: string;
     entityToken?: string;
     matterToken?: string;
+    initialStatus?: string;
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
@@ -86,6 +87,7 @@ function mockFetch(
           id: "handoff-1",
           url: "https://notion.so/handoff-1",
           properties: {
+            Status: { select: { name: opts.initialStatus ?? "Pending" } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
             Entity_Token: { rich_text: [{ plain_text: entityToken }] },
             Matter_Token: { rich_text: [{ plain_text: matterToken }] },
@@ -337,4 +339,44 @@ test("validateFinanceJudgement: rejects missing rationale", () => {
 test("validateFinanceJudgement: accepts a fully complete, policy-compliant judgement", () => {
   const result = validateFinanceJudgement(SUFFICIENT_JUDGEMENT as any);
   assert.strictEqual(result.valid, true);
+});
+
+// ============================================================================
+// Handoff pickup idempotency (Sales -> Strategy -> Finance flow)
+// ============================================================================
+
+test("Finance pickup refuses a Handoff that is already Picked-up", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Picked-up" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.quote, undefined, "must not process a Handoff that isn't genuinely Pending");
+  assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
+});
+
+test("Finance pickup refuses an already-Closed Handoff", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Closed" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.quote, undefined);
+  assert.strictEqual(log.handoffPatchBodies.length, 0);
+});
+
+test("Finance pickup refuses a Held Handoff (no explicit retry to Pending)", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Held" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.quote, undefined);
+  assert.strictEqual(log.handoffPatchBodies.length, 0);
 });

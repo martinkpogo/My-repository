@@ -6,6 +6,7 @@ import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
+import { claimPendingHandoff } from "../../handoffLifecycle";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -218,6 +219,25 @@ export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | nu
 }
 
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
+  // Idempotency guard: re-verifies the Handoff's live Status and claims it
+  // (Pending -> Picked-up) at the actual processing boundary, not just
+  // trusting the discovery query's Pending filter from moments earlier. A
+  // duplicate discovery trigger, a retried invocation, or a Handoff that
+  // was Held/Closed out from under this call all fail closed here rather
+  // than being reprocessed.
+  const claim = await claimPendingHandoff(env, state.handoffId!);
+  if (!claim.claimed) {
+    console.error(`Strategy handlePickup: refused -- ${claim.reason}`);
+    await logActivity(env, {
+      entry: `Strategy pickup refused — invalid Handoff state`,
+      type: "Blocker",
+      area: "Strategy",
+      decisionRationale: claim.reason,
+      outcome: "Blocked",
+    });
+    return state;
+  }
+
   const evalResult = await resolveStrategyHandoffContext(env, state.handoffId!);
   if (!evalResult.success) {
     console.error(`Strategy handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
@@ -228,11 +248,21 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
       decisionRationale: evalResult.insufficientContext.reason,
       outcome: "Blocked",
     });
+    // Already claimed (Picked-up) above -- move to Held rather than leaving
+    // it stuck at Picked-up, so the same Held->Pending retry path (see
+    // handleStrategyClarification) can bring it back for exactly one more
+    // pickup once the missing context is supplied.
+    await updatePage(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
+    }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: HAT_NAME },
-      `Couldn't pick up a strategy request (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — will retry automatically once supplied.`,
+      `Couldn't pick up a strategy request (Handoff ${state.handoffId}).\n\n${evalResult.insufficientContext.reason}\n\nNot proceeding without required sanitized context — send the missing detail and I'll retry.`,
     );
+    state.stage = "strategy_blocked";
+    state.awaiting = "strategy_clarification";
     return state;
   }
 
@@ -241,7 +271,6 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   state.strategyQuestion = evalResult.contract.sanitizedContext;
   state.strategyContext = evalResult.contract.sanitizedContext;
 
-  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
     entry: `Strategy picked up request: ${state.matterName || state.entityName || state.workId}`,
     type: "Activity",
@@ -265,7 +294,15 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion. Refusing to execute without it.",
       outcome: "Blocked",
     });
-    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Couldn't run this diagnosis — couldn't retrieve canonical governance from Notion. Please try again once resolved.`);
+    if (state.handoffId && state.stage !== "strategy_refining") {
+      await updatePage(env, state.handoffId, {
+        Status: select("Held"),
+        "Open Questions": richText("Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion."),
+      }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
+    }
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Couldn't run this diagnosis — couldn't retrieve canonical governance from Notion. Send a message once resolved and I'll retry.`);
+    state.stage = "strategy_blocked";
+    state.awaiting = "strategy_clarification";
     return state;
   }
 
@@ -348,13 +385,31 @@ export function formatDiagnosisForHandoff(result: StrategyDiagnosisResult): stri
 }
 
 /**
- * Delivers the diagnosis and closes the INCOMING Handoff as complete --
- * mirrors researchAnalyst.ts's deliverSynthesis exactly. The diagnosis
- * itself is informational/recommended, never an approved decision; a
- * SEPARATE downstream-Handoff proposal (routeToUnit) is gated on Martin's
- * explicit approval, independent of delivery.
+ * Delivers the diagnosis. A diagnosis WITH a recommended direction (a
+ * proposed intervention) never auto-closes the incoming Handoff or
+ * auto-routes anywhere -- per the canonical commercial flow, it enters the
+ * explicit awaiting_intervention_approval state (see
+ * presentInterventionForApproval) and the incoming Handoff stays Picked-up
+ * until Martin approves and the Strategy -> Finance Handoff is actually
+ * created. A diagnosis with NO recommendation (informational, or evidence
+ * doesn't yet support one) closes the incoming Handoff immediately and may
+ * still propose a non-commercial downstream handoff (research/marketing/
+ * sales) via routeToUnit -- mirrors researchAnalyst.ts's deliverSynthesis.
  */
 async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiagnosisResult): Promise<WorkState> {
+  if (result.recommendedDirection) {
+    await logActivity(env, {
+      entry: `Strategy intervention proposed: ${state.matterName || state.entityName || state.workId}`,
+      type: "Decision",
+      area: "Strategy",
+      decisions: `Proposed: ${result.recommendedDirection}`,
+      decisionRationale: result.recommendationRationale ?? "",
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, formatDiagnosisForTelegram(result));
+    return presentInterventionForApproval(env, state, result);
+  }
+
   if (state.handoffId) {
     await updatePage(env, state.handoffId, {
       Status: select("Closed"),
@@ -365,8 +420,8 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
     entry: `Strategy diagnosis completed: ${state.matterName || state.entityName || state.workId}`,
     type: "Decision",
     area: "Strategy",
-    decisions: result.recommendedDirection ? `Recommended: ${result.recommendedDirection}` : "No recommendation -- evidence insufficient for one.",
-    decisionRationale: result.recommendationRationale ?? result.noRecommendationReason ?? "",
+    decisions: "No recommendation -- evidence insufficient for one.",
+    decisionRationale: result.noRecommendationReason ?? "",
     outcome: "Complete",
   });
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, formatDiagnosisForTelegram(result));
@@ -383,13 +438,17 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
  * Hat Definition's own handoff_rules -- proposes (never auto-creates) a
  * downstream Handoff. "none" (no clear destination, or the diagnosis is
  * self-contained/informational) is a valid, expected outcome -- mirrors
- * R&I's routeToConsumingHat: never guesses when unclear.
+ * R&I's routeToConsumingHat: never guesses when unclear. Finance is
+ * deliberately NOT a routable destination here -- per the canonical
+ * commercial flow, Finance is reached exclusively through the
+ * Approve/Refine intervention-approval gate (presentInterventionForApproval/
+ * handleInterventionApproval), never through this general classifier, so
+ * there is exactly one path to Finance, not two.
  */
 const HANDOFF_ROUTES: Partial<Record<string, { unit: Unit; hat: string }>> = {
   research: { unit: "Research & Intelligence", hat: "Research & Intelligence Analyst" },
   marketing: { unit: "Marketing", hat: "Marketing Strategist" },
   sales: { unit: "Sales", hat: "Sales Executive" },
-  finance: { unit: "Finance", hat: "Value-Based Pricing Assessor" },
 };
 
 interface HandoffRoutingResult {
@@ -398,17 +457,18 @@ interface HandoffRoutingResult {
 }
 
 async function classifyHandoffTarget(env: Env, result: StrategyDiagnosisResult): Promise<HandoffRoutingResult> {
-  const summary = `Strategic problem: ${result.strategicProblem?.statement ?? ""}\nRecommended direction: ${result.recommendedDirection ?? "(none -- " + (result.noRecommendationReason ?? "") + ")"}\nUnresolved questions: ${result.unresolvedQuestions ?? ""}`;
+  const summary = `Strategic problem: ${result.strategicProblem?.statement ?? ""}\nNo recommendation yet: ${result.noRecommendationReason ?? ""}\nUnresolved questions: ${result.unresolvedQuestions ?? ""}`;
   const classification = await aiJson<HandoffRoutingResult>(env, {
     taskId: "strategy.handoff_routing",
     system: `You decide whether a completed Strategy diagnosis's next responsibility belongs to another Unit, per the Strategy Analyst Hat Definition's own handoff_rules:
 - "research": the diagnosis is blocked or weakened by missing evidence/validation that only Research & Intelligence can gather.
-- "marketing": the recommended direction is specifically marketing strategy/execution (positioning, campaign, content, channel decisions).
+- "marketing": the work is specifically marketing strategy/execution (positioning, campaign, content, channel decisions).
 - "sales": the next step is commercial progression of an opportunity (owned by Sales, not Strategy).
-- "finance": the recommended direction is an approved intervention that now needs value-based pricing/a quote (owned by Finance, not Strategy).
 - "none": the diagnosis is self-contained/informational, or the destination is not clearly one of the above -- never guess.
 
-Return JSON: {"target": "research" | "marketing" | "sales" | "finance" | "none", "reason": "..."}`,
+Never return "finance" -- pricing is reached only through Martin's explicit approval of a recommended intervention, never through this classifier.
+
+Return JSON: {"target": "research" | "marketing" | "sales" | "none", "reason": "..."}`,
     user: summary,
     light: true,
   });
@@ -424,13 +484,11 @@ async function routeToUnit(env: Env, state: WorkState, result: StrategyDiagnosis
   const verifiedFactsAndSources = formatDiagnosisForHandoff(result).slice(0, 1900);
 
   const requiredNextAction =
-    route.unit === "Finance"
-      ? "Price the Martin-approved intervention described above using value-based judgment. Do not treat any disclosed budget or willingness-to-pay as the pricing basis. Do not redesign, substitute, or reinterpret the approved intervention -- price what is described, or hold and state what's missing."
-      : route.unit === "Research & Intelligence"
-        ? "Gather/validate the additional evidence identified as missing above, per the unresolved questions."
-        : route.unit === "Marketing"
-          ? "Take the strategic direction above as input to marketing-specific strategy/execution decisions."
-          : "Take the strategic direction above as input to commercial progression.";
+    route.unit === "Research & Intelligence"
+      ? "Gather/validate the additional evidence identified as missing above, per the unresolved questions."
+      : route.unit === "Marketing"
+        ? "Take the strategic direction above as input to marketing-specific strategy/execution decisions."
+        : "Take the strategic direction above as input to commercial progression.";
 
   state.pendingStrategyHandoff = {
     unit: route.unit,
@@ -438,11 +496,8 @@ async function routeToUnit(env: Env, state: WorkState, result: StrategyDiagnosis
     handoffTitle: `Strategy diagnosis for ${route.hat}: ${(state.strategyQuestion ?? state.workId).slice(0, 60)}`,
     reason,
     requiredNextAction,
-    expectedOutput: route.unit === "Finance" ? "A quoted price and pricing rationale, or an explicit Held status naming the specific missing evidence." : `${route.hat} to use this diagnosis as direct input to its own work.`,
-    acceptanceCriteria:
-      route.unit === "Finance"
-        ? "A quoted price with clear value-based rationale that prices the intervention described, without alteration, or an explicit Held status."
-        : "Work proceeds using the strategic context preserved above without needing to reconstruct it.",
+    expectedOutput: `${route.hat} to use this diagnosis as direct input to its own work.`,
+    acceptanceCriteria: "Work proceeds using the strategic context preserved above without needing to reconstruct it.",
     verifiedFactsAndSources,
     assumptions: result.assumptions ?? "",
     openQuestions: result.unresolvedQuestions ?? "",
@@ -539,11 +594,207 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   return state;
 }
 
-/** Ambiguity loop: re-runs the diagnosis with the added detail. */
-export async function handleStrategyClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.strategyContext = `${state.strategyContext ?? ""}\n\nAdditional detail: ${text}`;
+/**
+ * Presents a recommended intervention for Martin's explicit Approve/Refine
+ * decision -- the canonical commercial flow's gate before any Strategy ->
+ * Finance Handoff may be created. A fresh proposalId is minted every time
+ * this runs (initial proposal or a revised one after Refine), and embedded
+ * in the callback_data (as "<proposalId>.<approve|refine>", joined with a
+ * "." rather than ":" so it survives the router's plain data.split(":")
+ * unchanged). handleInterventionApproval checks this id against
+ * state.pendingIntervention exactly -- a stale button from an earlier or
+ * superseded proposal can never approve a different/later one.
+ */
+async function presentInterventionForApproval(env: Env, state: WorkState, result: StrategyDiagnosisResult): Promise<WorkState> {
+  const proposalId = crypto.randomUUID();
+  const interventionSummary = result.recommendedDirection ?? "";
+  state.pendingIntervention = { proposalId, interventionSummary };
+
+  const message = `*Proposed intervention:* ${interventionSummary}\n\n${result.recommendationRationale ?? ""}\n\nThis is a recommendation, not yet an approved decision. Approve to route this to Finance for pricing, or Refine if it needs changes first.`;
+  const buttons = [
+    [
+      { text: "✅ Approve", callback_data: `strategyintervention:${state.workId}:${proposalId}.approve` },
+      { text: "🔁 Refine", callback_data: `strategyintervention:${state.workId}:${proposalId}.refine` },
+    ],
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, message, buttons);
+  state.pendingActionSummary = {
+    label: `Intervention approval: ${state.matterName || state.entityName || state.workId}`,
+    message,
+    buttons,
+    createdAt: new Date().toISOString(),
+  };
+  state.stage = "awaiting_intervention_approval";
+  state.awaiting = undefined;
+  return state;
+}
+
+/** Plain-text serialization of the APPROVED intervention for the Strategy -> Finance Handoff -- distinguishes every category Finance needs, per the canonical commercial flow. */
+function formatApprovedInterventionForFinance(result: StrategyDiagnosisResult): string {
+  const lines: string[] = [
+    `Approved intervention: ${result.recommendedDirection ?? ""}`,
+    `Diagnosis/rationale: ${result.recommendationRationale ?? ""}. Diagnosed cause: ${result.diagnosis?.cause ?? ""} (causation ${result.diagnosis?.causationSupported ? "supported" : "not fully supported"} by evidence). Strategic problem: ${result.strategicProblem?.statement ?? ""}`,
+    `Verified evidence: ${result.evidenceSources ?? ""}`,
+    `Assumptions: ${result.assumptions ?? ""}`,
+    `Unresolved questions: ${result.unresolvedQuestions ?? ""}`,
+    `Pricing requirements: Price this approved intervention using value-based judgment. Do not redesign, substitute, or reinterpret it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis.`,
+  ];
+  return lines.join("\n\n");
+}
+
+/**
+ * Martin's Approve/Refine decision on a proposed intervention. Verifies,
+ * before mutating anything: the WorkSession is actually in
+ * awaiting_intervention_approval, a pendingIntervention exists, and its
+ * proposalId matches exactly -- a callback for a stale/superseded proposal
+ * (or a completed session) is a logged no-op, never a mutation, per the
+ * existing fail-closed stage-guard pattern used by every other approval
+ * gate in this Worker (e.g. Finance's handleQuoteApproval).
+ */
+export async function handleInterventionApproval(env: Env, state: WorkState, proposalId: string, decision: "approve" | "refine"): Promise<WorkState> {
+  if (state.stage !== "awaiting_intervention_approval" || !state.pendingIntervention || state.pendingIntervention.proposalId !== proposalId) {
+    console.error(`Strategy handleInterventionApproval: stale/mismatched callback for work ${state.workId} (proposalId ${proposalId})`);
+    await logActivity(env, {
+      entry: `Strategy intervention approval callback ignored — stale or superseded`,
+      type: "Blocker",
+      area: "Strategy",
+      decisionRationale: `Callback proposalId ${proposalId} did not match the current pending intervention (stage: ${state.stage}). Treated as a no-op.`,
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "This intervention proposal has already been resolved or superseded -- nothing to do.");
+    return state;
+  }
+
+  const diagnosis = state.strategyDiagnosis;
+
+  if (decision === "refine") {
+    state.pendingIntervention = undefined;
+    state.pendingActionSummary = undefined;
+    await logActivity(env, {
+      entry: `Strategy intervention refinement requested: ${state.matterName || state.entityName || state.workId}`,
+      type: "Decision",
+      area: "Strategy",
+      decisionRationale: "Martin requested changes to the proposed intervention. A refinement is not an approval -- no Finance Handoff created.",
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Got it -- what should change about this intervention? Tell me what's off or what to take into account, and I'll produce a revised proposal.");
+    state.stage = "strategy_refining";
+    state.awaiting = "strategy_refinement_reason";
+    return state;
+  }
+
+  // decision === "approve"
+  if (!diagnosis || !diagnosis.recommendedDirection) {
+    console.error(`Strategy handleInterventionApproval: no diagnosis/recommendation on record for work ${state.workId}`);
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Couldn't find the diagnosis behind this approval -- please ask me to re-diagnose.");
+    return state;
+  }
+
+  try {
+    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
+      Handoff: title(`Value-based quote request — ${state.matterName || state.entityName || state.workId}`),
+      "From Unit": select("Strategy"),
+      "From Hat": richText(HAT_NAME),
+      "To Unit": select("Finance"),
+      "To Hat": richText("Value-Based Pricing Assessor"),
+      Type: select("Work"),
+      Status: select("Pending"),
+      Reason: richText(`Martin-approved intervention ready for value-based pricing: ${diagnosis.recommendedDirection}`.slice(0, 1900)),
+      "Required Next Action": richText(
+        "Price the Martin-approved intervention below using value-based judgment. Do not redesign, substitute, or reinterpret it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis -- price the approved intervention's value, or hold and state what's missing.",
+      ),
+      "Expected Output": richText("A quoted price and value-based pricing rationale for the approved intervention, or an explicit Held status naming the specific missing evidence."),
+      "Acceptance Criteria": richText("A quoted price with clear value-based rationale pricing the approved intervention as described, without alteration, or an explicit Held status."),
+      Entity_Token: richText(state.entityName ?? ""),
+      Matter_Token: richText(state.matterName ?? ""),
+      Assumptions: richText((diagnosis.assumptions ?? "").slice(0, 1900)),
+      "Open Questions": richText((diagnosis.unresolvedQuestions ?? "").slice(0, 1900)),
+      "Verified Facts & Sources": richText(formatApprovedInterventionForFinance(diagnosis).slice(0, 1900)),
+    });
+
+    // Close the Sales -> Strategy Handoff now that the approved intervention
+    // has been successfully transferred onward -- per the canonical flow,
+    // this is deferred until here (not at delivery time) specifically for
+    // the has-a-recommendation path.
+    if (state.handoffId) {
+      await updatePage(env, state.handoffId, {
+        Status: select("Closed"),
+        "Work Completed": richText(`Intervention approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${diagnosis.recommendedDirection}`.slice(0, 1900)),
+      }).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
+    }
+
+    await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
+    state.handoffId = handoff.id;
+    state.pendingIntervention = undefined;
+    state.pendingActionSummary = undefined;
+
+    await logActivity(env, {
+      entry: `Martin approved Strategy intervention -- Strategy -> Finance Handoff created`,
+      type: "Decision",
+      area: "Strategy",
+      decisions: `Approved: ${diagnosis.recommendedDirection}`,
+      decisionRationale: `Handoff ${handoff.id} created for Finance to price the approved intervention.`,
+      outcome: "Complete",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Approved -- routed to Finance for pricing. I'll let you know once Finance responds.`);
+
+    // Strategy's execution on this Handoff ends here -- Finance discovers
+    // and picks up the new Handoff independently (see
+    // discoverPendingFinanceHandoffs in index.ts), the same cross-Unit
+    // execution-boundary pattern every other Handoff in this Worker uses.
+    state.stage = "awaiting_finance";
+    state.awaiting = undefined;
+  } catch (err) {
+    console.error(`Strategy: failed to create Strategy -> Finance Handoff for work ${state.workId}`, err);
+    // Leave pendingIntervention intact so approving again actually retries,
+    // rather than silently having nothing left to act on.
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Couldn't create the Handoff to Finance -- please try approving again.");
+  }
+
+  return state;
+}
+
+/** Revision loop after Refine: re-runs the diagnosis with Martin's reasoning, then re-presents a fresh proposal (new proposalId) for approval. */
+export async function handleStrategyRefinement(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  state.strategyContext = `${state.strategyContext ?? ""}\n\nMartin's refinement request: ${text}`;
   await sendStrategyInProgressAck(env, state);
   return runDiagnosis(env, state);
+}
+
+/**
+ * Ambiguity/Held retry loop. Rather than continuing in-session (which would
+ * bypass the pickup-idempotency boundary), this requeues the Handoff:
+ * appends the added detail to Verified Facts & Sources and returns Status
+ * to Pending, mirroring salesExecutive.ts's handleMoreValueContext exactly.
+ * Discovery re-finds it and hands it back through handlePickup's own
+ * claim-then-process guard, so it is picked up again exactly once.
+ */
+export async function handleStrategyClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const augmentedContext = `${state.strategyContext ?? ""}\n\nAdditional detail: ${text}`;
+  state.strategyContext = augmentedContext;
+
+  if (!state.handoffId) {
+    // No Handoff context to requeue against (shouldn't normally occur) --
+    // fall back to direct continuation rather than losing the message.
+    await sendStrategyInProgressAck(env, state);
+    return runDiagnosis(env, state);
+  }
+
+  await updatePage(env, state.handoffId, {
+    "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
+    Status: select("Pending"),
+  });
+  await logActivity(env, {
+    entry: `Strategy Handoff retry — returned Held to Pending`,
+    type: "Decision",
+    area: "Strategy",
+    decisionRationale: "Martin supplied additional detail resolving the prior blocker; requeued for re-pickup.",
+    outcome: "Active",
+  });
+  await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Got it -- queued for re-diagnosis with the added detail. I'll follow up here once it's done.");
+  state.stage = "strategy_retry_queued";
+  state.awaiting = undefined;
+  return state;
 }
 
 /** Free-text follow-up after a delivered diagnosis -- re-runs with the added context, same discipline as R&I's own follow-up loop. */

@@ -981,16 +981,28 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Sales Executive" },
-    `*${state.entityName}* is now a Prospect. What's the proposed intervention (what ENIG would actually do)? Send it as a message — no pricing/budget figures, just the scope.`,
+    `*${state.entityName}* is now a Prospect. What's the commercial situation Strategy should diagnose (the problem/opportunity, in your own words)? Send it as a message — no pricing/budget figures, just the situation.`,
   );
   state.stage = "awaiting_intervention";
   state.awaiting = "intervention";
   return state;
 }
 
+/**
+ * Creates the Sales -> Strategy Handoff after Martin approves Entity/
+ * Prospect progression -- per the canonical commercial flow (Inbound ->
+ * Sales -> Strategy -> Finance -> Sales), this REPLACES the obsolete
+ * direct Sales -> Finance entry point. No intervention is sent to Finance
+ * at this point -- Strategy owns diagnosing the situation and developing a
+ * proposed intervention; Finance is reached only after Martin approves
+ * that intervention (see strategyAnalyst.ts's handleInterventionApproval).
+ * Sales's responsibility for this work session ends here; the runtime
+ * waits for Strategy (via the existing discoverPendingStrategyHandoffs
+ * discovery, never invoked in-process from this call).
+ */
 export async function handleInterventionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const trimmedIntervention = text.trim();
-  state.proposedIntervention = trimmedIntervention;
+  const trimmedSituation = text.trim();
+  state.proposedIntervention = trimmedSituation;
 
   // Fail-closed gate 1: entry_type is required on the Handoff and must never
   // be invented or defaulted. In this Worker's current code paths it's set
@@ -1000,7 +1012,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   if (!state.entryType) {
     console.error(`Sales Executive Handoff blocked -- missing entry_type for work ${state.workId}`);
     await logActivity(env, {
-      entry: `Sales -> Finance Handoff blocked -- missing entry_type: ${state.matterName ?? state.workId}`,
+      entry: `Sales -> Strategy Handoff blocked -- missing entry_type: ${state.matterName ?? state.workId}`,
       type: "Blocker",
       area: "Sales",
       decisionRationale:
@@ -1010,75 +1022,75 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Sales Executive" },
-      `Couldn't route *${state.matterName}* to Finance -- this work item is missing its entry type (how it originated). Not proceeding without it.`,
+      `Couldn't route *${state.matterName}* to Strategy -- this work item is missing its entry type (how it originated). Not proceeding without it.`,
     );
     return state;
   }
 
-  // Fail-closed gate 2: proposed intervention is a required Finance input
-  // (per the Sales Executive boundary) -- an empty/whitespace-only message
-  // must not produce a Handoff with nothing for Finance to price against.
-  if (!trimmedIntervention) {
+  // Fail-closed gate 2: a description of the commercial situation is a
+  // required Strategy input -- an empty/whitespace-only message must not
+  // produce a Handoff with nothing for Strategy to diagnose.
+  if (!trimmedSituation) {
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Sales Executive" },
-      "That looked empty -- what's the proposed intervention (what ENIG would actually do)? Send it as a message — no pricing/budget figures, just the scope.",
+      "That looked empty -- what's the commercial situation Strategy should diagnose? Send it as a message — no pricing/budget figures, just the situation.",
     );
     return state;
   }
 
-  // Fail-closed gate 3: value-relevant context (the other required Finance
+  // Fail-closed gate 3: value-relevant context (the other required Strategy
   // input) must exist in some form -- enquiry text, call notes, or both.
-  // Without it there is nothing for Finance to judge a value-based quote
-  // against, and Sales must not substitute or invent context to fill the gap.
+  // Without it there is nothing for Strategy to diagnose against, and Sales
+  // must not substitute or invent context to fill the gap.
   const valueContext = [state.enquiryText, state.callNotes].filter((v) => v && v.trim().length > 0).join("\n\n");
   if (!valueContext) {
     console.error(`Sales Executive Handoff blocked -- no value-relevant context for work ${state.workId}`);
     await logActivity(env, {
-      entry: `Sales -> Finance Handoff blocked -- no value-relevant context: ${state.matterName ?? state.workId}`,
+      entry: `Sales -> Strategy Handoff blocked -- no value-relevant context: ${state.matterName ?? state.workId}`,
       type: "Blocker",
       area: "Sales",
-      decisionRationale: "Neither enquiry text nor call notes are present -- Finance has nothing to judge a value-based quote against.",
+      decisionRationale: "Neither enquiry text nor call notes are present -- Strategy has nothing to diagnose against.",
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Sales Executive" },
-      `Couldn't route *${state.matterName}* to Finance -- there's no value-relevant context on record (no enquiry text or call notes). Send call notes first, then I'll route it.`,
+      `Couldn't route *${state.matterName}* to Strategy -- there's no value-relevant context on record (no enquiry text or call notes). Send call notes first, then I'll route it.`,
     );
     return state;
   }
 
   await updatePage(env, state.matterId!, {
     Status: select("Commercial Development"),
-    Next_action: richText("Awaiting Finance value-based quote"),
+    Next_action: richText("Awaiting Strategy diagnosis"),
   });
 
   const identityTokens = await resolveIdentityTokens(env, state.entityId!, state.matterId!);
 
   const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    Handoff: title(`Quote request — ${state.matterName}`),
+    Handoff: title(`Commercial diagnosis — ${state.matterName}`),
     "From Unit": select("Sales"),
     "From Hat": richText("Sales Executive"),
-    "To Unit": select("Finance"),
-    "To Hat": richText("Value-Based Pricing Assessor"),
+    "To Unit": select("Strategy"),
+    "To Hat": richText("Strategy Analyst"),
     Type: select("Work"),
     Status: select("Pending"),
-    Reason: richText(`Value-based quote requested for ${state.matterName}. Entry type: ${state.entryType}.`),
-    "Expected Output": richText("Quoted price (USD) and pricing rationale."),
+    Reason: richText(`Commercial fit/progression approved for ${state.matterName}. Entry type: ${state.entryType}.`),
+    "Expected Output": richText("A strategic diagnosis and, where evidence supports one, a proposed intervention for Finance to price -- or an explicit Held status naming the specific blocker."),
     "Required Next Action": richText(
-      "Judge a value-based quote and either approve it (routes back to Sales for Draft Proposal preparation) or hold it with a specific open question.",
+      "Diagnose the commercial situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and develop a proposed intervention where the evidence supports one. Do not send anything to Finance directly -- the proposed intervention requires Martin's explicit approval first.",
     ),
     "Acceptance Criteria": richText(
-      "A quoted price (USD) with clear value-based rationale, or an explicit Held status naming the specific question blocking judgment.",
+      "A diagnosis following Symptom -> Problem -> Cause -> Constraint -> Consequence, with either a defensible proposed intervention or an explicit Held status naming the specific blocker.",
     ),
     Entity_Token: richText(identityTokens.entityToken),
     Matter_Token: richText(identityTokens.matterToken),
     Assumptions: richText(
-      "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a Finance pricing input.",
+      "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a pricing input downstream.",
     ),
     "Verified Facts & Sources": richText(
-      `Proposed intervention: ${trimmedIntervention}\n\n${formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext)}\n\nRaw value context (enquiry + call notes):\n${valueContext}`.slice(
+      `Commercial situation: ${trimmedSituation}\n\n${formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext)}\n\nRaw value context (enquiry + call notes):\n${valueContext}`.slice(
         0,
         1900,
       ),
@@ -1086,28 +1098,28 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   });
 
   state.handoffId = handoff.id;
-  // Sales's execution ends here. Finance is a separate Unit and must
+  // Sales's execution ends here. Strategy is a separate Unit and must
   // discover and pick up this Handoff independently (see the scheduled
-  // discoverPendingFinanceHandoffs run in index.ts) rather than being
+  // discoverPendingStrategyHandoffs run in index.ts) rather than being
   // invoked in-process from this call. This mapping is how that later,
   // separate invocation finds its way back to this work item.
   await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
   await logActivity(env, {
-    entry: `Handoff to Finance created: ${state.matterName}`,
+    entry: `Handoff to Strategy created: ${state.matterName}`,
     type: "Activity",
     area: "Sales",
-    activity: `Handoff ${handoff.id} — quote requested.`,
-    nextActions: "Finance to pick up and judge value-based price.",
+    activity: `Handoff ${handoff.id} — commercial diagnosis requested.`,
+    nextActions: "Strategy to pick up, diagnose, and propose an intervention for Martin's approval.",
     outcome: "Active",
   });
 
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Sales Executive" },
-    `Got it — routing *${state.matterName}* to Finance for a value-based quote. I'll let you know here once Finance responds.`,
+    `Got it — routing *${state.matterName}* to Strategy for diagnosis. I'll let you know here once Strategy responds.`,
   );
 
-  state.stage = "awaiting_quote";
+  state.stage = "awaiting_strategy";
   state.awaiting = undefined;
   return state;
 }
