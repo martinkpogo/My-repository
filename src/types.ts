@@ -225,7 +225,9 @@ export interface WorkState {
     | "marketing_feedback"
     | "marketing_clarification"
     | "research_clarification"
-    | "research_feedback";
+    | "research_feedback"
+    | "strategy_clarification"
+    | "strategy_feedback";
   createdAt: string;
   updatedAt: string;
 
@@ -335,6 +337,33 @@ export interface WorkState {
     reason: string;
     handoffTitle: string;
     verifiedFactsAndSources: string;
+  };
+
+  /** The strategic question/business situation a Strategy work item is diagnosing -- carried across clarification/feedback loops. */
+  strategyQuestion?: string;
+  /** Sanitized supplied context (from a Handoff's own record) the diagnosis is grounded in. */
+  strategyContext?: string;
+  /** The Telegram message id of the "diagnosing this now" acknowledgment, edited in place per stage -- mirrors researchProgressMessageId. */
+  strategyProgressMessageId?: number;
+  /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
+  strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
+  /**
+   * A proposed Strategy -> another-Unit handoff, pending Martin's explicit
+   * approval before the Handoff record is created -- mirrors
+   * pendingResearchHandoff's own preview/approval gate exactly. A
+   * recommendation is never treated as authorization to route it onward.
+   */
+  pendingStrategyHandoff?: {
+    unit: Unit;
+    hat: string;
+    handoffTitle: string;
+    reason: string;
+    requiredNextAction: string;
+    expectedOutput: string;
+    acceptanceCriteria: string;
+    verifiedFactsAndSources: string;
+    assumptions: string;
+    openQuestions: string;
   };
 
   /**

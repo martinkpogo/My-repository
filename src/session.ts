@@ -4,6 +4,7 @@ import * as sales from "./units/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
+import * as strategy from "./units/strategy/strategyAnalyst";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
 import {
@@ -81,6 +82,10 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchClarification(this.env, state, text);
         case "research_feedback":
           return research.handleResearchFeedback(this.env, state, text);
+        case "strategy_clarification":
+          return strategy.handleStrategyClarification(this.env, state, text);
+        case "strategy_feedback":
+          return strategy.handleStrategyFeedback(this.env, state, text);
         default:
           return sendMessage(
             this.env,
@@ -111,6 +116,15 @@ export class WorkSession extends DurableObject<Env> {
    */
   async runResearchPickup(): Promise<WorkState> {
     return this.execute((state) => research.handlePickup(this.env, state));
+  }
+
+  /**
+   * Invoked independently by index.ts's scheduled Strategy-Handoff
+   * discovery once a Pending Handoff addressed to Strategy is found --
+   * mirrors runFinancePickup/runResearchPickup exactly.
+   */
+  async runStrategyPickup(): Promise<WorkState> {
+    return this.execute((state) => strategy.handlePickup(this.env, state));
   }
 
   /**
@@ -186,6 +200,8 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handlePaidMediaApproval(this.env, state, value === "approve");
         case "researchhandoff":
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
+        case "strategyhandoff":
+          return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);
         case "googlefolder":

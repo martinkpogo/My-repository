@@ -47,6 +47,11 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "sales.proposal_drafting": "client_confidential",
   "sales.proposal_revision": "client_confidential",
   "finance.quote_judgment": "business_sensitive",
+  // Same rationale as finance.quote_judgment -- Strategy operates on
+  // Entity_Token/Matter_Token and the Handoff's own sanitized text, never
+  // a real client identity.
+  "strategy.diagnosis": "business_sensitive",
+  "strategy.handoff_routing": "business_sensitive",
   // public_sourced, not business_sensitive -- Lead Discovery's evidence
   // originates from the open web, not from ENIG's own internal
   // operations. Never sees the discovered identity/contact itself (see

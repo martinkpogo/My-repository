@@ -103,6 +103,18 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Finance Quote Judgment",
     description: "Judges value-based price and pricing rationale from intervention context.",
   },
+  "strategy.diagnosis": {
+    id: "strategy.diagnosis",
+    name: "Strategy Analyst Diagnosis",
+    description:
+      "Diagnoses a supplied business situation (Symptom -> Problem -> Cause -> Constraint -> Consequence), frames the strategic problem, and develops options/a recommended direction only where evidence supports one. Never asserts causation without sufficient support; never treats supplied input as fact merely because another Hat/Unit supplied it.",
+  },
+  "strategy.handoff_routing": {
+    id: "strategy.handoff_routing",
+    name: "Strategy Handoff Routing",
+    description:
+      "Decides whether a completed Strategy diagnosis should be handed off to another Unit (Research & Intelligence, Marketing, Sales, or Finance) as its next responsibility, per the Strategy Analyst Hat Definition's own handoff_rules -- never guesses when the destination is unclear.",
+  },
   "lead.discovery_classification": {
     id: "lead.discovery_classification",
     name: "Lead Discovery Signal Classification",

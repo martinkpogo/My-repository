@@ -216,6 +216,7 @@ export default {
         const pickedForSales = await discoverPendingSalesHandoffs(env);
         const pickedForResearch = await discoverPendingResearchHandoffs(env);
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
+        const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
         return new Response(
           JSON.stringify({
@@ -224,6 +225,7 @@ export default {
             sales_handoffs_picked_up: pickedForSales,
             research_handoffs_picked_up: pickedForResearch,
             marketing_handoffs_picked_up: pickedForMarketing,
+            strategy_handoffs_picked_up: pickedForStrategy,
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -435,6 +437,7 @@ export default {
       await discoverPendingSalesHandoffs(env);
       await discoverPendingResearchHandoffs(env);
       await discoverPendingMarketingHandoffs(env);
+      await discoverPendingStrategyHandoffs(env);
       await checkStaleHandoffs(env);
     } catch (err) {
       console.error("Unhandled error in scheduled discovery run", err);
@@ -675,6 +678,51 @@ async function discoverPendingMarketingHandoffs(env: Env): Promise<number> {
   return pickedUp;
 }
 
+/**
+ * The Strategy side of a <Unit> -> Strategy execution boundary, mirroring
+ * discoverPendingResearchHandoffs/discoverPendingMarketingHandoffs exactly
+ * -- the creating Unit's Hat code only ever creates the Handoff (Status:
+ * Pending) and returns; this runs on its own schedule and discovers it
+ * independently.
+ */
+async function discoverPendingStrategyHandoffs(env: Env): Promise<number> {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    and: [
+      { property: "Status", select: { equals: "Pending" } },
+      { property: "To Unit", select: { equals: "Strategy" } },
+      { property: "Type", select: { equals: "Work" } },
+    ],
+  });
+
+  let pickedUp = 0;
+  for (const handoff of pending) {
+    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    if (!workId) {
+      try {
+        workId = newWorkId();
+        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+        const threadId = undefined;
+        const stub = getSessionStub(env, workId);
+        await stub.init(workId, chatId, "Strategy", "Strategy Analyst", threadId, { handoffId: handoff.id });
+        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);
+      } catch (err) {
+        console.error(`Failed to create a work item for externally-created Strategy Handoff ${handoff.id}`, err);
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+        continue;
+      }
+    }
+    const stub = getSessionStub(env, workId);
+    try {
+      await stub.runStrategyPickup();
+      pickedUp++;
+    } catch (err) {
+      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+    }
+  }
+  return pickedUp;
+}
+
 async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
   if (update.message) {
     const chatId = update.message.chat.id;
@@ -764,8 +812,8 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       );
       const unitHere = resolveUnitForThread(env, threadId);
       try {
-        if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Research & Intelligence" || unitHere === "Marketing") {
-          // These four are the only Units with real pickup logic (Marketing's
+        if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Research & Intelligence" || unitHere === "Marketing" || unitHere === "Strategy") {
+          // These five are the only Units with real pickup logic (Marketing's
           // is Handoff-only -- see discoverPendingMarketingHandoffs -- chat-
           // originated Marketing work still goes through handleMarketingIntake
           // directly, never this discovery path). Discovery only counts a
@@ -781,10 +829,19 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           const pickedForSales = await discoverPendingSalesHandoffs(env);
           const pickedForResearch = await discoverPendingResearchHandoffs(env);
           const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
+          const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
           await checkStaleHandoffs(env);
           const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
           const pickedForThisUnit =
-            unitHere === "Finance" ? picked : unitHere === "Sales" ? pickedForSales : unitHere === "Marketing" ? pickedForMarketing : pickedForResearch;
+            unitHere === "Finance"
+              ? picked
+              : unitHere === "Sales"
+                ? pickedForSales
+                : unitHere === "Marketing"
+                  ? pickedForMarketing
+                  : unitHere === "Strategy"
+                    ? pickedForStrategy
+                    : pickedForResearch;
           let reply: string;
           if (pendingCount === 0) {
             reply = `No Handoffs pending for ${unitHere}.`;
@@ -801,11 +858,12 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           const pickedForSales = await discoverPendingSalesHandoffs(env);
           const pickedForResearch = await discoverPendingResearchHandoffs(env);
           const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
+          const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
           await checkStaleHandoffs(env);
           await sendMessage(
             env,
             chatId,
-            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForResearch} picked up for Research & Intelligence, ${pickedForMarketing} picked up for Marketing.`,
+            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForResearch} picked up for Research & Intelligence, ${pickedForMarketing} picked up for Marketing, ${pickedForStrategy} picked up for Strategy.`,
             undefined,
             threadId,
           );

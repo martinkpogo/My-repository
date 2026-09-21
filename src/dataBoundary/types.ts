@@ -20,6 +20,8 @@ export type SemanticTaskId =
   | "sales.proposal_drafting"
   | "sales.proposal_revision"
   | "finance.quote_judgment"
+  | "strategy.diagnosis"
+  | "strategy.handoff_routing"
   | "lead.discovery_classification"
   | "lead.discovery_signal_evaluation"
   | "action.google_doc_intake"

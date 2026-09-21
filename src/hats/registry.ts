@@ -47,6 +47,7 @@ export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
   unit: "Research & Intelligence",
   specialization: "Research Intelligence",
 };
+export const STRATEGY_ANALYST: HatIdentity = { name: "Strategy Analyst", unit: "Strategy", specialization: "Strategy" };
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {
   "Marketing Strategist": MARKETING_STRATEGIST,
@@ -64,6 +65,7 @@ export const ALL_HATS: HatIdentity[] = [
   LEAD_GENERATION_SPECIALIST,
   VALUE_BASED_PRICING_ASSESSOR,
   RESEARCH_INTELLIGENCE_ANALYST,
+  STRATEGY_ANALYST,
   ...MARKETING_HAT_NAMES.map((name) => MARKETING_HAT_REGISTRY[name] as HatIdentity),
 ];
 
