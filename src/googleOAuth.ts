@@ -1527,6 +1527,13 @@ export async function handleGoogleActionApproval(
     return state;
   }
 
+  // Every path below this point is a final outcome (rejected, created, or
+  // failed) -- nothing remains pending on this work item afterward, so mark
+  // it terminal. Without this it stayed at its initial "new" stage forever,
+  // showing up in /sessions indefinitely as an ambiguous "(new)" entry with
+  // nothing left to act on.
+  state.stage = "complete";
+
   const kindLabel = action.type === "create_sheet" ? "Google Sheet" : "Google Doc";
 
   if (!approved) {
