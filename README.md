@@ -4,18 +4,20 @@ The ENIG Agent Runtime is the execution layer for ENIG’s AI-assisted business 
 
 It runs ENIG’s operational Units and Hats through a Cloudflare Worker, connects execution to Notion as the system of record, and uses Telegram as an operational interface.
 
-The current implementation covers the SM&BD and Finance vertical slice. Other Units are not yet part of the live runtime.
+The current implementation covers Sales (Lead Generation Specialist live; Sales Executive paused by policy — see below), Marketing, Finance, and Research & Intelligence. Business Development, Strategy, Creative & Design, and Operations exist in the type system but have no live implementation yet.
 
 Current status
 
-Runtime: Cloudflare Worker
+Runtime: Cloudflare Worker (`enig-agent`), Durable Objects for per-work-item state, KV for routing/session-index state
 Primary AI provider: Cloudflare Workers AI
-Provider architecture: Provider abstraction implemented; secondary-provider governance is being defined
+Provider architecture: Provider abstraction implemented (Workers AI plus several OpenAI-compatible fallback providers); automatic cross-provider fallback policy is not yet implemented — an ineligible/unavailable provider fails closed rather than silently downgrading
 System of record: Notion
-Operational interface: Telegram
-Live Units: SM&BD, Finance
-Deployment: Cloudflare Workers
+Operational interface: Telegram (two-stream: a Workspace topic for interactive decisions/approvals, an Operations topic for background telemetry/watchdogs)
+Live Units: Sales (Lead Generation Specialist), Marketing, Finance, Research & Intelligence
+Other integrations: Google Workspace (Docs/Sheets, controlled creation + comment-triggered editing), Read.ai (call notes)
+Deployment: Cloudflare Workers, via Cloudflare Workers Builds (see Deployment & CI/CD Automation below)
 Repository: martinkpogo/My-repository
+Tests: `npm test` (Node's built-in test runner via `tsx`) — 263 tests as of this writing, all passing; `npm run typecheck` clean
 
 The provider layer currently isolates provider-specific execution behind a common interface. Workers AI remains the production provider.
 
@@ -141,25 +143,42 @@ If no provider satisfies the required boundary and policy, execution stops or is
 Repository structure
 
 src/
-├── ai.ts
-├── ai/
-│   ├── types.ts
-│   ├── policy.ts
-│   ├── workersai.ts
-│   └── ...
-├── router.ts
-├── executionEngine.ts
-├── salesExecutive.ts
-├── finance/
-├── marketing/
-├── notion/
-├── telegram/
-├── session/
-├── log/
-└── ...
-tests/
+├── index.ts                    — Worker entry point: HTTP routes, Telegram webhook, admin endpoints, scheduled discovery
+├── router.ts                   — Workspace message classification/dispatch across Units
+├── session.ts                  — WorkSession Durable Object: per-work-item state, callback dispatch, sessions_index registry
+├── sessionsIndex.ts            — pure bounded-retention logic for the /sessions enumeration index
+├── types.ts                    — Env, WorkState, and the shared pending-approval types
+├── telegram.ts                 — Telegram Bot API client, two-stream (Workspace/Operations) message targeting
+├── notion.ts, governance.ts    — Notion API client; canonical governance-page retrieval
+├── log.ts                      — Activity & Decision Log writes
+├── chat.ts                     — general/DM conversational fallback
+├── ai.ts, ai/                  — AiPolicyExecutor, provider adapters (Workers AI + OpenAI-compatible fallbacks), common response contract
+├── dataBoundary/                — SemanticTaskId registry + sensitivity-tier policy every AI call is checked against
+├── actions/registry.ts         — generic ActionCapability hook (natural-language → proposed action), checked before Unit classification
+├── googleOAuth.ts               — Google Workspace OAuth + controlled Doc/Sheet creation and approval
+├── googleDocComments.ts, googleSheetComments.ts
+│                                — comment-triggered live editing (polled) for Docs and Sheets
+├── readai.ts, readaiOAuth.ts   — Read.ai call-notes integration
+├── hats/
+│   ├── registry.ts             — Marketing Hat registry (name → definition)
+│   ├── executionEngine.ts      — Marketing Hat execution/routing/approval lifecycle
+│   ├── relationships.ts        — cross-Hat context-sharing rules
+│   └── types.ts
+└── units/
+    ├── smbd/
+    │   ├── sales/
+    │   │   ├── salesExecutive.ts          — paused by policy (see Operational model)
+    │   │   ├── leadDiscovery.ts           — manual /lead recording + duplicate/governance helpers
+    │   │   └── leadGenerationDiscovery.ts — scheduled + on-demand opportunity discovery, approval gate
+    │   └── marketing/                     — the 5 Marketing Hat implementations (Strategist, Brand Communications, Content Strategist, Content Manager, Digital Marketer)
+    ├── finance/
+    │   └── valueBasedPricingAssessor.ts   — Handoff-only quote judgment + approval
+    └── research/
+        ├── researchAnalyst.ts             — protocol selection, synthesis, Handoff routing
+        ├── protocols.ts, researchPlan.ts, evidence.ts, safeContext.ts, protocolGuardrails.ts
+        └── webSearch.ts                   — Tavily-backed live search (optional; R&I stays closed-book without it)
 
-The exact directory structure may evolve as the runtime is developed. Architectural responsibility should remain more stable than file locations.
+Each `*.ts` file above has a co-located `*.test.ts` alongside it where automated coverage exists (22 test files, 263 tests as of this writing). Architectural responsibility should remain more stable than file locations — this listing may drift; treat it as a map, not a contract.
 
 Operational model
 
@@ -169,12 +188,16 @@ A Hat represents a defined responsibility. An Agent is an execution mechanism. A
 
 The runtime does not treat an AI model, provider, Agent, or code module as a substitute for a Hat’s business authority.
 
-The current live vertical slice includes:
+The current live Units:
 
-* SM&BD
-* Finance
+* **Sales** — Lead Generation Specialist is live: scheduled discovery (fixed problem-signal queries against the canonical Acquisition Criteria) and on-demand discovery (asked for directly in the Workspace stream, e.g. "find me 3 companies with a positioning problem"). Both paths run the same evidence pipeline — search → AI screening → Research & Intelligence Handoff → evaluate synthesis against Acquisition Criteria — and neither may create a Lead without Martin's explicit approval of the resulting Opportunity Finding. Sales Executive (the client-facing enquiry → proposal pipeline) is paused by standing policy: real client identity is confirmed-sensitive data Workers AI's training-data policy hasn't been approved to process, so that work runs instead in an isolated Sales Executive project with its own Notion/Gmail access, exchanging only opaque Entity/Matter tokens with this Worker via the Handoffs database.
+* **Marketing** — 5 Hats (Marketing Strategist, Brand Communications Strategist, Content Strategist, Content Manager, Digital Marketer), each drafting within its own ownership or routing/escalating to another Hat; paid-media/spend actions carry their own explicit approval gate.
+* **Finance** — Value-Based Pricing Assessor, activated only via Handoff from Sales (never directly from chat); judges a quote, presents it for approval, then hands the approved quote back to Sales.
+* **Research & Intelligence** — runs bounded research protocols against a canonical Research-Safe Consultancy Context, synthesizes source-linked findings, and can propose (approval-gated) routing a completed research item to another Unit as direct input to its work.
 
-The remaining ENIG Units are not being implemented merely to complete an organisational diagram. They will be built when real ENIG work requires them.
+Every approval-gated action across these Units — Google Doc/Sheet creation, Lead Opportunities, Entity/Matter drafts, Finance quotes, Marketing drafts/transitions/paid-media, R&I Handoffs — shares one generic recovery mechanism: if the Telegram approval message is missed or dismissed, `/sessions` shows it with a meaningful label and resurfaces the exact original message/buttons on selection, guarded against being actioned twice. `sessions_index` (the KV-backed enumeration this relies on) is bounded, not a second source of truth — see `src/sessionsIndex.ts`.
+
+The remaining ENIG Units (Business Development, Strategy, Creative & Design, Operations) are not being implemented merely to complete an organisational diagram. They will be built when real ENIG work requires them.
 
 Data and state
 
@@ -194,11 +217,13 @@ npm install
 
 Run the test suite:
 
-npx vitest run
+npm test
+
+(Node's built-in test runner via `tsx --test`, not vitest — despite what an older version of this README said.)
 
 Run type checking:
 
-npx tsc --noEmit
+npm run typecheck
 
 Development and deployment configuration should be maintained separately from this README where the instructions become operationally detailed.
 
@@ -252,10 +277,13 @@ Integrations
 
 The runtime currently interfaces with:
 
-* Notion
-* Telegram
-* Cloudflare Workers
-* Cloudflare Workers AI
+* Notion — system of record for governance pages and business objects (Entities, Matters, Proposals, Leads, Handoffs, Activity & Decision Log)
+* Telegram — operational interface (Workspace/Operations two-stream architecture), including inline-keyboard approval flows
+* Cloudflare Workers — runtime, Durable Objects (per-work-item session state), KV (routing pointers, `sessions_index`, watchdog bookkeeping)
+* Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Cerebras, Gemini, SambaNova, NVIDIA NIM) at the same protection tier
+* Google Workspace (Docs, Sheets, Drive) — OAuth-authorized, multi-account controlled Doc/Sheet creation with explicit approval before anything is written, plus comment-triggered live editing (polled)
+* Read.ai — pulls call summaries/notes into a work item via OAuth
+* Tavily — optional live web search backing Research & Intelligence and Lead Generation discovery; R&I stays closed-book (reasoning over supplied context only) if unset, rather than failing
 
 Additional integrations may be added when required by an approved responsibility.
 
