@@ -24,7 +24,9 @@ export type SemanticTaskId =
   | "action.google_doc_intake"
   | "action.google_doc_comment_edit"
   | "action.google_sheet_intake"
-  | "action.google_sheet_comment_edit";
+  | "action.google_sheet_comment_edit"
+  | "lead.discovery_ondemand_intake"
+  | "lead.discovery_ondemand_query_generation";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

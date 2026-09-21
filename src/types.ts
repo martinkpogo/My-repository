@@ -221,6 +221,14 @@ export interface WorkState {
    * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.
    */
   pendingGoogleAction?: import("./googleOAuth").PendingGoogleAction;
+
+  /**
+   * An evidence-backed opportunity finding (from either scheduled or
+   * on-demand Lead Generation Specialist discovery), awaiting Martin's
+   * explicit approval before it becomes a Lead -- per the governance
+   * requirement that no discovery source may create a Lead automatically.
+   */
+  pendingLeadOpportunity?: import("./units/smbd/sales/leadGenerationDiscovery").PendingLeadOpportunity;
 }
 
 export interface SessionSummary {
