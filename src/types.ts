@@ -1,3 +1,5 @@
+import type { InlineButton } from "./telegram";
+
 export interface Env {
   AI: Ai;
   WORK_SESSION: DurableObjectNamespace;
@@ -229,6 +231,38 @@ export interface WorkState {
    * requirement that no discovery source may create a Lead automatically.
    */
   pendingLeadOpportunity?: import("./units/smbd/sales/leadGenerationDiscovery").PendingLeadOpportunity;
+
+  /**
+   * Generic, display-only descriptor of whatever approval-gated action is
+   * currently pending on this WorkSession (if any) -- set alongside the
+   * domain-specific pending field above (pendingLeadOpportunity,
+   * pendingGoogleAction, entityDraft, etc.) by every propose site, so
+   * /sessions can show a meaningful label and resurface the exact original
+   * message+buttons if Martin's approval message is missed or dismissed.
+   *
+   * This is NEVER the authority for whether an action may still execute --
+   * that remains each domain-specific pending field, checked by its own
+   * resolve handler. pendingActionSummary is purely "what to redisplay if
+   * asked," not a second source of truth.
+   */
+  pendingActionSummary?: PendingActionSummary;
+}
+
+/**
+ * Generic descriptor for an approval-gated action awaiting Martin's
+ * decision, used to make any pending approval discoverable and
+ * re-actionable via /sessions regardless of which Hat/Unit proposed it.
+ * See WorkState.pendingActionSummary.
+ */
+export interface PendingActionSummary {
+  /** Short human-readable label for the /sessions list row, e.g. "Opportunity: Acme Co". */
+  label: string;
+  /** The exact original message text, resent verbatim if this item is resurfaced. */
+  message: string;
+  /** The exact original inline keyboard, resent verbatim if this item is resurfaced. */
+  buttons: InlineButton[][];
+  /** When this approval was first proposed -- used for backlog-age reporting only. */
+  createdAt: string;
 }
 
 export interface SessionSummary {
@@ -238,4 +272,6 @@ export interface SessionSummary {
   stage: string;
   label: string;
   updatedAt: string;
+  /** Whether this work item currently has a pendingActionSummary -- drives sessions_index's bounded pending/general pool split. */
+  hasPendingApproval?: boolean;
 }

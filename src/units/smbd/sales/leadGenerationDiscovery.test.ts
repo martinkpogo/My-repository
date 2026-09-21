@@ -629,6 +629,56 @@ test("proposeLeadOpportunity sets pendingLeadOpportunity and presents evidence-b
   assert.strictEqual(sentButtons[0][0].callback_data, "leadopportunity:work-opp-1:approve");
   assert.strictEqual(sentButtons[0][1].callback_data, "leadopportunity:work-opp-1:reject");
   assert.strictEqual(leadCreated, false, "presenting an opportunity must never itself create a Lead");
+
+  // Generic approval-recovery descriptor: /sessions can label and resurface
+  // this exact message/buttons if the original Telegram message is missed.
+  assert.ok(updated.pendingActionSummary, "proposeLeadOpportunity must also set the generic pendingActionSummary");
+  assert.strictEqual(updated.pendingActionSummary?.label, "Opportunity: Zenith Co");
+  assert.ok(sentText.endsWith(updated.pendingActionSummary!.message), "the stored summary message must be exactly what was sent (minus the Hat label prefix)");
+  assert.deepStrictEqual(updated.pendingActionSummary?.buttons, sentButtons);
+});
+
+test("handleLeadOpportunityApproval clears pendingActionSummary alongside pendingLeadOpportunity, and a stale second tap is a safe no-op", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let leadCreateCount = 0;
+  let lastSentText = "";
+
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      lastSentText = body.text;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (String(url).includes("/pages") && method === "POST") {
+      const body = JSON.parse(init.body ?? "{}");
+      if (body.parent?.data_source_id === "leads-ds") leadCreateCount++;
+      return new Response(JSON.stringify({ id: "lead-page", url: "https://notion.so/lead-page" }), { status: 200 });
+    }
+    if (String(url).includes("/data_sources") && String(url).includes("/query")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const state = fakeOpportunityState();
+  const proposed = await proposeLeadOpportunity(fakeEnv(), state, SAMPLE_OPPORTUNITY);
+  assert.ok(proposed.pendingActionSummary);
+
+  const resolved = await handleLeadOpportunityApproval(fakeEnv(), proposed, true);
+  assert.strictEqual(resolved.pendingActionSummary, undefined, "resolving the approval must clear pendingActionSummary");
+  assert.strictEqual(leadCreateCount, 1);
+
+  // Simulate a resurfaced (stale) tap on the same, already-resolved item --
+  // e.g. Martin taps an old /sessions-resurfaced button after already
+  // approving via the original message. Must not create a second Lead.
+  const staleTapResult = await handleLeadOpportunityApproval(fakeEnv(), resolved, true);
+  assert.strictEqual(leadCreateCount, 1, "a stale approval tap must not execute the action a second time");
+  assert.ok(lastSentText.includes("No valid pending opportunity"), "a stale tap must reply that there's nothing pending");
+  assert.strictEqual(staleTapResult.pendingActionSummary, undefined);
 });
 
 test("handleLeadOpportunityApproval creates a Lead only on explicit approval", async (t) => {

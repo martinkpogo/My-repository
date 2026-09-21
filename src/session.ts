@@ -13,6 +13,7 @@ import {
 } from "./googleOAuth";
 import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/smbd/sales/leadGenerationDiscovery";
 import type { PendingLeadOpportunity } from "./units/smbd/sales/leadGenerationDiscovery";
+import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -149,6 +150,7 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute(async (state) => {
       state.stage = "cancelled";
       state.awaiting = undefined;
+      state.pendingActionSummary = undefined;
       await logActivity(this.env, {
         entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
         type: "Activity",
@@ -241,13 +243,15 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   private async updateRegistry(state: WorkState): Promise<void> {
+    const hasPendingApproval = !!state.pendingActionSummary;
     const summary: SessionSummary = {
       workId: state.workId,
       unit: state.unit,
       hat: state.hat,
       stage: state.stage,
-      label: state.entityName ?? state.matterName ?? state.enquiryText?.slice(0, 40) ?? "(new)",
+      label: state.pendingActionSummary?.label ?? state.entityName ?? state.matterName ?? state.enquiryText?.slice(0, 40) ?? "(new)",
       updatedAt: state.updatedAt,
+      hasPendingApproval,
     };
     const key = "sessions_index";
     const raw = await this.env.STATE_KV.get(key);
@@ -255,8 +259,14 @@ export class WorkSession extends DurableObject<Env> {
     const withoutSelf = index.filter((s) => s.workId !== state.workId);
     const isTerminal = state.stage === "complete" || state.stage === "closed_not_qualified" || state.stage === "cancelled";
     // Terminal work items drop out of the index (they no longer show as "open").
-    const kept = isTerminal ? withoutSelf.slice(-50) : [...withoutSelf, summary].slice(-50);
+    const combined = isTerminal ? withoutSelf : [...withoutSelf, summary];
+
+    const kept = trimSessionsIndex(combined);
     await this.env.STATE_KV.put(key, JSON.stringify(kept));
+
+    const pendingCount = combined.filter((s) => s.hasPendingApproval).length;
+    await this.alertPendingApprovalBacklog(pendingCount);
+
     if (isTerminal) {
       const activeKey = `active:${state.chatId}:${state.threadId ?? "dm"}`;
       const active = await this.env.STATE_KV.get(activeKey);
@@ -267,5 +277,26 @@ export class WorkSession extends DurableObject<Env> {
         if (financeActive === state.workId) await this.env.STATE_KV.delete(financeActiveKey);
       }
     }
+  }
+
+  /**
+   * Fires when the sessions_index pending-approval pool is at or above its
+   * cap -- the oldest pending entries may no longer be listed by /sessions.
+   * This is a visible operational signal (Operations stream), not a silent
+   * eviction: the underlying WorkSession/DO state is never touched or lost
+   * by this, only its discoverability via the index. Rate-limited the same
+   * way the existing stale-Handoff watchdog in index.ts is.
+   */
+  private async alertPendingApprovalBacklog(count: number): Promise<void> {
+    const key = "pending_approval_backlog_last_alert";
+    const lastAlert = await this.env.STATE_KV.get(key);
+    if (!shouldAlertPendingApprovalBacklog(count, lastAlert, Date.now())) return;
+    await sendOperationsMessage(
+      this.env,
+      `⚠️ ${count} pending approvals now at or above the /sessions index's visible limit (${SESSIONS_INDEX_PENDING_CAP}) -- the oldest may no longer be listed there, though nothing has been deleted. Please work through the backlog via /sessions.`,
+    ).catch((err) => console.error("Failed to send pending-approval backlog alert", err));
+    await this.env.STATE_KV.put(key, String(Date.now())).catch((err) =>
+      console.error("Failed to record pending-approval backlog alert timestamp", err),
+    );
   }
 }

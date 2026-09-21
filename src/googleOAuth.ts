@@ -954,6 +954,13 @@ export async function proposeGoogleDocCreation(
     ],
   ];
 
+  state.pendingActionSummary = {
+    label: `Create Google Doc: ${title}`,
+    message: messageText,
+    buttons,
+    createdAt: new Date().toISOString(),
+  };
+
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
@@ -1456,6 +1463,8 @@ export async function handleGoogleFolderSelection(
     const truncated = (rows as string[][]).length > previewRows.length ? "\n..." : "";
     const messageText = `*Proposed Action*: Create Google Sheet\n\n*Title*: ${title}\n*Account*: ${accountIdentifier}\n*Folder*: ${folderName}\n\n*Preview*:\n${preview}${truncated}\n\nCreation has NOT executed yet. Approve this action?`;
 
+    state.pendingActionSummary = { label: `Create Google Sheet: ${title}`, message: messageText, buttons, createdAt: new Date().toISOString() };
+
     await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
     await logActivity(env, {
@@ -1479,6 +1488,8 @@ export async function handleGoogleFolderSelection(
   const preview = content.length > 300 ? `${content.slice(0, 300)}...` : content;
   const messageText = `*Proposed Action*: Create Google Doc\n\n*Title*: ${title}\n*Account*: ${accountIdentifier}\n*Folder*: ${folderName}\n\n*Content Preview*:\n${preview}\n\nCreation has NOT executed yet. Approve this action?`;
 
+  state.pendingActionSummary = { label: `Create Google Doc: ${title}`, message: messageText, buttons, createdAt: new Date().toISOString() };
+
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
@@ -1498,6 +1509,7 @@ export async function handleGoogleActionApproval(
 ): Promise<WorkState> {
   const action = state.pendingGoogleAction;
   state.pendingGoogleAction = undefined;
+  state.pendingActionSummary = undefined;
 
   const target: HatMessageTarget = {
     chatId: state.chatId,

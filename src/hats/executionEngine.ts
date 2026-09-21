@@ -236,17 +236,20 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       outcome: "Blocked",
     });
     const verb = target === "Marketing Strategist" ? "escalate to" : "route to";
-    await sendWorkspaceHatMessage(
-      env,
-      state,
-      `This needs to ${verb} *${target}* — ${decision.reason ?? "outside this Hat's ownership."}\n\nConfirm the transition?`,
+    const transitionMessage = `This needs to ${verb} *${target}* — ${decision.reason ?? "outside this Hat's ownership."}\n\nConfirm the transition?`;
+    const transitionButtons = [
       [
-        [
-          { text: "✅ Confirm", callback_data: `markettransition:${state.workId}:approve` },
-          { text: "🔁 Redo", callback_data: `markettransition:${state.workId}:redo` },
-        ],
+        { text: "✅ Confirm", callback_data: `markettransition:${state.workId}:approve` },
+        { text: "🔁 Redo", callback_data: `markettransition:${state.workId}:redo` },
       ],
-    );
+    ];
+    await sendWorkspaceHatMessage(env, state, transitionMessage, transitionButtons);
+    state.pendingActionSummary = {
+      label: `Route to ${target}`,
+      message: transitionMessage,
+      buttons: transitionButtons,
+      createdAt: new Date().toISOString(),
+    };
     state.stage = "awaiting_marketing_transition";
     state.awaiting = undefined;
     return state;
@@ -258,33 +261,39 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
 
   if (isPaidMedia) {
     state.pendingPaidMediaAction = { description: decision.draft ?? "" };
-    await sendWorkspaceHatMessage(
-      env,
-      state,
-      `*Paid media action*\n\n${decision.draft}\n\nThis involves spend and requires your explicit approval before anything runs. Approve this budget/spend?`,
+    const paidMediaMessage = `*Paid media action*\n\n${decision.draft}\n\nThis involves spend and requires your explicit approval before anything runs. Approve this budget/spend?`;
+    const paidMediaButtons = [
       [
-        [
-          { text: "✅ Approve spend", callback_data: `marketpaid:${state.workId}:approve` },
-          { text: "🔁 Redo", callback_data: `marketpaid:${state.workId}:redo` },
-        ],
+        { text: "✅ Approve spend", callback_data: `marketpaid:${state.workId}:approve` },
+        { text: "🔁 Redo", callback_data: `marketpaid:${state.workId}:redo` },
       ],
-    );
+    ];
+    await sendWorkspaceHatMessage(env, state, paidMediaMessage, paidMediaButtons);
+    state.pendingActionSummary = {
+      label: `Paid media spend: ${state.hat}`,
+      message: paidMediaMessage,
+      buttons: paidMediaButtons,
+      createdAt: new Date().toISOString(),
+    };
     state.stage = "awaiting_paid_media_approval";
     state.awaiting = undefined;
     return state;
   }
 
-  await sendWorkspaceHatMessage(
-    env,
-    state,
-    `${decision.draft}\n\nApprove this?`,
+  const draftMessage = `${decision.draft}\n\nApprove this?`;
+  const draftButtons = [
     [
-      [
-        { text: "✅ Approve", callback_data: `marketdraft:${state.workId}:approve` },
-        { text: "🔁 Redo", callback_data: `marketdraft:${state.workId}:redo` },
-      ],
+      { text: "✅ Approve", callback_data: `marketdraft:${state.workId}:approve` },
+      { text: "🔁 Redo", callback_data: `marketdraft:${state.workId}:redo` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, state, draftMessage, draftButtons);
+  state.pendingActionSummary = {
+    label: `Marketing draft: ${state.hat}`,
+    message: draftMessage,
+    buttons: draftButtons,
+    createdAt: new Date().toISOString(),
+  };
   state.stage = "awaiting_marketing_draft_approval";
   state.awaiting = undefined;
   return state;
@@ -307,7 +316,13 @@ function buildHatSystemPrompt(hat: MarketingHatDefinition, universalRoleContract
 
 export async function handleTransitionApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const pending = state.pendingTransition;
-  if (!approved || !pending) {
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, state, "This transition has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
+  if (!approved) {
     await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what to reconsider and I'll take another look.");
     state.pendingTransition = undefined;
     state.awaiting = "marketing_feedback";
@@ -331,6 +346,12 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
 }
 
 export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_marketing_draft_approval") {
+    await sendWorkspaceHatMessage(env, state, "This draft approval has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what's off or what to take into account, and I'll redo it.");
     state.awaiting = "marketing_feedback";
@@ -363,6 +384,12 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
 }
 
 export async function handlePaidMediaApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_paid_media_approval") {
+    await sendWorkspaceHatMessage(env, state, "This spend approval has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await sendWorkspaceHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
     state.pendingPaidMediaAction = undefined;

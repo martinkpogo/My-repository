@@ -241,23 +241,36 @@ async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState
     .filter(Boolean)
     .join("\n");
 
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Sales Executive" },
-    `*Proposed new Entity*\n\n${details}\n\nCreate this Entity?`,
+  const entityDraftMessage = `*Proposed new Entity*\n\n${details}\n\nCreate this Entity?`;
+  const entityDraftButtons = [
     [
-      [
-        { text: "✅ Approve", callback_data: `entitynew:${state.workId}:approve` },
-        { text: "🔁 Redo", callback_data: `entitynew:${state.workId}:redo` },
-      ],
+      { text: "✅ Approve", callback_data: `entitynew:${state.workId}:approve` },
+      { text: "🔁 Redo", callback_data: `entitynew:${state.workId}:redo` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, entityDraftMessage, entityDraftButtons);
+  state.pendingActionSummary = {
+    label: `New Entity: ${draft.name}`,
+    message: entityDraftMessage,
+    buttons: entityDraftButtons,
+    createdAt: new Date().toISOString(),
+  };
   state.stage = "awaiting_entity_creation_approval";
   state.awaiting = undefined;
   return state;
 }
 
 export async function handleEntityCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (!state.entityDraft) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      "This Entity proposal has already been resolved -- nothing to do.",
+    );
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await sendWorkspaceHatMessage(
       env,
@@ -371,23 +384,36 @@ async function draftNewMatter(env: Env, state: WorkState, guidance: string): Pro
   const statedNeed = summary?.stated_need || state.enquiryText || "";
   state.matterDraft = { name, statedNeed };
 
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Sales Executive" },
-    `*Proposed new Matter*\n\n*${name}*\n${statedNeed}\n\nCreate this Matter?`,
+  const matterDraftMessage = `*Proposed new Matter*\n\n*${name}*\n${statedNeed}\n\nCreate this Matter?`;
+  const matterDraftButtons = [
     [
-      [
-        { text: "✅ Approve", callback_data: `matternew:${state.workId}:approve` },
-        { text: "🔁 Redo", callback_data: `matternew:${state.workId}:redo` },
-      ],
+      { text: "✅ Approve", callback_data: `matternew:${state.workId}:approve` },
+      { text: "🔁 Redo", callback_data: `matternew:${state.workId}:redo` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, matterDraftMessage, matterDraftButtons);
+  state.pendingActionSummary = {
+    label: `New Matter: ${name}`,
+    message: matterDraftMessage,
+    buttons: matterDraftButtons,
+    createdAt: new Date().toISOString(),
+  };
   state.stage = "awaiting_matter_creation_approval";
   state.awaiting = undefined;
   return state;
 }
 
 export async function handleMatterCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (!state.matterDraft) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      "This Matter proposal has already been resolved -- nothing to do.",
+    );
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await sendWorkspaceHatMessage(
       env,
@@ -545,17 +571,20 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   const evidenceText = formatQualificationEvidence(qualification.conditions);
 
   if (qualification.overall === "Qualified") {
-    await sendWorkspaceHatMessage(
-      env,
-      { ...state, hat: "Sales Executive" },
-      `*Qualification: Qualified* — all four conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`,
+    const qualifyMessage = `*Qualification: Qualified* — all four conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`;
+    const qualifyButtons = [
       [
-        [
-          { text: "✅ Approve Lead→Prospect", callback_data: `qualify:${state.workId}:approve` },
-          { text: "🔁 Redo", callback_data: `qualify:${state.workId}:redo` },
-        ],
+        { text: "✅ Approve Lead→Prospect", callback_data: `qualify:${state.workId}:approve` },
+        { text: "🔁 Redo", callback_data: `qualify:${state.workId}:redo` },
       ],
-    );
+    ];
+    await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, qualifyMessage, qualifyButtons);
+    state.pendingActionSummary = {
+      label: `Lead→Prospect: ${state.entityName}`,
+      message: qualifyMessage,
+      buttons: qualifyButtons,
+      createdAt: new Date().toISOString(),
+    };
     state.stage = "awaiting_qualification_approval";
     state.awaiting = undefined;
   } else if (qualification.overall === "More Information Required") {
@@ -585,6 +614,16 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
 }
 
 export async function handleLeadToProspectApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_qualification_approval") {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      "This qualification approval has already been resolved -- nothing to do.",
+    );
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await sendWorkspaceHatMessage(
       env,
@@ -816,23 +855,36 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
     "Work Completed": richText("Draft Proposal prepared and presented to Martin for review."),
   });
 
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Sales Executive" },
-    `*Draft Proposal — ${state.entityName}*\n\n${draft}`,
+  const proposalMessage = `*Draft Proposal — ${state.entityName}*\n\n${draft}`;
+  const proposalButtons = [
     [
-      [
-        { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
-        { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
-      ],
+      { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
+      { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, proposalMessage, proposalButtons);
+  state.pendingActionSummary = {
+    label: `Draft Proposal: ${state.entityName}`,
+    message: proposalMessage,
+    buttons: proposalButtons,
+    createdAt: new Date().toISOString(),
+  };
   state.stage = "awaiting_proposal_approval";
   state.awaiting = undefined;
   return state;
 }
 
 export async function handleProposalApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_proposal_approval") {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      "This Proposal approval has already been resolved -- nothing to do.",
+    );
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await sendWorkspaceHatMessage(
       env,
@@ -903,17 +955,20 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
   );
   state.proposalDraft = revised;
   state.proposalRevisionCount = (state.proposalRevisionCount ?? 0) + 1;
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Sales Executive" },
-    `*Revised Draft Proposal*\n\n${revised}`,
+  const revisedProposalMessage = `*Revised Draft Proposal*\n\n${revised}`;
+  const revisedProposalButtons = [
     [
-      [
-        { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
-        { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
-      ],
+      { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
+      { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, revisedProposalMessage, revisedProposalButtons);
+  state.pendingActionSummary = {
+    label: `Draft Proposal: ${state.entityName}`,
+    message: revisedProposalMessage,
+    buttons: revisedProposalButtons,
+    createdAt: new Date().toISOString(),
+  };
   state.stage = "awaiting_proposal_approval";
   state.awaiting = undefined;
   return state;

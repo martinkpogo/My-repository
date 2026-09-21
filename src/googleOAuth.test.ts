@@ -358,6 +358,10 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
     assert.match(sentText, /selected@enig.com/);
     assert.strictEqual(sentButtons[0][0].callback_data, `googleaction:${workId}:approve`);
     assert.strictEqual(sentButtons[0][1].callback_data, `googleaction:${workId}:reject`);
+
+    assert.ok(updatedState.pendingActionSummary, "must also set the generic pendingActionSummary for /sessions recovery");
+    assert.strictEqual(updatedState.pendingActionSummary?.label, "Create Google Doc: Brand Guidelines");
+    assert.deepStrictEqual(updatedState.pendingActionSummary?.buttons, sentButtons);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -369,6 +373,7 @@ test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-boun
 
   let sentTelegramText = "";
   let sentButtons: any[] = [];
+  let filesCreateCallCount = 0;
 
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
@@ -383,6 +388,7 @@ test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-boun
 
     // Drive files.create mock
     if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      filesCreateCallCount++;
       return new Response(JSON.stringify({ id: "doc-id-state-bound-100" }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -456,7 +462,16 @@ test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-boun
 
     // State pending action cleared after execution
     assert.strictEqual(updatedState.pendingGoogleAction, undefined);
+    assert.strictEqual(updatedState.pendingActionSummary, undefined);
     assert.match(sentTelegramText, /Google Doc created and verified successfully/);
+    assert.strictEqual(filesCreateCallCount, 1);
+
+    // 3. A stale/resurfaced tap on the same, already-resolved work item
+    // (e.g. via /sessions) must not create a second Doc.
+    const staleState = await handleGoogleActionApproval(fakeEnv, updatedState, true);
+    assert.strictEqual(filesCreateCallCount, 1, "a stale approval tap must not execute the action a second time");
+    assert.match(sentTelegramText, /No valid pending Google action/);
+    assert.strictEqual(staleState.pendingActionSummary, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

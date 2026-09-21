@@ -484,6 +484,12 @@ function fakeStateWithPendingHandoff(): WorkState {
       handoffTitle: "R&I research for Marketing Strategist: test",
       verifiedFactsAndSources: "Findings:\n- The market is growing.",
     },
+    pendingActionSummary: {
+      label: "Research handoff to Marketing Strategist",
+      message: "This research looks directly relevant...",
+      buttons: [[{ text: "✅ Send handoff", callback_data: "researchhandoff:work_200:approve" }]],
+      createdAt: new Date().toISOString(),
+    },
   };
 }
 
@@ -527,36 +533,60 @@ test("29. handleResearchHandoffApproval sends nothing to Notion when there's no 
   }
 });
 
-test("30. handleResearchHandoffApproval on reject clears the pending handoff without creating a Handoff record", async () => {
+test("29b. handleResearchHandoffApproval: a stale/already-resolved tap is a safe no-op and never executes the Handoff twice", async () => {
+  const { restore, notionCallsByDataSource } = mockNotionAndTelegramFetch();
+  try {
+    const state = fakeStateWithPendingHandoff();
+    const first = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
+    assert.strictEqual(notionCallsByDataSource.filter((d) => d === "handoffs-ds").length, 1);
+
+    // Simulate a resurfaced button (e.g. via /sessions) tapped again after
+    // the original approval already resolved this work item.
+    const stale = await handleResearchHandoffApproval(fakeApprovalEnv(), first, true);
+    assert.strictEqual(
+      notionCallsByDataSource.filter((d) => d === "handoffs-ds").length,
+      1,
+      "a stale tap must not create a second Handoff",
+    );
+    assert.strictEqual(stale.pendingActionSummary, undefined);
+  } finally {
+    restore();
+  }
+});
+
+test("30. handleResearchHandoffApproval on reject clears the pending handoff and pendingActionSummary without creating a Handoff record", async () => {
   const { restore, notionCallsByDataSource } = mockNotionAndTelegramFetch();
   try {
     const state = fakeStateWithPendingHandoff();
     const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, false);
     assert.strictEqual(result.pendingResearchHandoff, undefined);
+    assert.strictEqual(result.pendingActionSummary, undefined);
     assert.ok(!notionCallsByDataSource.includes("handoffs-ds"));
   } finally {
     restore();
   }
 });
 
-test("31. handleResearchHandoffApproval on approve creates the Handoff record and clears the pending proposal", async () => {
+test("31. handleResearchHandoffApproval on approve creates the Handoff record and clears the pending proposal and pendingActionSummary", async () => {
   const { restore, notionCallsByDataSource } = mockNotionAndTelegramFetch();
   try {
     const state = fakeStateWithPendingHandoff();
     const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
     assert.strictEqual(result.pendingResearchHandoff, undefined);
+    assert.strictEqual(result.pendingActionSummary, undefined);
     assert.ok(notionCallsByDataSource.includes("handoffs-ds"), "a Handoff record must be created on approval");
   } finally {
     restore();
   }
 });
 
-test("32. handleResearchHandoffApproval keeps the pending proposal when Handoff creation fails, so approving again can retry it", async () => {
+test("32. handleResearchHandoffApproval keeps the pending proposal (and its pendingActionSummary) when Handoff creation fails, so approving again can retry it", async () => {
   const { restore } = mockNotionAndTelegramFetch(true);
   try {
     const state = fakeStateWithPendingHandoff();
     const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
     assert.ok(result.pendingResearchHandoff, "a failed creation must not silently discard the proposal");
+    assert.ok(result.pendingActionSummary, "a failed creation must not silently discard the resend descriptor either");
     assert.strictEqual(result.pendingResearchHandoff!.hat, "Marketing Strategist");
   } finally {
     restore();

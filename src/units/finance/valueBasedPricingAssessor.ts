@@ -240,17 +240,20 @@ async function judgeQuote(
   if (financeThreadId !== undefined) {
     await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
   }
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Value-Based Pricing Assessor" },
-    `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`,
+  const quoteMessage = `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`;
+  const quoteButtons = [
     [
-      [
-        { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
-        { text: "🔁 Redo", callback_data: `quote:${state.workId}:redo` },
-      ],
+      { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
+      { text: "🔁 Redo", callback_data: `quote:${state.workId}:redo` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Value-Based Pricing Assessor" }, quoteMessage, quoteButtons);
+  state.pendingActionSummary = {
+    label: `Finance Quote: ${entityToken}`,
+    message: quoteMessage,
+    buttons: quoteButtons,
+    createdAt: new Date().toISOString(),
+  };
   return state;
 }
 
@@ -310,6 +313,16 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
  * way Finance discovers Handoffs addressed to it.
  */
 export async function handleQuoteApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_quote_approval") {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      "This quote approval has already been resolved -- nothing to do.",
+    );
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
   if (!approved) {
     await updatePage(env, state.handoffId!, {
       Status: select("Held"),
