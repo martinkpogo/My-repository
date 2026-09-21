@@ -1,9 +1,9 @@
-import type { Env } from "../../../types";
-import { createPage, getPage, plainText, queryDataSource, relation, richText, select, title } from "../../../notion";
-import { aiJson } from "../../../ai";
-import { logActivity } from "../../../log";
-import { sendWorkspaceHatMessage } from "../../../telegram";
-import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../../governance";
+import type { Env } from "../../types";
+import { createPage, getPage, plainText, queryDataSource, relation, richText, select, title } from "../../notion";
+import { aiJson } from "../../ai";
+import { logActivity } from "../../log";
+import { sendWorkspaceHatMessage } from "../../telegram";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 
 /**
  * Canonical Notion governance for this Hat. Explicit page ID, not title

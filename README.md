@@ -165,12 +165,11 @@ src/
 │   ├── relationships.ts        — cross-Hat context-sharing rules
 │   └── types.ts
 └── units/
-    ├── smbd/
-    │   ├── sales/
-    │   │   ├── salesExecutive.ts          — paused by policy (see Operational model)
-    │   │   ├── leadDiscovery.ts           — manual /lead recording + duplicate/governance helpers
-    │   │   └── leadGenerationDiscovery.ts — scheduled + on-demand opportunity discovery, approval gate
-    │   └── marketing/                     — the 5 Marketing Hat implementations (Strategist, Brand Communications, Content Strategist, Content Manager, Digital Marketer)
+    ├── sales/
+    │   ├── salesExecutive.ts          — paused by policy (see Operational model)
+    │   ├── leadDiscovery.ts           — manual /lead recording + duplicate/governance helpers
+    │   └── leadGenerationDiscovery.ts — scheduled + on-demand opportunity discovery, approval gate
+    ├── marketing/                     — the 5 Marketing Hat implementations (Strategist, Brand Communications, Content Strategist, Content Manager, Digital Marketer)
     ├── finance/
     │   └── valueBasedPricingAssessor.ts   — Handoff-only quote judgment + approval
     └── research/

@@ -240,7 +240,7 @@ export interface WorkState {
    * explicit approval before it becomes a Lead -- per the governance
    * requirement that no discovery source may create a Lead automatically.
    */
-  pendingLeadOpportunity?: import("./units/smbd/sales/leadGenerationDiscovery").PendingLeadOpportunity;
+  pendingLeadOpportunity?: import("./units/sales/leadGenerationDiscovery").PendingLeadOpportunity;
 
   /**
    * Generic, display-only descriptor of whatever approval-gated action is
