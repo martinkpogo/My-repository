@@ -144,6 +144,16 @@ export interface WorkState {
   updatedAt: string;
 
   enquiryText?: string;
+  /**
+   * How this Sales work item originated -- carried onto the Sales -> Finance
+   * Handoff's Reason so Finance has that context, and required (fail-closed,
+   * never defaulted) before that Handoff may be created. "inbound_enquiry"
+   * is set by handleIncomingEnquiry, the only origination path this Worker
+   * currently drives; "outbound_outreach" exists for a work item originating
+   * from proactive outreach (e.g. off the back of an approved Lead
+   * Opportunity) -- exactly two values, no others.
+   */
+  entryType?: "inbound_enquiry" | "outbound_outreach";
   entityId?: string;
   entityName?: string;
   matterId?: string;
