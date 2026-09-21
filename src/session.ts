@@ -11,6 +11,8 @@ import {
   handleGoogleFolderSelection,
   handleGoogleActionApproval,
 } from "./googleOAuth";
+import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/smbd/sales/leadGenerationDiscovery";
+import type { PendingLeadOpportunity } from "./units/smbd/sales/leadGenerationDiscovery";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -131,6 +133,18 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => sales.handleQuoteReceived(this.env, state));
   }
 
+  /**
+   * Presents an evidence-backed opportunity finding to Martin for explicit
+   * approval before it may become a Lead -- invoked on a freshly created
+   * WorkSession (see processCompletedLGSResearchHandoffs in
+   * leadGenerationDiscovery.ts), the same way discoverPendingFinanceHandoffs
+   * creates a session for an externally-originated Handoff with no live
+   * chat behind it.
+   */
+  async proposeLeadOpportunity(opportunity: PendingLeadOpportunity): Promise<WorkState> {
+    return this.execute((state) => proposeLeadOpportunity(this.env, state, opportunity));
+  }
+
   async cancel(): Promise<WorkState> {
     return this.execute(async (state) => {
       state.stage = "cancelled";
@@ -176,6 +190,8 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
+        case "leadopportunity":
+          return handleLeadOpportunityApproval(this.env, state, value === "approve");
         default:
           return Promise.resolve(state);
       }

@@ -132,6 +132,18 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Given the exact cell content a Google Sheets comment is anchored to and the comment's own instruction, determines the specific replacement value for that cell -- never which cell to target (that comes from the comment's own anchor, not the AI), and never invents content beyond what the comment reasonably implies.",
   },
+  "lead.discovery_ondemand_intake": {
+    id: "lead.discovery_ondemand_intake",
+    name: "Lead Generation Specialist On-Demand Discovery Intake",
+    description:
+      "Classifies whether a Workspace message is asking Lead Generation Specialist to proactively discover new potential opportunities, as opposed to a specific enquiry, a named-company research request, or unrelated chat -- and extracts the requested count and problem-signal focus, never a company name, decision-maker, or contact.",
+  },
+  "lead.discovery_ondemand_query_generation": {
+    id: "lead.discovery_ondemand_query_generation",
+    name: "Lead Generation Specialist On-Demand Search Strategy Generation",
+    description:
+      "Generates web search queries for an on-demand discovery request, grounded in the canonical Acquisition Criteria and Martin's stated focus -- same non-diagnostic discipline as the fixed scheduled-discovery query set, never presupposing a negative diagnosis or naming a specific organisation.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
