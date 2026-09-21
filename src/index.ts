@@ -850,7 +850,20 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
 
     if (action === "switch") {
       await setActiveWorkId(env, chatId, threadId, workId);
-      await sendMessage(env, chatId, `Switched active context to work item ${workId}.`, undefined, threadId);
+      const switchedStub = getSessionStub(env, workId);
+      const switchedState = await switchedStub.getState();
+      const pending = switchedState?.pendingActionSummary;
+      if (pending) {
+        // Resurface the exact original approval message/buttons rather
+        // than just confirming the context switch -- this is the recovery
+        // path for a missed or dismissed approval message. The buttons are
+        // the same callback_data as the original send, so tapping them
+        // still routes through the same resolve handler and its own
+        // stale/already-resolved guard -- nothing here bypasses that.
+        await sendMessage(env, chatId, `Re-sending pending approval:\n\n${pending.message}`, pending.buttons, threadId);
+      } else {
+        await sendMessage(env, chatId, `Switched active context to work item ${workId}.`, undefined, threadId);
+      }
       return;
     }
 

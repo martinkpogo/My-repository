@@ -384,6 +384,13 @@ export async function proposeLeadOpportunity(
     "This is a candidate opportunity only -- no Lead has been created. Approve to record it as a Lead for Sales Executive follow-up, or reject to discard it.",
   ].join("\n");
 
+  state.pendingActionSummary = {
+    label: `Opportunity: ${opportunity.organisation}`,
+    message,
+    buttons,
+    createdAt: new Date().toISOString(),
+  };
+
   await sendWorkspaceHatMessage(env, target, message, buttons);
 
   await logActivity(env, {
@@ -408,6 +415,7 @@ export async function proposeLeadOpportunity(
 export async function handleLeadOpportunityApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const opportunity = state.pendingLeadOpportunity;
   state.pendingLeadOpportunity = undefined;
+  state.pendingActionSummary = undefined;
 
   const target: HatMessageTarget = { chatId: state.chatId, threadId: state.threadId, hat: HAT_TARGET_NAME, workId: state.workId };
 

@@ -768,17 +768,20 @@ export async function routeToConsumingHat(env: Env, state: WorkState, synthesis:
     outcome: "Blocked",
   });
 
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Research & Intelligence Analyst" },
-    `This research looks directly relevant to *${route.hat}*'s work: ${reason}\n\n*Preview of what would be sent:*\n${verifiedFactsAndSources.slice(0, 1200)}\n\nSend this to ${route.hat}?`,
+  const handoffMessage = `This research looks directly relevant to *${route.hat}*'s work: ${reason}\n\n*Preview of what would be sent:*\n${verifiedFactsAndSources.slice(0, 1200)}\n\nSend this to ${route.hat}?`;
+  const handoffButtons = [
     [
-      [
-        { text: "✅ Send handoff", callback_data: `researchhandoff:${state.workId}:approve` },
-        { text: "🚫 Don't send", callback_data: `researchhandoff:${state.workId}:reject` },
-      ],
+      { text: "✅ Send handoff", callback_data: `researchhandoff:${state.workId}:approve` },
+      { text: "🚫 Don't send", callback_data: `researchhandoff:${state.workId}:reject` },
     ],
-  );
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, handoffMessage, handoffButtons);
+  state.pendingActionSummary = {
+    label: `Research handoff to ${route.hat}`,
+    message: handoffMessage,
+    buttons: handoffButtons,
+    createdAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -800,6 +803,7 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
 
   if (!approved) {
     state.pendingResearchHandoff = undefined;
+    state.pendingActionSummary = undefined;
     await logActivity(env, {
       entry: `R&I handoff to ${pending.hat} declined by Martin`,
       type: "Decision",
@@ -825,6 +829,7 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
       "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
     });
     state.pendingResearchHandoff = undefined;
+    state.pendingActionSummary = undefined;
     await logActivity(env, {
       entry: `R&I research handed off to ${pending.hat}`,
       type: "Activity",
