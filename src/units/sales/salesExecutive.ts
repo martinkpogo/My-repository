@@ -1,4 +1,14 @@
-import type { Env, WorkState, QualificationResult, QualificationConditionResult } from "../../types";
+import type {
+  Env,
+  WorkState,
+  QualificationResult,
+  QualificationConditionResult,
+  CommercialEvidence,
+  ValueAtStake,
+  EvidenceType,
+  InvestmentToleranceContext,
+  MeasurementBaseline,
+} from "../../types";
 import {
   createPage,
   getPage,
@@ -33,9 +43,31 @@ const ENTITY_BUSINESS_OBJECT_PAGE_ID = "3cecb004-e583-81a9-b95e-e6ab79a3e5f3";
 const CONDITION_LABELS: Record<QualificationConditionResult["condition"], string> = {
   within_specialization: "Within our specialization",
   allows_diagnosis_first: "Open to a diagnosis-first approach",
+  commercial_value_evidence: "Attributable commercial-value evidence",
   open_to_ballpark_amount_and_time: "Open to discussing budget & timeline",
   ready_to_commit_required_resources: "Ready to commit the resources needed",
 };
+
+// The four conditions the qualification AI call is trusted to judge
+// directly. commercial_value_evidence is deliberately excluded -- per the
+// Commercial Value & Pricing Operating Model, that condition's assessment
+// is never taken from the AI's own say-so (see evaluateCommercialValueEvidence
+// below); it's computed deterministically from state.commercialEvidence and
+// spliced in regardless of what the AI returns for it.
+const AI_JUDGED_CONDITIONS: QualificationConditionResult["condition"][] = [
+  "within_specialization",
+  "allows_diagnosis_first",
+  "open_to_ballpark_amount_and_time",
+  "ready_to_commit_required_resources",
+];
+
+function computeOverallQualification(
+  conditions: QualificationConditionResult[],
+): QualificationResult["overall"] {
+  if (conditions.every((c) => c.assessment === "Satisfied")) return "Qualified";
+  if (conditions.some((c) => c.assessment === "Not Satisfied")) return "Not Qualified";
+  return "More Information Required";
+}
 
 function formatQualificationEvidence(conditions: QualificationConditionResult[]): string {
   return conditions
@@ -121,8 +153,249 @@ function buildQualificationSystemPrompt(
     "=== ENTITY BUSINESS OBJECT SPECIFICATION ===",
     entitySpecification,
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    'Evaluate each of the four canonical qualification conditions named above, strictly from the evidence given. Return JSON: {"conditions":[{"condition":"<canonical condition key, exactly as given above>","evidence":"...","assessment":"Satisfied|Not Satisfied|Insufficient Evidence"}, ...all four...], "overall":"Qualified|Not Qualified|More Information Required"}. overall is Qualified only if ALL four are Satisfied.',
+    'Evaluate the within_specialization, allows_diagnosis_first, open_to_ballpark_amount_and_time, and ready_to_commit_required_resources conditions named above, strictly from the evidence given. Do NOT evaluate commercial_value_evidence -- that condition is assessed separately by a deterministic process and any assessment you give for it will be discarded. Return JSON: {"conditions":[{"condition":"<canonical condition key, exactly as given above>","evidence":"...","assessment":"Satisfied|Not Satisfied|Insufficient Evidence"}, ...for the four conditions listed above only...], "overall":"Qualified|Not Qualified|More Information Required"}. Your "overall" value is advisory only and will be recomputed once the commercial_value_evidence condition is spliced in.',
   ].join("\n\n");
+}
+
+interface RawValueAtStake {
+  value?: number;
+  low?: number;
+  high?: number;
+  currency?: string;
+  period?: string;
+  evidence_type?: string;
+  source?: string;
+  evidence_quality?: string;
+  assumptions?: string;
+  limitations?: string;
+}
+
+interface RawCommercialEvidenceExtraction {
+  financial_consequence?: string;
+  value_at_stake?: RawValueAtStake;
+  cost_of_inaction?: RawValueAtStake;
+  affected_revenue_or_opportunity?: string;
+  desired_measurable_outcome?: string;
+  uncertainty?: string;
+  // Extracted separately from value evidence and never merged into it --
+  // see InvestmentToleranceContext's doc comment for why.
+  investment_tolerance_context?: {
+    low?: number;
+    high?: number;
+    currency?: string;
+    period?: string;
+  };
+}
+
+const VALID_EVIDENCE_TYPES: EvidenceType[] = ["directly_measured", "client_estimated", "derived", "assumption"];
+
+function normalizeValueAtStake(raw: RawValueAtStake | undefined): ValueAtStake | undefined {
+  if (!raw) return undefined;
+  const evidenceType = VALID_EVIDENCE_TYPES.includes(raw.evidence_type as EvidenceType)
+    ? (raw.evidence_type as EvidenceType)
+    : undefined;
+  return {
+    value: typeof raw.value === "number" ? raw.value : undefined,
+    low: typeof raw.low === "number" ? raw.low : undefined,
+    high: typeof raw.high === "number" ? raw.high : undefined,
+    currency: raw.currency || undefined,
+    period: raw.period || undefined,
+    evidenceType,
+    source: raw.source || undefined,
+    evidenceQuality: raw.evidence_quality || undefined,
+    assumptions: raw.assumptions || undefined,
+    limitations: raw.limitations || undefined,
+  };
+}
+
+function normalizeCommercialEvidence(raw: RawCommercialEvidenceExtraction | null): CommercialEvidence {
+  return {
+    financialConsequence: raw?.financial_consequence || undefined,
+    valueAtStake: normalizeValueAtStake(raw?.value_at_stake),
+    costOfInaction: normalizeValueAtStake(raw?.cost_of_inaction),
+    affectedRevenueOrOpportunity: raw?.affected_revenue_or_opportunity || undefined,
+    desiredMeasurableOutcome: raw?.desired_measurable_outcome || undefined,
+    uncertainty: raw?.uncertainty || undefined,
+  };
+}
+
+function normalizeInvestmentToleranceContext(
+  raw: RawCommercialEvidenceExtraction | null,
+): InvestmentToleranceContext | undefined {
+  const t = raw?.investment_tolerance_context;
+  if (!t) return undefined;
+  if (typeof t.low !== "number" && typeof t.high !== "number") return undefined;
+  return { low: t.low, high: t.high, currency: t.currency || undefined, period: t.period || undefined };
+}
+
+function buildCommercialEvidenceExtractionSystemPrompt(): string {
+  return [
+    "Extract structured commercial-value evidence from the supplied enquiry text and call notes, per ENIG's Commercial Value & Pricing Operating Model.",
+    "Extract ONLY what is explicitly present in the text. Never invent, infer, or estimate a number that isn't attributable to something the client or Martin actually said. If a figure is genuinely absent, omit that field entirely rather than filling it with a guess, a percentage-of-revenue inference, or a derived assumption presented as fact.",
+    "Distinguish evidence_type strictly: 'directly_measured' only if the text describes an actual measured/tracked figure (e.g. from records); 'client_estimated' if the client explicitly gave the figure as their own estimate; 'derived' only if the text shows the figure being calculated from other attributable figures also present in the text (state the derivation in 'assumptions'); 'assumption' if the figure has no real attribution at all -- including any figure YOU would have to infer or infer a percentage for. Never mark your own inference as directly_measured or client_estimated.",
+    "Investment tolerance (what the client might be willing to invest) is NOT commercial-value evidence -- extract it separately into investment_tolerance_context, never into value_at_stake or cost_of_inaction. Annual turnover alone, a disclosed budget alone, or a bare willingness-to-pay statement are NOT value-at-stake or cost-of-inaction evidence either -- do not populate those fields from turnover/budget/WTP statements unless the text also ties a number to the specific business problem or opportunity.",
+    "Respond with JSON: {\"financial_consequence\": \"...\", \"value_at_stake\": {\"value\":n|null,\"low\":n|null,\"high\":n|null,\"currency\":\"...\",\"period\":\"...\",\"evidence_type\":\"directly_measured|client_estimated|derived|assumption\",\"source\":\"...\",\"evidence_quality\":\"...\",\"assumptions\":\"...\",\"limitations\":\"...\"}, \"cost_of_inaction\": {...same shape...}, \"affected_revenue_or_opportunity\": \"...\", \"desired_measurable_outcome\": \"...\", \"uncertainty\": \"...\", \"investment_tolerance_context\": {\"low\":n|null,\"high\":n|null,\"currency\":\"...\",\"period\":\"...\"}}. Omit any field/sub-field you have no attributable evidence for -- do not fill it with null-as-a-guess or a placeholder string.",
+  ].join("\n\n");
+}
+
+/**
+ * Deterministically evaluates whether state.commercialEvidence satisfies
+ * the commercial_value_evidence qualification condition. This is the sole
+ * authority for that condition's assessment -- the qualification AI call's
+ * own opinion of this condition (if it ventures one) is discarded and
+ * replaced with this result, per the Commercial Value & Pricing Operating
+ * Model's rule that missing/assumption-only numerical evidence must not be
+ * filled or waved through by inference.
+ */
+function evaluateCommercialValueEvidence(evidence: CommercialEvidence | undefined): {
+  assessment: QualificationConditionResult["assessment"];
+  evidenceText: string;
+} {
+  const candidates = [evidence?.valueAtStake, evidence?.costOfInaction].filter(
+    (v): v is ValueAtStake => v !== undefined,
+  );
+  const withNumber = candidates.filter((v) => typeof v.value === "number" || typeof v.low === "number" || typeof v.high === "number");
+
+  if (withNumber.length === 0) {
+    return {
+      assessment: "Insufficient Evidence",
+      evidenceText: "No numerical value connected to the business problem or opportunity has been established.",
+    };
+  }
+
+  // Prefer a non-assumption candidate if one exists; an assumption-only
+  // figure can never satisfy this condition on its own, even if a number
+  // is technically present.
+  const primary = withNumber.find((v) => v.evidenceType && v.evidenceType !== "assumption") ?? withNumber[0];
+
+  if (!primary.evidenceType) {
+    return {
+      assessment: "Insufficient Evidence",
+      evidenceText: "A numerical value is present but its evidence type (measured/client-estimated/derived/assumption) was not established.",
+    };
+  }
+  if (primary.evidenceType === "assumption") {
+    return {
+      assessment: "Insufficient Evidence",
+      evidenceText: "The only numerical value available is an unsupported assumption -- assumption-only evidence cannot satisfy this condition on its own.",
+    };
+  }
+  if (!primary.source) {
+    return {
+      assessment: "Insufficient Evidence",
+      evidenceText: "A numerical value is present but has no attributable source.",
+    };
+  }
+  if (!primary.period) {
+    return {
+      assessment: "Insufficient Evidence",
+      evidenceText: "A numerical value is present but its applicable time period is unknown, which the model requires for responsible judgment.",
+    };
+  }
+
+  const amount =
+    typeof primary.value === "number"
+      ? String(primary.value)
+      : primary.low !== undefined && primary.high !== undefined
+        ? `${primary.low}-${primary.high}`
+        : "unspecified amount";
+  return {
+    assessment: "Satisfied",
+    evidenceText: `${primary.currency ?? ""} ${amount} over ${primary.period}, evidence type: ${primary.evidenceType}, source: ${primary.source}.`.trim(),
+  };
+}
+
+/**
+ * Preserves the commercial baseline established during qualification, for
+ * later measurement per the Commercial Value & Pricing Operating Model's
+ * Section 8. Deliberately does not invent a target/measurement period --
+ * those aren't established yet at Lead->Prospect time; only what's already
+ * known (the baseline itself) is carried forward.
+ */
+function buildMeasurementBaseline(evidence: CommercialEvidence | undefined): MeasurementBaseline | undefined {
+  const primary = evidence?.valueAtStake?.value !== undefined || evidence?.valueAtStake?.low !== undefined
+    ? evidence?.valueAtStake
+    : evidence?.costOfInaction;
+  if (!primary) return undefined;
+  const baselineValue =
+    typeof primary.value === "number"
+      ? String(primary.value)
+      : primary.low !== undefined && primary.high !== undefined
+        ? `${primary.low}-${primary.high}`
+        : undefined;
+  if (!baselineValue) return undefined;
+  return {
+    baselineMetric: evidence?.affectedRevenueOrOpportunity ?? evidence?.financialConsequence,
+    baselineValue: `${primary.currency ?? ""} ${baselineValue}`.trim(),
+    baselinePeriod: primary.period,
+    source: primary.source,
+    evidenceQuality: primary.evidenceType,
+    targetOutcome: evidence?.desiredMeasurableOutcome,
+    assumptions: primary.assumptions,
+    limitations: primary.limitations,
+  };
+}
+
+function formatMeasurementBaselineText(baseline: MeasurementBaseline): string {
+  return [
+    "Commercial baseline (Measurement Baseline, Commercial Value & Pricing Operating Model §8):",
+    baseline.baselineMetric ? `Metric: ${baseline.baselineMetric}` : null,
+    baseline.baselineValue ? `Baseline value: ${baseline.baselineValue}` : null,
+    baseline.baselinePeriod ? `Period: ${baseline.baselinePeriod}` : null,
+    baseline.source ? `Source: ${baseline.source}` : null,
+    baseline.evidenceQuality ? `Evidence type: ${baseline.evidenceQuality}` : null,
+    baseline.targetOutcome ? `Desired measurable outcome: ${baseline.targetOutcome}` : null,
+    baseline.assumptions ? `Assumptions: ${baseline.assumptions}` : null,
+    baseline.limitations ? `Limitations: ${baseline.limitations}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Formats the structured commercial-value evidence for the Sales -> Finance
+ * Handoff's "Verified Facts & Sources" text -- per the Commercial Value &
+ * Pricing Operating Model, this is what carries the pricing basis to
+ * Finance. Investment tolerance is included as an explicitly separate,
+ * clearly-labeled context-only block -- never merged into the evidence
+ * block above it, and never presented as if it were part of the pricing
+ * basis.
+ */
+function formatCommercialEvidenceForHandoff(
+  evidence: CommercialEvidence | undefined,
+  investmentTolerance: InvestmentToleranceContext | undefined,
+): string {
+  const formatValueAtStake = (label: string, v: ValueAtStake | undefined): string | null => {
+    if (!v) return null;
+    const amount = typeof v.value === "number" ? String(v.value) : v.low !== undefined && v.high !== undefined ? `${v.low}-${v.high}` : null;
+    if (!amount) return null;
+    return [
+      `${label}: ${v.currency ?? ""} ${amount}`.trim(),
+      v.period ? `  period: ${v.period}` : null,
+      v.evidenceType ? `  evidence type: ${v.evidenceType}` : null,
+      v.source ? `  source: ${v.source}` : null,
+      v.evidenceQuality ? `  evidence quality: ${v.evidenceQuality}` : null,
+      v.assumptions ? `  assumptions: ${v.assumptions}` : null,
+      v.limitations ? `  limitations: ${v.limitations}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  };
+
+  const lines = [
+    "=== Commercial-value evidence (pricing basis) ===",
+    evidence?.financialConsequence ? `Financial consequence: ${evidence.financialConsequence}` : null,
+    formatValueAtStake("Value at stake", evidence?.valueAtStake),
+    formatValueAtStake("Cost of inaction", evidence?.costOfInaction),
+    evidence?.affectedRevenueOrOpportunity ? `Affected revenue/opportunity: ${evidence.affectedRevenueOrOpportunity}` : null,
+    evidence?.desiredMeasurableOutcome ? `Desired measurable outcome: ${evidence.desiredMeasurableOutcome}` : null,
+    evidence?.uncertainty ? `Uncertainty: ${evidence.uncertainty}` : null,
+    "=== Investment tolerance (CONTEXT ONLY -- never the pricing basis, never a substitute for the evidence above) ===",
+    investmentTolerance && (investmentTolerance.low !== undefined || investmentTolerance.high !== undefined)
+      ? `${investmentTolerance.currency ?? ""} ${investmentTolerance.low ?? "?"}-${investmentTolerance.high ?? "?"}${investmentTolerance.period ? ` (${investmentTolerance.period})` : ""}`.trim()
+      : "None disclosed on record.",
+  ].filter(Boolean);
+  return lines.join("\n");
 }
 
 function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
@@ -543,13 +816,38 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     return state;
   }
 
+  const combinedText = `Enquiry: ${state.enquiryText ?? ""}\n\nCall notes: ${state.callNotes}`;
+
+  // Structured commercial-value evidence extraction, per the Commercial
+  // Value & Pricing Operating Model -- run before qualification so the
+  // deterministic evidence gate below has something to judge. Extraction
+  // failure (null) is treated as "no evidence extracted," not a blocker --
+  // evaluateCommercialValueEvidence already fails closed on empty input.
+  const extraction = await aiJson<RawCommercialEvidenceExtraction>(env, {
+    taskId: "sales.commercial_evidence_extraction",
+    system: buildCommercialEvidenceExtractionSystemPrompt(),
+    user: combinedText,
+    light: true,
+  });
+  state.commercialEvidence = normalizeCommercialEvidence(extraction);
+  state.investmentToleranceContext = normalizeInvestmentToleranceContext(extraction);
+  const commercialValueResult = evaluateCommercialValueEvidence(state.commercialEvidence);
+  await logActivity(env, {
+    entry: `Commercial-value evidence gate: ${commercialValueResult.assessment} — ${state.entityName}`,
+    type: "Decision",
+    area: "Sales",
+    decisionRationale: commercialValueResult.evidenceText,
+    outcome: "Active",
+  });
+
   const qualification = await aiJson<QualificationResult>(env, {
     taskId: "sales.call_qualification",
     system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
-    user: `Enquiry: ${state.enquiryText}\n\nCall notes: ${state.callNotes}`,
+    user: combinedText,
   });
 
-  if (!qualification || !Array.isArray(qualification.conditions) || qualification.conditions.length !== 4) {
+  const aiConditions = (qualification?.conditions ?? []).filter((c) => AI_JUDGED_CONDITIONS.includes(c.condition));
+  if (!qualification || aiConditions.length !== AI_JUDGED_CONDITIONS.length) {
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Sales Executive" },
@@ -559,6 +857,17 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     state.stage = "awaiting_call_clarification";
     return state;
   }
+
+  // commercial_value_evidence is never taken from the AI's own output --
+  // spliced in from the deterministic evaluation above, regardless of
+  // whether/what the AI returned for that condition.
+  const conditions: QualificationConditionResult[] = [
+    ...aiConditions,
+    { condition: "commercial_value_evidence", assessment: commercialValueResult.assessment, evidence: commercialValueResult.evidenceText },
+  ];
+  const overall = computeOverallQualification(conditions);
+  qualification.conditions = conditions;
+  qualification.overall = overall;
 
   state.qualification = qualification;
   await logActivity(env, {
@@ -572,7 +881,13 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   const evidenceText = formatQualificationEvidence(qualification.conditions);
 
   if (qualification.overall === "Qualified") {
-    const qualifyMessage = `*Qualification: Qualified* — all four conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`;
+    // Preserve the commercial baseline for later measurement, per the
+    // Commercial Value & Pricing Operating Model's Section 8 -- captured
+    // once here, at the point qualification is established, rather than
+    // re-derived downstream from whatever state happens to still be set.
+    state.measurementBaseline = buildMeasurementBaseline(state.commercialEvidence);
+
+    const qualifyMessage = `*Qualification: Qualified* — all five conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`;
     const qualifyButtons = [
       [
         { text: "✅ Approve Lead→Prospect", callback_data: `qualify:${state.workId}:approve` },
@@ -644,7 +959,17 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
   }
 
   await updatePage(env, state.entityId!, { Status: select("Prospect") });
-  await updatePage(env, state.matterId!, { Status: select("Qualified") });
+  await updatePage(env, state.matterId!, {
+    Status: select("Qualified"),
+    // Preserves the commercial baseline on the Matter record itself (not
+    // just in-memory WorkState) so it survives past this work item's
+    // lifetime -- per the Commercial Value & Pricing Operating Model's
+    // Section 8, using the existing Current_understanding field rather
+    // than inventing a new Notion property.
+    ...(state.measurementBaseline
+      ? { Current_understanding: richText(`${state.callNotes ?? ""}\n\n${formatMeasurementBaselineText(state.measurementBaseline)}`.slice(0, 1900)) }
+      : {}),
+  });
   await logActivity(env, {
     entry: `Entity progressed to Prospect: ${state.entityName}`,
     type: "Decision",
@@ -753,7 +1078,10 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
       "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a Finance pricing input.",
     ),
     "Verified Facts & Sources": richText(
-      `Proposed intervention: ${trimmedIntervention}\n\nValue context (enquiry + call notes):\n${valueContext}`.slice(0, 1900),
+      `Proposed intervention: ${trimmedIntervention}\n\n${formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext)}\n\nRaw value context (enquiry + call notes):\n${valueContext}`.slice(
+        0,
+        1900,
+      ),
     ),
   });
 
@@ -1090,3 +1418,17 @@ async function findEntityMatch(env: Env, name: string, email: string, phone: str
   }
   return { plausible: [] };
 }
+
+// Exported for unit testing only -- these are the deterministic Commercial
+// Value & Pricing Operating Model helpers (evidence normalization, the
+// evidence-quality gate, the measurement baseline, and the Handoff evidence
+// formatting). No other module imports these; handleCallNotes and
+// handleInterventionText remain the only production call sites.
+export {
+  normalizeCommercialEvidence,
+  normalizeInvestmentToleranceContext,
+  evaluateCommercialValueEvidence,
+  computeOverallQualification,
+  buildMeasurementBaseline,
+  formatCommercialEvidenceForHandoff,
+};

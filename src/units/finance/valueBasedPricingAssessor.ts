@@ -8,11 +8,102 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 
+interface RawValueAtStakeJudgement {
+  value?: number;
+  low?: number;
+  high?: number;
+  currency?: string;
+  period?: string;
+  evidence_type?: string;
+  source?: string;
+  evidence_quality?: string;
+}
+
 interface PriceJudgement {
   sufficient: boolean;
+  evidence_quality_assessment?: string;
+  value_at_stake?: RawValueAtStakeJudgement;
+  intervention_assessment?: string;
+  delivery_floor_rationale?: string;
+  market_modifiers_applied?: string;
   price?: number;
+  currency?: string;
   rationale?: string;
   reason_if_insufficient?: string;
+}
+
+const VALID_EVIDENCE_TYPES = ["directly_measured", "client_estimated", "derived", "assumption"];
+
+/**
+ * Patterns that mark a pricing rationale as relying on something the
+ * Commercial Value & Pricing Operating Model explicitly excludes (Section
+ * 5, Section 10). These are checked deterministically -- see
+ * validateFinanceJudgement -- because the model's prohibition on inventing
+ * a universal multiplier must hold even if the AI's own reasoning drifts
+ * toward one; the AI is not trusted as the sole authority here.
+ */
+const FORBIDDEN_PRICING_BASIS_PATTERNS: { pattern: RegExp; reason: string }[] = [
+  { pattern: /purchasing power parity|ppp[\s-]?(multiplier|adjustment|adjusted|discount)/i, reason: "a purchasing power parity (PPP) multiplier" },
+  { pattern: /\d{1,3}(\.\d+)?%\s*(of\s+(the\s+)?)?(value|revenue)(\s*(at stake|captur\w*))?/i, reason: "a fixed/universal percentage of value" },
+  { pattern: /universal\s+(percentage|rate|multiplier|discount)/i, reason: "a universal percentage/multiplier" },
+  { pattern: /ghana\s+(price\s+)?floor|hard[\s-]?coded\s+(ghana|minimum)\s+price/i, reason: "a hard-coded Ghana price floor" },
+  {
+    pattern: /convert(ed|ing)?\s+(the\s+)?currency.{0,40}(price|quote|basis)|currency\s+conversion(\s+rate)?\s+as\s+(the\s+)?(pricing|price)\s+(authority|basis)/i,
+    reason: "currency conversion used as pricing authority",
+  },
+  {
+    pattern: /(client'?s?\s+)?(disclosed\s+)?budget\s+(as|is|was|used as)\s+(the\s+)?(price|pricing|quote)|willingness[\s-]?to[\s-]?pay\s+(as|is|was|used as)\s+(the\s+)?(price|pricing|quote|basis)/i,
+    reason: "budget or willingness-to-pay used as the pricing basis",
+  },
+];
+
+/**
+ * Deterministic validation of Finance's structured AI judgment, per the
+ * Commercial Value & Pricing Operating Model's requirement that AI output
+ * is not authority on its own. This is the sole gate on whether a
+ * "sufficient: true" judgment is actually allowed to become a quote -- a
+ * judgment that fails any of these checks is forced to Held regardless of
+ * what the AI itself claimed. The AI cannot override this.
+ */
+function validateFinanceJudgement(judgement: PriceJudgement | null): { valid: true } | { valid: false; reason: string } {
+  if (!judgement) return { valid: false, reason: "No structured pricing judgment was returned." };
+
+  const v = judgement.value_at_stake;
+  const hasNumber = !!v && (typeof v.value === "number" || (typeof v.low === "number" && typeof v.high === "number"));
+  if (!hasNumber) {
+    return { valid: false, reason: "No numerical value-at-stake value or range was established." };
+  }
+  if (!v!.currency) {
+    return { valid: false, reason: "Value-at-stake has no currency stated." };
+  }
+  if (!v!.period) {
+    return { valid: false, reason: "Value-at-stake has no applicable time period stated, which is required for responsible pricing judgment." };
+  }
+  const evidenceType = v!.evidence_type;
+  if (!evidenceType || !VALID_EVIDENCE_TYPES.includes(evidenceType)) {
+    return { valid: false, reason: "Value-at-stake evidence type was not established as directly_measured, client_estimated, derived, or assumption." };
+  }
+  if (evidenceType === "assumption") {
+    return { valid: false, reason: "The only available value-at-stake figure is an unsupported assumption, which cannot satisfy the pricing evidence requirement on its own." };
+  }
+  if (!v!.source) {
+    return { valid: false, reason: "Value-at-stake has no attributable source." };
+  }
+  if (!judgement.intervention_assessment?.trim()) {
+    return { valid: false, reason: "The intervention or deliverable being priced is not identifiable from the supplied context." };
+  }
+  if (typeof judgement.price !== "number" || !Number.isFinite(judgement.price) || judgement.price <= 0) {
+    return { valid: false, reason: "No valid positive quoted price was produced." };
+  }
+  if (!judgement.rationale?.trim()) {
+    return { valid: false, reason: "No pricing rationale was provided." };
+  }
+  const scanText = `${judgement.rationale ?? ""} ${judgement.market_modifiers_applied ?? ""} ${v!.source ?? ""}`;
+  const forbidden = FORBIDDEN_PRICING_BASIS_PATTERNS.find((f) => f.pattern.test(scanText));
+  if (forbidden) {
+    return { valid: false, reason: `Pricing rationale appears to rely on ${forbidden.reason}, which is not canonical ENIG pricing policy.` };
+  }
+  return { valid: true };
 }
 
 // Canonical Notion governance source for this Hat, verified live in the
@@ -28,9 +119,17 @@ function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: 
     universalRoleContract,
     "=== HAT DEFINITION ===",
     hatDefinition,
+    "=== COMMERCIAL VALUE & PRICING OPERATING MODEL — CANONICAL JUDGMENT SEQUENCE ===",
+    "Work through these six steps, in order, using only the value context supplied below. State your reasoning for each briefly in the corresponding JSON field.",
+    "1. Evidence quality: assess the attribution and quality of the numerical evidence supplied (directly_measured, client_estimated, derived, or assumption). Never treat an assumption as equivalent to measured or client-estimated evidence.",
+    "2. Value-at-stake assessment: establish a value-at-stake range (or a single figure only where the evidence genuinely supports one) with currency, applicable period, evidence type, and source, from the supplied evidence only. Never invent a figure not attributable to the supplied context, and never derive one from an unrelated figure (e.g. general company turnover) without the context itself making that derivation explicit.",
+    "3. Intervention/delivery assessment: identify the specific intervention or diagnostic being priced and what it requires to deliver. Diagnosis-first engagements may be priced without a predetermined downstream intervention — price the defined diagnostic itself (its commercial question, expected output, and required effort), not a downstream intervention that hasn't been selected yet.",
+    "4. Delivery floor: state the legitimate ENIG delivery/economic floor only if it can genuinely be grounded in actual delivery economics present in the supplied context. If no such delivery-economics data is available to you, say so explicitly rather than inventing a floor number — a floor is never an arbitrary market minimum.",
+    "5. Market/commercial modifiers: note any legitimate market, currency, or commercial conditions you are applying, in plain language with rationale — never a fixed percentage of value, PPP multiplier, hard-coded regional floor, or automatic currency conversion presented as pricing authority. No such universal rule is canonical unless separately established and approved.",
+    "6. Quote and rationale: produce a quoted price and a brief rationale that traces back to the evidence above, if and only if the evidence above is sufficient to price responsibly. Never use a disclosed budget or willingness-to-pay figure as the price or as a factor in setting it — if the context mentions one, treat it only as a scope/fit signal to note in passing, never as part of the pricing basis or rationale.",
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    'Return JSON: {"sufficient": true, "price": <number>, "rationale": "..."} if you can judge a value-based price responsibly per the Hat Definition above, or {"sufficient": false, "reason_if_insufficient": "..."} if the Hat Definition\'s own rule for insufficient context applies to this case.',
-    "If context is insufficient, state only the missing category of information required (e.g., 'historical business-impact range required for pricing judgment'), without requesting, naming, or attempting to discover specific sensitive records or client entities.",
+    'Return JSON: {"sufficient": true, "evidence_quality_assessment": "...", "value_at_stake": {"value": n|null, "low": n|null, "high": n|null, "currency": "...", "period": "...", "evidence_type": "directly_measured|client_estimated|derived|assumption", "source": "...", "evidence_quality": "..."}, "intervention_assessment": "...", "delivery_floor_rationale": "...", "market_modifiers_applied": "...", "price": <number>, "currency": "...", "rationale": "..."} only if every step above can be responsibly completed. Otherwise return {"sufficient": false, "reason_if_insufficient": "..."} naming the SPECIFIC missing evidence category (e.g. \'value-at-stake has no applicable time period\', \'value exists only as an unsupported assumption\', \'no evidence source provided\', \'diagnostic purpose is unclear\') — never a generic reason, and never a request for a budget or willingness-to-pay figure as a substitute.',
+    "If context is insufficient, state only the missing category of information required, without requesting, naming, or attempting to discover specific sensitive records or client entities.",
   ].join("\n\n");
 }
 
@@ -190,8 +289,22 @@ async function judgeQuote(
     user: `Entity: ${entityToken}\nProposed intervention and value context:\n${judgmentContext}`,
   });
 
-  if (!judgement || judgement.sufficient !== true || typeof judgement.price !== "number") {
-    const reason = judgement?.reason_if_insufficient ?? "Value context insufficient to price responsibly.";
+  // The AI's own "sufficient: true" is never taken as final authority --
+  // per the Commercial Value & Pricing Operating Model, a structured
+  // judgment must also pass deterministic validation before it's allowed
+  // to become a quote. A judgment the AI marked insufficient is held on
+  // its own stated reason; one it marked sufficient is held anyway, on the
+  // deterministic reason, if validation fails. The AI cannot override this.
+  let holdReason: string | null = null;
+  if (!judgement || judgement.sufficient !== true) {
+    holdReason = judgement?.reason_if_insufficient ?? "Value context insufficient to price responsibly.";
+  } else {
+    const validation = validateFinanceJudgement(judgement);
+    if (!validation.valid) holdReason = validation.reason;
+  }
+
+  if (holdReason !== null) {
+    const reason = holdReason;
     await updatePage(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(reason),
@@ -217,30 +330,41 @@ async function judgeQuote(
     return state;
   }
 
+  // holdReason === null guarantees judgement is non-null, sufficient===true,
+  // and has already passed validateFinanceJudgement above (price/rationale
+  // present and valid) -- safe to treat as authoritative from here on.
+  const price = judgement!.price!;
+  const rationale = judgement!.rationale ?? "";
+
   await updatePage(env, state.handoffId!, {
     Status: select("Closed"),
-    "Work Completed": richText(`Quoted price: $${judgement.price}. Rationale: ${judgement.rationale ?? ""}`.slice(0, 1900)),
+    "Work Completed": richText(
+      `Quoted price: $${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
+        0,
+        1900,
+      ),
+    ),
   });
   await logActivity(env, {
-    entry: `Quote judged: $${judgement.price} — ${matterToken}`,
+    entry: `Quote judged: $${price} — ${matterToken}`,
     type: "Decision",
     area: "Finance",
-    decisions: `Value-based quote: $${judgement.price}`,
-    decisionRationale: judgement.rationale ?? "",
+    decisions: `Value-based quote: $${price}`,
+    decisionRationale: rationale,
     outcome: "Complete",
   });
 
   // The quote is a judgment call, not final authority (per the Finance Hat
   // Definition's authority_limits) — it goes to Martin for review before it
   // becomes the authoritative quote Sales is allowed to build a proposal on.
-  state.quote = { price: judgement.price, rationale: judgement.rationale ?? "" };
+  state.quote = { price, rationale };
   state.stage = "awaiting_quote_approval";
   state.awaiting = undefined;
   state.financeThreadId = financeThreadId;
   if (financeThreadId !== undefined) {
     await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
   }
-  const quoteMessage = `*Finance quote ready* for *${entityToken}*: $${judgement.price}\n\nRationale: ${judgement.rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`;
+  const quoteMessage = `*Finance quote ready* for *${entityToken}*: $${price}\n\nRationale: ${rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`;
   const quoteButtons = [
     [
       { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
@@ -399,3 +523,9 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   state.awaiting = undefined;
   return state;
 }
+
+// Exported for unit testing only -- the deterministic validation gate that
+// sits between Finance's structured AI judgment and an actual quote. No
+// other module imports this; judgeQuote remains the only production call
+// site.
+export { validateFinanceJudgement };

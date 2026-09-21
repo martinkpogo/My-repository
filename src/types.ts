@@ -93,9 +93,95 @@ export type Unit =
 export type QualificationAssessment = "Satisfied" | "Not Satisfied" | "Insufficient Evidence";
 
 export interface QualificationConditionResult {
-  condition: "within_specialization" | "allows_diagnosis_first" | "open_to_ballpark_amount_and_time" | "ready_to_commit_required_resources";
+  condition:
+    | "within_specialization"
+    | "allows_diagnosis_first"
+    | "commercial_value_evidence"
+    | "open_to_ballpark_amount_and_time"
+    | "ready_to_commit_required_resources";
   evidence: string;
   assessment: QualificationAssessment;
+}
+
+/**
+ * Distinguishes how a commercial number was arrived at, per the Commercial
+ * Value & Pricing Operating Model's Section 3 (Value-at-Stake Assessment).
+ * An assumption is never equivalent to measured or client-estimated
+ * evidence -- callers must not treat it as satisfying an evidence
+ * requirement on its own.
+ */
+export type EvidenceType = "directly_measured" | "client_estimated" | "derived" | "assumption";
+
+/**
+ * A single commercial-value figure, expressed as a range where precision
+ * isn't warranted (per the model's "a value-at-stake range is preferable
+ * to false precision"). Used for both value-at-stake and cost-of-inaction
+ * figures -- same shape, same evidentiary discipline.
+ */
+export interface ValueAtStake {
+  /** A single point figure, when the evidence supports one rather than a range. */
+  value?: number;
+  low?: number;
+  high?: number;
+  currency?: string;
+  /** The period this figure applies over, e.g. "annual", "6-12 months". */
+  period?: string;
+  evidenceType?: EvidenceType;
+  /** Who/what this figure is attributable to, e.g. "client-stated (Comfort, call 2026-09-20)". */
+  source?: string;
+  evidenceQuality?: string;
+  assumptions?: string;
+  limitations?: string;
+}
+
+/**
+ * Structured commercial-value evidence captured during Sales discovery, per
+ * the Commercial Value & Pricing Operating Model. This is the pricing
+ * basis Finance judges against -- investment tolerance is deliberately
+ * NOT part of this structure (see WorkState.investmentToleranceContext).
+ */
+export interface CommercialEvidence {
+  /** What the problem is costing, or could cost if unresolved -- free text, may be qualitative. */
+  financialConsequence?: string;
+  valueAtStake?: ValueAtStake;
+  costOfInaction?: ValueAtStake;
+  /** The specific revenue stream or opportunity the problem/value connects to. */
+  affectedRevenueOrOpportunity?: string;
+  desiredMeasurableOutcome?: string;
+  /** Any material uncertainty about the evidence as a whole, beyond what's captured per-figure. */
+  uncertainty?: string;
+}
+
+/**
+ * A client's stated investment range or boundary -- per the Commercial
+ * Value & Pricing Operating Model Section 7, this is a scope/fit sanity
+ * check only. It is NEVER part of CommercialEvidence and must never be
+ * used, by Sales or Finance, as the pricing basis or as a substitute for
+ * value-at-stake evidence. Carried through the Handoff as context only.
+ */
+export interface InvestmentToleranceContext {
+  low?: number;
+  high?: number;
+  currency?: string;
+  period?: string;
+}
+
+/**
+ * The commercial baseline preserved once an intervention is approved, per
+ * the Commercial Value & Pricing Operating Model Section 8 (Measurement
+ * Baseline) -- so the same evidence used to justify the intervention can
+ * later support measurement without re-litigating attribution.
+ */
+export interface MeasurementBaseline {
+  baselineMetric?: string;
+  baselineValue?: string;
+  baselinePeriod?: string;
+  source?: string;
+  evidenceQuality?: string;
+  targetOutcome?: string;
+  measurementPeriod?: string;
+  assumptions?: string;
+  limitations?: string;
 }
 
 export interface QualificationResult {
@@ -154,6 +240,28 @@ export interface WorkState {
    * Opportunity) -- exactly two values, no others.
    */
   entryType?: "inbound_enquiry" | "outbound_outreach";
+  /**
+   * Structured commercial-value evidence extracted from enquiry text/call
+   * notes during discovery, per the Commercial Value & Pricing Operating
+   * Model -- the pricing basis carried to Finance via the Handoff. Set by
+   * handleCallNotes's extraction step; deterministically validated (never
+   * taken on the AI's own say-so) before it can satisfy the
+   * commercial_value_evidence qualification condition.
+   */
+  commercialEvidence?: CommercialEvidence;
+  /**
+   * Client-stated investment range/boundary -- context only. See
+   * InvestmentToleranceContext's doc comment: never the pricing basis,
+   * never a substitute for commercialEvidence.
+   */
+  investmentToleranceContext?: InvestmentToleranceContext;
+  /**
+   * The commercial baseline preserved once Lead->Prospect is approved, for
+   * later measurement per the operating model's Section 8. Set once from
+   * commercialEvidence at qualification time and carried onto the Matter
+   * record; not re-derived downstream.
+   */
+  measurementBaseline?: MeasurementBaseline;
   entityId?: string;
   entityName?: string;
   matterId?: string;
