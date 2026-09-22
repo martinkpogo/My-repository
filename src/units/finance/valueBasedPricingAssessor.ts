@@ -366,7 +366,7 @@ async function judgeQuote(
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `*Finance has held the quote request* for *${entityToken}*.\n\nThe information provided isn't enough to work out a value-based price — a disclosed budget or willingness-to-pay figure on its own can't be used as the pricing basis.\n\nPlease share more about the expected business impact — for example revenue growth, cost savings, efficiency gains, or customer acquisition — and we'll reassess.`,
+      `*Finance has held the quote request* for *${entityToken}*.\n\n${reason}\n\n(A disclosed budget or willingness-to-pay figure on its own can never be used as the pricing basis — if that's the gap, share the expected business impact instead: revenue growth, cost savings, efficiency gains, or customer acquisition.)\n\nSend the missing detail and I'll reassess.`,
     );
     state.stage = "handoff_held";
     state.awaiting = awaitingOnInsufficient;

@@ -180,6 +180,38 @@ test("Hold reason identifies the specific missing evidence, not a generic messag
   assert.match(openQuestionsText(patch), /time period/i);
 });
 
+test("Telegram hold message states the actual specific reason -- not a hardcoded budget/WTP message regardless of cause", async (t) => {
+  // Regression test for a live incident: the Telegram-facing message was
+  // hardcoded to always claim a budget/WTP figure was the problem, even
+  // when the real (correctly recorded, in Notion) reason was something
+  // else entirely -- e.g. an unclassified evidence_type on otherwise
+  // complete business-impact evidence. Martin saw the same generic text
+  // on every hold and reasonably concluded Finance wasn't reading the
+  // Handoff at all.
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({
+    sufficient: true,
+    value_at_stake: { low: 8000000, high: 12000000, currency: "GHS", period: "annual", evidence_type: "not_a_real_type", source: "Client-stated" },
+    intervention_assessment: "Website redesign and content creation.",
+    price: 300000,
+    currency: "GHS",
+    rationale: "Priced against the documented opportunity.",
+  });
+  const state = fakeState();
+
+  await handlePickup(env, state);
+
+  assert.ok(
+    log.sentTexts.some((t) => /evidence type/i.test(t) && /directly_measured|client_estimated|derived|assumption/i.test(t)),
+    "the Telegram message must state the actual specific hold reason",
+  );
+  assert.ok(
+    !log.sentTexts.some((t) => /isn't enough to work out a value-based price/i.test(t)),
+    "must not send the old hardcoded generic-cause message when the real reason is something else",
+  );
+});
+
 test("L. Finance pricing -- sufficient evidence produces a quote and rationale without budget/WTP as the basis", async (t) => {
   mockFetch(t);
   const env = fakeEnv();
