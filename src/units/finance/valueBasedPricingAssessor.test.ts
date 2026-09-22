@@ -339,9 +339,22 @@ test("validateFinanceJudgement: rejects missing rationale", () => {
     value_at_stake: { value: 10000, currency: "USD", period: "annual", evidence_type: "client_estimated", source: "Client-stated" },
     intervention_assessment: "Diagnostic.",
     price: 5000,
+    currency: "USD",
   } as any);
   assert.strictEqual(result.valid, false);
   if (!result.valid) assert.match(result.reason, /rationale/i);
+});
+
+test("validateFinanceJudgement: rejects a quoted price with no top-level currency stated", () => {
+  const result = validateFinanceJudgement({
+    sufficient: true,
+    value_at_stake: { value: 10000, currency: "GHS", period: "annual", evidence_type: "client_estimated", source: "Client-stated" },
+    intervention_assessment: "Diagnostic.",
+    price: 5000,
+    rationale: "Rationale.",
+  } as any);
+  assert.strictEqual(result.valid, false);
+  if (!result.valid) assert.match(result.reason, /currency/i);
 });
 
 test("validateFinanceJudgement: accepts a fully complete, policy-compliant judgement", () => {

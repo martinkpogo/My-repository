@@ -96,6 +96,9 @@ function validateFinanceJudgement(judgement: PriceJudgement | null): { valid: tr
   if (typeof judgement.price !== "number" || !Number.isFinite(judgement.price) || judgement.price <= 0) {
     return { valid: false, reason: "No valid positive quoted price was produced." };
   }
+  if (!judgement.currency?.trim()) {
+    return { valid: false, reason: "The quoted price has no currency stated -- the quote's own currency must be explicit, never assumed." };
+  }
   if (!judgement.rationale?.trim()) {
     return { valid: false, reason: "No pricing rationale was provided." };
   }
@@ -127,7 +130,7 @@ function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: 
     "3. Intervention/delivery assessment: identify the specific intervention or diagnostic being priced and what it requires to deliver. Diagnosis-first engagements may be priced without a predetermined downstream intervention — price the defined diagnostic itself (its commercial question, expected output, and required effort), not a downstream intervention that hasn't been selected yet.",
     "4. Delivery floor: state the legitimate ENIG delivery/economic floor only if it can genuinely be grounded in actual delivery economics present in the supplied context. If no such delivery-economics data is available to you, say so explicitly rather than inventing a floor number — a floor is never an arbitrary market minimum.",
     "5. Market/commercial modifiers: note any legitimate market, currency, or commercial conditions you are applying, in plain language with rationale — never a fixed percentage of value, PPP multiplier, hard-coded regional floor, or automatic currency conversion presented as pricing authority. No such universal rule is canonical unless separately established and approved.",
-    "6. Quote and rationale: produce a quoted price and a brief rationale that traces back to the evidence above, if and only if the evidence above is sufficient to price responsibly. Never use a disclosed budget or willingness-to-pay figure as the price or as a factor in setting it — if the context mentions one, treat it only as a scope/fit signal to note in passing, never as part of the pricing basis or rationale.",
+    "6. Quote and rationale: produce a quoted price and a brief rationale that traces back to the evidence above, if and only if the evidence above is sufficient to price responsibly. Never use a disclosed budget or willingness-to-pay figure as the price or as a factor in setting it — if the context mentions one, treat it only as a scope/fit signal to note in passing, never as part of the pricing basis or rationale. Quote in the SAME currency the supplied value-at-stake evidence is denominated in (e.g. if the evidence is in Ghanaian cedis, quote in GHS) — never default to USD or any other currency not actually present in the supplied context, and never silently convert between currencies.",
     "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
     'Return JSON: {"sufficient": true, "evidence_quality_assessment": "...", "value_at_stake": {"value": n|null, "low": n|null, "high": n|null, "currency": "...", "period": "...", "evidence_type": "directly_measured|client_estimated|derived|assumption", "source": "...", "evidence_quality": "..."}, "intervention_assessment": "...", "delivery_floor_rationale": "...", "market_modifiers_applied": "...", "price": <number>, "currency": "...", "rationale": "..."} only if every step above can be responsibly completed. Otherwise return {"sufficient": false, "reason_if_insufficient": "..."} naming the SPECIFIC missing evidence category (e.g. \'value-at-stake has no applicable time period\', \'value exists only as an unsupported assumption\', \'no evidence source provided\', \'diagnostic purpose is unclear\') — never a generic reason, and never a request for a budget or willingness-to-pay figure as a substitute.',
     "If context is insufficient, state only the missing category of information required, without requesting, naming, or attempting to discover specific sensitive records or client entities.",
@@ -378,22 +381,23 @@ async function judgeQuote(
   // and has already passed validateFinanceJudgement above (price/rationale
   // present and valid) -- safe to treat as authoritative from here on.
   const price = judgement!.price!;
+  const currency = judgement!.currency!;
   const rationale = judgement!.rationale ?? "";
 
   await updatePage(env, state.handoffId!, {
     Status: select("Closed"),
     "Work Completed": richText(
-      `Quoted price: $${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
+      `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
         0,
         1900,
       ),
     ),
   });
   await logActivity(env, {
-    entry: `Quote judged: $${price} — ${matterToken}`,
+    entry: `Quote judged: ${currency} ${price} — ${matterToken}`,
     type: "Decision",
     area: "Finance",
-    decisions: `Value-based quote: $${price}`,
+    decisions: `Value-based quote: ${currency} ${price}`,
     decisionRationale: rationale,
     outcome: "Complete",
   });
@@ -401,14 +405,14 @@ async function judgeQuote(
   // The quote is a judgment call, not final authority (per the Finance Hat
   // Definition's authority_limits) — it goes to Martin for review before it
   // becomes the authoritative quote Sales is allowed to build a proposal on.
-  state.quote = { price, rationale };
+  state.quote = { price, currency, rationale };
   state.stage = "awaiting_quote_approval";
   state.awaiting = undefined;
   state.financeThreadId = financeThreadId;
   if (financeThreadId !== undefined) {
     await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
   }
-  const quoteMessage = `*Finance quote ready* for *${entityToken}*: $${price}\n\nRationale: ${rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`;
+  const quoteMessage = `*Finance quote ready* for *${entityToken}*: ${currency} ${price}\n\nRationale: ${rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`;
   const quoteButtons = [
     [
       { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
@@ -567,7 +571,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     Entity_Token: richText(state.entityName ?? ""),
     Matter_Token: richText(state.matterName ?? ""),
     "Verified Facts & Sources": richText(
-      `Authoritative quote: $${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
+      `Authoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
     ),
   });
   state.handoffId = followUp.id;

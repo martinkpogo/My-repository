@@ -88,13 +88,19 @@ function formatQualificationEvidence(conditions: QualificationConditionResult[])
  * for a value that crossed a Unit boundary. Returns null on any parse
  * failure; callers must treat null as "cannot proceed."
  */
-function parseAuthoritativeQuote(verifiedFactsAndSources: string): { price: number; rationale: string } | null {
-  const priceMatch = verifiedFactsAndSources.match(/Authoritative quote:\s*\$([\d,.]+)/);
+function parseAuthoritativeQuote(verifiedFactsAndSources: string): { price: number; currency?: string; rationale: string } | null {
+  // Matches both the current "Authoritative quote: <CURRENCY> <amount>"
+  // format (e.g. "GHS 420000") and the legacy "$<amount>" format still
+  // possible on an in-flight Handoff created before currency was carried
+  // through explicitly -- a bare "$" is read as USD for that legacy case
+  // only, never assumed for a currency-code-prefixed quote.
+  const priceMatch = verifiedFactsAndSources.match(/Authoritative quote:\s*(?:([A-Za-z]{2,5})\s+)?(\$)?\s*([\d,]+(?:\.\d+)?)/);
   if (!priceMatch) return null;
-  const price = Number(priceMatch[1].replace(/,/g, ""));
+  const price = Number(priceMatch[3].replace(/,/g, ""));
   if (!Number.isFinite(price)) return null;
+  const currency = priceMatch[1] ?? (priceMatch[2] ? "USD" : undefined);
   const rationaleMatch = verifiedFactsAndSources.match(/Rationale:\s*([\s\S]*)/);
-  return { price, rationale: rationaleMatch ? rationaleMatch[1].trim() : "" };
+  return { price, currency, rationale: rationaleMatch ? rationaleMatch[1].trim() : "" };
 }
 
 interface SalesExecutiveGovernance {
@@ -1251,7 +1257,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
     env,
     "sales.proposal_drafting",
     buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
-    `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: $${state.quote.price} — rationale: ${state.quote.rationale}`,
+    `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: ${state.quote.currency ?? ""} ${state.quote.price} — rationale: ${state.quote.rationale}`,
     { maxTokens: 3000 },
   );
 
@@ -1310,8 +1316,12 @@ export async function handleProposalApproval(env: Env, state: WorkState, approve
     Matter: relation([state.matterId!]),
     Handoff: relation([state.handoffId!]),
     Status: select("Draft"),
+    // No dedicated currency property exists on the Proposals database (not
+    // introduced here -- adding one is a schema change outside this fix's
+    // scope), so the currency is stated in the rationale text instead of
+    // being silently lost off the bare "Quoted Price" number.
     "Quoted Price": { number: state.quote?.price ?? 0 },
-    "Quote Rationale": richText(state.quote?.rationale ?? ""),
+    "Quote Rationale": richText(`${state.quote?.currency ? `Currency: ${state.quote.currency}. ` : ""}${state.quote?.rationale ?? ""}`),
   });
 
   await updatePage(env, state.matterId!, { Status: select("Proposal") });

@@ -191,6 +191,14 @@ export interface QualificationResult {
 
 export interface Quote {
   price: number;
+  /**
+   * The currency Finance's own judgment quoted the price in (e.g. "GHS",
+   * "USD") -- read verbatim from the AI's structured judgement, never
+   * assumed or hardcoded. Optional only for backward compatibility with a
+   * quote parsed from a legacy "$<amount>"-formatted Handoff record that
+   * predates currency being carried explicitly.
+   */
+  currency?: string;
   rationale: string;
 }
 

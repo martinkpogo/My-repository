@@ -314,7 +314,56 @@ test("9. Finance quote authority remains unchanged -- Sales reads the quote verb
 
   assert.ok(result.quote, "the parsed quote must be attached to state");
   assert.strictEqual(result.quote!.price, 18500, "the quote price must be read verbatim -- never modified, converted, or reinterpreted");
+  assert.strictEqual(result.quote!.currency, "USD", "a legacy bare '$'-formatted quote is read as USD");
   assert.strictEqual(result.quote!.rationale, "Value-based on projected revenue lift.");
+});
+
+test("9b. A currency-coded quote (e.g. GHS) is read verbatim, not assumed to be USD", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/handoff-quote-2") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "handoff-quote-2",
+          url: "https://notion.so/handoff-quote-2",
+          properties: {
+            "Verified Facts & Sources": {
+              rich_text: [{ plain_text: "Authoritative quote: GHS 420000\nRationale: Priced against the documented growth opportunity." }],
+            },
+            Entity_Token: { rich_text: [{ plain_text: "E-20" }] },
+            Matter_Token: { rich_text: [{ plain_text: "MAT-20" }] },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
+      return new Response(
+        JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }),
+        { status: 200 },
+      );
+    }
+    if (method === "PATCH" || (method === "POST" && urlStr.endsWith("/pages"))) {
+      return new Response(JSON.stringify({ id: "page", url: "https://notion.so/page", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const state = fakeState({ handoffId: "handoff-quote-2", stage: "awaiting_quote", awaiting: undefined });
+  const result = await handleQuoteReceived(fakeEnv(), state);
+
+  assert.ok(result.quote, "the parsed quote must be attached to state");
+  assert.strictEqual(result.quote!.price, 420000);
+  assert.strictEqual(result.quote!.currency, "GHS", "the currency Finance actually quoted in must be read verbatim, never defaulted to USD");
+  assert.strictEqual(result.quote!.rationale, "Priced against the documented growth opportunity.");
 });
 
 // ============================================================================
