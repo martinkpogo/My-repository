@@ -574,9 +574,9 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  const { proposalId, proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
 
-  const afterApproval = await handleInterventionApproval(env, afterPickup, proposalId, proposalVersion, "approve");
+  const afterApproval = await handleInterventionApproval(env, afterPickup, proposalVersion, "approve");
 
   assert.strictEqual(afterApproval.stage, "awaiting_finance");
   assert.strictEqual(afterApproval.strategyApprovalState, "APPROVED");
@@ -601,7 +601,7 @@ test("26-29. Strategy -> Finance carries the complete approved proposal -- timel
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalId, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const factsText = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text[0].text.content;
   assert.match(factsText, /Business situation:/);
@@ -623,7 +623,7 @@ test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as t
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalId, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
   assert.match(props["Required Next Action"].rich_text[0].text.content, /redesign/i);
@@ -640,10 +640,10 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  const { proposalId, proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const originalProposalId = afterPickup.strategyProposal!.proposalId;
 
-  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalId, proposalVersion, "refine");
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   assert.strictEqual(afterRefine.stage, "strategy_refining");
   assert.strictEqual(afterRefine.awaiting, "strategy_refinement_reason");
@@ -672,9 +672,9 @@ test("12/25. Reject records the rejection, closes the current attempt, and creat
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  const { proposalId, proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
 
-  const afterReject = await handleInterventionApproval(env, afterPickup, proposalId, proposalVersion, "reject");
+  const afterReject = await handleInterventionApproval(env, afterPickup, proposalVersion, "reject");
 
   assert.strictEqual(afterReject.stage, "strategy_rejected");
   assert.strictEqual(afterReject.strategyApprovalState, "REJECTED");
@@ -705,9 +705,11 @@ test("23. Old approval callback (superseded proposal version) cannot approve a r
     },
   });
 
-  // A callback carrying the SAME proposalId but an OLD version (1) --
-  // simulating a stale button from before Refine produced v2.
-  const result = await handleInterventionApproval(env, state, "current-proposal", 1, "approve");
+  // A callback carrying an OLD version (1) -- simulating a stale button
+  // from before Refine produced v2. Only proposalVersion travels through
+  // the actual Telegram callback (see the byte-limit test below), so this
+  // is the operative staleness check.
+  const result = await handleInterventionApproval(env, state, 1, "approve");
 
   assert.strictEqual(log.handoffCreateBody, null, "a version-mismatched callback must never create the Finance Handoff");
   assert.strictEqual(result.pendingStrategyApproval?.proposalVersion, 2, "the current pending approval must remain untouched");
@@ -718,34 +720,52 @@ test("24. Stale approval callback (wrong stage) does not mutate current work", a
   const env = fakeEnv();
   const state = fakeState({ stage: "delivered", strategyApprovalState: undefined, pendingStrategyApproval: undefined });
 
-  const result = await handleInterventionApproval(env, state, "some-proposal-id", 1, "approve");
+  const result = await handleInterventionApproval(env, state, 1, "approve");
 
   assert.strictEqual(result.stage, "delivered", "stage must not change on a stale callback");
   assert.strictEqual(log.handoffCreateBody, null);
 });
 
-test("17. Old approval callback cannot approve a proposal from a different WorkSession (proposalId mismatch)", async (t) => {
+test("17. A callback for a completed/superseded session (no matching pendingStrategyApproval at all) is a no-op", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  const proposal: StrategyProposal = { ...(RAW_PROPOSAL as any), proposalId: "current-proposal", proposalVersion: 1 };
+  // Simulates a callback arriving after the session moved on (e.g. already
+  // approved and awaiting Finance) -- pendingStrategyApproval/strategyProposal
+  // are already cleared, so there is nothing for any version number to match.
   const state = fakeState({
-    stage: "awaiting_intervention_approval",
-    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
-    strategyProposal: proposal,
-    pendingStrategyApproval: {
-      kind: "strategy_intervention",
-      strategyWorkSessionId: "work_strat_1",
-      proposalId: "current-proposal",
-      proposalVersion: 1,
-      decisionOptions: ["approve", "refine", "reject"],
-    },
+    stage: "awaiting_finance",
+    strategyApprovalState: "APPROVED",
+    strategyProposal: undefined,
+    pendingStrategyApproval: undefined,
   });
 
-  // A callback carrying an OLD proposalId (from a superseded proposal).
-  const result = await handleInterventionApproval(env, state, "stale-old-proposal", 1, "approve");
+  const result = await handleInterventionApproval(env, state, 1, "approve");
 
-  assert.strictEqual(log.handoffCreateBody, null, "a mismatched proposalId must never create the Finance Handoff");
-  assert.strictEqual(result.pendingStrategyApproval?.proposalId, "current-proposal", "the current proposal must remain untouched");
+  assert.strictEqual(log.handoffCreateBody, null, "a callback for a completed/superseded session must never create the Finance Handoff");
+  assert.strictEqual(result.stage, "awaiting_finance", "the completed session's state must not be disturbed");
+});
+
+test("Telegram callback_data byte-limit regression: every strategy-proposal button stays within Telegram's hard 64-byte limit", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  // A realistic-length workId (crypto.randomUUID() shape, 36 chars) -- the
+  // actual production failure this test guards against: the prior
+  // callback_data format embedded a second full UUID (proposalId)
+  // alongside workId and silently exceeded 64 bytes, causing Telegram to
+  // reject the entire message (buttons included) with no visible error.
+  const state = fakeState({ workId: "a1b2c3d4-e5f6-47a8-89ab-cdef01234567" });
+
+  const result = await handlePickup(env, state);
+  assert.ok(result.pendingStrategyApproval, "a pendingStrategyApproval must be set for this test to be meaningful");
+
+  const buttonRows = state.pendingActionSummary!.buttons;
+  for (const row of buttonRows) {
+    for (const button of row) {
+      const byteLength = Buffer.byteLength(button.callback_data, "utf8");
+      assert.ok(byteLength <= 64, `callback_data "${button.callback_data}" is ${byteLength} bytes, exceeding Telegram's 64-byte limit`);
+    }
+  }
 });
 
 test("Marketing-specific work is routed to Marketing when there is no recommendation yet (not absorbed by Strategy)", async (t) => {

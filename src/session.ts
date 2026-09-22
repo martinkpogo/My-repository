@@ -234,24 +234,24 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
-        case "strategyintervention": {
-          // value is "<proposalId>.<proposalVersion>.<approve|refine|reject>"
-          // -- joined with "." (not ":") specifically so it survives
-          // index.ts's plain data.split(":") destructure into [action,
-          // workId, value] unchanged. strategy.handleInterventionApproval
-          // verifies proposalId + proposalVersion against the current
-          // pendingStrategyApproval exactly.
-          const lastDot = value.lastIndexOf(".");
-          const decision = lastDot === -1 ? "" : value.slice(lastDot + 1);
-          const rest = lastDot === -1 ? "" : value.slice(0, lastDot);
-          const secondDot = rest.lastIndexOf(".");
-          const proposalId = secondDot === -1 ? "" : rest.slice(0, secondDot);
-          const versionStr = secondDot === -1 ? "" : rest.slice(secondDot + 1);
+        case "sprop": {
+          // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
+          // ":") specifically so it survives index.ts's plain
+          // data.split(":") destructure into [action, workId, value]
+          // unchanged. Deliberately compact: Telegram's callback_data has a
+          // hard 64-byte limit, and workId alone (a 36-char UUID, required
+          // for index.ts to resolve the right WorkSession) already leaves
+          // no room for a second UUID -- see developStrategyProposal's
+          // button construction for the full rationale.
+          const dot = value.lastIndexOf(".");
+          const versionStr = dot === -1 ? "" : value.slice(0, dot);
+          const decisionChar = dot === -1 ? "" : value.slice(dot + 1);
           const proposalVersion = Number(versionStr);
+          const decision = decisionChar === "a" ? "approve" : decisionChar === "r" ? "refine" : decisionChar === "j" ? "reject" : "";
           if ((decision !== "approve" && decision !== "refine" && decision !== "reject") || !Number.isFinite(proposalVersion)) {
             return Promise.resolve(state);
           }
-          return strategy.handleInterventionApproval(this.env, state, proposalId, proposalVersion, decision);
+          return strategy.handleInterventionApproval(this.env, state, proposalVersion, decision);
         }
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);

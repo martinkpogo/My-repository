@@ -1073,12 +1073,22 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   });
 
   const message = formatProposalPreview(state, proposal);
+  // Telegram's callback_data has a hard 64-byte limit. workId alone is a
+  // 36-char UUID (required so index.ts's data.split(":") can resolve the
+  // right WorkSession), so the value portion here must be tiny -- a single
+  // decision letter plus the integer proposalVersion is enough: version is
+  // already a strictly-incrementing per-work-item counter, so it alone
+  // (checked against pendingStrategyApproval.proposalVersion) gives the
+  // same stale/superseded-proposal protection a full proposalId would,
+  // without needing the UUID to round-trip through Telegram at all -- the
+  // UUID itself is still kept in state.strategyProposal.proposalId for
+  // internal bookkeeping/logging.
   const buttons = [
     [
-      { text: "✅ Approve", callback_data: `strategyintervention:${state.workId}:${proposalId}.${proposalVersion}.approve` },
-      { text: "🔁 Refine", callback_data: `strategyintervention:${state.workId}:${proposalId}.${proposalVersion}.refine` },
+      { text: "✅ Approve", callback_data: `sprop:${state.workId}:${proposalVersion}.a` },
+      { text: "🔁 Refine", callback_data: `sprop:${state.workId}:${proposalVersion}.r` },
     ],
-    [{ text: "❌ Reject", callback_data: `strategyintervention:${state.workId}:${proposalId}.${proposalVersion}.reject` }],
+    [{ text: "❌ Reject", callback_data: `sprop:${state.workId}:${proposalVersion}.j` }],
   ];
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, message, buttons);
 
@@ -1154,29 +1164,34 @@ function formatApprovedProposalForFinance(proposal: StrategyProposal): string {
 export async function handleInterventionApproval(
   env: Env,
   state: WorkState,
-  proposalId: string,
   proposalVersion: number,
   decision: "approve" | "refine" | "reject",
 ): Promise<WorkState> {
+  // Note: only proposalVersion travels through the Telegram callback (see
+  // developStrategyProposal's button construction -- callback_data has a
+  // hard 64-byte limit, too small to also carry the full-UUID proposalId
+  // alongside the required workId). proposalVersion is a strictly-
+  // incrementing per-work-item counter, so matching it against
+  // pendingStrategyApproval/state.strategyProposal gives the same
+  // stale/superseded-proposal protection a proposalId match would.
   const pending = state.pendingStrategyApproval;
   const proposal = state.strategyProposal;
   const identityMatches =
     state.strategyApprovalState === "AWAITING_INTERVENTION_APPROVAL" &&
     !!pending &&
     pending.strategyWorkSessionId === state.workId &&
-    pending.proposalId === proposalId &&
     pending.proposalVersion === proposalVersion &&
     !!proposal &&
-    proposal.proposalId === proposalId &&
-    proposal.proposalVersion === proposalVersion;
+    proposal.proposalVersion === proposalVersion &&
+    proposal.proposalId === pending.proposalId;
 
   if (!identityMatches) {
-    console.error(`Strategy handleInterventionApproval: stale/mismatched callback for work ${state.workId} (proposalId ${proposalId}, version ${proposalVersion})`);
+    console.error(`Strategy handleInterventionApproval: stale/mismatched callback for work ${state.workId} (version ${proposalVersion})`);
     await logActivity(env, {
       entry: `Strategy proposal approval callback ignored — stale or superseded`,
       type: "Blocker",
       area: "Strategy",
-      decisionRationale: `Callback proposalId ${proposalId} v${proposalVersion} did not match the current pending approval (state: ${state.strategyApprovalState ?? "none"}). Treated as a no-op.`,
+      decisionRationale: `Callback v${proposalVersion} did not match the current pending approval (state: ${state.strategyApprovalState ?? "none"}). Treated as a no-op.`,
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "This proposal has already been resolved or superseded -- nothing to do.");
