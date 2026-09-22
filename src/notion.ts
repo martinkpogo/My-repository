@@ -67,7 +67,16 @@ export async function queryDataSource(
     method: "POST",
     body: JSON.stringify(body),
   });
-  return (data.results ?? []).map((p: any) => ({ id: p.id, url: p.url, properties: p.properties }));
+  // Notion's data-source query does not reliably exclude archived/trashed
+  // pages from results on its own (confirmed live: an archived Handoff was
+  // returned by a Status=Pending discovery query, causing a WorkSession to
+  // repeatedly fail trying to edit it -- "Can't edit block that is
+  // archived"). Filter them out here, once, so every caller (every
+  // discovery loop) is protected rather than each having to guard against
+  // this individually.
+  return (data.results ?? [])
+    .filter((p: any) => !p.archived && !p.in_trash)
+    .map((p: any) => ({ id: p.id, url: p.url, properties: p.properties }));
 }
 
 export async function createPage(
