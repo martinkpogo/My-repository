@@ -513,6 +513,30 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     return state;
   }
 
+  if (!state.matterName && state.handoffId) {
+    // state.matterName was cached from the Handoff's Matter_Token at pickup
+    // time and may simply have been unset then (a data gap on the source
+    // Handoff, not something this Hat can invent) -- re-read the live
+    // record once before giving up, so correcting it in Notion and
+    // re-approving actually is the working retry path the blocked message
+    // below describes, rather than a permanent dead end.
+    const live = await getPage(env, state.handoffId).catch((err) => {
+      console.error(`Finance handleQuoteApproval: re-fetch of Handoff ${state.handoffId} failed`, err);
+      return null;
+    });
+    const liveMatterToken = live ? plainText(live.properties.Matter_Token) : "";
+    if (liveMatterToken) {
+      state.matterName = liveMatterToken;
+      await logActivity(env, {
+        entry: `Matter_Token recovered on retry: ${state.entityName ?? state.handoffId}`,
+        type: "Decision",
+        area: "Finance",
+        decisionRationale: "Matter_Token was missing at pickup time but present on the Handoff's live record now -- recovered without re-deriving it.",
+        outcome: "Active",
+      });
+    }
+  }
+
   if (!state.matterName) {
     console.error(`Finance handleQuoteApproval: state.matterName missing for handoff ${state.handoffId}`);
     await logActivity(env, {
@@ -525,7 +549,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, then retry.`,
+      `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, add the correct Matter_Token there, then retry (Approve again).`,
     );
     return state;
   }

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handlePickup, validateFinanceJudgement } from "./valueBasedPricingAssessor";
+import { handlePickup, handleQuoteApproval, validateFinanceJudgement } from "./valueBasedPricingAssessor";
 import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {
@@ -55,6 +55,8 @@ function fakeAi(judgementJson: unknown): Ai {
 interface FetchLog {
   handoffPatchBodies: any[];
   sentTexts: string[];
+  handoffCreateBody: any;
+  getCallCount: number;
 }
 
 function mockFetch(
@@ -67,7 +69,7 @@ function mockFetch(
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffPatchBodies: [], sentTexts: [] };
+  const log: FetchLog = { handoffPatchBodies: [], sentTexts: [], handoffCreateBody: null, getCallCount: 0 };
   const verifiedFacts = opts.verifiedFacts ?? "Proposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.";
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
@@ -82,6 +84,7 @@ function mockFetch(
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
     if (urlStr.endsWith("/pages/handoff-1") && method === "GET") {
+      log.getCallCount += 1;
       return new Response(
         JSON.stringify({
           id: "handoff-1",
@@ -107,6 +110,11 @@ function mockFetch(
       );
     }
     if (urlStr.endsWith("/pages") && method === "POST") {
+      const body = JSON.parse(init.body);
+      if (body.parent?.data_source_id === "handoffs-ds") {
+        log.handoffCreateBody = body;
+        return new Response(JSON.stringify({ id: "handoff-new", url: "https://notion.so/handoff-new", properties: {} }), { status: 200 });
+      }
       return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
     }
     throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
@@ -379,4 +387,65 @@ test("Finance pickup refuses a Held Handoff (no explicit retry to Pending)", asy
 
   assert.strictEqual(result.quote, undefined);
   assert.strictEqual(log.handoffPatchBodies.length, 0);
+});
+
+test("handleQuoteApproval: proceeds normally and creates the Finance -> Sales Handoff when matterName is already present", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityName: "E-47",
+    matterName: "M-12",
+    quote: { price: 100000, rationale: "Value-based rationale." },
+  });
+
+  const result = await handleQuoteApproval(env, state, true);
+
+  assert.strictEqual(result.stage, "quote_approved");
+  assert.ok(log.handoffCreateBody, "the Finance -> Sales Handoff must be created");
+  assert.strictEqual(log.handoffCreateBody.properties["To Unit"].select.name, "Sales");
+  assert.strictEqual(log.handoffCreateBody.properties.Matter_Token.rich_text[0].text.content, "M-12");
+});
+
+test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion after pickup, and completes the retry", async (t) => {
+  // Reproduces the live incident: the ORIGINATING Handoff's Matter_Token was
+  // empty at Finance pickup time (state.matterName cached as undefined), so
+  // the first Approve attempt blocked. Martin then corrects Matter_Token on
+  // the live Notion record and clicks Approve again (the documented retry
+  // path) -- this must now succeed rather than blocking forever, since
+  // nothing about the in-memory WorkState could otherwise ever change.
+  // The live Notion record now carries the corrected Matter_Token ("MAT-20")
+  // -- as it would after Martin edits the Handoff and clicks Approve again,
+  // a fresh invocation of handleQuoteApproval with its own live re-fetch.
+  const log = mockFetch(t, { matterToken: "MAT-20" });
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityName: "E-20",
+    matterName: undefined,
+    quote: { price: 420000, rationale: "Value-based rationale." },
+  });
+
+  const result = await handleQuoteApproval(env, state, true);
+
+  assert.strictEqual(result.stage, "quote_approved", "the retry must succeed once Matter_Token is present on the live record");
+  assert.ok(log.handoffCreateBody, "the Finance -> Sales Handoff must be created once recovered");
+  assert.strictEqual(log.handoffCreateBody.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
+});
+
+test("handleQuoteApproval: stays blocked (not a silent failure) when Matter_Token is still missing on re-check", async (t) => {
+  const log = mockFetch(t, { matterToken: "" });
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityName: "E-20",
+    matterName: undefined,
+    quote: { price: 420000, rationale: "Value-based rationale." },
+  });
+
+  const result = await handleQuoteApproval(env, state, true);
+
+  assert.strictEqual(result.stage, "awaiting_quote_approval", "stage must not silently advance when still blocked");
+  assert.strictEqual(log.handoffCreateBody, null, "no Finance -> Sales Handoff may be created without a Matter_Token");
+  assert.ok(log.sentTexts.some((t) => /no Matter_Token on record/i.test(t)));
 });
