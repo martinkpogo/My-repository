@@ -852,6 +852,8 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
       outcome: "Complete",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Sent -- this research has been handed off to *${pending.hat}* to inform their work.`);
+    // See WorkState.pendingHandoffAutoCheck's doc comment.
+    state.pendingHandoffAutoCheck = true;
   } catch (err) {
     console.error(`R&I: failed to create approved handoff to ${pending.unit}/${pending.hat} for work ${state.workId}`, err);
     await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `Couldn't create the handoff to *${pending.hat}* -- please try approving again.`);

@@ -612,6 +612,7 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   // The originating Sales -> Strategy Handoff must now be Closed.
   const originatingPatch = log.handoffPatchBodies.find((p) => p.properties?.Status?.select?.name === "Closed");
   assert.ok(originatingPatch, "the originating Handoff must be closed once the approved proposal is transferred");
+  assert.strictEqual(afterApproval.pendingHandoffAutoCheck, true, "successful Strategy -> Finance Handoff creation must automatically invoke the existing /checkhandoffs path");
 });
 
 test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matter_Token carry exactly what the originating Handoff supplied, never a real name", async (t) => {
@@ -719,6 +720,7 @@ test("12/25. Reject records the rejection, closes the current attempt, and creat
   assert.strictEqual(log.handoffCreateBody, null, "rejection must never create a Finance Handoff");
   const closedPatch = log.handoffPatchBodies.find((p) => p.properties?.Status?.select?.name === "Closed");
   assert.ok(closedPatch, "the current strategic attempt (originating Handoff) must be closed on rejection");
+  assert.notStrictEqual(afterReject.pendingHandoffAutoCheck, true, "no Handoff was queued, so the /checkhandoffs continuation must not be invoked");
 });
 
 test("23. Old approval callback (superseded proposal version) cannot approve a revised proposal", async (t) => {
@@ -815,11 +817,38 @@ test("Marketing-specific work is routed to Marketing when there is no recommenda
   assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Marketing");
   assert.strictEqual(afterPickup.pendingStrategyHandoff!.hat, "Marketing Strategist");
 
-  await handleStrategyHandoffApproval(env, afterPickup, true);
+  const afterApproval = await handleStrategyHandoffApproval(env, afterPickup, true);
   const props = log.handoffCreateBody.properties;
   assert.strictEqual(props["To Unit"].select.name, "Marketing");
   assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
   assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.strictEqual(afterApproval.pendingHandoffAutoCheck, true, "successful Strategy -> downstream Handoff creation must automatically invoke the existing /checkhandoffs path");
+});
+
+test("Strategy -> downstream: a failed Handoff creation must not invoke the /checkhandoffs continuation", async (t) => {
+  mockFetch(t, {}); // baseline mock, then override POST /pages to fail for this test
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "marketing", reason: "Positioning decision needed." });
+  const state = fakeState();
+  const afterPickup = await handlePickup(env, state);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.endsWith("/pages") && init?.method === "POST") {
+      const body = JSON.parse(init.body);
+      if (body.parent?.data_source_id === "handoffs-ds") {
+        return new Response("simulated failure", { status: 500 });
+      }
+    }
+    return originalFetch(url, init);
+  }) as typeof fetch;
+  try {
+    const afterApproval = await handleStrategyHandoffApproval(env, afterPickup, true);
+    assert.notStrictEqual(afterApproval.pendingHandoffAutoCheck, true, "a failed Handoff creation must not invoke the /checkhandoffs continuation");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("R&I evidence/research boundary preserved -- Strategy routes missing-evidence work to R&I rather than inventing it", async (t) => {

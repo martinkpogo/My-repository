@@ -289,6 +289,11 @@ export class WorkSession extends DurableObject<Env> {
    */
   private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
     const state = await this.require();
+    // Reset every call -- see WorkState.pendingHandoffAutoCheck's doc
+    // comment. Only the specific handler invoked by fn() below may set
+    // this true again, so a caller inspecting the returned state never
+    // sees a stale signal left over from an earlier, unrelated call.
+    state.pendingHandoffAutoCheck = false;
     try {
       return await this.save(await fn(state));
     } catch (err) {

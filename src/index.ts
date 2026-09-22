@@ -1,11 +1,20 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
-import { answerCallbackQuery, sendMessage, sendOperationsMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, newWorkId, resolveUnitForThread, routeIncomingText, SALES_EXECUTIVE_PAUSED, setActiveWorkId } from "./router";
-import { plainText, queryDataSource } from "./notion";
+import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
+import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId } from "./router";
+import {
+  checkStaleHandoffs,
+  discoverPendingFinanceHandoffs,
+  discoverPendingMarketingHandoffs,
+  discoverPendingResearchHandoffs,
+  discoverPendingSalesHandoffs,
+  discoverPendingStrategyHandoffs,
+  maybeAutoContinueCheckHandoffs,
+  runCheckHandoffs,
+} from "./checkHandoffs";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
-import type { SessionSummary, Unit } from "./types";
+import type { SessionSummary } from "./types";
 import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
 import type { ReadAiPayload } from "./readai";
 import {
@@ -451,24 +460,6 @@ export default {
 };
 
 /**
- * Runtime protection layer (Gap B of the architecture audit) for the two
- * discovery loops below: a Durable Object RPC call can fail at the
- * transport level (not just inside the Hat logic it invokes, which already
- * has its own protection in session.ts's execute()) — the Handoff stays
- * Pending either way, so it's automatically retried next cycle rather than
- * silently dropped. Logs and notifies Martin directly rather than aborting
- * the rest of the batch.
- */
-async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: unknown): Promise<void> {
-  console.error(`Automated pickup failed for Handoff ${handoffId}`, err);
-  await sendMessage(
-    env,
-    Number(env.MARTIN_TELEGRAM_USER_ID),
-    `⚠️ Automated pickup failed for Handoff ${handoffId}. Logged for review — it stays Pending and will retry next cycle.`,
-  ).catch((notifyErr) => console.error(`Failed to notify Martin of pickup failure for ${handoffId}`, notifyErr));
-}
-
-/**
  * Runtime protection layer (Gap B) for the main Telegram entry point: if
  * handleUpdate throws anything not already caught by a more specific
  * fail-closed check, this reports it to the same chat/topic the update
@@ -485,242 +476,6 @@ async function notifyMartinOfFailure(env: Env, update: TelegramUpdate): Promise<
     undefined,
     threadId,
   );
-}
-
-/**
- * The Finance side of the Sales -> Finance execution boundary. Sales's Hat
- * code only ever creates the Handoff (Status: Pending) and records the
- * handoff_workitem mapping, then returns - it never calls into Finance
- * directly. This runs on its own schedule and discovers that Handoff
- * independently, the same way a separate Finance AI Workspace would.
- */
-async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Finance" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let pickedUp = 0;
-  for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      // No live Telegram session behind this Handoff -- e.g. created
-      // directly in Notion by the isolated Sales Executive project, which
-      // has no WorkState of its own in this Worker. Create a fresh
-      // session instead of skipping it, so Finance can still pick it up.
-      // Defaults to Martin's DM, his preferred front door for every
-      // Unit/Hat's work, since there's no originating chat to inherit.
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        // The later quote-approval step resolves the real Matter page ID
-        // itself (via Matter_Token, the Handoffs schema no longer carries a
-        // Matter relation) -- nothing to seed here.
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Finance", "Value-Based Pricing Assessor", threadId, { handoffId: handoff.id });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Finance Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.runFinancePickup();
-      pickedUp++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return pickedUp;
-}
-
-/**
- * The Sales side of the Finance -> Sales execution boundary — the return
- * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
- * Finance's own approval handler only ever creates this Handoff (Status:
- * Pending) and records the handoff_workitem mapping, then returns — it
- * never calls into Sales directly. This runs on its own schedule and
- * discovers that Handoff independently, the same way discoverPendingFinanceHandoffs
- * does for the opposite direction.
- */
-async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
-  if (SALES_EXECUTIVE_PAUSED) {
-    // Sales Executive is paused -- leave any Pending Finance->Sales
-    // Handoff as-is for automatic pickup once it's back, rather than
-    // routing proposal drafting through the frozen in-Worker code.
-    return 0;
-  }
-
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Sales" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let pickedUp = 0;
-  for (const handoff of pending) {
-    const workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      console.error(`Pending Sales Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
-      continue;
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.runProposalDrafting();
-      pickedUp++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return pickedUp;
-}
-
-/**
- * The R&I side of a <Unit> -> Research & Intelligence execution boundary,
- * mirroring discoverPendingFinanceHandoffs exactly -- the creating Unit's
- * Hat code only ever creates the Handoff (Status: Pending) and returns;
- * this runs on its own schedule and discovers it independently.
- */
-async function discoverPendingResearchHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Research & Intelligence" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let pickedUp = 0;
-  for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      // No live Telegram session behind this Handoff -- same
-      // no-prior-session case discoverPendingFinanceHandoffs handles.
-      // Defaults to Martin's DM, his preferred front door.
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId, { handoffId: handoff.id });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Research Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Research Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.runResearchPickup();
-      pickedUp++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return pickedUp;
-}
-
-/**
- * The Marketing side of the Research & Intelligence -> Marketing
- * execution boundary, mirroring discoverPendingResearchHandoffs exactly.
- * Currently the only creator of a To-Unit-Marketing Handoff is
- * researchAnalyst.ts's own auto-routing (routeToConsumingHat) once it
- * judges completed research directly relevant to Marketing Strategist's
- * work -- see Martin's "research has to find and feed the strategist hat
- * that needs it" direction.
- */
-async function discoverPendingMarketingHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Marketing" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let pickedUp = 0;
-  for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Marketing", "Marketing Strategist", threadId, { handoffId: handoff.id });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Marketing Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Marketing Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.runMarketingHandoffPickup();
-      pickedUp++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return pickedUp;
-}
-
-/**
- * The Strategy side of a <Unit> -> Strategy execution boundary, mirroring
- * discoverPendingResearchHandoffs/discoverPendingMarketingHandoffs exactly
- * -- the creating Unit's Hat code only ever creates the Handoff (Status:
- * Pending) and returns; this runs on its own schedule and discovers it
- * independently.
- */
-async function discoverPendingStrategyHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Strategy" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let pickedUp = 0;
-  for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Strategy", "Strategy Analyst", threadId, { handoffId: handoff.id });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Strategy Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.runStrategyPickup();
-      pickedUp++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return pickedUp;
 }
 
 async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
@@ -806,85 +561,12 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       // GitHub Actions cron already run -- exposed as a command so it's
       // triggerable directly from Telegram, without the admin URL/secret,
       // and entirely outside the AI-gated routeIncomingText path (a plain
-      // command, never routed through generalChatReply).
-      await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
-        console.error("Failed to record last_cron_run", err),
-      );
-      const unitHere = resolveUnitForThread(env, threadId);
-      try {
-        if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Research & Intelligence" || unitHere === "Marketing" || unitHere === "Strategy") {
-          // These five are the only Units with real pickup logic (Marketing's
-          // is Handoff-only -- see discoverPendingMarketingHandoffs -- chat-
-          // originated Marketing work still goes through handleMarketingIntake
-          // directly, never this discovery path). Discovery only counts a
-          // Handoff as "picked up" if it has a handoff_workitem KV mapping
-          // (tied to a live Telegram session); a Handoff created directly in
-          // Notion -- e.g. by the isolated Sales Executive project -- has no
-          // such mapping, so discovery finds it but silently skips it, and
-          // picked stays 0 even though it's genuinely Pending. Query Notion
-          // directly too, so the reply can tell "nothing pending" apart from
-          // "pending but stuck for lack of a work-item mapping" instead of
-          // reporting both as the same "No Handoffs pending" message.
-          const picked = await discoverPendingFinanceHandoffs(env);
-          const pickedForSales = await discoverPendingSalesHandoffs(env);
-          const pickedForResearch = await discoverPendingResearchHandoffs(env);
-          const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
-          const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
-          await checkStaleHandoffs(env);
-          const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
-          const pickedForThisUnit =
-            unitHere === "Finance"
-              ? picked
-              : unitHere === "Sales"
-                ? pickedForSales
-                : unitHere === "Marketing"
-                  ? pickedForMarketing
-                  : unitHere === "Strategy"
-                    ? pickedForStrategy
-                    : pickedForResearch;
-          let reply: string;
-          if (pendingCount === 0) {
-            reply = `No Handoffs pending for ${unitHere}.`;
-          } else if (pickedForThisUnit >= pendingCount) {
-            reply = `Picked up ${pickedForThisUnit} Handoff(s) for ${unitHere}.`;
-          } else {
-            reply = `${pendingCount} Handoff(s) pending for ${unitHere}, but automated pickup couldn't process ${pendingCount - pickedForThisUnit} of them (no handoff_workitem mapping -- likely created outside a live Telegram session, e.g. directly in Notion or by the isolated Sales Executive project). Needs manual follow-up.`;
-          }
-          await sendMessage(env, chatId, reply, undefined, threadId);
-        } else if (unitHere === "dm" || unitHere === "unmapped") {
-          // No specific Unit to scope to -- fall back to the combined
-          // summary across all real pickup directions.
-          const picked = await discoverPendingFinanceHandoffs(env);
-          const pickedForSales = await discoverPendingSalesHandoffs(env);
-          const pickedForResearch = await discoverPendingResearchHandoffs(env);
-          const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
-          const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
-          await checkStaleHandoffs(env);
-          // This is a cross-Unit operational summary, not a reply about any
-          // single work item -- belongs in the Operations stream (per
-          // Martin's explicit request), not wherever /checkhandoffs happened
-          // to be typed. The per-Unit branch above still replies in-thread,
-          // since that IS about the specific work item(s) in that topic.
-          await sendOperationsMessage(
-            env,
-            `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForResearch} picked up for Research & Intelligence, ${pickedForMarketing} picked up for Marketing, ${pickedForStrategy} picked up for Strategy.`,
-          );
-        } else {
-          // Business Development, Strategy, Creative & Design, and
-          // Operations -- no pickup logic exists for any of these, so just
-          // report whether anything is queued for this Unit rather than
-          // attempting a pickup that doesn't exist.
-          const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
-          const reply =
-            pendingCount > 0
-              ? `${pendingCount} Handoff(s) pending for ${unitHere} — no automated pickup exists yet for this Unit.`
-              : `No Handoffs pending for ${unitHere}.`;
-          await sendMessage(env, chatId, reply, undefined, threadId);
-        }
-      } catch (err) {
-        console.error("Unhandled error in /checkhandoffs", err);
-        await sendMessage(env, chatId, "Handoff discovery failed unexpectedly. Logged for review — will retry next cycle.", undefined, threadId);
-      }
+      // command, never routed through generalChatReply). The full
+      // implementation now lives in checkHandoffs.ts's runCheckHandoffs --
+      // shared verbatim with the automatic post-confirmation continuation a
+      // Hat triggers right after successfully queuing a Handoff (see e.g.
+      // salesExecutive.ts's handleInterventionText).
+      await runCheckHandoffs(env, chatId, threadId);
       return;
     }
     if (text.startsWith("/")) {
@@ -943,7 +625,8 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(env, chatId, "That work item no longer exists.", undefined, threadId);
       return;
     }
-    await stub.handleCallback(action, value);
+    const result = await stub.handleCallback(action, value);
+    await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
     return;
   }
 }
@@ -1019,7 +702,8 @@ async function applyReadAiMeeting(
   );
   const stub = getSessionStub(env, workId);
   await setActiveWorkId(env, chatId, threadId, workId);
-  await stub.handleTextReply(formatCallNotesFromPayload(meeting));
+  const result = await stub.handleTextReply(formatCallNotesFromPayload(meeting));
+  await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
 }
 
 async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise<void> {
@@ -1032,7 +716,8 @@ async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise
     const state = await stub.getState();
     if (state && state.awaiting === "call_notes") {
       await sendMessage(env, chatId, `Read.ai call ended: *${title}*. Feeding it in as call notes for the active work item.`);
-      await stub.handleTextReply(formatCallNotesFromPayload(payload));
+      const result = await stub.handleTextReply(formatCallNotesFromPayload(payload));
+      await maybeAutoContinueCheckHandoffs(env, chatId, undefined, result);
       return;
     }
   }
@@ -1049,25 +734,6 @@ async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise
 // them into plain English for display without needing a maintained mapping.
 function humanizeStage(stage: string): string {
   return stage.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
-}
-
-/**
- * Read-only count of Pending Work Handoffs addressed to a Unit, independent
- * of whether automated pickup can actually process them (that depends on a
- * handoff_workitem KV mapping the discovery functions require -- see
- * /checkhandoffs). Used both for Units with no pickup logic at all and to
- * detect Finance/Sales Handoffs that are genuinely pending but stuck for
- * lack of that mapping.
- */
-async function countPendingHandoffsForUnit(env: Env, unit: Unit): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    and: [
-      { property: "To Unit", select: { equals: unit } },
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-  return pending.length;
 }
 
 async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
@@ -1111,54 +777,9 @@ async function listSessionKvKeys(env: Env): Promise<string[]> {
   return keys;
 }
 
-// A digest only needs to reach Martin when the outstanding set actually
-// changes, or as a backstop so a stuck item is never silently forgotten --
-// resending the identical list every discovery tick is just noise.
-const STALE_HANDOFF_DIGEST_BACKSTOP_MS = 24 * 60 * 60 * 1000;
 // Discovery now runs every 15 min (see wrangler.toml / cron-job.org), so a
 // legitimate gap between runs can be nearly that long — the threshold has
 // to clear one full cycle plus buffer, or every check would false-alarm.
 const WATCHDOG_STALE_THRESHOLD_MS = 20 * 60 * 1000;
 const WATCHDOG_ALERT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
-// Runs on every discovery tick, but only actually messages Martin when the
-// set of outstanding (Pending/Held) Handoffs has changed since the last
-// digest, or the backstop interval has elapsed with no change at all.
-async function checkStaleHandoffs(env: Env): Promise<void> {
-  const results = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    or: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "Status", select: { equals: "Held" } },
-    ],
-  });
-  if (results.length === 0) return;
-
-  const lastSentKey = "stale_handoff_digest_last_sent";
-  const lastFingerprintKey = "stale_handoff_digest_last_fingerprint";
-  const fingerprint = results
-    .map((p) => `${p.id}:${plainText(p.properties.Status)}`)
-    .sort()
-    .join(",");
-
-  const [lastSent, lastFingerprint] = await Promise.all([
-    env.STATE_KV.get(lastSentKey),
-    env.STATE_KV.get(lastFingerprintKey),
-  ]);
-
-  const changed = fingerprint !== lastFingerprint;
-  const backstopDue = !lastSent || Date.now() - Number(lastSent) >= STALE_HANDOFF_DIGEST_BACKSTOP_MS;
-  if (!changed && !backstopDue) return;
-
-  const lines = results.map((p) => {
-    const status = plainText(p.properties.Status);
-    const toUnit = plainText(p.properties["To Unit"]);
-    const name = plainText(p.properties.Handoff);
-    return `• [${status}] ${name} → ${toUnit}`;
-  });
-  await sendOperationsMessage(
-    env,
-    `*Handoff check-in* — ${results.length} item(s) not Closed:\n\n${lines.join("\n")}`,
-  );
-  await env.STATE_KV.put(lastSentKey, String(Date.now()));
-  await env.STATE_KV.put(lastFingerprintKey, fingerprint);
-}

@@ -773,6 +773,8 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
       outcome: "Complete",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Sent -- this diagnosis has been handed off to *${pending.hat}*.`);
+    // See WorkState.pendingHandoffAutoCheck's doc comment.
+    state.pendingHandoffAutoCheck = true;
   } catch (err) {
     console.error(`Strategy: failed to create approved handoff to ${pending.unit}/${pending.hat} for work ${state.workId}`, err);
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Couldn't create the handoff to *${pending.hat}* -- please try approving again.`);
@@ -1312,6 +1314,8 @@ export async function handleInterventionApproval(
       outcome: "Complete",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Approved -- routed to Finance for pricing. I'll let you know once Finance responds.`);
+    // See WorkState.pendingHandoffAutoCheck's doc comment.
+    state.pendingHandoffAutoCheck = true;
 
     // Strategy's execution on this Handoff ends here -- Finance discovers
     // and picks up the new Handoff independently (see

@@ -484,13 +484,29 @@ test("19. Finance -> Sales creates a token-only Handoff -- the title and Reason 
     quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." },
   });
 
-  await handleQuoteApproval(env, state, true);
+  const result = await handleQuoteApproval(env, state, true);
 
   const props = log.handoffCreateBody.properties;
   assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
   assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
   assert.match(props.Handoff.title[0].text.content, /M-12/);
   assert.match(props.Reason.rich_text[0].text.content, /M-12/);
+  assert.strictEqual(result.pendingHandoffAutoCheck, true, "successful Finance -> Sales Handoff creation must automatically invoke the existing /checkhandoffs path");
+});
+
+test("Finance -> Sales: quote approval blocked on a missing Matter_Token must not invoke the /checkhandoffs continuation", async (t) => {
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityToken: "E-20",
+    matterToken: undefined,
+    quote: { price: 420000, rationale: "Value-based rationale." },
+  });
+  mockFetch(t, { matterToken: "" });
+
+  const result = await handleQuoteApproval(env, state, true);
+
+  assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "no Handoff was queued (still blocked on Matter_Token), so the continuation must not be invoked");
 });
 
 test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion after pickup, and completes the retry", async (t) => {

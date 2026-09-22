@@ -141,6 +141,7 @@ test("1. Inbound enquiry -> valid Sales -> Strategy Handoff via the existing que
   assert.ok(props["Verified Facts & Sources"]);
   assert.strictEqual(result.handoffId, "handoff-page-1");
   assert.strictEqual(result.stage, "awaiting_strategy");
+  assert.strictEqual(result.pendingHandoffAutoCheck, true, "successful Handoff creation must automatically invoke the existing /checkhandoffs path");
 });
 
 test("17. Sales -> Strategy creates a token-only Handoff -- the real Entity/Matter name never appears in any protected field", async (t) => {
@@ -190,6 +191,7 @@ test("3. Missing entry_type fails closed -- no Handoff created, Blocker logged",
   assert.strictEqual(log.handoffCreateBody, null, "must not create a Handoff without a valid entry_type");
   assert.ok(log.sentTexts.some((t) => /entry type/i.test(t)));
   assert.strictEqual(result.handoffId, undefined);
+  assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "failed Handoff creation must not invoke the /checkhandoffs continuation");
 });
 
 test("4. Missing proposed intervention (empty/whitespace text) fails closed", async (t) => {

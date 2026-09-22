@@ -602,6 +602,8 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     { ...state, hat: "Value-Based Pricing Assessor" },
     `Quote approved — queued for Sales to prepare the Draft Proposal for *${state.entityToken}*.`,
   );
+  // See WorkState.pendingHandoffAutoCheck's doc comment.
+  state.pendingHandoffAutoCheck = true;
 
   state.stage = "quote_approved";
   state.awaiting = undefined;

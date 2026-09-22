@@ -454,6 +454,22 @@ export interface WorkState {
    * asked," not a second source of truth.
    */
   pendingActionSummary?: PendingActionSummary;
+
+  /**
+   * Transient one-shot signal, NOT a persistent pending-approval field: set
+   * by a Hat handler that just successfully queued a Handoff (createHandoff
+   * succeeded and its Telegram confirmation was sent) to tell the caller
+   * (router.ts / index.ts, running in the Worker's own isolate, never the
+   * WorkSession Durable Object itself -- see checkHandoffs.ts's
+   * runCheckHandoffs doc comment for why) to trigger the existing
+   * /checkhandoffs continuation immediately, in this same chat/thread,
+   * instead of waiting for the next scheduled discovery cycle. Reset to
+   * false at the start of every WorkSession.execute() call (session.ts) so
+   * a stale true from an earlier, unrelated call can never leak into a
+   * later one -- true only ever reflects "the handler that just ran, in
+   * this exact call, queued a Handoff."
+   */
+  pendingHandoffAutoCheck?: boolean;
 }
 
 /**

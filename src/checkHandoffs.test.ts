@@ -1,0 +1,191 @@
+/// <reference types="node" />
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { runCheckHandoffs, maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
+import type { Env, WorkState } from "./types";
+
+function fakeKv() {
+  const store = new Map<string, string>();
+  return {
+    get: async (key: string) => store.get(key) ?? null,
+    put: async (key: string, val: string) => {
+      store.set(key, val);
+    },
+    delete: async (key: string) => {
+      store.delete(key);
+    },
+    list: async ({ prefix }: { prefix?: string } = {}) => {
+      const keys = Array.from(store.keys())
+        .filter((k) => !prefix || k.startsWith(prefix))
+        .map((k) => ({ name: k }));
+      return { keys, list_complete: true, cursor: undefined } as any;
+    },
+    store,
+  };
+}
+
+function fakeEnv(kv = fakeKv()): Env & { STATE_KV: ReturnType<typeof fakeKv> } {
+  return {
+    AI: {} as any,
+    WORK_SESSION: {} as any,
+    STATE_KV: kv,
+    NOTION_VERSION: "2025-09-03",
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ENTITY_DATA_SOURCE_ID: "entity-ds",
+    MATTERS_DATA_SOURCE_ID: "matters-ds",
+    PROPOSALS_DATA_SOURCE_ID: "proposals-ds",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    LEADS_DATA_SOURCE_ID: "leads-ds",
+    TELEGRAM_BOT_TOKEN: "test-token",
+    MARTIN_TELEGRAM_USER_ID: "9999",
+    NOTION_TOKEN: "test-notion-token",
+    TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
+    WORKSPACE_TOPIC_ID: "100",
+    OPERATIONS_TOPIC_ID: "14",
+  } as any;
+}
+
+/** Mocks Notion (always "no pending Handoffs") + Telegram (always succeeds), and counts calls made to each. */
+function mockFetch(t: any): { notionCalls: number; telegramCalls: number } {
+  const originalFetch = globalThis.fetch;
+  const counts = { notionCalls: 0, telegramCalls: 0 };
+  globalThis.fetch = (async (url: string) => {
+    const urlStr = String(url);
+    if (urlStr.includes("api.notion.com")) {
+      counts.notionCalls++;
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      counts.telegramCalls++;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return counts;
+}
+
+test("runCheckHandoffs (manual, no opts): runs discovery and replies, exactly the existing /checkhandoffs behavior", async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await runCheckHandoffs(env, 12345, undefined);
+  assert.ok(counts.notionCalls > 0, "discovery must query Notion");
+  assert.ok(counts.telegramCalls > 0, "a reply must be sent");
+});
+
+test("runCheckHandoffs (auto:true): runs normally when no other automatic invocation is in flight", async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await runCheckHandoffs(env, 12345, undefined, { auto: true });
+  assert.ok(counts.notionCalls > 0, "discovery must still run");
+});
+
+test("runCheckHandoffs (auto:true): recursion guard -- a second automatic invocation while one is already in flight is skipped", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  // Simulate an automatic invocation already in flight (the guard key set,
+  // as runCheckHandoffs itself would leave it mid-execution).
+  await env.STATE_KV.put("checkhandoffs_auto_inflight", "1");
+
+  const counts2 = mockFetch(t); // fresh counter after the guard is seeded
+  await runCheckHandoffs(env, 12345, undefined, { auto: true });
+  assert.strictEqual(counts2.notionCalls, 0, "a second automatic invocation must not run discovery while one is already in flight");
+  assert.strictEqual(counts2.telegramCalls, 0, "a second automatic invocation must not send any reply either");
+});
+
+test("runCheckHandoffs (auto:true): clears its own in-flight guard once finished, so the next automatic invocation can run", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  await runCheckHandoffs(env, 12345, undefined, { auto: true });
+  const stillSet = await env.STATE_KV.get("checkhandoffs_auto_inflight");
+  assert.strictEqual(stillSet, null, "the guard must be cleared after the automatic run completes");
+});
+
+test("runCheckHandoffs (manual, no auto): ignores the automatic-invocation guard entirely -- Martin can always run the command directly", async (t) => {
+  const env = fakeEnv();
+  await env.STATE_KV.put("checkhandoffs_auto_inflight", "1");
+  const counts = mockFetch(t);
+  await runCheckHandoffs(env, 12345, undefined); // no opts.auto
+  assert.ok(counts.notionCalls > 0, "a manual invocation must never be blocked by the automatic-invocation guard");
+});
+
+function fakeState(overrides: Partial<WorkState> = {}): WorkState {
+  return {
+    workId: "work-1",
+    chatId: 12345,
+    stage: "test",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+test("maybeAutoContinueCheckHandoffs: no-op when pendingHandoffAutoCheck is unset -- the overwhelming majority of calls", async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await maybeAutoContinueCheckHandoffs(env, 12345, undefined, fakeState());
+  assert.strictEqual(counts.notionCalls, 0, "no discovery must run when the flag isn't set");
+  assert.strictEqual(counts.telegramCalls, 0);
+});
+
+test("maybeAutoContinueCheckHandoffs: no-op when state is null/undefined (e.g. work item no longer exists)", async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await maybeAutoContinueCheckHandoffs(env, 12345, undefined, undefined);
+  await maybeAutoContinueCheckHandoffs(env, 12345, undefined, null);
+  assert.strictEqual(counts.notionCalls, 0);
+});
+
+test("maybeAutoContinueCheckHandoffs: triggers the checkhandoffs continuation when pendingHandoffAutoCheck is true -- successful Handoff creation automatically invokes the existing /checkhandoffs path", async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await maybeAutoContinueCheckHandoffs(env, 12345, undefined, fakeState({ pendingHandoffAutoCheck: true }));
+  assert.ok(counts.notionCalls > 0, "discovery must run once the flag is set");
+});
+
+test("maybeAutoContinueCheckHandoffs: uses the exact chatId/threadId passed in -- same WorkSession/conversation context as the Handoff that was just created", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let telegramChatId: number | undefined;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.includes("api.notion.com")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      telegramChatId = body.chat_id;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // threadId undefined resolves to the "dm" stream, whose existing
+  // /checkhandoffs behavior is to reply via the cross-Unit Operations
+  // summary rather than back to chatId directly -- give it a thread mapped
+  // to a real Unit (Finance) instead, so the per-Unit reply-in-thread
+  // branch (which does reply to chatId) is exercised.
+  const env = fakeEnv();
+  (env as any).UNIT_TOPIC_MAP = JSON.stringify({ Finance: 42 });
+  await maybeAutoContinueCheckHandoffs(env, 777888, 42, fakeState({ pendingHandoffAutoCheck: true }));
+  assert.strictEqual(telegramChatId, 777888, "the reply must go to the exact same chat the Handoff confirmation was sent to");
+});
+
+test("maybeAutoContinueCheckHandoffs: does not throw even if the continuation itself fails -- a failure there must never break the caller's own flow", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("simulated Notion outage");
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv();
+  await assert.doesNotReject(() => maybeAutoContinueCheckHandoffs(env, 12345, undefined, fakeState({ pendingHandoffAutoCheck: true })));
+});

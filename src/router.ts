@@ -1,4 +1,4 @@
-import type { Env, Unit } from "./types";
+import type { Env } from "./types";
 import { aiJson } from "./ai";
 import { sendMessage } from "./telegram";
 import { generalDmReply } from "./chat";
@@ -6,6 +6,27 @@ import { getGovernance } from "./governance";
 import { marketingHatSummaryList } from "./hats/registry";
 import { researchProtocolSummaryList } from "./units/research/protocols";
 import { routeWorkspaceCapabilityAction } from "./actions/registry";
+import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
+import {
+  getActiveWorkId,
+  getReplyMessageWorkId,
+  getSessionStub,
+  newWorkId,
+  resolveStreamForThread,
+  SALES_EXECUTIVE_PAUSED,
+  setActiveWorkId,
+} from "./sessionRouting";
+
+// Every primitive previously defined directly in this file (newWorkId,
+// getActiveWorkId/setActiveWorkId, getReplyMessageWorkId/
+// setReplyMessageWorkId, getSessionStub, resolveStreamForThread/
+// resolveUnitForThread/threadIdForUnit, SALES_EXECUTIVE_PAUSED) now lives in
+// sessionRouting.ts -- re-exported here so every existing `from "./router"`
+// import keeps working unchanged. See sessionRouting.ts's doc comment for
+// why: checkHandoffs.ts needs these same primitives, and this file now
+// needs to call back into checkHandoffs.ts (maybeAutoContinueCheckHandoffs,
+// below) -- splitting the primitives out breaks that circular dependency.
+export * from "./sessionRouting";
 
 // Canonical Notion governance source for this Workspace's routing/execution
 // constraints (Core Structure category 3 — one AI Project Instructions page
@@ -13,98 +34,11 @@ import { routeWorkspaceCapabilityAction } from "./actions/registry";
 // does not restate any Hat's own operating procedure.
 const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d";
 
-// Sales Executive/Business Development intake is paused by deliberate,
-// standing policy, not as a temporary state pending a rebuild. Real client
-// identity (Entity/Matter, names, contact details) is confirmed-sensitive
-// data that this Worker's AI provider (Cloudflare Workers AI) is not
-// approved to process -- Workers AI's training-data policy for personal
-// information hasn't been confirmed acceptable, the same reason
-// chat.general_reply is gated in dataBoundary/policy.ts. That work now
-// lives entirely in an isolated Sales Executive Claude project with its own
-// Notion (Entity/Matters/Proposals) and Gmail access, where Martin reviews
-// and approves every client-facing action (e.g. an email) directly -- it is
-// live and working, exchanging only opaque Entity_Token/Matter_Token values
-// with this Worker via the shared Handoffs database.
-//
-// This flag stays true until an AI provider with a confirmed acceptable
-// personal-data/training policy is available for this Worker to use --
-// not until the isolated project exists (it already does). This Worker's
-// own Notion integration has also had its connection to the Engagement
-// page (Entity, Matters, Proposals) removed entirely, so salesExecutive.ts's
-// Notion calls fail regardless of this flag; re-granting that access to
-// bring this code back would undo the isolation this pause protects.
-export const SALES_EXECUTIVE_PAUSED = true;
-
-
 // Every other Unit's chat is business_sensitive (see chatSensitivityForUnit
 // in chat.ts) and should normally succeed, so seeing this message there
 // points to a genuine provider failure, not policy.
 const AI_UNAVAILABLE_MESSAGE =
   "Couldn't generate a reply -- no AI provider is currently available. This points to a genuine provider failure, not an access restriction; please try again shortly.";
-
-export function newWorkId(): string {
-  return crypto.randomUUID();
-}
-
-export async function getActiveWorkId(env: Env, chatId: number, threadId?: number): Promise<string | null> {
-  return env.STATE_KV.get(`active:${chatId}:${threadId ?? "dm"}`);
-}
-
-export async function setActiveWorkId(env: Env, chatId: number, threadId: number | undefined, workId: string): Promise<void> {
-  await env.STATE_KV.put(`active:${chatId}:${threadId ?? "dm"}`, workId);
-}
-
-export async function setReplyMessageWorkId(env: Env, messageId: number, workId: string): Promise<void> {
-  await env.STATE_KV.put(`reply_msg:${messageId}`, workId, { expirationTtl: 60 * 60 * 24 * 7 });
-}
-
-export async function getReplyMessageWorkId(env: Env, messageId: number): Promise<string | null> {
-  return env.STATE_KV.get(`reply_msg:${messageId}`);
-}
-
-export function getSessionStub(env: Env, workId: string) {
-  const id = env.WORK_SESSION.idFromName(workId);
-  return env.WORK_SESSION.get(id) as any;
-}
-
-export type StreamType = "workspace" | "operations" | "dm" | "unmapped";
-
-/**
- * Resolves a Telegram message_thread_id to its Telegram Stream ("workspace" | "operations" | "dm" | "unmapped").
- * Thread IDs indicate Telegram stream identity only, never Unit ownership.
- */
-export function resolveStreamForThread(env: Env, threadId?: number): StreamType {
-  if (threadId === undefined) return "dm";
-
-  if (env.WORKSPACE_TOPIC_ID && threadId === Number(env.WORKSPACE_TOPIC_ID)) {
-    return "workspace";
-  }
-  if (env.OPERATIONS_TOPIC_ID && threadId === Number(env.OPERATIONS_TOPIC_ID)) {
-    return "operations";
-  }
-
-  return "unmapped";
-}
-
-export function resolveUnitForThread(env: Env, threadId?: number): Unit | "unmapped" | "dm" {
-  if (threadId === undefined) return "dm";
-  if (env.UNIT_TOPIC_MAP) {
-    try {
-      const map: Record<string, number> = JSON.parse(env.UNIT_TOPIC_MAP);
-      const entry = Object.entries(map).find(([, id]) => Number(id) === threadId);
-      if (entry && entry[0] !== "Conversation" && entry[0] !== "Operations") {
-        return entry[0] as Unit;
-      }
-    } catch {
-      // JSON parse error
-    }
-  }
-  return "dm";
-}
-
-export function threadIdForUnit(_env: Env, _unit: Unit): number | undefined {
-  return undefined;
-}
 
 interface RoutingClassification {
   route: "enquiry" | "out_of_scope" | "ambiguous";
@@ -283,7 +217,8 @@ export async function routeIncomingText(
         const stub = getSessionStub(env, matchedWorkId);
         const state = await stub.getState();
         if (state && state.awaiting) {
-          await stub.handleTextReply(text);
+          const result = await stub.handleTextReply(text);
+          await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
           return;
         }
       }
@@ -297,7 +232,8 @@ export async function routeIncomingText(
         const stub = getSessionStub(env, activeId);
         const state = await stub.getState();
         if (state && state.awaiting) {
-          await stub.handleTextReply(text);
+          const result = await stub.handleTextReply(text);
+          await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
           return;
         }
       }

@@ -1139,6 +1139,11 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     { ...state, hat: "Sales Executive" },
     `Got it — routing *${state.matterName}* to Strategy for diagnosis. I'll let you know here once Strategy responds.`,
   );
+  // Tells the caller (router.ts/index.ts) to trigger the existing
+  // /checkhandoffs continuation immediately, in this same chat/thread,
+  // rather than waiting for the next scheduled discovery cycle -- see
+  // WorkState.pendingHandoffAutoCheck's doc comment.
+  state.pendingHandoffAutoCheck = true;
 
   state.stage = "awaiting_strategy";
   state.awaiting = undefined;

@@ -602,12 +602,40 @@ test("20. R&I -> downstream Unit creates a token-only Handoff, carrying the work
   });
 
   const state = { ...fakeStateWithPendingHandoff(), entityToken: "E-47", matterToken: "M-12" };
-  await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
+  const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
 
   assert.ok(handoffCreateBody, "a Handoff must be created");
   const props = handoffCreateBody.properties;
   assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
   assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.strictEqual(result.pendingHandoffAutoCheck, true, "successful R&I -> downstream Handoff creation must automatically invoke the existing /checkhandoffs path");
+});
+
+test("R&I -> downstream: a failed Handoff creation must not invoke the /checkhandoffs continuation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (urlArg: string, init: any) => {
+    const url = String(urlArg);
+    if (url.startsWith("https://api.notion.com")) {
+      if (url.endsWith("/pages") && init?.method === "POST") {
+        const body = JSON.parse(init.body);
+        if (body.parent?.data_source_id === "handoffs-ds") {
+          return new Response("simulated failure", { status: 500 });
+        }
+      }
+      return new Response(JSON.stringify({ id: "page_1", url: "https://notion.so/page_1", properties: {} }), { status: 200 });
+    }
+    if (url.startsWith("https://api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const state = fakeStateWithPendingHandoff();
+  const result = await handleResearchHandoffApproval(fakeApprovalEnv(), state, true);
+  assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "a failed Handoff creation must not invoke the /checkhandoffs continuation");
 });
 
 test("20b. R&I -> downstream Unit falls back to unbound placeholder tokens for a direct (non-Handoff-originated) research request", async (t) => {
