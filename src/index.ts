@@ -860,12 +860,14 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
           const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
           const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
           await checkStaleHandoffs(env);
-          await sendMessage(
+          // This is a cross-Unit operational summary, not a reply about any
+          // single work item -- belongs in the Operations stream (per
+          // Martin's explicit request), not wherever /checkhandoffs happened
+          // to be typed. The per-Unit branch above still replies in-thread,
+          // since that IS about the specific work item(s) in that topic.
+          await sendOperationsMessage(
             env,
-            chatId,
             `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForResearch} picked up for Research & Intelligence, ${pickedForMarketing} picked up for Marketing, ${pickedForStrategy} picked up for Strategy.`,
-            undefined,
-            threadId,
           );
         } else {
           // Business Development, Strategy, Creative & Design, and
