@@ -9,6 +9,18 @@ export interface NotionPage {
   id: string;
   url: string;
   properties: Record<string, any>;
+  /**
+   * Which database/data source this page actually lives in, e.g.
+   * { type: "data_source_id", data_source_id: "..." } -- only populated by
+   * getPage (createPage/updatePage callers already know the data source
+   * they targeted). Needed wherever a caller must confirm a page genuinely
+   * belongs to a specific canonical database rather than trusting an
+   * external signal (e.g. notionWebhook.ts confirming a webhook-referenced
+   * page is actually a Handoffs-database row before treating it as one).
+   */
+  parent?: { type: string; data_source_id?: string; page_id?: string; database_id?: string };
+  archived?: boolean;
+  inTrash?: boolean;
 }
 
 async function notionFetch(env: Env, path: string, init: RequestInit = {}): Promise<any> {
@@ -104,7 +116,7 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
 
 export async function getPage(env: Env, pageId: string): Promise<NotionPage> {
   const data = await notionFetch(env, `/pages/${pageId}`);
-  return { id: data.id, url: data.url, properties: data.properties };
+  return { id: data.id, url: data.url, properties: data.properties, parent: data.parent, archived: data.archived, inTrash: data.in_trash };
 }
 
 export function plainText(prop: any): string {

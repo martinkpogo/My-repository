@@ -88,22 +88,51 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
 }
 
 /**
+ * Sends the Operations-topic "a Sales Handoff needs a human to activate
+ * the Sales Claude Project" notification -- fired the first time a given
+ * Pending Sales Handoff is detected while Sales Executive's own automated
+ * pickup stays paused (see SALES_EXECUTIVE_PAUSED). Deliberately carries
+ * only opaque identifiers (Matter_Token, the Handoff's own Notion page id)
+ * -- never a real Entity/company name, matching the Operations security
+ * contract every other cross-Unit summary in this file already follows.
+ * Deduped per-Handoff via a plain KV flag: this is a notification-noise
+ * optimization only, never the authority for whether the Handoff itself
+ * may be processed (that remains its live Status, per claimPendingHandoff).
+ */
+async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matterToken: string): Promise<void> {
+  const notifiedKey = `sales_handoff_notified:${handoff.id}`;
+  if (await env.STATE_KV.get(notifiedKey)) return;
+  await sendOperationsMessage(
+    env,
+    `*SALES HANDOFF READY*\nMatter: ${matterToken}\nHandoff: ${handoff.id}\nTo: Sales Executive\nStatus: Pending\n\nAction required: open the Sales Executive workspace (the isolated Sales Claude Project) and check the pending Handoff.`,
+  );
+  await env.STATE_KV.put(notifiedKey, "1", { expirationTtl: 60 * 60 * 24 * 30 }).catch((err) =>
+    console.error(`Failed to record sales_handoff_notified for ${handoff.id}`, err),
+  );
+}
+
+/**
  * The Sales side of the Finance -> Sales execution boundary — the return
  * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
- * Finance's own approval handler only ever creates this Handoff (Status:
- * Pending) and records the handoff_workitem mapping, then returns — it
- * never calls into Sales directly. This runs on its own schedule and
- * discovers that Handoff independently, the same way discoverPendingFinanceHandoffs
- * does for the opposite direction.
+ * Also the entry point for a Handoff addressed to Sales that was created
+ * directly in Notion by an authorized external writer (today, the isolated
+ * Sales Claude Project) rather than by this Worker's own Finance code.
+ *
+ * Detection/registration (finding the Pending Handoff, creating its
+ * WorkSession and handoff_workitem mapping if one doesn't exist yet, and
+ * notifying Operations) always happens, regardless of
+ * SALES_EXECUTIVE_PAUSED -- a human must still be able to discover a
+ * pending Sales Handoff without having to notice it manually in Notion.
+ * Only the actual AI-driven execution (runProposalDrafting -- Sales's own
+ * client_confidential proposal-drafting work, see
+ * dataBoundary/policy.ts's PRODUCTION_TASK_SENSITIVITY) stays gated behind
+ * SALES_EXECUTIVE_PAUSED exactly as before: this function never performs
+ * identity-sensitive Sales work on its own, however it was invoked. The
+ * governed work itself happens only once Martin opens the Sales Claude
+ * Project and says "Check Handoff" -- a deliberate human activation
+ * boundary this function does not and must not cross.
  */
 export async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
-  if (SALES_EXECUTIVE_PAUSED) {
-    // Sales Executive is paused -- leave any Pending Finance->Sales
-    // Handoff as-is for automatic pickup once it's back, rather than
-    // routing proposal drafting through the frozen in-Worker code.
-    return 0;
-  }
-
   const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
     and: [
       { property: "Status", select: { equals: "Pending" } },
@@ -114,11 +143,38 @@ export async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
 
   let pickedUp = 0;
   for (const handoff of pending) {
-    const workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
-      console.error(`Pending Sales Handoff ${handoff.id} has no known work item mapping — skipping automated pickup`);
+      // No live Telegram session behind this Handoff -- e.g. created
+      // directly in Notion by the isolated Sales Executive project. Register
+      // it (mirrors every other Unit's own no-mapping branch above) so it
+      // is discoverable and its context is ready -- but registering is not
+      // executing: nothing here calls into Sales Executive's own AI work.
+      try {
+        workId = newWorkId();
+        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
+        const stub = getSessionStub(env, workId);
+        await stub.init(workId, chatId, "Sales", "Sales Executive", undefined, { handoffId: handoff.id });
+        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        console.log(`Created work item ${workId} for externally-created Sales Handoff ${handoff.id} (no prior session)`);
+      } catch (err) {
+        console.error(`Failed to create a work item for externally-created Sales Handoff ${handoff.id}`, err);
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+        continue;
+      }
+    }
+
+    if (SALES_EXECUTIVE_PAUSED) {
+      // Detected and registered -- that's the whole job while paused.
+      // Execution stays behind the deliberate human "Check Handoff"
+      // activation in the isolated Sales Claude Project, not this loop.
+      const matterToken = plainText(handoff.properties?.Matter_Token) || "(unknown)";
+      await notifySalesHandoffReady(env, handoff, matterToken).catch((err) =>
+        console.error(`Failed to send Sales Handoff ready notification for ${handoff.id}`, err),
+      );
       continue;
     }
+
     const stub = getSessionStub(env, workId);
     try {
       await stub.runProposalDrafting();
@@ -335,53 +391,84 @@ export async function checkStaleHandoffs(env: Env): Promise<void> {
   await env.STATE_KV.put(lastFingerprintKey, fingerprint);
 }
 
-// Guards runCheckHandoffs's automatic (auto:true) invocations against
-// overlapping/recursive re-entry -- see runCheckHandoffs's doc comment.
-// Deliberately NOT applied to a manual /checkhandoffs invocation (Martin
-// must always be able to run the command directly, even if an automatic
-// continuation happens to be mid-flight).
+// Guards runCheckHandoffs's non-manual invocations ("runtime_auto" and
+// "notion_webhook") against overlapping/recursive re-entry -- see
+// runCheckHandoffs's doc comment. Deliberately NOT applied to a manual
+// /checkhandoffs invocation (Martin must always be able to run the command
+// directly, even if a background continuation happens to be mid-flight).
+// Shared across both non-manual sources: both are background sweeps of the
+// exact same discovery functions, so overlapping either with the other is
+// exactly as wasteful/risky as overlapping it with itself.
 const AUTO_CHECKHANDOFFS_GUARD_KEY = "checkhandoffs_auto_inflight";
 const AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS = 30;
 
+/** Which caller invoked runCheckHandoffs -- see runCheckHandoffs's doc comment for the semantics of each. */
+export type CheckHandoffsSource = "manual" | "runtime_auto" | "notion_webhook";
+
 /**
  * The exact existing /checkhandoffs command body, factored out so it can be
- * invoked from two places with identical behavior: the manual /checkhandoffs
- * Telegram command (index.ts), and the automatic post-confirmation
- * continuation a Hat triggers right after successfully queuing a Handoff
- * (opts.auto: true — see each Unit's producer call site, e.g.
- * salesExecutive.ts's handleInterventionText). Same discovery calls, same
- * reply formatting, same per-Unit/dm/unmapped branching -- nothing about
- * command semantics changes based on how it was invoked, per the Handoff
- * automation task's explicit requirement not to alter what /checkhandoffs
- * means.
+ * invoked identically from three places:
  *
- * chatId/threadId determine which Telegram stream the reply lands in and
- * which Unit's topic resolveUnitForThread resolves to -- exactly the same
- * as if Martin had typed /checkhandoffs in that same chat/thread himself.
- * Every discovery function above always sweeps all five pickup directions
- * regardless of unitHere (only which summary line is sent back differs) --
- * so calling this from the chat/thread a Hat's own confirmation was just
- * sent to reliably discovers and picks up the Handoff that was just queued,
- * without needing to resolve or guess which specific Handoff to check.
+ * - "manual" (default) -- the /checkhandoffs Telegram command (index.ts).
+ *   Unchanged behavior: replies in the same chat/thread it was invoked from.
+ * - "runtime_auto" -- the automatic post-confirmation continuation a Hat
+ *   triggers right after successfully queuing a Handoff inside this Worker
+ *   (see maybeAutoContinueCheckHandoffs, and each Unit's producer call
+ *   site, e.g. salesExecutive.ts's handleInterventionText). Same reply
+ *   behavior as "manual" -- this is still a reaction to something that
+ *   just happened in the same chat/thread, just triggered by the runtime
+ *   instead of Martin typing the command.
+ * - "notion_webhook" -- background/event-driven detection of a Handoff
+ *   created directly in Notion by an authorized external writer (see
+ *   notionWebhook.ts). No Telegram user is waiting on a reply in any
+ *   particular chat/thread here, so this source never sends the
+ *   manual/runtime_auto per-unit or cross-unit summary reply -- Operations
+ *   telemetry for a webhook-triggered run comes entirely from the
+ *   discovery functions' own existing signals (a Hat's own pickup
+ *   confirmation when it actually processes something, the Sales-specific
+ *   "SALES HANDOFF READY" notification, and notifyMartinOfDiscoveryFailure
+ *   on error) -- never a synthetic /checkhandoffs message and never a fake
+ *   reply into the Conversation topic.
  *
- * opts.auto guards against overlapping automatic re-entry (see
+ * Same discovery calls, same claim/pickup gates, same per-Unit/dm/unmapped
+ * routing logic in every case -- nothing about what counts as a Handoff or
+ * how it's processed changes based on source; only whether/how a summary
+ * reply is sent does.
+ *
+ * chatId/threadId determine which Telegram stream a reply (for "manual"/
+ * "runtime_auto") lands in and which Unit's topic resolveUnitForThread
+ * resolves to. Every discovery function above always sweeps all five
+ * pickup directions regardless of unitHere (only which summary line is
+ * sent back differs) -- so calling this from the chat/thread a Hat's own
+ * confirmation was just sent to reliably discovers and picks up the
+ * Handoff that was just queued, without needing to resolve or guess which
+ * specific Handoff to check. "notion_webhook" always passes Martin's own
+ * DM (undefined threadId) since a webhook event has no Telegram thread of
+ * its own -- resolveUnitForThread(undefined) is "dm", so it runs the same
+ * full cross-Unit sweep the dm/unmapped branch always has, just without
+ * that branch's own summary reply.
+ *
+ * "runtime_auto"/"notion_webhook" guard against overlapping re-entry (see
  * AUTO_CHECKHANDOFFS_GUARD_KEY) -- a short-lived KV flag, not a call-count
  * limit, since by construction (every Hat pickup stops at an approval gate
  * before it would ever queue a further Handoff on its own -- see the
- * automation task's recursion analysis) an automatic invocation cannot
- * actually cause another automatic invocation to fire; this guard exists
- * as an explicit, testable safety net regardless.
+ * automation task's recursion analysis) a background invocation cannot
+ * actually cause another one to fire; this guard exists as an explicit,
+ * testable safety net regardless. "manual" never applies or checks it.
  */
 export async function runCheckHandoffs(
   env: Env,
   chatId: number,
   threadId: number | undefined,
-  opts: { auto?: boolean } = {},
+  opts: { source?: CheckHandoffsSource } = {},
 ): Promise<void> {
-  if (opts.auto) {
+  const source = opts.source ?? "manual";
+  const guarded = source === "runtime_auto" || source === "notion_webhook";
+
+  if (guarded) {
     const inflight = await env.STATE_KV.get(AUTO_CHECKHANDOFFS_GUARD_KEY);
     if (inflight) {
-      console.log("Automatic /checkhandoffs continuation skipped -- already in flight (recursion guard)");
+      console.log(`Background /checkhandoffs continuation (${source}) skipped -- already in flight (recursion guard)`);
       return;
     }
     await env.STATE_KV.put(AUTO_CHECKHANDOFFS_GUARD_KEY, "1", { expirationTtl: AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS });
@@ -390,8 +477,8 @@ export async function runCheckHandoffs(
   try {
     // Same discovery logic /admin/run-finance-discovery and the 5-minute
     // GitHub Actions cron already run -- exposed as a command (and now
-    // also as an automatic continuation) so it can run immediately rather
-    // than waiting for the next scheduled cycle.
+    // also as an automatic continuation and a webhook-triggered run) so it
+    // can run immediately rather than waiting for the next scheduled cycle.
     await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
       console.error("Failed to record last_cron_run", err),
     );
@@ -416,6 +503,9 @@ export async function runCheckHandoffs(
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
         const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
+        // notion_webhook always passes threadId undefined (Martin's DM),
+        // so resolveUnitForThread never resolves to a specific Unit here --
+        // this branch only ever runs for "manual"/"runtime_auto".
         const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
         const pickedForThisUnit =
           unitHere === "Finance"
@@ -445,6 +535,16 @@ export async function runCheckHandoffs(
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
         const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
+        if (source === "notion_webhook") {
+          // Background/event-driven: no Telegram user is waiting on a
+          // reply anywhere, and there is no per-Handoff context to target
+          // one at -- Operations telemetry for this run comes entirely
+          // from the discovery functions' own signals above (a Hat's own
+          // pickup confirmation, the Sales-specific ready notification,
+          // and notifyMartinOfDiscoveryFailure on error), never a
+          // synthetic summary message.
+          return;
+        }
         // This is a cross-Unit operational summary, not a reply about any
         // single work item -- belongs in the Operations stream (per
         // Martin's explicit request), not wherever /checkhandoffs happened
@@ -468,12 +568,14 @@ export async function runCheckHandoffs(
       }
     } catch (err) {
       console.error("Unhandled error in /checkhandoffs", err);
-      await sendMessage(env, chatId, "Handoff discovery failed unexpectedly. Logged for review — will retry next cycle.", undefined, threadId);
+      if (source !== "notion_webhook") {
+        await sendMessage(env, chatId, "Handoff discovery failed unexpectedly. Logged for review — will retry next cycle.", undefined, threadId);
+      }
     }
   } finally {
-    if (opts.auto) {
+    if (guarded) {
       await env.STATE_KV.delete(AUTO_CHECKHANDOFFS_GUARD_KEY).catch((err) =>
-        console.error("Failed to clear the /checkhandoffs auto-continuation recursion guard", err),
+        console.error("Failed to clear the /checkhandoffs background-continuation recursion guard", err),
       );
     }
   }
@@ -502,7 +604,7 @@ export async function maybeAutoContinueCheckHandoffs(
   state: WorkState | undefined | null,
 ): Promise<void> {
   if (!state?.pendingHandoffAutoCheck) return;
-  await runCheckHandoffs(env, chatId, threadId, { auto: true }).catch((err) =>
+  await runCheckHandoffs(env, chatId, threadId, { source: "runtime_auto" }).catch((err) =>
     console.error("Automatic /checkhandoffs continuation failed", err),
   );
 }

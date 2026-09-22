@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runCheckHandoffs, maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
+import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingSalesHandoffs } from "./checkHandoffs";
 import type { Env, WorkState } from "./types";
 
 function fakeKv() {
@@ -80,7 +80,7 @@ test("runCheckHandoffs (manual, no opts): runs discovery and replies, exactly th
 test("runCheckHandoffs (auto:true): runs normally when no other automatic invocation is in flight", async (t) => {
   const counts = mockFetch(t);
   const env = fakeEnv();
-  await runCheckHandoffs(env, 12345, undefined, { auto: true });
+  await runCheckHandoffs(env, 12345, undefined, { source: "runtime_auto" });
   assert.ok(counts.notionCalls > 0, "discovery must still run");
 });
 
@@ -92,7 +92,7 @@ test("runCheckHandoffs (auto:true): recursion guard -- a second automatic invoca
   await env.STATE_KV.put("checkhandoffs_auto_inflight", "1");
 
   const counts2 = mockFetch(t); // fresh counter after the guard is seeded
-  await runCheckHandoffs(env, 12345, undefined, { auto: true });
+  await runCheckHandoffs(env, 12345, undefined, { source: "runtime_auto" });
   assert.strictEqual(counts2.notionCalls, 0, "a second automatic invocation must not run discovery while one is already in flight");
   assert.strictEqual(counts2.telegramCalls, 0, "a second automatic invocation must not send any reply either");
 });
@@ -100,7 +100,7 @@ test("runCheckHandoffs (auto:true): recursion guard -- a second automatic invoca
 test("runCheckHandoffs (auto:true): clears its own in-flight guard once finished, so the next automatic invocation can run", async (t) => {
   mockFetch(t);
   const env = fakeEnv();
-  await runCheckHandoffs(env, 12345, undefined, { auto: true });
+  await runCheckHandoffs(env, 12345, undefined, { source: "runtime_auto" });
   const stillSet = await env.STATE_KV.get("checkhandoffs_auto_inflight");
   assert.strictEqual(stillSet, null, "the guard must be cleared after the automatic run completes");
 });
@@ -188,4 +188,165 @@ test("maybeAutoContinueCheckHandoffs: does not throw even if the continuation it
 
   const env = fakeEnv();
   await assert.doesNotReject(() => maybeAutoContinueCheckHandoffs(env, 12345, undefined, fakeState({ pendingHandoffAutoCheck: true })));
+});
+
+// --- source: "notion_webhook" ---------------------------------------------
+
+test('runCheckHandoffs source "notion_webhook": runs discovery but sends no synthetic Telegram summary reply', async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await runCheckHandoffs(env, Number(env.MARTIN_TELEGRAM_USER_ID), undefined, { source: "notion_webhook" });
+  assert.ok(counts.notionCalls > 0, "discovery must still run for a webhook-triggered sweep");
+  assert.strictEqual(counts.telegramCalls, 0, "no /checkhandoffs summary message may be sent for a webhook-triggered sweep");
+});
+
+test('runCheckHandoffs source "notion_webhook": shares the recursion guard with runtime_auto -- an overlapping webhook sweep is skipped', async (t) => {
+  const env = fakeEnv();
+  await env.STATE_KV.put("checkhandoffs_auto_inflight", "1");
+  const counts = mockFetch(t);
+  await runCheckHandoffs(env, Number(env.MARTIN_TELEGRAM_USER_ID), undefined, { source: "notion_webhook" });
+  assert.strictEqual(counts.notionCalls, 0, "a webhook sweep must not run discovery while a background sweep is already in flight");
+});
+
+test('runCheckHandoffs source "notion_webhook": failures are logged, never turned into a synthetic Telegram message', async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (String(url).includes("api.notion.com")) throw new Error("simulated Notion outage");
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const env = fakeEnv();
+  await assert.doesNotReject(() => runCheckHandoffs(env, Number(env.MARTIN_TELEGRAM_USER_ID), undefined, { source: "notion_webhook" }));
+});
+
+test("17. Manual /checkhandoffs behavior remains unchanged (default source)", async (t) => {
+  const counts = mockFetch(t);
+  const env = fakeEnv();
+  await runCheckHandoffs(env, 12345, undefined);
+  assert.ok(counts.notionCalls > 0);
+  assert.ok(counts.telegramCalls > 0, "manual invocation still replies, exactly as before this task");
+});
+
+// --- Sales external-Handoff detection (items 11-13) -----------------------
+
+function createMockWorkSession() {
+  const calls: { init: any[][]; runProposalDrafting: number } = { init: [], runProposalDrafting: 0 };
+  const stub = {
+    init: async (...args: any[]) => {
+      calls.init.push(args);
+    },
+    runProposalDrafting: async () => {
+      calls.runProposalDrafting++;
+    },
+  };
+  return {
+    calls,
+    workSession: {
+      idFromName: (name: string) => name,
+      get: (_id: any) => stub,
+    },
+  };
+}
+
+function mockSalesHandoffFetch(t: any) {
+  const originalFetch = globalThis.fetch;
+  const operationsMessages: string[] = [];
+  const salesHandoff = {
+    id: "handoff-sales-1",
+    url: "https://notion.so/handoff-sales-1",
+    properties: {
+      Matter_Token: { rich_text: [{ plain_text: "MAT-20" }] },
+      Entity_Token: { rich_text: [{ plain_text: "E-20" }] },
+    },
+    archived: false,
+  };
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.includes("/data_sources/handoffs-ds/query")) {
+      const body = JSON.parse(init.body);
+      const toUnit = body.filter?.and?.find((f: any) => f.property === "To Unit")?.select?.equals;
+      if (toUnit === "Sales") {
+        return new Response(JSON.stringify({ results: [salesHandoff] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      if (body.text) operationsMessages.push(body.text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return { operationsMessages };
+}
+
+test("11. Externally-created Sales Handoff without handoff_workitem is detected instead of skipped", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t);
+
+  const pickedUp = await discoverPendingSalesHandoffs(env);
+
+  assert.strictEqual(calls.init.length, 1, "a WorkSession must be registered for the externally-created Sales Handoff");
+  const mapped = await env.STATE_KV.get("handoff_workitem:handoff-sales-1");
+  assert.ok(mapped, "handoff_workitem mapping must be recorded so the Handoff is discoverable next time too");
+  assert.strictEqual(pickedUp, 0, "detection/registration is not counted as a pickup -- no identity-sensitive execution happened");
+});
+
+test("12. External Sales detection does not execute identity-sensitive Sales work automatically", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t);
+
+  await discoverPendingSalesHandoffs(env);
+
+  assert.strictEqual(calls.runProposalDrafting, 0, "Sales Executive's own AI-driven work must never run automatically from detection alone");
+});
+
+test("13. Operations notification is generated for a newly detected Sales Handoff", async (t) => {
+  const { workSession } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t);
+
+  await discoverPendingSalesHandoffs(env);
+
+  const readyMessage = operationsMessages.find((m) => m.includes("SALES HANDOFF READY"));
+  assert.ok(readyMessage, "an Operations notification must be sent for a newly detected Sales Handoff");
+  assert.match(readyMessage!, /MAT-20/);
+  assert.match(readyMessage!, /Open the Sales Executive workspace/i);
+});
+
+test("20. Sales Handoff ready notification never contains real Entity identity -- only the opaque Matter_Token/Handoff id", async (t) => {
+  const { workSession } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t);
+
+  await discoverPendingSalesHandoffs(env);
+
+  const readyMessage = operationsMessages.find((m) => m.includes("SALES HANDOFF READY"))!;
+  assert.ok(readyMessage);
+  assert.ok(!readyMessage.includes("@"), "no email-shaped content should ever appear in this notification");
+  assert.match(readyMessage, /MAT-20/, "only the opaque Matter_Token identifies the Matter");
+});
+
+test("Sales Handoff ready notification is sent once per Handoff, not on every discovery tick (dedup)", async (t) => {
+  const { workSession } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t);
+
+  await discoverPendingSalesHandoffs(env);
+  await discoverPendingSalesHandoffs(env);
+
+  const readyMessages = operationsMessages.filter((m) => m.includes("SALES HANDOFF READY"));
+  assert.strictEqual(readyMessages.length, 1, "the same pending Sales Handoff must not re-notify Operations on every tick");
 });

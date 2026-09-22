@@ -2,3 +2,8 @@ TELEGRAM_BOT_TOKEN=123456:ABC-your-bot-token-from-BotFather
 TELEGRAM_WEBHOOK_SECRET=choose-a-random-string
 MARTIN_TELEGRAM_USER_ID=123456789
 NOTION_TOKEN=secret_your-notion-internal-integration-token
+# The Notion webhook subscription's verification token (Notion issues this
+# during the one-time handshake when the subscription is created in the
+# integration dashboard -- copy it from there; nothing in this codebase
+# creates or registers the subscription itself). See src/notionWebhook.ts.
+NOTION_WEBHOOK_SECRET=notion-issued-verification-token

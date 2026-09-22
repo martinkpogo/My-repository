@@ -35,15 +35,24 @@ import {
 } from "./googleOAuth";
 import { pollGoogleDocComments } from "./googleDocComments";
 import { pollGoogleSheetComments } from "./googleSheetComments";
+import { handleNotionWebhookRequest } from "./notionWebhook";
 
 export { WorkSession } from "./session";
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
       return new Response("ok");
+    }
+
+    // Externally-created Handoff detection -- a Handoff queued directly in
+    // Notion (e.g. by the isolated Sales Claude Project) rather than by
+    // this Worker's own code. See notionWebhook.ts for the full
+    // authentication/filtering contract; this route only wires it up.
+    if (url.pathname === "/notion/webhook" && request.method === "POST") {
+      return handleNotionWebhookRequest(request, env, ctx);
     }
 
     if (url.pathname === "/telegram/webhook" && request.method === "POST") {

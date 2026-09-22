@@ -52,6 +52,20 @@ export interface Env {
   EMAIL_WEBHOOK_SECRET?: string;
 
   /**
+   * The Notion webhook subscription's verification token, used as the HMAC
+   * key for validating the X-Notion-Signature header on every event
+   * delivery to /notion/webhook (see notionWebhook.ts). Notion issues this
+   * token during the one-time verification handshake when the subscription
+   * is first created in the Notion integration dashboard -- it must be
+   * copied from there into this secret (`wrangler secret put
+   * NOTION_WEBHOOK_SECRET`) by hand; nothing in this codebase creates,
+   * registers, or modifies the actual Notion subscription. Unset means the
+   * webhook endpoint fails closed (rejects every event) rather than
+   * accepting unverified deliveries.
+   */
+  NOTION_WEBHOOK_SECRET?: string;
+
+  /**
    * Tavily search API key, used only by Research & Intelligence's live
    * web-search capability (src/units/research/webSearch.ts). Optional --
    * unset means R&I stays closed-book (reasons only over supplied
