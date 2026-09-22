@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   handleProposalHandoffPickup,
   handleSalesProposalDecision,
@@ -115,6 +116,9 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     matterToken: "MAT-20",
     strategyApprovalState: "APPROVED",
     strategyProposal: approvedStrategyProposal(),
+    // Test fixture only: no production code sets this today (see
+    // verifyStrategyProposalTokenSafety). Tests of the gate itself remove it.
+    strategyProposalTokenSafety: { proposalId: "strategy-prop-1", proposalVersion: 1, basis: "test fixture" },
     ...overrides,
   };
 }
@@ -366,24 +370,24 @@ test("5. The complete Proposal content is stored (beyond 2,000 chars, not trunca
   const stored = text(rec["Proposal Content"]);
   assert.strictEqual(stored, state.salesProposal!.versions[0].content, "stored content is the full composed Proposal");
   for (const heading of [
-    "1. PROPOSAL IDENTIFICATION",
-    "2. EXECUTIVE SUMMARY / CONTEXT",
-    "3. STRATEGIC PROBLEM / OPPORTUNITY",
-    "4. DIAGNOSIS",
-    "5. OBJECTIVE",
-    "6. RECOMMENDED INTERVENTION",
-    "7. SCOPE AND DELIVERABLES",
-    "8. APPROACH / METHOD",
-    "9. EXPECTED OUTCOMES",
-    "10. TIMELINE",
-    "11. BASIS FOR THE INVESTMENT",
-    "12. INVESTMENT",
-    "13. COMMERCIAL TERMS",
-    "14. WHAT ENIG NEEDS FROM THE CLIENT",
-    "15. ASSUMPTIONS, DEPENDENCIES, RISKS AND EXCLUSIONS",
-    "16. NEXT STEPS",
+    "PROPOSAL IDENTIFICATION",
+    "EXECUTIVE SUMMARY / CONTEXT",
+    "STRATEGIC PROBLEM / OPPORTUNITY",
+    "DIAGNOSIS",
+    "OBJECTIVE",
+    "RECOMMENDED INTERVENTION",
+    "SCOPE AND DELIVERABLES",
+    "APPROACH / METHOD",
+    "EXPECTED OUTCOMES",
+    "TIMELINE",
+    "BASIS FOR THE INVESTMENT",
+    "INVESTMENT",
+    "COMMERCIAL TERMS",
+    "WHAT ENIG NEEDS FROM THE CLIENT",
+    "ASSUMPTIONS, DEPENDENCIES, RISKS AND EXCLUSIONS",
+    "NEXT STEPS",
   ]) {
-    assert.ok(stored.includes(heading), `missing section: ${heading}`);
+    assert.match(stored, new RegExp(`\\n\\d+\\. ${heading.replace(/[/()]/g, "\\$&")}\\n`), `missing section: ${heading}`);
   }
   assert.ok(stored.includes("Unified Company Image and Messaging Framework"), "workstreams are carried in full");
   assert.ok(rec["Proposal Content"].rich_text.length > 1, "long content is split across rich-text items, not truncated");
@@ -398,33 +402,80 @@ test("6. The Finance quote remains exactly GHS 420,000", async (t) => {
   assert.strictEqual(rec["Quoted Price"].number, 420000);
   assert.match(text(rec["Quote Rationale"]), /^Currency: GHS\./);
   const content = text(rec["Proposal Content"]);
-  assert.match(content, /Investment: GHS 420,000 \(authoritative Finance quote/);
+  assert.match(content, /\nInvestment: GHS 420,000\n/);
   assert.strictEqual(state.salesProposal!.facts!.quote.price, 420000);
   assert.strictEqual(state.salesProposal!.facts!.quote.currency, "GHS");
 });
+
+function section(content: string, heading: string): string {
+  const m = content.match(new RegExp(`\\n\\d+\\. ${heading}\\n([\\s\\S]*?)(?=\\n\\n\\d+\\. |$)`));
+  return m ? m[1] : "";
+}
 
 test("7. The Finance rationale is preserved verbatim, with no added financial justification", async (t) => {
   const { world } = await createV1(t);
   const rec = proposals(world)[0].properties;
   const content = text(rec["Proposal Content"]);
-  assert.ok(content.includes(`Approved Finance pricing rationale:\n${FINANCE_RATIONALE}`));
   assert.ok(text(rec["Quote Rationale"]).endsWith(FINANCE_RATIONALE));
-  const basis = content.split("11. BASIS FOR THE INVESTMENT")[1].split("12. INVESTMENT")[0].trim();
-  assert.strictEqual(basis, `Approved Finance pricing rationale:\n${FINANCE_RATIONALE}`, "nothing beyond the Finance rationale in the basis section");
+  assert.strictEqual(section(content, "BASIS FOR THE INVESTMENT"), FINANCE_RATIONALE, "the basis section is exactly the Finance rationale");
 });
 
-test("8. The GHS 30,000–60,000 client planning range is kept as context and never replaces GHS 420,000", async (t) => {
+test("8. The GHS 30,000–60,000 planning range is kept out of Proposal Content, shown to Martin as internal review material, and never replaces GHS 420,000", async (t) => {
   const { world } = await createV1(t);
   const rec = proposals(world)[0].properties;
   const content = text(rec["Proposal Content"]);
   assert.strictEqual(rec["Quoted Price"].number, 420000);
-  assert.match(content, /Client-disclosed planning range \(commercial context only; client-disclosed, recorded on HO-62\): GHS 30,000–60,000/);
-  const investment = content.split("12. INVESTMENT")[1].split("13. COMMERCIAL TERMS")[0];
-  assert.ok(!investment.includes("30,000") && !investment.includes("60,000"), "the range never appears in the Investment section");
-  assert.match(investment, /GHS 420,000/);
-  const internal = content.split("INTERNAL REVIEW NOTES")[1];
-  assert.ok(content.indexOf("30,000") > content.indexOf("INTERNAL REVIEW NOTES"), "range only in the internal notes");
-  assert.match(internal, /does not replace or alter the Finance quote/);
+  assert.ok(!content.includes("30,000") && !content.includes("60,000"), "the planning range is not in Proposal Content");
+  assert.strictEqual(section(content, "INVESTMENT"), "Investment: GHS 420,000");
+  const review = world.telegram.map((m) => m.text).join("").split("INTERNAL REVIEW MATERIAL")[1];
+  assert.ok(review, "the approval request carries a labelled internal review section");
+  assert.match(review, /Client-disclosed planning range \(client-disclosed, recorded on HO-62\): GHS 30,000–60,000/);
+  assert.match(review, /does not replace or alter the Finance quote/);
+});
+
+test("8b. Proposal Content holds commercial substance only; the approved hash covers exactly that content", async (t) => {
+  const { world, state } = await createV1(t);
+  const content = text(proposals(world)[0].properties["Proposal Content"]);
+  for (const internal of [
+    "30,000",
+    "60,000",
+    "INTERNAL",
+    "review material",
+    "Payment terms",
+    "Quote validity",
+    "validity",
+    "issue date",
+    "Martin",
+    "Source Handoff",
+    "HO-64",
+    "HO-62",
+    "Approved Strategy proposal",
+    "strategy-prop-1",
+    "Identity & Artifact",
+    "approval",
+    "not altered",
+    "Not specified",
+    "established upstream",
+    "Approved Finance pricing rationale",
+  ]) {
+    assert.ok(!content.toLowerCase().includes(internal.toLowerCase()), `internal material in Proposal Content: ${internal}`);
+  }
+  const v1 = state.salesProposal!.versions[0];
+  assert.strictEqual(v1.content, content);
+  assert.strictEqual(v1.contentHash, createHash("sha256").update(content).digest("hex"), "hash is of Proposal Content only");
+  const snapshot = world.blockAppends[0].children.slice(1).map((b: any) => b.paragraph.rich_text[0].text.content).join("");
+  assert.strictEqual(snapshot, content, "the page-body snapshot holds no review material either");
+});
+
+test("8c. The review material stays available to Martin: open items, sources and the rationale conflict", async (t) => {
+  const { world } = await createV1(t);
+  const msg = world.telegram.map((m) => m.text).join("");
+  const [proposalPart, review] = msg.split("=== INTERNAL REVIEW MATERIAL");
+  assert.match(proposalPart, /=== PROPOSAL PROP-7 v1 \(the content being approved\) ===/);
+  assert.match(review, /not part of the Proposal, not stored in Proposal Content, not approved with it/);
+  assert.match(review, /Open items \(not stated upstream, not in the Proposal\): payment terms; quote validity period; issue date\./);
+  assert.match(review, /Source: Handoff HO-64 \(Finance → Sales\); approved Strategy proposal strategy-prop-1 v1\./);
+  assert.match(review, /conflict is unresolved/);
 });
 
 test("9. A newly generated Proposal is Pending Approval, Approved Version blank, Artifact Status Not Requested", async (t) => {
@@ -525,7 +576,9 @@ test("14. A substantive revision after approval creates a new Version, keeps the
   assert.strictEqual(text(rec["Artifact Status"]), "Held", "the previously released artifact work is held, not given v2");
   const v2Content = text(rec["Proposal Content"]);
   assert.match(v2Content, /Version: v2/);
-  assert.match(v2Content, /Introduced in v2: Add a second training session for the retail sales team\./);
+  assert.match(section(v2Content, "AMENDMENTS"), /^- Add a second training session for the retail sales team\.$/);
+  assert.ok(!v2Content.includes("Introduced in"), "amendment provenance is review material, not Proposal Content");
+  assert.match(approvalRequests(world).at(-1)!.text + world.telegram.at(-1)!.text, /Amendment introduced in v2 at Martin's direction\./);
   assert.match(v2Content, /GHS 420,000/, "the Finance quote is untouched by a Sales revision");
   assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "approved v1 substance is kept unchanged");
   assert.strictEqual(world.blockAppends.length, 2, "v1 and v2 snapshots both kept in the page body");
@@ -665,10 +718,50 @@ test("buildProposalContent is deterministic", () => {
     entityToken: "E-20",
     matterToken: "MAT-20",
     quote: { price: 420000, currency: "GHS", rationale: FINANCE_RATIONALE },
+    strategyProposalId: "strategy-prop-1",
     strategyProposalVersion: 1,
     strategy: approvedStrategyProposal(),
   };
   const a = buildProposalContent(facts, { proposalId: "PROP-7", version: 1, amendments: [] });
   const b = buildProposalContent(facts, { proposalId: "PROP-7", version: 1, amendments: [] });
   assert.strictEqual(a, b);
+});
+
+// ---------------------------------------------------------------------------
+// Strategy Proposal identity boundary.
+// ---------------------------------------------------------------------------
+
+test("S1. Without a token-safety verification for the approved Strategy Proposal (the production state today), nothing is produced", async (t) => {
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: undefined });
+  assert.strictEqual(proposals(world).length, 0, "no Proposal record");
+  assert.strictEqual(approvalRequests(world).length, 0, "nothing presented for approval");
+  assert.match(state.blockedReason ?? "", /Strategy Proposal identity boundary: .*strategy-prop-1 v1.*no authoritative token-safety verification/);
+  assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Held", "HO-64 is held with the reason, not left to retry every cycle");
+  assert.match(text(world.pages.get(HO64_ID)!.properties["Open Questions"]), /token-safety verification/);
+  assert.ok(!world.fetches.some((f) => f.url.endsWith("/pages") && f.body?.parent?.data_source_id === "proposals-ds"));
+});
+
+test("S2. A verification for a different Strategy Proposal version does not count", async (t) => {
+  const { world, state } = await createV1(t, {
+    strategyProposalTokenSafety: { proposalId: "strategy-prop-1", proposalVersion: 2, basis: "stale" },
+  });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /is for Strategy proposal strategy-prop-1 v2, not the approved strategy-prop-1 v1/);
+});
+
+test("S3. The gate is not a text heuristic: a clean-looking but unverified Strategy Proposal is still refused", async (t) => {
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: undefined, entityName: undefined, matterName: undefined });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /no authoritative token-safety verification/);
+});
+
+test("S4. Reprocessing an existing Proposal without verification does not re-hydrate Strategy facts, so no new Version can be built from them", async (t) => {
+  const { world, env } = await createV1(t);
+  const fresh = await handleProposalHandoffPickup(env, fakeState({ strategyProposalTokenSafety: undefined }));
+  assert.strictEqual(proposals(world).length, 1);
+  assert.strictEqual(fresh.salesProposal?.facts, undefined);
+  await handleSalesProposalDecision(env, fresh, 7, 1, "revise");
+  await handleSalesProposalRevisionText(env, fresh, "Clarify the audit scope.");
+  assert.strictEqual(text(proposals(world)[0].properties.Version), "v1", "no new Version without verified facts");
+  assert.match(fresh.blockedReason ?? "", /upstream facts .* not available/);
 });

@@ -458,6 +458,15 @@ export interface WorkState {
    * version: a revision request for a superseded version is refused.
    */
   pendingSalesProposalRevision?: { proposalNumber: number; fromVersion: number };
+  /**
+   * Authoritative confirmation that the approved Strategy Proposal carried
+   * on this work item is token-safe, bound to its exact proposal ID and
+   * version. Runtime Sales Proposal production refuses to consume a Strategy
+   * Proposal without a matching one (see verifyStrategyProposalTokenSafety).
+   * Nothing in the runtime sets this today: establishing it requires a
+   * separate upstream change on the Strategy side.
+   */
+  strategyProposalTokenSafety?: { proposalId: string; proposalVersion: number; basis: string };
 
   /**
    * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.

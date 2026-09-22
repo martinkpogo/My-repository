@@ -360,18 +360,46 @@ const FINANCE_ORIGIN = {
   "From Hat": { rich_text: [{ plain_text: "Value-Based Pricing Assessor" }] },
 };
 
-test("Finance -> Sales Handoff (approved quote) runs the Runtime token-safe Proposal flow, even while Sales intake is paused", async (t) => {
+test("Paused: a Finance -> Sales Handoff follows the existing paused behaviour -- registered, Operations notified, left Pending, no Proposal flow", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t, FINANCE_ORIGIN);
 
-  const pickedUp = await discoverPendingSalesHandoffs(env);
+  const pickedUp = await discoverPendingSalesHandoffs(env); // production default: SALES_EXECUTIVE_PAUSED
+
+  assert.strictEqual(calls.runTokenSafeProposal, 0, "the token-safe Proposal flow must not run while Sales is paused");
+  assert.strictEqual(calls.runProposalDrafting, 0);
+  assert.strictEqual(pickedUp, 0);
+  assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "the existing paused notification is sent");
+  // The mocked fetch throws on anything but the discovery query and Telegram,
+  // so reaching here also proves no Handoff status write (it stays Pending).
+});
+
+test("Not paused: a Finance -> Sales Handoff runs the token-safe Proposal flow instead of the old drafting path", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t, FINANCE_ORIGIN);
+
+  const pickedUp = await discoverPendingSalesHandoffs(env, false);
 
   assert.strictEqual(calls.runTokenSafeProposal, 1);
-  assert.strictEqual(calls.runProposalDrafting, 0, "the legacy identity-bearing drafting path is not used");
+  assert.strictEqual(calls.runProposalDrafting, 0);
   assert.strictEqual(pickedUp, 1);
-  assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "no hand-off to the isolated Sales project for this Handoff");
+  assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
+});
+
+test("Not paused: a non-Finance Sales Handoff still uses the existing drafting path", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t, { "From Unit": { select: { name: "Strategy" } }, "From Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] } });
+
+  await discoverPendingSalesHandoffs(env, false);
+
+  assert.strictEqual(calls.runTokenSafeProposal, 0);
+  assert.strictEqual(calls.runProposalDrafting, 1);
 });
 
 test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + notify only)", async (t) => {

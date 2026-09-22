@@ -79,6 +79,7 @@ export interface ProposalFacts {
   entityToken: string;
   matterToken: string;
   quote: ProposalQuote;
+  strategyProposalId: string;
   strategyProposalVersion: number;
   strategy: StrategyProposal;
   investmentTolerance?: InvestmentToleranceNote;
@@ -177,9 +178,14 @@ export function extractInvestmentTolerance(text: string): { low: number; high: n
   return null;
 }
 
-function list(items: (string | undefined)[] | undefined, emptyText: string): string {
-  const clean = (items ?? []).map((i) => (i ?? "").trim()).filter(Boolean);
-  return clean.length ? clean.map((i) => `- ${i}`).join("\n") : `- ${emptyText}`;
+function clean(items: (string | undefined)[] | undefined): string[] {
+  return (items ?? []).map((i) => (i ?? "").trim()).filter(Boolean);
+}
+
+/** A labelled bullet list, or null when there is nothing to list -- empty lists are omitted, never padded with placeholder text. */
+function labeledList(label: string, items: (string | undefined)[] | undefined): string | null {
+  const c = clean(items);
+  return c.length ? `${label}:\n${c.map((i) => `- ${i}`).join("\n")}` : null;
 }
 
 function field(label: string, value: string | undefined): string | null {
@@ -190,8 +196,6 @@ function field(label: string, value: string | undefined): string | null {
 function joinLines(lines: (string | null | undefined)[]): string {
   return lines.filter((l): l is string => !!l && l.length > 0).join("\n");
 }
-
-const NOT_SPECIFIED = "Not specified in the approved Strategy proposal.";
 
 /**
  * Names every fact a faithful Proposal needs that the approved Strategy
@@ -214,12 +218,18 @@ export function findMissingStrategyFacts(strategy: StrategyProposal | undefined)
 }
 
 /**
- * Composes the complete token-safe Proposal, following the Sales Executive
- * Hat Definition's proposal_content_standard section order, from upstream
- * facts only. Deterministic: the same facts, identity and amendments always
- * yield the same text. The final "Internal review notes" block is for
- * Martin's review and the Identity & Artifact environment -- it is not
- * client-facing content.
+ * Composes the canonical, token-safe Proposal Content, following the Sales
+ * Executive Hat Definition's proposal_content_standard section order, from
+ * upstream facts only. Deterministic: the same facts, identity and
+ * amendments always yield the same text.
+ *
+ * This is exactly what is stored in "Proposal Content", hashed, approved
+ * and consumed by the Identity & Artifact environment -- so it carries
+ * commercial proposal substance only. Internal review material (the
+ * client's planning range, open items, source references, governance
+ * wording) is produced separately by buildReviewNotes and is never part of
+ * this text. A section with nothing established upstream is omitted rather
+ * than filled with placeholder wording; buildReviewNotes lists it instead.
  */
 export function buildProposalContent(
   facts: ProposalFacts,
@@ -245,238 +255,153 @@ export function buildProposalContent(
   const dependencies: any[] = s.dependencies ?? [];
   const risks: any[] = s.risksAndConstraints?.risks ?? [];
   const constraints: any[] = s.risksAndConstraints?.constraints ?? [];
-  const quote = formatMoney(facts.quote.currency, facts.quote.price);
 
-  const sections: string[] = [];
+  const body: [string, string][] = [];
+  const add = (heading: string, lines: (string | null | undefined)[]) => {
+    const text = joinLines(lines);
+    if (text) body.push([heading, text]);
+  };
 
-  sections.push(`PROPOSAL — ${intervention.interventionName}`);
-  sections.push(
-    joinLines([
-      "1. PROPOSAL IDENTIFICATION",
-      `Proposal ID: ${identity.proposalId}`,
-      `Version: ${versionLabel(identity.version)}`,
-      `Entity_Token: ${facts.entityToken}`,
-      `Matter_Token: ${facts.matterToken}`,
-      `Source Handoff: ${facts.handoffRef} (Finance → Sales)`,
-      `Approved Strategy proposal: v${facts.strategyProposalVersion}`,
-      "Issue date and validity period: set when the approved Version is issued by the Identity & Artifact environment; no quote validity period was stated by Finance.",
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "2. EXECUTIVE SUMMARY / CONTEXT",
-      field("Business situation", es.businessSituation),
-      field("Strategic problem", es.strategicProblem),
-      field("Recommended direction", es.recommendedDirection),
-      field("Proposed intervention", es.proposedIntervention),
-      field("Expected business effect", es.expectedBusinessEffect),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "3. STRATEGIC PROBLEM / OPPORTUNITY",
-      field("Business objective", challenge.businessObjective),
-      field("Observed situation", challenge.observedSituation),
-      field("Strategic question", challenge.strategicQuestion),
-      field("Why it matters", challenge.whyItMatters),
-      field("Opportunity", opportunity.opportunity),
-      field("Basis", opportunity.basis),
-      field("Relevance to the business objective", opportunity.relevanceToBusinessObjective),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "4. DIAGNOSIS (established upstream by Strategy)",
-      field("Symptom", diagnosis.symptom),
-      field("Problem", diagnosis.problem),
-      "Causes:",
-      list(diagnosis.causes, NOT_SPECIFIED),
-      "Constraints:",
-      list(diagnosis.constraints, NOT_SPECIFIED),
-      "Consequences:",
-      list(diagnosis.consequences, NOT_SPECIFIED),
-      field("Diagnostic conclusion", diagnosis.diagnosticConclusion),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "5. OBJECTIVE",
-      field("Objective", objective.objective),
-      field("Intended change", objective.intendedChange),
-      field("Business alignment", objective.businessAlignment),
-      field("Measurement direction", objective.measurementDirection),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "6. RECOMMENDED INTERVENTION",
-      field("Intervention", intervention.interventionName),
-      field("Summary", intervention.interventionSummary),
-      field("Direction", direction.direction),
-      field("Rationale", direction.rationale),
-      field("Strategic logic", direction.strategicLogic),
-    ]),
-  );
-
-  const workstreamText = workstreams.length
-    ? workstreams
-        .map((w, i) =>
-          joinLines([
-            `Workstream ${i + 1}: ${w.name ?? ""}`.trim(),
-            field("  Objective", w.objective),
-            (w.activities ?? []).length ? `  Activities:\n${(w.activities as string[]).map((a) => `  - ${a}`).join("\n")}` : null,
-            field("  Output", w.output),
-            (w.acceptanceCriteria ?? []).length ? `  Acceptance criteria:\n${(w.acceptanceCriteria as string[]).map((a) => `  - ${a}`).join("\n")}` : null,
-          ]),
-        )
-        .join("\n")
-    : `- ${NOT_SPECIFIED}`;
-  const deliverableText = deliverables.length
-    ? deliverables
-        .map((d) => joinLines([`- ${d.name ?? ""}${d.description ? `: ${d.description}` : ""}${d.format ? ` [${d.format}]` : ""}`]))
-        .join("\n")
-    : `- ${NOT_SPECIFIED}`;
-
-  sections.push(
-    joinLines([
-      "7. SCOPE AND DELIVERABLES",
-      "In scope:",
-      list(scope.included, NOT_SPECIFIED),
-      "Out of scope:",
-      list(scope.excluded, NOT_SPECIFIED),
-      "Deliverables:",
-      deliverableText,
-    ]),
-  );
-
-  sections.push(joinLines(["8. APPROACH / METHOD", workstreamText]));
-
-  sections.push(
-    joinLines([
-      "9. EXPECTED OUTCOMES",
-      "Intended effects:",
-      list(effect.intendedEffects, NOT_SPECIFIED),
-      "Measurable effects:",
-      list(effect.measurableEffects, NOT_SPECIFIED),
-      "Effects requiring a baseline:",
-      list(effect.effectsRequiringBaseline, NOT_SPECIFIED),
-      "Limitations:",
-      list(effect.limitations, NOT_SPECIFIED),
-      "Success criteria:",
-      list(
-        success.map((c) => `${c.criterion ?? ""}${c.measurement ? ` (measured by: ${c.measurement})` : ""}${c.evidenceRequired ? ` (evidence: ${c.evidenceRequired})` : ""}`),
-        NOT_SPECIFIED,
-      ),
-    ]),
-  );
-
-  const phaseText = phases.length
-    ? phases.map((p) => `- ${p.name ?? ""}${p.duration ? ` (${p.duration})` : ""}${(p.outputs ?? []).length ? ` — outputs: ${(p.outputs as string[]).join("; ")}` : ""}${p.reviewPoint ? ` — review point: ${p.reviewPoint}` : ""}`).join("\n")
-    : null;
-  sections.push(
-    joinLines([
-      "10. TIMELINE",
-      timeline.totalDuration?.trim()
-        ? `${timeline.status ?? "Indicative"}: ${timeline.totalDuration}`
-        : "Not established upstream — no delivery schedule is stated.",
-      phaseText,
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "11. BASIS FOR THE INVESTMENT",
-      "Approved Finance pricing rationale:",
-      facts.quote.rationale,
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "12. INVESTMENT",
-      `Investment: ${quote} (authoritative Finance quote — not altered, converted, or substituted by Sales)`,
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "13. COMMERCIAL TERMS",
-      `Currency: ${facts.quote.currency}`,
-      "Payment terms: not established upstream — requires Martin's decision before client release.",
-      "Quote validity: not stated by Finance.",
-      "Client responsibilities:",
-      list(scope.clientResponsibilities, NOT_SPECIFIED),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "14. WHAT ENIG NEEDS FROM THE CLIENT",
-      "Information:",
-      list(inputs.requiredInformation, NOT_SPECIFIED),
-      "Documents:",
-      list(inputs.requiredDocuments, NOT_SPECIFIED),
-      "Access:",
-      list(inputs.requiredAccess, NOT_SPECIFIED),
-      "Stakeholder participation:",
-      list(inputs.requiredStakeholderParticipation, NOT_SPECIFIED),
-      "Decisions:",
-      list(inputs.requiredDecisions, NOT_SPECIFIED),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "15. ASSUMPTIONS, DEPENDENCIES, RISKS AND EXCLUSIONS",
-      "Assumptions:",
-      list(assumptions.map((a) => `${a.assumption ?? ""}${a.basis ? ` (basis: ${a.basis})` : ""}${a.materiality ? ` (materiality: ${a.materiality})` : ""}`), NOT_SPECIFIED),
-      "Dependencies:",
-      list(dependencies.map((d) => `${d.dependency ?? ""}${d.owner ? ` (owner: ${d.owner})` : ""}${d.impactIfUnavailable ? ` (if unavailable: ${d.impactIfUnavailable})` : ""}`), NOT_SPECIFIED),
-      "Risks:",
-      list(risks.map((r) => `${r.risk ?? ""}${r.mitigationOrResponse ? ` (response: ${r.mitigationOrResponse})` : ""}`), NOT_SPECIFIED),
-      "Constraints:",
-      list(constraints.map((c) => `${c.constraint ?? ""}${c.implication ? ` (implication: ${c.implication})` : ""}`), NOT_SPECIFIED),
-      "Exclusions:",
-      list(scope.excluded, NOT_SPECIFIED),
-    ]),
-  );
-
-  sections.push(
-    joinLines([
-      "16. NEXT STEPS",
-      `- Martin reviews this exact Proposal Version (${identity.proposalId} ${versionLabel(identity.version)}) and either authorizes it or requests changes.`,
-      "- On authorization, the approved Version is released to the Identity & Artifact environment, which produces the client-facing document.",
-      "- Client acceptance follows only after that release and does not bypass ENIG's internal approval gates.",
-    ]),
-  );
-
-  if (identity.amendments.length) {
-    sections.push(
+  add("PROPOSAL IDENTIFICATION", [
+    `Proposal ID: ${identity.proposalId}`,
+    `Version: ${versionLabel(identity.version)}`,
+    `Entity_Token: ${facts.entityToken}`,
+    `Matter_Token: ${facts.matterToken}`,
+  ]);
+  add("EXECUTIVE SUMMARY / CONTEXT", [
+    field("Business situation", es.businessSituation),
+    field("Strategic problem", es.strategicProblem),
+    field("Recommended direction", es.recommendedDirection),
+    field("Proposed intervention", es.proposedIntervention),
+    field("Expected business effect", es.expectedBusinessEffect),
+  ]);
+  add("STRATEGIC PROBLEM / OPPORTUNITY", [
+    field("Business objective", challenge.businessObjective),
+    field("Observed situation", challenge.observedSituation),
+    field("Strategic question", challenge.strategicQuestion),
+    field("Why it matters", challenge.whyItMatters),
+    field("Opportunity", opportunity.opportunity),
+    field("Basis", opportunity.basis),
+    field("Relevance to the business objective", opportunity.relevanceToBusinessObjective),
+  ]);
+  add("DIAGNOSIS", [
+    field("Symptom", diagnosis.symptom),
+    field("Problem", diagnosis.problem),
+    labeledList("Causes", diagnosis.causes),
+    labeledList("Constraints", diagnosis.constraints),
+    labeledList("Consequences", diagnosis.consequences),
+    field("Diagnostic conclusion", diagnosis.diagnosticConclusion),
+  ]);
+  add("OBJECTIVE", [
+    field("Objective", objective.objective),
+    field("Intended change", objective.intendedChange),
+    field("Business alignment", objective.businessAlignment),
+    field("Measurement direction", objective.measurementDirection),
+  ]);
+  add("RECOMMENDED INTERVENTION", [
+    field("Intervention", intervention.interventionName),
+    field("Summary", intervention.interventionSummary),
+    field("Direction", direction.direction),
+    field("Rationale", direction.rationale),
+    field("Strategic logic", direction.strategicLogic),
+  ]);
+  add("SCOPE AND DELIVERABLES", [
+    labeledList("In scope", scope.included),
+    labeledList("Out of scope", scope.excluded),
+    labeledList(
+      "Deliverables",
+      deliverables.map((d) => `${d.name ?? ""}${d.description ? `: ${d.description}` : ""}${d.format ? ` [${d.format}]` : ""}`),
+    ),
+  ]);
+  add(
+    "APPROACH / METHOD",
+    workstreams.map((w, i) =>
       joinLines([
-        "17. CHANGES DIRECTED BY MARTIN",
-        ...identity.amendments.map((a) => `- Introduced in ${versionLabel(a.version)}: ${a.text}`),
+        `Workstream ${i + 1}: ${w.name ?? ""}`.trim(),
+        field("  Objective", w.objective),
+        clean(w.activities).length ? `  Activities:\n${clean(w.activities).map((a) => `  - ${a}`).join("\n")}` : null,
+        field("  Output", w.output),
+        clean(w.acceptanceCriteria).length ? `  Acceptance criteria:\n${clean(w.acceptanceCriteria).map((a) => `  - ${a}`).join("\n")}` : null,
       ]),
-    );
-  }
-
-  const tolerance = facts.investmentTolerance;
-  sections.push(
-    joinLines([
-      "INTERNAL REVIEW NOTES (not client-facing)",
-      `- The Investment above is the authoritative Finance quote: ${quote}. It is unchanged.`,
-      tolerance
-        ? `- Client-disclosed planning range (commercial context only; ${tolerance.source}): ${formatMoney(tolerance.currency, tolerance.low)}–${formatMoney(tolerance.currency, tolerance.high).replace(`${tolerance.currency} `, "")}. Both figures are verified facts; the range does not replace or alter the Finance quote and is not the pricing basis.`
-        : "- No client-disclosed planning range is on record for this work.",
-      "- Open items for Martin: payment terms; quote validity period.",
-    ]),
+    ),
   );
+  add("EXPECTED OUTCOMES", [
+    labeledList("Intended effects", effect.intendedEffects),
+    labeledList("Measurable effects", effect.measurableEffects),
+    labeledList("Effects requiring a baseline", effect.effectsRequiringBaseline),
+    labeledList("Limitations", effect.limitations),
+    labeledList(
+      "Success criteria",
+      success.map((c) => `${c.criterion ?? ""}${c.measurement ? ` (measured by: ${c.measurement})` : ""}${c.evidenceRequired ? ` (evidence: ${c.evidenceRequired})` : ""}`),
+    ),
+  ]);
+  add("TIMELINE", [
+    timeline.totalDuration?.trim() ? `${timeline.status ?? "Indicative"}: ${timeline.totalDuration}` : null,
+    ...phases.map(
+      (p) => `- ${p.name ?? ""}${p.duration ? ` (${p.duration})` : ""}${clean(p.outputs).length ? ` — outputs: ${clean(p.outputs).join("; ")}` : ""}${p.reviewPoint ? ` — review point: ${p.reviewPoint}` : ""}`,
+    ),
+  ]);
+  // The Finance rationale is carried verbatim -- see buildReviewNotes for
+  // the unresolved conflict with the proposal standard's "translate into
+  // client-facing language" rule.
+  add("BASIS FOR THE INVESTMENT", [facts.quote.rationale]);
+  add("INVESTMENT", [`Investment: ${formatMoney(facts.quote.currency, facts.quote.price)}`]);
+  add("COMMERCIAL TERMS", [`Currency: ${facts.quote.currency}`, labeledList("Client responsibilities", scope.clientResponsibilities)]);
+  add("WHAT ENIG NEEDS FROM THE CLIENT", [
+    labeledList("Information", inputs.requiredInformation),
+    labeledList("Documents", inputs.requiredDocuments),
+    labeledList("Access", inputs.requiredAccess),
+    labeledList("Stakeholder participation", inputs.requiredStakeholderParticipation),
+    labeledList("Decisions", inputs.requiredDecisions),
+  ]);
+  add("ASSUMPTIONS, DEPENDENCIES, RISKS AND EXCLUSIONS", [
+    labeledList("Assumptions", assumptions.map((a) => `${a.assumption ?? ""}${a.basis ? ` (basis: ${a.basis})` : ""}${a.materiality ? ` (materiality: ${a.materiality})` : ""}`)),
+    labeledList("Dependencies", dependencies.map((d) => `${d.dependency ?? ""}${d.owner ? ` (owner: ${d.owner})` : ""}${d.impactIfUnavailable ? ` (if unavailable: ${d.impactIfUnavailable})` : ""}`)),
+    labeledList("Risks", risks.map((r) => `${r.risk ?? ""}${r.mitigationOrResponse ? ` (response: ${r.mitigationOrResponse})` : ""}`)),
+    labeledList("Constraints", constraints.map((c) => `${c.constraint ?? ""}${c.implication ? ` (implication: ${c.implication})` : ""}`)),
+    labeledList("Exclusions", scope.excluded),
+  ]);
+  add("AMENDMENTS", identity.amendments.map((a) => `- ${a.text}`));
+  add("NEXT STEPS", ["- Confirm acceptance of the scope and investment set out in this proposal."]);
 
-  return sections.join("\n\n");
+  const title = `PROPOSAL — ${intervention.interventionName}`;
+  return [title, ...body.map(([heading, text], i) => `${i + 1}. ${heading}\n${text}`)].join("\n\n");
+}
+
+/**
+ * Internal review material for Martin -- shown with the Proposal in the
+ * approval request, never written into Proposal Content, never hashed as
+ * part of the approved Version, and never handed to the Identity & Artifact
+ * environment. Nothing here is discarded: it is the review-path home for
+ * everything buildProposalContent deliberately leaves out.
+ */
+export function buildReviewNotes(
+  facts: ProposalFacts,
+  identity: { proposalId: string; version: number; amendments: { version: number; text: string }[] },
+): string {
+  const s: any = facts.strategy;
+  const quote = formatMoney(facts.quote.currency, facts.quote.price);
+  const tolerance = facts.investmentTolerance;
+  const notEstablished: string[] = [];
+  if (!s.timeline?.totalDuration?.trim() && !(s.timeline?.phases ?? []).length) notEstablished.push("timeline / delivery schedule");
+  if (!clean(s.commercialScope?.excluded).length) notEstablished.push("out-of-scope exclusions");
+  if (!clean(s.commercialScope?.clientResponsibilities).length) notEstablished.push("client responsibilities");
+  const inputs = s.entityInputs ?? {};
+  if (![inputs.requiredInformation, inputs.requiredDocuments, inputs.requiredAccess, inputs.requiredStakeholderParticipation, inputs.requiredDecisions].some((l) => clean(l).length)) {
+    notEstablished.push("what ENIG needs from the client");
+  }
+  return joinLines([
+    `Source: Handoff ${facts.handoffRef} (Finance → Sales); approved Strategy proposal ${facts.strategyProposalId} v${facts.strategyProposalVersion}.`,
+    `Investment is the authoritative Finance quote, unchanged: ${quote}.`,
+    tolerance
+      ? `Client-disclosed planning range (${tolerance.source}): ${formatMoney(tolerance.currency, tolerance.low)}–${formatMoney(tolerance.currency, tolerance.high).replace(`${tolerance.currency} `, "")}. Commercial context only: both figures are verified facts, and the range does not replace or alter the Finance quote and is not the pricing basis.`
+      : "No client-disclosed planning range is on record for this work.",
+    "Open items (not stated upstream, not in the Proposal): payment terms; quote validity period; issue date.",
+    notEstablished.length ? `Not established upstream, so omitted from the Proposal: ${notEstablished.join("; ")}.` : null,
+    "Basis for the Investment carries the Finance rationale verbatim. The proposal standard asks for client-facing translation of internal Finance reasoning; that conflict is unresolved and has not been decided here.",
+    ...identity.amendments.map((a) => `Amendment introduced in ${versionLabel(a.version)} at Martin's direction.`),
+    `Approving ${identity.proposalId} ${versionLabel(identity.version)} approves the Proposal above only; this review material is not part of it.`,
+  ]);
 }
 
 /** The identity strings this work item happens to know (only ever set by a Sales flow that legitimately resolved identity) -- used as a deny-list, never to resolve anything. */
@@ -625,7 +550,17 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
     `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
     `Record: ${sp.pageUrl}`,
   ].join("\n");
-  const message = `${header}\n\n${record.content}\n\nApprove exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}*? Approval applies to this Version only.`;
+  const notes = sp.facts
+    ? buildReviewNotes(sp.facts, { proposalId: sp.proposalId, version: sp.currentVersion, amendments: sp.amendments })
+    : "Unavailable: the upstream facts this Proposal was built from are not on this work item.";
+  const message = [
+    header,
+    `=== PROPOSAL ${sp.proposalId} ${versionLabel(sp.currentVersion)} (the content being approved) ===`,
+    record.content,
+    "=== INTERNAL REVIEW MATERIAL — not part of the Proposal, not stored in Proposal Content, not approved with it ===",
+    notes,
+    `Approve exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}*? Approval applies to the Proposal content of this Version only.`,
+  ].join("\n\n");
   const buttons = withWorkId(decisionButtons(sp, sp.currentVersion, true), state.workId);
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT }, message, buttons);
   state.pendingActionSummary = {
@@ -637,6 +572,34 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
   state.stage = "awaiting_sales_proposal_approval";
   state.awaiting = undefined;
   return state;
+}
+
+/**
+ * The Strategy Proposal is only consumed when its token safety is
+ * established by an authoritative source, bound to that exact proposal ID
+ * and version. The runtime cannot establish this itself: Strategy's
+ * drafting call receives the full originating Handoff context, which is not
+ * guaranteed to be identity-free, and the Strategy -> Finance Handoff holds
+ * only a truncated serialization. Inspecting the text here would need the
+ * real identity the runtime must never know, so there is no heuristic
+ * fallback: without a matching attestation this fails closed.
+ *
+ * No production code sets state.strategyProposalTokenSafety today -- a
+ * token-safe Strategy source (or an authoritative token-safe serialization
+ * at the Strategy -> Finance boundary) is a separate, required upstream
+ * change. Until it exists, Runtime Proposal production is blocked here.
+ */
+export function verifyStrategyProposalTokenSafety(state: WorkState): string | null {
+  const proposal = state.strategyProposal;
+  if (!proposal) return null; // absence is reported by resolveFacts as a missing fact
+  const attestation = state.strategyProposalTokenSafety;
+  if (!attestation) {
+    return `the approved Strategy Proposal (${proposal.proposalId} v${proposal.proposalVersion}) has no authoritative token-safety verification. It was drafted from Handoff context that is not certified token-safe, and no complete token-safe serialization of it exists at the Strategy → Finance boundary, so it cannot be used as a Proposal source.`;
+  }
+  if (attestation.proposalId !== proposal.proposalId || attestation.proposalVersion !== proposal.proposalVersion) {
+    return `the token-safety verification on record is for Strategy proposal ${attestation.proposalId} v${attestation.proposalVersion}, not the approved ${proposal.proposalId} v${proposal.proposalVersion}.`;
+  }
+  return null;
 }
 
 /**
@@ -695,6 +658,7 @@ async function resolveFacts(
       entityToken: tokens.entityToken,
       matterToken: tokens.matterToken,
       quote,
+      strategyProposalId: state.strategyProposal!.proposalId,
       strategyProposalVersion: state.strategyProposal!.proposalVersion,
       strategy: state.strategyProposal!,
       investmentTolerance,
@@ -769,7 +733,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
     if (sp.entityToken !== entityToken || sp.matterToken !== matterToken) {
       return failClosed(env, state, "the existing Proposal's tokens do not match the Handoff's tokens.", { holdHandoffId: handoffId, tokens });
     }
-    if (!sp.facts) {
+    if (!sp.facts && !verifyStrategyProposalTokenSafety(state)) {
       const resolved = await resolveFacts(env, state, handoff, tokens, parsed.quote);
       if ("facts" in resolved) sp.facts = resolved.facts;
     }
@@ -795,6 +759,9 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
   if (status !== "Pending" && status !== "Picked-up") {
     return failClosed(env, state, `Handoff ${handoffId} is ${status || "in an unknown status"} and has no canonical Proposal; not producing one from a non-active Handoff.`);
   }
+
+  const unverified = verifyStrategyProposalTokenSafety(state);
+  if (unverified) return failClosed(env, state, `Strategy Proposal identity boundary: ${unverified}`, { holdHandoffId: handoffId, tokens });
 
   const resolved = await resolveFacts(env, state, handoff, tokens, parsed.quote);
   if ("missing" in resolved) {
