@@ -193,6 +193,26 @@ test("3. Notion verification handshake is acknowledged without processing as an 
   assert.strictEqual(counts.notionGetPageCalls, 0, "the handshake must never be treated as a Handoff event");
 });
 
+test("3b. Regression: a verification handshake that ALSO arrives with an X-Notion-Signature header is still recognized (confirmed live -- Notion signs the handshake using the token it's handing over)", async (t) => {
+  const counts = mockFetchForPage(t, pendingWorkHandoffPage());
+  const env = fakeEnv();
+  const { ctx, flush } = fakeCtx();
+  const handshakeBody = JSON.stringify({ verification_token: "notion-issued-token-abc" });
+  const req = new Request("https://worker.example/notion/webhook", {
+    method: "POST",
+    body: handshakeBody,
+    // Signed with the token itself, per Notion's actual live behavior --
+    // NOT with env.NOTION_WEBHOOK_SECRET, which isn't configured yet at
+    // this point in a fresh setup. The handshake must be recognized by
+    // payload shape regardless of what this header contains.
+    headers: { "X-Notion-Signature": sign(handshakeBody, "notion-issued-token-abc") },
+  });
+  const res = await handleNotionWebhookRequest(req, env, ctx);
+  await flush();
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(counts.notionGetPageCalls, 0, "a signed handshake must still be recognized as a handshake, not rejected or treated as an event");
+});
+
 // --- 1 / 4 / 5 / 6 / 7 / 8 / 9 / 10: filtering ------------------------------
 
 test("1. Valid Notion Handoff event is accepted and wakes the discovery engine", async (t) => {

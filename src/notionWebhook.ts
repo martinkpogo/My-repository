@@ -161,17 +161,25 @@ export async function handleNotionWebhookRequest(request: Request, env: Env, ctx
 
   const signatureHeader = request.headers.get("X-Notion-Signature");
 
-  // The one-time, unsigned verification handshake -- recognized only when
-  // there is no signature header at all (a genuine event delivery always
-  // carries one once the subscription is verified). Never treated as an
-  // event, never used to authenticate anything beyond itself.
+  // The one-time verification handshake -- recognized by payload shape
+  // (a bare { verification_token: "..." } body), not by the absence of a
+  // signature header: confirmed live that Notion sends this request WITH
+  // an X-Notion-Signature header already attached (signed using the very
+  // token it's handing over in the body), not unsigned as Notion's own
+  // general webhook docs' happy-path example suggests. Checking payload
+  // shape first, before any signature requirement, is what actually works
+  // regardless of which way a given subscription's first request arrives.
+  // Never treated as an event, never used to authenticate anything beyond
+  // itself -- the token is logged so Martin can retrieve it from wrangler
+  // tail / the Cloudflare dashboard's log stream and enter it into Notion.
+  const verificationToken = extractVerificationToken(payload);
+  if (verificationToken) {
+    console.log(`Notion webhook verification handshake received -- verification_token: ${verificationToken}`);
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+
   if (!signatureHeader) {
-    const verificationToken = extractVerificationToken(payload);
-    if (verificationToken) {
-      console.log(`Notion webhook verification handshake received -- verification_token: ${verificationToken}`);
-      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-    }
-    // No signature and not a recognizable handshake -- fail closed.
+    // Not a recognizable handshake and no signature -- fail closed.
     return new Response("forbidden", { status: 403 });
   }
 
