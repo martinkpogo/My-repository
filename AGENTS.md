@@ -2,9 +2,13 @@
 
 This document establishes the execution contract and operating model for Jules (implementation agent) in the ENIG Agent Runtime repository.
 
-## Manual Notion operator actions
+## The Handoff identity-write boundary
 
-Any Handoff created, updated, or resubmitted by hand (i.e. via a Notion tool call, not by the deployed runtime's own code) must follow `handoff-writing-rules.yaml` in this repo's root before writing anything: Entity/Matter identity goes in as Entity_Token/Matter_Token only, never a real name, contact, email, or phone number. The runtime's own code enforces this automatically (`resolveIdentityTokens`, `dataBoundary/policy.ts`'s closed-context contract); a manual operator action bypasses that code path entirely and must apply the same discipline by hand, every time, before submitting.
+Every Handoff field that becomes another Unit's AI input context (Handoff title, Reason, Required Next Action, Expected Output, Acceptance Criteria, Assumptions, Open Questions, Verified Facts & Sources, Work Completed) may identify the Entity/Matter ONLY by its opaque Entity_Token/Matter_Token -- never a real Entity/company name, a real contact's name, an email address, a phone number, or any other detail that identifies who they actually are. Real identity may be read while preparing a Handoff; it must be resolved to tokens before anything is written to one.
+
+The runtime enforces this in code: every production Handoff write goes through `src/handoffWriter.ts`'s `createHandoff`/`updateHandoff`, which require Entity_Token/Matter_Token and reject (fail closed) any protected field containing prohibited identity. Do not write to the Handoffs database (`HANDOFFS_DATA_SOURCE_ID`) any other way.
+
+Any Handoff created, updated, or resubmitted by hand (i.e. via a Notion tool call, not by the deployed runtime's own code) bypasses that code path entirely and must follow `handoff-writing-rules.yaml` in this repo's root before writing anything, applying the same discipline manually, every time, before submitting.
 
 ## Authority Model
 

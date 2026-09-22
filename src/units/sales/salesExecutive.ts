@@ -21,6 +21,7 @@ import {
   uniqueId,
   updatePage,
 } from "../../notion";
+import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { aiJson, aiText } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
@@ -1073,35 +1074,49 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   });
 
   const identityTokens = await resolveIdentityTokens(env, state.entityId!, state.matterId!);
+  state.entityToken = identityTokens.entityToken;
+  state.matterToken = identityTokens.matterToken;
 
-  const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    Handoff: title(`Commercial diagnosis — ${state.matterName}`),
-    "From Unit": select("Sales"),
-    "From Hat": richText("Sales Executive"),
-    "To Unit": select("Strategy"),
-    "To Hat": richText("Strategy Analyst"),
-    Type: select("Work"),
-    Status: select("Pending"),
-    Reason: richText(`Commercial fit/progression approved for ${state.matterName}. Entry type: ${state.entryType}.`),
-    "Expected Output": richText("A strategic diagnosis and, where evidence supports one, a proposed intervention for Finance to price -- or an explicit Held status naming the specific blocker."),
-    "Required Next Action": richText(
-      "Diagnose the commercial situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and develop a proposed intervention where the evidence supports one. Do not send anything to Finance directly -- the proposed intervention requires Martin's explicit approval first.",
-    ),
-    "Acceptance Criteria": richText(
-      "A diagnosis following Symptom -> Problem -> Cause -> Constraint -> Consequence, with either a defensible proposed intervention or an explicit Held status naming the specific blocker.",
-    ),
-    Entity_Token: richText(identityTokens.entityToken),
-    Matter_Token: richText(identityTokens.matterToken),
-    Assumptions: richText(
-      "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a pricing input downstream.",
-    ),
-    "Verified Facts & Sources": richText(
-      `Commercial situation: ${trimmedSituation}\n\n${formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext)}\n\nRaw value context (enquiry + call notes):\n${valueContext}`.slice(
-        0,
-        1900,
+  const handoff = await createHandoff(
+    env,
+    {
+      Handoff: title(`Commercial diagnosis — ${identityTokens.matterToken}`),
+      "From Unit": select("Sales"),
+      "From Hat": richText("Sales Executive"),
+      "To Unit": select("Strategy"),
+      "To Hat": richText("Strategy Analyst"),
+      Type: select("Work"),
+      Status: select("Pending"),
+      Reason: richText(`Commercial fit/progression approved for ${identityTokens.matterToken}. Entry type: ${state.entryType}.`),
+      "Expected Output": richText("A strategic diagnosis and, where evidence supports one, a proposed intervention for Finance to price -- or an explicit Held status naming the specific blocker."),
+      "Required Next Action": richText(
+        "Diagnose the commercial situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and develop a proposed intervention where the evidence supports one. Do not send anything to Finance directly -- the proposed intervention requires Martin's explicit approval first.",
       ),
-    ),
-  });
+      "Acceptance Criteria": richText(
+        "A diagnosis following Symptom -> Problem -> Cause -> Constraint -> Consequence, with either a defensible proposed intervention or an explicit Held status naming the specific blocker.",
+      ),
+      Entity_Token: richText(identityTokens.entityToken),
+      Matter_Token: richText(identityTokens.matterToken),
+      Assumptions: richText(
+        "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a pricing input downstream.",
+      ),
+      "Verified Facts & Sources": richText(
+        `Commercial situation: ${trimmedSituation}\n\n${formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext)}\n\nRaw value context (enquiry + call notes):\n${valueContext}`.slice(
+          0,
+          1900,
+        ),
+      ),
+    },
+    {
+      entityToken: identityTokens.entityToken,
+      matterToken: identityTokens.matterToken,
+      entityName: state.entityName,
+      matterName: state.matterName,
+      email: state.entityDraft?.email,
+      phone: state.entityDraft?.phone,
+      contactName: state.entityDraft?.type === "Individual" ? state.entityDraft?.name : undefined,
+    },
+  );
 
   state.handoffId = handoff.id;
   // Sales's execution ends here. Strategy is a separate Unit and must
@@ -1153,12 +1168,22 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
   // handlePickup (invoked only via independent discovery, never from here)
   // remains the sole authority over sufficiency and the resulting
   // Held/Closed outcome. Sales's execution ends here.
-  await updatePage(env, state.handoffId!, {
-    "Verified Facts & Sources": richText(
-      `Proposed intervention + value context:\n${state.proposedIntervention}`.slice(0, 1900),
-    ),
-    Status: select("Pending"),
-  });
+  await updateHandoff(
+    env,
+    state.handoffId!,
+    {
+      "Verified Facts & Sources": richText(
+        `Proposed intervention + value context:\n${state.proposedIntervention}`.slice(0, 1900),
+      ),
+      Status: select("Pending"),
+    },
+    {
+      entityToken: state.entityToken ?? "",
+      matterToken: state.matterToken ?? "",
+      entityName: state.entityName,
+      matterName: state.matterName,
+    },
+  );
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Sales Executive" },
@@ -1251,7 +1276,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
   // failure leaves the Handoff Pending for automatic retry rather than
   // stuck — mirrors Finance's own handlePickup ordering.
   state.quote = quote;
-  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
 
   const draft = await aiText(
     env,
@@ -1264,7 +1289,7 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
   state.proposalDraft = draft;
   state.proposalRevisionCount = 0;
 
-  await updatePage(env, state.handoffId!, {
+  await updateHandoff(env, state.handoffId!, {
     Status: select("Closed"),
     "Work Completed": richText("Draft Proposal prepared and presented to Martin for review."),
   });

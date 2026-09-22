@@ -274,9 +274,24 @@ export interface WorkState {
    */
   measurementBaseline?: MeasurementBaseline;
   entityId?: string;
+  /** Human-readable Entity name -- only ever populated by a Unit that has legitimately resolved the real identity (Sales). Never overload this with a token. */
   entityName?: string;
   matterId?: string;
+  /** Human-readable Matter name -- only ever populated by a Unit that has legitimately resolved the real identity (Sales). Never overload this with a token. */
   matterName?: string;
+  /**
+   * The opaque Entity_Token (e.g. "E-20") this work item operates under.
+   * Units that operate on Handoffs only (Strategy, Finance, R&I) never
+   * learn a real Entity name at all, per the closed-context contract in
+   * dataBoundary/policy.ts -- this is the identity they actually have, and
+   * is what must be used in any Handoff field or Telegram message they
+   * produce. Distinct from entityName, which some of those Units'
+   * discovery code previously (incorrectly) overloaded to hold this same
+   * token -- see the centralized Handoff writer (src/handoffWriter.ts).
+   */
+  entityToken?: string;
+  /** The opaque Matter_Token (e.g. "MAT-20") this work item operates under. See entityToken's doc comment -- same semantics, Matter side. */
+  matterToken?: string;
   handoffId?: string;
   callNotes?: string;
   qualification?: QualificationResult;

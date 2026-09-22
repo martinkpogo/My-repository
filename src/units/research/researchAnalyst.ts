@@ -1,9 +1,10 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
+import { getPage, plainText, richText, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
+import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import type { ResearchProtocolId } from "./protocols";
@@ -197,7 +198,7 @@ async function requireSafeContext(env: Env, state: WorkState): Promise<string | 
       outcome: "Blocked",
     });
     if (state.handoffId) {
-      await updatePage(env, state.handoffId, {
+      await updateHandoff(env, state.handoffId, {
         Status: select("Held"),
         "Open Questions": richText("Research-Safe Consultancy Context unavailable or invalid in Notion -- blocked pending resolution."),
       }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -262,14 +263,14 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     return state;
   }
 
-  state.entityName = evalResult.contract.entityToken;
-  state.matterName = evalResult.contract.matterToken;
+  state.entityToken = evalResult.contract.entityToken;
+  state.matterToken = evalResult.contract.matterToken ?? "";
   state.researchQuestion = capResearchText(evalResult.contract.sanitizedContext);
   state.researchContext = capResearchText(evalResult.contract.sanitizedContext);
 
-  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
-    entry: `R&I picked up research request: ${state.matterName || state.entityName || state.workId}`,
+    entry: `R&I picked up research request: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Activity",
     area: "Research & Intelligence",
     activity: "Research & Intelligence Analyst picked up the request.",
@@ -405,7 +406,7 @@ async function handleBlockedOrAmbiguous(env: Env, state: WorkState, reasonText: 
     outcome: "Blocked",
   });
   if (state.handoffId) {
-    await updatePage(env, state.handoffId, {
+    await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText(reasonText.slice(0, 1900)),
     }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -563,7 +564,7 @@ async function handleSynthesisFailure(env: Env, state: WorkState, reasonText: st
     outcome: "Blocked",
   });
   if (state.handoffId) {
-    await updatePage(env, state.handoffId, {
+    await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText(reasonText.slice(0, 1900)),
     }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -661,13 +662,13 @@ function formatSynthesisForTelegram(synthesis: ResearchSynthesis): string {
  */
 async function deliverSynthesis(env: Env, state: WorkState, synthesis: ResearchSynthesis): Promise<WorkState> {
   if (state.handoffId) {
-    await updatePage(env, state.handoffId, {
+    await updateHandoff(env, state.handoffId, {
       Status: select("Closed"),
       "Work Completed": richText(JSON.stringify(synthesis).slice(0, 1900)),
     });
   }
   await logActivity(env, {
-    entry: `R&I research completed: ${state.matterName || state.entityName || state.workId}`,
+    entry: `R&I research completed: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Decision",
     area: "Research & Intelligence",
     decisions: synthesis.findings.map((f) => f.statement).join("; ").slice(0, 500),
@@ -816,18 +817,30 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
   }
 
   try {
-    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-      Handoff: title(pending.handoffTitle),
-      "From Unit": select("Research & Intelligence"),
-      "From Hat": richText("Research & Intelligence Analyst"),
-      "To Unit": select(pending.unit),
-      "To Hat": richText(pending.hat),
-      Type: select("Work"),
-      Status: select("Pending"),
-      Reason: richText(pending.reason),
-      "Expected Output": richText(`${pending.hat} to use this research as direct input to its own work.`),
-      "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
-    });
+    const handoff = await createHandoff(
+      env,
+      {
+        Handoff: title(pending.handoffTitle),
+        "From Unit": select("Research & Intelligence"),
+        "From Hat": richText("Research & Intelligence Analyst"),
+        "To Unit": select(pending.unit),
+        "To Hat": richText(pending.hat),
+        Type: select("Work"),
+        Status: select("Pending"),
+        Reason: richText(pending.reason),
+        "Expected Output": richText(`${pending.hat} to use this research as direct input to its own work.`),
+        // A direct Martin request (handleDirectRequest) has no originating
+        // Handoff and therefore no Entity/Matter token at all -- this
+        // research was never tied to a specific paying client Matter, so
+        // the placeholder "unbound" tokens (same convention
+        // leadGenerationDiscovery.ts uses for pre-Entity discovery
+        // Handoffs) are used rather than leaving the required field empty.
+        Entity_Token: richText(state.entityToken || "E-UNBOUND"),
+        Matter_Token: richText(state.matterToken || "M-UNBOUND"),
+        "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
+      },
+      { entityToken: state.entityToken || "E-UNBOUND", matterToken: state.matterToken || "M-UNBOUND" },
+    );
     state.pendingResearchHandoff = undefined;
     state.pendingActionSummary = undefined;
     await logActivity(env, {

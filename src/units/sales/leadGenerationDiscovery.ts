@@ -2,6 +2,7 @@ import type { Env, WorkState } from "../../types";
 import { isWebSearchConfigured, searchWeb } from "../research/webSearch";
 import type { WebSearchResult } from "../research/webSearch";
 import { createPage, plainText, queryDataSource, richText, select, title } from "../../notion";
+import { createHandoff } from "../../handoffWriter";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -564,22 +565,34 @@ async function searchAndHandoffForQuery(env: Env, query: string, summary: Discov
     }
 
     try {
-      await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-        Handoff: title(`LGS Research Request -- ${evaluation.organisation}`),
-        "From Unit": select("Sales"),
-        "From Hat": richText("Lead Generation Specialist"),
-        "To Unit": select("Research & Intelligence"),
-        "To Hat": richText("Research & Intelligence Analyst"),
-        Type: select("Work"),
-        Status: select("Pending"),
-        Reason: richText(`${LGS_HANDOFF_ORIGIN_MARKER}: Research organisation positioning and evidence for Acquisition Criteria evaluation.`),
-        "Expected Output": richText("Evidence-backed research relevant to the Acquisition Criteria, including a preliminary diagnosis/hypothesis where supported by evidence."),
-        Entity_Token: richText("E-UNBOUND"),
-        Matter_Token: richText("M-UNBOUND"),
-        "Verified Facts & Sources": richText(
-          `Candidate Organisation: ${evaluation.organisation}\nSource URL: ${result.url}\nCategory: ${evaluation.category || "unclassified"}\nInitial Signal Evidence: ${evaluation.evidence}\nDecision Maker / Role: ${evaluation.decisionMakerOrRole || "N/A"}\nQuery: "${query}"`,
-        ),
-      });
+      // Pre-Entity discovery: this candidate is a publicly-sourced web
+      // search result, not yet an ENIG Entity/Matter -- there is no real
+      // client identity to protect here (the organisation name IS the
+      // public subject of the research being requested), so the
+      // placeholder "E-UNBOUND"/"M-UNBOUND" tokens are used rather than a
+      // real Entity_Token/Matter_Token, and no entityName/matterName
+      // identity is passed to the validator (none exists yet to check
+      // against). See handoffWriter.ts's HandoffIdentity doc comment.
+      await createHandoff(
+        env,
+        {
+          Handoff: title(`LGS Research Request -- ${evaluation.organisation}`),
+          "From Unit": select("Sales"),
+          "From Hat": richText("Lead Generation Specialist"),
+          "To Unit": select("Research & Intelligence"),
+          "To Hat": richText("Research & Intelligence Analyst"),
+          Type: select("Work"),
+          Status: select("Pending"),
+          Reason: richText(`${LGS_HANDOFF_ORIGIN_MARKER}: Research organisation positioning and evidence for Acquisition Criteria evaluation.`),
+          "Expected Output": richText("Evidence-backed research relevant to the Acquisition Criteria, including a preliminary diagnosis/hypothesis where supported by evidence."),
+          Entity_Token: richText("E-UNBOUND"),
+          Matter_Token: richText("M-UNBOUND"),
+          "Verified Facts & Sources": richText(
+            `Candidate Organisation: ${evaluation.organisation}\nSource URL: ${result.url}\nCategory: ${evaluation.category || "unclassified"}\nInitial Signal Evidence: ${evaluation.evidence}\nDecision Maker / Role: ${evaluation.decisionMakerOrRole || "N/A"}\nQuery: "${query}"`,
+          ),
+        },
+        { entityToken: "E-UNBOUND", matterToken: "M-UNBOUND" },
+      );
       summary.handoffsCreated++;
       await logActivity(env, {
         entry: `R&I research handoff created for discovery candidate: ${evaluation.organisation}`,

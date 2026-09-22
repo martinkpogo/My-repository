@@ -143,6 +143,22 @@ test("1. Inbound enquiry -> valid Sales -> Strategy Handoff via the existing que
   assert.strictEqual(result.stage, "awaiting_strategy");
 });
 
+test("17. Sales -> Strategy creates a token-only Handoff -- the real Entity/Matter name never appears in any protected field", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  const props = handoffProps(log);
+  assert.strictEqual(richTextValue(props.Entity_Token), "E-47");
+  assert.strictEqual(richTextValue(props.Matter_Token), "M-12");
+  assert.strictEqual(result.entityToken, "E-47");
+  assert.strictEqual(result.matterToken, "M-12");
+  const serialized = JSON.stringify(props);
+  assert.ok(!serialized.includes("Meridian Foods Ghana Ltd"), "the real Entity name must never appear in the Handoff");
+  assert.ok(!serialized.includes("Cold Chain Logistics Redesign"), "the real Matter name must never appear in the Handoff");
+});
+
 test("1b. Sales does not create a Sales -> Finance Handoff -- the obsolete direct entry point is gone", async (t) => {
   const log = mockFetch(t);
   const state = fakeState({ entryType: "inbound_enquiry" });

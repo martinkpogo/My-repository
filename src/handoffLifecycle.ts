@@ -1,5 +1,6 @@
 import type { Env } from "./types";
-import { getPage, plainText, richText, select, updatePage } from "./notion";
+import { getPage, plainText, richText, select } from "./notion";
+import { updateHandoff } from "./handoffWriter";
 
 /**
  * Shared Handoff pickup-idempotency guard, used by every Unit pickup that
@@ -28,7 +29,7 @@ export async function claimPendingHandoff(env: Env, handoffId: string): Promise<
       reason: `Handoff ${handoffId} is currently "${status || "unknown"}", not Pending -- refusing to process it again.`,
     };
   }
-  await updatePage(env, handoffId, { Status: select("Picked-up") });
+  await updateHandoff(env, handoffId, { Status: select("Picked-up") });
   return { claimed: true };
 }
 
@@ -46,7 +47,7 @@ export async function closeHandoffIfOpen(env: Env, handoffId: string, reason: st
   const page = await getPage(env, handoffId);
   const status = plainText(page.properties.Status);
   if (status === "Closed") return;
-  await updatePage(env, handoffId, {
+  await updateHandoff(env, handoffId, {
     Status: select("Closed"),
     "Open Questions": richText(reason.slice(0, 1900)),
   });

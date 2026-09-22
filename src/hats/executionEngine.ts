@@ -3,7 +3,8 @@ import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendWorkspaceHatMessage } from "../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
-import { getPage, plainText, richText, select, updatePage } from "../notion";
+import { getPage, plainText, richText, select } from "../notion";
+import { updateHandoff } from "../handoffWriter";
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from "./registry";
 import {
@@ -58,7 +59,7 @@ export async function handleHandoffPickup(env: Env, state: WorkState): Promise<W
     return state;
   }
 
-  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
   state.hat = "Marketing Strategist";
   state.marketingTaskText = taskText;
   await logActivity(env, {
@@ -362,7 +363,7 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   // auto-routing to Marketing Strategist), close it out as the
   // completion signal -- same pattern Finance/Sales/R&I already use.
   if (state.handoffId) {
-    await updatePage(env, state.handoffId, {
+    await updateHandoff(env, state.handoffId, {
       Status: select("Closed"),
       "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
     }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));

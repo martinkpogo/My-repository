@@ -3,12 +3,26 @@
 # Applies to EVERY write to the Handoffs database in Notion -- whether
 # performed by the deployed runtime's own code, or by a human/agent
 # operating on Notion directly (manual Handoff creation, corrections,
-# resubmissions, cleanup). The runtime code already enforces this via
-# resolveIdentityTokens (src/units/sales/salesExecutive.ts) and the
-# closed-context contract (src/dataBoundary/policy.ts's
-# evaluateHandoffContext); this file exists because a manual operator
-# action bypasses that code path entirely and has to apply the same
-# discipline by hand, deliberately, every time.
+# resubmissions, cleanup).
+#
+# The runtime now enforces this rule in code, at a single point every
+# production Handoff write goes through: src/handoffWriter.ts's
+# createHandoff/updateHandoff. Every Unit that creates or updates a
+# Handoff (Sales, Strategy, Finance, Research & Intelligence, Marketing)
+# calls into that module rather than writing to the Handoffs database
+# directly -- it requires Entity_Token/Matter_Token, and rejects (fails
+# closed, never silently redacts) any protected field that contains a
+# real Entity/Matter name, a known contact's name, an email address, or a
+# phone number. It builds on resolveIdentityTokens
+# (src/units/sales/salesExecutive.ts) and the closed-context contract
+# (src/dataBoundary/policy.ts's evaluateHandoffContext), which remain the
+# authority for identity resolution itself -- src/handoffWriter.ts is the
+# write-side enforcement point, not a second identity-resolution mechanism.
+#
+# This file remains the manual-operator equivalent of that same rule: a
+# human or agent operating on Notion directly bypasses the runtime's own
+# code path entirely and has to apply the same discipline by hand,
+# deliberately, every time.
 
 opaque_token_boundary:
   rule: >

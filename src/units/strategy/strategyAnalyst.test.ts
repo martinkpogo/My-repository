@@ -614,6 +614,23 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   assert.ok(originatingPatch, "the originating Handoff must be closed once the approved proposal is transferred");
 });
 
+test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matter_Token carry exactly what the originating Handoff supplied, never a real name", async (t) => {
+  const log = mockFetch(t, { entityToken: "E-47", matterToken: "M-12" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  assert.strictEqual(afterPickup.entityToken, "E-47");
+  assert.strictEqual(afterPickup.matterToken, "M-12");
+
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+
+  const props = log.handoffCreateBody.properties;
+  assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
+  assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+});
+
 test("26-29. Strategy -> Finance carries the complete approved proposal -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
@@ -801,6 +818,8 @@ test("Marketing-specific work is routed to Marketing when there is no recommenda
   await handleStrategyHandoffApproval(env, afterPickup, true);
   const props = log.handoffCreateBody.properties;
   assert.strictEqual(props["To Unit"].select.name, "Marketing");
+  assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
+  assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
 });
 
 test("R&I evidence/research boundary preserved -- Strategy routes missing-evidence work to R&I rather than inventing it", async (t) => {

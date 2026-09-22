@@ -461,8 +461,8 @@ test("handleQuoteApproval: proceeds normally and creates the Finance -> Sales Ha
   const env = fakeEnv();
   const state = fakeState({
     stage: "awaiting_quote_approval",
-    entityName: "E-47",
-    matterName: "M-12",
+    entityToken: "E-47",
+    matterToken: "M-12",
     quote: { price: 100000, rationale: "Value-based rationale." },
   });
 
@@ -472,6 +472,25 @@ test("handleQuoteApproval: proceeds normally and creates the Finance -> Sales Ha
   assert.ok(log.handoffCreateBody, "the Finance -> Sales Handoff must be created");
   assert.strictEqual(log.handoffCreateBody.properties["To Unit"].select.name, "Sales");
   assert.strictEqual(log.handoffCreateBody.properties.Matter_Token.rich_text[0].text.content, "M-12");
+});
+
+test("19. Finance -> Sales creates a token-only Handoff -- the title and Reason never expose the Matter name, only Matter_Token", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityToken: "E-47",
+    matterToken: "M-12",
+    quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." },
+  });
+
+  await handleQuoteApproval(env, state, true);
+
+  const props = log.handoffCreateBody.properties;
+  assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
+  assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.match(props.Handoff.title[0].text.content, /M-12/);
+  assert.match(props.Reason.rich_text[0].text.content, /M-12/);
 });
 
 test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion after pickup, and completes the retry", async (t) => {
@@ -488,8 +507,8 @@ test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion 
   const env = fakeEnv();
   const state = fakeState({
     stage: "awaiting_quote_approval",
-    entityName: "E-20",
-    matterName: undefined,
+    entityToken: "E-20",
+    matterToken: undefined,
     quote: { price: 420000, rationale: "Value-based rationale." },
   });
 
@@ -505,8 +524,8 @@ test("handleQuoteApproval: stays blocked (not a silent failure) when Matter_Toke
   const env = fakeEnv();
   const state = fakeState({
     stage: "awaiting_quote_approval",
-    entityName: "E-20",
-    matterName: undefined,
+    entityToken: "E-20",
+    matterToken: undefined,
     quote: { price: 420000, rationale: "Value-based rationale." },
   });
 

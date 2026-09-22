@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
+import { getPage, plainText, richText, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
@@ -8,6 +8,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
+import { createHandoff, updateHandoff } from "../../handoffWriter";
 
 interface RawValueAtStakeJudgement {
   value?: number;
@@ -234,7 +235,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     // it stuck at Picked-up, so the existing Held->Pending retry path
     // (handleMoreValueContext) can bring it back for exactly one more
     // pickup once the missing context is supplied.
-    await updatePage(env, state.handoffId!, {
+    await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
     }).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -283,8 +284,8 @@ async function judgeQuote(
   // name — overwrite WorkState's copy too, so any later Finance-side
   // reference (e.g. handleQuoteApproval's own messages, below) also stays
   // token-only rather than falling back to whatever Sales originally set.
-  state.entityName = entityToken;
-  state.matterName = matterToken;
+  state.entityToken = entityToken;
+  state.matterToken = matterToken;
 
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, FINANCE_HAT_DEFINITION_PAGE_ID, "Finance Hat Definition"),
@@ -313,7 +314,7 @@ async function judgeQuote(
     // "quote_redo_reason") started at Held and never left it, so it's
     // already in a recoverable state and needs no extra transition here.
     if (awaitingOnInsufficient === "value_context_more") {
-      await updatePage(env, state.handoffId!, {
+      await updateHandoff(env, state.handoffId!, {
         Status: select("Held"),
         "Open Questions": richText(`Governance retrieval failed (${missing}).`),
       }).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -328,7 +329,7 @@ async function judgeQuote(
     return state;
   }
 
-  await updatePage(env, state.handoffId!, { Status: select("Picked-up") });
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
   await logActivity(env, {
     entry: `Finance ${activityLabel}: ${matterToken}`,
     type: "Activity",
@@ -359,7 +360,7 @@ async function judgeQuote(
 
   if (holdReason !== null) {
     const reason = holdReason;
-    await updatePage(env, state.handoffId!, {
+    await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(reason),
     });
@@ -391,7 +392,7 @@ async function judgeQuote(
   const currency = judgement!.currency!;
   const rationale = judgement!.rationale ?? "";
 
-  await updatePage(env, state.handoffId!, {
+  await updateHandoff(env, state.handoffId!, {
     Status: select("Closed"),
     "Work Completed": richText(
       `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
@@ -451,7 +452,7 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
   if (!evalResult.success) {
     console.error(`Finance redo blocked — context evaluation failed for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Finance redo blocked — insufficient business context: ${state.entityName}`,
+      entry: `Finance redo blocked — insufficient business context: ${state.entityToken}`,
       type: "Blocker",
       area: "Finance",
       decisionRationale: evalResult.insufficientContext.reason,
@@ -460,13 +461,13 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `Couldn't read the Handoff record for *${state.entityName}* to apply your reasoning: ${evalResult.insufficientContext.reason}`,
+      `Couldn't read the Handoff record for *${state.entityToken}* to apply your reasoning: ${evalResult.insufficientContext.reason}`,
     );
     return state;
   }
 
   const augmentedContext = `${evalResult.contract.sanitizedContext}\n\nMartin's redo reasoning: ${reasonText}`;
-  await updatePage(env, state.handoffId!, {
+  await updateHandoff(env, state.handoffId!, {
     "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
   });
 
@@ -503,12 +504,12 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   state.pendingActionSummary = undefined;
 
   if (!approved) {
-    await updatePage(env, state.handoffId!, {
+    await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText("Martin requested a redo of the quote. Awaiting his reasoning before reassessing."),
     });
     await logActivity(env, {
-      entry: `Finance quote redo requested: ${state.matterName ?? state.entityName}`,
+      entry: `Finance quote redo requested: ${state.matterToken ?? state.entityToken}`,
       type: "Decision",
       area: "Finance",
       decisionRationale: "Martin requested a redo of the computed quote.",
@@ -517,15 +518,15 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `Got it — why are you requesting a redo for *${state.entityName}*? Tell me what's off or what to take into account, and I'll reassess and get you a new quote to review.`,
+      `Got it — why are you requesting a redo for *${state.entityToken}*? Tell me what's off or what to take into account, and I'll reassess and get you a new quote to review.`,
     );
     state.stage = "quote_redo_requested";
     state.awaiting = "quote_redo_reason";
     return state;
   }
 
-  if (!state.matterName && state.handoffId) {
-    // state.matterName was cached from the Handoff's Matter_Token at pickup
+  if (!state.matterToken && state.handoffId) {
+    // state.matterToken was cached from the Handoff's Matter_Token at pickup
     // time and may simply have been unset then (a data gap on the source
     // Handoff, not something this Hat can invent) -- re-read the live
     // record once before giving up, so correcting it in Notion and
@@ -537,9 +538,9 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     });
     const liveMatterToken = live ? plainText(live.properties.Matter_Token) : "";
     if (liveMatterToken) {
-      state.matterName = liveMatterToken;
+      state.matterToken = liveMatterToken;
       await logActivity(env, {
-        entry: `Matter_Token recovered on retry: ${state.entityName ?? state.handoffId}`,
+        entry: `Matter_Token recovered on retry: ${state.entityToken ?? state.handoffId}`,
         type: "Decision",
         area: "Finance",
         decisionRationale: "Matter_Token was missing at pickup time but present on the Handoff's live record now -- recovered without re-deriving it.",
@@ -548,10 +549,10 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     }
   }
 
-  if (!state.matterName) {
-    console.error(`Finance handleQuoteApproval: state.matterName missing for handoff ${state.handoffId}`);
+  if (!state.matterToken) {
+    console.error(`Finance handleQuoteApproval: state.matterToken missing for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Quote approval blocked — no Matter_Token on record: ${state.entityName ?? state.handoffId}`,
+      entry: `Quote approval blocked — no Matter_Token on record: ${state.entityToken ?? state.handoffId}`,
       type: "Blocker",
       area: "Finance",
       decisionRationale: "This work item has no Matter_Token, so the Finance -> Sales follow-up Handoff can't identify which Matter it's for.",
@@ -560,32 +561,36 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityName ?? state.handoffId}*, add the correct Matter_Token there, then retry (Approve again).`,
+      `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityToken ?? state.handoffId}*, add the correct Matter_Token there, then retry (Approve again).`,
     );
     return state;
   }
 
-  const followUp = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-    Handoff: title(`Draft Proposal — ${state.matterName}`),
-    "From Unit": select("Finance"),
-    "From Hat": richText("Value-Based Pricing Assessor"),
-    "To Unit": select("Sales"),
-    "To Hat": richText("Sales Executive"),
-    Type: select("Work"),
-    Status: select("Pending"),
-    Reason: richText(`Value-based quote approved by Martin for ${state.matterName}; ready for Draft Proposal preparation.`),
-    "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
-    Entity_Token: richText(state.entityName ?? ""),
-    Matter_Token: richText(state.matterName ?? ""),
-    "Verified Facts & Sources": richText(
-      `Authoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
-    ),
-  });
+  const followUp = await createHandoff(
+    env,
+    {
+      Handoff: title(`Draft Proposal — ${state.matterToken}`),
+      "From Unit": select("Finance"),
+      "From Hat": richText("Value-Based Pricing Assessor"),
+      "To Unit": select("Sales"),
+      "To Hat": richText("Sales Executive"),
+      Type: select("Work"),
+      Status: select("Pending"),
+      Reason: richText(`Value-based quote approved by Martin for ${state.matterToken}; ready for Draft Proposal preparation.`),
+      "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
+      Entity_Token: richText(state.entityToken ?? ""),
+      Matter_Token: richText(state.matterToken ?? ""),
+      "Verified Facts & Sources": richText(
+        `Authoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
+      ),
+    },
+    { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
+  );
   state.handoffId = followUp.id;
   await env.STATE_KV.put(`handoff_workitem:${followUp.id}`, state.workId);
 
   await logActivity(env, {
-    entry: `Quote approved — routed to Sales for Draft Proposal: ${state.matterName}`,
+    entry: `Quote approved — routed to Sales for Draft Proposal: ${state.matterToken}`,
     type: "Activity",
     area: "Finance",
     activity: `Handoff ${followUp.id} — quote approved and queued for Sales.`,
@@ -595,7 +600,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Value-Based Pricing Assessor" },
-    `Quote approved — queued for Sales to prepare the Draft Proposal for *${state.entityName}*.`,
+    `Quote approved — queued for Sales to prepare the Draft Proposal for *${state.entityToken}*.`,
   );
 
   state.stage = "quote_approved";

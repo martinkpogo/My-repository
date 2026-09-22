@@ -1,5 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { createPage, getPage, plainText, richText, select, title, updatePage } from "../../notion";
+import { getPage, plainText, richText, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -7,6 +7,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
+import { createHandoff, updateHandoff } from "../../handoffWriter";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -434,7 +435,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     // it stuck at Picked-up, so the same Held->Pending retry path (see
     // handleStrategyClarification) can bring it back for exactly one more
     // pickup once the missing context is supplied.
-    await updatePage(env, state.handoffId!, {
+    await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
     }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -448,13 +449,13 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     return state;
   }
 
-  state.entityName = evalResult.contract.entityToken;
-  state.matterName = evalResult.contract.matterToken;
+  state.entityToken = evalResult.contract.entityToken;
+  state.matterToken = evalResult.contract.matterToken ?? "";
   state.strategyQuestion = evalResult.contract.sanitizedContext;
   state.strategyContext = evalResult.contract.sanitizedContext;
 
   await logActivity(env, {
-    entry: `Strategy picked up request: ${state.matterName || state.entityName || state.workId}`,
+    entry: `Strategy picked up request: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Activity",
     area: "Strategy",
     activity: "Strategy Analyst picked up the Handoff.",
@@ -477,7 +478,7 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
       outcome: "Blocked",
     });
     if (state.handoffId && state.stage !== "strategy_refining") {
-      await updatePage(env, state.handoffId, {
+      await updateHandoff(env, state.handoffId, {
         Status: select("Held"),
         "Open Questions": richText("Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion."),
       }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -516,7 +517,7 @@ async function handleBlocked(env: Env, state: WorkState, reason: string): Promis
     outcome: "Blocked",
   });
   if (state.handoffId) {
-    await updatePage(env, state.handoffId, {
+    await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText(reason.slice(0, 1900)),
     }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
@@ -581,7 +582,7 @@ export function formatDiagnosisForHandoff(result: StrategyDiagnosisResult): stri
 async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiagnosisResult): Promise<WorkState> {
   if (result.recommendedDirection) {
     await logActivity(env, {
-      entry: `Strategy intervention proposed: ${state.matterName || state.entityName || state.workId}`,
+      entry: `Strategy intervention proposed: ${state.matterToken || state.entityToken || state.workId}`,
       type: "Decision",
       area: "Strategy",
       decisions: `Proposed: ${result.recommendedDirection}`,
@@ -593,13 +594,13 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
   }
 
   if (state.handoffId) {
-    await updatePage(env, state.handoffId, {
+    await updateHandoff(env, state.handoffId, {
       Status: select("Closed"),
       "Work Completed": richText(formatDiagnosisForHandoff(result).slice(0, 1900)),
     });
   }
   await logActivity(env, {
-    entry: `Strategy diagnosis completed: ${state.matterName || state.entityName || state.workId}`,
+    entry: `Strategy diagnosis completed: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Decision",
     area: "Strategy",
     decisions: "No recommendation -- evidence insufficient for one.",
@@ -738,24 +739,28 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   }
 
   try {
-    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-      Handoff: title(pending.handoffTitle),
-      "From Unit": select("Strategy"),
-      "From Hat": richText(HAT_NAME),
-      "To Unit": select(pending.unit),
-      "To Hat": richText(pending.hat),
-      Type: select("Work"),
-      Status: select("Pending"),
-      Reason: richText(pending.reason),
-      "Required Next Action": richText(pending.requiredNextAction),
-      "Expected Output": richText(pending.expectedOutput),
-      "Acceptance Criteria": richText(pending.acceptanceCriteria),
-      Entity_Token: richText(state.entityName ?? ""),
-      Matter_Token: richText(state.matterName ?? ""),
-      Assumptions: richText(pending.assumptions.slice(0, 1900)),
-      "Open Questions": richText(pending.openQuestions.slice(0, 1900)),
-      "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
-    });
+    const handoff = await createHandoff(
+      env,
+      {
+        Handoff: title(pending.handoffTitle),
+        "From Unit": select("Strategy"),
+        "From Hat": richText(HAT_NAME),
+        "To Unit": select(pending.unit),
+        "To Hat": richText(pending.hat),
+        Type: select("Work"),
+        Status: select("Pending"),
+        Reason: richText(pending.reason),
+        "Required Next Action": richText(pending.requiredNextAction),
+        "Expected Output": richText(pending.expectedOutput),
+        "Acceptance Criteria": richText(pending.acceptanceCriteria),
+        Entity_Token: richText(state.entityToken ?? ""),
+        Matter_Token: richText(state.matterToken ?? ""),
+        Assumptions: richText(pending.assumptions.slice(0, 1900)),
+        "Open Questions": richText(pending.openQuestions.slice(0, 1900)),
+        "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
+      },
+      { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
+    );
     state.pendingStrategyHandoff = undefined;
     state.pendingActionSummary = undefined;
     await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
@@ -967,7 +972,7 @@ function normalizeStrategyProposal(raw: Partial<RawStrategyProposal> | null, pro
 function formatProposalPreview(state: WorkState, proposal: StrategyProposal): string {
   const lines = [
     `*Strategy Proposal Ready for Review* (v${proposal.proposalVersion})`,
-    `Entity: ${state.matterName || state.entityName || state.workId}`,
+    `Entity: ${state.matterToken || state.entityToken || state.workId}`,
     `\n*Strategic problem:* ${proposal.executiveSummary.strategicProblem}`,
     `\n*Recommended direction:* ${proposal.recommendedDirection.direction || proposal.executiveSummary.recommendedDirection}`,
     `\n*Proposed intervention:* ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
@@ -1075,7 +1080,7 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   state.strategyProposal = proposal;
 
   await logActivity(env, {
-    entry: `Strategy Proposal ${previousVersion ? "revised (v" + proposalVersion + ")" : "created"}: ${state.matterName || state.entityName || state.workId}`,
+    entry: `Strategy Proposal ${previousVersion ? "revised (v" + proposalVersion + ")" : "created"}: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Decision",
     area: "Strategy",
     decisions: proposal.recommendedDirection.direction,
@@ -1111,13 +1116,13 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
     decisionOptions: ["approve", "refine", "reject"],
   };
   state.pendingActionSummary = {
-    label: `Strategy Proposal v${proposalVersion}: ${state.matterName || state.entityName || state.workId}`,
+    label: `Strategy Proposal v${proposalVersion}: ${state.matterToken || state.entityToken || state.workId}`,
     message,
     buttons,
     createdAt: new Date().toISOString(),
   };
   await logActivity(env, {
-    entry: `Strategy approval request sent to Martin: ${state.matterName || state.entityName || state.workId}`,
+    entry: `Strategy approval request sent to Martin: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Activity",
     area: "Strategy",
     activity: `Proposal v${proposalVersion} (${proposalId}) awaiting Approve/Refine/Reject.`,
@@ -1214,7 +1219,7 @@ export async function handleInterventionApproval(
     state.pendingActionSummary = undefined;
     state.strategyApprovalState = "REFINEMENT_REQUESTED";
     await logActivity(env, {
-      entry: `Strategy proposal refinement requested: ${state.matterName || state.entityName || state.workId}`,
+      entry: `Strategy proposal refinement requested: ${state.matterToken || state.entityToken || state.workId}`,
       type: "Decision",
       area: "Strategy",
       decisionRationale: "Martin requested changes to the proposal. A refinement is not an approval -- no Finance Handoff created; the prior version is retained as historical context.",
@@ -1238,13 +1243,13 @@ export async function handleInterventionApproval(
       ).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId} on rejection`, err));
     }
     await logActivity(env, {
-      entry: `Strategy proposal rejected by Martin: ${state.matterName || state.entityName || state.workId}`,
+      entry: `Strategy proposal rejected by Martin: ${state.matterToken || state.entityToken || state.workId}`,
       type: "Decision",
       area: "Strategy",
       decisionRationale: "Martin rejected the proposal outright, with no further direction. No Finance Handoff created; the current strategic attempt is closed and will not be reopened automatically.",
       outcome: "Complete",
     });
-    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Understood -- this proposal for *${state.matterName || state.entityName}* has been rejected and closed. A new attempt would need a new Handoff.`);
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Understood -- this proposal for *${state.matterToken || state.entityToken}* has been rejected and closed. A new attempt would need a new Handoff.`);
     state.stage = "strategy_rejected";
     state.awaiting = undefined;
     return state;
@@ -1252,37 +1257,41 @@ export async function handleInterventionApproval(
 
   // decision === "approve"
   try {
-    const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
-      Handoff: title(`Value-based quote request — ${state.matterName || state.entityName || state.workId}`),
-      "From Unit": select("Strategy"),
-      "From Hat": richText(HAT_NAME),
-      "To Unit": select("Finance"),
-      "To Hat": richText("Value-Based Pricing Assessor"),
-      Type: select("Work"),
-      Status: select("Pending"),
-      Reason: richText(`Martin-approved Strategic Intervention Proposal (v${proposal!.proposalVersion}) ready for value-based pricing: ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
-      "Required Next Action": richText(
-        "Conduct value-based pricing assessment of the approved Strategy intervention without redesigning, substituting, removing, or materially altering it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis -- price the approved intervention's value, or hold and state what's missing.",
-      ),
-      "Expected Output": richText(
-        "An authoritative quote, currency, priced scope, pricing rationale, timing considered, pricing assumptions, and quote validity for the approved intervention -- or an explicit Held status naming the specific missing evidence.",
-      ),
-      "Acceptance Criteria": richText(
-        "Approved intervention preserved; approved scope preserved; approved timeline considered; value-based pricing applied; budget/WTP not used as pricing basis; no strategic redesign; no material substitution; pricing assumptions explicit; currency correct.",
-      ),
-      Entity_Token: richText(state.entityName ?? ""),
-      Matter_Token: richText(state.matterName ?? ""),
-      Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
-      "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
-      "Verified Facts & Sources": richText(formatApprovedProposalForFinance(proposal!).slice(0, 1900)),
-    });
+    const handoff = await createHandoff(
+      env,
+      {
+        Handoff: title(`Value-based quote request — ${state.matterToken || state.entityToken || state.workId}`),
+        "From Unit": select("Strategy"),
+        "From Hat": richText(HAT_NAME),
+        "To Unit": select("Finance"),
+        "To Hat": richText("Value-Based Pricing Assessor"),
+        Type: select("Work"),
+        Status: select("Pending"),
+        Reason: richText(`Martin-approved Strategic Intervention Proposal (v${proposal!.proposalVersion}) ready for value-based pricing: ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
+        "Required Next Action": richText(
+          "Conduct value-based pricing assessment of the approved Strategy intervention without redesigning, substituting, removing, or materially altering it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis -- price the approved intervention's value, or hold and state what's missing.",
+        ),
+        "Expected Output": richText(
+          "An authoritative quote, currency, priced scope, pricing rationale, timing considered, pricing assumptions, and quote validity for the approved intervention -- or an explicit Held status naming the specific missing evidence.",
+        ),
+        "Acceptance Criteria": richText(
+          "Approved intervention preserved; approved scope preserved; approved timeline considered; value-based pricing applied; budget/WTP not used as pricing basis; no strategic redesign; no material substitution; pricing assumptions explicit; currency correct.",
+        ),
+        Entity_Token: richText(state.entityToken ?? ""),
+        Matter_Token: richText(state.matterToken ?? ""),
+        Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
+        "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
+        "Verified Facts & Sources": richText(formatApprovedProposalForFinance(proposal!).slice(0, 1900)),
+      },
+      { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
+    );
 
     // Close the Sales -> Strategy Handoff only now that the approved
     // proposal has been successfully transferred onward -- per the
     // canonical flow, this is deferred until here (not at proposal-
     // development time), and only after the Finance Handoff actually exists.
     if (state.handoffId) {
-      await updatePage(env, state.handoffId, {
+      await updateHandoff(env, state.handoffId, {
         Status: select("Closed"),
         "Work Completed": richText(`Proposal v${proposal!.proposalVersion} approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
       }).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
@@ -1347,7 +1356,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
     return runDiagnosis(env, state);
   }
 
-  await updatePage(env, state.handoffId, {
+  await updateHandoff(env, state.handoffId, {
     "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
     Status: select("Pending"),
   });
