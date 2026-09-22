@@ -8,6 +8,7 @@ import type {
   DataTransformation,
   HandoffContextContract,
   HandoffContextEvaluationResult,
+  OutboundDataPolicy,
   ProviderEligibilityRule,
   SemanticTaskId,
   SensitivityLevel,
@@ -142,6 +143,171 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
     allowedSensitivities: FALLBACK_PROVIDER_SENSITIVITIES,
   },
 };
+
+/**
+ * Architect-authorized Outbound Data Gate policy -- see OutboundDataPolicy's
+ * doc comment (dataBoundary/types.ts) for what each value means and the
+ * fail-closed rule for a taskId absent from this map. This is the single
+ * per-task outbound-policy governance table the Outbound Data Gate
+ * (src/ai/outboundGate.ts) consults; it is deliberately kept here, next to
+ * PRODUCTION_TASK_SENSITIVITY, rather than in a separate configuration
+ * system, and does not duplicate SEMANTIC_TASK_REGISTRY.
+ *
+ * Every one of the 30 registered SemanticTaskIds is accounted for below --
+ * either given a resolved policy, or named in the "deliberately unresolved"
+ * comment block explaining why it has none. A task's outbound policy is
+ * independent of its PRODUCTION_TASK_SENSITIVITY entry (that governs
+ * provider *eligibility*; this governs outbound *content*), though the two
+ * are drawn from the same underlying architecture and usually agree.
+ *
+ * -- TOKEN_SAFE_RUNTIME --
+ * strategy.diagnosis / strategy.handoff_routing / strategy.proposal_drafting,
+ * finance.quote_judgment, sales.proposal_drafting / sales.proposal_revision:
+ * per the Entity_Token/Matter_Token data-boundary redesign, these operate
+ * on opaque tokens and sanitized Handoff/Proposal text, never a real client
+ * identity -- the current expected posture for this Outbound Data Gate
+ * task. NOTE: sales.proposal_drafting/sales.proposal_revision's own current
+ * runtime prompt construction (salesExecutive.ts's legacy handleQuoteReceived/
+ * handleProposalFeedback -- the path used only for a non-Finance-origin
+ * Sales Handoff while SALES_EXECUTIVE_PAUSED is false) still interpolates
+ * state.entityName and raw state.enquiryText/callNotes directly into the
+ * prompt, which the gate's own content detectors will correctly BLOCK if
+ * that path is ever exercised with real identity present. That is an
+ * existing gap in salesExecutive.ts, exposed rather than fixed by this
+ * table -- fixing the prompt itself is out of this task's scope.
+ *
+ * research.context_relevance / research.protocol_selection /
+ * research.plan_generation / research.synthesis / research.handoff_routing:
+ * R&I operates on Entity_Token/Matter_Token, Martin's own direct chat
+ * requests, or already-sanitized supplied context -- never a real client
+ * identity (no existing governance rule requires otherwise for any of the
+ * five).
+ *
+ * lead.discovery_classification: leadDiscovery.ts's own
+ * redactSignalForClassification strips the discovered name/contact before
+ * this task's prompt is ever built -- the classifier only ever sees
+ * sanitized evidence text.
+ *
+ * lead.discovery_signal_evaluation: deliberately exempted from this gate's
+ * company-name detector specifically (see OUTBOUND_POLICY_PUBLIC_SOURCE_
+ * EXEMPT_TASKS below) -- this task's whole job is evaluating attributed
+ * public web-search results, which legitimately and by design name a real,
+ * publicly-discoverable organisation (that's what "organisation": "<name
+ * if identifiable>" in its own response schema means). This is a real
+ * organisation name, but not ENIG's own confidential client/contact
+ * identity -- the Entity_Token/Matter_Token boundary this gate otherwise
+ * protects has no token for a company ENIG hasn't engaged. Email/phone/
+ * address/person-name detectors still apply in full -- a discovered
+ * person's direct contact detail is never let through.
+ *
+ * lead.discovery_ondemand_intake / lead.discovery_ondemand_query_generation:
+ * operate only on Martin's own request text -- per their own registry
+ * descriptions, never a company name, decision-maker, or contact.
+ *
+ * marketing.intake_classification / marketing.hat_action_decision: operate
+ * only on Martin's own internal Marketing-task text, about ENIG's own
+ * internal operations -- no Unit other than Sales can be handed a real
+ * client identity to begin with (Entity/Matters/Proposals access is
+ * exclusively the isolated Sales Executive project's now).
+ *
+ * action.google_doc_intake / action.google_doc_comment_edit /
+ * action.google_sheet_intake / action.google_sheet_comment_edit: operate on
+ * Martin's own request text or his own Google Doc/Sheet content for
+ * internal operational documents (e.g. a content calendar) -- not a
+ * channel real client identity flows through today. Content-level
+ * detectors still apply as defense-in-depth.
+ *
+ * chat.general_reply: TOKEN_SAFE_RUNTIME as the task-level default, safe
+ * specifically because the one genuinely risky case -- the Sales Unit
+ * persona, where Martin could paste real enquiry text -- is already,
+ * separately blocked upstream by this task's own client_confidential
+ * PRODUCTION_TASK_SENSITIVITY default (chatSensitivityForUnit in chat.ts
+ * passes no override for Sales, and no provider is eligible for
+ * client_confidential) before a Sales-Unit call ever reaches this gate.
+ * Every other Unit's chat persona is architecturally never handed a real
+ * client identity (see the marketing.* rationale above) -- for those the
+ * TOKEN_SAFE_RUNTIME default is both correct and, per the same
+ * architectural guarantee, safe.
+ *
+ * -- IDENTITY_AUTHORIZED --
+ * sales.enquiry_extraction: inspected, not assumed. Its one and only job
+ * (salesExecutive.ts's handleIncomingEnquiry/handleEntityRedoReason) is to
+ * extract the sender's name/organisation/email/phone FROM the raw incoming
+ * enquiry text -- the identity is already present in the outbound prompt by
+ * construction; a TOKEN_SAFE_RUNTIME classification would permanently and
+ * incorrectly block this task's only legitimate use. This is NOT the
+ * identity/artifact execution environment IDENTITY_AUTHORIZED is otherwise
+ * reserved for -- it is a narrow, explicit exception for one existing task
+ * whose current, unchanged workflow genuinely requires identity-bearing
+ * input, made explicitly here rather than assumed. It is not inferred from
+ * this being a Sales task, from provider trust, or from anything else this
+ * type's doc comment rules out: sales.enquiry_extraction is
+ * PRODUCTION_TASK_SENSITIVITY's own "pii_restricted" entry, and no
+ * provider is eligible for pii_restricted today -- this Outbound Data Gate
+ * entry does not change that; it only establishes the policy this gate
+ * itself would apply if that separate, unrelated restriction were ever
+ * lifted.
+ *
+ * -- Deliberately unresolved (no entry below; the gate blocks these) --
+ * routing.enquiry_classification / routing.marketing_specialization_check /
+ * routing.research_specialization_check: each sends the raw, not-yet-
+ * classified incoming message text -- exactly the text that, when it IS a
+ * client enquiry (the case these classifiers exist to detect), is expected
+ * to describe the prospect's business/situation and may well name it. This
+ * mirrors these tasks' own client_confidential PRODUCTION_TASK_SENSITIVITY
+ * -- already unreachable today (no eligible provider), and left genuinely
+ * unresolved here rather than given a TOKEN_SAFE_RUNTIME label the content
+ * doesn't support, so a future change to provider eligibility doesn't
+ * silently start sending identity-bearing raw enquiry text through this
+ * gate under a mislabeled policy.
+ *
+ * sales.matter_summary_drafting / sales.call_prep_briefing /
+ * sales.commercial_evidence_extraction / sales.call_qualification: operate
+ * on raw, pre-tokenization enquiry text and/or call notes -- call_prep_
+ * briefing's own prompt construction includes state.entityName directly.
+ * Same rationale as the routing.* classifiers above: client_confidential,
+ * already unreachable, deliberately left unresolved rather than mislabeled.
+ */
+export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId, OutboundDataPolicy>>> = {
+  "chat.general_reply": "TOKEN_SAFE_RUNTIME",
+  "marketing.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "marketing.hat_action_decision": "TOKEN_SAFE_RUNTIME",
+  "research.context_relevance": "TOKEN_SAFE_RUNTIME",
+  "research.protocol_selection": "TOKEN_SAFE_RUNTIME",
+  "research.plan_generation": "TOKEN_SAFE_RUNTIME",
+  "research.synthesis": "TOKEN_SAFE_RUNTIME",
+  "research.handoff_routing": "TOKEN_SAFE_RUNTIME",
+  "sales.proposal_drafting": "TOKEN_SAFE_RUNTIME",
+  "sales.proposal_revision": "TOKEN_SAFE_RUNTIME",
+  "finance.quote_judgment": "TOKEN_SAFE_RUNTIME",
+  "strategy.diagnosis": "TOKEN_SAFE_RUNTIME",
+  "strategy.handoff_routing": "TOKEN_SAFE_RUNTIME",
+  "strategy.proposal_drafting": "TOKEN_SAFE_RUNTIME",
+  "lead.discovery_classification": "TOKEN_SAFE_RUNTIME",
+  "lead.discovery_signal_evaluation": "TOKEN_SAFE_RUNTIME",
+  "lead.discovery_ondemand_intake": "TOKEN_SAFE_RUNTIME",
+  "lead.discovery_ondemand_query_generation": "TOKEN_SAFE_RUNTIME",
+  "action.google_doc_intake": "TOKEN_SAFE_RUNTIME",
+  "action.google_doc_comment_edit": "TOKEN_SAFE_RUNTIME",
+  "action.google_sheet_intake": "TOKEN_SAFE_RUNTIME",
+  "action.google_sheet_comment_edit": "TOKEN_SAFE_RUNTIME",
+  // Explicit, narrow, inspected exception -- see this map's own doc comment.
+  "sales.enquiry_extraction": "IDENTITY_AUTHORIZED",
+};
+
+/**
+ * Tasks exempted from the Outbound Data Gate's company/organisation-name
+ * detector specifically (every other detector -- email, phone, address,
+ * person-name/title, labeled contact field -- still applies in full). See
+ * PRODUCTION_OUTBOUND_POLICY's own doc comment, lead.discovery_signal_
+ * evaluation entry, for the rationale: this task's legitimate, by-design
+ * subject matter is a real, publicly-discoverable organisation name found
+ * via public web search, which is not the same thing as a leak of ENIG's
+ * own confidential client/contact identity.
+ */
+export const OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS: ReadonlySet<SemanticTaskId> = new Set<SemanticTaskId>([
+  "lead.discovery_signal_evaluation",
+]);
 
 export interface DataBoundaryEvaluatorOptions {
   taskSensitivities?: Partial<Record<SemanticTaskId, SensitivityLevel>>;

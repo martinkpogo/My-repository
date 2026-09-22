@@ -5,6 +5,7 @@ import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
 import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
+import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator } from "./outboundGate";
 import { sendMessage } from "../telegram";
 
 // Fallback order: Workers AI first (it's the free baseline until its
@@ -35,10 +36,12 @@ const DEFAULT_PROVIDERS: AiProvider[] = [
 export class AiPolicyExecutor {
   private providers: AiProvider[];
   private dataBoundaryEvaluator: DataBoundaryEvaluator;
+  private outboundDataGate: OutboundDataGateEvaluator;
 
-  constructor(providers?: AiProvider[], dataBoundaryEvaluator?: DataBoundaryEvaluator) {
+  constructor(providers?: AiProvider[], dataBoundaryEvaluator?: DataBoundaryEvaluator, outboundDataGate?: OutboundDataGateEvaluator) {
     this.providers = providers ?? DEFAULT_PROVIDERS;
     this.dataBoundaryEvaluator = dataBoundaryEvaluator ?? defaultDataBoundaryEvaluator;
+    this.outboundDataGate = outboundDataGate ?? defaultOutboundDataGateEvaluator;
   }
 
   /**
@@ -132,6 +135,23 @@ export class AiPolicyExecutor {
         return null;
       }
       effectiveTask = { ...effectiveTask, messages: redactedMessages };
+
+      // Outbound Data Gate: the centralized, fail-closed final check on the
+      // ACTUAL effective (post-transform, post-redaction) messages, run
+      // for every provider attempt in the fallback loop -- a fallback
+      // provider never bypasses this. Never trusts a provider or the task
+      // succeeding as license to skip it; blocks and moves on (never
+      // silently redacts/changes the payload) whenever this exact payload
+      // isn't established as permitted for this task's declared outbound
+      // policy. No provider.execute() call is reached for a blocked
+      // attempt.
+      const gateResult = this.outboundDataGate.evaluate(task.taskId, provider.id, effectiveTask.messages);
+      if (!gateResult.allowed) {
+        console.warn(
+          `AiPolicyExecutor: Outbound Data Gate blocked provider ${provider.id} for task ${task.taskId} [${gateResult.reasonCategory}] (policy: ${gateResult.policy}, detector: ${gateResult.detectorClassification}). Call not sent to this provider.`,
+        );
+        continue;
+      }
 
       const result = await provider.execute(env, effectiveTask);
       if (result.success) {

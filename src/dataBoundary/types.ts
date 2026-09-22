@@ -52,6 +52,37 @@ export type SensitivityLevel =
   | "client_confidential"
   | "pii_restricted";
 
+/**
+ * Outbound Data Gate policy -- the destination/task-aware classification the
+ * gate (src/ai/outboundGate.ts) resolves for a SemanticTaskId before any
+ * provider.execute() call, per Architect-authorized Outbound Data Gate
+ * policy in dataBoundary/policy.ts's PRODUCTION_OUTBOUND_POLICY.
+ *
+ * TOKEN_SAFE_RUNTIME: the task's outbound payload must contain only
+ * Entity_Token/Matter_Token-shaped opaque identifiers, sanitized business
+ * context, and ordinary business language -- never a real organisation/
+ * person name, email, phone, physical address, or other direct identity/
+ * contact information. The gate inspects the actual payload for this; a
+ * task-level TOKEN_SAFE_RUNTIME classification is necessary but not
+ * sufficient -- content the gate cannot establish as safe still blocks.
+ *
+ * IDENTITY_AUTHORIZED: the task is explicitly authorized to carry
+ * identity-bearing content outbound. Reserved for a specifically authorized
+ * identity/artifact execution environment -- never inferred from provider
+ * trust, AI confidence, task success, approval state, Handoff existence,
+ * urgency, caller identity, or a task merely being Sales-related. No
+ * current production task is IDENTITY_AUTHORIZED merely because it exists;
+ * see PRODUCTION_OUTBOUND_POLICY's own doc comment for the one task
+ * (sales.enquiry_extraction) whose existing, unchanged workflow already
+ * requires identity-bearing AI processing by design, and why.
+ *
+ * A SemanticTaskId absent from PRODUCTION_OUTBOUND_POLICY has no resolved
+ * outbound policy at all -- the gate blocks it outright (fail closed), the
+ * same "unresolved policy hold" discipline DataBoundaryEvaluator already
+ * applies to sensitivity/provider-eligibility resolution.
+ */
+export type OutboundDataPolicy = "TOKEN_SAFE_RUNTIME" | "IDENTITY_AUTHORIZED";
+
 export interface ContextSegment {
   type: "system" | "user" | "history" | "governance";
   content: string;
