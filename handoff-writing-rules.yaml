@@ -1,0 +1,61 @@
+# ENIG Handoff Field-Writing Rules
+#
+# Applies to EVERY write to the Handoffs database in Notion -- whether
+# performed by the deployed runtime's own code, or by a human/agent
+# operating on Notion directly (manual Handoff creation, corrections,
+# resubmissions, cleanup). The runtime code already enforces this via
+# resolveIdentityTokens (src/units/sales/salesExecutive.ts) and the
+# closed-context contract (src/dataBoundary/policy.ts's
+# evaluateHandoffContext); this file exists because a manual operator
+# action bypasses that code path entirely and has to apply the same
+# discipline by hand, deliberately, every time.
+
+opaque_token_boundary:
+  rule: >
+    Every Handoff field that becomes another Unit's AI input context
+    (Handoff title, Reason, Required Next Action, Expected Output,
+    Acceptance Criteria, Assumptions, Open Questions, Verified Facts &
+    Sources, Work Completed) must identify the Entity/Matter ONLY by its
+    Entity_Token and Matter_Token (e.g. "E-20", "MAT-20") -- never by the
+    real Entity/company name, a real contact's name, an email address, a
+    phone number, or any other detail that identifies who they actually
+    are.
+
+  never_write:
+    - Real Entity/company name (e.g. "Meridian Foods Ghana Ltd")
+    - Real contact names (e.g. "Comfort Agyare", "Daniel Agyeman")
+    - Email addresses or phone numbers
+    - Any other detail that could identify the Entity outside its token
+
+  always_write:
+    - Entity_Token -- from the Entity page's "Entity ID" unique_id property
+    - Matter_Token -- from the Matter page's "Matter_ID" unique_id property
+
+  reading_real_identity_is_fine:
+    note: >
+      Reading the full Entity/Matter page, an email thread, or supplied
+      documents is expected and necessary to gather evidence -- the
+      boundary is about what gets WRITTEN into a Handoff field, not what
+      is read while preparing one. The runtime's own resolveIdentityTokens
+      reads the entire Entity/Matter page and then deliberately discards
+      everything except the token; a manual operator must do the same
+      thing by hand -- resolve the real identity to its token before
+      writing anything forward, not while reading source material.
+
+  before_writing_a_handoff_by_hand:
+    - Look up the Entity page's "Entity ID" and the Matter page's
+      "Matter_ID" properties (or copy them verbatim from an existing
+      Handoff already on record for the same case) -- use those, never
+      the Name/Matter title.
+    - Re-read every field about to be written and confirm it contains no
+      real name, contact, or contact detail before submitting.
+
+  incident_reference: >
+    HO-58 (Meridian Foods Ghana Ltd / E-20 / MAT-20, 2026-09-22) violated
+    this rule -- the real company name and contact details (name, email)
+    were written into the Handoff title and Verified Facts & Sources when
+    it was created by hand, bypassing the runtime's own
+    resolveIdentityTokens enforcement entirely. Left as historical record
+    (test-engagement data, not a real client-data exposure) rather than
+    scrubbed; see the Activity & Decision Log entry consolidating HO-58
+    for the full account. This file exists to stop it happening again.

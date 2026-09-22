@@ -2,6 +2,10 @@
 
 This document establishes the execution contract and operating model for Jules (implementation agent) in the ENIG Agent Runtime repository.
 
+## Manual Notion operator actions
+
+Any Handoff created, updated, or resubmitted by hand (i.e. via a Notion tool call, not by the deployed runtime's own code) must follow `handoff-writing-rules.yaml` in this repo's root before writing anything: Entity/Matter identity goes in as Entity_Token/Matter_Token only, never a real name, contact, email, or phone number. The runtime's own code enforces this automatically (`resolveIdentityTokens`, `dataBoundary/policy.ts`'s closed-context contract); a manual operator action bypasses that code path entirely and must apply the same discipline by hand, every time, before submitting.
+
 ## Authority Model
 
 * **Architect** remains the architectural and governance authority for ENIG.
