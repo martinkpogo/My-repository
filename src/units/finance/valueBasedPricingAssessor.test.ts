@@ -66,6 +66,7 @@ function mockFetch(
     entityToken?: string;
     matterToken?: string;
     initialStatus?: string;
+    requiredNextAction?: string;
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
@@ -73,6 +74,7 @@ function mockFetch(
   const verifiedFacts = opts.verifiedFacts ?? "Proposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.";
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
+  const requiredNextAction = opts.requiredNextAction ?? "";
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -92,6 +94,7 @@ function mockFetch(
           properties: {
             Status: { select: { name: opts.initialStatus ?? "Pending" } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
+            "Required Next Action": { rich_text: [{ plain_text: requiredNextAction }] },
             Entity_Token: { rich_text: [{ plain_text: entityToken }] },
             Matter_Token: { rich_text: [{ plain_text: matterToken }] },
           },
@@ -210,6 +213,25 @@ test("Telegram hold message states the actual specific reason -- not a hardcoded
     !log.sentTexts.some((t) => /isn't enough to work out a value-based price/i.test(t)),
     "must not send the old hardcoded generic-cause message when the real reason is something else",
   );
+});
+
+test("Required Next Action content is folded into the pricing judgment context, not silently ignored", async (t) => {
+  // Mirrors strategyAnalyst.ts's equivalent regression test -- same live
+  // incident pattern, confirmed for Finance's own context reconstruction.
+  mockFetch(t, { requiredNextAction: "The evidence is client-estimated (management estimate from the CEO and BDM) -- classify evidence_type as client_estimated." });
+  const env = fakeEnv();
+  let capturedUserPrompt = "";
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      capturedUserPrompt = String(opts?.messages?.[1]?.content ?? "");
+      return { response: JSON.stringify(SUFFICIENT_JUDGEMENT) };
+    },
+  } as any;
+  const state = fakeState();
+
+  await handlePickup(env, state);
+
+  assert.match(capturedUserPrompt, /classify evidence_type as client_estimated/, "guidance written into Required Next Action must reach the pricing judgment input");
 });
 
 test("L. Finance pricing -- sufficient evidence produces a quote and rationale without budget/WTP as the basis", async (t) => {

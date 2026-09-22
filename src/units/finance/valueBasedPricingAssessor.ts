@@ -155,7 +155,14 @@ export async function resolveHandoffBusinessContext(
 ): Promise<HandoffContextEvaluationResult> {
   try {
     const handoff = await getPage(env, handoffId);
-    const judgmentContext = plainText(handoff.properties["Verified Facts & Sources"]);
+    const verifiedFacts = plainText(handoff.properties["Verified Facts & Sources"]);
+    // Required Next Action is where a human naturally writes refinement
+    // guidance when returning a Held Handoff to Pending directly in Notion
+    // -- see strategyAnalyst.ts's resolveStrategyHandoffContext for the
+    // confirmed live incident this mirrors. Always folded in so guidance
+    // written there actually reaches the pricing judgment.
+    const requiredNextAction = plainText(handoff.properties["Required Next Action"]);
+    const judgmentContext = requiredNextAction ? `${verifiedFacts}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : verifiedFacts;
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
 

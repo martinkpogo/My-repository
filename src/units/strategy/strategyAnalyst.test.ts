@@ -208,7 +208,7 @@ interface FetchLog {
 
 function mockFetch(
   t: any,
-  opts: { verifiedFacts?: string; entityToken?: string; matterToken?: string; initialStatus?: string } = {},
+  opts: { verifiedFacts?: string; entityToken?: string; matterToken?: string; initialStatus?: string; requiredNextAction?: string } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
   const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [] };
@@ -216,6 +216,7 @@ function mockFetch(
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
   const initialStatus = opts.initialStatus ?? "Pending";
+  const requiredNextAction = opts.requiredNextAction ?? "";
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -235,6 +236,7 @@ function mockFetch(
           properties: {
             Status: { select: { name: initialStatus } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
+            "Required Next Action": { rich_text: [{ plain_text: requiredNextAction }] },
             Entity_Token: { rich_text: [{ plain_text: entityToken }] },
             Matter_Token: { rich_text: [{ plain_text: matterToken }] },
           },
@@ -347,6 +349,24 @@ test("3. Strategy picks up a Pending Handoff", async (t) => {
   assert.ok(result.strategyQuestion, "the strategic question/context must be populated from the Handoff");
   assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup must actually progress the work item");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Picked-up"), "the claim step must set Picked-up");
+});
+
+test("Required Next Action content is folded into the diagnosis context, not silently ignored", async (t) => {
+  // Regression test for a live incident: a human returned a Held Handoff
+  // to Pending directly in Notion, writing detailed refinement guidance
+  // into Required Next Action (the field a person naturally edits) rather
+  // than through the bot's own Telegram reply flow (which appends to
+  // Verified Facts & Sources instead). resolveStrategyHandoffContext only
+  // ever read Verified Facts & Sources/Reason, so the guidance was never
+  // seen and re-diagnosis reproduced the identical Held outcome.
+  mockFetch(t, { requiredNextAction: "Re-run the diagnosis using evidence-bounded framing: do not assert an unproven causal link to lost revenue." });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.match(result.strategyContext ?? "", /evidence-bounded framing/, "guidance written into Required Next Action must reach the diagnosis input");
 });
 
 test("4. Strategy refuses a Handoff already Picked-up", async (t) => {

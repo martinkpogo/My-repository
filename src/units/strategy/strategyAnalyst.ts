@@ -274,7 +274,18 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
 export async function resolveStrategyHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
   try {
     const handoff = await getPage(env, handoffId);
-    const sanitizedContext = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
+    const verifiedFacts = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
+    // Required Next Action is where a human naturally writes refinement
+    // guidance when returning a Held Handoff to Pending directly in Notion
+    // (rather than through the bot's own Telegram reply flow, which
+    // appends to Verified Facts & Sources instead -- see
+    // handleStrategyClarification) -- confirmed live: a detailed
+    // evidence-bounded reframing written there was silently never read,
+    // so re-diagnosis saw only the unchanged original evidence and
+    // reproduced the identical Held outcome. Always folded in here so
+    // guidance reaches the diagnosis regardless of which path supplied it.
+    const requiredNextAction = plainText(handoff.properties["Required Next Action"]);
+    const sanitizedContext = requiredNextAction ? `${verifiedFacts}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : verifiedFacts;
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
 
