@@ -194,7 +194,7 @@ export class WorkSession extends DurableObject<Env> {
       state.stage = "cancelled";
       state.awaiting = undefined;
       state.pendingActionSummary = undefined;
-      state.pendingIntervention = undefined;
+      state.pendingStrategyApproval = undefined;
       state.pendingStrategyHandoff = undefined;
       await logActivity(this.env, {
         entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
@@ -235,16 +235,23 @@ export class WorkSession extends DurableObject<Env> {
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
         case "strategyintervention": {
-          // value is "<proposalId>.<approve|refine>" -- joined with "." (not
-          // ":") specifically so it survives index.ts's plain
-          // data.split(":") destructure into [action, workId, value]
-          // unchanged. strategy.handleInterventionApproval verifies this
-          // proposalId against the current pendingIntervention itself.
-          const dot = value.lastIndexOf(".");
-          const proposalId = dot === -1 ? "" : value.slice(0, dot);
-          const decision = dot === -1 ? "" : value.slice(dot + 1);
-          if (decision !== "approve" && decision !== "refine") return Promise.resolve(state);
-          return strategy.handleInterventionApproval(this.env, state, proposalId, decision);
+          // value is "<proposalId>.<proposalVersion>.<approve|refine|reject>"
+          // -- joined with "." (not ":") specifically so it survives
+          // index.ts's plain data.split(":") destructure into [action,
+          // workId, value] unchanged. strategy.handleInterventionApproval
+          // verifies proposalId + proposalVersion against the current
+          // pendingStrategyApproval exactly.
+          const lastDot = value.lastIndexOf(".");
+          const decision = lastDot === -1 ? "" : value.slice(lastDot + 1);
+          const rest = lastDot === -1 ? "" : value.slice(0, lastDot);
+          const secondDot = rest.lastIndexOf(".");
+          const proposalId = secondDot === -1 ? "" : rest.slice(0, secondDot);
+          const versionStr = secondDot === -1 ? "" : rest.slice(secondDot + 1);
+          const proposalVersion = Number(versionStr);
+          if ((decision !== "approve" && decision !== "refine" && decision !== "reject") || !Number.isFinite(proposalVersion)) {
+            return Promise.resolve(state);
+          }
+          return strategy.handleInterventionApproval(this.env, state, proposalId, proposalVersion, decision);
         }
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);

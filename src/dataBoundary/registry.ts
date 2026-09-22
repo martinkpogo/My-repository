@@ -115,6 +115,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Decides whether a completed Strategy diagnosis should be handed off to another Unit (Research & Intelligence, Marketing, Sales, or Finance) as its next responsibility, per the Strategy Analyst Hat Definition's own handoff_rules -- never guesses when the destination is unclear.",
   },
+  "strategy.proposal_drafting": {
+    id: "strategy.proposal_drafting",
+    name: "Strategy Intervention Proposal Drafting",
+    description:
+      "Expands a completed, causation-disciplined Strategy diagnosis into the complete Strategic Intervention Proposal (strategic opportunity/objective/direction, proposed intervention with workstreams, deliverables, phased timeline, scope, assumptions, dependencies, risks/constraints, expected business effect, success criteria) Martin reviews for Approve/Refine/Reject. Never manufactures precision the diagnosis doesn't support; marks an unsupportable timeline Indicative rather than Confirmed.",
+  },
   "lead.discovery_classification": {
     id: "lead.discovery_classification",
     name: "Lead Discovery Signal Classification",

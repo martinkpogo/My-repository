@@ -5,9 +5,11 @@ import {
   handleStrategyHandoffApproval,
   handleInterventionApproval,
   handleStrategyClarification,
+  handleStrategyRefinement,
   evaluateCausationDiscipline,
   formatDiagnosisForHandoff,
   type StrategyDiagnosisResult,
+  type StrategyProposal,
 } from "./strategyAnalyst";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
 import type { WorkState, Env } from "../../types";
@@ -55,13 +57,129 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
   };
 }
 
-/** Dispatches on the system prompt's own distinguishing text -- diagnosis vs. handoff-routing classification. */
-function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" }): Ai {
+const RAW_PROPOSAL = {
+  executiveSummary: {
+    businessSituation: "Recurring late-delivery complaints over two quarters.",
+    strategicProblem: "Delivery reliability is degrading due to a capacity constraint, threatening the largest account.",
+    recommendedDirection: "Expand interim delivery capacity via a third-party logistics partner within the quarter.",
+    proposedIntervention: "Third-party logistics capacity expansion programme.",
+    expectedBusinessEffect: "Restored delivery reliability and reduced churn risk on the largest account.",
+    decisionRequired: "Approve, refine, or reject this proposed intervention.",
+  },
+  businessContext: {
+    entityContext: "Existing client, two quarters of documented delivery issues.",
+    businessObjectives: "Restore reliable delivery within the quarter.",
+    relevantMarketContext: "Regional logistics capacity is tight but available via third parties.",
+    relevantAudienceOrCustomerContext: "Largest account, high churn sensitivity.",
+    currentState: "Missed delivery windows for two consecutive quarters.",
+    engagementTrigger: "Sales call notes documenting the complaints.",
+    relevantCommercialContext: "Account represents material recurring revenue.",
+    evidence: ["Sales call notes, two quarters of delivery data referenced therein."],
+  },
+  strategicChallenge: {
+    businessObjective: "Restore reliable delivery.",
+    observedSituation: "Two consecutive quarters of missed delivery windows.",
+    strategicQuestion: "How to restore delivery reliability given fixed warehouse capacity.",
+    whyItMatters: "This account represents material recurring revenue.",
+  },
+  diagnosis: {
+    symptom: "Late delivery complaints.",
+    problem: "Delivery reliability has degraded for the largest account.",
+    causes: ["Warehouse capacity constraint documented in call notes for two consecutive quarters."],
+    constraints: ["Warehouse capacity fixed through year-end."],
+    consequences: ["Client trust erosion, churn risk."],
+    evidence: ["Sales call notes."],
+    diagnosticConclusion: "The capacity constraint is the documented driver of the delivery degradation.",
+  },
+  strategicOpportunity: {
+    opportunity: "Restore reliability ahead of competitors facing the same regional constraint.",
+    basis: "Third-party logistics capacity is available now.",
+    relevanceToBusinessObjective: "Directly restores the objective.",
+    opportunityConditions: ["Partner onboarded within 30 days."],
+  },
+  strategicObjective: {
+    objective: "Restore delivery reliability within the quarter.",
+    intendedChange: "Eliminate missed delivery windows for the affected account.",
+    businessAlignment: "Protects material recurring revenue.",
+    measurementDirection: "Reduction in missed delivery windows.",
+  },
+  recommendedDirection: {
+    direction: "Expand interim delivery capacity via a third-party logistics partner within the quarter.",
+    rationale: "Directly addresses the documented capacity constraint within the client's tolerance window.",
+    strategicLogic: "Fastest lever given fixed warehouse capacity through year-end.",
+    alternativesConsidered: ["Internal capacity expansion (rejected -- not deliverable within the quarter)."],
+    selectionBasis: "Speed and directness of fit to the documented constraint.",
+  },
+  proposedIntervention: {
+    interventionName: "Third-party logistics capacity expansion",
+    interventionSummary: "Onboard a third-party logistics partner to absorb overflow delivery volume.",
+    workstreams: [
+      {
+        name: "Partner onboarding",
+        objective: "Secure and onboard a capable third-party logistics partner.",
+        activities: ["Shortlist partners", "Negotiate terms", "Integrate operationally"],
+        output: "Operational third-party logistics partner.",
+        dependencies: ["Client sign-off on added cost."],
+        acceptanceCriteria: ["Partner live and receiving overflow volume within 30 days."],
+      },
+    ],
+  },
+  deliverables: [
+    { name: "Partner onboarding plan", description: "Step-by-step onboarding plan.", format: "Document", acceptanceCriteria: ["Approved by Martin."] },
+  ],
+  timeline: {
+    status: "Indicative",
+    totalDuration: "Approximately 4-6 weeks, indicative.",
+    phases: [
+      { name: "Partner selection", duration: "2 weeks", activities: ["Shortlist", "Negotiate"], outputs: ["Signed terms"], dependencies: [], reviewPoint: "End of week 2" },
+    ],
+  },
+  entityInputs: {
+    requiredInformation: ["Current delivery volumes by region."],
+    requiredDocuments: [],
+    requiredAccess: [],
+    requiredStakeholderParticipation: ["Operations lead."],
+    requiredDecisions: ["Approval of added third-party cost."],
+  },
+  assumptions: [{ assumption: "Third-party logistics partner has available capacity.", basis: "Preliminary market scan.", materiality: "High -- the plan depends on it." }],
+  dependencies: [{ dependency: "Client sign-off on added cost.", owner: "Client", impactIfUnavailable: "Programme cannot proceed as scoped." }],
+  risksAndConstraints: {
+    risks: [{ risk: "Vendor reliability unverified.", potentialEffect: "Delivery issues persist.", mitigationOrResponse: "Phased onboarding with review gate." }],
+    constraints: [{ constraint: "Warehouse capacity fixed through year-end.", implication: "Internal expansion is not viable this quarter." }],
+  },
+  expectedBusinessEffect: {
+    intendedEffects: ["Restored delivery reliability."],
+    measurableEffects: ["Reduction in missed delivery windows."],
+    effectsRequiringBaseline: ["Churn rate change."],
+    limitations: ["Exact churn probability if unresolved is not established."],
+  },
+  successCriteria: [{ criterion: "No missed delivery windows for the account.", measurement: "Monthly delivery log.", evidenceRequired: "Operations delivery records." }],
+  commercialScope: {
+    included: ["Third-party partner onboarding", "Operational integration"],
+    excluded: ["Warehouse capital expansion"],
+    expectedResources: ["Operations lead time", "Third-party partner fees"],
+    expectedDuration: "4-6 weeks",
+    clientResponsibilities: ["Sign-off on added cost."],
+    downstreamUnitResponsibilities: ["Finance to price the engagement."],
+  },
+  strategicRecommendation: {
+    recommendation: "Expand interim delivery capacity via a third-party logistics partner within the quarter.",
+    rationale: "Directly addresses the documented capacity constraint within the client's tolerance window.",
+    evidenceBasis: ["Sales call notes, two quarters of delivery data referenced therein."],
+    conditionsOfApproval: ["Partner onboarded within 30 days."],
+  },
+};
+
+/** Dispatches on the system prompt's own distinguishing text -- diagnosis vs. proposal drafting vs. handoff-routing classification. */
+function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" }, proposalJson: unknown = RAW_PROPOSAL): Ai {
   return {
     run: async (_model: any, opts: any) => {
       const system = String(opts?.messages?.[0]?.content ?? "");
       if (system.includes("canonical operating procedure")) {
         return { response: JSON.stringify(diagnosisJson) };
+      }
+      if (system.includes("Expand it into the COMPLETE Strategic Intervention Proposal")) {
+        return { response: JSON.stringify(proposalJson) };
       }
       if (system.includes("next responsibility belongs to another Unit")) {
         return { response: JSON.stringify(routingJson) };
@@ -352,7 +470,7 @@ test("8. Pending retry can be picked up again exactly once", async (t) => {
   void second;
 });
 
-test("9. Strategy intervention requires Martin approval -- no Finance Handoff auto-created", async (t) => {
+test("9. A recommended diagnosis develops a full Strategic Intervention Proposal requiring Martin approval -- no Finance Handoff auto-created", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
@@ -361,14 +479,43 @@ test("9. Strategy intervention requires Martin approval -- no Finance Handoff au
   const result = await handlePickup(env, state);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
-  assert.ok(result.pendingIntervention, "a pendingIntervention must be set");
-  assert.strictEqual(result.pendingIntervention!.proposalId.length > 0, true);
+  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(result.strategyProposal, "a strategyProposal must be set");
+  assert.strictEqual(result.strategyProposal!.proposalVersion, 1);
+  assert.ok(result.pendingStrategyApproval, "a pendingStrategyApproval must be set");
+  assert.strictEqual(result.pendingStrategyApproval!.proposalId, result.strategyProposal!.proposalId);
+  assert.strictEqual(result.pendingStrategyApproval!.proposalVersion, 1);
+  assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
   assert.strictEqual(log.handoffCreateBody, null, "no Handoff of any kind may be created before Martin approves");
   // The originating Handoff must NOT be closed yet either -- it stays live
-  // until the intervention is actually approved (see requirement 4).
+  // (Picked-up) until the intervention is actually approved.
   const patches = log.handoffPatchBodies;
   assert.ok(!patches.some((p) => p.properties?.Status?.select?.name === "Closed"), "must not close the incoming Handoff before approval");
   assert.ok(log.sentTexts.some((t) => /not yet an approved decision/i.test(t)));
+  assert.ok(log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
+});
+
+test("Proposal contains every required structural section", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+  const p = result.strategyProposal as StrategyProposal;
+
+  assert.ok(p.strategicObjective.objective, "must contain a strategic objective");
+  assert.ok(p.recommendedDirection.direction, "must contain a recommended direction");
+  assert.ok(p.proposedIntervention.workstreams.length > 0, "must contain intervention workstreams");
+  assert.ok(p.deliverables.length > 0, "must contain deliverables");
+  assert.ok(p.timeline.totalDuration, "must contain a timeline");
+  assert.ok(["Indicative", "Confirmed"].includes(p.timeline.status));
+  assert.ok(p.commercialScope.included.length > 0, "must contain scope boundaries");
+  assert.ok(p.assumptions.length > 0, "must contain assumptions");
+  assert.ok(p.dependencies.length > 0, "must contain dependencies");
+  assert.ok(p.risksAndConstraints.risks.length > 0 || p.risksAndConstraints.constraints.length > 0, "must contain risks/constraints");
+  assert.ok(p.expectedBusinessEffect.intendedEffects.length > 0, "must contain expected business effects");
+  assert.ok(p.successCriteria.length > 0, "must contain success criteria");
 });
 
 test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales -> Strategy Handoff", async (t) => {
@@ -378,12 +525,13 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  const proposalId = afterPickup.pendingIntervention!.proposalId;
+  const { proposalId, proposalVersion } = afterPickup.pendingStrategyApproval!;
 
-  const afterApproval = await handleInterventionApproval(env, afterPickup, proposalId, "approve");
+  const afterApproval = await handleInterventionApproval(env, afterPickup, proposalId, proposalVersion, "approve");
 
   assert.strictEqual(afterApproval.stage, "awaiting_finance");
-  assert.strictEqual(afterApproval.pendingIntervention, undefined);
+  assert.strictEqual(afterApproval.strategyApprovalState, "APPROVED");
+  assert.strictEqual(afterApproval.pendingStrategyApproval, undefined);
   const created = log.handoffCreateBody;
   assert.ok(created, "the Strategy -> Finance Handoff must be created");
   const props = created.properties;
@@ -394,97 +542,161 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   assert.strictEqual(props.Status.select.name, "Pending");
   // The originating Sales -> Strategy Handoff must now be Closed.
   const originatingPatch = log.handoffPatchBodies.find((p) => p.properties?.Status?.select?.name === "Closed");
-  assert.ok(originatingPatch, "the originating Handoff must be closed once the approved intervention is transferred");
+  assert.ok(originatingPatch, "the originating Handoff must be closed once the approved proposal is transferred");
 });
 
-test("11. Refinement does not create a Finance Handoff", async (t) => {
+test("26-29. Strategy -> Finance carries the complete approved proposal -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  const proposalId = afterPickup.pendingIntervention!.proposalId;
-
-  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalId, "refine");
-
-  assert.strictEqual(afterRefine.stage, "strategy_refining");
-  assert.strictEqual(afterRefine.awaiting, "strategy_refinement_reason");
-  assert.strictEqual(afterRefine.pendingIntervention, undefined, "the superseded proposal must be cleared");
-  assert.strictEqual(log.handoffCreateBody, null, "a refinement must never create a Finance Handoff");
-  assert.ok(!log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Closed"), "refinement must not close the originating Handoff -- the work session is retained");
-});
-
-test("12. Rejected intervention does not create a Finance Handoff (via the existing /cancel mechanism)", async () => {
-  // The full /cancel path lives in session.ts (a Durable Object, untestable
-  // via this runner -- see src/handoffLifecycle.test.ts for direct coverage
-  // of closeHandoffIfOpen, the extracted function session.ts's cancel()
-  // calls). At the strategyAnalyst.ts level, the guarantee this test can
-  // verify directly is that nothing in this module creates a Finance
-  // Handoff except handleInterventionApproval's own "approve" branch.
-  assert.strictEqual(typeof handleInterventionApproval, "function");
-});
-
-test("13. Strategy -> Finance carries the approved intervention (not a bare conclusion)", async (t) => {
-  const log = mockFetch(t);
-  const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
-  const state = fakeState();
-
-  const afterPickup = await handlePickup(env, state);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingIntervention!.proposalId, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalId, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const factsText = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text[0].text.content;
+  assert.match(factsText, /Business situation:/);
+  assert.match(factsText, /Strategic problem:/);
+  assert.match(factsText, /Approved recommended direction:/);
   assert.match(factsText, /Approved intervention:/);
-  assert.match(factsText, /Diagnosis\/rationale:/);
-  assert.match(factsText, /Verified evidence:/);
-  assert.match(factsText, /Assumptions:/);
-  assert.match(factsText, /Unresolved questions:/);
-  assert.match(factsText, /Pricing requirements:/);
-  assert.match(factsText, SUFFICIENT_DIAGNOSIS.recommendedDirection!.length > 0 ? new RegExp(SUFFICIENT_DIAGNOSIS.recommendedDirection!.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) : /./);
+  assert.match(factsText, /Workstreams:/);
+  assert.match(factsText, /Deliverables:/);
+  assert.match(factsText, /Timeline \(Indicative\):/);
+  assert.match(factsText, /Commercial scope:/);
+  assert.match(factsText, /Expected business effect:/);
+  assert.match(factsText, /Success criteria:/);
 });
 
-test("14. Finance receives only the approved intervention -- never budget/WTP as the pricing basis", async (t) => {
+test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as the pricing basis", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingIntervention!.proposalId, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalId, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
-  assert.match(props["Required Next Action"].rich_text[0].text.content, /[Dd]o not redesign/);
+  assert.match(props["Required Next Action"].rich_text[0].text.content, /redesign/i);
   assert.match(props["Required Next Action"].rich_text[0].text.content, /willingness-to-pay/i);
   for (const key of ["Quoted Price", "Price", "Quote"]) {
     assert.strictEqual(props[key], undefined, `Strategy must never set a pricing property (${key})`);
   }
 });
 
-test("16. Stale approval callback (wrong stage) does not mutate current work", async (t) => {
+test("11/21/22. Refine does not create a Finance Handoff, and a new proposal version increments proposalVersion", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  const state = fakeState({ stage: "delivered", pendingIntervention: undefined });
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
 
-  const result = await handleInterventionApproval(env, state, "some-proposal-id", "approve");
+  const afterPickup = await handlePickup(env, state);
+  const { proposalId, proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const originalProposalId = afterPickup.strategyProposal!.proposalId;
+
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalId, proposalVersion, "refine");
+
+  assert.strictEqual(afterRefine.stage, "strategy_refining");
+  assert.strictEqual(afterRefine.awaiting, "strategy_refinement_reason");
+  assert.strictEqual(afterRefine.strategyApprovalState, "REFINEMENT_REQUESTED");
+  assert.strictEqual(afterRefine.pendingStrategyApproval, undefined, "the superseded approval identity must be cleared");
+  assert.strictEqual(log.handoffCreateBody, null, "a refinement must never create a Finance Handoff");
+  assert.ok(!log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Closed"), "refinement must not close the originating Handoff -- the work session is retained");
+
+  // Simulate Martin's refinement reasoning being submitted -- a new
+  // proposal version must be produced and the old one preserved as history.
+  // Note: afterRefine and afterPickup are the SAME mutated state object
+  // (execute()'s handlers mutate and return the same reference), so the
+  // prior proposalId must be captured before this call, not read off
+  // afterPickup afterward.
+  const afterRevision = await handleStrategyRefinement(env, afterRefine, "Consider a phased rollout instead.");
+  assert.strictEqual(afterRevision.strategyProposal!.proposalVersion, 2, "refinement must increment proposalVersion");
+  assert.strictEqual(afterRevision.strategyProposalHistory?.length, 1, "the prior version must be preserved as historical context");
+  assert.strictEqual(afterRevision.strategyProposalHistory![0].proposalId, originalProposalId, "the exact prior version must be what's preserved");
+  assert.notStrictEqual(afterRevision.strategyProposal!.proposalId, originalProposalId, "a fresh proposalId must be minted for the revision");
+});
+
+test("12/25. Reject records the rejection, closes the current attempt, and creates no Finance Handoff", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const { proposalId, proposalVersion } = afterPickup.pendingStrategyApproval!;
+
+  const afterReject = await handleInterventionApproval(env, afterPickup, proposalId, proposalVersion, "reject");
+
+  assert.strictEqual(afterReject.stage, "strategy_rejected");
+  assert.strictEqual(afterReject.strategyApprovalState, "REJECTED");
+  assert.strictEqual(afterReject.pendingStrategyApproval, undefined);
+  assert.strictEqual(log.handoffCreateBody, null, "rejection must never create a Finance Handoff");
+  const closedPatch = log.handoffPatchBodies.find((p) => p.properties?.Status?.select?.name === "Closed");
+  assert.ok(closedPatch, "the current strategic attempt (originating Handoff) must be closed on rejection");
+});
+
+test("23. Old approval callback (superseded proposal version) cannot approve a revised proposal", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const proposalV2: StrategyProposal = {
+    ...(RAW_PROPOSAL as any),
+    proposalId: "current-proposal",
+    proposalVersion: 2,
+  };
+  const state = fakeState({
+    stage: "awaiting_intervention_approval",
+    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
+    strategyProposal: proposalV2,
+    pendingStrategyApproval: {
+      kind: "strategy_intervention",
+      strategyWorkSessionId: "work_strat_1",
+      proposalId: "current-proposal",
+      proposalVersion: 2,
+      decisionOptions: ["approve", "refine", "reject"],
+    },
+  });
+
+  // A callback carrying the SAME proposalId but an OLD version (1) --
+  // simulating a stale button from before Refine produced v2.
+  const result = await handleInterventionApproval(env, state, "current-proposal", 1, "approve");
+
+  assert.strictEqual(log.handoffCreateBody, null, "a version-mismatched callback must never create the Finance Handoff");
+  assert.strictEqual(result.pendingStrategyApproval?.proposalVersion, 2, "the current pending approval must remain untouched");
+});
+
+test("24. Stale approval callback (wrong stage) does not mutate current work", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeState({ stage: "delivered", strategyApprovalState: undefined, pendingStrategyApproval: undefined });
+
+  const result = await handleInterventionApproval(env, state, "some-proposal-id", 1, "approve");
 
   assert.strictEqual(result.stage, "delivered", "stage must not change on a stale callback");
   assert.strictEqual(log.handoffCreateBody, null);
 });
 
-test("17. Old approval callback cannot approve a revised intervention (proposalId mismatch)", async (t) => {
+test("17. Old approval callback cannot approve a proposal from a different WorkSession (proposalId mismatch)", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
+  const proposal: StrategyProposal = { ...(RAW_PROPOSAL as any), proposalId: "current-proposal", proposalVersion: 1 };
   const state = fakeState({
     stage: "awaiting_intervention_approval",
-    pendingIntervention: { proposalId: "current-proposal", interventionSummary: "Revised intervention." },
+    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
+    strategyProposal: proposal,
+    pendingStrategyApproval: {
+      kind: "strategy_intervention",
+      strategyWorkSessionId: "work_strat_1",
+      proposalId: "current-proposal",
+      proposalVersion: 1,
+      decisionOptions: ["approve", "refine", "reject"],
+    },
   });
 
   // A callback carrying an OLD proposalId (from a superseded proposal).
-  const result = await handleInterventionApproval(env, state, "stale-old-proposal", "approve");
+  const result = await handleInterventionApproval(env, state, "stale-old-proposal", 1, "approve");
 
   assert.strictEqual(log.handoffCreateBody, null, "a mismatched proposalId must never create the Finance Handoff");
-  assert.strictEqual(result.pendingIntervention?.proposalId, "current-proposal", "the current proposal must remain untouched");
+  assert.strictEqual(result.pendingStrategyApproval?.proposalId, "current-proposal", "the current proposal must remain untouched");
 });
 
 test("Marketing-specific work is routed to Marketing when there is no recommendation yet (not absorbed by Strategy)", async (t) => {
@@ -517,7 +729,7 @@ test("R&I evidence/research boundary preserved -- Strategy routes missing-eviden
   assert.match(props["Required Next Action"].rich_text[0].text.content, /[Gg]ather.*validate/);
 });
 
-test("The generic downstream classifier can never route to Finance -- Finance is reachable only via intervention approval", async (t) => {
+test("39. The generic downstream classifier can never route to Finance -- Finance is reachable only via the Approve gate", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   // Even if a (misbehaving) classifier returned "finance", it isn't a key
@@ -542,7 +754,7 @@ test("formatDiagnosisForHandoff includes the full reasoning chain, not just the 
   assert.match(text, /Rationale:/);
 });
 
-test("Closed-context protections remain intact -- missing Entity_Token blocks before any AI call", async (t) => {
+test("36/37/38. Closed-context protections remain intact -- missing Entity_Token blocks before any AI call", async (t) => {
   mockFetch(t, { entityToken: "" });
   const env = fakeEnv();
   env.AI = forbiddenAi();

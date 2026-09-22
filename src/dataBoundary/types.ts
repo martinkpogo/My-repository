@@ -22,6 +22,7 @@ export type SemanticTaskId =
   | "finance.quote_judgment"
   | "strategy.diagnosis"
   | "strategy.handoff_routing"
+  | "strategy.proposal_drafting"
   | "lead.discovery_classification"
   | "lead.discovery_signal_evaluation"
   | "action.google_doc_intake"

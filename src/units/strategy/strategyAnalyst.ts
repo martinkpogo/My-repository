@@ -6,7 +6,7 @@ import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
-import { claimPendingHandoff } from "../../handoffLifecycle";
+import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -91,6 +91,177 @@ export interface StrategyDiagnosisResult {
   assumptions?: string;
   unresolvedQuestions?: string;
 }
+
+/**
+ * The complete Strategic Intervention Proposal Martin reviews for
+ * Approve/Refine/Reject -- a runtime/work-state artifact (see
+ * WorkState.strategyProposal), not a Notion database object or a new
+ * Business Object. Developed from an already causation-disciplined
+ * StrategyDiagnosisResult via developStrategyProposal, never generated in
+ * place of the diagnosis step. Detailed enough for Martin to evaluate what
+ * ENIG proposes to do, and specified enough for Finance to price without
+ * having to redesign the intervention -- see formatApprovedProposalForFinance.
+ */
+export interface StrategyProposal {
+  proposalId: string;
+  proposalVersion: number;
+
+  executiveSummary: {
+    businessSituation: string;
+    strategicProblem: string;
+    recommendedDirection: string;
+    proposedIntervention: string;
+    expectedBusinessEffect: string;
+    decisionRequired: string;
+  };
+
+  businessContext: {
+    entityContext: string;
+    businessObjectives: string;
+    relevantMarketContext: string;
+    relevantAudienceOrCustomerContext: string;
+    currentState: string;
+    engagementTrigger: string;
+    relevantCommercialContext: string;
+    evidence: string[];
+  };
+
+  strategicChallenge: {
+    businessObjective: string;
+    observedSituation: string;
+    strategicQuestion: string;
+    whyItMatters: string;
+  };
+
+  diagnosis: {
+    symptom: string;
+    problem: string;
+    causes: string[];
+    constraints: string[];
+    consequences: string[];
+    evidence: string[];
+    diagnosticConclusion: string;
+  };
+
+  strategicOpportunity: {
+    opportunity: string;
+    basis: string;
+    relevanceToBusinessObjective: string;
+    opportunityConditions: string[];
+  };
+
+  strategicObjective: {
+    objective: string;
+    intendedChange: string;
+    businessAlignment: string;
+    measurementDirection: string;
+  };
+
+  recommendedDirection: {
+    direction: string;
+    rationale: string;
+    strategicLogic: string;
+    alternativesConsidered: string[];
+    selectionBasis: string;
+  };
+
+  proposedIntervention: {
+    interventionName: string;
+    interventionSummary: string;
+    workstreams: Array<{
+      name: string;
+      objective: string;
+      activities: string[];
+      output: string;
+      dependencies: string[];
+      acceptanceCriteria: string[];
+    }>;
+  };
+
+  deliverables: Array<{
+    name: string;
+    description: string;
+    format: string;
+    acceptanceCriteria: string[];
+  }>;
+
+  timeline: {
+    status: "Indicative" | "Confirmed";
+    totalDuration: string;
+    phases: Array<{
+      name: string;
+      duration: string;
+      activities: string[];
+      outputs: string[];
+      dependencies: string[];
+      reviewPoint: string;
+    }>;
+  };
+
+  entityInputs: {
+    requiredInformation: string[];
+    requiredDocuments: string[];
+    requiredAccess: string[];
+    requiredStakeholderParticipation: string[];
+    requiredDecisions: string[];
+  };
+
+  assumptions: Array<{
+    assumption: string;
+    basis: string;
+    materiality: string;
+  }>;
+
+  dependencies: Array<{
+    dependency: string;
+    owner: string;
+    impactIfUnavailable: string;
+  }>;
+
+  risksAndConstraints: {
+    risks: Array<{
+      risk: string;
+      potentialEffect: string;
+      mitigationOrResponse: string;
+    }>;
+    constraints: Array<{
+      constraint: string;
+      implication: string;
+    }>;
+  };
+
+  expectedBusinessEffect: {
+    intendedEffects: string[];
+    measurableEffects: string[];
+    effectsRequiringBaseline: string[];
+    limitations: string[];
+  };
+
+  successCriteria: Array<{
+    criterion: string;
+    measurement: string;
+    evidenceRequired: string;
+  }>;
+
+  commercialScope: {
+    included: string[];
+    excluded: string[];
+    expectedResources: string[];
+    expectedDuration: string;
+    clientResponsibilities: string[];
+    downstreamUnitResponsibilities: string[];
+  };
+
+  strategicRecommendation: {
+    recommendation: string;
+    rationale: string;
+    evidenceBasis: string[];
+    conditionsOfApproval: string[];
+  };
+}
+
+/** Everything in StrategyProposal except the two identifiers this module assigns itself (proposalId, proposalVersion). */
+type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersion">;
 
 /**
  * Reconstructs the strategic question and supplied context directly from
@@ -407,7 +578,7 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, formatDiagnosisForTelegram(result));
-    return presentInterventionForApproval(env, state, result);
+    return developStrategyProposal(env, state, result);
   }
 
   if (state.handoffId) {
@@ -594,102 +765,418 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   return state;
 }
 
+function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleContract: string, diagnosis: StrategyDiagnosisResult): string {
+  return [
+    "You are executing the Strategy Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== TASK (execution mechanics -- not part of the governance above) ===",
+    "A causation-disciplined diagnosis (below, already validated) has concluded a recommended direction is defensible. Expand it into the COMPLETE Strategic Intervention Proposal Martin will review to decide whether ENIG should do this work -- not a generic diagnosis report. It must be detailed enough for Martin to evaluate exactly what is being proposed, and specified enough for Finance to price the approved intervention later WITHOUT having to redesign it.",
+    "=== VALIDATED DIAGNOSIS (already produced -- expand this, do not re-diagnose or contradict it) ===",
+    JSON.stringify(diagnosis),
+    "=== DISCIPLINE (do not weaken) ===",
+    "Distinguish verified facts from interpretation; distinguish evidence from assumptions; never assert a causal claim beyond what the diagnosis already supports; never invent a numerical outcome; identify evidence limitations; surface conflicting evidence if any exists. If an exact timeline duration cannot be reliably supported by the evidence, set timeline.status to \"Indicative\" (never \"Confirmed\" merely to look complete) and let totalDuration/phase durations reflect that (e.g. \"approximately 6-8 weeks, indicative\").",
+    "You MAY design the strategic intervention itself (positioning, strategic messaging, audience considerations, communication strategy, customer journey strategy, strategic workstreams, required downstream outputs, implementation principles, strategic measurement, timelines, dependencies). You must NOT perform another Unit's execution responsibility -- e.g. if a marketing strategy is required, specify the strategic marketing intervention, but do not treat this as authorization to route the case to Marketing Strategist (that remains a separate, Martin-gated decision, never automatic).",
+    "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
+    `Return JSON exactly matching this shape (all string fields are prose, all array fields are lists of strings unless the array holds objects as shown; use "" or [] only where the diagnosis genuinely gives nothing to say, never as a placeholder for something you didn't bother filling in):
+{
+  "executiveSummary": {"businessSituation":"...","strategicProblem":"...","recommendedDirection":"...","proposedIntervention":"...","expectedBusinessEffect":"...","decisionRequired":"..."},
+  "businessContext": {"entityContext":"...","businessObjectives":"...","relevantMarketContext":"...","relevantAudienceOrCustomerContext":"...","currentState":"...","engagementTrigger":"...","relevantCommercialContext":"...","evidence":["..."]},
+  "strategicChallenge": {"businessObjective":"...","observedSituation":"...","strategicQuestion":"...","whyItMatters":"..."},
+  "diagnosis": {"symptom":"...","problem":"...","causes":["..."],"constraints":["..."],"consequences":["..."],"evidence":["..."],"diagnosticConclusion":"..."},
+  "strategicOpportunity": {"opportunity":"...","basis":"...","relevanceToBusinessObjective":"...","opportunityConditions":["..."]},
+  "strategicObjective": {"objective":"...","intendedChange":"...","businessAlignment":"...","measurementDirection":"..."},
+  "recommendedDirection": {"direction":"...","rationale":"...","strategicLogic":"...","alternativesConsidered":["..."],"selectionBasis":"..."},
+  "proposedIntervention": {"interventionName":"...","interventionSummary":"...","workstreams":[{"name":"...","objective":"...","activities":["..."],"output":"...","dependencies":["..."],"acceptanceCriteria":["..."]}]},
+  "deliverables": [{"name":"...","description":"...","format":"...","acceptanceCriteria":["..."]}],
+  "timeline": {"status":"Indicative"|"Confirmed","totalDuration":"...","phases":[{"name":"...","duration":"...","activities":["..."],"outputs":["..."],"dependencies":["..."],"reviewPoint":"..."}]},
+  "entityInputs": {"requiredInformation":["..."],"requiredDocuments":["..."],"requiredAccess":["..."],"requiredStakeholderParticipation":["..."],"requiredDecisions":["..."]},
+  "assumptions": [{"assumption":"...","basis":"...","materiality":"..."}],
+  "dependencies": [{"dependency":"...","owner":"...","impactIfUnavailable":"..."}],
+  "risksAndConstraints": {"risks":[{"risk":"...","potentialEffect":"...","mitigationOrResponse":"..."}],"constraints":[{"constraint":"...","implication":"..."}]},
+  "expectedBusinessEffect": {"intendedEffects":["..."],"measurableEffects":["..."],"effectsRequiringBaseline":["..."],"limitations":["..."]},
+  "successCriteria": [{"criterion":"...","measurement":"...","evidenceRequired":"..."}],
+  "commercialScope": {"included":["..."],"excluded":["..."],"expectedResources":["..."],"expectedDuration":"...","clientResponsibilities":["..."],"downstreamUnitResponsibilities":["..."]},
+  "strategicRecommendation": {"recommendation":"...","rationale":"...","evidenceBasis":["..."],"conditionsOfApproval":["..."]}
+}`,
+  ].join("\n\n");
+}
+
+function str(v: unknown, fallback = ""): string {
+  return typeof v === "string" && v.length > 0 ? v : fallback;
+}
+function arr(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
 /**
- * Presents a recommended intervention for Martin's explicit Approve/Refine
+ * Normalizes the AI's raw proposal JSON into a fully-shaped StrategyProposal
+ * -- every field is guaranteed present (empty string/array where the model
+ * gave nothing usable) so downstream formatting/preview code never has to
+ * guard against undefined. timeline.status is forced to "Indicative" unless
+ * the model explicitly and validly returned "Confirmed" -- never manufactures
+ * false precision by defaulting the other way.
+ */
+function normalizeStrategyProposal(raw: Partial<RawStrategyProposal> | null, proposalId: string, proposalVersion: number): StrategyProposal {
+  const r = raw ?? ({} as Partial<RawStrategyProposal>);
+  return {
+    proposalId,
+    proposalVersion,
+    executiveSummary: {
+      businessSituation: str(r.executiveSummary?.businessSituation),
+      strategicProblem: str(r.executiveSummary?.strategicProblem),
+      recommendedDirection: str(r.executiveSummary?.recommendedDirection),
+      proposedIntervention: str(r.executiveSummary?.proposedIntervention),
+      expectedBusinessEffect: str(r.executiveSummary?.expectedBusinessEffect),
+      decisionRequired: str(r.executiveSummary?.decisionRequired, "Approve, refine, or reject this proposed intervention."),
+    },
+    businessContext: {
+      entityContext: str(r.businessContext?.entityContext),
+      businessObjectives: str(r.businessContext?.businessObjectives),
+      relevantMarketContext: str(r.businessContext?.relevantMarketContext),
+      relevantAudienceOrCustomerContext: str(r.businessContext?.relevantAudienceOrCustomerContext),
+      currentState: str(r.businessContext?.currentState),
+      engagementTrigger: str(r.businessContext?.engagementTrigger),
+      relevantCommercialContext: str(r.businessContext?.relevantCommercialContext),
+      evidence: arr(r.businessContext?.evidence),
+    },
+    strategicChallenge: {
+      businessObjective: str(r.strategicChallenge?.businessObjective),
+      observedSituation: str(r.strategicChallenge?.observedSituation),
+      strategicQuestion: str(r.strategicChallenge?.strategicQuestion),
+      whyItMatters: str(r.strategicChallenge?.whyItMatters),
+    },
+    diagnosis: {
+      symptom: str(r.diagnosis?.symptom),
+      problem: str(r.diagnosis?.problem),
+      causes: arr(r.diagnosis?.causes),
+      constraints: arr(r.diagnosis?.constraints),
+      consequences: arr(r.diagnosis?.consequences),
+      evidence: arr(r.diagnosis?.evidence),
+      diagnosticConclusion: str(r.diagnosis?.diagnosticConclusion),
+    },
+    strategicOpportunity: {
+      opportunity: str(r.strategicOpportunity?.opportunity),
+      basis: str(r.strategicOpportunity?.basis),
+      relevanceToBusinessObjective: str(r.strategicOpportunity?.relevanceToBusinessObjective),
+      opportunityConditions: arr(r.strategicOpportunity?.opportunityConditions),
+    },
+    strategicObjective: {
+      objective: str(r.strategicObjective?.objective),
+      intendedChange: str(r.strategicObjective?.intendedChange),
+      businessAlignment: str(r.strategicObjective?.businessAlignment),
+      measurementDirection: str(r.strategicObjective?.measurementDirection),
+    },
+    recommendedDirection: {
+      direction: str(r.recommendedDirection?.direction),
+      rationale: str(r.recommendedDirection?.rationale),
+      strategicLogic: str(r.recommendedDirection?.strategicLogic),
+      alternativesConsidered: arr(r.recommendedDirection?.alternativesConsidered),
+      selectionBasis: str(r.recommendedDirection?.selectionBasis),
+    },
+    proposedIntervention: {
+      interventionName: str(r.proposedIntervention?.interventionName),
+      interventionSummary: str(r.proposedIntervention?.interventionSummary),
+      workstreams: Array.isArray(r.proposedIntervention?.workstreams)
+        ? r.proposedIntervention!.workstreams.map((w) => ({
+            name: str(w?.name),
+            objective: str(w?.objective),
+            activities: arr(w?.activities),
+            output: str(w?.output),
+            dependencies: arr(w?.dependencies),
+            acceptanceCriteria: arr(w?.acceptanceCriteria),
+          }))
+        : [],
+    },
+    deliverables: Array.isArray(r.deliverables)
+      ? r.deliverables.map((d) => ({ name: str(d?.name), description: str(d?.description), format: str(d?.format), acceptanceCriteria: arr(d?.acceptanceCriteria) }))
+      : [],
+    timeline: {
+      status: r.timeline?.status === "Confirmed" ? "Confirmed" : "Indicative",
+      totalDuration: str(r.timeline?.totalDuration, "Not yet reliably established."),
+      phases: Array.isArray(r.timeline?.phases)
+        ? r.timeline!.phases.map((p) => ({
+            name: str(p?.name),
+            duration: str(p?.duration),
+            activities: arr(p?.activities),
+            outputs: arr(p?.outputs),
+            dependencies: arr(p?.dependencies),
+            reviewPoint: str(p?.reviewPoint),
+          }))
+        : [],
+    },
+    entityInputs: {
+      requiredInformation: arr(r.entityInputs?.requiredInformation),
+      requiredDocuments: arr(r.entityInputs?.requiredDocuments),
+      requiredAccess: arr(r.entityInputs?.requiredAccess),
+      requiredStakeholderParticipation: arr(r.entityInputs?.requiredStakeholderParticipation),
+      requiredDecisions: arr(r.entityInputs?.requiredDecisions),
+    },
+    assumptions: Array.isArray(r.assumptions) ? r.assumptions.map((a) => ({ assumption: str(a?.assumption), basis: str(a?.basis), materiality: str(a?.materiality) })) : [],
+    dependencies: Array.isArray(r.dependencies)
+      ? r.dependencies.map((d) => ({ dependency: str(d?.dependency), owner: str(d?.owner), impactIfUnavailable: str(d?.impactIfUnavailable) }))
+      : [],
+    risksAndConstraints: {
+      risks: Array.isArray(r.risksAndConstraints?.risks)
+        ? r.risksAndConstraints!.risks.map((x) => ({ risk: str(x?.risk), potentialEffect: str(x?.potentialEffect), mitigationOrResponse: str(x?.mitigationOrResponse) }))
+        : [],
+      constraints: Array.isArray(r.risksAndConstraints?.constraints)
+        ? r.risksAndConstraints!.constraints.map((x) => ({ constraint: str(x?.constraint), implication: str(x?.implication) }))
+        : [],
+    },
+    expectedBusinessEffect: {
+      intendedEffects: arr(r.expectedBusinessEffect?.intendedEffects),
+      measurableEffects: arr(r.expectedBusinessEffect?.measurableEffects),
+      effectsRequiringBaseline: arr(r.expectedBusinessEffect?.effectsRequiringBaseline),
+      limitations: arr(r.expectedBusinessEffect?.limitations),
+    },
+    successCriteria: Array.isArray(r.successCriteria)
+      ? r.successCriteria.map((s) => ({ criterion: str(s?.criterion), measurement: str(s?.measurement), evidenceRequired: str(s?.evidenceRequired) }))
+      : [],
+    commercialScope: {
+      included: arr(r.commercialScope?.included),
+      excluded: arr(r.commercialScope?.excluded),
+      expectedResources: arr(r.commercialScope?.expectedResources),
+      expectedDuration: str(r.commercialScope?.expectedDuration),
+      clientResponsibilities: arr(r.commercialScope?.clientResponsibilities),
+      downstreamUnitResponsibilities: arr(r.commercialScope?.downstreamUnitResponsibilities),
+    },
+    strategicRecommendation: {
+      recommendation: str(r.strategicRecommendation?.recommendation, str(r.executiveSummary?.recommendedDirection)),
+      rationale: str(r.strategicRecommendation?.rationale),
+      evidenceBasis: arr(r.strategicRecommendation?.evidenceBasis),
+      conditionsOfApproval: arr(r.strategicRecommendation?.conditionsOfApproval),
+    },
+  };
+}
+
+/** Concise proposal preview per the canonical commercial flow's "Strategy Proposal Ready for Review" gate -- the full structured proposal remains available to the approval flow via state.strategyProposal itself, this is only the Telegram-facing summary. */
+function formatProposalPreview(state: WorkState, proposal: StrategyProposal): string {
+  const lines = [
+    `*Strategy Proposal Ready for Review* (v${proposal.proposalVersion})`,
+    `Entity: ${state.matterName || state.entityName || state.workId}`,
+    `\n*Strategic problem:* ${proposal.executiveSummary.strategicProblem}`,
+    `\n*Recommended direction:* ${proposal.recommendedDirection.direction || proposal.executiveSummary.recommendedDirection}`,
+    `\n*Proposed intervention:* ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
+    proposal.commercialScope.included.length ? `\n*Scope (included):* ${proposal.commercialScope.included.join("; ")}` : null,
+    proposal.deliverables.length ? `\n*Deliverables:* ${proposal.deliverables.map((d) => d.name).join("; ")}` : null,
+    `\n*Timeline (${proposal.timeline.status}):* ${proposal.timeline.totalDuration}`,
+    `\n*Expected business effect:* ${proposal.executiveSummary.expectedBusinessEffect}`,
+    proposal.assumptions.length ? `\n*Key assumptions:* ${proposal.assumptions.map((a) => a.assumption).join("; ")}` : null,
+    proposal.risksAndConstraints.risks.length || proposal.risksAndConstraints.constraints.length
+      ? `\n*Key risks/constraints:* ${[...proposal.risksAndConstraints.risks.map((r) => r.risk), ...proposal.risksAndConstraints.constraints.map((c) => c.constraint)].join("; ")}`
+      : null,
+    `\n*Decision required:* ${proposal.executiveSummary.decisionRequired}\n\nThis is a recommendation, not yet an approved decision.`,
+  ].filter(Boolean);
+  return lines.join("\n").slice(0, 3900);
+}
+
+/**
+ * Develops the complete Strategic Intervention Proposal from a validated
+ * diagnosis and presents it for Martin's explicit Approve/Refine/Reject
  * decision -- the canonical commercial flow's gate before any Strategy ->
- * Finance Handoff may be created. A fresh proposalId is minted every time
- * this runs (initial proposal or a revised one after Refine), and embedded
- * in the callback_data (as "<proposalId>.<approve|refine>", joined with a
+ * Finance Handoff may be created. A fresh proposalId + incremented
+ * proposalVersion is minted every time this runs (initial proposal, or a
+ * revised one after Refine); the prior version (if any) is preserved in
+ * strategyProposalHistory, never discarded. The exact identity (workId +
+ * proposalId + proposalVersion) is embedded in both pendingStrategyApproval
+ * and the callback_data (as "<proposalId>.<version>.<decision>", joined with
  * "." rather than ":" so it survives the router's plain data.split(":")
- * unchanged). handleInterventionApproval checks this id against
- * state.pendingIntervention exactly -- a stale button from an earlier or
+ * unchanged) -- handleInterventionApproval checks all three against
+ * pendingStrategyApproval exactly, so a stale button from an earlier or
  * superseded proposal can never approve a different/later one.
  */
-async function presentInterventionForApproval(env: Env, state: WorkState, result: StrategyDiagnosisResult): Promise<WorkState> {
-  const proposalId = crypto.randomUUID();
-  const interventionSummary = result.recommendedDirection ?? "";
-  state.pendingIntervention = { proposalId, interventionSummary };
+async function developStrategyProposal(env: Env, state: WorkState, diagnosis: StrategyDiagnosisResult): Promise<WorkState> {
+  const governance = await getStrategyGovernance(env);
+  if (!governance) {
+    return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while developing the proposal. Refusing to proceed without it.");
+  }
 
-  const message = `*Proposed intervention:* ${interventionSummary}\n\n${result.recommendationRationale ?? ""}\n\nThis is a recommendation, not yet an approved decision. Approve to route this to Finance for pricing, or Refine if it needs changes first.`;
+  await advanceStrategyProgress(env, state, "Developing the full Strategic Intervention Proposal...");
+
+  const raw = await aiJson<RawStrategyProposal>(env, {
+    taskId: "strategy.proposal_drafting",
+    system: buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract, diagnosis),
+    user: state.strategyContext ?? "",
+    maxTokens: 4000,
+  });
+  if (!raw) {
+    return handleBlocked(env, state, "Could not generate a complete Strategic Intervention Proposal from the validated diagnosis -- the drafting call returned no usable output.");
+  }
+
+  const previousVersion = state.strategyProposal;
+  if (previousVersion) {
+    state.strategyProposalHistory = [...(state.strategyProposalHistory ?? []), previousVersion];
+  }
+  const proposalVersion = (previousVersion?.proposalVersion ?? 0) + 1;
+  const proposalId = crypto.randomUUID();
+  const proposal = normalizeStrategyProposal(raw, proposalId, proposalVersion);
+  state.strategyProposal = proposal;
+
+  await logActivity(env, {
+    entry: `Strategy Proposal ${previousVersion ? "revised (v" + proposalVersion + ")" : "created"}: ${state.matterName || state.entityName || state.workId}`,
+    type: "Decision",
+    area: "Strategy",
+    decisions: proposal.recommendedDirection.direction,
+    decisionRationale: proposal.recommendedDirection.rationale,
+    outcome: "Blocked",
+  });
+
+  const message = formatProposalPreview(state, proposal);
   const buttons = [
     [
-      { text: "✅ Approve", callback_data: `strategyintervention:${state.workId}:${proposalId}.approve` },
-      { text: "🔁 Refine", callback_data: `strategyintervention:${state.workId}:${proposalId}.refine` },
+      { text: "✅ Approve", callback_data: `strategyintervention:${state.workId}:${proposalId}.${proposalVersion}.approve` },
+      { text: "🔁 Refine", callback_data: `strategyintervention:${state.workId}:${proposalId}.${proposalVersion}.refine` },
     ],
+    [{ text: "❌ Reject", callback_data: `strategyintervention:${state.workId}:${proposalId}.${proposalVersion}.reject` }],
   ];
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, message, buttons);
+
+  state.pendingStrategyApproval = {
+    kind: "strategy_intervention",
+    strategyWorkSessionId: state.workId,
+    proposalId,
+    proposalVersion,
+    decisionOptions: ["approve", "refine", "reject"],
+  };
   state.pendingActionSummary = {
-    label: `Intervention approval: ${state.matterName || state.entityName || state.workId}`,
+    label: `Strategy Proposal v${proposalVersion}: ${state.matterName || state.entityName || state.workId}`,
     message,
     buttons,
     createdAt: new Date().toISOString(),
   };
+  await logActivity(env, {
+    entry: `Strategy approval request sent to Martin: ${state.matterName || state.entityName || state.workId}`,
+    type: "Activity",
+    area: "Strategy",
+    activity: `Proposal v${proposalVersion} (${proposalId}) awaiting Approve/Refine/Reject.`,
+    outcome: "Active",
+  });
+
+  state.strategyApprovalState = "AWAITING_INTERVENTION_APPROVAL";
   state.stage = "awaiting_intervention_approval";
   state.awaiting = undefined;
   return state;
 }
 
-/** Plain-text serialization of the APPROVED intervention for the Strategy -> Finance Handoff -- distinguishes every category Finance needs, per the canonical commercial flow. */
-function formatApprovedInterventionForFinance(result: StrategyDiagnosisResult): string {
+/**
+ * Serializes the APPROVED Strategic Intervention Proposal for the Strategy
+ * -> Finance Handoff's "Work Completed" field -- the complete commercially
+ * relevant proposal (business situation, strategic problem, diagnosis,
+ * strategic objective, recommended direction, approved intervention,
+ * workstreams, deliverables, timeline, commercial scope, expected business
+ * effect, success criteria, dependencies, assumptions, risks/constraints),
+ * never merely proposedIntervention, per the canonical commercial flow.
+ */
+function formatApprovedProposalForFinance(proposal: StrategyProposal): string {
   const lines: string[] = [
-    `Approved intervention: ${result.recommendedDirection ?? ""}`,
-    `Diagnosis/rationale: ${result.recommendationRationale ?? ""}. Diagnosed cause: ${result.diagnosis?.cause ?? ""} (causation ${result.diagnosis?.causationSupported ? "supported" : "not fully supported"} by evidence). Strategic problem: ${result.strategicProblem?.statement ?? ""}`,
-    `Verified evidence: ${result.evidenceSources ?? ""}`,
-    `Assumptions: ${result.assumptions ?? ""}`,
-    `Unresolved questions: ${result.unresolvedQuestions ?? ""}`,
-    `Pricing requirements: Price this approved intervention using value-based judgment. Do not redesign, substitute, or reinterpret it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis.`,
+    `Business situation: ${proposal.executiveSummary.businessSituation}`,
+    `Strategic problem: ${proposal.executiveSummary.strategicProblem}`,
+    `Diagnosis: ${proposal.diagnosis.diagnosticConclusion} (symptom: ${proposal.diagnosis.symptom}; problem: ${proposal.diagnosis.problem}; causes: ${proposal.diagnosis.causes.join("; ")}; constraints: ${proposal.diagnosis.constraints.join("; ")}; consequences: ${proposal.diagnosis.consequences.join("; ")})`,
+    `Strategic objective: ${proposal.strategicObjective.objective} -- ${proposal.strategicObjective.intendedChange}`,
+    `Approved recommended direction: ${proposal.recommendedDirection.direction}\nRationale: ${proposal.recommendedDirection.rationale}`,
+    `Approved intervention: ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
+    `Workstreams: ${proposal.proposedIntervention.workstreams.map((w) => `${w.name} (${w.objective}; output: ${w.output})`).join(" | ") || "(none specified)"}`,
+    `Deliverables: ${proposal.deliverables.map((d) => `${d.name}: ${d.description} [${d.format}]`).join(" | ") || "(none specified)"}`,
+    `Timeline (${proposal.timeline.status}): ${proposal.timeline.totalDuration} -- ${proposal.timeline.phases.map((p) => `${p.name} (${p.duration})`).join(" | ") || "(no phases specified)"}`,
+    `Commercial scope: included -- ${proposal.commercialScope.included.join("; ") || "(none specified)"}; excluded -- ${proposal.commercialScope.excluded.join("; ") || "(none specified)"}`,
+    `Expected business effect: ${proposal.executiveSummary.expectedBusinessEffect}. Intended: ${proposal.expectedBusinessEffect.intendedEffects.join("; ")}. Measurable: ${proposal.expectedBusinessEffect.measurableEffects.join("; ")}. Limitations: ${proposal.expectedBusinessEffect.limitations.join("; ")}`,
+    `Success criteria: ${proposal.successCriteria.map((s) => `${s.criterion} (measured by: ${s.measurement})`).join("; ") || "(none specified)"}`,
+    `Relevant dependencies: ${proposal.dependencies.map((d) => `${d.dependency} (owner: ${d.owner})`).join("; ") || "(none specified)"}`,
+    `Relevant assumptions: ${proposal.assumptions.map((a) => `${a.assumption} (${a.materiality})`).join("; ") || "(none specified)"}`,
+    `Relevant risks/constraints: ${[...proposal.risksAndConstraints.risks.map((r) => r.risk), ...proposal.risksAndConstraints.constraints.map((c) => c.constraint)].join("; ") || "(none specified)"}`,
   ];
   return lines.join("\n\n");
 }
 
 /**
- * Martin's Approve/Refine decision on a proposed intervention. Verifies,
- * before mutating anything: the WorkSession is actually in
- * awaiting_intervention_approval, a pendingIntervention exists, and its
- * proposalId matches exactly -- a callback for a stale/superseded proposal
- * (or a completed session) is a logged no-op, never a mutation, per the
- * existing fail-closed stage-guard pattern used by every other approval
- * gate in this Worker (e.g. Finance's handleQuoteApproval).
+ * Martin's Approve/Refine/Reject decision on the current Strategy Proposal.
+ * Verifies, before mutating anything: strategyApprovalState is exactly
+ * AWAITING_INTERVENTION_APPROVAL, pendingStrategyApproval exists, and its
+ * strategyWorkSessionId/proposalId/proposalVersion all match the callback
+ * exactly -- a callback for a stale/superseded proposal version, or for a
+ * different/completed WorkSession, is a logged no-op, never a mutation, per
+ * the existing fail-closed stage-guard pattern used by every other approval
+ * gate in this Worker (e.g. Finance's handleQuoteApproval). Reuses the
+ * existing generic Telegram-callback/approval infrastructure -- no new
+ * callback/approval mechanism was introduced.
  */
-export async function handleInterventionApproval(env: Env, state: WorkState, proposalId: string, decision: "approve" | "refine"): Promise<WorkState> {
-  if (state.stage !== "awaiting_intervention_approval" || !state.pendingIntervention || state.pendingIntervention.proposalId !== proposalId) {
-    console.error(`Strategy handleInterventionApproval: stale/mismatched callback for work ${state.workId} (proposalId ${proposalId})`);
+export async function handleInterventionApproval(
+  env: Env,
+  state: WorkState,
+  proposalId: string,
+  proposalVersion: number,
+  decision: "approve" | "refine" | "reject",
+): Promise<WorkState> {
+  const pending = state.pendingStrategyApproval;
+  const proposal = state.strategyProposal;
+  const identityMatches =
+    state.strategyApprovalState === "AWAITING_INTERVENTION_APPROVAL" &&
+    !!pending &&
+    pending.strategyWorkSessionId === state.workId &&
+    pending.proposalId === proposalId &&
+    pending.proposalVersion === proposalVersion &&
+    !!proposal &&
+    proposal.proposalId === proposalId &&
+    proposal.proposalVersion === proposalVersion;
+
+  if (!identityMatches) {
+    console.error(`Strategy handleInterventionApproval: stale/mismatched callback for work ${state.workId} (proposalId ${proposalId}, version ${proposalVersion})`);
     await logActivity(env, {
-      entry: `Strategy intervention approval callback ignored — stale or superseded`,
+      entry: `Strategy proposal approval callback ignored — stale or superseded`,
       type: "Blocker",
       area: "Strategy",
-      decisionRationale: `Callback proposalId ${proposalId} did not match the current pending intervention (stage: ${state.stage}). Treated as a no-op.`,
+      decisionRationale: `Callback proposalId ${proposalId} v${proposalVersion} did not match the current pending approval (state: ${state.strategyApprovalState ?? "none"}). Treated as a no-op.`,
       outcome: "Blocked",
     });
-    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "This intervention proposal has already been resolved or superseded -- nothing to do.");
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "This proposal has already been resolved or superseded -- nothing to do.");
     return state;
   }
 
-  const diagnosis = state.strategyDiagnosis;
-
   if (decision === "refine") {
-    state.pendingIntervention = undefined;
+    state.pendingStrategyApproval = undefined;
     state.pendingActionSummary = undefined;
+    state.strategyApprovalState = "REFINEMENT_REQUESTED";
     await logActivity(env, {
-      entry: `Strategy intervention refinement requested: ${state.matterName || state.entityName || state.workId}`,
+      entry: `Strategy proposal refinement requested: ${state.matterName || state.entityName || state.workId}`,
       type: "Decision",
       area: "Strategy",
-      decisionRationale: "Martin requested changes to the proposed intervention. A refinement is not an approval -- no Finance Handoff created.",
+      decisionRationale: "Martin requested changes to the proposal. A refinement is not an approval -- no Finance Handoff created; the prior version is retained as historical context.",
       outcome: "Blocked",
     });
-    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Got it -- what should change about this intervention? Tell me what's off or what to take into account, and I'll produce a revised proposal.");
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Got it -- what should change about this proposal? Tell me what's off or what to take into account, and I'll produce a revised version.");
     state.stage = "strategy_refining";
     state.awaiting = "strategy_refinement_reason";
     return state;
   }
 
-  // decision === "approve"
-  if (!diagnosis || !diagnosis.recommendedDirection) {
-    console.error(`Strategy handleInterventionApproval: no diagnosis/recommendation on record for work ${state.workId}`);
-    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Couldn't find the diagnosis behind this approval -- please ask me to re-diagnose.");
+  if (decision === "reject") {
+    state.pendingStrategyApproval = undefined;
+    state.pendingActionSummary = undefined;
+    state.strategyApprovalState = "REJECTED";
+    if (state.handoffId) {
+      await closeHandoffIfOpen(
+        env,
+        state.handoffId,
+        "Strategy Proposal rejected by Martin with no further direction -- a materially new strategic attempt requires a new Handoff.",
+      ).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId} on rejection`, err));
+    }
+    await logActivity(env, {
+      entry: `Strategy proposal rejected by Martin: ${state.matterName || state.entityName || state.workId}`,
+      type: "Decision",
+      area: "Strategy",
+      decisionRationale: "Martin rejected the proposal outright, with no further direction. No Finance Handoff created; the current strategic attempt is closed and will not be reopened automatically.",
+      outcome: "Complete",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Understood -- this proposal for *${state.matterName || state.entityName}* has been rejected and closed. A new attempt would need a new Handoff.`);
+    state.stage = "strategy_rejected";
+    state.awaiting = undefined;
     return state;
   }
 
+  // decision === "approve"
   try {
     const handoff = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, {
       Handoff: title(`Value-based quote request — ${state.matterName || state.entityName || state.workId}`),
@@ -699,41 +1186,46 @@ export async function handleInterventionApproval(env: Env, state: WorkState, pro
       "To Hat": richText("Value-Based Pricing Assessor"),
       Type: select("Work"),
       Status: select("Pending"),
-      Reason: richText(`Martin-approved intervention ready for value-based pricing: ${diagnosis.recommendedDirection}`.slice(0, 1900)),
+      Reason: richText(`Martin-approved Strategic Intervention Proposal (v${proposal!.proposalVersion}) ready for value-based pricing: ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
       "Required Next Action": richText(
-        "Price the Martin-approved intervention below using value-based judgment. Do not redesign, substitute, or reinterpret it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis -- price the approved intervention's value, or hold and state what's missing.",
+        "Conduct value-based pricing assessment of the approved Strategy intervention without redesigning, substituting, removing, or materially altering it. Do not treat any disclosed budget or willingness-to-pay as the pricing basis -- price the approved intervention's value, or hold and state what's missing.",
       ),
-      "Expected Output": richText("A quoted price and value-based pricing rationale for the approved intervention, or an explicit Held status naming the specific missing evidence."),
-      "Acceptance Criteria": richText("A quoted price with clear value-based rationale pricing the approved intervention as described, without alteration, or an explicit Held status."),
+      "Expected Output": richText(
+        "An authoritative quote, currency, priced scope, pricing rationale, timing considered, pricing assumptions, and quote validity for the approved intervention -- or an explicit Held status naming the specific missing evidence.",
+      ),
+      "Acceptance Criteria": richText(
+        "Approved intervention preserved; approved scope preserved; approved timeline considered; value-based pricing applied; budget/WTP not used as pricing basis; no strategic redesign; no material substitution; pricing assumptions explicit; currency correct.",
+      ),
       Entity_Token: richText(state.entityName ?? ""),
       Matter_Token: richText(state.matterName ?? ""),
-      Assumptions: richText((diagnosis.assumptions ?? "").slice(0, 1900)),
-      "Open Questions": richText((diagnosis.unresolvedQuestions ?? "").slice(0, 1900)),
-      "Verified Facts & Sources": richText(formatApprovedInterventionForFinance(diagnosis).slice(0, 1900)),
+      Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
+      "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
+      "Verified Facts & Sources": richText(formatApprovedProposalForFinance(proposal!).slice(0, 1900)),
     });
 
-    // Close the Sales -> Strategy Handoff now that the approved intervention
-    // has been successfully transferred onward -- per the canonical flow,
-    // this is deferred until here (not at delivery time) specifically for
-    // the has-a-recommendation path.
+    // Close the Sales -> Strategy Handoff only now that the approved
+    // proposal has been successfully transferred onward -- per the
+    // canonical flow, this is deferred until here (not at proposal-
+    // development time), and only after the Finance Handoff actually exists.
     if (state.handoffId) {
       await updatePage(env, state.handoffId, {
         Status: select("Closed"),
-        "Work Completed": richText(`Intervention approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${diagnosis.recommendedDirection}`.slice(0, 1900)),
+        "Work Completed": richText(`Proposal v${proposal!.proposalVersion} approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
       }).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
     }
 
     await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
     state.handoffId = handoff.id;
-    state.pendingIntervention = undefined;
+    state.pendingStrategyApproval = undefined;
     state.pendingActionSummary = undefined;
+    state.strategyApprovalState = "APPROVED";
 
     await logActivity(env, {
-      entry: `Martin approved Strategy intervention -- Strategy -> Finance Handoff created`,
+      entry: `Martin approved Strategy Proposal -- Strategy -> Finance Handoff created`,
       type: "Decision",
       area: "Strategy",
-      decisions: `Approved: ${diagnosis.recommendedDirection}`,
-      decisionRationale: `Handoff ${handoff.id} created for Finance to price the approved intervention.`,
+      decisions: `Approved: ${proposal!.proposedIntervention.interventionName}`,
+      decisionRationale: `Handoff ${handoff.id} created for Finance to price the approved intervention (proposal v${proposal!.proposalVersion}).`,
       outcome: "Complete",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Approved -- routed to Finance for pricing. I'll let you know once Finance responds.`);
@@ -746,15 +1238,16 @@ export async function handleInterventionApproval(env: Env, state: WorkState, pro
     state.awaiting = undefined;
   } catch (err) {
     console.error(`Strategy: failed to create Strategy -> Finance Handoff for work ${state.workId}`, err);
-    // Leave pendingIntervention intact so approving again actually retries,
-    // rather than silently having nothing left to act on.
+    // Leave pendingStrategyApproval/strategyApprovalState intact so
+    // approving again actually retries, rather than silently having
+    // nothing left to act on.
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Couldn't create the Handoff to Finance -- please try approving again.");
   }
 
   return state;
 }
 
-/** Revision loop after Refine: re-runs the diagnosis with Martin's reasoning, then re-presents a fresh proposal (new proposalId) for approval. */
+/** Revision loop after Refine: re-runs the diagnosis with Martin's reasoning, then develops and re-presents a fresh proposal version for approval. */
 export async function handleStrategyRefinement(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.strategyContext = `${state.strategyContext ?? ""}\n\nMartin's refinement request: ${text}`;
   await sendStrategyInProgressAck(env, state);

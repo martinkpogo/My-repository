@@ -368,17 +368,40 @@ export interface WorkState {
   };
 
   /**
-   * A Strategy-proposed intervention awaiting Martin's explicit
-   * Approve/Refine decision, per the canonical commercial flow (Sales ->
-   * Strategy -> Finance). proposalId is a fresh token minted on every new
-   * or revised proposal -- the approval callback must match it exactly, so
-   * a stale button referencing an earlier or superseded proposal can never
-   * approve a different/later one. Only an Approve whose proposalId
-   * matches this field may create the Strategy -> Finance Handoff.
+   * The complete Strategic Intervention Proposal currently in play for this
+   * Strategy work item -- a runtime/work-state artifact, not a Notion
+   * database object. Regenerated (new proposalId, proposalVersion + 1) on
+   * every Refine; the prior version is pushed onto strategyProposalHistory
+   * rather than discarded, so it remains available as historical context.
    */
-  pendingIntervention?: {
+  strategyProposal?: import("./units/strategy/strategyAnalyst").StrategyProposal;
+  /** Every superseded proposal version for this work item, oldest first -- see strategyProposal's doc comment. */
+  strategyProposalHistory?: import("./units/strategy/strategyAnalyst").StrategyProposal[];
+  /**
+   * The Strategy Proposal's own approval-lifecycle state, per the canonical
+   * commercial flow (Sales -> Strategy -> Finance). This is authoritative
+   * for whether an Approve/Refine/Reject callback may act at all --
+   * handleInterventionApproval refuses to mutate anything unless this is
+   * exactly "AWAITING_INTERVENTION_APPROVAL" and pendingStrategyApproval
+   * matches the callback's identity exactly.
+   */
+  strategyApprovalState?: "DRAFT" | "AWAITING_INTERVENTION_APPROVAL" | "REFINEMENT_REQUESTED" | "APPROVED" | "REJECTED";
+  /**
+   * The exact proposal identity currently awaiting Martin's decision --
+   * workId + proposalId + proposalVersion must all match a callback before
+   * it may mutate state, so a stale callback from an earlier proposal
+   * version, or one addressed to a different/superseded WorkSession, is a
+   * logged no-op rather than a mutation. Reuses the existing generic
+   * approval-callback infrastructure (Telegram inline buttons ->
+   * handleCallback -> this Hat's own handler) -- no new callback/approval
+   * mechanism was introduced.
+   */
+  pendingStrategyApproval?: {
+    kind: "strategy_intervention";
+    strategyWorkSessionId: string;
     proposalId: string;
-    interventionSummary: string;
+    proposalVersion: number;
+    decisionOptions: ("approve" | "refine" | "reject")[];
   };
 
   /**
