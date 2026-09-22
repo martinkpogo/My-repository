@@ -232,13 +232,16 @@ test("17. Manual /checkhandoffs behavior remains unchanged (default source)", as
 // --- Sales external-Handoff detection (items 11-13) -----------------------
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; runProposalDrafting: number } = { init: [], runProposalDrafting: 0 };
+  const calls: { init: any[][]; runProposalDrafting: number; runTokenSafeProposal: number } = { init: [], runProposalDrafting: 0, runTokenSafeProposal: 0 };
   const stub = {
     init: async (...args: any[]) => {
       calls.init.push(args);
     },
     runProposalDrafting: async () => {
       calls.runProposalDrafting++;
+    },
+    runTokenSafeProposal: async () => {
+      calls.runTokenSafeProposal++;
     },
   };
   return {
@@ -250,7 +253,7 @@ function createMockWorkSession() {
   };
 }
 
-function mockSalesHandoffFetch(t: any) {
+function mockSalesHandoffFetch(t: any, extraProperties: Record<string, any> = {}) {
   const originalFetch = globalThis.fetch;
   const operationsMessages: string[] = [];
   const salesHandoff = {
@@ -259,6 +262,7 @@ function mockSalesHandoffFetch(t: any) {
     properties: {
       Matter_Token: { rich_text: [{ plain_text: "MAT-20" }] },
       Entity_Token: { rich_text: [{ plain_text: "E-20" }] },
+      ...extraProperties,
     },
     archived: false,
   };
@@ -349,4 +353,36 @@ test("Sales Handoff ready notification is sent once per Handoff, not on every di
 
   const readyMessages = operationsMessages.filter((m) => m.includes("SALES HANDOFF READY"));
   assert.strictEqual(readyMessages.length, 1, "the same pending Sales Handoff must not re-notify Operations on every tick");
+});
+
+const FINANCE_ORIGIN = {
+  "From Unit": { select: { name: "Finance" } },
+  "From Hat": { rich_text: [{ plain_text: "Value-Based Pricing Assessor" }] },
+};
+
+test("Finance -> Sales Handoff (approved quote) runs the Runtime token-safe Proposal flow, even while Sales intake is paused", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t, FINANCE_ORIGIN);
+
+  const pickedUp = await discoverPendingSalesHandoffs(env);
+
+  assert.strictEqual(calls.runTokenSafeProposal, 1);
+  assert.strictEqual(calls.runProposalDrafting, 0, "the legacy identity-bearing drafting path is not used");
+  assert.strictEqual(pickedUp, 1);
+  assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "no hand-off to the isolated Sales project for this Handoff");
+});
+
+test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + notify only)", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t, { "From Unit": { select: { name: "Strategy" } }, "From Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] } });
+
+  await discoverPendingSalesHandoffs(env);
+
+  assert.strictEqual(calls.runTokenSafeProposal, 0);
+  assert.strictEqual(calls.runProposalDrafting, 0);
+  assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });

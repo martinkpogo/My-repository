@@ -111,6 +111,13 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
   );
 }
 
+function isFinanceQuoteHandoff(handoff: { properties?: Record<string, any> }): boolean {
+  return (
+    plainText(handoff.properties?.["From Unit"]) === "Finance" &&
+    plainText(handoff.properties?.["From Hat"]) === "Value-Based Pricing Assessor"
+  );
+}
+
 /**
  * The Sales side of the Finance -> Sales execution boundary — the return
  * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
@@ -162,6 +169,23 @@ export async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
         await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
         continue;
       }
+    }
+
+    // A Finance -> Sales Handoff (an approved quote) is the Runtime Sales
+    // Executive's token-safe Proposal work: it runs on Entity_Token /
+    // Matter_Token and upstream Handoff/Strategy records only, makes no
+    // client_confidential AI call and never resolves identity -- so it is
+    // not held behind SALES_EXECUTIVE_PAUSED, which covers identity-bearing
+    // Sales intake. Every other Sales Handoff keeps the existing behaviour.
+    if (isFinanceQuoteHandoff(handoff)) {
+      const stub = getSessionStub(env, workId);
+      try {
+        await stub.runTokenSafeProposal();
+        pickedUp++;
+      } catch (err) {
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+      }
+      continue;
     }
 
     if (SALES_EXECUTIVE_PAUSED) {

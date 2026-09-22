@@ -124,6 +124,16 @@ function findViolation(fieldName: string, text: string, identity: HandoffIdentit
 }
 
 /**
+ * The same identity check validateHandoffProperties applies per Handoff
+ * field, exposed for other token-safe canonical records (e.g. the Runtime
+ * Sales Proposal) that must hold the identical boundary. Returns a violation
+ * reason, or null if the text is clean.
+ */
+export function findIdentityViolation(fieldName: string, text: string, identity: HandoffIdentity): string | null {
+  return findViolation(fieldName, text, identity);
+}
+
+/**
  * Validates every protected field present in `properties` against the
  * supplied identity. Throws HandoffWriteViolationError on the first
  * violation found -- fail closed, never a partial/silent redaction.

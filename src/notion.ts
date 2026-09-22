@@ -48,6 +48,23 @@ export function richText(text: string): NotionPropertyValue {
   return { rich_text: [{ text: { content: text.slice(0, 2000) } }] };
 }
 
+/**
+ * Like richText, but for content longer than a single 2,000-char rich-text
+ * item -- split across up to 100 items (Notion's per-property limit) so the
+ * full text is stored rather than silently truncated. Throws rather than
+ * truncating if the text exceeds that limit: a caller storing canonical
+ * content must fail closed, never persist a partial record.
+ */
+export const RICH_TEXT_LONG_MAX_CHARS = 2000 * 100;
+export function richTextLong(text: string): NotionPropertyValue {
+  if (text.length > RICH_TEXT_LONG_MAX_CHARS) {
+    throw new Error(`richTextLong: content is ${text.length} chars, above Notion's ${RICH_TEXT_LONG_MAX_CHARS}-char rich-text property limit`);
+  }
+  const items: { text: { content: string } }[] = [];
+  for (let i = 0; i < text.length; i += 2000) items.push({ text: { content: text.slice(i, i + 2000) } });
+  return { rich_text: items };
+}
+
 export function select(name: string): NotionPropertyValue {
   return { select: { name } };
 }
@@ -117,6 +134,30 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
 export async function getPage(env: Env, pageId: string): Promise<NotionPage> {
   const data = await notionFetch(env, `/pages/${pageId}`);
   return { id: data.id, url: data.url, properties: data.properties, parent: data.parent, archived: data.archived, inTrash: data.in_trash };
+}
+
+/**
+ * Appends a heading plus the given text (as paragraph blocks, chunked to
+ * Notion's 2,000-char rich-text limit) to the end of a page's body. Used to
+ * keep an immutable snapshot of each canonical record version in the page
+ * itself, alongside whatever its properties currently hold.
+ */
+export async function appendTextBlocks(env: Env, pageId: string, heading: string, text: string): Promise<void> {
+  const paragraphs: Record<string, unknown>[] = [];
+  for (let i = 0; i < text.length; i += 2000) {
+    paragraphs.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
+  }
+  const blocks = [
+    { object: "block", type: "heading_3", heading_3: { rich_text: [{ type: "text", text: { content: heading.slice(0, 2000) } }] } },
+    ...paragraphs,
+  ];
+  // Notion accepts at most 100 children per append request.
+  for (let i = 0; i < blocks.length; i += 100) {
+    await notionFetch(env, `/blocks/${pageId}/children`, {
+      method: "PATCH",
+      body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
+    });
+  }
 }
 
 export function plainText(prop: any): string {

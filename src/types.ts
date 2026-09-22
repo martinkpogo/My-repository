@@ -250,7 +250,8 @@ export interface WorkState {
     | "research_feedback"
     | "strategy_clarification"
     | "strategy_feedback"
-    | "strategy_refinement_reason";
+    | "strategy_refinement_reason"
+    | "sales_proposal_revision";
   createdAt: string;
   updatedAt: string;
 
@@ -440,6 +441,23 @@ export interface WorkState {
     proposalVersion: number;
     decisionOptions: ("approve" | "refine" | "reject")[];
   };
+
+  /**
+   * The canonical, token-safe Runtime Sales Proposal produced from a
+   * Finance -> Sales Handoff (see units/sales/tokenSafeProposal.ts). The
+   * Notion Proposals record is the system of record; this mirrors it so an
+   * approval callback can be checked against the exact Proposal ID + Version
+   * Martin was shown. Every version's full content is kept here (and as a
+   * snapshot in the Proposal page body), so an approved version's substance
+   * survives a later revision.
+   */
+  salesProposal?: import("./units/sales/tokenSafeProposal").RuntimeSalesProposal;
+  /**
+   * Set when Martin asked for changes to a specific Proposal ID + Version
+   * and the runtime is waiting for his change text. Bound to that exact
+   * version: a revision request for a superseded version is refused.
+   */
+  pendingSalesProposalRevision?: { proposalNumber: number; fromVersion: number };
 
   /**
    * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.
