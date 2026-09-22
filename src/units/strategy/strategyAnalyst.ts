@@ -974,6 +974,42 @@ function formatProposalPreview(state: WorkState, proposal: StrategyProposal): st
 }
 
 /**
+ * Deterministic post-check on the AI-drafted proposal -- mirrors
+ * evaluateCausationDiscipline's role for the diagnosis step: the AI's own
+ * output is never taken on trust merely because it parsed as valid JSON. A
+ * proposal missing any section Martin needs to actually evaluate what's
+ * being proposed (or Finance needs to price it without redesigning it) is
+ * never presented for approval as-is -- developStrategyProposal instead
+ * treats this the same as any other blocked/insufficient outcome (Held,
+ * with the specific missing sections named, recoverable via the existing
+ * Held -> Pending retry path).
+ */
+export function evaluateProposalCompleteness(proposal: StrategyProposal): { valid: true } | { valid: false; reason: string } {
+  const missing: string[] = [];
+  if (!proposal.executiveSummary.businessSituation) missing.push("executive summary: business situation");
+  if (!proposal.executiveSummary.strategicProblem) missing.push("executive summary: strategic problem");
+  if (!proposal.executiveSummary.recommendedDirection) missing.push("executive summary: recommended direction");
+  if (!proposal.executiveSummary.proposedIntervention) missing.push("executive summary: proposed intervention");
+  if (!proposal.executiveSummary.expectedBusinessEffect) missing.push("executive summary: expected business effect");
+  if (!proposal.strategicObjective.objective) missing.push("strategic objective");
+  if (!proposal.recommendedDirection.direction) missing.push("recommended direction");
+  if (!proposal.proposedIntervention.interventionName) missing.push("proposed intervention name");
+  if (proposal.proposedIntervention.workstreams.length === 0) missing.push("intervention workstreams");
+  if (proposal.deliverables.length === 0) missing.push("deliverables");
+  if (proposal.timeline.phases.length === 0) missing.push("timeline phases");
+  if (proposal.commercialScope.included.length === 0) missing.push("commercial scope (included)");
+  if (proposal.assumptions.length === 0) missing.push("assumptions");
+  if (proposal.risksAndConstraints.risks.length === 0 && proposal.risksAndConstraints.constraints.length === 0) missing.push("risks/constraints");
+  if (proposal.expectedBusinessEffect.intendedEffects.length === 0) missing.push("expected business effect (intended effects)");
+  if (proposal.successCriteria.length === 0) missing.push("success criteria");
+
+  if (missing.length > 0) {
+    return { valid: false, reason: `The drafted proposal is missing required section(s): ${missing.join("; ")}.` };
+  }
+  return { valid: true };
+}
+
+/**
  * Develops the complete Strategic Intervention Proposal from a validated
  * diagnosis and presents it for Martin's explicit Approve/Refine/Reject
  * decision -- the canonical commercial flow's gate before any Strategy ->
@@ -1006,13 +1042,25 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
     return handleBlocked(env, state, "Could not generate a complete Strategic Intervention Proposal from the validated diagnosis -- the drafting call returned no usable output.");
   }
 
+  const nextVersion = (state.strategyProposal?.proposalVersion ?? 0) + 1;
+  const proposalId = crypto.randomUUID();
+  const proposal = normalizeStrategyProposal(raw, proposalId, nextVersion);
+
+  const completeness = evaluateProposalCompleteness(proposal);
+  if (!completeness.valid) {
+    console.error(`Strategy developStrategyProposal: proposal failed completeness check for work ${state.workId}: ${completeness.reason}`);
+    // Nothing is mutated on this path -- the prior proposal (if any) and
+    // its approval state are left exactly as they were, so a retry (via
+    // the existing Held -> Pending path) re-drafts cleanly rather than
+    // leaving a half-adopted revision in place.
+    return handleBlocked(env, state, `${completeness.reason} Not presenting this as-is for approval.`);
+  }
+
   const previousVersion = state.strategyProposal;
   if (previousVersion) {
     state.strategyProposalHistory = [...(state.strategyProposalHistory ?? []), previousVersion];
   }
-  const proposalVersion = (previousVersion?.proposalVersion ?? 0) + 1;
-  const proposalId = crypto.randomUUID();
-  const proposal = normalizeStrategyProposal(raw, proposalId, proposalVersion);
+  const proposalVersion = nextVersion;
   state.strategyProposal = proposal;
 
   await logActivity(env, {

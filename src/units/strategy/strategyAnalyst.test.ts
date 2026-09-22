@@ -7,6 +7,7 @@ import {
   handleStrategyClarification,
   handleStrategyRefinement,
   evaluateCausationDiscipline,
+  evaluateProposalCompleteness,
   formatDiagnosisForHandoff,
   type StrategyDiagnosisResult,
   type StrategyProposal,
@@ -516,6 +517,54 @@ test("Proposal contains every required structural section", async (t) => {
   assert.ok(p.risksAndConstraints.risks.length > 0 || p.risksAndConstraints.constraints.length > 0, "must contain risks/constraints");
   assert.ok(p.expectedBusinessEffect.intendedEffects.length > 0, "must contain expected business effects");
   assert.ok(p.successCriteria.length > 0, "must contain success criteria");
+});
+
+test("evaluateProposalCompleteness: accepts a fully-populated proposal", () => {
+  const proposal = { ...(RAW_PROPOSAL as any), proposalId: "p1", proposalVersion: 1 };
+  const result = evaluateProposalCompleteness(proposal);
+  assert.strictEqual(result.valid, true);
+});
+
+test("evaluateProposalCompleteness: rejects a proposal missing required sections (workstreams, deliverables, success criteria)", () => {
+  const proposal = {
+    ...(RAW_PROPOSAL as any),
+    proposalId: "p1",
+    proposalVersion: 1,
+    proposedIntervention: { ...RAW_PROPOSAL.proposedIntervention, workstreams: [] },
+    deliverables: [],
+    successCriteria: [],
+  };
+  const result = evaluateProposalCompleteness(proposal);
+  assert.strictEqual(result.valid, false);
+  if (!result.valid) {
+    assert.match(result.reason, /intervention workstreams/);
+    assert.match(result.reason, /deliverables/);
+    assert.match(result.reason, /success criteria/);
+  }
+});
+
+test("An incomplete AI-drafted proposal is held (not presented for approval) -- the deterministic completeness check overrides the AI's own JSON output", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const incompleteProposal = {
+    ...RAW_PROPOSAL,
+    proposedIntervention: { ...RAW_PROPOSAL.proposedIntervention, workstreams: [] },
+    deliverables: [],
+    successCriteria: [],
+  };
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "none" }, incompleteProposal);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.stage, "strategy_blocked", "an incomplete proposal must be held, not presented for approval");
+  assert.strictEqual(result.awaiting, "strategy_clarification");
+  assert.strictEqual(result.strategyProposal, undefined, "no proposal should be adopted into state on a completeness failure");
+  assert.strictEqual(result.pendingStrategyApproval, undefined);
+  const heldPatch = lastHandoffPatch(log);
+  assert.strictEqual(heldPatch.properties.Status.select.name, "Held");
+  assert.match(heldPatch.properties["Open Questions"].rich_text[0].text.content, /missing required section/i);
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "the incomplete proposal must never reach the approval preview");
 });
 
 test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales -> Strategy Handoff", async (t) => {
