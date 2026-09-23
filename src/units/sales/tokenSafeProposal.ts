@@ -1,5 +1,7 @@
 import type { Env, WorkState } from "../../types";
-import type { StrategyProposal } from "../strategy/strategyAnalyst";
+import type { StrategyProposal, StrategyBoundaryRepresentation } from "../strategy/strategyAnalyst";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
 import {
   appendTextBlocks,
   createPage,
@@ -81,7 +83,7 @@ export interface ProposalFacts {
   quote: ProposalQuote;
   strategyProposalId: string;
   strategyProposalVersion: number;
-  strategy: StrategyProposal;
+  strategy: StrategyBoundaryRepresentation;
   investmentTolerance?: InvestmentToleranceNote;
 }
 
@@ -215,6 +217,80 @@ export function findMissingStrategyFacts(strategy: StrategyProposal | undefined)
   const deliverables = s.deliverables ?? [];
   if (workstreams.length === 0 && deliverables.length === 0) missing.push("scope -- at least one workstream or deliverable");
   return missing;
+}
+
+/**
+ * The same completeness check as findMissingStrategyFacts, over the curated
+ * StrategyBoundaryRepresentation Sales now actually receives (via the
+ * Finance -> Sales Handoff) instead of the complete StrategyProposal.
+ * Deliberately a separate function rather than widening
+ * findMissingStrategyFacts's own signature -- that function is kept exactly
+ * as it was.
+ */
+export function findMissingStrategyBoundaryFacts(strategy: StrategyBoundaryRepresentation | undefined): string[] {
+  if (!strategy) return ["the Martin-approved Strategic Intervention Proposal"];
+  const missing: string[] = [];
+  const s: any = strategy;
+  if (!s.executiveSummary?.businessSituation?.trim()) missing.push("business situation (executiveSummary.businessSituation)");
+  if (!s.executiveSummary?.strategicProblem?.trim()) missing.push("strategic problem (executiveSummary.strategicProblem)");
+  if (!s.diagnosis?.problem?.trim() && !s.diagnosis?.diagnosticConclusion?.trim()) missing.push("diagnosis (diagnosis.problem / diagnosis.diagnosticConclusion)");
+  if (!s.strategicObjective?.objective?.trim()) missing.push("strategic objective (strategicObjective.objective)");
+  if (!s.proposedIntervention?.interventionName?.trim()) missing.push("approved intervention name (proposedIntervention.interventionName)");
+  if (!s.proposedIntervention?.interventionSummary?.trim()) missing.push("approved intervention summary (proposedIntervention.interventionSummary)");
+  const workstreams = s.proposedIntervention?.workstreams ?? [];
+  const deliverables = s.deliverables ?? [];
+  if (workstreams.length === 0 && deliverables.length === 0) missing.push("scope -- at least one workstream or deliverable");
+  return missing;
+}
+
+/**
+ * Parses the Strategy-authored boundary block out of a Finance -> Sales
+ * Handoff's combined "Verified Facts & Sources" text. This IS the Strategy-
+ * facts source for Runtime Sales Proposal production -- fails closed
+ * (returns `error`) on any missing markers, invalid JSON, non-object
+ * content, missing proposalId/proposalVersion, or an incomplete
+ * representation, and never falls back to state.strategyProposal, old
+ * conversation state, Telegram history, another Handoff, or an
+ * inferred/reconstructed value.
+ */
+export function parseStrategyBoundaryRepresentation(handoffText: string): { representation: StrategyBoundaryRepresentation } | { error: string } {
+  const block = extractLabeledBlock(handoffText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END);
+  if (!block) return { error: "the Handoff carries no Strategy boundary representation (missing START/END markers)" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(block);
+  } catch {
+    return { error: "the Strategy boundary representation is not valid JSON" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "the Strategy boundary representation is not a JSON object" };
+  }
+  const rep = parsed as Partial<StrategyBoundaryRepresentation>;
+  if (typeof rep.proposalId !== "string" || !rep.proposalId.trim()) {
+    return { error: "the Strategy boundary representation has no proposalId" };
+  }
+  if (typeof rep.proposalVersion !== "number" || !Number.isFinite(rep.proposalVersion)) {
+    return { error: "the Strategy boundary representation has no proposalVersion" };
+  }
+  const missing = findMissingStrategyBoundaryFacts(rep as StrategyBoundaryRepresentation);
+  if (missing.length) return { error: `the Strategy boundary representation is incomplete: ${missing.join("; ")}` };
+  return { representation: rep as StrategyBoundaryRepresentation };
+}
+
+/**
+ * Parses Finance's own commercial-judgment block out of the same combined
+ * Handoff text, then hands its inner content to the existing, unchanged
+ * parseFinanceQuote -- the block's own inner wording ("Authoritative
+ * quote: ...\nRationale: ...") is written by Finance in exactly the format
+ * parseFinanceQuote already expects, so no change to that function's own
+ * parsing logic was needed.
+ */
+export function parseFinanceJudgmentBlock(handoffText: string): { quote: ProposalQuote } | { error: string } {
+  const block = extractLabeledBlock(handoffText, FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END);
+  if (!block) return { error: "the Handoff carries no Finance commercial judgment block (missing START/END markers)" };
+  const parsed = parseFinanceQuote(block);
+  if ("missing" in parsed) return { error: parsed.missing };
+  return { quote: parsed.quote };
 }
 
 /**
@@ -603,10 +679,14 @@ export function verifyStrategyProposalTokenSafety(state: WorkState): string | nu
 }
 
 /**
- * Resolves the upstream facts for this Handoff: the authoritative quote from
- * the Handoff's own record, and the Martin-approved Strategy proposal this
- * work item already holds. Returns the exact list of what's missing instead
- * of guessing.
+ * Resolves the upstream facts for this Handoff: the authoritative Finance
+ * quote and the Strategy boundary representation, BOTH read exclusively
+ * from the Finance -> Sales Handoff's own "Verified Facts & Sources" text
+ * (see parseStrategyBoundaryRepresentation / parseFinanceJudgmentBlock) --
+ * never from state.strategyProposal, per the Strategy -> Finance -> Sales
+ * boundary-routing change. Returns the exact list of what's missing instead
+ * of guessing, and never falls back to state, conversation history, another
+ * Handoff, or an inferred value.
  */
 async function resolveFacts(
   env: Env,
@@ -615,15 +695,18 @@ async function resolveFacts(
   tokens: { entityToken: string; matterToken: string },
   quote: ProposalQuote,
 ): Promise<{ facts: ProposalFacts } | { missing: string[] }> {
+  const handoffText = plainText(handoff.properties["Verified Facts & Sources"]);
+  const strategyResult = parseStrategyBoundaryRepresentation(handoffText);
+
   const missing: string[] = [];
-  if (state.strategyApprovalState !== "APPROVED" || !state.strategyProposal) {
-    missing.push("the Martin-approved Strategic Intervention Proposal on this work item (Strategy approval state is not APPROVED here)");
+  if ("error" in strategyResult) {
+    missing.push(`the Strategy boundary representation from the Finance -> Sales Handoff (${strategyResult.error})`);
   } else {
     if (state.entityToken && state.entityToken !== tokens.entityToken) missing.push(`a consistent Entity_Token (work item ${state.entityToken} vs Handoff ${tokens.entityToken})`);
     if (state.matterToken && state.matterToken !== tokens.matterToken) missing.push(`a consistent Matter_Token (work item ${state.matterToken} vs Handoff ${tokens.matterToken})`);
-    missing.push(...findMissingStrategyFacts(state.strategyProposal));
   }
   if (missing.length) return { missing };
+  const strategy = (strategyResult as { representation: StrategyBoundaryRepresentation }).representation;
 
   let investmentTolerance: InvestmentToleranceNote | undefined;
   const t = state.investmentToleranceContext;
@@ -658,9 +741,9 @@ async function resolveFacts(
       entityToken: tokens.entityToken,
       matterToken: tokens.matterToken,
       quote,
-      strategyProposalId: state.strategyProposal!.proposalId,
-      strategyProposalVersion: state.strategyProposal!.proposalVersion,
-      strategy: state.strategyProposal!,
+      strategyProposalId: strategy.proposalId,
+      strategyProposalVersion: strategy.proposalVersion,
+      strategy,
       investmentTolerance,
     },
   };
@@ -711,8 +794,8 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
   );
   if (!contract.success) return failClosed(env, state, contract.insufficientContext.reason, { holdHandoffId: handoffId, tokens });
 
-  const parsed = parseFinanceQuote(verifiedFacts);
-  if ("missing" in parsed) return failClosed(env, state, `missing or ambiguous: ${parsed.missing}.`, { holdHandoffId: handoffId, tokens });
+  const parsed = parseFinanceJudgmentBlock(verifiedFacts);
+  if ("error" in parsed) return failClosed(env, state, `missing or ambiguous: ${parsed.error}.`, { holdHandoffId: handoffId, tokens });
 
   const existing = await findExistingProposal(env, state, handoffId, matterToken);
   if ("error" in existing) return failClosed(env, state, `Proposal identity: ${existing.error}`, { holdHandoffId: handoffId, tokens });

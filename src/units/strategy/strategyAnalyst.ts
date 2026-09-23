@@ -1,5 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { getPage, plainText, richText, select, title } from "../../notion";
+import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -101,7 +101,7 @@ export interface StrategyDiagnosisResult {
  * StrategyDiagnosisResult via developStrategyProposal, never generated in
  * place of the diagnosis step. Detailed enough for Martin to evaluate what
  * ENIG proposes to do, and specified enough for Finance to price without
- * having to redesign the intervention -- see formatApprovedProposalForFinance.
+ * having to redesign the intervention -- see buildStrategyBoundaryRepresentation.
  */
 export interface StrategyProposal {
   proposalId: string;
@@ -1268,34 +1268,103 @@ async function reviseStrategyProposal(
   return presentStrategyProposalForApproval(env, state, proposal, "revised");
 }
 
+/** Opens the Strategy-authored block within a Handoff's "Verified Facts & Sources" text -- see serializeStrategyBoundaryRepresentation. */
+export const STRATEGY_BOUNDARY_START = "=== STRATEGY BOUNDARY REPRESENTATION ===";
+/** Closes the Strategy-authored block -- see STRATEGY_BOUNDARY_START. */
+export const STRATEGY_BOUNDARY_END = "=== END STRATEGY BOUNDARY REPRESENTATION ===";
+
 /**
- * Serializes the APPROVED Strategic Intervention Proposal for the Strategy
- * -> Finance Handoff's "Work Completed" field -- the complete commercially
- * relevant proposal (business situation, strategic problem, diagnosis,
- * strategic objective, recommended direction, approved intervention,
- * workstreams, deliverables, timeline, commercial scope, expected business
- * effect, success criteria, dependencies, assumptions, risks/constraints),
- * never merely proposedIntervention, per the canonical commercial flow.
+ * The deliberate, curated cross-Unit boundary representation of an approved
+ * Strategy Proposal -- exactly the fields Finance's pricing judgment and
+ * Sales's client-facing proposal composition actually consume (per the
+ * Strategy -> Finance -> Sales boundary-routing inspection this
+ * implements), never a blind serialization of the complete StrategyProposal.
+ * Deliberately excludes businessContext and strategicRecommendation, which
+ * stay Strategy-internal -- neither Finance's nor Sales's own consumption
+ * logic has ever referenced them.
+ *
+ * This type, and everything built from it below, makes a claim about
+ * BOUNDARY ROUTING only: which fields cross the Unit boundary, and how they
+ * are carried. It makes NO claim that the included content is free of real
+ * entity/contact identity -- that is the separate, still-open question
+ * verifyStrategyProposalTokenSafety's own doc comment describes, untouched
+ * by this type.
  */
-function formatApprovedProposalForFinance(proposal: StrategyProposal): string {
-  const lines: string[] = [
-    `Business situation: ${proposal.executiveSummary.businessSituation}`,
-    `Strategic problem: ${proposal.executiveSummary.strategicProblem}`,
-    `Diagnosis: ${proposal.diagnosis.diagnosticConclusion} (symptom: ${proposal.diagnosis.symptom}; problem: ${proposal.diagnosis.problem}; causes: ${proposal.diagnosis.causes.join("; ")}; constraints: ${proposal.diagnosis.constraints.join("; ")}; consequences: ${proposal.diagnosis.consequences.join("; ")})`,
-    `Strategic objective: ${proposal.strategicObjective.objective} -- ${proposal.strategicObjective.intendedChange}`,
-    `Approved recommended direction: ${proposal.recommendedDirection.direction}\nRationale: ${proposal.recommendedDirection.rationale}`,
-    `Approved intervention: ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
-    `Workstreams: ${proposal.proposedIntervention.workstreams.map((w) => `${w.name} (${w.objective}; output: ${w.output})`).join(" | ") || "(none specified)"}`,
-    `Deliverables: ${proposal.deliverables.map((d) => `${d.name}: ${d.description} [${d.format}]`).join(" | ") || "(none specified)"}`,
-    `Timeline (${proposal.timeline.status}): ${proposal.timeline.totalDuration} -- ${proposal.timeline.phases.map((p) => `${p.name} (${p.duration})`).join(" | ") || "(no phases specified)"}`,
-    `Commercial scope: included -- ${proposal.commercialScope.included.join("; ") || "(none specified)"}; excluded -- ${proposal.commercialScope.excluded.join("; ") || "(none specified)"}`,
-    `Expected business effect: ${proposal.executiveSummary.expectedBusinessEffect}. Intended: ${proposal.expectedBusinessEffect.intendedEffects.join("; ")}. Measurable: ${proposal.expectedBusinessEffect.measurableEffects.join("; ")}. Limitations: ${proposal.expectedBusinessEffect.limitations.join("; ")}`,
-    `Success criteria: ${proposal.successCriteria.map((s) => `${s.criterion} (measured by: ${s.measurement})`).join("; ") || "(none specified)"}`,
-    `Relevant dependencies: ${proposal.dependencies.map((d) => `${d.dependency} (owner: ${d.owner})`).join("; ") || "(none specified)"}`,
-    `Relevant assumptions: ${proposal.assumptions.map((a) => `${a.assumption} (${a.materiality})`).join("; ") || "(none specified)"}`,
-    `Relevant risks/constraints: ${[...proposal.risksAndConstraints.risks.map((r) => r.risk), ...proposal.risksAndConstraints.constraints.map((c) => c.constraint)].join("; ") || "(none specified)"}`,
-  ];
-  return lines.join("\n\n");
+export type StrategyBoundaryRepresentation = Pick<
+  StrategyProposal,
+  | "proposalId"
+  | "proposalVersion"
+  | "executiveSummary"
+  | "strategicChallenge"
+  | "strategicOpportunity"
+  | "diagnosis"
+  | "strategicObjective"
+  | "recommendedDirection"
+  | "proposedIntervention"
+  | "deliverables"
+  | "timeline"
+  | "entityInputs"
+  | "assumptions"
+  | "dependencies"
+  | "risksAndConstraints"
+  | "expectedBusinessEffect"
+  | "successCriteria"
+  | "commercialScope"
+>;
+
+/** Selects the boundary fields (see StrategyBoundaryRepresentation) from an approved Strategy Proposal. */
+export function buildStrategyBoundaryRepresentation(proposal: StrategyProposal): StrategyBoundaryRepresentation {
+  return {
+    proposalId: proposal.proposalId,
+    proposalVersion: proposal.proposalVersion,
+    executiveSummary: proposal.executiveSummary,
+    strategicChallenge: proposal.strategicChallenge,
+    strategicOpportunity: proposal.strategicOpportunity,
+    diagnosis: proposal.diagnosis,
+    strategicObjective: proposal.strategicObjective,
+    recommendedDirection: proposal.recommendedDirection,
+    proposedIntervention: proposal.proposedIntervention,
+    deliverables: proposal.deliverables,
+    timeline: proposal.timeline,
+    entityInputs: proposal.entityInputs,
+    assumptions: proposal.assumptions,
+    dependencies: proposal.dependencies,
+    risksAndConstraints: proposal.risksAndConstraints,
+    expectedBusinessEffect: proposal.expectedBusinessEffect,
+    successCriteria: proposal.successCriteria,
+    commercialScope: proposal.commercialScope,
+  };
+}
+
+/**
+ * Serializes the boundary representation as deterministic JSON (a fixed key
+ * order, from the object literal above -- never derived from Object.keys on
+ * AI-produced input) wrapped in explicit start/end markers, so a downstream
+ * Unit can locate and parse exactly this block within a larger Handoff field
+ * without ambiguity (see extractLabeledBlock), and a human reading the
+ * Handoff directly in Notion can see plainly where Strategy's own material
+ * starts and ends.
+ */
+export function serializeStrategyBoundaryRepresentation(rep: StrategyBoundaryRepresentation): string {
+  return `${STRATEGY_BOUNDARY_START}\n${JSON.stringify(rep)}\n${STRATEGY_BOUNDARY_END}`;
+}
+
+/**
+ * Locates a `${startMarker} ... ${endMarker}` block within `text` and
+ * returns its inner content (trimmed), or null if the markers aren't both
+ * present in order. The shared extraction primitive every downstream
+ * consumer of a labeled boundary block uses (Finance, to carry the Strategy
+ * block forward verbatim without re-authoring it; Sales, to parse both the
+ * Strategy and Finance blocks out of the combined Finance -> Sales
+ * Handoff) -- one matching implementation, not one per caller.
+ */
+export function extractLabeledBlock(text: string, startMarker: string, endMarker: string): string | null {
+  const startIdx = text.indexOf(startMarker);
+  if (startIdx === -1) return null;
+  const contentStart = startIdx + startMarker.length;
+  const endIdx = text.indexOf(endMarker, contentStart);
+  if (endIdx === -1) return null;
+  return text.slice(contentStart, endIdx).trim();
 }
 
 /**
@@ -1421,7 +1490,7 @@ export async function handleInterventionApproval(
         Matter_Token: richText(state.matterToken ?? ""),
         Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
         "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
-        "Verified Facts & Sources": richText(formatApprovedProposalForFinance(proposal!).slice(0, 1900)),
+        "Verified Facts & Sources": richTextLong(serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal!))),
       },
       { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
     );

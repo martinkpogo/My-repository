@@ -9,6 +9,9 @@ import {
   evaluateCausationDiscipline,
   evaluateProposalCompleteness,
   formatDiagnosisForHandoff,
+  STRATEGY_BOUNDARY_START,
+  STRATEGY_BOUNDARY_END,
+  extractLabeledBlock,
   type StrategyDiagnosisResult,
   type StrategyProposal,
 } from "./strategyAnalyst";
@@ -636,7 +639,7 @@ test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matte
   assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
 });
 
-test("26-29. Strategy -> Finance carries the complete approved proposal -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
+test("26-29. Strategy -> Finance carries the complete curated Strategy boundary representation -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
@@ -645,17 +648,54 @@ test("26-29. Strategy -> Finance carries the complete approved proposal -- timel
   const afterPickup = await handlePickup(env, state);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
-  const factsText = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text[0].text.content;
-  assert.match(factsText, /Business situation:/);
-  assert.match(factsText, /Strategic problem:/);
-  assert.match(factsText, /Approved recommended direction:/);
-  assert.match(factsText, /Approved intervention:/);
-  assert.match(factsText, /Workstreams:/);
-  assert.match(factsText, /Deliverables:/);
-  assert.match(factsText, /Timeline \(Indicative\):/);
-  assert.match(factsText, /Commercial scope:/);
-  assert.match(factsText, /Expected business effect:/);
-  assert.match(factsText, /Success criteria:/);
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  const factsText = items.map((i) => i.text.content).join("");
+  assert.match(factsText, new RegExp(STRATEGY_BOUNDARY_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(factsText, new RegExp(STRATEGY_BOUNDARY_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const block = extractLabeledBlock(factsText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END)!;
+  const rep = JSON.parse(block);
+  assert.strictEqual(typeof rep.proposalId, "string");
+  assert.strictEqual(rep.proposalVersion, 1);
+  assert.ok(rep.executiveSummary.businessSituation);
+  assert.ok(rep.executiveSummary.strategicProblem);
+  assert.ok(rep.recommendedDirection.direction);
+  assert.ok(rep.proposedIntervention.interventionName);
+  assert.ok(rep.proposedIntervention.workstreams.length > 0);
+  assert.ok(rep.deliverables.length > 0);
+  assert.strictEqual(rep.timeline.status, "Indicative");
+  assert.ok(rep.commercialScope.included.length > 0);
+  assert.ok(rep.expectedBusinessEffect.intendedEffects.length > 0);
+  assert.ok(rep.successCriteria.length > 0);
+  // Deliberately excluded from the boundary representation -- stays Strategy-internal.
+  assert.strictEqual(rep.businessContext, undefined);
+  assert.strictEqual(rep.strategicRecommendation, undefined);
+});
+
+test("The Strategy boundary representation is not truncated at 1900 characters -- richTextLong chunks the full content", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  // RAW_PROPOSAL's own realistic prose already exceeds 1900 chars once
+  // serialized as the curated boundary representation (confirmed directly:
+  // the OLD formatter alone already produced 2192 chars from this exact
+  // fixture) -- the richer boundary representation this task adds is larger
+  // still, so this fixture is sufficient to prove no truncation occurs.
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  assert.ok(items.length > 1, "content beyond a single 2,000-char rich-text item must be split, not truncated");
+  const factsText = items.map((i) => i.text.content).join("");
+  assert.ok(factsText.length > 1900, `expected the serialized boundary representation to exceed 1900 chars, got ${factsText.length}`);
+
+  const block = extractLabeledBlock(factsText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END)!;
+  const rep = JSON.parse(block); // throws if truncated mid-JSON -- proves the full block survived intact
+  assert.ok(rep.diagnosis.causes.length > 0);
+  assert.ok(rep.assumptions.length > 0);
+  assert.ok(rep.risksAndConstraints.risks.length > 0 || rep.risksAndConstraints.constraints.length > 0);
 });
 
 test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as the pricing basis", async (t) => {

@@ -12,6 +12,8 @@ import {
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import type { StrategyProposal } from "../strategy/strategyAnalyst";
+import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../strategy/strategyAnalyst";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
 
 // ---------------------------------------------------------------------------
 // Fixtures: the live MAT-20 slice (HO-64, E-20/MAT-20, GHS 420,000).
@@ -22,6 +24,19 @@ const HO62_ID = "handoff-ho-62";
 const FINANCE_RATIONALE =
   "The price is based on the value-at-stake, which is the company's annual turnover. The intervention is expected to contribute to increased sales growth and enhanced credibility with larger accounts, which can lead to improved financial performance. The price is set at approximately 1.5% of the annual turnover, which is a reasonable estimate of the value that the intervention can bring to the company.";
 const HO64_FACTS = `Authoritative quote: GHS 420000\nRationale: ${FINANCE_RATIONALE}`;
+
+/** The Strategy-authored boundary block, exactly as Strategy would write it onto the Strategy -> Finance Handoff. */
+function strategyBlock(proposal: StrategyProposal): string {
+  return serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal));
+}
+/** Finance's own commercial-judgment block, exactly as handleQuoteApproval would write it. */
+function financeBlock(factsText: string): string {
+  return `${FINANCE_JUDGMENT_START}\n${factsText}\n${FINANCE_JUDGMENT_END}`;
+}
+/** The combined Finance -> Sales "Verified Facts & Sources" text -- both labeled sections, as handleQuoteApproval now produces it. */
+function combinedHo64Facts(proposal: StrategyProposal = approvedStrategyProposal(), financeText: string = HO64_FACTS): string {
+  return `${strategyBlock(proposal)}\n\n${financeBlock(financeText)}`;
+}
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -173,7 +188,7 @@ function ho64Props(overrides: Props = {}): Props {
     Status: { select: { name: "Pending" } },
     Entity_Token: rt("E-20"),
     Matter_Token: rt("MAT-20"),
-    "Verified Facts & Sources": rt(HO64_FACTS),
+    "Verified Facts & Sources": rt(combinedHo64Facts()),
     ...overrides,
   };
 }
@@ -331,18 +346,17 @@ test("3. Proposal carries E-20 and MAT-20 as tokens and no Entity/Matter relatio
 test("4. A real client identity cannot enter the Runtime Proposal -- fails closed before any record is written", async (t) => {
   const leaked = approvedStrategyProposal();
   leaked.executiveSummary = { ...leaked.executiveSummary, businessSituation: "Acme Foods Ghana Ltd is pursuing larger accounts" };
-  const { world, state } = await createV1(t, { strategyProposal: leaked, entityName: "Acme Foods Ghana Ltd" });
+  const { world, state } = await createV1(t, { entityName: "Acme Foods Ghana Ltd" }, { ho64: ho64Props({ "Verified Facts & Sources": rt(combinedHo64Facts(leaked)) }) });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /identity-bearing value/);
   assert.ok(!world.telegram.some((m) => m.text.includes("Acme Foods")), "the identity itself is never echoed to Telegram");
   assert.ok(!world.logs.some((l) => JSON.stringify(l).includes("Acme Foods")), "nor into the Activity Log");
-  assert.ok(!JSON.stringify(world.pages.get(HO64_ID)!.properties).includes("Acme Foods"), "nor onto the Handoff");
 });
 
 test("4b. Contact details (email / phone) cannot enter the Runtime Proposal even when no name is known", async (t) => {
   const leaked = approvedStrategyProposal();
   leaked.executiveSummary = { ...leaked.executiveSummary, strategicProblem: "Contact ceo@example.com or +233 24 123 4567" };
-  const { world, state } = await createV1(t, { strategyProposal: leaked });
+  const { world, state } = await createV1(t, {}, { ho64: ho64Props({ "Verified Facts & Sources": rt(combinedHo64Facts(leaked)) }) });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /identity-bearing value/);
 });
@@ -358,6 +372,22 @@ test("16. Runtime never resolves Entity_Token/Matter_Token -- no Entity/Matters 
   }
   const pageReads = world.fetches.filter((f) => f.method === "GET" && f.url.includes("/pages/")).map((f) => f.url.split("/pages/")[1]);
   assert.ok(pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds")), `only the Handoff and the Proposal are read: ${pageReads}`);
+});
+
+test("Sales does not require state.strategyProposal for Proposal production -- the Finance -> Sales Handoff alone is the Strategy-facts source", async (t) => {
+  // No state.strategyProposal at all on this work item (e.g. a fresh
+  // Durable Object created for an externally-discovered Handoff, per
+  // checkHandoffs.ts's own fallback path) -- production per this routing
+  // change no longer needs it for Proposal production. Note
+  // verifyStrategyProposalTokenSafety (left untouched by this change, see
+  // its own doc comment) returns null when state.strategyProposal is
+  // absent -- "nothing to verify" -- so this specific gate does not itself
+  // block this path; resolveFacts's own Handoff-sourced parsing is what
+  // actually supplies the Strategy facts here.
+  const { world, state } = await createV1(t, { strategyProposal: undefined, strategyProposalTokenSafety: undefined, strategyApprovalState: undefined });
+  assert.strictEqual(proposals(world).length, 1, "a Proposal is still produced, sourced entirely from the Handoff");
+  assert.strictEqual(state.salesProposal?.facts?.strategyProposalId, "strategy-prop-1");
+  assert.strictEqual(state.salesProposal?.facts?.strategyProposalVersion, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -638,16 +668,38 @@ test("18c. Missing token fields fail closed", async (t) => {
 test("18d. Missing required Proposal facts fail closed and name exactly what is missing", async (t) => {
   const thin = approvedStrategyProposal({ deliverables: [] });
   thin.proposedIntervention = { ...thin.proposedIntervention, workstreams: [] };
-  const { world, state } = await createV1(t, { strategyProposal: thin });
+  const { world, state } = await createV1(t, {}, { ho64: ho64Props({ "Verified Facts & Sources": rt(combinedHo64Facts(thin)) }) });
   assert.strictEqual(proposals(world).length, 0);
-  assert.match(state.blockedReason ?? "", /required Proposal facts are missing: scope -- at least one workstream or deliverable/);
+  assert.match(state.blockedReason ?? "", /required Proposal facts are missing:.*scope -- at least one workstream or deliverable/);
   assert.match(text(world.pages.get(HO64_ID)!.properties["Open Questions"]), /workstream or deliverable/);
 });
 
-test("18e. No Martin-approved Strategy proposal on the work item fails closed", async (t) => {
-  const { world, state } = await createV1(t, { strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL" });
+test("18e. A Finance -> Sales Handoff with no Strategy boundary representation fails closed (missing Strategy section)", async (t) => {
+  const { world, state } = await createV1(t, {}, { ho64: ho64Props({ "Verified Facts & Sources": rt(financeBlock(HO64_FACTS)) }) });
   assert.strictEqual(proposals(world).length, 0);
-  assert.match(state.blockedReason ?? "", /Martin-approved Strategic Intervention Proposal/);
+  assert.match(state.blockedReason ?? "", /Strategy boundary representation.*missing START\/END markers/);
+});
+
+test("18e-2. A Strategy boundary block that is not valid JSON fails closed (malformed Strategy section)", async (t) => {
+  const malformed = `${STRATEGY_BOUNDARY_START}\nnot json at all {{{\n${STRATEGY_BOUNDARY_END}\n\n${financeBlock(HO64_FACTS)}`;
+  const { world, state } = await createV1(t, {}, { ho64: ho64Props({ "Verified Facts & Sources": rt(malformed) }) });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /Strategy boundary representation.*not valid JSON/);
+});
+
+test("18e-3. A Strategy boundary block missing proposalId/proposalVersion fails closed", async (t) => {
+  const rep = buildStrategyBoundaryRepresentation(approvedStrategyProposal());
+  const { proposalId, ...withoutId } = rep as any;
+  const noId = `${STRATEGY_BOUNDARY_START}\n${JSON.stringify(withoutId)}\n${STRATEGY_BOUNDARY_END}\n\n${financeBlock(HO64_FACTS)}`;
+  const { world, state } = await createV1(t, {}, { ho64: ho64Props({ "Verified Facts & Sources": rt(noId) }) });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /Strategy boundary representation has no proposalId/);
+});
+
+test("18e-4. A Finance -> Sales Handoff with no Finance commercial judgment block fails closed (missing Finance judgment)", async (t) => {
+  const { world, state } = await createV1(t, {}, { ho64: ho64Props({ "Verified Facts & Sources": rt(strategyBlock(approvedStrategyProposal())) }) });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /Finance commercial judgment block.*missing START\/END markers/);
 });
 
 test("18f. A token mismatch between the work item and HO-64 fails closed", async (t) => {
