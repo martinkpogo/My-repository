@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
+import { LeadOpportunityDiscoveryCapability } from "./units/sales/leadGenerationDiscovery";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import {
   getActiveWorkId,
@@ -180,6 +181,32 @@ export async function dispatchCowork(
   decision: Extract<WorkspaceDecision, { mode: "cowork" }>,
 ): Promise<void> {
   if (decision.unit === "Sales") {
+    if (decision.hat === "Lead Generation Specialist") {
+      // Lead Discovery is a separate specialization from Sales Progression
+      // intake -- independent of SALES_EXECUTIVE_PAUSED by design (see
+      // sessionRouting.ts's own doc comment: Lead Discovery runs in this
+      // shared Worker regardless of whether Sales Progression is paused,
+      // the two are independent). Calls the capability's own governed
+      // intake directly -- the same lead.discovery_ondemand_intake path
+      // the /lead command and the (now Cowork-only) capability dispatch
+      // already used, just entered deterministically via Cowork
+      // responsibility resolution instead of generic capability matching.
+      // No WorkSession is created here -- this capability never creates
+      // one (confirmed by the Chat capability boundary audit); it acts
+      // directly on chatId/threadId and queues its own Handoffs to R&I.
+      const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, chatId, text, threadId);
+      if (!handled) {
+        await sendMessage(
+          env,
+          chatId,
+          `That didn't look like a discovery request to Lead Generation Specialist -- try something like "find me 3 companies showing a positioning problem."`,
+          undefined,
+          threadId,
+        );
+      }
+      return;
+    }
+
     if (SALES_EXECUTIVE_PAUSED) {
       console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
       await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
