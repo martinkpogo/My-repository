@@ -2,6 +2,8 @@
 
 This document establishes the execution contract and operating model for Jules (implementation agent) in the ENIG Agent Runtime repository.
 
+**Scope note:** the architectural/governance rules below (Handoff identity-write boundary, Authority Model, Provider and Data-Boundary Constraints) bind every implementation agent working in this repository, Claude Code included. The *process* mechanics -- the sandboxed submit action, the mandatory Draft PR, the multi-round pre-submission report/approval loop described in "Operating Model & Capability Distinctions," "Standard Execution Sequence," and the Jules-specific evidence states in "Evidence & Reporting Rule" -- are Jules-specific, because Jules is watched more closely here and makes mistakes more often. See "Claude Code Execution Contract" below for Claude Code's equivalent, simpler process.
+
 ## The Handoff identity-write boundary
 
 Every Handoff field that becomes another Unit's AI input context (Handoff title, Reason, Required Next Action, Expected Output, Acceptance Criteria, Assumptions, Open Questions, Verified Facts & Sources, Work Completed) may identify the Entity/Matter ONLY by its opaque Entity_Token/Matter_Token -- never a real Entity/company name, a real contact's name, an email address, a phone number, or any other detail that identifies who they actually are. Real identity may be read while preparing a Handoff; it must be resolved to tokens before anything is written to one.
@@ -17,7 +19,17 @@ Any Handoff created, updated, or resubmitted by hand (i.e. via a Notion tool cal
 * Jules does **not** redesign ENIG architecture, modify runtime behavior without authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
 * Jules **must stop** at any new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision and return to Architect rather than inventing a rule.
 
-## Operating Model & Capability Distinctions
+## Claude Code Execution Contract
+
+Claude Code is trusted to run the full local pipeline -- inspect, implement, test, typecheck, self-audit -- autonomously, and does not need the Jules-specific Draft-PR-and-wait gate below. The same substantive rules still apply in full (Handoff identity-write boundary, Authority Model, Provider and Data-Boundary Constraints, and every "stop and report instead of guessing" instruction elsewhere in this repo's instructions) -- what's different is the submission mechanics:
+
+* Claude Code still does not commit, push, or open a PR on its own initiative. Martin's explicit approval remains required before any of those actions, exactly as for Jules.
+* Once Martin gives that approval for a given piece of work, Claude Code may carry it through commit -> push -> PR creation in one pass, without an intermediate stop for a separate "approve the push" or "approve the PR" step, unless Martin's instruction says otherwise for that task.
+* Claude Code opens the PR **Ready for review**, not Draft, so the repository's configured GitHub Actions (`pr-validation.yml` -> `auto-merge.yml` -> `deploy.yml`) take over immediately according to their configured rules. Martin reviews on GitHub (or asks Claude Code to watch/babysit the PR) rather than manually flipping it from Draft.
+* Deployment authorization still follows the same rule as Jules: a merge is not itself authorization to deploy outside of what the repo's own Actions are already configured to do.
+* Claude Code still reports exact completion states (commit SHA, push confirmation, PR URL, CI/merge state) rather than assuming or claiming an unconfirmed outcome -- the Evidence & Reporting Rule's discipline applies here too, just without the Jules-specific Draft-PR step in the state list.
+
+## Operating Model & Capability Distinctions (Jules)
 
 Jules operates inside a sandboxed environment with specific technical capability boundaries:
 
