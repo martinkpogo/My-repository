@@ -1,7 +1,15 @@
 import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
-import { getActiveWorkId, getSessionStub, routeIncomingText, setActiveWorkId } from "./router";
+import {
+  getActiveWorkId,
+  getSessionStub,
+  getWorkspaceMode,
+  routeIncomingText,
+  setActiveWorkId,
+  setCoworkClarificationPending,
+  setWorkspaceMode,
+} from "./router";
 import {
   checkStaleHandoffs,
   discoverPendingFinanceHandoffs,
@@ -511,7 +519,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format).",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format).",
         undefined,
         threadId,
       );
@@ -519,6 +527,22 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     }
     if (text === "/sessions") {
       await listSessions(env, chatId, threadId);
+      return;
+    }
+    if (text === "/mode") {
+      // Displays the current Workspace mode and the two toggle buttons --
+      // the actual switch happens only through the "mode" callback below
+      // (a deterministic Telegram tap), never through this command or any
+      // AI interpretation of it. Same pattern as /sessions's own
+      // display-then-tap-a-button design.
+      const currentMode = await getWorkspaceMode(env, chatId, threadId);
+      const buttons: InlineButton[][] = [
+        [
+          { text: currentMode === "chat" ? "• Chat" : "Chat", callback_data: "mode::chat" },
+          { text: currentMode === "cowork" ? "• Cowork" : "Cowork", callback_data: "mode::cowork" },
+        ],
+      ];
+      await sendMessage(env, chatId, `Current Workspace mode here: *${currentMode}*.`, buttons, threadId);
       return;
     }
     if (text === "/cancel") {
@@ -625,6 +649,20 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
 
     if (action === "pullcallpick") {
       await applyReadAiMeeting(env, chatId, workId, value, undefined, threadId);
+      return;
+    }
+
+    if (action === "mode") {
+      // Deterministic Telegram toggle -- the sole way Workspace mode
+      // changes. Never creates, cancels, or mutates a WorkSession or
+      // Handoff; only writes the thread-scoped mode marker (and clears any
+      // stale clarification-pending marker, since switching away from
+      // Cowork mid-clarification should not leave a dangling "waiting for
+      // an answer" state behind).
+      const newMode = value === "cowork" ? "cowork" : "chat";
+      await setWorkspaceMode(env, chatId, threadId, newMode);
+      await setCoworkClarificationPending(env, chatId, threadId, false);
+      await sendMessage(env, chatId, `Workspace mode switched to *${newMode}*.`, undefined, threadId);
       return;
     }
 

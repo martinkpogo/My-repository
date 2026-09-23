@@ -250,15 +250,21 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  *
  * -- Deliberately unresolved (no entry below; the gate blocks these) --
  * routing.enquiry_classification / routing.marketing_specialization_check /
- * routing.research_specialization_check: each sends the raw, not-yet-
- * classified incoming message text -- exactly the text that, when it IS a
- * client enquiry (the case these classifiers exist to detect), is expected
- * to describe the prospect's business/situation and may well name it. This
- * mirrors these tasks' own client_confidential PRODUCTION_TASK_SENSITIVITY
- * -- already unreachable today (no eligible provider), and left genuinely
- * unresolved here rather than given a TOKEN_SAFE_RUNTIME label the content
+ * routing.research_specialization_check: each sends the raw,
+ * not-yet-classified incoming Workspace message text -- exactly the text
+ * that, when it IS a client enquiry (the case these classifiers exist to
+ * detect), is expected to describe the prospect's business/situation and
+ * may well name it. Workspace Chat/Cowork mode routing and responsibility
+ * resolution no longer use an AI classifier at all (see workspaceRouter.ts
+ * -- mode is Martin's own explicit choice and responsibility resolution is
+ * deterministic structural matching against the finite Unit/Hat registry),
+ * so these three classifiers are unreachable in production for the same
+ * reason they always were: client_confidential has no eligible provider in
+ * PRODUCTION_PROVIDER_ELIGIBILITY above. This is a deliberate, existing
+ * governance boundary, not a defect introduced here -- left genuinely
+ * unresolved rather than given a TOKEN_SAFE_RUNTIME label the content
  * doesn't support, so a future change to provider eligibility doesn't
- * silently start sending identity-bearing raw enquiry text through this
+ * silently start sending identity-bearing raw Workspace text through this
  * gate under a mislabeled policy.
  *
  * sales.matter_summary_drafting / sales.call_prep_briefing /

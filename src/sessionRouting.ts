@@ -58,6 +58,60 @@ export async function getReplyMessageWorkId(env: Env, messageId: number): Promis
   return env.STATE_KV.get(`reply_msg:${messageId}`);
 }
 
+/**
+ * Workspace interaction mode (Chat/Cowork) -- thread-scoped conversational
+ * state, deliberately separate from WorkState (a WorkSession is governed
+ * work state; mode is interaction state -- see workspaceRouter.ts's own
+ * doc comment for why these must never be merged). Absent/unreadable KV
+ * defaults to "chat" -- the safe, inert default; a read failure must never
+ * be interpreted as "cowork."
+ */
+export type WorkspaceMode = "chat" | "cowork";
+
+export async function getWorkspaceMode(env: Env, chatId: number, threadId: number | undefined): Promise<WorkspaceMode> {
+  try {
+    const raw = await env.STATE_KV.get(`mode:${chatId}:${threadId ?? "dm"}`);
+    return raw === "cowork" ? "cowork" : "chat";
+  } catch (err) {
+    console.error(`getWorkspaceMode: KV read failed for chat ${chatId} thread ${threadId} -- defaulting to chat`, err);
+    return "chat";
+  }
+}
+
+export async function setWorkspaceMode(env: Env, chatId: number, threadId: number | undefined, mode: WorkspaceMode): Promise<void> {
+  await env.STATE_KV.put(`mode:${chatId}:${threadId ?? "dm"}`, mode);
+}
+
+/**
+ * Marks that this thread is currently waiting on Martin's answer to a
+ * responsibility-clarification question ("Who should own this work?").
+ * While pending, the NEXT message in this thread is interpreted as the
+ * answer (parsed against the same finite Unit/Hat registry), not as a
+ * fresh message needing its own resolution. Cleared the instant it
+ * resolves or Martin switches back to Chat. Deliberately just a marker --
+ * no separate "resolved responsibility" is ever stored here; once
+ * resolved, WorkState.unit/hat (set at WorkSession.init time) is the only
+ * authoritative responsibility record, per the explicit decision not to
+ * create a second authority that could drift from it.
+ */
+export async function isCoworkClarificationPending(env: Env, chatId: number, threadId: number | undefined): Promise<boolean> {
+  try {
+    return (await env.STATE_KV.get(`cowork_pending:${chatId}:${threadId ?? "dm"}`)) === "1";
+  } catch (err) {
+    console.error(`isCoworkClarificationPending: KV read failed for chat ${chatId} thread ${threadId} -- defaulting to not pending`, err);
+    return false;
+  }
+}
+
+export async function setCoworkClarificationPending(env: Env, chatId: number, threadId: number | undefined, pending: boolean): Promise<void> {
+  const key = `cowork_pending:${chatId}:${threadId ?? "dm"}`;
+  if (pending) {
+    await env.STATE_KV.put(key, "1");
+  } else {
+    await env.STATE_KV.delete(key);
+  }
+}
+
 export function getSessionStub(env: Env, workId: string) {
   const id = env.WORK_SESSION.idFromName(workId);
   return env.WORK_SESSION.get(id) as any;
