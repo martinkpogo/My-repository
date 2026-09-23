@@ -343,6 +343,20 @@ test("T. Cowork decision dispatches to the resolved Unit's existing governed ent
   assert.strictEqual(calls.init[1][3], "Marketing Strategist");
 });
 
+test("T2. Cowork decision for Sales/Lead Generation Specialist routes to its own discovery capability, never Sales enquiry-extraction -- no WorkSession fabricated by this dispatch", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({ WORK_SESSION: workSession as any });
+
+  await routeIncomingText(env, -1004435157576, "Lead Generation Specialist: find me 3 companies showing a positioning problem.", 604, {
+    resolveRouting: fixedDecision({ mode: "cowork", unit: "Sales", hat: "Lead Generation Specialist" }),
+  });
+
+  assert.strictEqual(calls.init.length, 0, "Lead Generation Specialist dispatch must never go through Sales's newWorkId/init/handleIncomingEnquiry path");
+  assert.strictEqual(calls.handleIncomingEnquiry.length, 0, "must never misroute into enquiry-extraction");
+  assert.ok(sent.length > 0, "some reply must still be sent (the capability's own fallback, since no real classifier is mocked here)");
+});
+
 test("U. Cowork decision for a Unit with no existing chat-triggered governed entry point fails closed (UNSUPPORTED) -- never fabricates ownership, and notifies Operations", async (t) => {
   const sent = mockTelegramFetch(t);
   const { calls, workSession } = createMockWorkSession();
