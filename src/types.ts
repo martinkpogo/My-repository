@@ -467,6 +467,20 @@ export interface WorkState {
    * separate upstream change on the Strategy side.
    */
   strategyProposalTokenSafety?: { proposalId: string; proposalVersion: number; basis: string };
+  /**
+   * The exact Strategy Proposal identity (proposalId + proposalVersion)
+   * Martin is refining -- set when he taps Refine, bound to the proposal
+   * that was actually on screen at that moment. handleStrategyRefinement
+   * verifies this matches state.strategyProposal exactly before applying
+   * anything; a mismatch (the proposal moved on in the meantime) is a
+   * fail-closed no-op, same discipline as pendingStrategyApproval/
+   * pendingSalesProposalRevision. This exists so Martin's free-text
+   * refinement reply can be bound to a specific artifact rather than
+   * "whatever the current proposal happens to be" -- it never becomes part
+   * of state.strategyContext and is never persisted to the Handoff; it is
+   * transient control input for exactly one revision.
+   */
+  pendingStrategyRefinement?: { proposalId: string; proposalVersion: number };
 
   /**
    * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.
