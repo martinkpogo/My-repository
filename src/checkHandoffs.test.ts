@@ -295,7 +295,7 @@ test("11. Externally-created Sales Handoff without handoff_workitem is detected 
   (env as any).WORK_SESSION = workSession;
   mockSalesHandoffFetch(t);
 
-  const pickedUp = await discoverPendingSalesHandoffs(env);
+  const pickedUp = await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.init.length, 1, "a WorkSession must be registered for the externally-created Sales Handoff");
   const mapped = await env.STATE_KV.get("handoff_workitem:handoff-sales-1");
@@ -309,7 +309,7 @@ test("12. External Sales detection does not execute identity-sensitive Sales wor
   (env as any).WORK_SESSION = workSession;
   mockSalesHandoffFetch(t);
 
-  await discoverPendingSalesHandoffs(env);
+  await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.runProposalDrafting, 0, "Sales Executive's own AI-driven work must never run automatically from detection alone");
 });
@@ -320,7 +320,7 @@ test("13. Operations notification is generated for a newly detected Sales Handof
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t);
 
-  await discoverPendingSalesHandoffs(env);
+  await discoverPendingSalesHandoffs(env, true);
 
   const readyMessage = operationsMessages.find((m) => m.includes("SALES HANDOFF READY"));
   assert.ok(readyMessage, "an Operations notification must be sent for a newly detected Sales Handoff");
@@ -334,7 +334,7 @@ test("20. Sales Handoff ready notification never contains real Entity identity -
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t);
 
-  await discoverPendingSalesHandoffs(env);
+  await discoverPendingSalesHandoffs(env, true);
 
   const readyMessage = operationsMessages.find((m) => m.includes("SALES HANDOFF READY"))!;
   assert.ok(readyMessage);
@@ -348,8 +348,8 @@ test("Sales Handoff ready notification is sent once per Handoff, not on every di
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t);
 
-  await discoverPendingSalesHandoffs(env);
-  await discoverPendingSalesHandoffs(env);
+  await discoverPendingSalesHandoffs(env, true);
+  await discoverPendingSalesHandoffs(env, true);
 
   const readyMessages = operationsMessages.filter((m) => m.includes("SALES HANDOFF READY"));
   assert.strictEqual(readyMessages.length, 1, "the same pending Sales Handoff must not re-notify Operations on every tick");
@@ -366,7 +366,7 @@ test("Paused: a Finance -> Sales Handoff follows the existing paused behaviour -
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t, FINANCE_ORIGIN);
 
-  const pickedUp = await discoverPendingSalesHandoffs(env); // production default: SALES_EXECUTIVE_PAUSED
+  const pickedUp = await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.runTokenSafeProposal, 0, "the token-safe Proposal flow must not run while Sales is paused");
   assert.strictEqual(calls.runProposalDrafting, 0);
@@ -408,7 +408,7 @@ test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + 
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t, { "From Unit": { select: { name: "Strategy" } }, "From Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] } });
 
-  await discoverPendingSalesHandoffs(env);
+  await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.runTokenSafeProposal, 0);
   assert.strictEqual(calls.runProposalDrafting, 0);

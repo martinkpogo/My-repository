@@ -29,14 +29,14 @@ import type { Env, Unit } from "./types";
 // live and working, exchanging only opaque Entity_Token/Matter_Token values
 // with this Worker via the shared Handoffs database.
 //
-// This flag stays true until an AI provider with a confirmed acceptable
-// personal-data/training policy is available for this Worker to use --
-// not until the isolated project exists (it already does). This Worker's
-// own Notion integration has also had its connection to the Engagement
-// page (Entity, Matters, Proposals) removed entirely, so salesExecutive.ts's
-// Notion calls fail regardless of this flag; re-granting that access to
-// bring this code back would undo the isolation this pause protects.
-export const SALES_EXECUTIVE_PAUSED = true;
+// Currently set to false: Sales runtime execution is enabled for the
+// controlled MAT-20 live validation, per Martin's explicit approval. This is
+// a deliberate, scoped exception to the standing pause described above, not
+// a reversal of the underlying policy -- the AI-provider personal-data/
+// training-policy concern this flag exists for has not been resolved. The
+// gate can be restored to true after MAT-20 validation if separately
+// decided.
+export const SALES_EXECUTIVE_PAUSED = false;
 
 export function newWorkId(): string {
   return crypto.randomUUID();
