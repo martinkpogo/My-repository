@@ -117,6 +117,16 @@ function approvedStrategyProposal(overrides: Partial<StrategyProposal> = {}): St
   } as StrategyProposal;
 }
 
+/** A fully-populated, honest attestation for a given (proposalId, proposalVersion) -- both required checks recorded as having covered the required (entityName, matterName) fields, matching what presentStrategyProposalForApproval would actually produce. */
+function validAttestation(proposalId: string, proposalVersion: number): WorkState["strategyProposalTokenSafety"] {
+  return {
+    proposalId,
+    proposalVersion,
+    sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
+    proposalContent: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
+  };
+}
+
 function fakeState(overrides: Partial<WorkState> = {}): WorkState {
   return {
     workId: "11111111-2222-3333-4444-555555555555",
@@ -133,7 +143,7 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     strategyProposal: approvedStrategyProposal(),
     // Test fixture only: no production code sets this today (see
     // verifyStrategyProposalTokenSafety). Tests of the gate itself remove it.
-    strategyProposalTokenSafety: { proposalId: "strategy-prop-1", proposalVersion: 1, basis: "test fixture" },
+    strategyProposalTokenSafety: validAttestation("strategy-prop-1", 1),
     ...overrides,
   };
 }
@@ -783,19 +793,19 @@ test("buildProposalContent is deterministic", () => {
 // Strategy Proposal identity boundary.
 // ---------------------------------------------------------------------------
 
-test("S1. Without a token-safety verification for the approved Strategy Proposal (the production state today), nothing is produced", async (t) => {
+test("S1. Without a token-safety attestation for the approved Strategy Proposal (the production state today), nothing is produced", async (t) => {
   const { world, state } = await createV1(t, { strategyProposalTokenSafety: undefined });
   assert.strictEqual(proposals(world).length, 0, "no Proposal record");
   assert.strictEqual(approvalRequests(world).length, 0, "nothing presented for approval");
-  assert.match(state.blockedReason ?? "", /Strategy Proposal identity boundary: .*strategy-prop-1 v1.*no authoritative token-safety verification/);
+  assert.match(state.blockedReason ?? "", /Strategy Proposal identity boundary: .*strategy-prop-1 v1.*no token-safety attestation on record/);
   assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Held", "HO-64 is held with the reason, not left to retry every cycle");
-  assert.match(text(world.pages.get(HO64_ID)!.properties["Open Questions"]), /token-safety verification/);
+  assert.match(text(world.pages.get(HO64_ID)!.properties["Open Questions"]), /token-safety attestation/);
   assert.ok(!world.fetches.some((f) => f.url.endsWith("/pages") && f.body?.parent?.data_source_id === "proposals-ds"));
 });
 
-test("S2. A verification for a different Strategy Proposal version does not count", async (t) => {
+test("S2. An attestation for a different Strategy Proposal version does not count", async (t) => {
   const { world, state } = await createV1(t, {
-    strategyProposalTokenSafety: { proposalId: "strategy-prop-1", proposalVersion: 2, basis: "stale" },
+    strategyProposalTokenSafety: validAttestation("strategy-prop-1", 2),
   });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /is for Strategy proposal strategy-prop-1 v2, not the approved strategy-prop-1 v1/);
@@ -804,7 +814,38 @@ test("S2. A verification for a different Strategy Proposal version does not coun
 test("S3. The gate is not a text heuristic: a clean-looking but unverified Strategy Proposal is still refused", async (t) => {
   const { world, state } = await createV1(t, { strategyProposalTokenSafety: undefined, entityName: undefined, matterName: undefined });
   assert.strictEqual(proposals(world).length, 0);
-  assert.match(state.blockedReason ?? "", /no authoritative token-safety verification/);
+  assert.match(state.blockedReason ?? "", /no token-safety attestation on record/);
+});
+
+test("S5. A legacy {proposalId, proposalVersion, basis} attestation (no sourceBoundary/proposalContent) cannot pass verification", async (t) => {
+  const legacy = { proposalId: "strategy-prop-1", proposalVersion: 1, basis: "approved by Martin" } as any;
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: legacy });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check/);
+});
+
+test("S6. An attestation whose sourceBoundary check did not cover the required identity fields fails verification", async (t) => {
+  const incomplete: WorkState["strategyProposalTokenSafety"] = {
+    proposalId: "strategy-prop-1",
+    proposalVersion: 1,
+    sourceBoundary: { checked: true, identityFieldsChecked: ["entityName"] }, // missing matterName
+    proposalContent: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
+  };
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: incomplete });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check ran against the required known-identity fields/);
+});
+
+test("S7. An attestation whose proposalContent check did not cover the required identity fields fails verification", async (t) => {
+  const incomplete: WorkState["strategyProposalTokenSafety"] = {
+    proposalId: "strategy-prop-1",
+    proposalVersion: 1,
+    sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
+    proposalContent: { checked: true, identityFieldsChecked: ["matterName"] }, // missing entityName
+  };
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: incomplete });
+  assert.strictEqual(proposals(world).length, 0);
+  assert.match(state.blockedReason ?? "", /does not confirm the complete Strategy Proposal was independently checked/);
 });
 
 test("S4. Reprocessing an existing Proposal without verification does not re-hydrate Strategy facts, so no new Version can be built from them", async (t) => {

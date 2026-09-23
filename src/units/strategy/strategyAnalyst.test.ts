@@ -12,6 +12,7 @@ import {
   STRATEGY_BOUNDARY_START,
   STRATEGY_BOUNDARY_END,
   extractLabeledBlock,
+  checkStrategyProposalForKnownIdentity,
   type StrategyDiagnosisResult,
   type StrategyProposal,
 } from "./strategyAnalyst";
@@ -58,6 +59,16 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     handoffId: "handoff-1",
+    // The same WorkSession that ran Sales's own intake, before Strategy
+    // picked up -- entityName/matterName are never set BY Strategy (it
+    // never learns them, per the closed-context contract), but they're
+    // already resident on the shared WorkState from Sales's own earlier
+    // work, exactly as production has it. strategySourceBoundaryAttestation
+    // mirrors what handleInterventionText (salesExecutive.ts) already sets
+    // once its own Sales -> Strategy Handoff write passes findViolation.
+    entityName: "Test Entity",
+    matterName: "Test Matter",
+    strategySourceBoundaryAttestation: { handoffId: "handoff-1", checked: true, identityFieldsChecked: ["entityName", "matterName"] },
     ...overrides,
   };
 }
@@ -523,6 +534,70 @@ test("9. A recommended diagnosis develops a full Strategic Intervention Proposal
   assert.ok(log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
 });
 
+test("A fresh Strategy Proposal that passes both checks receives a complete strategyProposalTokenSafety attestation bound to v1", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  const attestation = result.strategyProposalTokenSafety;
+  assert.strictEqual(attestation?.proposalId, result.strategyProposal!.proposalId);
+  assert.strictEqual(attestation?.proposalVersion, 1);
+  assert.strictEqual(attestation?.sourceBoundary.checked, true);
+  assert.deepStrictEqual([...attestation!.sourceBoundary.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  assert.strictEqual(attestation?.proposalContent.checked, true);
+  assert.deepStrictEqual([...attestation!.proposalContent.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+});
+
+test("Missing source-boundary attestation fails closed -- the Proposal is never presented for approval", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState({ strategySourceBoundaryAttestation: undefined });
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
+  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.ok(log.sentTexts.some((t) => /no Sales source-boundary identity check is on record/.test(t)));
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
+});
+
+test("Missing authoritative entityName/matterName fails closed -- the Proposal is never presented for approval", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState({ entityName: undefined });
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyProposal, undefined);
+  assert.ok(log.sentTexts.some((t) => /no authoritative Entity\/Matter identity is on record/.test(t)));
+});
+
+test("A drafted Strategy Proposal containing a known identity value fails closed -- never presented, never routed downstream", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const leaked = {
+    ...RAW_PROPOSAL,
+    executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Test Entity is pursuing larger accounts." },
+  };
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, leaked);
+  const state = fakeState(); // default fakeState entityName/matterName: "Test Entity" / "Test Matter"
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyProposal, undefined, "the leaked proposal must never become the current Proposal");
+  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.ok(log.sentTexts.some((t) => /known identity value \(matched field: entityName\)/.test(t)));
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
+  // The violation detail is never echoed -- the actual matched value must never reach Telegram or the Handoff.
+  assert.ok(!log.sentTexts.join("").includes("Test Entity is pursuing larger accounts"));
+});
+
 test("Proposal contains every required structural section", async (t) => {
   mockFetch(t);
   const env = fakeEnv();
@@ -568,6 +643,82 @@ test("evaluateProposalCompleteness: rejects a proposal missing required sections
     assert.match(result.reason, /deliverables/);
     assert.match(result.reason, /success criteria/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// checkStrategyProposalForKnownIdentity: the bounded known-identity check.
+// ---------------------------------------------------------------------------
+
+function cleanProposal(overrides: Partial<StrategyProposal> = {}): StrategyProposal {
+  return { ...(RAW_PROPOSAL as any), proposalId: "p1", proposalVersion: 1, ...overrides } as StrategyProposal;
+}
+
+test("checkStrategyProposalForKnownIdentity: a clean token-safe proposal passes", () => {
+  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { entityName: "Acme Co", matterName: "Acme Co — Positioning" });
+  assert.strictEqual(result.violation, null);
+  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing the exact entityName fails", () => {
+  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Meridian Foods Ghana Ltd is pursuing larger accounts." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  assert.match(result.violation ?? "", /matched field: entityName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing the exact matterName fails", () => {
+  const proposal = cleanProposal({ strategicChallenge: { ...RAW_PROPOSAL.strategicChallenge, observedSituation: "Directly concerns the Cold Chain Logistics Redesign effort." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  assert.match(result.violation ?? "", /matched field: matterName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing a known email fails when email is part of the available identity set", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Confirm with comfort@meridianfoods.com before proceeding." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", email: "comfort@meridianfoods.com" });
+  assert.match(result.violation ?? "", /matched field: email/);
+  assert.ok(result.identityFieldsChecked.includes("email"));
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing a known phone fails, with punctuation normalized like findViolation", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Contact reachable at +233 24 412 3456 if needed." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", phone: "+233-24-412-3456" });
+  assert.match(result.violation ?? "", /matched field: phone/);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing a known contact name fails when contactName is supplied", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Follow up with Comfort Agyare about the timeline." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", contactName: "Comfort Agyare" });
+  assert.match(result.violation ?? "", /matched field: contactName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: matching is case-insensitive, consistent with findViolation's existing semantics", () => {
+  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "meridian foods ghana ltd is pursuing larger accounts." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Y Matter" });
+  assert.match(result.violation ?? "", /matched field: entityName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: nested fields (workstreams, deliverables, arrays) are inspected, not just top-level fields", () => {
+  const proposal = cleanProposal({
+    proposedIntervention: {
+      ...RAW_PROPOSAL.proposedIntervention,
+      workstreams: [{ name: "Vendor onboarding", objective: "Bring Meridian Foods Ghana Ltd's preferred carrier online.", activities: [], output: "", dependencies: [], acceptanceCriteria: [] }],
+    },
+  });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Y Matter" });
+  assert.match(result.violation ?? "", /matched field: entityName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: an arbitrary unknown name is not falsely classified as a violation merely for being a name", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Comparable to the approach a firm like Jonathan Osei Consulting might take." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  assert.strictEqual(result.violation, null, "an unknown third-party name is out of scope for the bounded known-identity check");
+});
+
+test("checkStrategyProposalForKnownIdentity: only entityName/matterName present -- optional fields are not recorded as checked when absent", () => {
+  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { entityName: "X Co", matterName: "Y Matter" });
+  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  assert.ok(!result.identityFieldsChecked.includes("email"));
+  assert.ok(!result.identityFieldsChecked.includes("phone"));
+  assert.ok(!result.identityFieldsChecked.includes("contactName"));
 });
 
 test("An incomplete AI-drafted proposal is held (not presented for approval) -- the deterministic completeness check overrides the AI's own JSON output", async (t) => {
@@ -724,6 +875,8 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   const afterPickup = await handlePickup(env, state);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const originalProposalId = afterPickup.strategyProposal!.proposalId;
+  const v1Attestation = afterPickup.strategyProposalTokenSafety;
+  assert.strictEqual(v1Attestation?.proposalVersion, 1, "v1 must have its own attestation");
 
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
@@ -751,6 +904,13 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   assert.strictEqual(afterRevision.pendingStrategyRefinement, undefined, "the consumed refinement binding must be cleared");
   assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "the revised proposal must re-enter the approval gate, never become approved by being generated");
   assert.strictEqual(afterRevision.pendingStrategyApproval?.proposalVersion, 2, "the new approval request must be bound to the revised version");
+
+  // v2 gets its OWN independent attestation -- never inherited from v1's,
+  // per the "v1 must not authorize v2" requirement.
+  const v2Attestation = afterRevision.strategyProposalTokenSafety;
+  assert.strictEqual(v2Attestation?.proposalVersion, 2);
+  assert.strictEqual(v2Attestation?.proposalId, originalProposalId);
+  assert.notDeepStrictEqual(v2Attestation, v1Attestation, "v2's attestation must be its own, not a copy/reuse of v1's");
 });
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ import {
   updatePage,
   type NotionPage,
 } from "../../notion";
-import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
+import { updateHandoff, findIdentityViolation, type HandoffIdentity, type KnownIdentityField } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -653,27 +653,41 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
 /**
  * The Strategy Proposal is only consumed when its token safety is
  * established by an authoritative source, bound to that exact proposal ID
- * and version. The runtime cannot establish this itself: Strategy's
- * drafting call receives the full originating Handoff context, which is not
- * guaranteed to be identity-free, and the Strategy -> Finance Handoff holds
- * only a truncated serialization. Inspecting the text here would need the
- * real identity the runtime must never know, so there is no heuristic
- * fallback: without a matching attestation this fails closed.
- *
- * No production code sets state.strategyProposalTokenSafety today -- a
- * token-safe Strategy source (or an authoritative token-safe serialization
- * at the Strategy -> Finance boundary) is a separate, required upstream
- * change. Until it exists, Runtime Proposal production is blocked here.
+ * and version. This is a BOUNDED known-identity guarantee, not a claim that
+ * the Proposal is free of arbitrary/unknown identity -- see
+ * strategyAnalyst.ts's checkStrategyProposalForKnownIdentity and
+ * types.ts's WorkState.strategyProposalTokenSafety doc comments for the
+ * exact claim and its limits. Two independent deterministic checks make up
+ * the evidence, both required: (1) the Sales-authored Sales -> Strategy
+ * source Handoff was checked against Sales's known identity at write time
+ * (sourceBoundary), and (2) the complete assembled Strategy Proposal for
+ * this EXACT version was independently checked against that same
+ * known-identity set (proposalContent). Neither Martin's approval, the
+ * Handoff merely existing, nor Outbound Data Gate passage is evidence of
+ * either -- both are separate, unrelated gates. Fails closed if either
+ * check is missing, marked false, or doesn't record the required
+ * (entityName, matterName) fields as having been checked -- a legacy
+ * `{proposalId, proposalVersion, basis: string}` attestation cannot pass,
+ * since it has neither `sourceBoundary` nor `proposalContent`.
  */
 export function verifyStrategyProposalTokenSafety(state: WorkState): string | null {
   const proposal = state.strategyProposal;
   if (!proposal) return null; // absence is reported by resolveFacts as a missing fact
   const attestation = state.strategyProposalTokenSafety;
   if (!attestation) {
-    return `the approved Strategy Proposal (${proposal.proposalId} v${proposal.proposalVersion}) has no authoritative token-safety verification. It was drafted from Handoff context that is not certified token-safe, and no complete token-safe serialization of it exists at the Strategy → Finance boundary, so it cannot be used as a Proposal source.`;
+    return `the approved Strategy Proposal (${proposal.proposalId} v${proposal.proposalVersion}) has no token-safety attestation on record -- it cannot be used as a Proposal source.`;
   }
   if (attestation.proposalId !== proposal.proposalId || attestation.proposalVersion !== proposal.proposalVersion) {
-    return `the token-safety verification on record is for Strategy proposal ${attestation.proposalId} v${attestation.proposalVersion}, not the approved ${proposal.proposalId} v${proposal.proposalVersion}.`;
+    return `the token-safety attestation on record is for Strategy proposal ${attestation.proposalId} v${attestation.proposalVersion}, not the approved ${proposal.proposalId} v${proposal.proposalVersion}.`;
+  }
+  const required: KnownIdentityField[] = ["entityName", "matterName"];
+  const sourceBoundary = attestation.sourceBoundary;
+  if (!sourceBoundary || sourceBoundary.checked !== true || !required.every((f) => sourceBoundary.identityFieldsChecked?.includes(f))) {
+    return `the token-safety attestation for ${proposal.proposalId} v${proposal.proposalVersion} does not confirm the Sales source-boundary identity check ran against the required known-identity fields (entityName, matterName).`;
+  }
+  const proposalContent = attestation.proposalContent;
+  if (!proposalContent || proposalContent.checked !== true || !required.every((f) => proposalContent.identityFieldsChecked?.includes(f))) {
+    return `the token-safety attestation for ${proposal.proposalId} v${proposal.proposalVersion} does not confirm the complete Strategy Proposal was independently checked against the required known-identity fields (entityName, matterName).`;
   }
   return null;
 }

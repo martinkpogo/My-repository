@@ -7,7 +7,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
-import { createHandoff, updateHandoff } from "../../handoffWriter";
+import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -1124,6 +1124,60 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   return presentStrategyProposalForApproval(env, state, proposal, "created");
 }
 
+/** The known-identity values checkStrategyProposalForKnownIdentity compares a Proposal's serialized content against -- never persisted or forwarded, only ever held locally for the duration of one comparison. */
+export interface KnownIdentityCheckInput {
+  entityName?: string;
+  matterName?: string;
+  contactName?: string;
+  email?: string;
+  phone?: string;
+}
+
+/**
+ * The bounded, deterministic known-identity check for a complete assembled
+ * StrategyProposal -- the Strategy-side half of the two-part
+ * strategyProposalTokenSafety guarantee (see its own doc comment in
+ * types.ts). Deliberately NOT arbitrary-name/PII detection: it only tests
+ * whether the Proposal's serialized content contains one of the SPECIFIC
+ * known identity values supplied, using the exact same comparison
+ * primitive (textContainsIdentityValue, handoffWriter.ts) findViolation
+ * already uses for Handoff fields -- one matching implementation, not a
+ * second one that could drift. `JSON.stringify(proposal)` is used as the
+ * haystack specifically so every nested field/array in the Proposal is
+ * covered, not just a hand-picked subset that could accidentally omit one.
+ *
+ * This function itself never persists, logs, or forwards the identity
+ * values it's given -- it returns only which known-identity FIELDS were
+ * checked (never their values) and, on a match, which field matched
+ * (never the matched value itself) -- consistent with isTokenSafe's own
+ * "the violation detail is never echoed" discipline in tokenSafeProposal.ts.
+ */
+export function checkStrategyProposalForKnownIdentity(
+  proposal: StrategyProposal,
+  identity: KnownIdentityCheckInput,
+): { violation: string | null; identityFieldsChecked: KnownIdentityField[] } {
+  const haystack = JSON.stringify(proposal);
+  const identityFieldsChecked: KnownIdentityField[] = [];
+  const checks: Array<[KnownIdentityField, string | undefined, "name" | "email" | "phone"]> = [
+    ["entityName", identity.entityName, "name"],
+    ["matterName", identity.matterName, "name"],
+    ["contactName", identity.contactName, "name"],
+    ["email", identity.email, "email"],
+    ["phone", identity.phone, "phone"],
+  ];
+  for (const [field, value, kind] of checks) {
+    if (!value?.trim()) continue;
+    identityFieldsChecked.push(field);
+    if (textContainsIdentityValue(haystack, value, kind)) {
+      return {
+        violation: `the drafted Strategy Proposal contains a known identity value (matched field: ${field}) -- refusing to present it for approval or route it downstream.`,
+        identityFieldsChecked,
+      };
+    }
+  }
+  return { violation: null, identityFieldsChecked };
+}
+
 /**
  * Shared tail for both a freshly-drafted proposal (developStrategyProposal)
  * and a revised one (reviseStrategyProposal): pushes the prior version (if
@@ -1132,6 +1186,25 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
  * Activity Log's own wording ("created" vs "revised") -- everything else is
  * identical for both callers, including the approval gate itself: a
  * revised proposal never becomes approved merely because it was generated.
+ *
+ * This is also the shared seam for the bounded known-identity safety gate
+ * (see checkStrategyProposalForKnownIdentity) -- because both callers
+ * converge here, v1, v2, and every later refinement version are each
+ * independently checked, never inheriting a prior version's result. The
+ * check runs FIRST, before any state is mutated, so a failure here leaves
+ * state.strategyProposal/strategyProposalHistory untouched -- the same
+ * discipline the completeness check already applies one level up in both
+ * callers.
+ *
+ * Reading state.entityName/matterName/entityDraft here is a deliberate,
+ * narrow exception to Strategy's own closed-context rule (Strategy's
+ * diagnosis/drafting code never reads real identity, and still doesn't --
+ * see resolveStrategyHandoffContext) -- this one local comparison exists
+ * only because the same WorkSession/Durable Object happens to retain what
+ * Sales already legitimately resolved, per the boundary-routing
+ * inspection this implements. Nothing read here is written to
+ * state.strategyProposal, the Handoff, logs, or any Telegram message --
+ * only which fields were checked, never the values.
  */
 async function presentStrategyProposalForApproval(
   env: Env,
@@ -1139,6 +1212,38 @@ async function presentStrategyProposalForApproval(
   proposal: StrategyProposal,
   logVerb: "created" | "revised",
 ): Promise<WorkState> {
+  const sourceBoundary = state.strategySourceBoundaryAttestation;
+  if (!sourceBoundary || sourceBoundary.checked !== true) {
+    return handleBlocked(
+      env,
+      state,
+      "no Sales source-boundary identity check is on record for this work item's Sales -> Strategy Handoff -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
+    );
+  }
+  if (!state.entityName?.trim() || !state.matterName?.trim()) {
+    return handleBlocked(
+      env,
+      state,
+      "no authoritative Entity/Matter identity is on record for this work item -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
+    );
+  }
+  const identityCheck = checkStrategyProposalForKnownIdentity(proposal, {
+    entityName: state.entityName,
+    matterName: state.matterName,
+    contactName: state.entityDraft?.name,
+    email: state.entityDraft?.email,
+    phone: state.entityDraft?.phone,
+  });
+  if (identityCheck.violation) {
+    return handleBlocked(env, state, identityCheck.violation);
+  }
+  state.strategyProposalTokenSafety = {
+    proposalId: proposal.proposalId,
+    proposalVersion: proposal.proposalVersion,
+    sourceBoundary: { checked: true, identityFieldsChecked: sourceBoundary.identityFieldsChecked },
+    proposalContent: { checked: true, identityFieldsChecked: identityCheck.identityFieldsChecked },
+  };
+
   const previousVersion = state.strategyProposal;
   if (previousVersion) {
     state.strategyProposalHistory = [...(state.strategyProposalHistory ?? []), previousVersion];

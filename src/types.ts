@@ -1,4 +1,5 @@
 import type { InlineButton } from "./telegram";
+import type { KnownIdentityField } from "./handoffWriter";
 
 export interface Env {
   AI: Ai;
@@ -459,14 +460,47 @@ export interface WorkState {
    */
   pendingSalesProposalRevision?: { proposalNumber: number; fromVersion: number };
   /**
-   * Authoritative confirmation that the approved Strategy Proposal carried
-   * on this work item is token-safe, bound to its exact proposal ID and
-   * version. Runtime Sales Proposal production refuses to consume a Strategy
-   * Proposal without a matching one (see verifyStrategyProposalTokenSafety).
-   * Nothing in the runtime sets this today: establishing it requires a
-   * separate upstream change on the Strategy side.
+   * The result of the Sales-side known-identity check performed when the
+   * Sales -> Strategy Handoff was created (createHandoff already runs
+   * findViolation against the authoritative identity Sales supplied --
+   * see handoffWriter.ts's identityFieldsPresent). This records WHICH known-
+   * identity fields were actually available and checked at that moment --
+   * never the values themselves -- so a later Strategy Proposal-content
+   * check can honestly say its known-identity set matches what the source
+   * boundary was already checked against. Set once, immediately after that
+   * Handoff is successfully created (a throw there means this is never
+   * set, consistent with fail-closed) -- see salesExecutive.ts's
+   * handleInterventionText.
    */
-  strategyProposalTokenSafety?: { proposalId: string; proposalVersion: number; basis: string };
+  strategySourceBoundaryAttestation?: {
+    handoffId: string;
+    checked: true;
+    identityFieldsChecked: KnownIdentityField[];
+  };
+  /**
+   * The bounded, deterministic known-identity safety attestation for the
+   * EXACT Strategy Proposal (proposalId, proposalVersion) currently
+   * approved/in-flight -- see verifyStrategyProposalTokenSafety and
+   * checkStrategyProposalForKnownIdentity (strategyAnalyst.ts). This is a
+   * narrow claim: the Sales-authored Sales -> Strategy source Handoff was
+   * checked against Sales's known identity, AND the complete assembled
+   * Strategy Proposal for this exact version was independently checked
+   * against that same known-identity set -- neither found a match. It is
+   * NOT a claim that the Proposal is free of arbitrary/unknown identity;
+   * see checkStrategyProposalForKnownIdentity's own doc comment. Every
+   * distinct proposalVersion (including every refinement) requires its own
+   * independent proposalContent check -- never inherited from a prior
+   * version, per verifyStrategyProposalTokenSafety's exact-match discipline.
+   * Never carries the identity values themselves, only which fields were
+   * checked. Replaces the prior unconstrained `basis: string` shape, which
+   * could not honestly represent which checks had actually run.
+   */
+  strategyProposalTokenSafety?: {
+    proposalId: string;
+    proposalVersion: number;
+    sourceBoundary: { checked: true; identityFieldsChecked: KnownIdentityField[] };
+    proposalContent: { checked: true; identityFieldsChecked: KnownIdentityField[] };
+  };
   /**
    * The exact Strategy Proposal identity (proposalId + proposalVersion)
    * Martin is refining -- set when he taps Refine, bound to the proposal
