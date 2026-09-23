@@ -160,6 +160,61 @@ test("17. Sales -> Strategy creates a token-only Handoff -- the real Entity/Matt
   assert.ok(!serialized.includes("Cold Chain Logistics Redesign"), "the real Matter name must never appear in the Handoff");
 });
 
+test("Source-boundary attestation: the Sales -> Strategy Handoff write records entityName/matterName as the checked known-identity fields", async (t) => {
+  mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityName: "Acme Co", matterName: "Acme Co — Positioning", entityDraft: undefined });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.checked, true);
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.handoffId, "handoff-page-1");
+  assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+});
+
+test("Source-boundary attestation: optional email is recorded as checked when present on entityDraft", async (t) => {
+  mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityDraft: { name: "Acme Co", email: "info@acme.example", phone: "", type: "Organisation" } });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  assert.ok(result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("email"));
+});
+
+test("Source-boundary attestation: optional phone is recorded as checked when present on entityDraft", async (t) => {
+  mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityDraft: { name: "Acme Co", email: "", phone: "+233241234567", type: "Organisation" } });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  assert.ok(result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("phone"));
+});
+
+test("Source-boundary attestation: optional contactName is recorded as checked when present on an Individual-typed entityDraft", async (t) => {
+  mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityDraft: { name: "Kwame Mensah", email: "", phone: "", type: "Individual" } });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  assert.ok(result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("contactName"));
+});
+
+test("Source-boundary attestation: an Organisation-typed entityDraft does not record contactName (avoids double-flagging the same org name)", async (t) => {
+  mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityDraft: { name: "Acme Co", email: "", phone: "", type: "Organisation" } });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  assert.ok(!result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("contactName"));
+});
+
+test("Existing known-identity Handoff violation still blocks the Sales -> Strategy write, and no attestation is recorded", async (t) => {
+  mockFetch(t);
+  const state = fakeState({ entryType: "inbound_enquiry", entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+
+  await assert.rejects(() => handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging for Meridian Foods Ghana Ltd specifically."));
+  assert.strictEqual(state.strategySourceBoundaryAttestation, undefined, "no attestation may be recorded when the underlying Handoff write itself was refused");
+});
+
 test("1b. Sales does not create a Sales -> Finance Handoff -- the obsolete direct entry point is gone", async (t) => {
   const log = mockFetch(t);
   const state = fakeState({ entryType: "inbound_enquiry" });

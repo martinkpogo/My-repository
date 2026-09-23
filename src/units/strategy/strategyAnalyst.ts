@@ -1,5 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { getPage, plainText, richText, select, title } from "../../notion";
+import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -7,7 +7,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
-import { createHandoff, updateHandoff } from "../../handoffWriter";
+import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -101,7 +101,7 @@ export interface StrategyDiagnosisResult {
  * StrategyDiagnosisResult via developStrategyProposal, never generated in
  * place of the diagnosis step. Detailed enough for Martin to evaluate what
  * ENIG proposes to do, and specified enough for Finance to price without
- * having to redesign the intervention -- see formatApprovedProposalForFinance.
+ * having to redesign the intervention -- see buildStrategyBoundaryRepresentation.
  */
 export interface StrategyProposal {
   proposalId: string;
@@ -319,6 +319,15 @@ async function sendStrategyInProgressAck(env: Env, state: WorkState): Promise<vo
     env,
     { ...state, hat: HAT_NAME },
     "🧭 Diagnosing this now -- establishing the situation before proposing any direction. I'll follow up here once it's done.",
+  );
+}
+
+/** Same mechanism as sendStrategyInProgressAck, accurate wording for a revision -- a refinement never re-runs diagnosis, so it shouldn't say it is. */
+async function sendStrategyRefinementInProgressAck(env: Env, state: WorkState): Promise<void> {
+  state.strategyProgressMessageId = await sendWorkspaceHatMessage(
+    env,
+    { ...state, hat: HAT_NAME },
+    "🧭 Applying your requested change to the current proposal now. I'll follow up here once it's done.",
   );
 }
 
@@ -822,6 +831,44 @@ function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleC
   ].join("\n\n");
 }
 
+/**
+ * The revision counterpart to buildProposalDraftingSystemPrompt -- grounds
+ * the model in the CURRENT, already-produced proposal and asks it to apply
+ * Martin's requested change to that artifact, never to re-diagnose or
+ * invent new business facts. Deliberately distinct from the drafting
+ * prompt (no diagnosis is supplied, no re-diagnosis is invited) per the
+ * target semantic model: existing Strategy Proposal + Martin's revision
+ * instruction -> revised Strategy Proposal, not raw context -> diagnose
+ * again -> draft another proposal.
+ *
+ * The identity-discipline paragraph exists because Martin's own `user`
+ * message (the requested change itself, passed separately -- see
+ * reviseStrategyProposal) may contain a real company/person name he typed;
+ * this instructs the model not to let that copy into the token-safe
+ * proposal it returns. This is a prompt-level instruction only -- it does
+ * not replace, weaken, or duplicate the Outbound Data Gate's own structural
+ * detectors, which independently inspect the actual outbound messages
+ * (including Martin's instruction) under this same strategy.proposal_drafting
+ * task's existing TOKEN_SAFE_RUNTIME policy, unchanged by this function.
+ */
+function buildProposalRevisionSystemPrompt(hatDefinition: string, universalRoleContract: string, currentProposal: StrategyProposal): string {
+  return [
+    "You are executing the Strategy Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.",
+    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+    universalRoleContract,
+    "=== HAT DEFINITION ===",
+    hatDefinition,
+    "=== TASK (execution mechanics -- not part of the governance above) ===",
+    "Below is the CURRENT, already-produced Strategic Intervention Proposal. The user message that follows this system prompt is Martin's requested change to it. Apply ONLY that requested change, as minimally as the change allows -- do not re-diagnose the underlying situation, do not invent a new business fact not already present in the current proposal below, and preserve every section the requested change does not touch exactly as it already reads.",
+    "=== CURRENT PROPOSAL (revise this artifact -- do not replace it wholesale, do not start over) ===",
+    JSON.stringify(currentProposal),
+    "=== IDENTITY DISCIPLINE (do not weaken) ===",
+    "Martin's requested change is an edit instruction, never new verified business evidence -- treat it exactly as you would treat a note in the margin of the proposal above, not as a new fact about the Entity/Matter. The current proposal above already refers to the Entity/Matter only by the context and tokens already present in it, never by a real company or person name. If Martin's requested change names a real company, person, email, phone number, or address, apply only the SUBSTANCE of what he's asking for (what should be different about the proposal) and do not copy that name or contact detail into any field of your output -- describe the change using only the terms, tokens, and context already used in the current proposal above.",
+    "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
+    `Return the COMPLETE revised proposal as JSON, in exactly the same shape as the current proposal above: {"executiveSummary": {...}, "businessContext": {...}, "strategicChallenge": {...}, "diagnosis": {...}, "strategicOpportunity": {...}, "strategicObjective": {...}, "recommendedDirection": {...}, "proposedIntervention": {...}, "deliverables": [...], "timeline": {...}, "entityInputs": {...}, "assumptions": [...], "dependencies": [...], "risksAndConstraints": {...}, "expectedBusinessEffect": {...}, "successCriteria": [...], "commercialScope": {...}, "strategicRecommendation": {...}}. Every field must be present -- use the current proposal's own existing value for anything the requested change doesn't affect, never an empty placeholder.`,
+  ].join("\n\n");
+}
+
 function str(v: unknown, fallback = ""): string {
   return typeof v === "string" && v.length > 0 ? v : fallback;
 }
@@ -1074,15 +1121,138 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
     return handleBlocked(env, state, `${completeness.reason} Not presenting this as-is for approval.`);
   }
 
+  return presentStrategyProposalForApproval(env, state, proposal, "created");
+}
+
+/** The known-identity values checkStrategyProposalForKnownIdentity compares a Proposal's serialized content against -- never persisted or forwarded, only ever held locally for the duration of one comparison. */
+export interface KnownIdentityCheckInput {
+  entityName?: string;
+  matterName?: string;
+  contactName?: string;
+  email?: string;
+  phone?: string;
+}
+
+/**
+ * The bounded, deterministic known-identity check for a complete assembled
+ * StrategyProposal -- the Strategy-side half of the two-part
+ * strategyProposalTokenSafety guarantee (see its own doc comment in
+ * types.ts). Deliberately NOT arbitrary-name/PII detection: it only tests
+ * whether the Proposal's serialized content contains one of the SPECIFIC
+ * known identity values supplied, using the exact same comparison
+ * primitive (textContainsIdentityValue, handoffWriter.ts) findViolation
+ * already uses for Handoff fields -- one matching implementation, not a
+ * second one that could drift. `JSON.stringify(proposal)` is used as the
+ * haystack specifically so every nested field/array in the Proposal is
+ * covered, not just a hand-picked subset that could accidentally omit one.
+ *
+ * This function itself never persists, logs, or forwards the identity
+ * values it's given -- it returns only which known-identity FIELDS were
+ * checked (never their values) and, on a match, which field matched
+ * (never the matched value itself) -- consistent with isTokenSafe's own
+ * "the violation detail is never echoed" discipline in tokenSafeProposal.ts.
+ */
+export function checkStrategyProposalForKnownIdentity(
+  proposal: StrategyProposal,
+  identity: KnownIdentityCheckInput,
+): { violation: string | null; identityFieldsChecked: KnownIdentityField[] } {
+  const haystack = JSON.stringify(proposal);
+  const identityFieldsChecked: KnownIdentityField[] = [];
+  const checks: Array<[KnownIdentityField, string | undefined, "name" | "email" | "phone"]> = [
+    ["entityName", identity.entityName, "name"],
+    ["matterName", identity.matterName, "name"],
+    ["contactName", identity.contactName, "name"],
+    ["email", identity.email, "email"],
+    ["phone", identity.phone, "phone"],
+  ];
+  for (const [field, value, kind] of checks) {
+    if (!value?.trim()) continue;
+    identityFieldsChecked.push(field);
+    if (textContainsIdentityValue(haystack, value, kind)) {
+      return {
+        violation: `the drafted Strategy Proposal contains a known identity value (matched field: ${field}) -- refusing to present it for approval or route it downstream.`,
+        identityFieldsChecked,
+      };
+    }
+  }
+  return { violation: null, identityFieldsChecked };
+}
+
+/**
+ * Shared tail for both a freshly-drafted proposal (developStrategyProposal)
+ * and a revised one (reviseStrategyProposal): pushes the prior version (if
+ * any) onto history, presents the new version for Martin's Approve/Refine/
+ * Reject decision, and resets approval state. `logVerb` only changes the
+ * Activity Log's own wording ("created" vs "revised") -- everything else is
+ * identical for both callers, including the approval gate itself: a
+ * revised proposal never becomes approved merely because it was generated.
+ *
+ * This is also the shared seam for the bounded known-identity safety gate
+ * (see checkStrategyProposalForKnownIdentity) -- because both callers
+ * converge here, v1, v2, and every later refinement version are each
+ * independently checked, never inheriting a prior version's result. The
+ * check runs FIRST, before any state is mutated, so a failure here leaves
+ * state.strategyProposal/strategyProposalHistory untouched -- the same
+ * discipline the completeness check already applies one level up in both
+ * callers.
+ *
+ * Reading state.entityName/matterName/entityDraft here is a deliberate,
+ * narrow exception to Strategy's own closed-context rule (Strategy's
+ * diagnosis/drafting code never reads real identity, and still doesn't --
+ * see resolveStrategyHandoffContext) -- this one local comparison exists
+ * only because the same WorkSession/Durable Object happens to retain what
+ * Sales already legitimately resolved, per the boundary-routing
+ * inspection this implements. Nothing read here is written to
+ * state.strategyProposal, the Handoff, logs, or any Telegram message --
+ * only which fields were checked, never the values.
+ */
+async function presentStrategyProposalForApproval(
+  env: Env,
+  state: WorkState,
+  proposal: StrategyProposal,
+  logVerb: "created" | "revised",
+): Promise<WorkState> {
+  const sourceBoundary = state.strategySourceBoundaryAttestation;
+  if (!sourceBoundary || sourceBoundary.checked !== true) {
+    return handleBlocked(
+      env,
+      state,
+      "no Sales source-boundary identity check is on record for this work item's Sales -> Strategy Handoff -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
+    );
+  }
+  if (!state.entityName?.trim() || !state.matterName?.trim()) {
+    return handleBlocked(
+      env,
+      state,
+      "no authoritative Entity/Matter identity is on record for this work item -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
+    );
+  }
+  const identityCheck = checkStrategyProposalForKnownIdentity(proposal, {
+    entityName: state.entityName,
+    matterName: state.matterName,
+    contactName: state.entityDraft?.name,
+    email: state.entityDraft?.email,
+    phone: state.entityDraft?.phone,
+  });
+  if (identityCheck.violation) {
+    return handleBlocked(env, state, identityCheck.violation);
+  }
+  state.strategyProposalTokenSafety = {
+    proposalId: proposal.proposalId,
+    proposalVersion: proposal.proposalVersion,
+    sourceBoundary: { checked: true, identityFieldsChecked: sourceBoundary.identityFieldsChecked },
+    proposalContent: { checked: true, identityFieldsChecked: identityCheck.identityFieldsChecked },
+  };
+
   const previousVersion = state.strategyProposal;
   if (previousVersion) {
     state.strategyProposalHistory = [...(state.strategyProposalHistory ?? []), previousVersion];
   }
-  const proposalVersion = nextVersion;
+  const proposalVersion = proposal.proposalVersion;
   state.strategyProposal = proposal;
 
   await logActivity(env, {
-    entry: `Strategy Proposal ${previousVersion ? "revised (v" + proposalVersion + ")" : "created"}: ${state.matterToken || state.entityToken || state.workId}`,
+    entry: `Strategy Proposal ${logVerb === "revised" ? "revised (v" + proposalVersion + ")" : "created"}: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Decision",
     area: "Strategy",
     decisions: proposal.recommendedDirection.direction,
@@ -1113,7 +1283,7 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   state.pendingStrategyApproval = {
     kind: "strategy_intervention",
     strategyWorkSessionId: state.workId,
-    proposalId,
+    proposalId: proposal.proposalId,
     proposalVersion,
     decisionOptions: ["approve", "refine", "reject"],
   };
@@ -1127,7 +1297,7 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
     entry: `Strategy approval request sent to Martin: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Activity",
     area: "Strategy",
-    activity: `Proposal v${proposalVersion} (${proposalId}) awaiting Approve/Refine/Reject.`,
+    activity: `Proposal v${proposalVersion} (${proposal.proposalId}) awaiting Approve/Refine/Reject.`,
     outcome: "Active",
   });
 
@@ -1138,33 +1308,168 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
 }
 
 /**
- * Serializes the APPROVED Strategic Intervention Proposal for the Strategy
- * -> Finance Handoff's "Work Completed" field -- the complete commercially
- * relevant proposal (business situation, strategic problem, diagnosis,
- * strategic objective, recommended direction, approved intervention,
- * workstreams, deliverables, timeline, commercial scope, expected business
- * effect, success criteria, dependencies, assumptions, risks/constraints),
- * never merely proposedIntervention, per the canonical commercial flow.
+ * Applies Martin's scoped revision instruction to the EXISTING Strategy
+ * Proposal -- the target semantic model this implements: existing Strategy
+ * Proposal + Martin's revision instruction -> revised Strategy Proposal.
+ * Never re-diagnoses, never touches state.strategyContext or the Handoff's
+ * business-evidence fields -- `instruction` is Martin's control input
+ * against an already-produced artifact, not verified business evidence
+ * (see handleStrategyRefinement's own doc comment), so it is sent to the AI
+ * ONLY as this call's `user` message, never merged into or persisted as
+ * business context.
+ *
+ * This still runs as the exact same "strategy.proposal_drafting" semantic
+ * task as the original drafting call -- no new task ID, no Outbound Data
+ * Gate policy change. The gate (already sitting immediately before
+ * provider.execute() in ai/policy.ts, unmodified by this function) inspects
+ * `instruction` as part of the actual outbound message like any other
+ * TOKEN_SAFE_RUNTIME content; if it contains a structurally-detectable
+ * identity (email, phone, address, a titled or contact-marked name, a
+ * company legal suffix), the gate blocks every provider attempt and this
+ * call returns null -- handled below as "no usable output," the same
+ * fail-closed path governance-retrieval or completeness failures already
+ * use, never a silent redaction of Martin's instruction.
  */
-function formatApprovedProposalForFinance(proposal: StrategyProposal): string {
-  const lines: string[] = [
-    `Business situation: ${proposal.executiveSummary.businessSituation}`,
-    `Strategic problem: ${proposal.executiveSummary.strategicProblem}`,
-    `Diagnosis: ${proposal.diagnosis.diagnosticConclusion} (symptom: ${proposal.diagnosis.symptom}; problem: ${proposal.diagnosis.problem}; causes: ${proposal.diagnosis.causes.join("; ")}; constraints: ${proposal.diagnosis.constraints.join("; ")}; consequences: ${proposal.diagnosis.consequences.join("; ")})`,
-    `Strategic objective: ${proposal.strategicObjective.objective} -- ${proposal.strategicObjective.intendedChange}`,
-    `Approved recommended direction: ${proposal.recommendedDirection.direction}\nRationale: ${proposal.recommendedDirection.rationale}`,
-    `Approved intervention: ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
-    `Workstreams: ${proposal.proposedIntervention.workstreams.map((w) => `${w.name} (${w.objective}; output: ${w.output})`).join(" | ") || "(none specified)"}`,
-    `Deliverables: ${proposal.deliverables.map((d) => `${d.name}: ${d.description} [${d.format}]`).join(" | ") || "(none specified)"}`,
-    `Timeline (${proposal.timeline.status}): ${proposal.timeline.totalDuration} -- ${proposal.timeline.phases.map((p) => `${p.name} (${p.duration})`).join(" | ") || "(no phases specified)"}`,
-    `Commercial scope: included -- ${proposal.commercialScope.included.join("; ") || "(none specified)"}; excluded -- ${proposal.commercialScope.excluded.join("; ") || "(none specified)"}`,
-    `Expected business effect: ${proposal.executiveSummary.expectedBusinessEffect}. Intended: ${proposal.expectedBusinessEffect.intendedEffects.join("; ")}. Measurable: ${proposal.expectedBusinessEffect.measurableEffects.join("; ")}. Limitations: ${proposal.expectedBusinessEffect.limitations.join("; ")}`,
-    `Success criteria: ${proposal.successCriteria.map((s) => `${s.criterion} (measured by: ${s.measurement})`).join("; ") || "(none specified)"}`,
-    `Relevant dependencies: ${proposal.dependencies.map((d) => `${d.dependency} (owner: ${d.owner})`).join("; ") || "(none specified)"}`,
-    `Relevant assumptions: ${proposal.assumptions.map((a) => `${a.assumption} (${a.materiality})`).join("; ") || "(none specified)"}`,
-    `Relevant risks/constraints: ${[...proposal.risksAndConstraints.risks.map((r) => r.risk), ...proposal.risksAndConstraints.constraints.map((c) => c.constraint)].join("; ") || "(none specified)"}`,
-  ];
-  return lines.join("\n\n");
+async function reviseStrategyProposal(
+  env: Env,
+  state: WorkState,
+  currentProposal: StrategyProposal,
+  instruction: string,
+): Promise<WorkState> {
+  const governance = await getStrategyGovernance(env);
+  if (!governance) {
+    return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while revising the proposal. Refusing to proceed without it.");
+  }
+
+  const raw = await aiJson<RawStrategyProposal>(env, {
+    taskId: "strategy.proposal_drafting",
+    system: buildProposalRevisionSystemPrompt(governance.hatDefinition, governance.universalRoleContract, currentProposal),
+    user: instruction,
+    maxTokens: 4000,
+  });
+  if (!raw) {
+    return handleBlocked(
+      env,
+      state,
+      "Could not produce a revised Strategic Intervention Proposal from the requested change -- the revision call returned no usable output. (This is also what happens if the requested change could not be sent to the AI provider at all, e.g. because it named a real client/contact identity rather than describing the change in terms of the existing proposal -- rephrase without naming the company or a contact and try again.)",
+    );
+  }
+
+  // Same proposal lineage, next version -- a revision of the existing
+  // artifact, not a fresh proposal with a new identity.
+  const proposalId = currentProposal.proposalId;
+  const proposalVersion = currentProposal.proposalVersion + 1;
+  const proposal = normalizeStrategyProposal(raw, proposalId, proposalVersion);
+
+  const completeness = evaluateProposalCompleteness(proposal);
+  if (!completeness.valid) {
+    console.error(`Strategy reviseStrategyProposal: revised proposal failed completeness check for work ${state.workId}: ${completeness.reason}`);
+    // Nothing is mutated on this path -- state.strategyProposal is left
+    // exactly as it was (still currentProposal), so a retry re-revises
+    // cleanly rather than leaving a half-adopted revision in place.
+    return handleBlocked(env, state, `${completeness.reason} Not presenting this as-is for approval.`);
+  }
+
+  return presentStrategyProposalForApproval(env, state, proposal, "revised");
+}
+
+/** Opens the Strategy-authored block within a Handoff's "Verified Facts & Sources" text -- see serializeStrategyBoundaryRepresentation. */
+export const STRATEGY_BOUNDARY_START = "=== STRATEGY BOUNDARY REPRESENTATION ===";
+/** Closes the Strategy-authored block -- see STRATEGY_BOUNDARY_START. */
+export const STRATEGY_BOUNDARY_END = "=== END STRATEGY BOUNDARY REPRESENTATION ===";
+
+/**
+ * The deliberate, curated cross-Unit boundary representation of an approved
+ * Strategy Proposal -- exactly the fields Finance's pricing judgment and
+ * Sales's client-facing proposal composition actually consume (per the
+ * Strategy -> Finance -> Sales boundary-routing inspection this
+ * implements), never a blind serialization of the complete StrategyProposal.
+ * Deliberately excludes businessContext and strategicRecommendation, which
+ * stay Strategy-internal -- neither Finance's nor Sales's own consumption
+ * logic has ever referenced them.
+ *
+ * This type, and everything built from it below, makes a claim about
+ * BOUNDARY ROUTING only: which fields cross the Unit boundary, and how they
+ * are carried. It makes NO claim that the included content is free of real
+ * entity/contact identity -- that is the separate, still-open question
+ * verifyStrategyProposalTokenSafety's own doc comment describes, untouched
+ * by this type.
+ */
+export type StrategyBoundaryRepresentation = Pick<
+  StrategyProposal,
+  | "proposalId"
+  | "proposalVersion"
+  | "executiveSummary"
+  | "strategicChallenge"
+  | "strategicOpportunity"
+  | "diagnosis"
+  | "strategicObjective"
+  | "recommendedDirection"
+  | "proposedIntervention"
+  | "deliverables"
+  | "timeline"
+  | "entityInputs"
+  | "assumptions"
+  | "dependencies"
+  | "risksAndConstraints"
+  | "expectedBusinessEffect"
+  | "successCriteria"
+  | "commercialScope"
+>;
+
+/** Selects the boundary fields (see StrategyBoundaryRepresentation) from an approved Strategy Proposal. */
+export function buildStrategyBoundaryRepresentation(proposal: StrategyProposal): StrategyBoundaryRepresentation {
+  return {
+    proposalId: proposal.proposalId,
+    proposalVersion: proposal.proposalVersion,
+    executiveSummary: proposal.executiveSummary,
+    strategicChallenge: proposal.strategicChallenge,
+    strategicOpportunity: proposal.strategicOpportunity,
+    diagnosis: proposal.diagnosis,
+    strategicObjective: proposal.strategicObjective,
+    recommendedDirection: proposal.recommendedDirection,
+    proposedIntervention: proposal.proposedIntervention,
+    deliverables: proposal.deliverables,
+    timeline: proposal.timeline,
+    entityInputs: proposal.entityInputs,
+    assumptions: proposal.assumptions,
+    dependencies: proposal.dependencies,
+    risksAndConstraints: proposal.risksAndConstraints,
+    expectedBusinessEffect: proposal.expectedBusinessEffect,
+    successCriteria: proposal.successCriteria,
+    commercialScope: proposal.commercialScope,
+  };
+}
+
+/**
+ * Serializes the boundary representation as deterministic JSON (a fixed key
+ * order, from the object literal above -- never derived from Object.keys on
+ * AI-produced input) wrapped in explicit start/end markers, so a downstream
+ * Unit can locate and parse exactly this block within a larger Handoff field
+ * without ambiguity (see extractLabeledBlock), and a human reading the
+ * Handoff directly in Notion can see plainly where Strategy's own material
+ * starts and ends.
+ */
+export function serializeStrategyBoundaryRepresentation(rep: StrategyBoundaryRepresentation): string {
+  return `${STRATEGY_BOUNDARY_START}\n${JSON.stringify(rep)}\n${STRATEGY_BOUNDARY_END}`;
+}
+
+/**
+ * Locates a `${startMarker} ... ${endMarker}` block within `text` and
+ * returns its inner content (trimmed), or null if the markers aren't both
+ * present in order. The shared extraction primitive every downstream
+ * consumer of a labeled boundary block uses (Finance, to carry the Strategy
+ * block forward verbatim without re-authoring it; Sales, to parse both the
+ * Strategy and Finance blocks out of the combined Finance -> Sales
+ * Handoff) -- one matching implementation, not one per caller.
+ */
+export function extractLabeledBlock(text: string, startMarker: string, endMarker: string): string | null {
+  const startIdx = text.indexOf(startMarker);
+  if (startIdx === -1) return null;
+  const contentStart = startIdx + startMarker.length;
+  const endIdx = text.indexOf(endMarker, contentStart);
+  if (endIdx === -1) return null;
+  return text.slice(contentStart, endIdx).trim();
 }
 
 /**
@@ -1217,6 +1522,13 @@ export async function handleInterventionApproval(
   }
 
   if (decision === "refine") {
+    // Binds the refinement text Martin is about to type to the EXACT
+    // proposal identity he was looking at when he tapped Refine (already
+    // confirmed above, via identityMatches, to equal state.strategyProposal
+    // at this exact moment) -- handleStrategyRefinement re-verifies this
+    // against state.strategyProposal before applying anything, so a stale
+    // or superseded refinement reply is a fail-closed no-op.
+    state.pendingStrategyRefinement = { proposalId: proposal!.proposalId, proposalVersion };
     state.pendingStrategyApproval = undefined;
     state.pendingActionSummary = undefined;
     state.strategyApprovalState = "REFINEMENT_REQUESTED";
@@ -1283,7 +1595,7 @@ export async function handleInterventionApproval(
         Matter_Token: richText(state.matterToken ?? ""),
         Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
         "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
-        "Verified Facts & Sources": richText(formatApprovedProposalForFinance(proposal!).slice(0, 1900)),
+        "Verified Facts & Sources": richTextLong(serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal!))),
       },
       { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
     );
@@ -1334,11 +1646,60 @@ export async function handleInterventionApproval(
   return state;
 }
 
-/** Revision loop after Refine: re-runs the diagnosis with Martin's reasoning, then develops and re-presents a fresh proposal version for approval. */
+/**
+ * Revision loop after Refine. Martin's text here is a scoped revision
+ * instruction against the CURRENT Strategy Proposal, never verified
+ * business evidence -- it is NEVER appended to state.strategyContext (that
+ * remains exactly the token-safe Handoff-derived context it already was),
+ * never written to the Handoff's Verified Facts & Sources or any other
+ * durable business-evidence field, and never triggers a re-diagnosis. It
+ * is applied via reviseStrategyProposal, which sends it to the AI only as
+ * that call's own `user` message, bound to and grounded in the existing
+ * proposal object already held in state.strategyProposal.
+ *
+ * Fails closed before touching anything if this reply doesn't match the
+ * exact Proposal ID + Version Martin was actually shown when he tapped
+ * Refine (see pendingStrategyRefinement's own doc comment) -- a stale or
+ * superseded refinement reply is a logged no-op, the same discipline
+ * handleInterventionApproval already applies to the Approve/Refine/Reject
+ * buttons themselves.
+ */
 export async function handleStrategyRefinement(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.strategyContext = `${state.strategyContext ?? ""}\n\nMartin's refinement request: ${text}`;
-  await sendStrategyInProgressAck(env, state);
-  return runDiagnosis(env, state);
+  const pending = state.pendingStrategyRefinement;
+  const currentProposal = state.strategyProposal;
+  const identityMatches =
+    !!pending &&
+    !!currentProposal &&
+    pending.proposalId === currentProposal.proposalId &&
+    pending.proposalVersion === currentProposal.proposalVersion;
+
+  if (!identityMatches) {
+    state.pendingStrategyRefinement = undefined;
+    console.error(`Strategy handleStrategyRefinement: stale/mismatched refinement request for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Strategy refinement request ignored — stale or superseded`,
+      type: "Blocker",
+      area: "Strategy",
+      decisionRationale: `Refinement text arrived bound to ${pending ? `${pending.proposalId} v${pending.proposalVersion}` : "no pending refinement"}, but the current Strategy Proposal is ${currentProposal ? `${currentProposal.proposalId} v${currentProposal.proposalVersion}` : "absent"}. Treated as a no-op -- nothing was applied.`,
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT_NAME },
+      "This refinement request no longer matches the current Strategy Proposal -- nothing was applied. If you still want a change, tap Refine again on the current proposal.",
+    );
+    return state;
+  }
+
+  const instruction = text.trim();
+  if (!instruction) {
+    await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "That looked empty -- what should change about this proposal?");
+    return state;
+  }
+
+  state.pendingStrategyRefinement = undefined;
+  await sendStrategyRefinementInProgressAck(env, state);
+  return reviseStrategyProposal(env, state, currentProposal, instruction);
 }
 
 /**

@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handlePickup, handleQuoteApproval, validateFinanceJudgement } from "./valueBasedPricingAssessor";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
 import type { WorkState, Env } from "../../types";
+
+/**
+ * A minimal Strategy boundary block -- handleQuoteApproval only locates and
+ * carries this block forward verbatim (see extractLabeledBlock); it never
+ * parses or validates its JSON, so a minimal stand-in is enough here. Real
+ * completeness validation of the Strategy boundary representation is
+ * Sales's own responsibility, tested in tokenSafeProposal.test.ts.
+ */
+const FAKE_STRATEGY_BOUNDARY_BLOCK = `${STRATEGY_BOUNDARY_START}\n{"proposalId":"strategy-prop-1","proposalVersion":1}\n${STRATEGY_BOUNDARY_END}`;
 
 function fakeEnv(): Env {
   return {
@@ -71,7 +81,7 @@ function mockFetch(
 ): FetchLog {
   const originalFetch = globalThis.fetch;
   const log: FetchLog = { handoffPatchBodies: [], sentTexts: [], handoffCreateBody: null, getCallCount: 0 };
-  const verifiedFacts = opts.verifiedFacts ?? "Proposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.";
+  const verifiedFacts = opts.verifiedFacts ?? `${FAKE_STRATEGY_BOUNDARY_BLOCK}\n\nProposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.`;
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
   const requiredNextAction = opts.requiredNextAction ?? "";
@@ -454,6 +464,38 @@ test("Finance pickup refuses a Held Handoff (no explicit retry to Pending)", asy
 
   assert.strictEqual(result.quote, undefined);
   assert.strictEqual(log.handoffPatchBodies.length, 0);
+});
+
+test("handleQuoteApproval: retrieves the original Strategy Handoff (via the still-live state.handoffId) and carries its Strategy boundary block forward verbatim, appending Finance's own labeled commercial judgment", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityToken: "E-47",
+    matterToken: "M-12",
+    quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." },
+  });
+
+  const result = await handleQuoteApproval(env, state, true);
+
+  assert.strictEqual(result.stage, "quote_approved");
+  // The re-fetch happens against the ORIGINAL Strategy -> Finance Handoff
+  // (state.handoffId, "handoff-1") -- if state.handoffId had already been
+  // reassigned to the new Finance -> Sales Handoff before this re-fetch,
+  // the mock's single "/pages/handoff-1" GET handler would not have been
+  // exercised and the Strategy block below could not have been found.
+  assert.strictEqual(log.getCallCount, 1, "Finance re-fetches the source Strategy Handoff exactly once");
+
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  const combined = items.map((i) => i.text.content).join("");
+
+  const strategyBlock = extractLabeledBlock(combined, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END);
+  assert.strictEqual(strategyBlock, extractLabeledBlock(FAKE_STRATEGY_BOUNDARY_BLOCK, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END), "the Strategy boundary block is carried forward byte-for-byte, never reformatted");
+
+  assert.match(combined, /=== FINANCE COMMERCIAL JUDGMENT ===/);
+  assert.match(combined, /=== END FINANCE COMMERCIAL JUDGMENT ===/);
+  assert.match(combined, /Authoritative quote: GHS 100000/);
+  assert.match(combined, /Rationale: Value-based rationale\./);
 });
 
 test("handleQuoteApproval: proceeds normally and creates the Finance -> Sales Handoff when matterName is already present", async (t) => {

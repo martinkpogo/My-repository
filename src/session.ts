@@ -5,6 +5,7 @@ import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
 import * as strategy from "./units/strategy/strategyAnalyst";
+import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
 import {
@@ -75,6 +76,8 @@ export class WorkSession extends DurableObject<Env> {
           return sales.handleEntityRedoReason(this.env, state, text);
         case "proposal_feedback":
           return sales.handleProposalFeedback(this.env, state, text);
+        case "sales_proposal_revision":
+          return salesProposal.handleSalesProposalRevisionText(this.env, state, text);
         case "marketing_feedback":
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":
@@ -149,6 +152,16 @@ export class WorkSession extends DurableObject<Env> {
    */
   async runProposalDrafting(): Promise<WorkState> {
     return this.execute((state) => sales.handleQuoteReceived(this.env, state));
+  }
+
+  /**
+   * Runtime Sales Executive pickup of a Finance -> Sales Handoff: produces
+   * the one canonical token-safe Proposal and asks Martin to authorize its
+   * exact Version (see units/sales/tokenSafeProposal.ts). Invoked only by
+   * checkHandoffs.ts's Sales discovery, never by Finance directly.
+   */
+  async runTokenSafeProposal(): Promise<WorkState> {
+    return this.execute((state) => salesProposal.handleProposalHandoffPickup(this.env, state));
   }
 
   /**
@@ -252,6 +265,20 @@ export class WorkSession extends DurableObject<Env> {
             return Promise.resolve(state);
           }
           return strategy.handleInterventionApproval(this.env, state, proposalVersion, decision);
+        }
+        case salesProposal.PROPOSAL_CALLBACK_ACTION: {
+          // value is "<proposalNumber>.<version>.<a|r>" -- binds the decision
+          // to the exact Proposal ID + Version; "." keeps it intact through
+          // index.ts's split(":") and well under Telegram's 64-byte limit.
+          const m = value.match(/^(\d+)\.(\d+)\.([ar])$/);
+          if (!m) return Promise.resolve(state);
+          return salesProposal.handleSalesProposalDecision(
+            this.env,
+            state,
+            Number(m[1]),
+            Number(m[2]),
+            m[3] === "a" ? "approve" : "revise",
+          );
         }
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);

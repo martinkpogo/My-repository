@@ -1,4 +1,5 @@
 import type { InlineButton } from "./telegram";
+import type { KnownIdentityField } from "./handoffWriter";
 
 export interface Env {
   AI: Ai;
@@ -250,7 +251,8 @@ export interface WorkState {
     | "research_feedback"
     | "strategy_clarification"
     | "strategy_feedback"
-    | "strategy_refinement_reason";
+    | "strategy_refinement_reason"
+    | "sales_proposal_revision";
   createdAt: string;
   updatedAt: string;
 
@@ -440,6 +442,79 @@ export interface WorkState {
     proposalVersion: number;
     decisionOptions: ("approve" | "refine" | "reject")[];
   };
+
+  /**
+   * The canonical, token-safe Runtime Sales Proposal produced from a
+   * Finance -> Sales Handoff (see units/sales/tokenSafeProposal.ts). The
+   * Notion Proposals record is the system of record; this mirrors it so an
+   * approval callback can be checked against the exact Proposal ID + Version
+   * Martin was shown. Every version's full content is kept here (and as a
+   * snapshot in the Proposal page body), so an approved version's substance
+   * survives a later revision.
+   */
+  salesProposal?: import("./units/sales/tokenSafeProposal").RuntimeSalesProposal;
+  /**
+   * Set when Martin asked for changes to a specific Proposal ID + Version
+   * and the runtime is waiting for his change text. Bound to that exact
+   * version: a revision request for a superseded version is refused.
+   */
+  pendingSalesProposalRevision?: { proposalNumber: number; fromVersion: number };
+  /**
+   * The result of the Sales-side known-identity check performed when the
+   * Sales -> Strategy Handoff was created (createHandoff already runs
+   * findViolation against the authoritative identity Sales supplied --
+   * see handoffWriter.ts's identityFieldsPresent). This records WHICH known-
+   * identity fields were actually available and checked at that moment --
+   * never the values themselves -- so a later Strategy Proposal-content
+   * check can honestly say its known-identity set matches what the source
+   * boundary was already checked against. Set once, immediately after that
+   * Handoff is successfully created (a throw there means this is never
+   * set, consistent with fail-closed) -- see salesExecutive.ts's
+   * handleInterventionText.
+   */
+  strategySourceBoundaryAttestation?: {
+    handoffId: string;
+    checked: true;
+    identityFieldsChecked: KnownIdentityField[];
+  };
+  /**
+   * The bounded, deterministic known-identity safety attestation for the
+   * EXACT Strategy Proposal (proposalId, proposalVersion) currently
+   * approved/in-flight -- see verifyStrategyProposalTokenSafety and
+   * checkStrategyProposalForKnownIdentity (strategyAnalyst.ts). This is a
+   * narrow claim: the Sales-authored Sales -> Strategy source Handoff was
+   * checked against Sales's known identity, AND the complete assembled
+   * Strategy Proposal for this exact version was independently checked
+   * against that same known-identity set -- neither found a match. It is
+   * NOT a claim that the Proposal is free of arbitrary/unknown identity;
+   * see checkStrategyProposalForKnownIdentity's own doc comment. Every
+   * distinct proposalVersion (including every refinement) requires its own
+   * independent proposalContent check -- never inherited from a prior
+   * version, per verifyStrategyProposalTokenSafety's exact-match discipline.
+   * Never carries the identity values themselves, only which fields were
+   * checked. Replaces the prior unconstrained `basis: string` shape, which
+   * could not honestly represent which checks had actually run.
+   */
+  strategyProposalTokenSafety?: {
+    proposalId: string;
+    proposalVersion: number;
+    sourceBoundary: { checked: true; identityFieldsChecked: KnownIdentityField[] };
+    proposalContent: { checked: true; identityFieldsChecked: KnownIdentityField[] };
+  };
+  /**
+   * The exact Strategy Proposal identity (proposalId + proposalVersion)
+   * Martin is refining -- set when he taps Refine, bound to the proposal
+   * that was actually on screen at that moment. handleStrategyRefinement
+   * verifies this matches state.strategyProposal exactly before applying
+   * anything; a mismatch (the proposal moved on in the meantime) is a
+   * fail-closed no-op, same discipline as pendingStrategyApproval/
+   * pendingSalesProposalRevision. This exists so Martin's free-text
+   * refinement reply can be bound to a specific artifact rather than
+   * "whatever the current proposal happens to be" -- it never becomes part
+   * of state.strategyContext and is never persisted to the Handoff; it is
+   * transient control input for exactly one revision.
+   */
+  pendingStrategyRefinement?: { proposalId: string; proposalVersion: number };
 
   /**
    * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.

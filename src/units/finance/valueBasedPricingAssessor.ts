@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "../../types";
-import { getPage, plainText, richText, select, title } from "../../notion";
+import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
@@ -9,6 +9,12 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+
+/** Opens Finance's own commercial-judgment block within the Finance -> Sales Handoff's combined "Verified Facts & Sources" text -- see handleQuoteApproval. */
+export const FINANCE_JUDGMENT_START = "=== FINANCE COMMERCIAL JUDGMENT ===";
+/** Closes Finance's commercial-judgment block -- see FINANCE_JUDGMENT_START. */
+export const FINANCE_JUDGMENT_END = "=== END FINANCE COMMERCIAL JUDGMENT ===";
 
 interface RawValueAtStakeJudgement {
   value?: number;
@@ -566,6 +572,50 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     return state;
   }
 
+  // Retrieve the ORIGINAL Strategy -> Finance Handoff (state.handoffId still
+  // refers to it -- reassigned below only once the Finance -> Sales Handoff
+  // exists) and carry its Strategy boundary block forward VERBATIM. Finance
+  // never parses, re-derives, or reformats the Strategy-authored content --
+  // it locates the exact substring Strategy already wrote and re-embeds it,
+  // unchanged, inside the same start/end markers Strategy itself used. This
+  // is the routing change per the Strategy -> Finance -> Sales boundary
+  // inspection: Sales's upstream source of Strategy facts becomes this
+  // Handoff, never state.strategyProposal.
+  const sourceHandoffId = state.handoffId;
+  let strategyBoundaryBlock: string | null = null;
+  if (sourceHandoffId) {
+    const sourceHandoff = await getPage(env, sourceHandoffId).catch((err) => {
+      console.error(`Finance handleQuoteApproval: could not re-read source Strategy Handoff ${sourceHandoffId}`, err);
+      return null;
+    });
+    if (sourceHandoff) {
+      const sourceText = plainText(sourceHandoff.properties["Verified Facts & Sources"]);
+      strategyBoundaryBlock = extractLabeledBlock(sourceText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END);
+    }
+  }
+
+  if (!strategyBoundaryBlock) {
+    console.error(`Finance handleQuoteApproval: no Strategy boundary representation found on source Handoff ${sourceHandoffId} for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Quote approval blocked — no Strategy boundary representation on source Handoff: ${state.matterToken ?? state.entityToken}`,
+      type: "Blocker",
+      area: "Finance",
+      decisionRationale: `The original Strategy -> Finance Handoff (${sourceHandoffId ?? "unknown"}) does not carry a Strategy boundary representation Finance can pass through -- refusing to create the Finance -> Sales Handoff without it, rather than routing Sales an incomplete boundary.`,
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      `Quote approved, but I can't route it to Sales — the original Strategy Handoff for *${state.entityToken}* doesn't carry a Strategy boundary representation I can pass through. Please check Handoff ${sourceHandoffId ?? "(unknown)"}, then retry (Approve again).`,
+    );
+    return state;
+  }
+
+  const combinedVerifiedFactsAndSources = [
+    `${STRATEGY_BOUNDARY_START}\n${strategyBoundaryBlock}\n${STRATEGY_BOUNDARY_END}`,
+    `${FINANCE_JUDGMENT_START}\nAuthoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}\n${FINANCE_JUDGMENT_END}`,
+  ].join("\n\n");
+
   const followUp = await createHandoff(
     env,
     {
@@ -580,9 +630,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
       Entity_Token: richText(state.entityToken ?? ""),
       Matter_Token: richText(state.matterToken ?? ""),
-      "Verified Facts & Sources": richText(
-        `Authoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}`.slice(0, 1900),
-      ),
+      "Verified Facts & Sources": richTextLong(combinedVerifiedFactsAndSources),
     },
     { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
   );

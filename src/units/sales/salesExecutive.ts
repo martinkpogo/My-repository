@@ -21,7 +21,7 @@ import {
   uniqueId,
   updatePage,
 } from "../../notion";
-import { createHandoff, updateHandoff } from "../../handoffWriter";
+import { createHandoff, updateHandoff, identityFieldsPresent } from "../../handoffWriter";
 import { aiJson, aiText } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
@@ -1077,6 +1077,16 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   state.entityToken = identityTokens.entityToken;
   state.matterToken = identityTokens.matterToken;
 
+  const strategyHandoffIdentity = {
+    entityToken: identityTokens.entityToken,
+    matterToken: identityTokens.matterToken,
+    entityName: state.entityName,
+    matterName: state.matterName,
+    email: state.entityDraft?.email,
+    phone: state.entityDraft?.phone,
+    contactName: state.entityDraft?.type === "Individual" ? state.entityDraft?.name : undefined,
+  };
+
   const handoff = await createHandoff(
     env,
     {
@@ -1107,16 +1117,24 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
         ),
       ),
     },
-    {
-      entityToken: identityTokens.entityToken,
-      matterToken: identityTokens.matterToken,
-      entityName: state.entityName,
-      matterName: state.matterName,
-      email: state.entityDraft?.email,
-      phone: state.entityDraft?.phone,
-      contactName: state.entityDraft?.type === "Individual" ? state.entityDraft?.name : undefined,
-    },
+    strategyHandoffIdentity,
   );
+
+  // The Handoff write above already ran createHandoff's known-identity
+  // check (findViolation, via handoffWriter.ts) against exactly
+  // strategyHandoffIdentity -- reaching this line means it passed (a
+  // violation throws before createPage is ever called, so this line is
+  // never reached on failure). This records WHICH known-identity fields
+  // were actually available and checked at that moment -- never the
+  // values themselves -- so presentStrategyProposalForApproval can later
+  // honestly attest that the Strategy Proposal was checked against the
+  // same known-identity set the source boundary already was. See
+  // WorkState.strategySourceBoundaryAttestation's own doc comment.
+  state.strategySourceBoundaryAttestation = {
+    handoffId: handoff.id,
+    checked: true,
+    identityFieldsChecked: identityFieldsPresent(strategyHandoffIdentity),
+  };
 
   state.handoffId = handoff.id;
   // Sales's execution ends here. Strategy is a separate Unit and must

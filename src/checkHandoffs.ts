@@ -111,6 +111,13 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
   );
 }
 
+function isFinanceQuoteHandoff(handoff: { properties?: Record<string, any> }): boolean {
+  return (
+    plainText(handoff.properties?.["From Unit"]) === "Finance" &&
+    plainText(handoff.properties?.["From Hat"]) === "Value-Based Pricing Assessor"
+  );
+}
+
 /**
  * The Sales side of the Finance -> Sales execution boundary — the return
  * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
@@ -123,16 +130,25 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
  * notifying Operations) always happens, regardless of
  * SALES_EXECUTIVE_PAUSED -- a human must still be able to discover a
  * pending Sales Handoff without having to notice it manually in Notion.
- * Only the actual AI-driven execution (runProposalDrafting -- Sales's own
- * client_confidential proposal-drafting work, see
- * dataBoundary/policy.ts's PRODUCTION_TASK_SENSITIVITY) stays gated behind
- * SALES_EXECUTIVE_PAUSED exactly as before: this function never performs
- * identity-sensitive Sales work on its own, however it was invoked. The
- * governed work itself happens only once Martin opens the Sales Claude
- * Project and says "Check Handoff" -- a deliberate human activation
- * boundary this function does not and must not cross.
+ *
+ * Execution stays gated behind SALES_EXECUTIVE_PAUSED for every Sales
+ * Handoff, a Finance -> Sales quote Handoff included: while paused, the
+ * Handoff is registered, Operations is notified, and it stays Pending --
+ * this function performs no Sales work on its own, however it was invoked.
+ * The governed work happens only once Martin opens the Sales Claude Project
+ * and says "Check Handoff" -- a deliberate human activation boundary this
+ * function does not and must not cross.
+ *
+ * When not paused: a Finance -> Sales quote Handoff runs the Runtime Sales
+ * Executive's token-safe Proposal flow (runTokenSafeProposal, see
+ * units/sales/tokenSafeProposal.ts), which replaces the older
+ * runProposalDrafting path for those Handoffs; any other Sales Handoff
+ * still goes to runProposalDrafting as before.
+ *
+ * `paused` defaults to SALES_EXECUTIVE_PAUSED and exists so the unpaused
+ * path can be tested; production callers never pass it.
  */
-export async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
+export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = SALES_EXECUTIVE_PAUSED): Promise<number> {
   const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
     and: [
       { property: "Status", select: { equals: "Pending" } },
@@ -164,7 +180,7 @@ export async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
       }
     }
 
-    if (SALES_EXECUTIVE_PAUSED) {
+    if (paused) {
       // Detected and registered -- that's the whole job while paused.
       // Execution stays behind the deliberate human "Check Handoff"
       // activation in the isolated Sales Claude Project, not this loop.
@@ -172,6 +188,20 @@ export async function discoverPendingSalesHandoffs(env: Env): Promise<number> {
       await notifySalesHandoffReady(env, handoff, matterToken).catch((err) =>
         console.error(`Failed to send Sales Handoff ready notification for ${handoff.id}`, err),
       );
+      continue;
+    }
+
+    // Not paused: a Finance -> Sales quote Handoff goes to the Runtime Sales
+    // Executive's token-safe Proposal flow instead of the older
+    // runProposalDrafting path. Every other Sales Handoff is unchanged.
+    if (isFinanceQuoteHandoff(handoff)) {
+      const stub = getSessionStub(env, workId);
+      try {
+        await stub.runTokenSafeProposal();
+        pickedUp++;
+      } catch (err) {
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+      }
       continue;
     }
 

@@ -9,11 +9,16 @@ import {
   evaluateCausationDiscipline,
   evaluateProposalCompleteness,
   formatDiagnosisForHandoff,
+  STRATEGY_BOUNDARY_START,
+  STRATEGY_BOUNDARY_END,
+  extractLabeledBlock,
+  checkStrategyProposalForKnownIdentity,
   type StrategyDiagnosisResult,
   type StrategyProposal,
 } from "./strategyAnalyst";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
 import type { WorkState, Env } from "../../types";
+import { redactIdentityTerms } from "../../ai/identityRedaction";
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -54,6 +59,16 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     handoffId: "handoff-1",
+    // The same WorkSession that ran Sales's own intake, before Strategy
+    // picked up -- entityName/matterName are never set BY Strategy (it
+    // never learns them, per the closed-context contract), but they're
+    // already resident on the shared WorkState from Sales's own earlier
+    // work, exactly as production has it. strategySourceBoundaryAttestation
+    // mirrors what handleInterventionText (salesExecutive.ts) already sets
+    // once its own Sales -> Strategy Handoff write passes findViolation.
+    entityName: "Test Entity",
+    matterName: "Test Matter",
+    strategySourceBoundaryAttestation: { handoffId: "handoff-1", checked: true, identityFieldsChecked: ["entityName", "matterName"] },
     ...overrides,
   };
 }
@@ -172,7 +187,7 @@ const RAW_PROPOSAL = {
 };
 
 /** Dispatches on the system prompt's own distinguishing text -- diagnosis vs. proposal drafting vs. handoff-routing classification. */
-function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" }, proposalJson: unknown = RAW_PROPOSAL): Ai {
+function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" }, proposalJson: unknown = RAW_PROPOSAL, revisionJson: unknown = null): Ai {
   return {
     run: async (_model: any, opts: any) => {
       const system = String(opts?.messages?.[0]?.content ?? "");
@@ -181,6 +196,9 @@ function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" 
       }
       if (system.includes("Expand it into the COMPLETE Strategic Intervention Proposal")) {
         return { response: JSON.stringify(proposalJson) };
+      }
+      if (system.includes("revise this artifact")) {
+        return { response: JSON.stringify(revisionJson ?? proposalJson) };
       }
       if (system.includes("next responsibility belongs to another Unit")) {
         return { response: JSON.stringify(routingJson) };
@@ -516,6 +534,70 @@ test("9. A recommended diagnosis develops a full Strategic Intervention Proposal
   assert.ok(log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
 });
 
+test("A fresh Strategy Proposal that passes both checks receives a complete strategyProposalTokenSafety attestation bound to v1", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  const attestation = result.strategyProposalTokenSafety;
+  assert.strictEqual(attestation?.proposalId, result.strategyProposal!.proposalId);
+  assert.strictEqual(attestation?.proposalVersion, 1);
+  assert.strictEqual(attestation?.sourceBoundary.checked, true);
+  assert.deepStrictEqual([...attestation!.sourceBoundary.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  assert.strictEqual(attestation?.proposalContent.checked, true);
+  assert.deepStrictEqual([...attestation!.proposalContent.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+});
+
+test("Missing source-boundary attestation fails closed -- the Proposal is never presented for approval", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState({ strategySourceBoundaryAttestation: undefined });
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
+  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.ok(log.sentTexts.some((t) => /no Sales source-boundary identity check is on record/.test(t)));
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
+});
+
+test("Missing authoritative entityName/matterName fails closed -- the Proposal is never presented for approval", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState({ entityName: undefined });
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyProposal, undefined);
+  assert.ok(log.sentTexts.some((t) => /no authoritative Entity\/Matter identity is on record/.test(t)));
+});
+
+test("A drafted Strategy Proposal containing a known identity value fails closed -- never presented, never routed downstream", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const leaked = {
+    ...RAW_PROPOSAL,
+    executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Test Entity is pursuing larger accounts." },
+  };
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, leaked);
+  const state = fakeState(); // default fakeState entityName/matterName: "Test Entity" / "Test Matter"
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategyProposal, undefined, "the leaked proposal must never become the current Proposal");
+  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.ok(log.sentTexts.some((t) => /known identity value \(matched field: entityName\)/.test(t)));
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
+  // The violation detail is never echoed -- the actual matched value must never reach Telegram or the Handoff.
+  assert.ok(!log.sentTexts.join("").includes("Test Entity is pursuing larger accounts"));
+});
+
 test("Proposal contains every required structural section", async (t) => {
   mockFetch(t);
   const env = fakeEnv();
@@ -561,6 +643,82 @@ test("evaluateProposalCompleteness: rejects a proposal missing required sections
     assert.match(result.reason, /deliverables/);
     assert.match(result.reason, /success criteria/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// checkStrategyProposalForKnownIdentity: the bounded known-identity check.
+// ---------------------------------------------------------------------------
+
+function cleanProposal(overrides: Partial<StrategyProposal> = {}): StrategyProposal {
+  return { ...(RAW_PROPOSAL as any), proposalId: "p1", proposalVersion: 1, ...overrides } as StrategyProposal;
+}
+
+test("checkStrategyProposalForKnownIdentity: a clean token-safe proposal passes", () => {
+  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { entityName: "Acme Co", matterName: "Acme Co — Positioning" });
+  assert.strictEqual(result.violation, null);
+  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing the exact entityName fails", () => {
+  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Meridian Foods Ghana Ltd is pursuing larger accounts." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  assert.match(result.violation ?? "", /matched field: entityName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing the exact matterName fails", () => {
+  const proposal = cleanProposal({ strategicChallenge: { ...RAW_PROPOSAL.strategicChallenge, observedSituation: "Directly concerns the Cold Chain Logistics Redesign effort." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  assert.match(result.violation ?? "", /matched field: matterName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing a known email fails when email is part of the available identity set", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Confirm with comfort@meridianfoods.com before proceeding." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", email: "comfort@meridianfoods.com" });
+  assert.match(result.violation ?? "", /matched field: email/);
+  assert.ok(result.identityFieldsChecked.includes("email"));
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing a known phone fails, with punctuation normalized like findViolation", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Contact reachable at +233 24 412 3456 if needed." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", phone: "+233-24-412-3456" });
+  assert.match(result.violation ?? "", /matched field: phone/);
+});
+
+test("checkStrategyProposalForKnownIdentity: a proposal containing a known contact name fails when contactName is supplied", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Follow up with Comfort Agyare about the timeline." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", contactName: "Comfort Agyare" });
+  assert.match(result.violation ?? "", /matched field: contactName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: matching is case-insensitive, consistent with findViolation's existing semantics", () => {
+  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "meridian foods ghana ltd is pursuing larger accounts." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Y Matter" });
+  assert.match(result.violation ?? "", /matched field: entityName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: nested fields (workstreams, deliverables, arrays) are inspected, not just top-level fields", () => {
+  const proposal = cleanProposal({
+    proposedIntervention: {
+      ...RAW_PROPOSAL.proposedIntervention,
+      workstreams: [{ name: "Vendor onboarding", objective: "Bring Meridian Foods Ghana Ltd's preferred carrier online.", activities: [], output: "", dependencies: [], acceptanceCriteria: [] }],
+    },
+  });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Y Matter" });
+  assert.match(result.violation ?? "", /matched field: entityName/);
+});
+
+test("checkStrategyProposalForKnownIdentity: an arbitrary unknown name is not falsely classified as a violation merely for being a name", () => {
+  const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Comparable to the approach a firm like Jonathan Osei Consulting might take." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  assert.strictEqual(result.violation, null, "an unknown third-party name is out of scope for the bounded known-identity check");
+});
+
+test("checkStrategyProposalForKnownIdentity: only entityName/matterName present -- optional fields are not recorded as checked when absent", () => {
+  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { entityName: "X Co", matterName: "Y Matter" });
+  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  assert.ok(!result.identityFieldsChecked.includes("email"));
+  assert.ok(!result.identityFieldsChecked.includes("phone"));
+  assert.ok(!result.identityFieldsChecked.includes("contactName"));
 });
 
 test("An incomplete AI-drafted proposal is held (not presented for approval) -- the deterministic completeness check overrides the AI's own JSON output", async (t) => {
@@ -632,7 +790,7 @@ test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matte
   assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
 });
 
-test("26-29. Strategy -> Finance carries the complete approved proposal -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
+test("26-29. Strategy -> Finance carries the complete curated Strategy boundary representation -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
@@ -641,17 +799,54 @@ test("26-29. Strategy -> Finance carries the complete approved proposal -- timel
   const afterPickup = await handlePickup(env, state);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
-  const factsText = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text[0].text.content;
-  assert.match(factsText, /Business situation:/);
-  assert.match(factsText, /Strategic problem:/);
-  assert.match(factsText, /Approved recommended direction:/);
-  assert.match(factsText, /Approved intervention:/);
-  assert.match(factsText, /Workstreams:/);
-  assert.match(factsText, /Deliverables:/);
-  assert.match(factsText, /Timeline \(Indicative\):/);
-  assert.match(factsText, /Commercial scope:/);
-  assert.match(factsText, /Expected business effect:/);
-  assert.match(factsText, /Success criteria:/);
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  const factsText = items.map((i) => i.text.content).join("");
+  assert.match(factsText, new RegExp(STRATEGY_BOUNDARY_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(factsText, new RegExp(STRATEGY_BOUNDARY_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  const block = extractLabeledBlock(factsText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END)!;
+  const rep = JSON.parse(block);
+  assert.strictEqual(typeof rep.proposalId, "string");
+  assert.strictEqual(rep.proposalVersion, 1);
+  assert.ok(rep.executiveSummary.businessSituation);
+  assert.ok(rep.executiveSummary.strategicProblem);
+  assert.ok(rep.recommendedDirection.direction);
+  assert.ok(rep.proposedIntervention.interventionName);
+  assert.ok(rep.proposedIntervention.workstreams.length > 0);
+  assert.ok(rep.deliverables.length > 0);
+  assert.strictEqual(rep.timeline.status, "Indicative");
+  assert.ok(rep.commercialScope.included.length > 0);
+  assert.ok(rep.expectedBusinessEffect.intendedEffects.length > 0);
+  assert.ok(rep.successCriteria.length > 0);
+  // Deliberately excluded from the boundary representation -- stays Strategy-internal.
+  assert.strictEqual(rep.businessContext, undefined);
+  assert.strictEqual(rep.strategicRecommendation, undefined);
+});
+
+test("The Strategy boundary representation is not truncated at 1900 characters -- richTextLong chunks the full content", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  // RAW_PROPOSAL's own realistic prose already exceeds 1900 chars once
+  // serialized as the curated boundary representation (confirmed directly:
+  // the OLD formatter alone already produced 2192 chars from this exact
+  // fixture) -- the richer boundary representation this task adds is larger
+  // still, so this fixture is sufficient to prove no truncation occurs.
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  assert.ok(items.length > 1, "content beyond a single 2,000-char rich-text item must be split, not truncated");
+  const factsText = items.map((i) => i.text.content).join("");
+  assert.ok(factsText.length > 1900, `expected the serialized boundary representation to exceed 1900 chars, got ${factsText.length}`);
+
+  const block = extractLabeledBlock(factsText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END)!;
+  const rep = JSON.parse(block); // throws if truncated mid-JSON -- proves the full block survived intact
+  assert.ok(rep.diagnosis.causes.length > 0);
+  assert.ok(rep.assumptions.length > 0);
+  assert.ok(rep.risksAndConstraints.risks.length > 0 || rep.risksAndConstraints.constraints.length > 0);
 });
 
 test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as the pricing basis", async (t) => {
@@ -680,6 +875,8 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   const afterPickup = await handlePickup(env, state);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const originalProposalId = afterPickup.strategyProposal!.proposalId;
+  const v1Attestation = afterPickup.strategyProposalTokenSafety;
+  assert.strictEqual(v1Attestation?.proposalVersion, 1, "v1 must have its own attestation");
 
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
@@ -687,20 +884,191 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   assert.strictEqual(afterRefine.awaiting, "strategy_refinement_reason");
   assert.strictEqual(afterRefine.strategyApprovalState, "REFINEMENT_REQUESTED");
   assert.strictEqual(afterRefine.pendingStrategyApproval, undefined, "the superseded approval identity must be cleared");
+  assert.deepStrictEqual(afterRefine.pendingStrategyRefinement, { proposalId: originalProposalId, proposalVersion }, "the refinement instruction must be bound to the exact proposal Martin was shown");
   assert.strictEqual(log.handoffCreateBody, null, "a refinement must never create a Finance Handoff");
   assert.ok(!log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Closed"), "refinement must not close the originating Handoff -- the work session is retained");
 
   // Simulate Martin's refinement reasoning being submitted -- a new
-  // proposal version must be produced and the old one preserved as history.
-  // Note: afterRefine and afterPickup are the SAME mutated state object
-  // (execute()'s handlers mutate and return the same reference), so the
-  // prior proposalId must be captured before this call, not read off
-  // afterPickup afterward.
+  // proposal version must be produced FROM the existing proposal (same
+  // lineage/proposalId, version incremented), and the old version preserved
+  // as history. Note: afterRefine and afterPickup are the SAME mutated
+  // state object (execute()'s handlers mutate and return the same
+  // reference), so the prior proposalId must be captured before this call,
+  // not read off afterPickup afterward.
   const afterRevision = await handleStrategyRefinement(env, afterRefine, "Consider a phased rollout instead.");
   assert.strictEqual(afterRevision.strategyProposal!.proposalVersion, 2, "refinement must increment proposalVersion");
+  assert.strictEqual(afterRevision.strategyProposal!.proposalId, originalProposalId, "a revision keeps the same proposal lineage -- it is not a fresh proposal");
   assert.strictEqual(afterRevision.strategyProposalHistory?.length, 1, "the prior version must be preserved as historical context");
   assert.strictEqual(afterRevision.strategyProposalHistory![0].proposalId, originalProposalId, "the exact prior version must be what's preserved");
-  assert.notStrictEqual(afterRevision.strategyProposal!.proposalId, originalProposalId, "a fresh proposalId must be minted for the revision");
+  assert.strictEqual(afterRevision.strategyProposalHistory![0].proposalVersion, 1, "the prior version's own version number must be preserved");
+  assert.strictEqual(afterRevision.pendingStrategyRefinement, undefined, "the consumed refinement binding must be cleared");
+  assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "the revised proposal must re-enter the approval gate, never become approved by being generated");
+  assert.strictEqual(afterRevision.pendingStrategyApproval?.proposalVersion, 2, "the new approval request must be bound to the revised version");
+
+  // v2 gets its OWN independent attestation -- never inherited from v1's,
+  // per the "v1 must not authorize v2" requirement.
+  const v2Attestation = afterRevision.strategyProposalTokenSafety;
+  assert.strictEqual(v2Attestation?.proposalVersion, 2);
+  assert.strictEqual(v2Attestation?.proposalId, originalProposalId);
+  assert.notDeepStrictEqual(v2Attestation, v1Attestation, "v2's attestation must be its own, not a copy/reuse of v1's");
+});
+
+// ---------------------------------------------------------------------------
+// Strategy Refinement boundary: Martin's free text is control input against
+// the existing proposal, never business evidence merged into
+// state.strategyContext. See handleStrategyRefinement's own doc comment.
+// ---------------------------------------------------------------------------
+
+test("SR1. Refinement text is NOT appended to state.strategyContext", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const contextBefore = afterPickup.strategyContext;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
+
+  const afterRevision = await handleStrategyRefinement(env, afterRefine, "Consider a phased rollout instead, and emphasise the digital channel.");
+
+  assert.strictEqual(afterRevision.strategyContext, contextBefore, "state.strategyContext must be completely unchanged by a refinement");
+  assert.ok(!afterRevision.strategyContext?.includes("phased rollout"), "the refinement instruction text must never appear inside strategyContext");
+});
+
+test("SR2. A refinement request containing 'Meridian Foods Ghana Ltd' does not contaminate Strategy business context", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const contextBefore = afterPickup.strategyContext;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
+
+  const afterRevision = await handleStrategyRefinement(env, afterRefine, "Use the same direction, but make it more suitable for Meridian Foods Ghana Ltd.");
+
+  assert.strictEqual(afterRevision.strategyContext, contextBefore, "strategyContext must be byte-for-byte unchanged");
+  assert.ok(!afterRevision.strategyContext?.includes("Meridian"), "the real company name must never enter strategyContext");
+  assert.ok(!JSON.stringify(afterRevision.strategyProposalHistory ?? []).includes("Meridian"), "nor the preserved proposal history");
+});
+
+test("SR3. A refinement request containing 'Ama Mensah' does not contaminate Strategy business context", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const contextBefore = afterPickup.strategyContext;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
+
+  const afterRevision = await handleStrategyRefinement(env, afterRefine, "Loop in Ama Mensah's feedback -- she thinks the timeline is too slow.");
+
+  assert.strictEqual(afterRevision.strategyContext, contextBefore, "strategyContext must be byte-for-byte unchanged");
+  assert.ok(!afterRevision.strategyContext?.includes("Ama Mensah"), "the real person name must never enter strategyContext");
+});
+
+test("SR4. The existing Strategy Proposal remains the revision source -- the system prompt is grounded in it, not in re-diagnosis", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  let capturedSystem = "";
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      const system = String(opts?.messages?.[0]?.content ?? "");
+      if (system.includes("canonical operating procedure")) return { response: JSON.stringify(SUFFICIENT_DIAGNOSIS) };
+      if (system.includes("Expand it into the COMPLETE Strategic Intervention Proposal")) return { response: JSON.stringify(RAW_PROPOSAL) };
+      if (system.includes("revise this artifact")) {
+        capturedSystem = system;
+        return { response: JSON.stringify(RAW_PROPOSAL) };
+      }
+      throw new Error(`Unexpected AI call -- ${system.slice(0, 60)}`);
+    },
+  } as any;
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const originalProposal = afterPickup.strategyProposal!;
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
+
+  await handleStrategyRefinement(env, afterRefine, "Tighten the timeline.");
+
+  // The pipeline's own pre-existing identityRedaction step (ai/identityRedaction.ts,
+  // unmodified by this change) rewrites "Martin" -> "the operator" in EVERY
+  // outbound message, including this one -- the fixture proposal's own
+  // acceptanceCriteria text ("Approved by Martin.") is redacted the same way
+  // any other outbound content would be, so the embedded JSON is expected to
+  // differ from the raw object by exactly that substitution. Comparing after
+  // applying the identical redaction confirms the prompt is still grounded in
+  // the existing proposal's substance, not a re-diagnosis.
+  assert.ok(capturedSystem.includes(redactIdentityTerms(JSON.stringify(originalProposal))), "the revision prompt must be grounded in the exact existing proposal object");
+  assert.ok(!capturedSystem.includes("canonical operating procedure"), "the revision call is not the diagnosis call");
+});
+
+test("SR5. A stale refinement request (proposal moved on since Refine was tapped) is rejected -- fail closed, no AI call, no mutation", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  let aiCalled = false;
+  env.AI = {
+    run: async () => {
+      aiCalled = true;
+      throw new Error("AI must not be called for a stale refinement request");
+    },
+  } as any;
+  const currentProposal = { ...RAW_PROPOSAL, proposalId: "current-proposal-id", proposalVersion: 3 } as any;
+  const state = fakeState({
+    strategyProposal: currentProposal,
+    // Bound to a DIFFERENT (older) proposal than what's now current --
+    // simulates the proposal having moved on since Refine was tapped.
+    pendingStrategyRefinement: { proposalId: "current-proposal-id", proposalVersion: 1 },
+  });
+
+  const result = await handleStrategyRefinement(env, state, "Make it shorter.");
+
+  assert.strictEqual(aiCalled, false, "a stale refinement request must never reach the AI");
+  assert.deepStrictEqual(result.strategyProposal, currentProposal, "the current proposal must be completely untouched");
+  assert.strictEqual(result.pendingStrategyRefinement, undefined, "the stale binding must be cleared");
+});
+
+test("SR6. The revised proposal still requires Martin's Approve/Refine/Reject -- it is never approved merely by being generated", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
+
+  const afterRevision = await handleStrategyRefinement(env, afterRefine, "Add a training workstream.");
+
+  assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(afterRevision.pendingActionSummary, "a fresh approval prompt with buttons must be presented");
+  assert.ok(afterRevision.pendingActionSummary!.buttons.flat().some((b: any) => b.text.includes("Approve")));
+});
+
+test("SR7. Refinement does not write the raw instruction into Handoff Verified Facts & Sources", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const afterPickup = await handlePickup(env, state);
+  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
+
+  await handleStrategyRefinement(env, afterRefine, "Reprioritise the workstreams for Meridian Foods Ghana Ltd specifically.");
+
+  const factsWrites = log.handoffPatchBodies
+    .map((p) => p.properties?.["Verified Facts & Sources"]?.rich_text?.[0]?.text?.content)
+    .filter((c): c is string => typeof c === "string");
+  for (const facts of factsWrites) {
+    assert.ok(!facts.includes("Meridian"), "the refinement instruction must never reach Verified Facts & Sources");
+    assert.ok(!facts.includes("Reprioritise the workstreams"), "the raw instruction text must never reach Verified Facts & Sources");
+  }
 });
 
 test("12/25. Reject records the rejection, closes the current attempt, and creates no Finance Handoff", async (t) => {

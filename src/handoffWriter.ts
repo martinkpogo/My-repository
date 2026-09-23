@@ -78,6 +78,49 @@ function extractPropertyText(value: unknown): string {
   return parts.map((p) => p.plain_text ?? p.text?.content ?? "").join("");
 }
 
+/** The known-identity fields this module's checks can compare against -- see HandoffIdentity. Never a real value itself, only ever used to name which field(s) a check used/found. */
+export type KnownIdentityField = "entityName" | "matterName" | "contactName" | "email" | "phone";
+
+/**
+ * The single low-level "does this text contain this known identity value"
+ * primitive -- shared by findViolation's per-Handoff-field check and, for
+ * the bounded Strategy Proposal known-identity check (see
+ * strategyAnalyst.ts's checkStrategyProposalForKnownIdentity), the same
+ * comparison applied to a Proposal's serialized content. One implementation,
+ * not two that could drift apart. Matching semantics are unchanged from
+ * findViolation's own pre-existing behavior: case-insensitive substring for
+ * name/email (with a length>=3 guard on names against short-needle false
+ * positives), digit-normalized substring for phone.
+ */
+export function textContainsIdentityValue(text: string, value: string | undefined, kind: "name" | "email" | "phone"): boolean {
+  if (!text.trim()) return false;
+  const trimmed = value?.trim();
+  if (!trimmed) return false;
+  if (kind === "phone") {
+    const phoneDigits = trimmed.replace(/\D/g, "");
+    return phoneDigits.length >= 7 && text.replace(/\D/g, "").includes(phoneDigits);
+  }
+  if (kind === "name" && trimmed.length < 3) return false; // same short-needle guard findViolation has always applied
+  return text.toLowerCase().includes(trimmed.toLowerCase());
+}
+
+/**
+ * Which of the known-identity fields on `identity` actually have a value --
+ * i.e. which ones findViolation/textContainsIdentityValue actually exercise
+ * for this identity object, as opposed to being silently skipped for being
+ * absent. Used to record what a known-identity check actually covered
+ * (never the values themselves) -- see WorkState.strategySourceBoundaryAttestation.
+ */
+export function identityFieldsPresent(identity: HandoffIdentity): KnownIdentityField[] {
+  const fields: KnownIdentityField[] = [];
+  if (identity.entityName?.trim()) fields.push("entityName");
+  if (identity.matterName?.trim()) fields.push("matterName");
+  if (identity.contactName?.trim()) fields.push("contactName");
+  if (identity.email?.trim()) fields.push("email");
+  if (identity.phone?.trim()) fields.push("phone");
+  return fields;
+}
+
 /**
  * Checks a single protected field's resolved text against the known
  * identity. Returns a violation reason, or null if the field is clean.
@@ -87,7 +130,6 @@ function extractPropertyText(value: unknown): string {
  */
 function findViolation(fieldName: string, text: string, identity: HandoffIdentity): string | null {
   if (!text.trim()) return null;
-  const haystack = text.toLowerCase();
 
   const namedChecks: Array<[string | undefined, string]> = [
     [identity.entityName, "the real Entity/company name"],
@@ -95,22 +137,16 @@ function findViolation(fieldName: string, text: string, identity: HandoffIdentit
     [identity.contactName, "a known contact's real name"],
   ];
   for (const [needle, label] of namedChecks) {
-    const trimmed = needle?.trim();
-    // Guard against a too-short needle (e.g. a single-letter/word name)
-    // matching incidentally inside unrelated text.
-    if (trimmed && trimmed.length >= 3 && haystack.includes(trimmed.toLowerCase())) {
-      return `Handoff field "${fieldName}" contains ${label} ("${trimmed}") -- identity must be carried only as Entity_Token/Matter_Token, never written into a Handoff field.`;
+    if (textContainsIdentityValue(text, needle, "name")) {
+      return `Handoff field "${fieldName}" contains ${label} ("${needle!.trim()}") -- identity must be carried only as Entity_Token/Matter_Token, never written into a Handoff field.`;
     }
   }
 
-  if (identity.email && haystack.includes(identity.email.trim().toLowerCase())) {
+  if (textContainsIdentityValue(text, identity.email, "email")) {
     return `Handoff field "${fieldName}" contains a known contact's email address -- never write contact details into a Handoff field.`;
   }
-  if (identity.phone) {
-    const phoneDigits = identity.phone.replace(/\D/g, "");
-    if (phoneDigits.length >= 7 && text.replace(/\D/g, "").includes(phoneDigits)) {
-      return `Handoff field "${fieldName}" contains a known contact's phone number -- never write contact details into a Handoff field.`;
-    }
+  if (textContainsIdentityValue(text, identity.phone, "phone")) {
+    return `Handoff field "${fieldName}" contains a known contact's phone number -- never write contact details into a Handoff field.`;
   }
 
   if (EMAIL_PATTERN.test(text)) {
@@ -121,6 +157,16 @@ function findViolation(fieldName: string, text: string, identity: HandoffIdentit
   }
 
   return null;
+}
+
+/**
+ * The same identity check validateHandoffProperties applies per Handoff
+ * field, exposed for other token-safe canonical records (e.g. the Runtime
+ * Sales Proposal) that must hold the identical boundary. Returns a violation
+ * reason, or null if the text is clean.
+ */
+export function findIdentityViolation(fieldName: string, text: string, identity: HandoffIdentity): string | null {
+  return findViolation(fieldName, text, identity);
 }
 
 /**
