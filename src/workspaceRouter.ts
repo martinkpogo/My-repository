@@ -1,31 +1,45 @@
 import type { Env, Unit } from "./types";
-import { aiJson } from "./ai";
-import { sendMessage } from "./telegram";
-import { getGovernance } from "./governance";
-import { ALL_HATS, marketingHatSummaryList } from "./hats/registry";
-import { getRegisteredCapabilities } from "./actions/registry";
-import { getChatHistory } from "./chat";
+import { ALL_HATS } from "./hats/registry";
+import { getWorkspaceMode, isCoworkClarificationPending, setCoworkClarificationPending } from "./sessionRouting";
 
 /**
- * The single Workspace-message classification seam (CHAT/COWORK boundary).
+ * The deterministic Workspace interaction boundary (CHAT/COWORK).
  *
- * This module decides ONLY. It never creates a WorkSession, never writes to
- * Notion, never calls a governed execution handler, and never sends a
- * message that commits to an action -- classifyWorkspaceMessage's result is
- * a routing PROPOSAL. router.ts is the only caller that acts on it, and
- * every "cowork" decision still passes through the exact same existing
- * governed entry points (stub.init + handle*Request) and every gate inside
+ * This module decides ONLY, and decides deterministically -- no AI provider
+ * call is made anywhere in this file, for either mode determination or
+ * responsibility resolution. It never creates a WorkSession, never writes
+ * to Notion, never calls a governed execution handler. router.ts is the
+ * only caller that acts on its result, and every "cowork" decision still
+ * passes through the exact same existing governed entry points
+ * (dispatchCowork -> stub.init + handle*Request) and every gate inside
  * them (approval, Handoff, token-boundary, fail-closed checks) exactly as
- * before this module existed. This module adds no execution authority of
- * its own -- CHAT -> workspace routing decision -> COWORK candidate ->
- * existing governed execution gates, never CHAT -> AI says COWORK -> execute.
+ * before this module existed.
+ *
+ * Mode (Chat/Cowork) is Workspace-thread interaction state, deliberately
+ * distinct from WorkState (a WorkSession's own governed-work state) -- a
+ * Workspace conversation can exist with no WorkSession at all, and an
+ * existing WorkSession must survive a mode switch untouched (see
+ * sessionRouting.ts's getWorkspaceMode/setWorkspaceMode doc comment).
+ *
+ * This replaces the prior AI-based classifier
+ * (routing.workspace_classification, now fully removed from the
+ * SemanticTaskId registry and Data Boundary policy tables -- see
+ * dataBoundary/types.ts, registry.ts, policy.ts). That task was
+ * client_confidential with no eligible production provider, so the prior
+ * architecture always failed closed for every fresh Workspace message.
+ * This module never reintroduces that dependency: mode is Martin's own
+ * explicit choice (a deterministic Telegram callback), and responsibility
+ * resolution is deterministic structural matching against the finite
+ * Unit/Hat registry (ALL_HATS) -- never semantic inference from subject
+ * matter ("positioning" does not imply Strategy; "pricing" does not imply
+ * Finance).
  */
 
-// Canonical Notion governance source for this Workspace's routing/execution
-// constraints -- same page classifyNewMessage previously used. Governs the
-// bar for a genuine Sales enquiry; does not restate any Hat's own operating
-// procedure.
-const SMBD_PROJECT_INSTRUCTIONS_PAGE_ID = "3cecb004-e583-8193-918b-c81ae322976d";
+export type WorkspaceDecision =
+  | { mode: "chat"; unit?: Unit }
+  | { mode: "cowork"; unit: Unit; hat?: string }
+  | { mode: "clarify"; question: string }
+  | { mode: "blocked"; reason: string };
 
 const VALID_UNITS: Unit[] = [
   "Sales",
@@ -38,186 +52,143 @@ const VALID_UNITS: Unit[] = [
   "Operations",
 ];
 
-function isUnit(value: unknown): value is Unit {
-  return typeof value === "string" && (VALID_UNITS as string[]).includes(value);
-}
+/**
+ * Small, explicit, finite alias table for well-established abbreviations
+ * already used throughout this codebase's own examples and prompts (e.g.
+ * "R&I, what does this market look like?"). Deliberately NOT a fuzzy/
+ * similarity matcher -- each entry is an exact alternate spelling for one
+ * specific, uniquely-identifiable registered Unit, added only where no
+ * other registered name could reasonably match it. This is the entire
+ * "conservative near-match" surface this module supports; nothing else is
+ * treated as a near-match.
+ */
+const UNIT_ALIASES: Record<string, Unit> = {
+  "R&I": "Research & Intelligence",
+};
 
-export type WorkspaceDecision =
-  | { mode: "chat"; unit?: Unit }
-  | { mode: "cowork"; unit: Unit; hat: string; capability?: string }
-  | { mode: "clarify"; question: string }
-  | { mode: "blocked"; reason: string };
+const CLARIFICATION_QUESTION =
+  "Who should own this work? Name the Unit or Hat (e.g. Sales, Strategy, Finance, Marketing, Research & Intelligence).";
 
-interface RawWorkspaceClassification {
-  mode?: "chat" | "cowork" | "clarify";
-  unit?: string;
+interface Addressee {
+  name: string;
+  unit: Unit;
   hat?: string;
-  capability?: string;
-  question?: string;
 }
 
-/** Progressive Hat metadata only -- name/unit/specialization, never a full Hat Definition. */
-function hatIdentitySummaryList(): string {
-  return ALL_HATS.map((h) => `- ${h.name} (Unit: ${h.unit}${h.specialization ? `, specialization: ${h.specialization}` : ""})`).join("\n");
-}
-
-function capabilitySummaryList(): string {
-  const capabilities = getRegisteredCapabilities();
-  if (capabilities.length === 0) return "(none currently registered)";
-  return capabilities.map((c) => `- ${c.id}: ${c.description}`).join("\n");
-}
-
-function buildClassificationSystemPrompt(projectInstructions: string): string {
-  return `You are the single Workspace routing seam for ENIG, an AI-staffed consultancy operating on Telegram. Every fresh message in the Workspace stream is classified here, exactly once, before anything else happens. Your output is a routing PROPOSAL only -- it is never itself authorization to execute anything; the runtime enforces its own separate, unmodified approval/Handoff/token gates regardless of what you decide.
-
-=== THE TWO MODES ===
-CHAT is the default. It covers: general questions, business discussion, asking a Unit/Hat for advice/analysis/opinion, internal reasoning out loud, discussion of ENIG's own operations, and exploratory discussion where no governed work has actually been requested yet -- even if a specific Unit or Hat is named, a company is mentioned, the wording is imperative, or the message sounds like something a Hat could in principle execute. Naming a Unit/Hat only establishes WHO the user is talking to, never that governed work should start.
-
-COWORK is active governed work: WorkSession, Business Objects, Handoffs, approvals, and execution. Use it only when the user is actually asking ENIG to perform a defined piece of work right now -- a concrete business/service matter needing governed execution, clearly corresponding to an existing Hat/workflow/capability, or the user has just moved from discussing an issue into actually doing the work (e.g. "let's diagnose it properly and develop the intervention" after a chat discussion already established the situation).
-
-Examples that MUST stay CHAT:
-- "Finance, explain our value-based pricing." (asking for an explanation, not commissioning pricing work)
-- "Strategy, what do you think about this positioning problem?" (asking for an opinion)
-- "Marketing Strategist, what should we consider before changing our positioning?" (asking for considerations, not commissioning campaign work)
-- "R&I, what does this market look like?" phrased as a passing question with no request to actually investigate
-- "How should ENIG approach this kind of client?" (a general question about ENIG itself)
-
-Examples that ARE COWORK:
-- A concrete Sales enquiry: a specific prospect names their business, situation, or problem and asks for help -- e.g. "we're a bakery chain and our branding feels dated, can you help." A vague or test-like message with no real situation described is NOT this.
-- A genuine R&I research request: an explicit ask to investigate/research a market, competitor, customer/audience, or business/regulatory question -- e.g. "research this company," "what do customers in this segment care about."
-- "Marketing Strategist, let's develop the campaign strategy for this" -- ONLY once the message establishes that actual work is being undertaken (e.g. "let's develop," "let's get this started," "go ahead and draft"), not merely because the Hat was named.
-- A clear instruction to begin diagnosing/pricing/proposing/researching/drafting something specific, where the request supplies (or has already, in this conversation, supplied) enough concrete substance to actually start.
-
-Never default to Sales, and never use any fixed Unit priority -- every Unit (Sales, Marketing, Business Development, Finance, Strategy, Research & Intelligence, Creative & Design, Operations) must be independently addressable on its own terms. A Telegram topic/thread is a stream identity only, never a Unit identity -- do not let which topic a message arrived in decide the Unit; decide from the message (and recent conversation) itself.
-
-=== HAT METADATA (progressive -- identity only, not full Hat definitions) ===
-${hatIdentitySummaryList()}
-
-Marketing's five Hats, with their purpose:
-${marketingHatSummaryList()}
-
-=== REGISTERED WORKSPACE CAPABILITIES ===
-${capabilitySummaryList()}
-Only propose a capability id from this exact list, and only when the message clearly asks for that specific action to actually happen (e.g. "create a Google Doc for X," "update the content calendar sheet") -- capability-sounding words inside an ordinary discussion (e.g. mentioning a spreadsheet in passing) must stay CHAT.
-
-=== SALES AI PROJECT INSTRUCTIONS (retrieved from Notion's canonical governance -- authoritative for what counts as a genuine Sales enquiry) ===
-${projectInstructions}
-
-=== WHEN TO USE "clarify" INSTEAD OF GUESSING ===
-Use clarify when the request could reasonably mean either discussion or active work, or when the available Hat/Unit metadata above is insufficient to safely determine which Unit or Hat should own it. Ask one direct, short clarifying question. Never invent ownership.
-
-=== RESPONSE FORMAT ===
-Return JSON only: {"mode": "chat" | "cowork" | "clarify", "unit": "<exact Unit name from the list above, if applicable>", "hat": "<exact Hat name, if applicable and known>", "capability": "<exact capability id, only for cowork with a registered capability>", "question": "<only for clarify>"}. Omit any field that doesn't apply. For "chat", include "unit" only when a specific Unit/Hat was clearly addressed -- omit it for a general question addressed to no one in particular.`;
+/** Every name a message could deterministically address, longest-first so a specific Hat wins over its bare Unit name. */
+function buildAddresseeCandidates(): Addressee[] {
+  const hatEntries: Addressee[] = ALL_HATS.map((h) => ({ name: h.name, unit: h.unit as Unit, hat: h.name }));
+  const unitEntries: Addressee[] = VALID_UNITS.map((u) => ({ name: u, unit: u }));
+  const aliasEntries: Addressee[] = Object.entries(UNIT_ALIASES).map(([alias, unit]) => ({ name: alias, unit }));
+  return [...hatEntries, ...unitEntries, ...aliasEntries].sort((a, b) => b.name.length - a.name.length);
 }
 
 /**
- * Classifies a fresh Workspace message as chat/cowork/clarify/blocked. This
- * is the ONLY place a new Workspace message is classified -- router.ts must
- * not run any further independent classifier before or after this call.
- * Fails closed (mode: "blocked", Martin messaged directly) if governance
- * can't be retrieved or the AI call itself fails -- never guesses, never
- * silently falls through to execution.
+ * True when `text` structurally addresses `name` -- a case-insensitive
+ * match at the very start of the message, followed by a clear boundary
+ * (end of string, or punctuation/whitespace that isn't a continuing
+ * letter). This is the vocative pattern every example throughout this
+ * design uses ("Finance, ...", "Strategy, ...", "Marketing Strategist,
+ * ..."). Deliberately anchored to the START of the message only -- a Unit
+ * name appearing mid-sentence ("should we loop in Finance on this?") is
+ * never treated as addressing, which is what keeps this structural rather
+ * than semantic.
  */
-export async function classifyWorkspaceMessage(
+function matchesAddressPrefix(text: string, name: string): boolean {
+  const trimmed = text.trimStart();
+  if (trimmed.length < name.length) return false;
+  if (trimmed.slice(0, name.length).toLowerCase() !== name.toLowerCase()) return false;
+  const rest = trimmed.slice(name.length);
+  return rest.length === 0 || /^[\s,:;\-–—.!]/.test(rest);
+}
+
+/**
+ * Deterministic structural matching only -- exact registered Hat/Unit
+ * names and the small explicit alias table above, matched as a leading
+ * vocative address. Returns null on no match (never guesses); the caller
+ * treats null as "no explicit addressee," which routes to clarification,
+ * never to invented ownership.
+ */
+export function resolveAddressee(text: string): Addressee | null {
+  const candidates = buildAddresseeCandidates();
+  for (const candidate of candidates) {
+    if (matchesAddressPrefix(text, candidate.name)) return candidate;
+  }
+  return null;
+}
+
+/** True when the text is plausibly Martin's answer to the clarification question -- reuses the exact same addressee matcher, never a separate parser. */
+function resolveClarificationAnswer(text: string): Addressee | null {
+  // Martin's answer may name the Unit/Hat anywhere reasonable in a short
+  // reply ("Strategy" / "That's Strategy work" / "Strategy please") rather
+  // than strictly as a leading vocative -- still exact structural matching
+  // against the same finite registry, just checked as a whole-message
+  // case-insensitive containment rather than a leading-prefix match, since
+  // a direct answer to a direct question is not the same shape as an
+  // address inside a work request.
+  const candidates = buildAddresseeCandidates();
+  const lower = text.toLowerCase();
+  for (const candidate of candidates) {
+    const needle = candidate.name.toLowerCase();
+    const idx = lower.indexOf(needle);
+    if (idx === -1) continue;
+    const before = idx === 0 ? "" : lower[idx - 1];
+    const after = lower[idx + needle.length] ?? "";
+    const boundaryBefore = before === "" || /[\s,:;\-–—."'(]/.test(before);
+    const boundaryAfter = after === "" || /[\s,:;\-–—.!"')]/.test(after);
+    if (boundaryBefore && boundaryAfter) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The single deterministic Workspace routing decision for a fresh message
+ * already established as belonging to the Workspace stream, with no
+ * existing WorkSession association (router.ts checks reply-association and
+ * the active-pointer/awaiting continuation BEFORE ever calling this --
+ * existing WorkSession identity always takes precedence, per the mode
+ * priority order). No AI provider call is made here, ever.
+ */
+export async function resolveWorkspaceRouting(
   env: Env,
   chatId: number,
   threadId: number | undefined,
   text: string,
 ): Promise<WorkspaceDecision> {
-  const projectInstructions = await getGovernance(env, SMBD_PROJECT_INSTRUCTIONS_PAGE_ID, "Sales AI Project Instructions");
-  if (!projectInstructions) {
-    console.error("classifyWorkspaceMessage: Sales Project Instructions retrieval failed — refusing to classify/route");
-    await sendMessage(
-      env,
-      chatId,
-      "This message wasn't processed — routing governance couldn't be retrieved from Notion. Please resend once resolved.",
-      undefined,
-      threadId,
-    );
-    return { mode: "blocked", reason: "routing governance retrieval failed" };
+  const mode = await getWorkspaceMode(env, chatId, threadId);
+
+  if (mode === "chat") {
+    // Chat mode never resolves responsibility for governed work -- this
+    // addressee lookup only picks which Unit persona voices the reply
+    // (see chat.ts's generalChatReply), the same deterministic structural
+    // match resolveAddressee already uses for Cowork, reused here rather
+    // than duplicated. It never creates a WorkSession and never implies
+    // ownership of anything.
+    const addressee = resolveAddressee(text);
+    return addressee ? { mode: "chat", unit: addressee.unit } : { mode: "chat" };
   }
 
-  // Recent conversation context lets a short transition message ("okay,
-  // let's diagnose it properly") resolve against what was already
-  // established in chat, without requiring every follow-up to repeat the
-  // whole situation, and without treating every follow-up in a client-
-  // adjacent conversation as automatically COWORK.
-  const history = await getChatHistory(env, chatId, threadId);
-  const recentHistoryText = history
-    .slice(-6)
-    .map((t) => `${t.role}: ${t.content}`)
-    .join("\n");
-
-  const result = await aiJson<RawWorkspaceClassification>(env, {
-    taskId: "routing.workspace_classification",
-    system: buildClassificationSystemPrompt(projectInstructions),
-    user: `${recentHistoryText ? `Recent conversation in this thread:\n${recentHistoryText}\n\n` : ""}New message: ${text}`,
-    light: true,
-  });
-
-  const mapped = mapRawClassificationToDecision(result);
-  if (mapped.messageForMartin) {
-    console.error(`classifyWorkspaceMessage: ${mapped.logReason} (chat ${chatId})`);
-    await sendMessage(env, chatId, mapped.messageForMartin, undefined, threadId);
-  }
-  return mapped.decision;
-}
-
-/**
- * Pure mapping from the AI's raw classification JSON to a WorkspaceDecision
- * -- no I/O, no side effects, deterministic. Exported specifically so the
- * decision logic (chat/cowork/clarify/blocked mapping, capability
- * validation, Unit validation) can be tested directly without depending on
- * the AI call itself succeeding -- routing.workspace_classification is
- * client_confidential with no eligible provider today (see
- * PRODUCTION_PROVIDER_ELIGIBILITY in dataBoundary/policy.ts), the same
- * standing constraint its predecessor classifiers always had, so the real
- * end-to-end call cannot be exercised with controlled content in this
- * environment either. classifyWorkspaceMessage itself remains the only
- * production caller.
- */
-export function mapRawClassificationToDecision(
-  result: RawWorkspaceClassification | null,
-): { decision: WorkspaceDecision; messageForMartin?: string; logReason?: string } {
-  if (!result || !result.mode) {
-    return {
-      decision: { mode: "blocked", reason: "workspace classification unavailable" },
-      messageForMartin:
-        "Couldn't classify that message — no AI provider is currently available. This points to a genuine provider failure, not an access restriction; please try again shortly.",
-      logReason: "AI classification unavailable",
-    };
-  }
-
-  if (result.mode === "clarify") {
-    return {
-      decision: {
-        mode: "clarify",
-        question: result.question?.trim() || "Could you clarify whether you'd like to discuss this, or have ENIG actively start work on it?",
-      },
-    };
-  }
-
-  if (result.mode === "chat") {
-    return { decision: { mode: "chat", unit: isUnit(result.unit) ? result.unit : undefined } };
-  }
-
-  if (result.mode === "cowork") {
-    if (!isUnit(result.unit)) {
-      return {
-        decision: {
-          mode: "clarify",
-          question: "I couldn't determine which Unit should own this work — could you name it explicitly (e.g. Sales, Strategy, Marketing, Research & Intelligence)?",
-        },
-      };
+  // mode === "cowork" from here.
+  const pending = await isCoworkClarificationPending(env, chatId, threadId);
+  if (pending) {
+    const answer = resolveClarificationAnswer(text);
+    if (!answer) {
+      // Still unresolved -- ask again, stay pending. Never guesses.
+      return { mode: "clarify", question: CLARIFICATION_QUESTION };
     }
-    const capabilities = getRegisteredCapabilities();
-    const capability = typeof result.capability === "string" && capabilities.some((c) => c.id === result.capability) ? result.capability : undefined;
-    return { decision: { mode: "cowork", unit: result.unit, hat: typeof result.hat === "string" ? result.hat : "", capability } };
+    await setCoworkClarificationPending(env, chatId, threadId, false);
+    return { mode: "cowork", unit: answer.unit, hat: answer.hat };
   }
 
-  return {
-    decision: { mode: "blocked", reason: "workspace classification returned an unrecognized mode" },
-    messageForMartin: "Couldn't classify that message safely — the routing decision came back in an unexpected shape. Please try rephrasing.",
-    logReason: `AI returned an unrecognized mode "${result.mode}"`,
-  };
+  const addressee = resolveAddressee(text);
+  if (addressee) {
+    return { mode: "cowork", unit: addressee.unit, hat: addressee.hat };
+  }
+
+  // No explicit addressee, and no deterministic structural/contextual rule
+  // applies (this module never infers responsibility from subject matter --
+  // "positioning" does not imply Strategy, "pricing" does not imply
+  // Finance). Ask, and remember we're waiting for the answer.
+  await setCoworkClarificationPending(env, chatId, threadId, true);
+  return { mode: "clarify", question: CLARIFICATION_QUESTION };
 }

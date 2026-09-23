@@ -1,9 +1,8 @@
 import type { Env } from "./types";
 import { sendMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
-import { routeWorkspaceCapabilityAction } from "./actions/registry";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
-import { classifyWorkspaceMessage, type WorkspaceDecision } from "./workspaceRouter";
+import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import {
   getActiveWorkId,
   getReplyMessageWorkId,
@@ -47,20 +46,21 @@ export async function routeIncomingText(
     replyToMessageId?: number;
     // Test-only injection seam, mirroring the AiPolicyExecutor injection
     // pattern already used in ai/policy.ts. Production callers never pass
-    // this -- the real classifyWorkspaceMessage always runs. It exists
-    // because routing.workspace_classification is client_confidential with
-    // no eligible provider (see dataBoundary/policy.ts), so the real AI
-    // call cannot be exercised with controlled content in tests; this lets
-    // tests verify routeIncomingText/dispatchCowork's own dispatch logic
-    // (which Unit/capability a given WorkspaceDecision reaches) without
-    // depending on that unrelated, pre-existing provider-eligibility gate.
-    classify?: typeof classifyWorkspaceMessage;
+    // this -- the real resolveWorkspaceRouting always runs. It exists so
+    // tests can verify routeIncomingText/dispatchCowork's own dispatch
+    // logic (which Unit/capability a given WorkspaceDecision reaches)
+    // without depending on real KV-backed mode/clarification state.
+    resolveRouting?: typeof resolveWorkspaceRouting;
   } = {},
 ): Promise<void> {
   if (text.startsWith("/")) return; // commands handled by caller
 
   if (!options.forceNewEnquiry) {
-    // 1. Explicit reply-to-message association (reply_msg:<messageId> -> workId)
+    // 1. Existing WorkSession association -- takes precedence over Workspace
+    // mode entirely. Continuing already-governed work is never re-routed
+    // through mode/responsibility resolution.
+
+    // 1a. Explicit reply-to-message association (reply_msg:<messageId> -> workId)
     if (options.replyToMessageId) {
       const matchedWorkId = await getReplyMessageWorkId(env, options.replyToMessageId);
       if (matchedWorkId) {
@@ -74,7 +74,7 @@ export async function routeIncomingText(
       }
     }
 
-    // 2. Active pointer check for non-DM topic streams
+    // 1b. Active pointer check for non-DM topic streams
     const streamType = resolveStreamForThread(env, threadId);
     if (streamType !== "dm") {
       const activeId = await getActiveWorkId(env, chatId, threadId);
@@ -118,19 +118,16 @@ export async function routeIncomingText(
     return;
   }
 
-  // Workspace stream: the single classification seam decides Chat vs
-  // Cowork (and, if Cowork, which Unit/Hat/capability) exactly once. This
-  // is a routing PROPOSAL only -- routeWorkspaceCapabilityAction and every
-  // governed Unit entry point below still run in full, unmodified, with
-  // every approval/Handoff/token-boundary/fail-closed check they already
-  // had. Nothing here executes on the classifier's say-so alone.
-  const classify = options.classify ?? classifyWorkspaceMessage;
-  const decision = await classify(env, chatId, threadId, text);
+  // Workspace stream, no existing WorkSession association. 2. Explicit
+  // Workspace mode decides Chat vs Cowork -- fully deterministic, no AI
+  // provider call anywhere in resolveWorkspaceRouting (see
+  // workspaceRouter.ts). This is still only a routing decision: every
+  // governed Unit entry point below runs in full, unmodified, with every
+  // approval/Handoff/token-boundary/fail-closed check it already had.
+  const resolveRouting = options.resolveRouting ?? resolveWorkspaceRouting;
+  const decision = await resolveRouting(env, chatId, threadId, text);
 
   if (decision.mode === "blocked") {
-    // classifyWorkspaceMessage already messaged Martin directly (governance
-    // retrieval failure, AI-call failure, or an unrecognized AI response) --
-    // fail closed here means doing nothing further, not a second message.
     return;
   }
 
@@ -140,6 +137,18 @@ export async function routeIncomingText(
   }
 
   if (decision.mode === "chat") {
+    // 3. Workspace mode = Chat. Ordinary Chat is a plain conversational
+    // reply only -- it does not dispatch through the generic Workspace
+    // capability registry (routeWorkspaceCapabilityAction). The currently
+    // registered capabilities (Google Doc/Sheet creation, Lead Opportunity
+    // Discovery) can themselves create a WorkSession or a Handoff, which
+    // is governed state Chat must never create merely because an arbitrary
+    // message arrived while mode is Chat -- see the read-only Chat
+    // capability boundary inspection this correction resolves. Cowork
+    // remains the entry point into governed capability/workflow paths
+    // that are already wired to it (see dispatchCowork below); this
+    // restores the boundary that existed before this Workspace mode
+    // change, without altering the capabilities' own implementations.
     const reply = decision.unit
       ? await generalChatReply(env, decision.unit, chatId, threadId, text)
       : await generalDmReply(env, chatId, threadId, text);
@@ -170,16 +179,6 @@ export async function dispatchCowork(
   text: string,
   decision: Extract<WorkspaceDecision, { mode: "cowork" }>,
 ): Promise<void> {
-  if (decision.capability) {
-    // The classifier already determined this is Cowork for a specific,
-    // registered capability -- routeWorkspaceCapabilityAction's own
-    // handleIntake is the existing defense-in-depth re-check, never
-    // bypassed. Whatever it decides (handled or not) is final for this
-    // message; it is not a general Unit dispatch fallback.
-    await routeWorkspaceCapabilityAction(env, chatId, text, threadId);
-    return;
-  }
-
   if (decision.unit === "Sales") {
     if (SALES_EXECUTIVE_PAUSED) {
       console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
@@ -188,7 +187,7 @@ export async function dispatchCowork(
     }
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Sales", "Sales Executive", threadId);
+    await stub.init(workId, chatId, "Sales", decision.hat ?? "Sales Executive", threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleIncomingEnquiry(text);
     return;
@@ -197,7 +196,7 @@ export async function dispatchCowork(
   if (decision.unit === "Marketing") {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Marketing", "Marketing", threadId);
+    await stub.init(workId, chatId, "Marketing", decision.hat ?? "Marketing", threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleMarketingRequest(text);
     return;
@@ -206,7 +205,7 @@ export async function dispatchCowork(
   if (decision.unit === "Research & Intelligence") {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId);
+    await stub.init(workId, chatId, "Research & Intelligence", decision.hat ?? "Research & Intelligence Analyst", threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
     await stub.handleResearchRequest(text);
     return;
@@ -217,7 +216,7 @@ export async function dispatchCowork(
   // are only ever entered via a Handoff from another Unit's own governed
   // workflow today -- fabricating a direct-chat entry point here would be
   // a parallel execution implementation, not routing into an existing one.
-  console.error(`Workspace router: Cowork proposed for ${decision.unit}, which has no existing chat-triggered governed entry point (chat ${chatId})`);
+  console.error(`Workspace router: Cowork resolved for ${decision.unit}, which has no existing chat-triggered governed entry point (chat ${chatId})`);
   await sendMessage(
     env,
     chatId,
