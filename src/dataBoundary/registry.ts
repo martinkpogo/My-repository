@@ -7,6 +7,11 @@ export interface SemanticTaskDefinition {
 }
 
 export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTaskDefinition>> = {
+  "routing.workspace_classification": {
+    id: "routing.workspace_classification",
+    name: "Routing Workspace Classification",
+    description: "Single Workspace-message classification seam: decides Chat vs Cowork (and, if Cowork, which Unit/Hat/capability) as a routing proposal only, never execution authority.",
+  },
   "routing.enquiry_classification": {
     id: "routing.enquiry_classification",
     name: "Routing Enquiry Classification",

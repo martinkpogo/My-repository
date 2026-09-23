@@ -29,6 +29,14 @@ import type {
  * (opaque tokens + sanitized business text only, never a real name).
  */
 export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId, SensitivityLevel>>> = {
+  // Same rationale as routing.enquiry_classification below: this task now
+  // receives the same raw, not-yet-classified Workspace message text that
+  // classifier's own client_confidential rating exists for -- it replaces
+  // that classifier (and routing.marketing_specialization_check /
+  // routing.research_specialization_check) as the first-line Workspace
+  // seam, so it inherits the strictest of its predecessors' ratings rather
+  // than being narrowed to any one predecessor's weaker rating.
+  "routing.workspace_classification": "client_confidential",
   "routing.enquiry_classification": "client_confidential",
   "routing.marketing_specialization_check": "client_confidential",
   "chat.general_reply": "client_confidential",
@@ -153,7 +161,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * PRODUCTION_TASK_SENSITIVITY, rather than in a separate configuration
  * system, and does not duplicate SEMANTIC_TASK_REGISTRY.
  *
- * Every one of the 30 registered SemanticTaskIds is accounted for below --
+ * Every one of the 31 registered SemanticTaskIds is accounted for below --
  * either given a resolved policy, or named in the "deliberately unresolved"
  * comment block explaining why it has none. A task's outbound policy is
  * independent of its PRODUCTION_TASK_SENSITIVITY entry (that governs
@@ -249,16 +257,20 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * lifted.
  *
  * -- Deliberately unresolved (no entry below; the gate blocks these) --
- * routing.enquiry_classification / routing.marketing_specialization_check /
- * routing.research_specialization_check: each sends the raw, not-yet-
- * classified incoming message text -- exactly the text that, when it IS a
- * client enquiry (the case these classifiers exist to detect), is expected
- * to describe the prospect's business/situation and may well name it. This
- * mirrors these tasks' own client_confidential PRODUCTION_TASK_SENSITIVITY
- * -- already unreachable today (no eligible provider), and left genuinely
- * unresolved here rather than given a TOKEN_SAFE_RUNTIME label the content
+ * routing.workspace_classification / routing.enquiry_classification /
+ * routing.marketing_specialization_check / routing.research_specialization_check:
+ * each sends the raw, not-yet-classified incoming Workspace message text --
+ * exactly the text that, when it IS a client enquiry (the case these
+ * classifiers exist to detect), is expected to describe the prospect's
+ * business/situation and may well name it. routing.workspace_classification
+ * is the current single classification seam (see workspaceRouter.ts) and is
+ * unreachable in production today for the same reason its three
+ * predecessors were: client_confidential has no eligible provider in
+ * PRODUCTION_PROVIDER_ELIGIBILITY above. This is a deliberate, existing
+ * governance boundary, not a defect introduced here -- left genuinely
+ * unresolved rather than given a TOKEN_SAFE_RUNTIME label the content
  * doesn't support, so a future change to provider eligibility doesn't
- * silently start sending identity-bearing raw enquiry text through this
+ * silently start sending identity-bearing raw Workspace text through this
  * gate under a mislabeled policy.
  *
  * sales.matter_summary_drafting / sales.call_prep_briefing /

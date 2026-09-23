@@ -1,6 +1,7 @@
 import type { ProviderId } from "../ai/types";
 
 export type SemanticTaskId =
+  | "routing.workspace_classification"
   | "routing.enquiry_classification"
   | "routing.marketing_specialization_check"
   | "chat.general_reply"
