@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { sendMessage } from "./telegram";
+import { sendMessage, sendOperationsMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
@@ -217,6 +217,17 @@ export async function dispatchCowork(
   // workflow today -- fabricating a direct-chat entry point here would be
   // a parallel execution implementation, not routing into an existing one.
   console.error(`Workspace router: Cowork resolved for ${decision.unit}, which has no existing chat-triggered governed entry point (chat ${chatId})`);
+  // This is a genuine UNSUPPORTED resolution -- responsibility resolved
+  // correctly, but no execution path exists for it. The reply below goes
+  // only to the Workspace topic it came from, reading like any other
+  // response; without this, the fact that Cowork dispatch is a known no-op
+  // for this Unit is invisible everywhere else. Mirrors the same
+  // Operations-visibility pattern already used for other operational
+  // signals (see e.g. WorkSession's alertPendingApprovalBacklog).
+  await sendOperationsMessage(
+    env,
+    `⚠️ Cowork resolved to ${decision.unit}${decision.hat ? `/${decision.hat}` : ""}, which has no existing chat-triggered governed entry point -- nothing was started. (chat ${chatId})`,
+  ).catch((err) => console.error("Failed to send UNSUPPORTED-Unit Operations notice", err));
   await sendMessage(
     env,
     chatId,

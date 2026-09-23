@@ -343,8 +343,8 @@ test("T. Cowork decision dispatches to the resolved Unit's existing governed ent
   assert.strictEqual(calls.init[1][3], "Marketing Strategist");
 });
 
-test("U. Cowork decision for a Unit with no existing chat-triggered governed entry point fails closed (UNSUPPORTED) -- never fabricates ownership", async (t) => {
-  mockTelegramFetch(t);
+test("U. Cowork decision for a Unit with no existing chat-triggered governed entry point fails closed (UNSUPPORTED) -- never fabricates ownership, and notifies Operations", async (t) => {
+  const sent = mockTelegramFetch(t);
   const { calls, workSession } = createMockWorkSession();
   const env = fakeEnv({ WORK_SESSION: workSession as any });
 
@@ -352,6 +352,10 @@ test("U. Cowork decision for a Unit with no existing chat-triggered governed ent
   await dispatchCowork(env, -1004435157576, 604, "Finance, price this for us.", decision as any);
 
   assert.strictEqual(calls.init.length, 0, "no WorkSession may be fabricated for a Unit with no existing chat-triggered governed entry point");
+  assert.ok(
+    sent.some((m) => m.includes("Cowork resolved to Finance/Value-Based Pricing Assessor") && m.includes("no existing chat-triggered governed entry point")),
+    "an UNSUPPORTED Cowork resolution must be visible in Operations, not just the originating Workspace topic",
+  );
 });
 
 test("V. Mode selection itself never creates governed work -- switching to cowork alone (no follow-up message) creates nothing", async () => {
