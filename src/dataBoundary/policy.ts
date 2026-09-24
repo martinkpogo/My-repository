@@ -203,6 +203,26 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "business_development.assess_partnership": "business_sensitive",
   "business_development.qualify_partnership": "business_sensitive",
   "business_development.develop_partnership": "business_sensitive",
+  // Architect-reviewed (Growth & Market Development batch): payload traced
+  // end-to-end (discoverGrowthOpportunity/researchMarket/
+  // assessMarketOpportunity receive Martin's raw Workspace message text;
+  // judgeGrowthQualification/draftDevelopGrowthOpportunity receive the
+  // growth opportunity's accumulated signal/evidence, both Martin-derived
+  // free text) -- structurally identical, function-for-function, to their
+  // already-classified Opportunity/Partnership Development counterparts:
+  // no Entity, Handoff, counterparty record, or other structured identity
+  // data crosses the AI boundary at the current implementation. Same
+  // requiresApproval: true / Data Boundary separation on
+  // develop_growth_opportunity as develop_opportunity/develop_partnership
+  // -- the AI only drafts a proposed state; only Martin's approval commits
+  // it. As with the other two BD Hat families, classify the data actually
+  // crossing the AI boundary today, not the maximum sensitivity the
+  // business subject could potentially acquire later.
+  "business_development.discover_growth_opportunity": "business_sensitive",
+  "business_development.research_market": "business_sensitive",
+  "business_development.assess_market_opportunity": "business_sensitive",
+  "business_development.qualify_growth_opportunity": "business_sensitive",
+  "business_development.develop_growth_opportunity": "business_sensitive",
 };
 
 /**
