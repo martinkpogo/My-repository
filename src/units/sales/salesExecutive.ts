@@ -27,7 +27,7 @@ import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, sendOperationsMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
-import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
+import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
@@ -809,12 +809,23 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
  * pickup path -- so qualification reasoning behaves identically regardless
  * of where the call notes originated. Returns null when the AI assessment
  * was inconclusive; the caller decides how to surface that.
+ *
+ * taskIds is caller-supplied, not hardcoded, because the two call sites
+ * are NOT the same trust level: handleCallNotes still feeds raw,
+ * pre-tokenization text, so it must keep using the client_confidential
+ * sales.commercial_evidence_extraction/sales.call_qualification taskIds;
+ * handleCallNotesHandoffPickup's content is provably token-safe, so it
+ * uses the business_sensitive _handoff siblings instead. Re-rating the
+ * shared taskId itself would have made the still-raw live-chat path
+ * eligible for a real provider too -- see dataBoundary/policy.ts's
+ * PRODUCTION_TASK_SENSITIVITY doc comment.
  */
 async function runQualificationAssessment(
   env: Env,
   state: WorkState,
   combinedText: string,
   governance: { hatDefinition: string; universalRoleContract: string; entitySpecification?: string },
+  taskIds: { evidenceExtraction: SemanticTaskId; qualification: SemanticTaskId },
 ): Promise<{ qualification: QualificationResult; evidenceText: string } | null> {
   // Structured commercial-value evidence extraction, per the Commercial
   // Value & Pricing Operating Model -- run before qualification so the
@@ -822,7 +833,7 @@ async function runQualificationAssessment(
   // failure (null) is treated as "no evidence extracted," not a blocker --
   // evaluateCommercialValueEvidence already fails closed on empty input.
   const extraction = await aiJson<RawCommercialEvidenceExtraction>(env, {
-    taskId: "sales.commercial_evidence_extraction",
+    taskId: taskIds.evidenceExtraction,
     system: buildCommercialEvidenceExtractionSystemPrompt(),
     user: combinedText,
     light: true,
@@ -839,7 +850,7 @@ async function runQualificationAssessment(
   });
 
   const qualification = await aiJson<QualificationResult>(env, {
-    taskId: "sales.call_qualification",
+    taskId: taskIds.qualification,
     system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
     user: combinedText,
   });
@@ -908,7 +919,10 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   }
 
   const combinedText = `Enquiry: ${state.enquiryText ?? ""}\n\nCall notes: ${state.callNotes}`;
-  const result = await runQualificationAssessment(env, state, combinedText, governance);
+  const result = await runQualificationAssessment(env, state, combinedText, governance, {
+    evidenceExtraction: "sales.commercial_evidence_extraction",
+    qualification: "sales.call_qualification",
+  });
 
   if (!result) {
     await sendWorkspaceHatMessage(
@@ -994,7 +1008,7 @@ export async function resolveCallNotesHandoffContext(env: Env, handoffId: string
         provenance: `notion:handoff:${handoffId}`,
         requiredCategory: "de-identified call notes for commercial qualification",
       },
-      "sales.call_qualification",
+      "sales.call_qualification_handoff",
     );
   } catch (err) {
     console.error(`Call-notes Handoff business-context reconstruction failed for ${handoffId}`, err);
@@ -1091,7 +1105,10 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
     return state;
   }
 
-  const result = await runQualificationAssessment(env, state, contract.sanitizedContext, governance);
+  const result = await runQualificationAssessment(env, state, contract.sanitizedContext, governance, {
+    evidenceExtraction: "sales.commercial_evidence_extraction_handoff",
+    qualification: "sales.call_qualification_handoff",
+  });
 
   if (!result) {
     await updateHandoff(env, state.handoffId!, {

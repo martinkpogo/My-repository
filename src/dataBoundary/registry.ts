@@ -88,6 +88,18 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Sales Call Qualification Assessment",
     description: "Evaluates the five canonical qualification conditions from call notes.",
   },
+  "sales.commercial_evidence_extraction_handoff": {
+    id: "sales.commercial_evidence_extraction_handoff",
+    name: "Sales Commercial-Value Evidence Extraction (Handoff)",
+    description:
+      "Same extraction as sales.commercial_evidence_extraction, restricted to the token-safe Handoff-pickup path: the isolated Sales Executive Claude project's already de-identified call notes (Section 6A), never raw enquiry/call-notes text.",
+  },
+  "sales.call_qualification_handoff": {
+    id: "sales.call_qualification_handoff",
+    name: "Sales Call Qualification Assessment (Handoff)",
+    description:
+      "Same qualification assessment as sales.call_qualification, restricted to the token-safe Handoff-pickup path: the isolated Sales Executive Claude project's already de-identified call notes (Section 6A), never raw enquiry/call-notes text.",
+  },
   "sales.proposal_drafting": {
     id: "sales.proposal_drafting",
     name: "Sales Proposal Drafting",
