@@ -205,6 +205,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Research Opportunity",
     description: "Organizes and analyzes evidence for a named opportunity signal from Martin's own supplied facts, never fabricating unstated evidence.",
   },
+  "business_development.assess_opportunity": {
+    id: "business_development.assess_opportunity",
+    name: "Business Development Assess Opportunity",
+    description: "Determines whether a researched signal has a substantive reason for ENIG to pursue it, across strategic/commercial relevance, capability fit, evidence quality, and material unknowns.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {

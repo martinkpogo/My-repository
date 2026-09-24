@@ -55,28 +55,26 @@ import { aiJson } from "../../ai";
  * so Hat resolution genuinely exercises three Hats, not one -- but their
  * handlers are explicit stubs pending the same treatment.
  *
- * qualify_opportunity's and discover_opportunity's reasoning are real and
- * live (judgeOpportunityQualification/discoverOpportunity, both
- * classified business_sensitive -- Architect-approved). research_
- * opportunity's evidence-organization reasoning is also real
- * (researchOpportunity, business_development.research_opportunity) --
- * classified business_sensitive pending Architect review (same payload
- * category as every other BD task: Martin's own typed text, never a
- * Handoff/Entity/contact object), UNCLASSIFIED in
+ * All four of this Hat's evidence-pipeline actions now have real,
+ * registered AI reasoning: discover_opportunity, research_opportunity,
+ * assess_opportunity, and qualify_opportunity (discoverOpportunity/
+ * researchOpportunity/assessOpportunity/judgeOpportunityQualification).
+ * qualify_opportunity and discover_opportunity are Architect-approved and
+ * classified business_sensitive; research_opportunity and
+ * assess_opportunity are classified business_sensitive pending Architect
+ * review (same payload category as every other BD task: Martin's own
+ * typed text, never a Handoff/Entity/contact object), UNCLASSIFIED in
  * PRODUCTION_TASK_SENSITIVITY until then, so real calls fail closed
  * (UNRESOLVED_POLICY_HOLD) rather than running unreviewed. BD has no live
  * web-search/external-research capability wired up (unlike R&I or Lead
- * Discovery) -- research_opportunity only organizes and draws
- * implications from facts Martin has actually supplied, never fabricating
- * external evidence.
+ * Discovery) -- both research_opportunity and assess_opportunity only
+ * reason over facts Martin has actually supplied, never fabricating
+ * external evidence, capability claims, or market facts.
  *
- * One thing still not decided here, left as a loud placeholder rather
- * than invented:
- *
- * TODO(intelligence): assess_opportunity still needs a real, registered
- * AI task (matching how discover_opportunity/research_opportunity/
- * qualify_opportunity above are registered) -- its read handler still
- * throws "not yet implemented."
+ * What's still not decided here, left as a loud placeholder rather than
+ * invented: develop_opportunity/determine_next_move's entry-handler
+ * logic (write, requiresApproval: true) is not yet implemented -- they
+ * mutate bdOpportunity.developedState, still just a throw below.
  *
  * NOTE: dispatch wiring (four chokepoints, including the approval
  * callback) is done -- see units/dispatch.ts, units/registry.ts, and
@@ -182,6 +180,48 @@ Return JSON:
   return `Findings: ${result.findings.join("; ")}\n\nImplications: ${result.implications ?? "(not stated)"}\n\nLimitations: ${limitations}\n\nSources: ${sources}`;
 }
 
+/**
+ * Real strategic/commercial-relevance judgment for assess_opportunity,
+ * per the Hat Definition's own Output contract (Notion): "assessment
+ * with evidence, implications, limitations, and unresolved questions,"
+ * examining strategic relevance, commercial relevance, plausible value
+ * to ENIG, fit with ENIG's capabilities, evidence quality, and material
+ * unknowns. Distinct from qualify_opportunity: assess judges whether
+ * there's a *substantive reason to pursue* across these named
+ * dimensions; qualify later applies the evidence-sufficiency threshold
+ * gate. Same evidence discipline as discover/research above -- never
+ * fabricates evidence, only assesses what's actually been stated.
+ * Stateless (a "read" action).
+ */
+async function assessOpportunity(env: Env, text: string): Promise<string> {
+  const result = await aiJson<{
+    assessment?: string;
+    strategicRelevance?: string;
+    commercialRelevance?: string;
+    capabilityFit?: string;
+    evidenceQuality?: string;
+    unresolvedQuestions?: string[];
+  }>(env, {
+    taskId: "business_development.assess_opportunity",
+    system: `You determine whether a researched Business Development signal has a substantive reason for ENIG to pursue it -- examining strategic relevance, commercial relevance, plausible value to ENIG, fit with ENIG's capabilities, evidence quality, and material unknowns.
+
+Base this only on what has actually been stated -- never invent evidence, capability claims, or market facts not present in the input. If a dimension can't be judged from what's given, say so as an unresolved question rather than guessing.
+
+Return JSON:
+{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "strategicRelevance": "<brief>", "commercialRelevance": "<brief>", "capabilityFit": "<brief -- does this fit ENIG's actual capabilities>", "evidenceQuality": "<brief -- how strong is what's been stated so far>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}
+- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
+    user: text,
+    light: true,
+  });
+
+  if (!result || !result.assessment) {
+    return "Couldn't complete an assessment from that -- can you share more about the strategic/commercial case, or ENIG's fit for this opportunity?";
+  }
+
+  const unresolved = result.unresolvedQuestions && result.unresolvedQuestions.length > 0 ? result.unresolvedQuestions.join(", ") : "(none stated)";
+  return `Assessment: ${result.assessment}\n\nStrategic relevance: ${result.strategicRelevance ?? "(not stated)"}\nCommercial relevance: ${result.commercialRelevance ?? "(not stated)"}\nCapability fit: ${result.capabilityFit ?? "(not stated)"}\nEvidence quality: ${result.evidenceQuality ?? "(not stated)"}\n\nUnresolved questions: ${unresolved}`;
+}
+
 async function opportunityDevelopmentReadHandler(env: Env, actionName: OpportunityDevelopmentAction, text: string): Promise<string> {
   switch (actionName) {
     case "discover_opportunity":
@@ -189,11 +229,7 @@ async function opportunityDevelopmentReadHandler(env: Env, actionName: Opportuni
     case "research_opportunity":
       return researchOpportunity(env, text);
     case "assess_opportunity":
-      // TODO(intelligence): real AI-driven evidence reasoning per the Hat
-      // Definition's own Output contract (Notion) -- needs its own
-      // registered, governed AI task before this can produce a real
-      // answer rather than an explicit placeholder.
-      throw new Error(`business_development.opportunity_development.${actionName}: read handler not yet implemented -- draft manifest only.`);
+      return assessOpportunity(env, text);
     default:
       // qualify_opportunity is "internal" and develop_opportunity/
       // determine_next_move/handoff_to_sales/handoff_to_strategy are

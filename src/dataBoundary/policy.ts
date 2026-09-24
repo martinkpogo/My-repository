@@ -138,6 +138,17 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // undecided architectural question -- not resolved by this
   // classification.
   "business_development.research_opportunity": "business_sensitive",
+  // Architect-reviewed: payload is Martin's raw Workspace message text
+  // only, same as discover_opportunity/research_opportunity. Assessing
+  // strategic/commercial relevance, capability fit, evidence quality, and
+  // material unknowns is a different business judgment from
+  // qualify_opportunity's evidence-sufficiency threshold, but neither
+  // changes the underlying classification -- the AI boundary receives
+  // Martin-authored Workspace text, never a Handoff, Entity, contact, or
+  // other structured identity data. The evidence discipline (unresolved
+  // questions stay unresolved, never converted into invented facts) is an
+  // execution constraint on the reasoning task, not a sensitivity concern.
+  "business_development.assess_opportunity": "business_sensitive",
 };
 
 /**
