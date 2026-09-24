@@ -42,7 +42,14 @@ export type SemanticTaskId =
   // are registered (so the type/registry are internally consistent) but
   // not yet runnable in production.
   | "business_development.intake_classification"
-  | "business_development.hat_action_decision";
+  | "business_development.hat_action_decision"
+  // qualify_opportunity's real evidence-sufficiency judgment (and its
+  // Partnership/Growth equivalents once built) -- payload is the
+  // accumulated evidence text Martin has typed across turns, same
+  // category as the two Stage 1/2 tasks above. Sensitivity classification
+  // pending Architect review; UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY
+  // until then (fails closed).
+  | "business_development.opportunity_qualification";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

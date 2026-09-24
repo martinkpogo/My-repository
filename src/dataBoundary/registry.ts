@@ -190,6 +190,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Hat Action Decision",
     description: "Stage 2: picks which of the resolved Hat's own declared actions a request needs, per the generic Action Registry.",
   },
+  "business_development.opportunity_qualification": {
+    id: "business_development.opportunity_qualification",
+    name: "Business Development Opportunity Qualification",
+    description: "Applies the evidence threshold for Qualified / Held / Blocked to an in-flight BD opportunity's gathered evidence.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
