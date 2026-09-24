@@ -65,23 +65,26 @@ import { aiJson } from "../../ai";
  * facts Martin has actually supplied, never fabricating external
  * evidence, capability claims, or market facts.
  *
- * develop_opportunity is also real now (draftDevelopOpportunity/
- * proposeDevelopOpportunity/handleBDOpportunityDevelopApproval) --
- * unlike the read actions above, this is a "write" action with
- * requiresApproval: true, so it follows the same preview + Martin-
- * approval pattern as handoff_to_sales/handoff_to_strategy (build a
- * draft into pendingBDDevelop, present approve/reject buttons, only
- * record it into bdOpportunity.developedState once Martin approves) --
- * not the stateless single-reply shape the read actions use. Registered
- * as business_development.develop_opportunity, classified
- * business_sensitive pending Architect review (same payload category as
- * qualify_opportunity: the opportunity's signal + evidence + qualification
- * rationale, all Martin-typed text), UNCLASSIFIED in
- * PRODUCTION_TASK_SENSITIVITY until then (fails closed).
+ * develop_opportunity and determine_next_move are also real now
+ * (draftDevelopOpportunity/proposeDevelopOpportunity/
+ * handleBDOpportunityDevelopApproval and draftNextMove/proposeNextMove/
+ * handleBDOpportunityNextMoveApproval) -- unlike the read actions above,
+ * both are "write" actions with requiresApproval: true, so they follow
+ * the same preview + Martin-approval pattern as handoff_to_sales/
+ * handoff_to_strategy (build a draft into pendingBDDevelop/
+ * pendingBDNextMove, present approve/reject buttons, only record into
+ * bdOpportunity.developedState/nextMove once Martin approves) -- not the
+ * stateless single-reply shape the read actions use. develop_opportunity
+ * is classified business_sensitive (Architect-approved); determine_next_move
+ * (business_development.determine_next_move) is classified
+ * business_sensitive pending Architect review (same payload category:
+ * the opportunity's signal + evidence + qualification + developed state,
+ * all Martin-derived text), UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY
+ * until then (fails closed).
  *
- * What's still not decided here, left as a loud placeholder rather than
- * invented: determine_next_move's entry-handler logic is not yet
- * implemented -- still just a throw below.
+ * Every action on Opportunity Development now has real implementation --
+ * the remaining open items are Partnership Development/Growth & Market
+ * Development's stubbed Hats (below).
  *
  * NOTE: dispatch wiring (four chokepoints, including the approval
  * callback) is done -- see units/dispatch.ts, units/registry.ts, and
@@ -542,13 +545,124 @@ export async function handleBDOpportunityDevelopApproval(env: Env, state: WorkSt
 }
 
 /**
+ * Real next-action reasoning for determine_next_move, per the Hat
+ * Definition's own Output contract (Notion): "one governed next move,
+ * with rationale and any required human decision or approval." Grounded
+ * only in the opportunity's actual signal/evidence/qualification/
+ * developed state -- never invents a next move not implied by what's
+ * been established. Drafts only; proposeNextMove below presents it for
+ * Martin's approval, matching requiresApproval: true.
+ */
+async function draftNextMove(env: Env, opportunity: BDOpportunityState): Promise<{ nextMove?: string; rationale?: string; requiresHumanDecision?: string } | null> {
+  const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+
+  return aiJson(env, {
+    taskId: "business_development.determine_next_move",
+    system: `You identify the single next concrete action required to advance an active Business Development opportunity, based on the evidence already established and remaining gates.
+
+Ground this only in the opportunity's actual signal, evidence, qualification, and development state -- never invent a next move not implied by what's actually been established. If a human decision or approval beyond this recommendation is required before the move can happen, name it explicitly.
+
+Return JSON:
+{"nextMove": "<one concrete next action>", "rationale": "<why this is the right next move, grounded in what's known>", "requiresHumanDecision": "<any decision or approval Martin still needs to make before this can happen, or null if none>"}`,
+    user: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}\n\nDevelopment state: ${opportunity.developedState ?? "(not yet developed)"}`,
+    light: true,
+  });
+}
+
+/**
+ * Proposes (never auto-commits) a determine_next_move recommendation --
+ * mirrors proposeDevelopOpportunity's preview/approval pattern exactly:
+ * build a preview into pendingBDNextMove, present Telegram
+ * approve/reject buttons, and only record it into
+ * bdOpportunity.nextMove in handleBDOpportunityNextMoveApproval once
+ * Martin approves.
+ */
+async function proposeNextMove(env: Env, state: WorkState): Promise<WorkState> {
+  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  const draft = await draftNextMove(env, opportunity);
+
+  if (!draft || !draft.nextMove) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME },
+      "Couldn't determine a next move from that -- try qualifying or developing the opportunity first, or share more about where it stands.",
+    );
+    return state;
+  }
+
+  const nextMoveSummary = `Next move: ${draft.nextMove}\n\nRationale: ${draft.rationale ?? "(not stated)"}${draft.requiresHumanDecision ? `\n\nRequires your decision: ${draft.requiresHumanDecision}` : ""}`;
+
+  state.pendingBDNextMove = { nextMoveSummary };
+
+  await logActivity(env, {
+    entry: "Business Development recommended a next move -- pending approval",
+    type: "Decision",
+    area: "Business Development",
+    decisionRationale: nextMoveSummary,
+    outcome: "Blocked",
+  });
+
+  const nextMoveMessage = `*Recommended next move:*\n${nextMoveSummary}\n\nThis is a recommendation, not yet approved. Approve this?`;
+  const nextMoveButtons = [
+    [
+      { text: "✅ Approve", callback_data: `bdnextmove:${state.workId}:approve` },
+      { text: "🚫 Discard", callback_data: `bdnextmove:${state.workId}:reject` },
+    ],
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, nextMoveMessage, nextMoveButtons);
+  return state;
+}
+
+/**
+ * Resolves determine_next_move's approve/reject callback -- mirrors
+ * handleBDOpportunityDevelopApproval exactly. Approval records the
+ * recommendation into bdOpportunity.nextMove; rejection discards it with
+ * no state change.
+ */
+export async function handleBDOpportunityNextMoveApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const pending = state.pendingBDNextMove;
+
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "There's no pending next-move recommendation to act on.");
+    return state;
+  }
+
+  if (!approved) {
+    state.pendingBDNextMove = undefined;
+    await logActivity(env, {
+      entry: "Business Development next-move recommendation declined by Martin",
+      type: "Decision",
+      area: "Business Development",
+      decisionRationale: "Martin chose not to commit this next move.",
+      outcome: "Complete",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "Okay -- that next move wasn't committed.");
+    return state;
+  }
+
+  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  state.bdOpportunity = { ...opportunity, nextMove: pending.nextMoveSummary };
+  state.pendingBDNextMove = undefined;
+
+  await logActivity(env, {
+    entry: "Business Development next move approved",
+    type: "Activity",
+    area: "Business Development",
+    activity: "Opportunity Development Hat's next-move recommendation approved by Martin.",
+    outcome: "Active",
+  });
+  await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "Next move committed.");
+  return state;
+}
+
+/**
  * Entry handler for Opportunity Development's "internal" and "write"
  * actions. qualify_opportunity routes here (not readHandler) because it
  * needs the WorkSession to pause/resume on Held -- see
- * runQualifyOpportunity. handoff_to_sales/handoff_to_strategy and
- * develop_opportunity only propose their draft/preview here -- the
- * actual state change happens in their respective approval handlers
- * once Martin approves.
+ * runQualifyOpportunity. handoff_to_sales/handoff_to_strategy,
+ * develop_opportunity, and determine_next_move only propose their
+ * draft/preview here -- the actual state change happens in their
+ * respective approval handlers once Martin approves.
  */
 async function opportunityDevelopmentEntryHandler(
   env: Env,
@@ -572,8 +686,14 @@ async function opportunityDevelopmentEntryHandler(
     return proposeDevelopOpportunity(env, state);
   }
 
-  // TODO: determine_next_move -- not yet implemented.
-  throw new Error(`business_development.opportunity_development.${actionName}: entry handler not yet implemented -- draft manifest only.`);
+  if (actionName === "determine_next_move") {
+    return proposeNextMove(env, state);
+  }
+
+  // discover_opportunity/research_opportunity/assess_opportunity are
+  // declared "read" -- dispatchAction never routes them here; reaching
+  // this branch means the caller didn't respect the declared consequence.
+  throw new Error(`${actionName}: not an internal/write action on Opportunity Development.`);
 }
 
 /**
