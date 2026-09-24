@@ -369,6 +369,23 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * client identity to begin with (Entity/Matters/Proposals access is
  * exclusively the isolated Sales Executive project's now).
  *
+ * business_development.*: all eighteen registered Business Development
+ * tasks (intake_classification, hat_action_decision, and the five-task
+ * families for each of Opportunity/Partnership/Growth & Market
+ * Development) operate on Martin's own raw Workspace/Cowork text or the
+ * opportunity's own accumulated signal/evidence (BDOpportunityState --
+ * `signal: string`, `evidence: string[]`, `developedState?: string`,
+ * every field free text Martin himself supplied). BD has no incoming
+ * Handoff pickup path at all and never reads an Entity/Matter record --
+ * confirmed by direct inspection of businessDevelopmentManifest.ts and
+ * dispatch.ts's Stage 1/2 routing, the same payload/provenance review
+ * that established these tasks' PRODUCTION_TASK_SENSITIVITY entries.
+ * TOKEN_SAFE_RUNTIME is the correct default here for the same reason it
+ * is marketing.intake_classification/marketing.hat_action_decision's
+ * default above -- content-level detectors remain the backstop against
+ * Martin typing real identity into free text, same as every other
+ * TOKEN_SAFE_RUNTIME task in this table.
+ *
  * action.google_doc_intake / action.google_doc_comment_edit /
  * action.google_sheet_intake / action.google_sheet_comment_edit: operate on
  * Martin's own request text or his own Google Doc/Sheet content for
@@ -441,6 +458,24 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "chat.general_reply": "TOKEN_SAFE_RUNTIME",
   "marketing.intake_classification": "TOKEN_SAFE_RUNTIME",
   "marketing.hat_action_decision": "TOKEN_SAFE_RUNTIME",
+  "business_development.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "business_development.hat_action_decision": "TOKEN_SAFE_RUNTIME",
+  "business_development.opportunity_qualification": "TOKEN_SAFE_RUNTIME",
+  "business_development.discover_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.research_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.assess_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.develop_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.determine_next_move": "TOKEN_SAFE_RUNTIME",
+  "business_development.discover_partner": "TOKEN_SAFE_RUNTIME",
+  "business_development.research_partner": "TOKEN_SAFE_RUNTIME",
+  "business_development.assess_partnership": "TOKEN_SAFE_RUNTIME",
+  "business_development.qualify_partnership": "TOKEN_SAFE_RUNTIME",
+  "business_development.develop_partnership": "TOKEN_SAFE_RUNTIME",
+  "business_development.discover_growth_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.research_market": "TOKEN_SAFE_RUNTIME",
+  "business_development.assess_market_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.qualify_growth_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.develop_growth_opportunity": "TOKEN_SAFE_RUNTIME",
   "research.context_relevance": "TOKEN_SAFE_RUNTIME",
   "research.protocol_selection": "TOKEN_SAFE_RUNTIME",
   "research.plan_generation": "TOKEN_SAFE_RUNTIME",
