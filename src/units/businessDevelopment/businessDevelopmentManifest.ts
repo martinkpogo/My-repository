@@ -55,26 +55,33 @@ import { aiJson } from "../../ai";
  * so Hat resolution genuinely exercises three Hats, not one -- but their
  * handlers are explicit stubs pending the same treatment.
  *
- * All four of this Hat's evidence-pipeline actions now have real,
- * registered AI reasoning: discover_opportunity, research_opportunity,
+ * All four of this Hat's evidence-pipeline actions have real, registered
+ * AI reasoning: discover_opportunity, research_opportunity,
  * assess_opportunity, and qualify_opportunity (discoverOpportunity/
- * researchOpportunity/assessOpportunity/judgeOpportunityQualification).
- * qualify_opportunity and discover_opportunity are Architect-approved and
- * classified business_sensitive; research_opportunity and
- * assess_opportunity are classified business_sensitive pending Architect
- * review (same payload category as every other BD task: Martin's own
- * typed text, never a Handoff/Entity/contact object), UNCLASSIFIED in
- * PRODUCTION_TASK_SENSITIVITY until then, so real calls fail closed
- * (UNRESOLVED_POLICY_HOLD) rather than running unreviewed. BD has no live
+ * researchOpportunity/assessOpportunity/judgeOpportunityQualification) --
+ * all classified business_sensitive (Architect-approved). BD has no live
  * web-search/external-research capability wired up (unlike R&I or Lead
- * Discovery) -- both research_opportunity and assess_opportunity only
- * reason over facts Martin has actually supplied, never fabricating
- * external evidence, capability claims, or market facts.
+ * Discovery) -- research_opportunity/assess_opportunity only reason over
+ * facts Martin has actually supplied, never fabricating external
+ * evidence, capability claims, or market facts.
+ *
+ * develop_opportunity is also real now (draftDevelopOpportunity/
+ * proposeDevelopOpportunity/handleBDOpportunityDevelopApproval) --
+ * unlike the read actions above, this is a "write" action with
+ * requiresApproval: true, so it follows the same preview + Martin-
+ * approval pattern as handoff_to_sales/handoff_to_strategy (build a
+ * draft into pendingBDDevelop, present approve/reject buttons, only
+ * record it into bdOpportunity.developedState once Martin approves) --
+ * not the stateless single-reply shape the read actions use. Registered
+ * as business_development.develop_opportunity, classified
+ * business_sensitive pending Architect review (same payload category as
+ * qualify_opportunity: the opportunity's signal + evidence + qualification
+ * rationale, all Martin-typed text), UNCLASSIFIED in
+ * PRODUCTION_TASK_SENSITIVITY until then (fails closed).
  *
  * What's still not decided here, left as a loud placeholder rather than
- * invented: develop_opportunity/determine_next_move's entry-handler
- * logic (write, requiresApproval: true) is not yet implemented -- they
- * mutate bdOpportunity.developedState, still just a throw below.
+ * invented: determine_next_move's entry-handler logic is not yet
+ * implemented -- still just a throw below.
  *
  * NOTE: dispatch wiring (four chokepoints, including the approval
  * callback) is done -- see units/dispatch.ts, units/registry.ts, and
@@ -419,12 +426,129 @@ export async function handleBDOpportunityHandoffApproval(env: Env, state: WorkSt
 }
 
 /**
+ * Real drafting reasoning for develop_opportunity, per the Hat
+ * Definition's own Output contract (Notion): "developed opportunity
+ * state and defined next action," establishing stakeholders, value
+ * hypothesis, relationship or route, dependencies, risks, evidence gaps,
+ * and concrete next step. Grounded only in the opportunity's actual
+ * signal/evidence/qualification -- never fabricates stakeholders or
+ * routes not implied by what's been gathered. This drafts only; it never
+ * commits anything itself -- proposeDevelopOpportunity below presents it
+ * for Martin's approval, matching requiresApproval: true.
+ */
+async function draftDevelopOpportunity(
+  env: Env,
+  opportunity: BDOpportunityState,
+): Promise<{ stakeholders?: string; valueHypothesis?: string; route?: string; dependencies?: string; risks?: string; nextStep?: string } | null> {
+  const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+
+  return aiJson(env, {
+    taskId: "business_development.develop_opportunity",
+    system: `You take a qualified Business Development opportunity forward by drafting its stakeholders, value hypothesis, relationship or route, dependencies, risks, and a concrete next step.
+
+Ground everything only in the opportunity's actual signal, gathered evidence, and qualification rationale -- never invent stakeholders, routes, or facts not implied by what's actually been established. Where something can't be determined from what's given, say so plainly rather than guessing.
+
+Return JSON:
+{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<why this could create value for ENIG>", "route": "<the plausible path forward>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
+    user: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}`,
+    light: true,
+  });
+}
+
+/**
+ * Proposes (never auto-commits) a develop_opportunity draft -- mirrors
+ * proposeOpportunityHandoff's preview/approval pattern exactly: build a
+ * preview into pendingBDDevelop, present Telegram approve/reject
+ * buttons, and only record it into bdOpportunity.developedState in
+ * handleBDOpportunityDevelopApproval once Martin approves.
+ */
+async function proposeDevelopOpportunity(env: Env, state: WorkState): Promise<WorkState> {
+  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  const draft = await draftDevelopOpportunity(env, opportunity);
+
+  if (!draft) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME },
+      "Couldn't draft a development plan from that -- try qualifying the opportunity first, or share more about it.",
+    );
+    return state;
+  }
+
+  const draftSummary = `Stakeholders: ${draft.stakeholders ?? "(not stated)"}\nValue hypothesis: ${draft.valueHypothesis ?? "(not stated)"}\nRoute: ${draft.route ?? "(not stated)"}\nDependencies: ${draft.dependencies ?? "(not stated)"}\nRisks: ${draft.risks ?? "(not stated)"}\nNext step: ${draft.nextStep ?? "(not stated)"}`;
+
+  state.pendingBDDevelop = { draftSummary };
+
+  await logActivity(env, {
+    entry: "Business Development drafted an opportunity development plan -- pending approval",
+    type: "Decision",
+    area: "Business Development",
+    decisionRationale: draftSummary,
+    outcome: "Blocked",
+  });
+
+  const draftMessage = `*Draft development plan:*\n${draftSummary}\n\nThis is a draft, not yet committed. Approve this?`;
+  const draftButtons = [
+    [
+      { text: "✅ Approve", callback_data: `bddevelop:${state.workId}:approve` },
+      { text: "🚫 Discard", callback_data: `bddevelop:${state.workId}:reject` },
+    ],
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, draftMessage, draftButtons);
+  return state;
+}
+
+/**
+ * Resolves develop_opportunity's approve/reject callback -- mirrors
+ * handleBDOpportunityHandoffApproval exactly. Approval records the draft
+ * into bdOpportunity.developedState (the only thing this action's
+ * requiresApproval: true actually gates); rejection discards it with no
+ * state change.
+ */
+export async function handleBDOpportunityDevelopApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const pending = state.pendingBDDevelop;
+
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "There's no pending development draft to act on.");
+    return state;
+  }
+
+  if (!approved) {
+    state.pendingBDDevelop = undefined;
+    await logActivity(env, {
+      entry: "Business Development development draft declined by Martin",
+      type: "Decision",
+      area: "Business Development",
+      decisionRationale: "Martin chose not to commit this development plan.",
+      outcome: "Complete",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "Okay -- that development plan wasn't committed.");
+    return state;
+  }
+
+  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  state.bdOpportunity = { ...opportunity, developedState: pending.draftSummary };
+  state.pendingBDDevelop = undefined;
+
+  await logActivity(env, {
+    entry: "Business Development opportunity development plan approved",
+    type: "Activity",
+    area: "Business Development",
+    activity: "Opportunity Development Hat's development draft approved by Martin.",
+    outcome: "Active",
+  });
+  await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "Development plan committed.");
+  return state;
+}
+
+/**
  * Entry handler for Opportunity Development's "internal" and "write"
  * actions. qualify_opportunity routes here (not readHandler) because it
  * needs the WorkSession to pause/resume on Held -- see
- * runQualifyOpportunity. handoff_to_sales/handoff_to_strategy only
- * propose the handoff here -- the actual Handoff is created in
- * handleBDOpportunityHandoffApproval once Martin approves.
+ * runQualifyOpportunity. handoff_to_sales/handoff_to_strategy and
+ * develop_opportunity only propose their draft/preview here -- the
+ * actual state change happens in their respective approval handlers
+ * once Martin approves.
  */
 async function opportunityDevelopmentEntryHandler(
   env: Env,
@@ -444,10 +568,12 @@ async function opportunityDevelopmentEntryHandler(
     return proposeOpportunityHandoff(env, state, "Strategy", "Strategy Analyst", text);
   }
 
-  // TODO: develop_opportunity/determine_next_move -- these mutate
-  // bdOpportunity.developedState; not yet implemented beyond the type
-  // existing (see BDOpportunityState.developedState).
-  throw new Error(`business_development.opportunity_development.${actionName}: entry handler not yet implemented beyond qualify/handoff actions -- draft manifest only.`);
+  if (actionName === "develop_opportunity") {
+    return proposeDevelopOpportunity(env, state);
+  }
+
+  // TODO: determine_next_move -- not yet implemented.
+  throw new Error(`business_development.opportunity_development.${actionName}: entry handler not yet implemented -- draft manifest only.`);
 }
 
 /**

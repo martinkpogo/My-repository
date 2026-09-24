@@ -149,6 +149,20 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // questions stay unresolved, never converted into invented facts) is an
   // execution constraint on the reasoning task, not a sensitivity concern.
   "business_development.assess_opportunity": "business_sensitive",
+  // Architect-reviewed: payload is the opportunity's signal + evidence +
+  // qualification result + qualification rationale, all derived from
+  // Martin's Workspace input -- same category as every other BD task.
+  // requiresApproval: true (this is a "write" action) does not change the
+  // Data Boundary classification -- what the AI may receive, whether the
+  // resulting action is privileged, and whether Martin must approve it
+  // are three separate controls. The AI only drafts a proposed state;
+  // only Martin's approval (handleBDOpportunityDevelopApproval) commits
+  // it to bdOpportunity.developedState, so the AI itself never exercises
+  // the privileged consequence. The grounding constraint (never
+  // manufacture stakeholders/routes/facts not supported by the evidence)
+  // is an execution constraint on the reasoning task, not a sensitivity
+  // concern.
+  "business_development.develop_opportunity": "business_sensitive",
 };
 
 /**

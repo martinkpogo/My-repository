@@ -320,6 +320,8 @@ export class WorkSession extends DurableObject<Env> {
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
         case "bdopportunityhandoff":
           return businessDevelopment.handleBDOpportunityHandoffApproval(this.env, state, value === "approve");
+        case "bddevelop":
+          return businessDevelopment.handleBDOpportunityDevelopApproval(this.env, state, value === "approve");
         case "sprop": {
           // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
           // ":") specifically so it survives index.ts's plain

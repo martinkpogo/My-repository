@@ -65,7 +65,13 @@ export type SemanticTaskId =
   // every other BD task above. Sensitivity classification pending
   // Architect review; UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY until
   // then (fails closed).
-  | "business_development.assess_opportunity";
+  | "business_development.assess_opportunity"
+  // develop_opportunity's real drafting reasoning -- payload is the
+  // opportunity's signal + gathered evidence + qualification rationale,
+  // same shape as qualify_opportunity's payload, all Martin-typed text.
+  // Sensitivity classification pending Architect review; UNCLASSIFIED in
+  // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
+  | "business_development.develop_opportunity";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

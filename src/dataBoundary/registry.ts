@@ -210,6 +210,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Assess Opportunity",
     description: "Determines whether a researched signal has a substantive reason for ENIG to pursue it, across strategic/commercial relevance, capability fit, evidence quality, and material unknowns.",
   },
+  "business_development.develop_opportunity": {
+    id: "business_development.develop_opportunity",
+    name: "Business Development Develop Opportunity",
+    description: "Drafts stakeholders, value hypothesis, route, dependencies, risks, and next step for a qualified BD opportunity, pending Martin's approval.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
