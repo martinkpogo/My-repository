@@ -470,6 +470,16 @@ export interface WorkState {
     draftSummary: string;
   };
   /**
+   * A drafted next-move recommendation for an active BD opportunity,
+   * pending Martin's explicit approval before it's recorded into
+   * bdOpportunity.nextMove -- mirrors pendingBDDevelop's own preview/
+   * approval gate exactly (see handleBDOpportunityNextMoveApproval). A
+   * recommendation is never treated as authorization to commit it.
+   */
+  pendingBDNextMove?: {
+    nextMoveSummary: string;
+  };
+  /**
    * The Strategy Proposal's own approval-lifecycle state, per the canonical
    * commercial flow (Sales -> Strategy -> Finance). This is authoritative
    * for whether an Approve/Refine/Reject callback may act at all --

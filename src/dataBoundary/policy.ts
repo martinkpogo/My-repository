@@ -163,6 +163,19 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // is an execution constraint on the reasoning task, not a sensitivity
   // concern.
   "business_development.develop_opportunity": "business_sensitive",
+  // Architect-reviewed: payload is the opportunity's signal + evidence +
+  // qualification/rationale + developed state, all Martin-derived text --
+  // no Entity, Handoff, contact record, or other structured identity
+  // data crosses the AI boundary. Including developedState doesn't
+  // change the classification. Same requiresApproval: true / Data
+  // Boundary separation as develop_opportunity: draftNextMove only
+  // proposes; only Martin's approval (handleBDOpportunityNextMoveApproval)
+  // commits the result to bdOpportunity.nextMove, so the AI itself never
+  // exercises the privileged consequence. The grounding rule (derive
+  // only from established state, surface unresolved human decisions
+  // rather than inventing a route) is an execution constraint, not a
+  // sensitivity concern.
+  "business_development.determine_next_move": "business_sensitive",
 };
 
 /**

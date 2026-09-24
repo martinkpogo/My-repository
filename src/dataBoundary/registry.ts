@@ -215,6 +215,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Develop Opportunity",
     description: "Drafts stakeholders, value hypothesis, route, dependencies, risks, and next step for a qualified BD opportunity, pending Martin's approval.",
   },
+  "business_development.determine_next_move": {
+    id: "business_development.determine_next_move",
+    name: "Business Development Determine Next Move",
+    description: "Identifies the next concrete action required to advance an active BD opportunity, pending Martin's approval.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {

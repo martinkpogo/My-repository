@@ -23,4 +23,6 @@ export interface BDOpportunityState {
   qualificationRationale?: string;
   /** Set once develop_* has run: stakeholders, value hypothesis, route, dependencies, risks, next step, as free text pending a more structured shape once develop_* is actually implemented. */
   developedState?: string;
+  /** Set once determine_next_move has been approved: the concrete next action to advance this opportunity, as free text. */
+  nextMove?: string;
 }
