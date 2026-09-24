@@ -220,6 +220,31 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Determine Next Move",
     description: "Identifies the next concrete action required to advance an active BD opportunity, pending Martin's approval.",
   },
+  "business_development.discover_partner": {
+    id: "business_development.discover_partner",
+    name: "Business Development Discover Partner",
+    description: "Identifies a candidate strategic relationship or partnership from a signal in Martin's request text.",
+  },
+  "business_development.research_partner": {
+    id: "business_development.research_partner",
+    name: "Business Development Research Partner",
+    description: "Organizes and analyzes evidence for a named partner/relationship from Martin's own supplied facts, never fabricating unstated evidence.",
+  },
+  "business_development.assess_partnership": {
+    id: "business_development.assess_partnership",
+    name: "Business Development Assess Partnership",
+    description: "Determines whether a researched partnership has a substantive reason for ENIG to pursue it, across mutual value, strategic fit, and relationship viability.",
+  },
+  "business_development.qualify_partnership": {
+    id: "business_development.qualify_partnership",
+    name: "Business Development Qualify Partnership",
+    description: "Applies the evidence threshold for Qualified / Held / Blocked to an in-flight partnership's gathered evidence.",
+  },
+  "business_development.develop_partnership": {
+    id: "business_development.develop_partnership",
+    name: "Business Development Develop Partnership",
+    description: "Drafts stakeholders, value proposition, relationship model, route, dependencies, and risks for a qualified partnership, pending Martin's approval.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {

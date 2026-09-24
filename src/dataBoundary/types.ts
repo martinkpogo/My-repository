@@ -77,7 +77,25 @@ export type SemanticTaskId =
   // all Martin-derived text, same category as every other BD task.
   // Sensitivity classification pending Architect review; UNCLASSIFIED in
   // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
-  | "business_development.determine_next_move";
+  | "business_development.determine_next_move"
+  // Partnership Development's discover/research/assess/qualify/develop
+  // reasoning -- same payload shape as their Opportunity Development
+  // counterparts (Martin-derived text: request text, or the
+  // partnership's signal/evidence/qualification), partnership-flavored
+  // wording rather than reused generic prompts, per Notion's Hat
+  // Definition treating Partnership Development as its own specialized
+  // Hat, not an alias of Opportunity Development. determine_next_move
+  // and the two handoff_to_* actions reuse the existing Hat-agnostic
+  // business_development.determine_next_move task and the
+  // SemanticTaskId-free preview/approval Handoff pattern respectively --
+  // no new registration needed for those three. Sensitivity
+  // classification pending Architect review; UNCLASSIFIED in
+  // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
+  | "business_development.discover_partner"
+  | "business_development.research_partner"
+  | "business_development.assess_partnership"
+  | "business_development.qualify_partnership"
+  | "business_development.develop_partnership";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely
