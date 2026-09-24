@@ -117,6 +117,14 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // data. The Qualified/Held/Blocked outcome is a business-process result,
   // not a data-sensitivity category, and never changes this rating.
   "business_development.opportunity_qualification": "business_sensitive",
+  // Architect-reviewed: payload is Martin's raw Workspace message text only
+  // -- simpler than opportunity_qualification's payload (no accumulated
+  // evidence structure or additional object context). Substantive
+  // reasoning rather than routing does not change the sensitivity class,
+  // same rationale as opportunity_qualification -- it interprets Martin's
+  // internal ENIG request, never an Entity, Handoff, contact record, or
+  // existing client-confidential artifact.
+  "business_development.discover_opportunity": "business_sensitive",
 };
 
 /**
