@@ -255,7 +255,17 @@ export interface WorkState {
     | "strategy_direct_request_matter"
     | "finance_direct_request_matter"
     | "finance_direct_request_context"
-    | "sales_proposal_revision";
+    | "sales_proposal_revision"
+    /**
+     * Set when a Business Development qualify_* action (any of the three
+     * Hats' qualify_opportunity/qualify_partnership/qualify_growth_opportunity)
+     * returns Held -- an "internal" consequence action pausing on missing
+     * evidence, never an approval gate (see actionRegistry.ts's
+     * consequence/approval separation). Resumed by supplying the missing
+     * evidence in reply; bdOpportunity below carries what was already
+     * gathered.
+     */
+    | "bd_opportunity_evidence_gap";
   createdAt: string;
   updatedAt: string;
 
@@ -431,6 +441,9 @@ export interface WorkState {
   strategyProposal?: import("./units/strategy/strategyAnalyst").StrategyProposal;
   /** Every superseded proposal version for this work item, oldest first -- see strategyProposal's doc comment. */
   strategyProposalHistory?: import("./units/strategy/strategyAnalyst").StrategyProposal[];
+
+  /** Business Development's in-flight opportunity state -- see BDOpportunityState's doc comment. Execution state (persisted for pause/resume across a qualify_* hold), not governed business state. */
+  bdOpportunity?: import("./units/businessDevelopment/types").BDOpportunityState;
   /**
    * The Strategy Proposal's own approval-lifecycle state, per the canonical
    * commercial flow (Sales -> Strategy -> Finance). This is authoritative
