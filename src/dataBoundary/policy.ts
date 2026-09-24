@@ -176,6 +176,33 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // rather than inventing a route) is an execution constraint, not a
   // sensitivity concern.
   "business_development.determine_next_move": "business_sensitive",
+  // Architect-reviewed (Partnership Development batch): payload is
+  // Martin's raw Workspace message text (discover_partner/
+  // research_partner/assess_partnership) or the partnership's
+  // accumulated signal/evidence (qualify_partnership/develop_partnership)
+  // -- structurally identical in kind to their already-classified
+  // Opportunity Development counterparts, no externally sourced
+  // counterparty record or structured identity data. Architect's
+  // explicit ruling: treating Partnership Development's payloads as the
+  // same sensitivity class as Opportunity Development's is sound on the
+  // payload/provenance actually confirmed here; the subject-matter
+  // difference (partnership vs. opportunity) does not by itself create a
+  // new Data Boundary class. Classify the data actually crossing the AI
+  // boundary, not the maximum sensitivity the business subject could
+  // potentially acquire later -- if a future payload ever carries a named
+  // counterparty contact, confidential counterparty-supplied terms, or
+  // other non-public contractual/identity data, that content would need
+  // reclassification (or escalation) on its own facts, not a pre-emptive
+  // bump here. determine_next_move and the two handoff_to_* actions reuse
+  // the existing Hat-agnostic business_development.determine_next_move
+  // task and the SemanticTaskId-free Handoff preview/approval pattern --
+  // Architect confirmed no separate SemanticTaskId or sensitivity entry
+  // is needed for their reuse.
+  "business_development.discover_partner": "business_sensitive",
+  "business_development.research_partner": "business_sensitive",
+  "business_development.assess_partnership": "business_sensitive",
+  "business_development.qualify_partnership": "business_sensitive",
+  "business_development.develop_partnership": "business_sensitive",
 };
 
 /**
