@@ -10,6 +10,7 @@ import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+import { resolveMatterFromText } from "../../identityResolution";
 
 /** Opens Finance's own commercial-judgment block within the Finance -> Sales Handoff's combined "Verified Facts & Sources" text -- see handleQuoteApproval. */
 export const FINANCE_JUDGMENT_START = "=== FINANCE COMMERCIAL JUDGMENT ===";
@@ -197,6 +198,106 @@ export async function resolveHandoffBusinessContext(
   }
 }
 
+/**
+ * Entry point for a fresh Finance quote Martin originates directly in
+ * Cowork chat, with no upstream Handoff -- the direct_request origination
+ * path (ENIG Operating Model design doc, Migration path Step 4), mirroring
+ * strategy.handleDirectRequest exactly. Martin must always name an
+ * existing Matter explicitly (its ENIG token, e.g. "MAT-20") -- there is
+ * no upstream Unit here to have already established one -- resolved via
+ * the same shared resolveMatterFromText Strategy uses, never AI-guessed.
+ * Once resolved, joins the identical shared judgeQuote every Handoff
+ * pickup already uses -- no parallel pricing implementation.
+ *
+ * A direct-entry quote completes standalone once approved: it never
+ * carries a Strategy boundary representation (there is no upstream
+ * Strategy -> Finance Handoff to read one from) and never creates a
+ * Finance -> Sales Handoff -- see handleQuoteApproval's own handling of
+ * !state.handoffId.
+ */
+export async function handleDirectRequest(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const resolved = await resolveMatterFromText(env, text);
+  if (!resolved) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      "Which Matter is this about? Include its token (e.g. MAT-20) and I'll pick up the pricing assessment from there.",
+    );
+    state.stage = "finance_blocked";
+    state.awaiting = "finance_direct_request_matter";
+    return state;
+  }
+
+  const evalResult = evaluateHandoffContext(
+    {
+      entityToken: resolved.entityToken,
+      matterToken: resolved.matterToken,
+      sanitizedContext: text,
+      provenance: "martin:direct_request",
+      requiredCategory: "historical business-impact range for value-based pricing",
+    },
+    "finance.quote_judgment",
+  );
+  if (!evalResult.success) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      `Couldn't start this pricing assessment.\n\n${evalResult.insufficientContext.reason}`,
+    );
+    state.stage = "finance_blocked";
+    state.awaiting = "finance_direct_request_matter";
+    return state;
+  }
+
+  // Token resolution has succeeded at this point -- any further hold
+  // inside judgeQuote (insufficient evidence, failed validation) is about
+  // evidence sufficiency, not Matter identity, so it must route to
+  // handleDirectRequestContext, never back through token resolution.
+  state.entryType = "direct_request";
+  state.financeJudgmentContext = evalResult.contract.sanitizedContext;
+
+  return judgeQuote(env, state, {
+    entityToken: evalResult.contract.entityToken,
+    matterToken: evalResult.contract.matterToken ?? "",
+    judgmentContext: evalResult.contract.sanitizedContext,
+    financeThreadId: state.threadId,
+    awaitingOnInsufficient: "finance_direct_request_context",
+    activityLabel: "started a pricing assessment directly from chat (no upstream Handoff)",
+  });
+}
+
+/**
+ * Continuation once a direct request was held for a missing/unresolved
+ * Matter token -- re-attempts resolution against Martin's follow-up text
+ * exactly as handleDirectRequest does on first entry, rather than a
+ * separate, drifting implementation.
+ */
+export async function handleDirectRequestClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  return handleDirectRequest(env, state, text);
+}
+
+/**
+ * Continuation once a direct request's Matter was resolved but judgeQuote
+ * held for insufficient evidence -- appends Martin's follow-up to the
+ * context already established (state.financeJudgmentContext, this work
+ * item's own source of truth, since there is no Handoff record to
+ * re-read it from) and re-runs judgeQuote, mirroring handleQuoteRedoReason's
+ * augmentation pattern for the Handoff-based path.
+ */
+export async function handleDirectRequestContext(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const augmentedContext = `${state.financeJudgmentContext ?? ""}\n\nAdditional value context: ${text}`;
+  state.financeJudgmentContext = augmentedContext;
+
+  return judgeQuote(env, state, {
+    entityToken: state.entityToken ?? "",
+    matterToken: state.matterToken ?? "",
+    judgmentContext: augmentedContext,
+    financeThreadId: state.financeThreadId ?? state.threadId,
+    awaitingOnInsufficient: "finance_direct_request_context",
+    activityLabel: "resumed a directly-requested pricing assessment following Martin's additional context",
+  });
+}
+
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
   // Follows wherever this session's home chat/thread already is (Martin's
   // DM by default -- see discoverPendingFinanceHandoffs) rather than
@@ -335,7 +436,9 @@ async function judgeQuote(
     return state;
   }
 
-  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
+  if (state.handoffId) {
+    await updateHandoff(env, state.handoffId, { Status: select("Picked-up") });
+  }
   await logActivity(env, {
     entry: `Finance ${activityLabel}: ${matterToken}`,
     type: "Activity",
@@ -366,10 +469,12 @@ async function judgeQuote(
 
   if (holdReason !== null) {
     const reason = holdReason;
-    await updateHandoff(env, state.handoffId!, {
-      Status: select("Held"),
-      "Open Questions": richText(reason),
-    });
+    if (state.handoffId) {
+      await updateHandoff(env, state.handoffId, {
+        Status: select("Held"),
+        "Open Questions": richText(reason),
+      });
+    }
     await logActivity(env, {
       entry: `Handoff held — insufficient value context: ${matterToken}`,
       type: "Blocker",
@@ -398,15 +503,17 @@ async function judgeQuote(
   const currency = judgement!.currency!;
   const rationale = judgement!.rationale ?? "";
 
-  await updateHandoff(env, state.handoffId!, {
-    Status: select("Closed"),
-    "Work Completed": richText(
-      `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
-        0,
-        1900,
+  if (state.handoffId) {
+    await updateHandoff(env, state.handoffId, {
+      Status: select("Closed"),
+      "Work Completed": richText(
+        `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
+          0,
+          1900,
+        ),
       ),
-    ),
-  });
+    });
+  }
   await logActivity(env, {
     entry: `Quote judged: ${currency} ${price} — ${matterToken}`,
     type: "Decision",
@@ -426,13 +533,21 @@ async function judgeQuote(
   if (financeThreadId !== undefined) {
     await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
   }
-  const quoteMessage = `*Finance quote ready* for *${entityToken}*: ${currency} ${price}\n\nRationale: ${rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`;
-  const quoteButtons = [
-    [
-      { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
-      { text: "🔁 Redo", callback_data: `quote:${state.workId}:redo` },
-    ],
-  ];
+  // A direct-entry quote (no upstream Handoff) has no Redo loop yet -- see
+  // handleQuoteApproval's own doc comment on its "!approved" branch -- and
+  // never routes to Sales on approval, so its message/buttons say so
+  // rather than promising either.
+  const quoteMessage = state.handoffId
+    ? `*Finance quote ready* for *${entityToken}*: ${currency} ${price}\n\nRationale: ${rationale}\n\nApprove this quote to send it to Sales for the Draft Proposal?`
+    : `*Finance quote ready* for *${entityToken}*: ${currency} ${price}\n\nRationale: ${rationale}\n\nApprove this quote?`;
+  const quoteButtons = state.handoffId
+    ? [
+        [
+          { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
+          { text: "🔁 Redo", callback_data: `quote:${state.workId}:redo` },
+        ],
+      ]
+    : [[{ text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` }]];
   await sendWorkspaceHatMessage(env, { ...state, hat: "Value-Based Pricing Assessor" }, quoteMessage, quoteButtons);
   state.pendingActionSummary = {
     label: `Finance Quote: ${entityToken}`,
@@ -510,7 +625,21 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   state.pendingActionSummary = undefined;
 
   if (!approved) {
-    await updateHandoff(env, state.handoffId!, {
+    // A direct-entry quote (no upstream Handoff) has no Redo loop yet --
+    // its own quoteButtons omit this button, so this only fires on a
+    // stale callback. Fail closed with a clear message rather than
+    // crashing on the unconditional updateHandoff below, which assumes a
+    // Handoff exists.
+    if (!state.handoffId) {
+      await sendWorkspaceHatMessage(
+        env,
+        { ...state, hat: "Value-Based Pricing Assessor" },
+        `Redo isn't yet supported for a directly-requested quote -- send a new direct request with the additional context and I'll reassess from scratch.`,
+      );
+      return state;
+    }
+
+    await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText("Martin requested a redo of the quote. Awaiting his reasoning before reassessing."),
     });
@@ -528,6 +657,31 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     );
     state.stage = "quote_redo_requested";
     state.awaiting = "quote_redo_reason";
+    return state;
+  }
+
+  if (!state.handoffId) {
+    // Direct-entry quote (no upstream Strategy -> Finance Handoff):
+    // completes standalone. There is no Strategy boundary representation
+    // to carry forward and, per the decision behind this path, no
+    // Finance -> Sales Handoff is created -- a direct-entry quote was
+    // never part of that chain. Any Sales involvement is a separate,
+    // later action Martin takes himself.
+    await logActivity(env, {
+      entry: `Finance quote approved (direct request): ${state.matterToken ?? state.entityToken}`,
+      type: "Decision",
+      area: "Finance",
+      decisions: `Approved quote: ${state.quote?.currency ?? ""} ${state.quote?.price ?? ""}`,
+      decisionRationale: state.quote?.rationale ?? "",
+      outcome: "Complete",
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      `Quote approved: ${state.quote?.currency ?? ""} ${state.quote?.price ?? ""} for *${state.entityToken}*.`,
+    );
+    state.stage = "quote_approved";
+    state.awaiting = undefined;
     return state;
   }
 

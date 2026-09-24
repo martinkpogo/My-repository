@@ -74,12 +74,13 @@ function mockTelegramFetch(t: any) {
 }
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; handleIncomingEnquiry: string[]; handleMarketingRequest: string[]; handleResearchRequest: string[]; handleStrategyRequest: string[] } = {
+  const calls: { init: any[][]; handleIncomingEnquiry: string[]; handleMarketingRequest: string[]; handleResearchRequest: string[]; handleStrategyRequest: string[]; handleFinanceRequest: string[] } = {
     init: [],
     handleIncomingEnquiry: [],
     handleMarketingRequest: [],
     handleResearchRequest: [],
     handleStrategyRequest: [],
+    handleFinanceRequest: [],
   };
   const stub = {
     init: async (...args: any[]) => {
@@ -96,6 +97,9 @@ function createMockWorkSession() {
     },
     handleStrategyRequest: async (text: string) => {
       calls.handleStrategyRequest.push(text);
+    },
+    handleFinanceRequest: async (text: string) => {
+      calls.handleFinanceRequest.push(text);
     },
     getState: async () => undefined,
   };
@@ -380,14 +384,28 @@ test("U. Cowork decision for a Unit with no existing chat-triggered governed ent
   const { calls, workSession } = createMockWorkSession();
   const env = fakeEnv({ WORK_SESSION: workSession as any });
 
-  const decision: WorkspaceDecision = { mode: "cowork", unit: "Finance", hat: "Value-Based Pricing Assessor" };
-  await dispatchCowork(env, -1004435157576, 604, "Finance, price this for us.", decision as any);
+  const decision: WorkspaceDecision = { mode: "cowork", unit: "Business Development", hat: undefined };
+  await dispatchCowork(env, -1004435157576, 604, "Business Development, find us a new channel partner.", decision as any);
 
   assert.strictEqual(calls.init.length, 0, "no WorkSession may be fabricated for a Unit with no existing chat-triggered governed entry point");
   assert.ok(
-    sent.some((m) => m.includes("Cowork resolved to Finance/Value-Based Pricing Assessor") && m.includes("no existing chat-triggered governed entry point")),
+    sent.some((m) => m.includes("Cowork resolved to Business Development") && m.includes("no existing chat-triggered governed entry point")),
     "an UNSUPPORTED Cowork resolution must be visible in Operations, not just the originating Workspace topic",
   );
+});
+
+test("T4. Cowork decision for Finance routes to its own direct_request entry point (Migration path Step 4)", async (t) => {
+  mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({ WORK_SESSION: workSession as any });
+
+  await routeIncomingText(env, -1004435157576, "Finance, price MAT-20: recurring delivery complaints.", 604, {
+    resolveRouting: fixedDecision({ mode: "cowork", unit: "Finance", hat: "Value-Based Pricing Assessor" }),
+  });
+
+  assert.strictEqual(calls.init[0][2], "Finance");
+  assert.strictEqual(calls.init[0][3], "Value-Based Pricing Assessor");
+  assert.deepStrictEqual(calls.handleFinanceRequest, ["Finance, price MAT-20: recurring delivery complaints."]);
 });
 
 test("V. Mode selection itself never creates governed work -- switching to cowork alone (no follow-up message) creates nothing", async () => {

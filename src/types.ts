@@ -253,6 +253,8 @@ export interface WorkState {
     | "strategy_feedback"
     | "strategy_refinement_reason"
     | "strategy_direct_request_matter"
+    | "finance_direct_request_matter"
+    | "finance_direct_request_context"
     | "sales_proposal_revision";
   createdAt: string;
   updatedAt: string;
@@ -347,6 +349,15 @@ export interface WorkState {
    * session, and lets terminal cleanup clear that topic's active pointer too.
    */
   financeThreadId?: number;
+  /**
+   * Sanitized value context a direct-entry (no upstream Handoff) Finance
+   * quote is grounded in -- carried across the finance_direct_request_context
+   * continuation loop so an insufficient-evidence hold can be re-augmented
+   * from Martin's own follow-up without a Handoff record to re-read it
+   * from (contrast the Handoff-pickup path, whose source of truth stays
+   * the Handoff's own Verified Facts & Sources). Mirrors strategyContext.
+   */
+  financeJudgmentContext?: string;
 
   /** Original task text for a Marketing work item — carried across redo/clarification loops. */
   marketingTaskText?: string;

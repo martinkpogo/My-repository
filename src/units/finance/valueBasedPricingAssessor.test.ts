@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handlePickup, handleQuoteApproval, validateFinanceJudgement } from "./valueBasedPricingAssessor";
+import {
+  handlePickup,
+  handleQuoteApproval,
+  handleDirectRequest,
+  handleDirectRequestClarification,
+  handleDirectRequestContext,
+  validateFinanceJudgement,
+} from "./valueBasedPricingAssessor";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
 import type { WorkState, Env } from "../../types";
 
@@ -592,4 +599,214 @@ test("handleQuoteApproval: stays blocked (not a silent failure) when Matter_Toke
   assert.strictEqual(result.stage, "awaiting_quote_approval", "stage must not silently advance when still blocked");
   assert.strictEqual(log.handoffCreateBody, null, "no Finance -> Sales Handoff may be created without a Matter_Token");
   assert.ok(log.sentTexts.some((t) => /no Matter_Token on record/i.test(t)));
+});
+
+// ---------------------------------------------------------------------------
+// handleDirectRequest / handleDirectRequestClarification / handleDirectRequestContext
+// -- the direct_request origination path (Migration path Step 4): a fresh
+// Finance quote Martin starts directly from chat, with no upstream Handoff.
+// ---------------------------------------------------------------------------
+
+function mockDirectRequestFetch(
+  t: any,
+  opts: { matterFound?: boolean; matterNumber?: number; matterPrefix?: string; entityNumber?: number; entityPrefix?: string } = {},
+) {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  const matterFound = opts.matterFound ?? true;
+  const matterNumber = opts.matterNumber ?? 20;
+  const matterPrefix = opts.matterPrefix ?? "MAT";
+  const entityNumber = opts.entityNumber ?? 7;
+  const entityPrefix = opts.entityPrefix ?? "E";
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      sentTexts.push(body.text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      if (!matterFound) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              properties: {
+                Matter_ID: { unique_id: { prefix: matterPrefix, number: matterNumber } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "entity-page-1",
+          url: "https://notion.so/entity-page-1",
+          properties: { "Entity ID": { unique_id: { prefix: entityPrefix, number: entityNumber } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
+      return new Response(
+        JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  return { sentTexts };
+}
+
+function fakeDirectRequestState(overrides: Partial<WorkState> = {}): WorkState {
+  return {
+    workId: "work_fin_direct_1",
+    chatId: 1,
+    unit: "Finance",
+    hat: "Value-Based Pricing Assessor",
+    stage: "awaiting_pickup",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+test("handleDirectRequest resolves an explicit Matter token and produces a quote ready for approval, with no Redo button offered", async (t) => {
+  const { sentTexts } = mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Finance, price MAT-20: GHS 8M-12M annual opportunity, client-estimated.");
+
+  assert.strictEqual(result.entryType, "direct_request");
+  assert.strictEqual(result.matterToken, "MAT-20");
+  assert.strictEqual(result.entityToken, "E-7");
+  assert.strictEqual(result.stage, "awaiting_quote_approval");
+  assert.ok(result.quote, "a quote must be produced");
+  assert.ok(sentTexts.some((m) => m.includes("Approve this quote?") && !m.includes("Draft Proposal")), "a direct-entry quote must never promise routing to Sales");
+});
+
+test("handleDirectRequest fails closed with a clarifying message when no Matter token is present -- never guesses which Matter", async (t) => {
+  const { sentTexts } = mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = { run: async () => { throw new Error("AI must not be called when required context is missing"); } } as any;
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Finance, we have an opportunity worth pricing.");
+
+  assert.strictEqual(result.stage, "finance_blocked");
+  assert.strictEqual(result.awaiting, "finance_direct_request_matter");
+  assert.strictEqual(result.entryType, undefined, "must never proceed without a resolved Matter");
+  assert.ok(sentTexts.some((m) => m.includes("Which Matter")), "must ask Martin to name the Matter rather than guessing");
+});
+
+test("handleDirectRequest fails closed when the token in the text doesn't resolve to any real Matter", async (t) => {
+  const { sentTexts } = mockDirectRequestFetch(t, { matterFound: false });
+  const env = fakeEnv();
+  env.AI = { run: async () => { throw new Error("AI must not be called when required context is missing"); } } as any;
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Finance, price MAT-999: this Matter doesn't exist.");
+
+  assert.strictEqual(result.stage, "finance_blocked");
+  assert.strictEqual(result.awaiting, "finance_direct_request_matter");
+  assert.ok(sentTexts.some((m) => m.includes("Which Matter")), "an unresolvable token must fail closed exactly like a missing one, never guess");
+});
+
+test("handleDirectRequestClarification re-attempts Matter resolution against Martin's follow-up text", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeDirectRequestState({ stage: "finance_blocked", awaiting: "finance_direct_request_matter" });
+
+  const result = await handleDirectRequestClarification(env, state, "It's MAT-20, sorry -- GHS 8M-12M annual, client-estimated.");
+
+  assert.strictEqual(result.matterToken, "MAT-20");
+  assert.strictEqual(result.entityToken, "E-7");
+  assert.strictEqual(result.stage, "awaiting_quote_approval", "supplying the token on follow-up must unblock and complete the request");
+});
+
+test("handleDirectRequest holds on insufficient evidence via finance_direct_request_context, never finance_direct_request_matter -- a follow-up here is more value context, not a token", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({ sufficient: false, reason_if_insufficient: "Value exists only as an unsupported assumption." });
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Finance, price MAT-20: rough guess only, no real evidence.");
+
+  assert.strictEqual(result.stage, "handoff_held");
+  assert.strictEqual(result.awaiting, "finance_direct_request_context", "insufficient-evidence hold must route to the context continuation, not back through token resolution");
+  assert.ok(result.financeJudgmentContext, "the original context must be preserved for the follow-up to build on");
+});
+
+test("handleDirectRequestContext augments the preserved context (not the Matter token) and re-runs the quote judgment", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeDirectRequestState({
+    stage: "handoff_held",
+    awaiting: "finance_direct_request_context",
+    entityToken: "E-7",
+    matterToken: "MAT-20",
+    financeJudgmentContext: "Original: rough guess only, no real evidence.",
+  });
+
+  const result = await handleDirectRequestContext(env, state, "Correction: GHS 8M-12M annual, client-estimated on the call.");
+
+  assert.strictEqual(result.stage, "awaiting_quote_approval");
+  assert.match(result.financeJudgmentContext ?? "", /Correction: GHS 8M-12M annual/, "Martin's follow-up must be folded into the preserved context");
+  assert.match(result.financeJudgmentContext ?? "", /Original: rough guess only/, "the original context must not be discarded");
+});
+
+test("handleQuoteApproval: a direct-entry quote (no handoffId) completes standalone -- no Strategy boundary read, no Finance -> Sales Handoff created", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeDirectRequestState({
+    stage: "awaiting_quote_approval",
+    handoffId: undefined,
+    entityToken: "E-7",
+    matterToken: "MAT-20",
+    quote: { price: 15000, currency: "USD", rationale: "Priced against the estimated opportunity." },
+  });
+
+  const result = await handleQuoteApproval(env, state, true);
+
+  assert.strictEqual(result.stage, "quote_approved");
+  assert.strictEqual(log.handoffCreateBody, null, "a direct-entry quote must never create a Finance -> Sales Handoff");
+  assert.strictEqual(log.getCallCount, 0, "must never attempt to re-read a source Handoff that doesn't exist");
+});
+
+test("handleQuoteApproval: Redo on a direct-entry quote fails closed with a clear message rather than crashing on a missing Handoff", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  const state = fakeDirectRequestState({
+    stage: "awaiting_quote_approval",
+    handoffId: undefined,
+    entityToken: "E-7",
+    matterToken: "MAT-20",
+    quote: { price: 15000, currency: "USD", rationale: "Priced against the estimated opportunity." },
+  });
+
+  await handleQuoteApproval(env, state, false);
+
+  assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write may be attempted against a nonexistent Handoff");
+  assert.ok(log.sentTexts.some((m) => m.includes("Redo isn't yet supported for a directly-requested quote")));
 });
