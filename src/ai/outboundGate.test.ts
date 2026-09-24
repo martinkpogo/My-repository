@@ -100,6 +100,51 @@ test("9. Unknown/unclassified content where token-safe status cannot be establis
 });
 
 // ---------------------------------------------------------------------------
+// Governance content exemption: Architect-authored Hat Definition/Business
+// Object text wrapped in GOVERNANCE_CONTENT_START/END (governance.ts) is
+// stripped before the structural detectors run, so its own legitimate
+// prose (a "name: <Hat Name>" YAML field, an illustrative example company
+// name) can never itself trigger a block -- confirmed live against
+// production before this fix (NAME_FIELD_DETECTED, then
+// COMPANY_SUFFIX_DETECTED). Content OUTSIDE the markers -- real
+// user/client-supplied text -- must still be scanned in full.
+// ---------------------------------------------------------------------------
+
+test("Governance content: a Hat Definition's own 'name:' YAML field inside the governance wrapper no longer blocks (the exact live NAME_FIELD_DETECTED false positive)", () => {
+  const text =
+    "=== GOVERNANCE CONTENT (Architect-authored, never client-supplied) ===\nhat:\n  name: Sales Executive\n  unit: Sales\n=== END GOVERNANCE CONTENT ===";
+  const result = classifyOutboundText(text, false);
+  assert.strictEqual(result.classification, "DEFINITELY_PERMITTED");
+});
+
+test("Governance content: an illustrative example company name inside the governance wrapper no longer blocks (the exact live COMPANY_SUFFIX_DETECTED false positive)", () => {
+  const text =
+    "=== GOVERNANCE CONTENT (Architect-authored, never client-supplied) ===\nNamed Entity, not Person, because clients are frequently organisations (e.g. Meridian Advisory Group, Okoye Manufacturing).\n=== END GOVERNANCE CONTENT ===";
+  const result = classifyOutboundText(text, false);
+  assert.strictEqual(result.classification, "DEFINITELY_PERMITTED");
+});
+
+test("Governance content: the SAME text is still blocked when it appears OUTSIDE the governance wrapper -- the exemption is scoped to the marked span, not the pattern itself", () => {
+  const insideMarkers = classifyOutboundText(
+    "=== GOVERNANCE CONTENT (Architect-authored, never client-supplied) ===\nname: Sales Executive\n=== END GOVERNANCE CONTENT ===",
+    false,
+  );
+  assert.strictEqual(insideMarkers.classification, "DEFINITELY_PERMITTED");
+
+  const outsideMarkers = classifyOutboundText("name: Sales Executive", false);
+  assert.strictEqual(outsideMarkers.classification, "DEFINITELY_PROHIBITED");
+  assert.strictEqual(outsideMarkers.reasonCategory, "NAME_FIELD_DETECTED");
+});
+
+test("Governance content: real client-supplied content outside the wrapper is still fully scanned even when a governance block is also present in the same message", () => {
+  const text =
+    "=== GOVERNANCE CONTENT (Architect-authored, never client-supplied) ===\nname: Sales Executive\n=== END GOVERNANCE CONTENT ===\n\nUser call notes: reach out to comfort@meridianfoods.com directly.";
+  const result = classifyOutboundText(text, false);
+  assert.strictEqual(result.classification, "DEFINITELY_PROHIBITED");
+  assert.strictEqual(result.reasonCategory, "EMAIL_DETECTED");
+});
+
+// ---------------------------------------------------------------------------
 // The company-suffix exemption: legitimate public-source organisation
 // names (Lead Discovery's own subject matter) are not blocked by the
 // company-suffix detector specifically, but a discovered contact's direct

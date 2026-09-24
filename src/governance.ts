@@ -10,6 +10,29 @@ export const UNIVERSAL_ROLE_CONTRACT_PAGE_ID = "3cecb004-e583-81ee-8f1e-f0d58532
 const GOVERNANCE_CACHE_TTL_SECONDS = 15 * 60;
 
 /**
+ * Marks a span of a prompt as Architect-authored governance content --
+ * canonical Universal Role Contract / Hat Definition / Business Object
+ * specification text, never client-supplied -- so src/ai/outboundGate.ts's
+ * stripGovernanceContent can exempt it from the structural leak detectors
+ * before scanning, the same way it already strips ENIG-token-shaped spans.
+ * Mirrors strategyAnalyst.ts's STRATEGY_BOUNDARY_START/END convention.
+ *
+ * This is the general fix for a category of false positive, not a
+ * one-string patch: governance prose can legitimately contain a YAML
+ * "name:" field naming the object itself (confirmed live:
+ * "name: Sales Executive" tripped NAME_FIELD_DETECTED) or an illustrative
+ * example company name in a Business Object's own doc note (confirmed
+ * live: "Meridian Advisory Group" tripped COMPANY_SUFFIX_DETECTED) --
+ * neither is real client identity, but both are structurally
+ * indistinguishable from it to a detector that only sees the final text.
+ * Wrapping the source (every getGovernance call) closes the whole
+ * category at once, including future governance edits, rather than
+ * requiring a new patch each time a new false positive surfaces.
+ */
+export const GOVERNANCE_CONTENT_START = "=== GOVERNANCE CONTENT (Architect-authored, never client-supplied) ===";
+export const GOVERNANCE_CONTENT_END = "=== END GOVERNANCE CONTENT ===";
+
+/**
  * Strips the canonical Hat/Business-Object documentation convention's own
  * object-identifying "name: <value>" YAML line (e.g. "name: Sales
  * Executive", "name: Entity") from governance content before it ever
@@ -46,7 +69,7 @@ export async function getGovernance(env: Env, pageId: string, label: string): Pr
   const cacheKey = `governance:${pageId}`;
   try {
     const cached = await env.STATE_KV.get(cacheKey);
-    if (cached) return stripObjectNameField(cached);
+    if (cached) return wrapGovernanceContent(stripObjectNameField(cached));
   } catch (err) {
     console.error(`Governance cache read failed for ${label} (${pageId})`, err);
   }
@@ -56,9 +79,13 @@ export async function getGovernance(env: Env, pageId: string, label: string): Pr
     env.STATE_KV.put(cacheKey, content, { expirationTtl: GOVERNANCE_CACHE_TTL_SECONDS }).catch((err) => {
       console.error(`Governance cache write failed for ${label} (${pageId})`, err);
     });
-    return stripObjectNameField(content);
+    return wrapGovernanceContent(stripObjectNameField(content));
   } catch (err) {
     console.error(`Governance retrieval failed for ${label} (${pageId})`, err);
     return null;
   }
+}
+
+function wrapGovernanceContent(content: string): string {
+  return `${GOVERNANCE_CONTENT_START}\n${content}\n${GOVERNANCE_CONTENT_END}`;
 }

@@ -30,6 +30,7 @@ import {
 } from "../dataBoundary/policy";
 import { isSemanticTaskId } from "../dataBoundary/registry";
 import type { OutboundDataPolicy, SemanticTaskId } from "../dataBoundary/types";
+import { GOVERNANCE_CONTENT_START, GOVERNANCE_CONTENT_END } from "../governance";
 
 export type OutboundGateReasonCategory =
   | "ALLOWED"
@@ -75,6 +76,40 @@ const ENIG_TOKEN_PATTERN = /\b[A-Z]{1,6}-\d{1,6}\b/g;
 /** Strips every ENIG-token-shaped span from text before running detectors, so a token can never itself trip a detector (defensive -- none of the detectors below currently collide with the token shape, but this makes that guarantee explicit and future-proof). */
 function stripTokens(text: string): string {
   return text.replace(ENIG_TOKEN_PATTERN, "");
+}
+
+// Escapes the fixed governance markers for use inside a RegExp -- they
+// contain characters (parentheses, commas) that are regex-special.
+function escapeForRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const GOVERNANCE_CONTENT_PATTERN = new RegExp(
+  `${escapeForRegExp(GOVERNANCE_CONTENT_START)}[\\s\\S]*?${escapeForRegExp(GOVERNANCE_CONTENT_END)}`,
+  "g",
+);
+
+/**
+ * Strips every Architect-authored governance block (see
+ * governance.ts's GOVERNANCE_CONTENT_START/END doc comment) from text
+ * before running the structural detectors below -- the same "strip a
+ * known-safe span before scanning" pattern stripTokens already uses for
+ * ENIG tokens. Governance content (the Universal Role Contract, a Hat
+ * Definition, a Business Object specification) is canonical, Architect-
+ * controlled text that never carries real client identity -- but its own
+ * legitimate prose can be structurally indistinguishable from a leak
+ * (confirmed live: a Hat Definition's own "name: Sales Executive" YAML
+ * field and a Business Object's own illustrative "Meridian Advisory
+ * Group" example both tripped detectors meant for genuine client-
+ * identity-bearing content). This closes that whole category at once,
+ * including future governance edits, rather than requiring a new patch
+ * each time a new false positive surfaces in governance prose. Only
+ * content actually wrapped by getGovernance carries these markers --
+ * user/client-supplied content (enquiry text, call notes, Handoff
+ * sanitizedContext) is never wrapped and stays fully scanned.
+ */
+function stripGovernanceContent(text: string): string {
+  return text.replace(GOVERNANCE_CONTENT_PATTERN, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +202,7 @@ interface DetectorHit {
  * only -- every other detector still applies.
  */
 export function classifyOutboundText(text: string, companySuffixExempt: boolean): DetectorHit {
-  const scan = stripTokens(text);
+  const scan = stripTokens(stripGovernanceContent(text));
 
   if (EMAIL_PATTERN.test(scan)) return { classification: "DEFINITELY_PROHIBITED", reasonCategory: "EMAIL_DETECTED" };
   if (PHONE_PATTERN.test(scan)) return { classification: "DEFINITELY_PROHIBITED", reasonCategory: "PHONE_DETECTED" };
