@@ -165,6 +165,18 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * Runtime Sales Executive pickup of a call-notes Handoff created by the
+   * isolated Sales Executive Claude project (Section 6A of its Project
+   * Instructions) -- runs the commercial-value-evidence-extraction and
+   * qualification reasoning against the Handoff's already de-identified
+   * content. Invoked only by checkHandoffs.ts's Sales discovery, never
+   * directly. Mirrors runFinancePickup/runTokenSafeProposal exactly.
+   */
+  async runCallNotesPickup(): Promise<WorkState> {
+    return this.execute((state) => sales.handleCallNotesHandoffPickup(this.env, state));
+  }
+
+  /**
    * Presents an evidence-backed opportunity finding to Martin for explicit
    * approval before it may become a Lead -- invoked on a freshly created
    * WorkSession (see processCompletedLGSResearchHandoffs in

@@ -24,9 +24,11 @@ import {
 import { createHandoff, updateHandoff, identityFieldsPresent } from "../../handoffWriter";
 import { aiJson, aiText } from "../../ai";
 import { logActivity } from "../../log";
-import { sendWorkspaceHatMessage } from "../../telegram";
+import { sendWorkspaceHatMessage, sendOperationsMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
+import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
+import { claimPendingHandoff } from "../../handoffLifecycle";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -796,6 +798,88 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
   return state;
 }
 
+/**
+ * The shared commercial-value-evidence-extraction + qualification pipeline
+ * -- used by both the live in-chat call-notes path (handleCallNotes) and
+ * the token-safe Handoff pickup path (handleCallNotesHandoffPickup, for
+ * the isolated Sales Executive project's Section 6A call-notes Handoffs).
+ * Runs the same two AI calls and condition-merge logic against whatever
+ * combinedText the caller supplies -- raw enquiry+call-notes text for the
+ * live path, a Handoff's already de-identified sanitizedContext for the
+ * pickup path -- so qualification reasoning behaves identically regardless
+ * of where the call notes originated. Returns null when the AI assessment
+ * was inconclusive; the caller decides how to surface that.
+ */
+async function runQualificationAssessment(
+  env: Env,
+  state: WorkState,
+  combinedText: string,
+  governance: { hatDefinition: string; universalRoleContract: string; entitySpecification?: string },
+): Promise<{ qualification: QualificationResult; evidenceText: string } | null> {
+  // Structured commercial-value evidence extraction, per the Commercial
+  // Value & Pricing Operating Model -- run before qualification so the
+  // deterministic evidence gate below has something to judge. Extraction
+  // failure (null) is treated as "no evidence extracted," not a blocker --
+  // evaluateCommercialValueEvidence already fails closed on empty input.
+  const extraction = await aiJson<RawCommercialEvidenceExtraction>(env, {
+    taskId: "sales.commercial_evidence_extraction",
+    system: buildCommercialEvidenceExtractionSystemPrompt(),
+    user: combinedText,
+    light: true,
+  });
+  state.commercialEvidence = normalizeCommercialEvidence(extraction);
+  state.investmentToleranceContext = normalizeInvestmentToleranceContext(extraction);
+  const commercialValueResult = evaluateCommercialValueEvidence(state.commercialEvidence);
+  await logActivity(env, {
+    entry: `Commercial-value evidence gate: ${commercialValueResult.assessment} — ${state.entityName ?? state.matterToken ?? state.entityToken}`,
+    type: "Decision",
+    area: "Sales",
+    decisionRationale: commercialValueResult.evidenceText,
+    outcome: "Active",
+  });
+
+  const qualification = await aiJson<QualificationResult>(env, {
+    taskId: "sales.call_qualification",
+    system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
+    user: combinedText,
+  });
+
+  const aiConditions = (qualification?.conditions ?? []).filter((c) => AI_JUDGED_CONDITIONS.includes(c.condition));
+  if (!qualification || aiConditions.length !== AI_JUDGED_CONDITIONS.length) {
+    return null;
+  }
+
+  // commercial_value_evidence is never taken from the AI's own output --
+  // spliced in from the deterministic evaluation above, regardless of
+  // whether/what the AI returned for that condition.
+  const conditions: QualificationConditionResult[] = [
+    ...aiConditions,
+    { condition: "commercial_value_evidence", assessment: commercialValueResult.assessment, evidence: commercialValueResult.evidenceText },
+  ];
+  const overall = computeOverallQualification(conditions);
+  qualification.conditions = conditions;
+  qualification.overall = overall;
+  state.qualification = qualification;
+
+  await logActivity(env, {
+    entry: `Qualification evaluated: ${qualification.overall}`,
+    type: "Decision",
+    area: "Sales",
+    decisionRationale: qualification.conditions.map((c) => `${c.condition}: ${c.assessment} — ${c.evidence}`).join("\n"),
+    outcome: qualification.overall === "Qualified" ? "Active" : "Complete",
+  });
+
+  if (qualification.overall === "Qualified") {
+    // Preserve the commercial baseline for later measurement, per the
+    // Commercial Value & Pricing Operating Model's Section 8 -- captured
+    // once here, at the point qualification is established, rather than
+    // re-derived downstream from whatever state happens to still be set.
+    state.measurementBaseline = buildMeasurementBaseline(state.commercialEvidence);
+  }
+
+  return { qualification, evidenceText: formatQualificationEvidence(qualification.conditions) };
+}
+
 export async function handleCallNotes(env: Env, state: WorkState, notes: string): Promise<WorkState> {
   state.callNotes = state.callNotes ? `${state.callNotes}\n\n${notes}` : notes;
 
@@ -824,37 +908,9 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
   }
 
   const combinedText = `Enquiry: ${state.enquiryText ?? ""}\n\nCall notes: ${state.callNotes}`;
+  const result = await runQualificationAssessment(env, state, combinedText, governance);
 
-  // Structured commercial-value evidence extraction, per the Commercial
-  // Value & Pricing Operating Model -- run before qualification so the
-  // deterministic evidence gate below has something to judge. Extraction
-  // failure (null) is treated as "no evidence extracted," not a blocker --
-  // evaluateCommercialValueEvidence already fails closed on empty input.
-  const extraction = await aiJson<RawCommercialEvidenceExtraction>(env, {
-    taskId: "sales.commercial_evidence_extraction",
-    system: buildCommercialEvidenceExtractionSystemPrompt(),
-    user: combinedText,
-    light: true,
-  });
-  state.commercialEvidence = normalizeCommercialEvidence(extraction);
-  state.investmentToleranceContext = normalizeInvestmentToleranceContext(extraction);
-  const commercialValueResult = evaluateCommercialValueEvidence(state.commercialEvidence);
-  await logActivity(env, {
-    entry: `Commercial-value evidence gate: ${commercialValueResult.assessment} — ${state.entityName}`,
-    type: "Decision",
-    area: "Sales",
-    decisionRationale: commercialValueResult.evidenceText,
-    outcome: "Active",
-  });
-
-  const qualification = await aiJson<QualificationResult>(env, {
-    taskId: "sales.call_qualification",
-    system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
-    user: combinedText,
-  });
-
-  const aiConditions = (qualification?.conditions ?? []).filter((c) => AI_JUDGED_CONDITIONS.includes(c.condition));
-  if (!qualification || aiConditions.length !== AI_JUDGED_CONDITIONS.length) {
+  if (!result) {
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Sales Executive" },
@@ -865,35 +921,9 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     return state;
   }
 
-  // commercial_value_evidence is never taken from the AI's own output --
-  // spliced in from the deterministic evaluation above, regardless of
-  // whether/what the AI returned for that condition.
-  const conditions: QualificationConditionResult[] = [
-    ...aiConditions,
-    { condition: "commercial_value_evidence", assessment: commercialValueResult.assessment, evidence: commercialValueResult.evidenceText },
-  ];
-  const overall = computeOverallQualification(conditions);
-  qualification.conditions = conditions;
-  qualification.overall = overall;
-
-  state.qualification = qualification;
-  await logActivity(env, {
-    entry: `Qualification evaluated: ${qualification.overall}`,
-    type: "Decision",
-    area: "Sales",
-    decisionRationale: qualification.conditions.map((c) => `${c.condition}: ${c.assessment} — ${c.evidence}`).join("\n"),
-    outcome: qualification.overall === "Qualified" ? "Active" : "Complete",
-  });
-
-  const evidenceText = formatQualificationEvidence(qualification.conditions);
+  const { qualification, evidenceText } = result;
 
   if (qualification.overall === "Qualified") {
-    // Preserve the commercial baseline for later measurement, per the
-    // Commercial Value & Pricing Operating Model's Section 8 -- captured
-    // once here, at the point qualification is established, rather than
-    // re-derived downstream from whatever state happens to still be set.
-    state.measurementBaseline = buildMeasurementBaseline(state.commercialEvidence);
-
     const qualifyMessage = `*Qualification: Qualified* — all five conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${state.entityName}*?`;
     const qualifyButtons = [
       [
@@ -933,6 +963,169 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
     state.stage = "closed_not_qualified";
     state.awaiting = undefined;
   }
+  return state;
+}
+
+/**
+ * Resolves a call-notes Handoff's token-safe business context, mirroring
+ * Finance's resolveHandoffBusinessContext (valueBasedPricingAssessor.ts)
+ * exactly -- reads Entity_Token/Matter_Token and the de-identified
+ * narrative the isolated Sales Executive Claude project wrote to
+ * "Verified Facts & Sources" (per this project's Section 6A Handoff-to-
+ * Runtime-Sales-Executive procedure), and validates it through the same
+ * closed-context contract every other Handoff pickup uses. Never resolves
+ * entityToken/matterToken to a real Notion page -- per
+ * HandoffContextContract's own rule, they are reference identifiers only,
+ * never lookup keys into a controlled database.
+ */
+export async function resolveCallNotesHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
+  try {
+    const handoff = await getPage(env, handoffId);
+    const sanitizedContext = plainText(handoff.properties["Verified Facts & Sources"]);
+    const entityToken = plainText(handoff.properties.Entity_Token);
+    const matterToken = plainText(handoff.properties.Matter_Token);
+
+    return evaluateHandoffContext(
+      {
+        handoffId,
+        entityToken,
+        matterToken,
+        sanitizedContext,
+        provenance: `notion:handoff:${handoffId}`,
+        requiredCategory: "de-identified call notes for commercial qualification",
+      },
+      "sales.call_qualification",
+    );
+  } catch (err) {
+    console.error(`Call-notes Handoff business-context reconstruction failed for ${handoffId}`, err);
+    return {
+      success: false,
+      insufficientContext: {
+        isInsufficient: true,
+        category: "handoff record access",
+        reason: `Insufficient execution context: unable to access Handoff record ${handoffId}.`,
+      },
+    };
+  }
+}
+
+/**
+ * Runtime Sales Executive's pickup of a call-notes Handoff created by the
+ * isolated Sales Executive Claude project (Section 6A of its Project
+ * Instructions). The de-identified narrative it produced is already
+ * token-safe, so this runs the same commercial-value-evidence-extraction
+ * and qualification reasoning handleCallNotes runs for a live chat, just
+ * against contract.sanitizedContext instead of raw enquiry/call-notes
+ * text.
+ *
+ * Deliberately does NOT offer a live Telegram Approve/Redo button or
+ * attempt a Lead->Prospect Entity.Status transition the way handleCallNotes
+ * does: this session never resolves a real Entity/Matter page (only
+ * entityToken/matterToken), and HandoffContextContract's own rule forbids
+ * treating a token as a lookup key into a controlled database. Instead the
+ * qualification result is written back to THIS Handoff only (Closed, token-
+ * safe Work Completed) for the isolated Sales Executive project -- which
+ * already holds legitimate real-identity access -- to pick up on its own
+ * next Handoff check and complete any Lead->Prospect approval with Martin
+ * itself, per the Entity Business Object's own lifecycle.
+ *
+ * Invoked only by checkHandoffs.ts's Sales discovery, never directly.
+ */
+export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
+  const claim = await claimPendingHandoff(env, state.handoffId!);
+  if (!claim.claimed) {
+    console.error(`Sales call-notes pickup: refused -- ${claim.reason}`);
+    await logActivity(env, {
+      entry: `Sales call-notes pickup rejected — invalid Handoff state`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale: claim.reason,
+      outcome: "Blocked",
+    });
+    return state;
+  }
+
+  const evalResult = await resolveCallNotesHandoffContext(env, state.handoffId!);
+  if (!evalResult.success) {
+    console.error(`Sales call-notes pickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
+    await logActivity(env, {
+      entry: `Sales call-notes pickup blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale: evalResult.insufficientContext.reason,
+      outcome: "Blocked",
+    });
+    await updateHandoff(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
+    }).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    await sendOperationsMessage(
+      env,
+      `⚠️ Sales couldn't pick up a call-notes Handoff (${state.handoffId}): ${evalResult.insufficientContext.reason}`,
+    ).catch((err) => console.error("Failed to send call-notes pickup Operations notice", err));
+    state.stage = "handoff_held";
+    return state;
+  }
+
+  const { contract } = evalResult;
+  state.entityToken = contract.entityToken;
+  state.matterToken = contract.matterToken;
+  const displayToken = contract.matterToken ?? contract.entityToken;
+
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
+
+  const governance = await getSalesExecutiveGovernance(env, { includeEntitySpecification: true });
+  if (!governance) {
+    console.error(`Sales call-notes pickup blocked — governance retrieval failed for handoff ${state.handoffId}`);
+    await updateHandoff(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(
+        "Could not retrieve canonical Sales Executive Hat Definition, Universal Role Contract, and/or Entity Business Object specification from Notion.",
+      ),
+    }).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    await sendOperationsMessage(
+      env,
+      `⚠️ Sales couldn't evaluate call notes for ${displayToken}: governance retrieval failed. Handoff held for retry.`,
+    ).catch((err) => console.error("Failed to send call-notes governance-failure Operations notice", err));
+    state.stage = "handoff_held";
+    return state;
+  }
+
+  const result = await runQualificationAssessment(env, state, contract.sanitizedContext, governance);
+
+  if (!result) {
+    await updateHandoff(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(
+        "Qualification assessment was inconclusive from the supplied call notes. Send additional de-identified call notes and re-submit.",
+      ),
+    }).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    await sendOperationsMessage(
+      env,
+      `Sales qualification inconclusive for ${displayToken} — Handoff held, needs additional call notes.`,
+    ).catch((err) => console.error("Failed to send inconclusive-qualification Operations notice", err));
+    state.stage = "handoff_held";
+    return state;
+  }
+
+  const { qualification, evidenceText } = result;
+
+  await updateHandoff(env, state.handoffId!, {
+    Status: select("Closed"),
+    "Work Completed": richText(`Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, 1900)),
+  });
+  await logActivity(env, {
+    entry: `Call-notes Handoff closed — Qualification: ${qualification.overall}: ${displayToken}`,
+    type: "Activity",
+    area: "Sales",
+    outcome: "Complete",
+  });
+  await sendOperationsMessage(
+    env,
+    `*Runtime Sales Executive qualification complete* — ${displayToken}: ${qualification.overall}.\n\nResult written back to the call-notes Handoff (${state.handoffId}) for the isolated Sales Executive project to review and, if Qualified, complete the Lead→Prospect approval with Martin.`,
+  ).catch((err) => console.error("Failed to send qualification-complete Operations notice", err));
+
+  state.stage = "handoff_closed_qualification_complete";
   return state;
 }
 
