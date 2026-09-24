@@ -36,11 +36,17 @@ import { aiJson } from "../../ai";
  * final. This is BD's own conformance-test proof that internal and write
  * are genuinely different gates, not a relabeled binary.
  *
- * STATUS: Opportunity Development and Partnership Development are both
- * fully built out -- every action on both Hats has real implementation,
- * all classified business_sensitive in PRODUCTION_TASK_SENSITIVITY
- * (Architect-approved). Growth & Market Development remains an explicit
- * stub (notYetImplementedHat) pending the same treatment.
+ * STATUS: all three Hats -- Opportunity Development, Partnership
+ * Development, and Growth & Market Development -- are fully built out:
+ * every action on all three has real implementation. Opportunity
+ * Development and Partnership Development's discover/research/assess/
+ * qualify/develop tasks are classified business_sensitive in
+ * PRODUCTION_TASK_SENSITIVITY (Architect-approved). Growth & Market
+ * Development's five equivalent tasks (discover_growth_opportunity,
+ * research_market, assess_market_opportunity, qualify_growth_opportunity,
+ * develop_growth_opportunity) are registered but NOT yet classified --
+ * pending Architect review, same as every new BD task before it; they
+ * fail closed (UNRESOLVED_POLICY_HOLD) until classified.
  *
  * The write-action plumbing (handoff_to_sales/handoff_to_strategy,
  * develop_*, determine_next_move) is generic across all Hats built on
@@ -48,14 +54,16 @@ import { aiJson } from "../../ai";
  * proposeBDDevelopment/handleBDDevelopApproval, and
  * proposeNextMove/handleBDNextMoveApproval all derive the calling Hat's
  * identity from state.hat (set by dispatch.ts's Hat resolution) rather
- * than a hardcoded per-Hat constant, so Partnership Development reuses
- * them unchanged -- only the domain-specific discover/research/assess/
- * qualify reasoning and each Hat's develop_* drafting prompt are
- * Hat-specific (discoverOpportunity/discoverPartner,
- * draftDevelopOpportunity/draftDevelopPartnership, etc.). This
- * generalization happened now, on the second real Hat, matching the
- * design doc's guidance: prove the shape on Hat 1, generalize only once
- * Hat 2 actually needs the same shape -- not before. (An earlier draft
+ * than a hardcoded per-Hat constant, so Partnership Development and
+ * Growth & Market Development both reuse them unchanged -- only the
+ * domain-specific discover/research/assess/qualify reasoning and each
+ * Hat's develop_* drafting prompt are Hat-specific
+ * (discoverOpportunity/discoverPartner/discoverGrowthOpportunity,
+ * draftDevelopOpportunity/draftDevelopPartnership/
+ * draftDevelopGrowthOpportunity, etc.). This generalization happened on
+ * the second real Hat, matching the design doc's guidance: prove the
+ * shape on Hat 1, generalize only once Hat 2 actually needs the same
+ * shape -- not before. (An earlier draft
  * of this file called evaluateHandoffContext with a made-up
  * SemanticTaskId for outbound Handoffs, which was simply the wrong
  * pattern -- that function validates *inbound* context, e.g.
@@ -64,24 +72,23 @@ import { aiJson } from "../../ai";
  * SemanticTaskId involved. Corrected; no governance decision was
  * actually needed for that fix.)
  *
- * qualify_opportunity/qualify_partnership are both "internal" -- real
- * hold/resume flows against BDOpportunityState, reusing the same
- * "bd_opportunity_evidence_gap" awaiting-state key in each Hat's own
- * awaitingHandlers map (safe to reuse: lookup is scoped to
+ * qualify_opportunity/qualify_partnership/qualify_growth_opportunity are
+ * all "internal" -- real hold/resume flows against BDOpportunityState,
+ * reusing the same "bd_opportunity_evidence_gap" awaiting-state key in
+ * each Hat's own awaitingHandlers map (safe to reuse: lookup is scoped to
  * manifest.hats[state.hat] first, so the key only needs to be unique
  * within one Hat's map, not globally).
  *
  * determine_next_move and the two handoff_to_* actions reuse the exact
- * same registered tasks/pattern across both Hats (their prompts are
+ * same registered tasks/pattern across all three Hats (their prompts are
  * already Hat-agnostic, and Handoffs need no SemanticTaskId at all) --
- * only discover_partner, research_partner, assess_partnership,
- * qualify_partnership, and develop_partnership needed their own new,
- * partnership-flavored registered tasks, since Notion treats Partnership
- * Development as its own specialized Hat, not an alias of Opportunity
- * Development.
+ * only each Hat's own discover/research/assess/qualify/develop actions
+ * needed their own new, domain-flavored registered tasks, since Notion
+ * treats Opportunity Development, Partnership Development, and Growth &
+ * Market Development as three distinct specialized Hats, not aliases of
+ * one another.
  *
- * Growth & Market Development remains stubbed -- the last open item on
- * Business Development.
+ * All three Business Development Hats are now fully built.
  *
  * NOTE: dispatch wiring (four chokepoints, including the approval
  * callback) is done -- see units/dispatch.ts, units/registry.ts, and
@@ -1002,22 +1009,6 @@ const partnershipDevelopmentHat: HatManifest<PartnershipDevelopmentAction> = {
   awaitingHandlers: partnershipDevelopmentAwaitingHandlers,
 };
 
-/** Stubs a Hat that hasn't been built out yet -- both readHandler and entryHandler fail loudly rather than silently no-op. Currently used only by Growth & Market Development. */
-function notYetImplementedHat<A extends string>(hatName: string, responsibility: string, actions: ActionDefinition<A>[]): HatManifest<A> {
-  return {
-    name: hatName,
-    responsibility,
-    actions,
-    readHandler: async (_env, actionName) => {
-      throw new Error(`${hatName}.${actionName}: read handler not yet implemented -- draft manifest only.`);
-    },
-    entryHandler: async (_env, _state, actionName) => {
-      throw new Error(`${hatName}.${actionName}: entry handler not yet implemented -- draft manifest only.`);
-    },
-    awaitingHandlers: {},
-  };
-}
-
 type GrowthMarketDevelopmentAction =
   | "discover_growth_opportunity"
   | "research_market"
@@ -1027,6 +1018,8 @@ type GrowthMarketDevelopmentAction =
   | "determine_next_move"
   | "handoff_to_sales"
   | "handoff_to_strategy";
+
+const GROWTH_MARKET_DEVELOPMENT_HAT_NAME = "Growth & Market Development Manager — Growth & Market Development";
 
 const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAction>[] = [
   { name: "discover_growth_opportunity", consequence: "read", description: "Identify a potential market, channel, offering, or growth space." },
@@ -1039,11 +1032,230 @@ const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAc
   { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
 ];
 
-const growthMarketDevelopmentHat = notYetImplementedHat(
-  "Growth & Market Development Manager — Growth & Market Development",
-  "Own the identification and development of broader opportunities for ENIG's growth across markets, channels, offerings, and growth directions. Identify, research, assess, and develop growth directions where the central question concerns ENIG's broader market position, expansion, channels, offerings, or future sources of growth. Does not automatically own client acquisition, strategic diagnosis, or execution responsibilities belonging to another ENIG Unit.",
-  growthMarketDevelopmentActions,
-);
+/** Real signal-identification reasoning for discover_growth_opportunity, per the Hat Definition's Output contract: "candidate market/channel/offering with the signal, why it may matter, and evidence still required." Same discipline as discoverOpportunity/discoverPartner -- never fabricates evidence. */
+async function discoverGrowthOpportunity(env: Env, text: string): Promise<string> {
+  const result = await aiJson<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
+    taskId: "business_development.discover_growth_opportunity",
+    system: `You identify potential markets, channels, offerings, or growth directions relevant to ENIG's broader market position and future sources of growth.
+
+Never invent or infer evidence that isn't in the request -- name what's still needed instead of assuming it.
+
+Return JSON:
+{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}
+- signal: a concise statement of the candidate market, channel, offering, or growth direction itself.
+- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.
+- evidenceNeeded: what's still required to move this from a signal to a developed growth opportunity -- never empty; discovery alone is never sufficient evidence.`,
+    user: text,
+    light: true,
+  });
+
+  if (!result || !result.signal) {
+    return "Couldn't identify a clear market, channel, or growth signal from that -- can you name the market, channel, offering, or growth direction you have in mind?";
+  }
+
+  const evidenceNeeded = result.evidenceNeeded && result.evidenceNeeded.length > 0 ? result.evidenceNeeded : ["supporting evidence for this signal"];
+  return `Signal: ${result.signal}\n\nWhy it may matter: ${result.whyItMayMatter ?? "(not stated)"}\n\nEvidence still needed: ${evidenceNeeded.join(", ")}`;
+}
+
+/** Real evidence-organization reasoning for research_market, per the Hat Definition's Output contract: "evidence-backed findings, implications, limitations, and sources." Same no-fabrication discipline as researchOpportunity/researchPartner -- BD has no live web-search/external-research capability. */
+async function researchMarket(env: Env, text: string): Promise<string> {
+  const result = await aiJson<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
+    taskId: "business_development.research_market",
+    system: `You research a named market, industry, segment, channel, competitor landscape, or demand signal to establish relevant facts and evidence for ENIG's potential growth direction.
+
+You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request. Never fabricate facts, statistics, claims, or sources not present in the input. Anything relevant but not actually stated must be named as a limitation, never inferred or assumed.
+
+Return JSON:
+{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for ENIG's growth, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}
+- findings: only facts genuinely present in the input, restated clearly -- never invented.
+- limitations: what's still unknown or unverified; never empty if findings alone can't establish the opportunity.
+- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
+    user: text,
+    light: true,
+  });
+
+  if (!result || !result.findings || result.findings.length === 0) {
+    return "Couldn't extract any concrete findings from that -- can you share what you already know about this market, channel, or growth direction?";
+  }
+
+  const limitations = result.limitations && result.limitations.length > 0 ? result.limitations.join(", ") : "(none stated)";
+  const sources = result.sources && result.sources.length > 0 ? result.sources.join(", ") : "Martin's own account";
+  return `Findings: ${result.findings.join("; ")}\n\nImplications: ${result.implications ?? "(not stated)"}\n\nLimitations: ${limitations}\n\nSources: ${sources}`;
+}
+
+/** Real market-attractiveness/capability-fit judgment for assess_market_opportunity, per the Hat Definition's Output contract: "assessment with evidence, implications, limitations, and unresolved questions," examining market attractiveness, strategic/commercial relevance, and capability fit. Same evidence discipline as assessOpportunity/assessPartnership. */
+async function assessMarketOpportunity(env: Env, text: string): Promise<string> {
+  const result = await aiJson<{
+    assessment?: string;
+    marketAttractiveness?: string;
+    strategicCommercialRelevance?: string;
+    capabilityFit?: string;
+    unresolvedQuestions?: string[];
+  }>(env, {
+    taskId: "business_development.assess_market_opportunity",
+    system: `You determine whether a researched market, channel, offering, or growth direction has a substantive reason for ENIG to pursue it -- examining market attractiveness, strategic/commercial relevance, and fit with ENIG's actual capabilities.
+
+Base this only on what has actually been stated -- never invent evidence, capability claims, or market facts not present in the input. If a dimension can't be judged from what's given, say so as an unresolved question rather than guessing.
+
+Return JSON:
+{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "marketAttractiveness": "<brief>", "strategicCommercialRelevance": "<brief>", "capabilityFit": "<brief -- does this fit ENIG's actual capabilities>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}
+- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
+    user: text,
+    light: true,
+  });
+
+  if (!result || !result.assessment) {
+    return "Couldn't complete an assessment from that -- can you share more about the market's attractiveness, or ENIG's fit for this growth direction?";
+  }
+
+  const unresolved = result.unresolvedQuestions && result.unresolvedQuestions.length > 0 ? result.unresolvedQuestions.join(", ") : "(none stated)";
+  return `Assessment: ${result.assessment}\n\nMarket attractiveness: ${result.marketAttractiveness ?? "(not stated)"}\nStrategic/commercial relevance: ${result.strategicCommercialRelevance ?? "(not stated)"}\nCapability fit: ${result.capabilityFit ?? "(not stated)"}\n\nUnresolved questions: ${unresolved}`;
+}
+
+async function growthMarketDevelopmentReadHandler(env: Env, actionName: GrowthMarketDevelopmentAction, text: string): Promise<string> {
+  switch (actionName) {
+    case "discover_growth_opportunity":
+      return discoverGrowthOpportunity(env, text);
+    case "research_market":
+      return researchMarket(env, text);
+    case "assess_market_opportunity":
+      return assessMarketOpportunity(env, text);
+    default:
+      throw new Error(`${actionName}: not a read action on Growth & Market Development.`);
+  }
+}
+
+/** Real evidence-sufficiency judgment for qualify_growth_opportunity -- same rule and fail-closed-to-Held behaviour as judgeOpportunityQualification/judgePartnershipQualification, growth/market-flavored prompt. */
+async function judgeGrowthQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
+  const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
+
+  const result = await aiJson<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
+    taskId: "business_development.qualify_growth_opportunity",
+    system: `You apply Business Development's evidence threshold for whether a growth/market opportunity is sufficiently real to invest further effort in developing.
+
+Qualification must not be based on enthusiasm, confidence, or superficial fit -- it must be based on the actual evidence gathered. If required evidence is missing to make this judgment, hold rather than infer or guess.
+
+Return JSON:
+{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}
+- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this growth opportunity.
+- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.
+- Blocked: the evidence gathered actively indicates this growth opportunity should not be pursued.
+- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
+    user: `Growth opportunity signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}`,
+    light: true,
+  });
+
+  if (!result || (result.qualification !== "Qualified" && result.qualification !== "Held" && result.qualification !== "Blocked")) {
+    return {
+      qualification: "Held",
+      rationale: "Couldn't complete the evidence assessment -- please try again or share more detail.",
+      missingEvidence: ["a retry of the evidence assessment"],
+    };
+  }
+
+  return {
+    qualification: result.qualification,
+    rationale: result.rationale ?? "(no rationale given)",
+    missingEvidence: result.qualification === "Held" ? (result.missingEvidence ?? []) : undefined,
+  };
+}
+
+async function runQualifyGrowthOpportunity(env: Env, state: WorkState): Promise<WorkState> {
+  const opportunity = state.bdOpportunity ?? { hatFamily: "growth_market_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  const result = await judgeGrowthQualification(env, opportunity);
+
+  state.bdOpportunity = {
+    ...opportunity,
+    qualification: result.qualification,
+    qualificationRationale: result.rationale,
+    missingEvidence: result.missingEvidence,
+  };
+
+  if (result.qualification === "Held") {
+    state.awaiting = EVIDENCE_GAP_AWAITING_STATE;
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: GROWTH_MARKET_DEVELOPMENT_HAT_NAME },
+      `Held -- ${result.rationale}\n\nWhat evidence can you share for: ${result.missingEvidence?.join(", ") || "this growth opportunity"}?`,
+    );
+    return state;
+  }
+
+  state.awaiting = undefined;
+  if (result.qualification === "Blocked") {
+    await sendWorkspaceHatMessage(env, { ...state, hat: GROWTH_MARKET_DEVELOPMENT_HAT_NAME }, `Blocked -- ${result.rationale}`);
+    return state;
+  }
+
+  await sendWorkspaceHatMessage(env, { ...state, hat: GROWTH_MARKET_DEVELOPMENT_HAT_NAME }, `Qualified -- ${result.rationale}`);
+  return state;
+}
+
+async function resumeQualifyGrowthOpportunity(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const opportunity = state.bdOpportunity ?? { hatFamily: "growth_market_development" as const, signal: "", evidence: [] };
+  state.bdOpportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
+  return runQualifyGrowthOpportunity(env, state);
+}
+
+/** Real drafting reasoning for develop_growth_opportunity, per the Hat Definition's Output contract: "developed growth opportunity state and defined next action," establishing value hypothesis, requirements, route, dependencies, and risks. Same grounding discipline as draftDevelopOpportunity/draftDevelopPartnership, growth/market-flavored prompt. */
+async function draftDevelopGrowthOpportunity(env: Env, opportunity: BDOpportunityState): Promise<DevelopmentDraft | null> {
+  const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+
+  return aiJson(env, {
+    taskId: "business_development.develop_growth_opportunity",
+    system: `You take a qualified growth/market opportunity forward by drafting its stakeholders, value hypothesis, requirements, route, dependencies, and risks.
+
+Ground everything only in the opportunity's actual signal, gathered evidence, and qualification rationale -- never invent stakeholders, routes, or facts not implied by what's actually been established. Where something can't be determined from what's given, say so plainly rather than guessing.
+
+Return JSON:
+{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<why this could create value for ENIG>", "route": "<the plausible path forward -- market entry, channel, offering build-out>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
+    user: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}`,
+    light: true,
+  });
+}
+
+async function growthMarketDevelopmentEntryHandler(
+  env: Env,
+  state: WorkState,
+  actionName: GrowthMarketDevelopmentAction,
+  text: string,
+): Promise<WorkState> {
+  if (actionName === "qualify_growth_opportunity") {
+    return runQualifyGrowthOpportunity(env, state);
+  }
+
+  if (actionName === "handoff_to_sales") {
+    return proposeBDHandoff(env, state, "Sales", "Sales Executive", text);
+  }
+
+  if (actionName === "handoff_to_strategy") {
+    return proposeBDHandoff(env, state, "Strategy", "Strategy Analyst", text);
+  }
+
+  if (actionName === "develop_growth_opportunity") {
+    return proposeBDDevelopment(env, state, "growth_market_development", draftDevelopGrowthOpportunity);
+  }
+
+  if (actionName === "determine_next_move") {
+    return proposeNextMove(env, state, "growth_market_development");
+  }
+
+  throw new Error(`${actionName}: not an internal/write action on Growth & Market Development.`);
+}
+
+const growthMarketDevelopmentAwaitingHandlers: HatManifest<GrowthMarketDevelopmentAction>["awaitingHandlers"] = {
+  [EVIDENCE_GAP_AWAITING_STATE]: resumeQualifyGrowthOpportunity,
+};
+
+const growthMarketDevelopmentHat: HatManifest<GrowthMarketDevelopmentAction> = {
+  name: GROWTH_MARKET_DEVELOPMENT_HAT_NAME,
+  responsibility:
+    "Own the identification and development of broader opportunities for ENIG's growth across markets, channels, offerings, and growth directions. Identify, research, assess, and develop growth directions where the central question concerns ENIG's broader market position, expansion, channels, offerings, or future sources of growth. Does not automatically own client acquisition, strategic diagnosis, or execution responsibilities belonging to another ENIG Unit.",
+  actions: growthMarketDevelopmentActions,
+  readHandler: growthMarketDevelopmentReadHandler,
+  entryHandler: growthMarketDevelopmentEntryHandler,
+  awaitingHandlers: growthMarketDevelopmentAwaitingHandlers,
+};
 
 export const businessDevelopmentManifest: UnitManifest = {
   unit: "Business Development",

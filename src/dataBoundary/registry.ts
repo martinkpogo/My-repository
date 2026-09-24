@@ -245,6 +245,31 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Develop Partnership",
     description: "Drafts stakeholders, value proposition, relationship model, route, dependencies, and risks for a qualified partnership, pending Martin's approval.",
   },
+  "business_development.discover_growth_opportunity": {
+    id: "business_development.discover_growth_opportunity",
+    name: "Business Development Discover Growth Opportunity",
+    description: "Identifies a candidate market, channel, offering, or growth direction from a signal in Martin's request text.",
+  },
+  "business_development.research_market": {
+    id: "business_development.research_market",
+    name: "Business Development Research Market",
+    description: "Organizes and analyzes evidence for a named market/industry/segment/channel from Martin's own supplied facts, never fabricating unstated evidence.",
+  },
+  "business_development.assess_market_opportunity": {
+    id: "business_development.assess_market_opportunity",
+    name: "Business Development Assess Market Opportunity",
+    description: "Determines whether a researched growth/market signal has a substantive reason for ENIG to pursue it, across market attractiveness, strategic/commercial relevance, and capability fit.",
+  },
+  "business_development.qualify_growth_opportunity": {
+    id: "business_development.qualify_growth_opportunity",
+    name: "Business Development Qualify Growth Opportunity",
+    description: "Applies the evidence threshold for Qualified / Held / Blocked to an in-flight growth opportunity's gathered evidence.",
+  },
+  "business_development.develop_growth_opportunity": {
+    id: "business_development.develop_growth_opportunity",
+    name: "Business Development Develop Growth Opportunity",
+    description: "Drafts value hypothesis, requirements, route, dependencies, and risks for a qualified growth opportunity, pending Martin's approval.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
