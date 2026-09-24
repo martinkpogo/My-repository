@@ -4,6 +4,8 @@ import { generalChatReply, generalDmReply } from "./chat";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
 import { LeadOpportunityDiscoveryCapability } from "./units/sales/leadGenerationDiscovery";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
+import { findUnitManifest } from "./units/registry";
+import { resolveUnitRequest } from "./units/dispatch";
 import {
   getActiveWorkId,
   getReplyMessageWorkId,
@@ -266,10 +268,33 @@ export async function dispatchCowork(
     return;
   }
 
-  // Business Development, Creative & Design, Operations: no existing
-  // chat-triggered governed entry point -- fabricating a direct-chat entry
-  // point here would be a parallel execution implementation, not routing
-  // into an existing one.
+  // Unit Registry manifest dispatch (ENIG Operating Model design doc, "The
+  // Unit Registry") -- a generic lookup, not a per-Unit branch: any Unit
+  // registered in src/units/registry.ts routes through here identically.
+  // Only Business Development is registered today; Creative & Design and
+  // Operations fall through to the UNSUPPORTED path below exactly as
+  // before, since neither has a manifest yet.
+  const manifest = findUnitManifest(decision.unit);
+  if (manifest) {
+    const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, decision.hat);
+    if (dispatchResult.kind === "handled") {
+      // Stage 1/2 already replied directly (a "read" action's answer, or
+      // an ambiguity/clarification message) -- no WorkSession needed, per
+      // the design doc's read/write split ("Read -- no WorkSession
+      // created").
+      return;
+    }
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, decision.unit, dispatchResult.hat, threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleUnitAction(dispatchResult.actionName, text);
+    return;
+  }
+
+  // Creative & Design, Operations: no existing chat-triggered governed
+  // entry point -- fabricating a direct-chat entry point here would be a
+  // parallel execution implementation, not routing into an existing one.
   console.error(`Workspace router: Cowork resolved for ${decision.unit}, which has no existing chat-triggered governed entry point (chat ${chatId})`);
   // This is a genuine UNSUPPORTED resolution -- responsibility resolved
   // correctly, but no execution path exists for it. The reply below goes

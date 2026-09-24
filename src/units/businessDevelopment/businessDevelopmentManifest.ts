@@ -400,4 +400,12 @@ export const businessDevelopmentManifest: UnitManifest = {
     [partnershipDevelopmentHat.name]: partnershipDevelopmentHat,
     [growthMarketDevelopmentHat.name]: growthMarketDevelopmentHat,
   },
+  // Registered in dataBoundary/types.ts + registry.ts, but NOT yet
+  // classified in PRODUCTION_TASK_SENSITIVITY (dataBoundary/policy.ts) --
+  // pending Architect review. Calls against these taskIds fail closed
+  // (UNRESOLVED_POLICY_HOLD) until that classification lands; this
+  // manifest is wired into dispatch but not yet live end-to-end.
+  intakeClassificationTaskId: "business_development.intake_classification",
+  intakeIntroLine: "You route incoming Business Development requests for ENIG, among its three parallel specialist Hats.",
+  actionClassificationTaskId: "business_development.hat_action_decision",
 };

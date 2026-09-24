@@ -1,5 +1,6 @@
 import type { Env } from "../types";
 import type { SemanticTaskId } from "../dataBoundary/types";
+import type { ActionDefinition } from "./actionRegistry";
 import { aiJson } from "../ai";
 
 /**
@@ -63,6 +64,55 @@ export async function classifyCandidateHats<H extends string = string>(
   return aiJson<Stage1IntakeClassification<H>>(env, {
     taskId: options.taskId,
     system: buildStage1SystemPrompt(options.introLine, options.hatSummaryList),
+    user: text,
+    light: options.light,
+  });
+}
+
+/**
+ * Generic Stage 2 action classification -- the Action Registry's own
+ * "reads the message against that Unit's own declared action list and
+ * picks one, or asks a clarifying question if none fit" step (ENIG
+ * Operating Model design doc, "The Action Registry"). Unit-agnostic: any
+ * Unit built on the Unit Registry manifest pattern supplies its own
+ * taskId (a distinct SemanticTaskId, same "never share across Units"
+ * rule classifyCandidateHats' doc comment states) and the resolved Hat's
+ * own ActionDefinition list, rather than reimplementing this prompt shape.
+ */
+export interface ActionClassification<A extends string = string> {
+  action?: A | null;
+  reason?: string;
+}
+
+export interface ClassifyActionOptions {
+  /** The Unit's own registered SemanticTaskId for this classification call -- never shared across Units. */
+  taskId: SemanticTaskId;
+  /** One sentence naming the Unit/Hat whose action list this call picks from -- e.g. "You decide which action this request needs, within Business Development's Opportunity Development Hat." */
+  introLine: string;
+  light?: boolean;
+}
+
+/** Pure prompt-construction, exported for direct testability without needing to mock the AI provider chain. */
+export function buildActionClassificationSystemPrompt<A extends string>(introLine: string, actions: ActionDefinition<A>[]): string {
+  const actionList = actions.map((a) => `- ${a.name}: ${a.description}`).join("\n");
+  return `${introLine} Below are the only actions you may choose from. Pick exactly one that genuinely matches the request, or null if none fit.
+
+${actionList}
+
+Return JSON:
+{"action": "<exact action name>" | null, "reason": "<brief rationale>"}
+- action: exactly one of the action names above, verbatim -- never invent a new action name. null if none genuinely fit; never guess.`;
+}
+
+export async function classifyAction<A extends string = string>(
+  env: Env,
+  options: ClassifyActionOptions,
+  actions: ActionDefinition<A>[],
+  text: string,
+): Promise<ActionClassification<A> | null> {
+  return aiJson<ActionClassification<A>>(env, {
+    taskId: options.taskId,
+    system: buildActionClassificationSystemPrompt(options.introLine, actions),
     user: text,
     light: options.light,
   });

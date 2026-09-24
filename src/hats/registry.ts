@@ -48,6 +48,18 @@ export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
   specialization: "Research Intelligence",
 };
 export const STRATEGY_ANALYST: HatIdentity = { name: "Strategy Analyst", unit: "Strategy", specialization: "Strategy" };
+// Business Development's three parallel specialist Hats -- selected only
+// when their specialization is relevant, never mandatory workflow stages
+// (see businessDevelopmentManifest.ts). Registered here purely for
+// discovery/direct-addressing (resolveAddressee) -- their own governed
+// execution lives in the Unit Registry manifest, not in a
+// runDiagnosis/judgeQuote-shaped function like the Hats above.
+export const BD_OPPORTUNITY_DEVELOPMENT: HatIdentity = { name: "Business Development Manager — Opportunity Development", unit: "Business Development" };
+export const BD_PARTNERSHIP_DEVELOPMENT: HatIdentity = { name: "Partnerships Manager — Partnership Development", unit: "Business Development" };
+export const BD_GROWTH_MARKET_DEVELOPMENT: HatIdentity = {
+  name: "Growth & Market Development Manager — Growth & Market Development",
+  unit: "Business Development",
+};
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {
   "Marketing Strategist": MARKETING_STRATEGIST,
@@ -66,6 +78,9 @@ export const ALL_HATS: HatIdentity[] = [
   VALUE_BASED_PRICING_ASSESSOR,
   RESEARCH_INTELLIGENCE_ANALYST,
   STRATEGY_ANALYST,
+  BD_OPPORTUNITY_DEVELOPMENT,
+  BD_PARTNERSHIP_DEVELOPMENT,
+  BD_GROWTH_MARKET_DEVELOPMENT,
   ...MARKETING_HAT_NAMES.map((name) => MARKETING_HAT_REGISTRY[name] as HatIdentity),
 ];
 

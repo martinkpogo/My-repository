@@ -1,5 +1,6 @@
 import type { Env, Unit, WorkState } from "../types";
 import type { ActionDefinition, ConsequenceLevel } from "../hats/actionRegistry";
+import type { SemanticTaskId } from "../dataBoundary/types";
 
 /**
  * Generic Unit Manifest contract (ENIG Operating Model design doc, "The
@@ -97,6 +98,25 @@ export interface UnitManifest {
    * resolution happens before action resolution, never the two at once.
    */
   hats: Record<string, HatManifest<any>>;
+
+  /**
+   * This Unit's own registered SemanticTaskId for Stage 1 (which Hat)
+   * classification -- never shared across Units (Data Boundary
+   * sensitivity is resolved per task). A Unit-specific fact declared
+   * here, not a kernel decision.
+   */
+  intakeClassificationTaskId: SemanticTaskId;
+  /** One sentence naming this Unit for Stage 1's prompt -- e.g. "You route incoming Business Development requests for ENIG, among its three parallel specialist Hats." */
+  intakeIntroLine: string;
+
+  /**
+   * This Unit's own registered SemanticTaskId for Stage 2 (which action,
+   * within the resolved Hat's own declared list) classification -- one
+   * per Unit, shared across all of its Hats (sensitivity is about the
+   * Unit's business content, not which Hat within it), never shared
+   * across Units.
+   */
+  actionClassificationTaskId: SemanticTaskId;
 }
 
 export function findHatManifest(hatName: string | undefined, manifest: UnitManifest): HatManifest | undefined {

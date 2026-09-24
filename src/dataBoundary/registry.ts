@@ -180,6 +180,16 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Generates web search queries for an on-demand discovery request, grounded in the canonical Acquisition Criteria and Martin's stated focus -- same non-diagnostic discipline as the fixed scheduled-discovery query set, never presupposing a negative diagnosis or naming a specific organisation.",
   },
+  "business_development.intake_classification": {
+    id: "business_development.intake_classification",
+    name: "Business Development Intake Classification",
+    description: "Stage 1 candidate Hat identification among Business Development's three parallel Hats.",
+  },
+  "business_development.hat_action_decision": {
+    id: "business_development.hat_action_decision",
+    name: "Business Development Hat Action Decision",
+    description: "Stage 2: picks which of the resolved Hat's own declared actions a request needs, per the generic Action Registry.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
