@@ -5,7 +5,50 @@ import {
   REGISTERED_MARKETING_RELATIONSHIPS,
   resolveMarketingCandidateRelationships,
   selectMarketingAmbiguityReasonCode,
+  resolveCandidateRelationships,
+  selectAmbiguityReasonCode,
+  type RelationshipDefinition,
 } from "./relationships";
+
+// ---------------------------------------------------------------------------
+// Generic-core reuse: a toy non-Marketing Hat set, proving a second Unit can
+// call resolveCandidateRelationships/selectAmbiguityReasonCode directly with
+// its own relationship list, rather than reimplementing Stage 2 resolution.
+// ---------------------------------------------------------------------------
+
+type ToyHatName = "Diagnostician" | "Prescriber";
+
+const TOY_RELATIONSHIPS: RelationshipDefinition<ToyHatName>[] = [
+  {
+    id: "prescriber__diagnosis",
+    from: "Diagnostician",
+    to: "Prescriber",
+    conditional: false,
+    description: "Established diagnosis that Prescriber relies on.",
+  },
+];
+
+test("resolveCandidateRelationships (generic core): a non-Marketing Hat set resolves via its own relationship list", () => {
+  const result = resolveCandidateRelationships<ToyHatName>(["Diagnostician", "Prescriber"], TOY_RELATIONSHIPS);
+  assert.equal(result.resolved, true);
+  assert.equal(result.hat, "Prescriber");
+  assert.equal(result.relationshipId, "prescriber__diagnosis");
+});
+
+test("resolveCandidateRelationships (generic core): fails closed with NO_REGISTERED_RELATIONSHIP for an unrelated candidate pair", () => {
+  const result = resolveCandidateRelationships<ToyHatName>(["Diagnostician", "Prescriber"], []);
+  assert.equal(result.resolved, false);
+  assert.equal(selectAmbiguityReasonCode(result), "NO_REGISTERED_RELATIONSHIP");
+});
+
+test("resolveMarketingCandidateRelationships is a thin wrapper over the generic core bound to REGISTERED_MARKETING_RELATIONSHIPS", () => {
+  const viaWrapper = resolveMarketingCandidateRelationships(["Marketing Strategist", "Brand & Communications Strategist"]);
+  const viaGenericCore = resolveCandidateRelationships(
+    ["Marketing Strategist", "Brand & Communications Strategist"],
+    REGISTERED_MARKETING_RELATIONSHIPS,
+  );
+  assert.deepEqual(viaWrapper, viaGenericCore);
+});
 
 test("REGISTERED_MARKETING_RELATIONSHIPS contains exactly the five unique approved IDs", () => {
   const ids = REGISTERED_MARKETING_RELATIONSHIPS.map((r) => r.id);
