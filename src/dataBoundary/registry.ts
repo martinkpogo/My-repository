@@ -200,6 +200,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Discover Opportunity",
     description: "Identifies a candidate BD opportunity from a signal, market, organisation, or relationship in Martin's request text.",
   },
+  "business_development.research_opportunity": {
+    id: "business_development.research_opportunity",
+    name: "Business Development Research Opportunity",
+    description: "Organizes and analyzes evidence for a named opportunity signal from Martin's own supplied facts, never fabricating unstated evidence.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {

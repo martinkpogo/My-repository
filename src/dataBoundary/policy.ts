@@ -125,6 +125,19 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // internal ENIG request, never an Entity, Handoff, contact record, or
   // existing client-confidential artifact.
   "business_development.discover_opportunity": "business_sensitive",
+  // Architect-reviewed: payload is Martin's raw Workspace message text
+  // only, same as discover_opportunity. The action may concern an
+  // external market/organisation/partnership, but the AI boundary
+  // receives Martin-authored business text, never client-confidential
+  // records, Entity data, Handoff payloads, or contact/PII data. Note:
+  // BD has no live web-search/external-research capability -- this task
+  // organizes and interprets evidence Martin actually supplies, never
+  // manufactures sources or external findings, and never implies
+  // external research was performed. Whether to give BD real research
+  // capability (its own, or a governed transition to R&I) is a separate,
+  // undecided architectural question -- not resolved by this
+  // classification.
+  "business_development.research_opportunity": "business_sensitive",
 };
 
 /**

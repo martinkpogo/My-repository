@@ -55,23 +55,27 @@ import { aiJson } from "../../ai";
  * so Hat resolution genuinely exercises three Hats, not one -- but their
  * handlers are explicit stubs pending the same treatment.
  *
- * qualify_opportunity's evidence-sufficiency judgment is real and live
- * (judgeOpportunityQualification, business_development.opportunity_
- * qualification, classified business_sensitive -- Architect-approved).
- * discover_opportunity's signal-identification reasoning is also real
- * (discoverOpportunity, business_development.discover_opportunity) --
+ * qualify_opportunity's and discover_opportunity's reasoning are real and
+ * live (judgeOpportunityQualification/discoverOpportunity, both
+ * classified business_sensitive -- Architect-approved). research_
+ * opportunity's evidence-organization reasoning is also real
+ * (researchOpportunity, business_development.research_opportunity) --
  * classified business_sensitive pending Architect review (same payload
  * category as every other BD task: Martin's own typed text, never a
  * Handoff/Entity/contact object), UNCLASSIFIED in
  * PRODUCTION_TASK_SENSITIVITY until then, so real calls fail closed
- * (UNRESOLVED_POLICY_HOLD) rather than running unreviewed.
+ * (UNRESOLVED_POLICY_HOLD) rather than running unreviewed. BD has no live
+ * web-search/external-research capability wired up (unlike R&I or Lead
+ * Discovery) -- research_opportunity only organizes and draws
+ * implications from facts Martin has actually supplied, never fabricating
+ * external evidence.
  *
  * One thing still not decided here, left as a loud placeholder rather
  * than invented:
  *
- * TODO(intelligence): research_opportunity/assess_opportunity still need
- * real, registered AI tasks (matching how discover_opportunity and
- * qualify_opportunity above are registered) -- their read handler still
+ * TODO(intelligence): assess_opportunity still needs a real, registered
+ * AI task (matching how discover_opportunity/research_opportunity/
+ * qualify_opportunity above are registered) -- its read handler still
  * throws "not yet implemented."
  *
  * NOTE: dispatch wiring (four chokepoints, including the approval
@@ -142,16 +146,53 @@ Return JSON:
   return `Signal: ${result.signal}\n\nWhy it may matter: ${result.whyItMayMatter ?? "(not stated)"}\n\nEvidence still needed: ${evidenceNeeded.join(", ")}`;
 }
 
+/**
+ * Real evidence-organization reasoning for research_opportunity, per the
+ * Hat Definition's own Output contract (Notion): "evidence-backed
+ * findings, implications for ENIG, limitations, and sources." BD has no
+ * live web-search/external-research capability wired up (unlike R&I or
+ * Lead Discovery) -- this organizes and draws implications only from
+ * what Martin has actually supplied in the request, never fabricating
+ * facts, statistics, or claims not present in the input. Anything not
+ * actually stated is named as a limitation, not inferred or guessed.
+ * Stateless (a "read" action), same as discoverOpportunity above.
+ */
+async function researchOpportunity(env: Env, text: string): Promise<string> {
+  const result = await aiJson<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
+    taskId: "business_development.research_opportunity",
+    system: `You research a named organisation, market, industry, relationship, partnership, channel, or offering to establish relevant facts and evidence for a Business Development opportunity.
+
+You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request. Never fabricate facts, statistics, claims, or sources not present in the input. Anything relevant but not actually stated must be named as a limitation, never inferred or assumed.
+
+Return JSON:
+{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for ENIG, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}
+- findings: only facts genuinely present in the input, restated clearly -- never invented.
+- limitations: what's still unknown or unverified; never empty if findings alone can't establish the opportunity.
+- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
+    user: text,
+    light: true,
+  });
+
+  if (!result || !result.findings || result.findings.length === 0) {
+    return "Couldn't extract any concrete findings from that -- can you share what you already know about this opportunity (organisation, market, evidence you have)?";
+  }
+
+  const limitations = result.limitations && result.limitations.length > 0 ? result.limitations.join(", ") : "(none stated)";
+  const sources = result.sources && result.sources.length > 0 ? result.sources.join(", ") : "Martin's own account";
+  return `Findings: ${result.findings.join("; ")}\n\nImplications: ${result.implications ?? "(not stated)"}\n\nLimitations: ${limitations}\n\nSources: ${sources}`;
+}
+
 async function opportunityDevelopmentReadHandler(env: Env, actionName: OpportunityDevelopmentAction, text: string): Promise<string> {
   switch (actionName) {
     case "discover_opportunity":
       return discoverOpportunity(env, text);
     case "research_opportunity":
+      return researchOpportunity(env, text);
     case "assess_opportunity":
       // TODO(intelligence): real AI-driven evidence reasoning per the Hat
-      // Definition's per-action Output contract (Notion). Each of these
-      // needs its own registered, governed AI task before this can
-      // produce a real answer rather than an explicit placeholder.
+      // Definition's own Output contract (Notion) -- needs its own
+      // registered, governed AI task before this can produce a real
+      // answer rather than an explicit placeholder.
       throw new Error(`business_development.opportunity_development.${actionName}: read handler not yet implemented -- draft manifest only.`);
     default:
       // qualify_opportunity is "internal" and develop_opportunity/
