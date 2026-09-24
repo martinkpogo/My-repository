@@ -1,5 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { getPage, plainText, queryDataSource, richText, richTextLong, select, title, uniqueId } from "../../notion";
+import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -8,7 +8,7 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
-import { ENIG_TOKEN_PATTERN } from "../../ai/outboundGate";
+import { resolveMatterFromText } from "../../identityResolution";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -409,44 +409,6 @@ export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | nu
     return { valid: false, reason: "No recommended direction was given, and no reason was stated for why one isn't yet supported." };
   }
   return { valid: true };
-}
-
-interface ResolvedMatterIdentity {
-  matterToken: string;
-  entityToken: string;
-}
-
-/**
- * Deterministically resolves an existing Matter from an ENIG token
- * (e.g. "MAT-20") found in Martin's own text -- never AI-guessed, per the
- * Handoff identity-write boundary's discipline that identity resolution
- * stays deterministic. Returns null if no token is found, or the token
- * doesn't resolve to a real, existing Matter with a related Entity --
- * both are fail-closed, never a guess at which Matter was meant.
- */
-async function resolveMatterFromText(env: Env, text: string): Promise<ResolvedMatterIdentity | null> {
-  const tokenMatches = text.match(ENIG_TOKEN_PATTERN);
-  const candidateToken = tokenMatches?.[0];
-  if (!candidateToken) return null;
-
-  const tokenShape = /^([A-Z]{1,6})-(\d{1,6})$/.exec(candidateToken);
-  if (!tokenShape) return null;
-  const number = Number(tokenShape[2]);
-
-  const candidates = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
-    property: "Matter_ID",
-    unique_id: { equals: number },
-  });
-  const matter = candidates.find((m) => uniqueId(m.properties.Matter_ID) === candidateToken);
-  if (!matter) return null;
-
-  const entityId = matter.properties.Entity?.relation?.[0]?.id;
-  if (!entityId) return null;
-  const entity = await getPage(env, entityId);
-  const entityToken = uniqueId(entity.properties["Entity ID"]);
-  if (!entityToken) return null;
-
-  return { matterToken: candidateToken, entityToken };
 }
 
 /**
