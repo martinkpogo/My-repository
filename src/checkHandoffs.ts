@@ -119,6 +119,18 @@ function isFinanceQuoteHandoff(handoff: { properties?: Record<string, any> }): b
 }
 
 /**
+ * Identifies a call-notes Handoff created by the isolated Sales Executive
+ * Claude project (per its Project Instructions' Section 6A) rather than by
+ * this Worker's own Finance/Strategy code. Detected by the fixed "Call
+ * Notes (Matter:" marker Section 6A writes into Reason -- a Notion schema
+ * property was deliberately not added for this, since the marker already
+ * uniquely identifies the Handoff without a live database change.
+ */
+function isCallNotesHandoff(handoff: { properties?: Record<string, any> }): boolean {
+  return plainText(handoff.properties?.Reason).startsWith("Call Notes (Matter:");
+}
+
+/**
  * The Sales side of the Finance -> Sales execution boundary — the return
  * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
  * Also the entry point for a Handoff addressed to Sales that was created
@@ -193,11 +205,24 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
 
     // Not paused: a Finance -> Sales quote Handoff goes to the Runtime Sales
     // Executive's token-safe Proposal flow instead of the older
-    // runProposalDrafting path. Every other Sales Handoff is unchanged.
+    // runProposalDrafting path. A call-notes Handoff from the isolated
+    // Sales Executive project goes to the qualification pickup. Every
+    // other Sales Handoff is unchanged.
     if (isFinanceQuoteHandoff(handoff)) {
       const stub = getSessionStub(env, workId);
       try {
         await stub.runTokenSafeProposal();
+        pickedUp++;
+      } catch (err) {
+        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
+      }
+      continue;
+    }
+
+    if (isCallNotesHandoff(handoff)) {
+      const stub = getSessionStub(env, workId);
+      try {
+        await stub.runCallNotesPickup();
         pickedUp++;
       } catch (err) {
         await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
