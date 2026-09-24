@@ -232,7 +232,12 @@ test("17. Manual /checkhandoffs behavior remains unchanged (default source)", as
 // --- Sales external-Handoff detection (items 11-13) -----------------------
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; runProposalDrafting: number; runTokenSafeProposal: number } = { init: [], runProposalDrafting: 0, runTokenSafeProposal: 0 };
+  const calls: { init: any[][]; runProposalDrafting: number; runTokenSafeProposal: number; runCallNotesPickup: number } = {
+    init: [],
+    runProposalDrafting: 0,
+    runTokenSafeProposal: 0,
+    runCallNotesPickup: 0,
+  };
   const stub = {
     init: async (...args: any[]) => {
       calls.init.push(args);
@@ -242,6 +247,9 @@ function createMockWorkSession() {
     },
     runTokenSafeProposal: async () => {
       calls.runTokenSafeProposal++;
+    },
+    runCallNotesPickup: async () => {
+      calls.runCallNotesPickup++;
     },
   };
   return {
@@ -412,5 +420,69 @@ test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + 
 
   assert.strictEqual(calls.runTokenSafeProposal, 0);
   assert.strictEqual(calls.runProposalDrafting, 0);
+  assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
+});
+
+// --- Call-notes Handoff detection (isCallNotesHandoff) --------------------
+//
+// Reason is free text a Claude session composes itself -- HO-69, a real
+// Handoff created by the isolated Sales Executive project, opened with
+// "requiredCategory: call_notes. De-identified call notes bundle..."
+// rather than the literal example phrase Section 6A's instructions gave.
+// These tests pin detection to the requiredCategory marker itself, not to
+// any particular surrounding wording, so this doesn't silently regress
+// again.
+
+test("Not paused: a call-notes Handoff (requiredCategory: call_notes) runs the call-notes pickup flow, not the old drafting path", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t, {
+    Reason: {
+      rich_text: [{ plain_text: "Call Notes (Matter: MAT-20). requiredCategory: call_notes. De-identified call notes bundle prepared per Section 6A." }],
+    },
+  });
+
+  const pickedUp = await discoverPendingSalesHandoffs(env, false);
+
+  assert.strictEqual(calls.runCallNotesPickup, 1);
+  assert.strictEqual(calls.runTokenSafeProposal, 0);
+  assert.strictEqual(calls.runProposalDrafting, 0);
+  assert.strictEqual(pickedUp, 1);
+});
+
+test("Detection matches on free-text Reason wording, not just the literal opening phrase -- regression test for HO-69's actual wording", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t, {
+    Reason: {
+      rich_text: [
+        {
+          plain_text:
+            "requiredCategory: call_notes. De-identified call notes bundle for MAT-20, prepared per Section 6A. Source: user-supplied transcript in place of a Read.ai connector pull.",
+        },
+      ],
+    },
+  });
+
+  await discoverPendingSalesHandoffs(env, false);
+
+  assert.strictEqual(calls.runCallNotesPickup, 1, "must still route to call-notes pickup even without the literal 'Call Notes (Matter:' opening phrase");
+  assert.strictEqual(calls.runProposalDrafting, 0);
+});
+
+test("Paused: a call-notes Handoff follows the existing paused behaviour (detect + notify only, no pickup)", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages } = mockSalesHandoffFetch(t, {
+    Reason: { rich_text: [{ plain_text: "Call Notes (Matter: MAT-20). requiredCategory: call_notes." }] },
+  });
+
+  const pickedUp = await discoverPendingSalesHandoffs(env, true);
+
+  assert.strictEqual(calls.runCallNotesPickup, 0, "call-notes pickup must not run automatically while Sales is paused");
+  assert.strictEqual(pickedUp, 0);
   assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });
