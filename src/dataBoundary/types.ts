@@ -95,7 +95,24 @@ export type SemanticTaskId =
   | "business_development.research_partner"
   | "business_development.assess_partnership"
   | "business_development.qualify_partnership"
-  | "business_development.develop_partnership";
+  | "business_development.develop_partnership"
+  // Growth & Market Development's discover/research/assess/qualify/develop
+  // reasoning -- same payload shape as their Opportunity/Partnership
+  // Development counterparts (Martin-derived text: request text, or the
+  // growth opportunity's signal/evidence/qualification), growth/market-
+  // flavored wording per Notion's Hat Definition treating Growth & Market
+  // Development as its own specialized Hat. determine_next_move and the
+  // two handoff_to_* actions reuse the existing Hat-agnostic
+  // business_development.determine_next_move task and the
+  // SemanticTaskId-free preview/approval Handoff pattern respectively --
+  // no new registration needed for those three. Sensitivity
+  // classification pending Architect review; UNCLASSIFIED in
+  // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
+  | "business_development.discover_growth_opportunity"
+  | "business_development.research_market"
+  | "business_development.assess_market_opportunity"
+  | "business_development.qualify_growth_opportunity"
+  | "business_development.develop_growth_opportunity";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely
