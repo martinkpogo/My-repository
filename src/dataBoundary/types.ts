@@ -49,7 +49,12 @@ export type SemanticTaskId =
   // category as the two Stage 1/2 tasks above. Sensitivity classification
   // pending Architect review; UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY
   // until then (fails closed).
-  | "business_development.opportunity_qualification";
+  | "business_development.opportunity_qualification"
+  // discover_opportunity's real signal-identification reasoning -- payload
+  // is Martin's raw Workspace message only, same category as every other
+  // BD task above. Sensitivity classification pending Architect review;
+  // UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY until then (fails closed).
+  | "business_development.discover_opportunity";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

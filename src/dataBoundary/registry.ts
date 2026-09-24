@@ -195,6 +195,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Opportunity Qualification",
     description: "Applies the evidence threshold for Qualified / Held / Blocked to an in-flight BD opportunity's gathered evidence.",
   },
+  "business_development.discover_opportunity": {
+    id: "business_development.discover_opportunity",
+    name: "Business Development Discover Opportunity",
+    description: "Identifies a candidate BD opportunity from a signal, market, organisation, or relationship in Martin's request text.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {

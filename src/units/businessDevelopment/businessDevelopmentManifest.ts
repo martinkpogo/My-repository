@@ -55,11 +55,13 @@ import { aiJson } from "../../ai";
  * so Hat resolution genuinely exercises three Hats, not one -- but their
  * handlers are explicit stubs pending the same treatment.
  *
- * qualify_opportunity's evidence-sufficiency judgment is now real
- * (judgeOpportunityQualification, registered as
- * business_development.opportunity_qualification) -- classified
- * business_sensitive pending Architect review (same payload category as
- * the Stage 1/2 tasks: Martin's own typed evidence text, never a
+ * qualify_opportunity's evidence-sufficiency judgment is real and live
+ * (judgeOpportunityQualification, business_development.opportunity_
+ * qualification, classified business_sensitive -- Architect-approved).
+ * discover_opportunity's signal-identification reasoning is also real
+ * (discoverOpportunity, business_development.discover_opportunity) --
+ * classified business_sensitive pending Architect review (same payload
+ * category as every other BD task: Martin's own typed text, never a
  * Handoff/Entity/contact object), UNCLASSIFIED in
  * PRODUCTION_TASK_SENSITIVITY until then, so real calls fail closed
  * (UNRESOLVED_POLICY_HOLD) rather than running unreviewed.
@@ -67,12 +69,10 @@ import { aiJson } from "../../ai";
  * One thing still not decided here, left as a loud placeholder rather
  * than invented:
  *
- * TODO(intelligence): discover_opportunity/research_opportunity/
- * assess_opportunity still need real, registered AI tasks (matching how
- * marketing.hat_action_decision and strategy's diagnosis tasks are
- * registered, and now how business_development.opportunity_qualification
- * is registered above) -- their read handler still throws "not yet
- * implemented."
+ * TODO(intelligence): research_opportunity/assess_opportunity still need
+ * real, registered AI tasks (matching how discover_opportunity and
+ * qualify_opportunity above are registered) -- their read handler still
+ * throws "not yet implemented."
  *
  * NOTE: dispatch wiring (four chokepoints, including the approval
  * callback) is done -- see units/dispatch.ts, units/registry.ts, and
@@ -107,9 +107,45 @@ const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentActi
   { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
 ];
 
-async function opportunityDevelopmentReadHandler(_env: Env, actionName: OpportunityDevelopmentAction, _text: string): Promise<string> {
+/**
+ * Real signal-identification reasoning for discover_opportunity, per the
+ * Hat Definition's own Output contract (Notion): "candidate opportunity
+ * with the signal, why it may matter to ENIG, and what evidence is still
+ * missing." Per the operating boundary "BD does not invent evidence to
+ * close qualification gaps," this never fabricates supporting evidence --
+ * it only names what's still needed, exactly like qualify_opportunity's
+ * missingEvidence. Stateless (a "read" action -- no WorkSession, nothing
+ * persisted): if Martin wants to carry this forward into qualification,
+ * that evidence has to be supplied again when he invokes qualify_opportunity.
+ */
+async function discoverOpportunity(env: Env, text: string): Promise<string> {
+  const result = await aiJson<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
+    taskId: "business_development.discover_opportunity",
+    system: `You identify potential Business Development opportunities for ENIG from explicit user direction, market signals, organisations, industries, geographies, partnerships, channels, offerings, or strategic relationships.
+
+Never invent or infer evidence that isn't in the request -- name what's still needed instead of assuming it.
+
+Return JSON:
+{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}
+- signal: a concise statement of the candidate opportunity itself.
+- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.
+- evidenceNeeded: what's still required to move this from a signal to a developed opportunity -- never empty; discovery alone is never sufficient evidence.`,
+    user: text,
+    light: true,
+  });
+
+  if (!result || !result.signal) {
+    return "Couldn't identify a clear opportunity signal from that -- can you name the market, organisation, partnership, or channel you have in mind?";
+  }
+
+  const evidenceNeeded = result.evidenceNeeded && result.evidenceNeeded.length > 0 ? result.evidenceNeeded : ["supporting evidence for this signal"];
+  return `Signal: ${result.signal}\n\nWhy it may matter: ${result.whyItMayMatter ?? "(not stated)"}\n\nEvidence still needed: ${evidenceNeeded.join(", ")}`;
+}
+
+async function opportunityDevelopmentReadHandler(env: Env, actionName: OpportunityDevelopmentAction, text: string): Promise<string> {
   switch (actionName) {
     case "discover_opportunity":
+      return discoverOpportunity(env, text);
     case "research_opportunity":
     case "assess_opportunity":
       // TODO(intelligence): real AI-driven evidence reasoning per the Hat
