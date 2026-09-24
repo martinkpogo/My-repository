@@ -17,6 +17,8 @@ export type SemanticTaskId =
   | "sales.call_prep_briefing"
   | "sales.commercial_evidence_extraction"
   | "sales.call_qualification"
+  | "sales.commercial_evidence_extraction_handoff"
+  | "sales.call_qualification_handoff"
   | "sales.proposal_drafting"
   | "sales.proposal_revision"
   | "finance.quote_judgment"

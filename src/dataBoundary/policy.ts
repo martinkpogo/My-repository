@@ -27,6 +27,15 @@ import type {
  * lower than its sales.* siblings because the Entity_Token/Matter_Token
  * data-boundary redesign made this call's context provably identity-free
  * (opaque tokens + sanitized business text only, never a real name).
+ *
+ * sales.commercial_evidence_extraction_handoff and sales.call_qualification_
+ * handoff apply the same business_sensitive reasoning to only ONE of two
+ * call sites that would otherwise share a single taskId: they're distinct
+ * SemanticTaskIds from sales.commercial_evidence_extraction/sales.
+ * call_qualification specifically so re-rating the token-safe Handoff-
+ * pickup path (handleCallNotesHandoffPickup) never widens provider
+ * eligibility for the still-raw live-chat path (handleCallNotes), which
+ * keeps the original two client_confidential.
  */
 export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId, SensitivityLevel>>> = {
   "routing.enquiry_classification": "client_confidential",
@@ -45,6 +54,18 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "sales.call_prep_briefing": "client_confidential",
   "sales.commercial_evidence_extraction": "client_confidential",
   "sales.call_qualification": "client_confidential",
+  // Split from their sales.commercial_evidence_extraction/sales.
+  // call_qualification siblings specifically because those two are still
+  // reachable from handleCallNotes's live-chat path (raw, pre-tokenization
+  // enquiry/call-notes text) -- re-rating the shared taskId would have
+  // made that raw path eligible for a real provider too. These _handoff
+  // variants are used only by handleCallNotesHandoffPickup, fed
+  // exclusively by the isolated Sales Executive project's already
+  // de-identified call notes (Section 6A) -- same rationale as
+  // finance.quote_judgment: the Entity_Token/Matter_Token data-boundary
+  // redesign makes this call's context provably identity-free.
+  "sales.commercial_evidence_extraction_handoff": "business_sensitive",
+  "sales.call_qualification_handoff": "business_sensitive",
   "sales.proposal_drafting": "client_confidential",
   "sales.proposal_revision": "client_confidential",
   "finance.quote_judgment": "business_sensitive",
@@ -153,7 +174,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * PRODUCTION_TASK_SENSITIVITY, rather than in a separate configuration
  * system, and does not duplicate SEMANTIC_TASK_REGISTRY.
  *
- * Every one of the 30 registered SemanticTaskIds is accounted for below --
+ * Every one of the 32 registered SemanticTaskIds is accounted for below --
  * either given a resolved policy, or named in the "deliberately unresolved"
  * comment block explaining why it has none. A task's outbound policy is
  * independent of its PRODUCTION_TASK_SENSITIVITY entry (that governs
@@ -161,6 +182,14 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * are drawn from the same underlying architecture and usually agree.
  *
  * -- TOKEN_SAFE_RUNTIME --
+ * sales.commercial_evidence_extraction_handoff / sales.call_qualification_
+ * handoff: used only by handleCallNotesHandoffPickup -- the isolated Sales
+ * Executive project's already de-identified call notes (Section 6A),
+ * carrying only Entity_Token/Matter_Token and sanitized narrative text.
+ * Their raw-text siblings (sales.commercial_evidence_extraction / sales.
+ * call_qualification, still used by handleCallNotes's live-chat path)
+ * remain client_confidential and unresolved below -- see that entry.
+ *
  * strategy.diagnosis / strategy.handoff_routing / strategy.proposal_drafting,
  * finance.quote_judgment, sales.proposal_drafting / sales.proposal_revision:
  * per the Entity_Token/Matter_Token data-boundary redesign, these operate
@@ -273,6 +302,10 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * briefing's own prompt construction includes state.entityName directly.
  * Same rationale as the routing.* classifiers above: client_confidential,
  * already unreachable, deliberately left unresolved rather than mislabeled.
+ * The last two have a token-safe _handoff sibling (see TOKEN_SAFE_RUNTIME
+ * above) for the one call site that is provably identity-free; these
+ * entries themselves stay unresolved because handleCallNotes's live-chat
+ * path still is not.
  */
 export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId, OutboundDataPolicy>>> = {
   "chat.general_reply": "TOKEN_SAFE_RUNTIME",
@@ -285,6 +318,8 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "research.handoff_routing": "TOKEN_SAFE_RUNTIME",
   "sales.proposal_drafting": "TOKEN_SAFE_RUNTIME",
   "sales.proposal_revision": "TOKEN_SAFE_RUNTIME",
+  "sales.commercial_evidence_extraction_handoff": "TOKEN_SAFE_RUNTIME",
+  "sales.call_qualification_handoff": "TOKEN_SAFE_RUNTIME",
   "finance.quote_judgment": "TOKEN_SAFE_RUNTIME",
   "strategy.diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.handoff_routing": "TOKEN_SAFE_RUNTIME",
