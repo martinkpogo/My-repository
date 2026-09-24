@@ -1,6 +1,6 @@
 # ENIG Operating Model
 
-As of 2026-09-23.
+As of 2026-09-24.
 
 ## Why this isn't a contradiction
 
@@ -100,7 +100,7 @@ The fix is not to let a direct request skip the discipline a Handoff enforces --
 
 None of this requires touching Marketing, Research & Intelligence, or the WorkSession/Handoff/approval/Data Boundary machinery -- they already fit the target shape or are the foundation everything else builds on.
 
-1. **Sales dispatch fix.** Smallest, most concrete: stop force-routing every Sales-addressed message through `handleIncomingEnquiry`; wire `Lead Generation Specialist` back in when that Hat resolves; add a minimal action check ("does this look like a new enquiry, or not") in front of the existing pipeline.
+1. ~~**Sales dispatch fix.**~~ Done -- `Lead Generation Specialist` is wired into `dispatchCowork`'s Sales branch and no longer forced through `handleIncomingEnquiry`.
 2. **Formalize the Action Registry pattern.** Extract Marketing's Stage 1/2 classification into a reusable shape other Units can register against, rather than each reimplementing it.
 3. **Read/write split.** Add the consequence property to the registry; wire read actions to bypass WorkSession creation.
 4. **Strategy/Finance direct entry.** Add the `direct_request` origination path once the registry exists to hang it on.
@@ -110,8 +110,7 @@ Each step is independently shippable and testable, the same discipline used for 
 
 ## Open questions
 
-- [ ] What is Sales's real action list beyond `new_enquiry`? (`status_check`, `follow_up`, `revise_draft` are guesses, not confirmed)
+- [x] What is Sales's real action list beyond `new_enquiry`? One real answer is now built and validated end-to-end: `call_notes` -- the isolated Sales Executive project hands off de-identified call notes via a Handoff, and the Runtime Sales Executive runs commercial-value-evidence-extraction + qualification against them (`handleCallNotesHandoffPickup`). `status_check`, `follow_up`, `revise_draft` remain unconfirmed guesses.
 - [ ] Should Strategy/Finance direct requests be gated any differently than Handoff-originated ones -- e.g. still require Martin to name an Entity/Matter explicitly, since there's no upstream Unit to have already established one?
 - [ ] Does a "read" action ever need any lightweight audit trail (a log entry, no WorkSession), or is truly zero record acceptable for pure lookups?
 - [ ] What should Business Development, Creative & Design, and Operations actually *do* -- none of the three have any defined Hat/capability yet, so this is a product question before it's an engineering one
-- [ ] Which piece do you want built first: the Sales dispatch fix (smallest, immediate), or the Action Registry pattern itself (larger, but every later piece depends on it)?
