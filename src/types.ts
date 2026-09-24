@@ -252,21 +252,25 @@ export interface WorkState {
     | "strategy_clarification"
     | "strategy_feedback"
     | "strategy_refinement_reason"
+    | "strategy_direct_request_matter"
     | "sales_proposal_revision";
   createdAt: string;
   updatedAt: string;
 
   enquiryText?: string;
   /**
-   * How this Sales work item originated -- carried onto the Sales -> Finance
-   * Handoff's Reason so Finance has that context, and required (fail-closed,
-   * never defaulted) before that Handoff may be created. "inbound_enquiry"
-   * is set by handleIncomingEnquiry, the only origination path this Worker
-   * currently drives; "outbound_outreach" exists for a work item originating
-   * from proactive outreach (e.g. off the back of an approved Lead
-   * Opportunity) -- exactly two values, no others.
+   * How this work item originated. "inbound_enquiry" is set by Sales's
+   * handleIncomingEnquiry and carried onto the Sales -> Finance Handoff's
+   * Reason so Finance has that context, required (fail-closed, never
+   * defaulted) before that Handoff may be created. "outbound_outreach"
+   * exists for a work item originating from proactive outreach (e.g. off
+   * the back of an approved Lead Opportunity) but nothing sets it yet.
+   * "direct_request" is set by a Unit's own handleDirectRequest for work
+   * Martin originates directly in Cowork chat rather than via an upstream
+   * Handoff (see strategy.handleDirectRequest) -- exactly three values,
+   * no others.
    */
-  entryType?: "inbound_enquiry" | "outbound_outreach";
+  entryType?: "inbound_enquiry" | "outbound_outreach" | "direct_request";
   /**
    * Structured commercial-value evidence extracted from enquiry text/call
    * notes during discovery, per the Commercial Value & Pricing Operating

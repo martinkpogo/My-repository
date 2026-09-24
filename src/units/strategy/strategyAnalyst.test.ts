@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   handlePickup,
+  handleDirectRequest,
+  handleDirectRequestClarification,
   handleStrategyHandoffApproval,
   handleInterventionApproval,
   handleStrategyClarification,
@@ -1331,4 +1333,169 @@ test("Material events use the existing logActivity mechanism", async (t) => {
     assert.ok(entry.Area, "every log entry must have an Area");
     assert.ok(entry.Outcome, "every log entry must have an Outcome");
   }
+});
+
+// ---------------------------------------------------------------------------
+// handleDirectRequest / handleDirectRequestClarification -- the
+// direct_request origination path (Migration path Step 4): a fresh
+// diagnosis Martin starts directly from chat, with no upstream Handoff.
+// ---------------------------------------------------------------------------
+
+function mockDirectRequestFetch(
+  t: any,
+  opts: { matterFound?: boolean; matterNumber?: number; matterPrefix?: string; entityNumber?: number; entityPrefix?: string } = {},
+) {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  const matterFound = opts.matterFound ?? true;
+  const matterNumber = opts.matterNumber ?? 20;
+  const matterPrefix = opts.matterPrefix ?? "MAT";
+  const entityNumber = opts.entityNumber ?? 7;
+  const entityPrefix = opts.entityPrefix ?? "E";
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      sentTexts.push(body.text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      if (!matterFound) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              properties: {
+                Matter_ID: { unique_id: { prefix: matterPrefix, number: matterNumber } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "entity-page-1",
+          url: "https://notion.so/entity-page-1",
+          properties: { "Entity ID": { unique_id: { prefix: entityPrefix, number: entityNumber } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
+      return new Response(
+        JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  return { sentTexts };
+}
+
+function fakeDirectRequestState(overrides: Partial<WorkState> = {}): WorkState {
+  return {
+    workId: "work_direct_1",
+    chatId: 1,
+    unit: "Strategy",
+    hat: "Strategy Analyst",
+    stage: "awaiting_pickup",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+test("handleDirectRequest resolves an explicit Matter token, runs the shared diagnosis pipeline, and marks entryType direct_request", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  // NO_RECOMMENDATION_DIAGNOSIS, not SUFFICIENT_DIAGNOSIS: a recommended
+  // direction routes into developStrategyProposal's own
+  // checkStrategyProposalForKnownIdentity gate, which requires a
+  // Sales-sourced strategySourceBoundaryAttestation -- direct-entry work
+  // has none, so it correctly holds there (see the dedicated test below).
+  // This test proves origination into the shared diagnosis pipeline
+  // itself, the actual scope of this step.
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
+
+  assert.strictEqual(result.entryType, "direct_request");
+  assert.strictEqual(result.matterToken, "MAT-20");
+  assert.strictEqual(result.entityToken, "E-7");
+  assert.ok(result.strategyQuestion, "the strategic question must be populated from Martin's own text");
+  assert.strictEqual(result.stage, "delivered", "a diagnosis with no recommendation must complete, not hold");
+});
+
+test("handleDirectRequest: a diagnosis WITH a recommended direction is correctly held by the existing known-identity gate -- direct-entry work has no Sales-sourced source-boundary attestation", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
+
+  // Reaches the diagnosis pipeline (entryType/tokens are set) but the
+  // downstream proposal-approval flow legitimately fails closed here --
+  // this is pre-existing discipline (checkStrategyProposalForKnownIdentity),
+  // not something this step changes or bypasses.
+  assert.strictEqual(result.entryType, "direct_request");
+  assert.strictEqual(result.matterToken, "MAT-20");
+});
+
+test("handleDirectRequest fails closed with a clarifying message when no Matter token is present -- never guesses which Matter", async (t) => {
+  const { sentTexts } = mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Strategy, we have recurring delivery complaints for this account.");
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_direct_request_matter");
+  assert.strictEqual(result.entryType, undefined, "must never proceed without a resolved Matter");
+  assert.ok(sentTexts.some((m) => m.includes("Which Matter")), "must ask Martin to name the Matter rather than guessing");
+});
+
+test("handleDirectRequest fails closed when the token in the text doesn't resolve to any real Matter", async (t) => {
+  const { sentTexts } = mockDirectRequestFetch(t, { matterFound: false });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-999: this Matter doesn't exist.");
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_direct_request_matter");
+  assert.ok(sentTexts.some((m) => m.includes("Which Matter")), "an unresolvable token must fail closed exactly like a missing one, never guess");
+});
+
+test("handleDirectRequestClarification re-attempts resolution against Martin's follow-up text", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+  const state = fakeDirectRequestState({ stage: "strategy_blocked", awaiting: "strategy_direct_request_matter" });
+
+  const result = await handleDirectRequestClarification(env, state, "It's MAT-20, sorry -- recurring delivery complaints.");
+
+  assert.strictEqual(result.matterToken, "MAT-20");
+  assert.strictEqual(result.entityToken, "E-7");
+  assert.strictEqual(result.stage, "delivered", "supplying the token on follow-up must unblock and complete the request");
 });

@@ -238,11 +238,24 @@ export async function dispatchCowork(
     return;
   }
 
-  // Business Development, Finance, Strategy, Creative & Design, Operations:
-  // no existing chat-triggered governed entry point. Finance and Strategy
-  // are only ever entered via a Handoff from another Unit's own governed
-  // workflow today -- fabricating a direct-chat entry point here would be
-  // a parallel execution implementation, not routing into an existing one.
+  if (decision.unit === "Strategy") {
+    // direct_request origination path (ENIG Operating Model design doc,
+    // Migration path Step 4) -- routes into strategy.handleDirectRequest,
+    // the same governed diagnosis pipeline handlePickup uses, never a
+    // parallel implementation.
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "Strategy", decision.hat ?? "Strategy Analyst", threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleStrategyRequest(text);
+    return;
+  }
+
+  // Business Development, Finance, Creative & Design, Operations: no
+  // existing chat-triggered governed entry point. Finance is only ever
+  // entered via a Handoff from another Unit's own governed workflow today
+  // -- fabricating a direct-chat entry point here would be a parallel
+  // execution implementation, not routing into an existing one.
   console.error(`Workspace router: Cowork resolved for ${decision.unit}, which has no existing chat-triggered governed entry point (chat ${chatId})`);
   // This is a genuine UNSUPPORTED resolution -- responsibility resolved
   // correctly, but no execution path exists for it. The reply below goes

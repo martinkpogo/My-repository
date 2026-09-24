@@ -59,6 +59,10 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => research.handleDirectRequest(this.env, state, text));
   }
 
+  async handleStrategyRequest(text: string): Promise<WorkState> {
+    return this.execute((state) => strategy.handleDirectRequest(this.env, state, text));
+  }
+
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (state.awaiting) {
@@ -88,6 +92,8 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchFeedback(this.env, state, text);
         case "strategy_clarification":
           return strategy.handleStrategyClarification(this.env, state, text);
+        case "strategy_direct_request_matter":
+          return strategy.handleDirectRequestClarification(this.env, state, text);
         case "strategy_feedback":
           return strategy.handleStrategyFeedback(this.env, state, text);
         case "strategy_refinement_reason":

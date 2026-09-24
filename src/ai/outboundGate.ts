@@ -71,7 +71,7 @@ export interface OutboundGateResult {
 // prefix, per the ENIG token convention -- an opaque Notion Unique ID
 // display string, never a real name.
 // ---------------------------------------------------------------------------
-const ENIG_TOKEN_PATTERN = /\b[A-Z]{1,6}-\d{1,6}\b/g;
+export const ENIG_TOKEN_PATTERN = /\b[A-Z]{1,6}-\d{1,6}\b/g;
 
 /** Strips every ENIG-token-shaped span from text before running detectors, so a token can never itself trip a detector (defensive -- none of the detectors below currently collide with the token shape, but this makes that guarantee explicit and future-proof). */
 function stripTokens(text: string): string {
