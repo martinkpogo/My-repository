@@ -175,7 +175,7 @@ test("Non-exempted TOKEN_SAFE_RUNTIME task still blocks a company-suffix name", 
 
 test("Every registered SemanticTaskId either has a resolved outbound policy or is deliberately absent (blocked)", () => {
   const allTaskIds = Object.keys(SEMANTIC_TASK_REGISTRY) as SemanticTaskId[];
-  assert.strictEqual(allTaskIds.length, 40);
+  assert.strictEqual(allTaskIds.length, 45);
   for (const id of allTaskIds) {
     const policy = PRODUCTION_OUTBOUND_POLICY[id];
     assert.ok(
