@@ -1,19 +1,29 @@
 import type { MarketingHatName } from "./types";
 
-export type MarketingAmbiguityReasonCode =
+/**
+ * Generic action-relationship reason codes -- not Marketing-specific.
+ * Kept as the one shared vocabulary so a second Unit's Stage 2 resolver
+ * reports failures the same way Marketing's does, rather than inventing
+ * its own.
+ */
+export type AmbiguityReasonCode =
   | "NO_PLAUSIBLE_HATS"
   | "NO_REGISTERED_RELATIONSHIP"
   | "MULTIPLE_CONFLICTING_RELATIONSHIPS"
   | "CONDITIONAL_ESTABLISHING_REQUIRED"
   | "CLASSIFICATION_FAILED";
+/** @deprecated Marketing-specific alias for AmbiguityReasonCode -- kept for existing callers/tests, identical type. */
+export type MarketingAmbiguityReasonCode = AmbiguityReasonCode;
 
-export interface MarketingRelationshipDefinition {
+export interface RelationshipDefinition<H extends string> {
   id: string;
-  from: MarketingHatName;
-  to: MarketingHatName;
+  from: H;
+  to: H;
   conditional: boolean;
   description: string;
 }
+/** @deprecated Marketing-specific alias for RelationshipDefinition<MarketingHatName> -- kept for existing callers/tests, identical type. */
+export type MarketingRelationshipDefinition = RelationshipDefinition<MarketingHatName>;
 
 export const REGISTERED_MARKETING_RELATIONSHIPS: MarketingRelationshipDefinition[] = [
   {
@@ -58,22 +68,29 @@ export const REGISTERED_MARKETING_RELATIONSHIPS: MarketingRelationshipDefinition
   },
 ];
 
-export interface Stage2ResolutionResult {
+export interface Stage2ResolutionResult<H extends string = MarketingHatName> {
   resolved: boolean;
-  hat?: MarketingHatName;
+  hat?: H;
   relationshipId?: string;
   reason?: string;
-  reasonCode?: MarketingAmbiguityReasonCode;
+  reasonCode?: AmbiguityReasonCode;
 }
 
 /**
- * Pure, deterministic, request-text-free Stage 2 resolver for Marketing Hat candidate relationships.
- * Fails closed on ambiguity, missing registered relationships, or unresolved conditional establishing flags.
+ * Pure, deterministic, request-text-free Stage 2 resolver for a Unit's own
+ * registered candidate relationships -- the generalized shape of what was
+ * Marketing-only logic (see resolveMarketingCandidateRelationships below,
+ * now a thin wrapper over this). Fails closed on ambiguity, missing
+ * registered relationships, or unresolved conditional establishing flags.
+ * A second Unit calls this directly with its own candidates and its own
+ * RelationshipDefinition<H> list, rather than reimplementing this
+ * resolution logic.
  */
-export function resolveMarketingCandidateRelationships(
-  candidates: MarketingHatName[],
+export function resolveCandidateRelationships<H extends string>(
+  candidates: H[],
+  relationships: RelationshipDefinition<H>[],
   establishing?: boolean,
-): Stage2ResolutionResult {
+): Stage2ResolutionResult<H> {
   const uniqueCandidates = Array.from(new Set(candidates));
 
   if (uniqueCandidates.length === 0) {
@@ -91,7 +108,7 @@ export function resolveMarketingCandidateRelationships(
     };
   }
 
-  const matchingRelationships = REGISTERED_MARKETING_RELATIONSHIPS.filter(
+  const matchingRelationships = relationships.filter(
     (rel) => uniqueCandidates.includes(rel.from) && uniqueCandidates.includes(rel.to),
   );
 
@@ -135,7 +152,7 @@ export function resolveMarketingCandidateRelationships(
     }
   }
 
-  const resolvedHats = new Set<MarketingHatName>();
+  const resolvedHats = new Set<H>();
   for (const rel of matchingRelationships) {
     if (rel.conditional) {
       if (establishing === true) {
@@ -171,11 +188,24 @@ export function resolveMarketingCandidateRelationships(
 }
 
 /**
- * Pure function that maps Stage 2 resolution result / failure state to a machine-readable reason code.
+ * Marketing's own Stage 2 resolver, now a thin wrapper over the generic
+ * resolveCandidateRelationships bound to REGISTERED_MARKETING_RELATIONSHIPS
+ * -- unchanged call signature and behavior for every existing caller/test.
  */
-export function selectMarketingAmbiguityReasonCode(
-  result: Stage2ResolutionResult | null | undefined,
-): MarketingAmbiguityReasonCode {
+export function resolveMarketingCandidateRelationships(
+  candidates: MarketingHatName[],
+  establishing?: boolean,
+): Stage2ResolutionResult<MarketingHatName> {
+  return resolveCandidateRelationships(candidates, REGISTERED_MARKETING_RELATIONSHIPS, establishing);
+}
+
+/**
+ * Pure function that maps a Stage 2 resolution result / failure state to a
+ * machine-readable reason code -- generic, not Marketing-specific.
+ */
+export function selectAmbiguityReasonCode<H extends string>(
+  result: Stage2ResolutionResult<H> | null | undefined,
+): AmbiguityReasonCode {
   if (!result) {
     return "CLASSIFICATION_FAILED";
   }
@@ -195,4 +225,11 @@ export function selectMarketingAmbiguityReasonCode(
     return "CONDITIONAL_ESTABLISHING_REQUIRED";
   }
   return "CLASSIFICATION_FAILED";
+}
+
+/** @deprecated Marketing-specific alias for selectAmbiguityReasonCode -- kept for existing callers/tests, identical behavior. */
+export function selectMarketingAmbiguityReasonCode(
+  result: Stage2ResolutionResult<MarketingHatName> | null | undefined,
+): AmbiguityReasonCode {
+  return selectAmbiguityReasonCode(result);
 }

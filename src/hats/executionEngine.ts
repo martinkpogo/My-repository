@@ -11,6 +11,7 @@ import {
   resolveMarketingCandidateRelationships,
   selectMarketingAmbiguityReasonCode,
 } from "./relationships";
+import { classifyCandidateHats } from "./intakeClassification";
 
 /**
  * Shared Marketing execution mechanics only — not a Hat registry, and not
@@ -24,13 +25,14 @@ import {
  * same role governance.ts/ai.ts already play for every other Hat: shared
  * infrastructure a Hat's own file is called from, never a duplicate
  * authority system or a second source of Hat responsibilities.
+ *
+ * Stage 1 candidate-Hat classification (classifyCandidateHats,
+ * intakeClassification.ts) and Stage 2 deterministic relationship
+ * resolution (resolveCandidateRelationships, relationships.ts) are now
+ * generic, reusable shapes a second Unit registers against directly --
+ * this file calls them bound to Marketing's own taskId/Hat list/
+ * relationships, rather than owning that classification logic itself.
  */
-
-interface Stage1IntakeClassification {
-  candidates?: MarketingHatName[];
-  establishing?: boolean;
-  reason?: string;
-}
 
 interface HatActionDecision {
   action: "draft" | "route" | "clarify";
@@ -83,23 +85,16 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
   state.marketingTaskText = text;
 
   // Stage 1: LLM identifies candidate Hats and establishing context
-  const stage1 = await aiJson<Stage1IntakeClassification>(env, {
-    taskId: "marketing.intake_classification",
-    system: `You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit. Below are the five Marketing Hats and their purposes. Identify ALL genuinely plausible candidate Hats for the incoming request, and whether establishing foundational strategy/briefs/guidance is required.
-
-${marketingHatSummaryList()}
-
-Return JSON:
-{
-  "candidates": ["<exact Hat name 1>", ...],
-  "establishing": true | false,
-  "reason": "<brief rationale>"
-}
-- candidates: list 1 or more Marketing Hats that are genuinely plausible candidates for this request.
-- establishing: set true if creating/establishing strategy, guidance, or briefs from scratch; set false if managing or executing against already-established direction.`,
-    user: text,
-    light: true,
-  });
+  const stage1 = await classifyCandidateHats<MarketingHatName>(
+    env,
+    {
+      taskId: "marketing.intake_classification",
+      introLine: "You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit.",
+      hatSummaryList: marketingHatSummaryList(),
+      light: true,
+    },
+    text,
+  );
 
   if (!stage1 || !stage1.candidates) {
     const reasonCode = selectMarketingAmbiguityReasonCode(null);
