@@ -459,6 +459,17 @@ export interface WorkState {
     opportunitySummary: string;
   };
   /**
+   * A drafted BD opportunity development (stakeholders, value hypothesis,
+   * route, dependencies, risks, next step), pending Martin's explicit
+   * approval before it's recorded into bdOpportunity.developedState --
+   * mirrors pendingBDHandoff's own preview/approval gate exactly (see
+   * handleBDOpportunityDevelopApproval). A draft is never treated as
+   * authorization to commit it.
+   */
+  pendingBDDevelop?: {
+    draftSummary: string;
+  };
+  /**
    * The Strategy Proposal's own approval-lifecycle state, per the canonical
    * commercial flow (Sales -> Strategy -> Finance). This is authoritative
    * for whether an Approve/Refine/Reject callback may act at all --
