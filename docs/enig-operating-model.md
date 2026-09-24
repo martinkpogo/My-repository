@@ -102,7 +102,7 @@ None of this requires touching Marketing, Research & Intelligence, or the WorkSe
 
 1. ~~**Sales dispatch fix.**~~ Done -- `Lead Generation Specialist` is wired into `dispatchCowork`'s Sales branch and no longer forced through `handleIncomingEnquiry`.
 2. **Formalize the Action Registry pattern.** Extract Marketing's Stage 1/2 classification into a reusable shape other Units can register against, rather than each reimplementing it.
-3. **Read/write split.** Add the consequence property to the registry; wire read actions to bypass WorkSession creation.
+3. ~~**Read/write split.**~~ Mechanism built -- `ConsequenceLevel`/`ActionDefinition`/`dispatchAction` in `src/hats/actionRegistry.ts` resolve a registered action's declared read/write consequence: read runs immediately with no WorkSession/approval gate, write hands back a dispatch signal for the existing pipeline, unchanged. Proven only against a toy action set -- no real Unit is wired to it yet, since that requires first deciding a Unit's actual action list (see Open questions below).
 4. **Strategy/Finance direct entry.** Add the `direct_request` origination path once the registry exists to hang it on.
 5. **New Units (Business Development, Creative & Design, Operations).** Built from scratch against the by-then-standard pattern, once (1)-(4) prove it out on Units that already have most of the pieces.
 
