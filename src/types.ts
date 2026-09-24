@@ -445,6 +445,20 @@ export interface WorkState {
   /** Business Development's in-flight opportunity state -- see BDOpportunityState's doc comment. Execution state (persisted for pause/resume across a qualify_* hold), not governed business state. */
   bdOpportunity?: import("./units/businessDevelopment/types").BDOpportunityState;
   /**
+   * A proposed BD -> Sales/Strategy opportunity handoff, pending Martin's
+   * explicit approval before the Handoff record is created -- mirrors
+   * pendingResearchHandoff/pendingStrategyHandoff's own preview/approval
+   * gate exactly (see handleBDOpportunityHandoffApproval). A recommendation
+   * is never treated as authorization to route it onward.
+   */
+  pendingBDHandoff?: {
+    unit: Unit;
+    hat: string;
+    handoffTitle: string;
+    reason: string;
+    opportunitySummary: string;
+  };
+  /**
    * The Strategy Proposal's own approval-lifecycle state, per the canonical
    * commercial flow (Sales -> Strategy -> Finance). This is authoritative
    * for whether an Approve/Refine/Reject callback may act at all --
