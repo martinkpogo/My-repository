@@ -1,6 +1,33 @@
 import test from "node:test";
 import assert from "node:assert";
-import { stripObjectNameField } from "./governance";
+import { stripObjectNameField, getGovernance, GOVERNANCE_CONTENT_START, GOVERNANCE_CONTENT_END } from "./governance";
+
+function fakeKv() {
+  const store = new Map<string, string>();
+  return {
+    get: async (key: string) => store.get(key) ?? null,
+    put: async (key: string, val: string) => {
+      store.set(key, val);
+    },
+  };
+}
+
+/** Mocks a single Notion code block containing `blockText` as the page's only content. */
+function mockGovernancePageFetch(t: any, blockText: string): void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    return new Response(
+      JSON.stringify({
+        results: [{ type: "code", code: { rich_text: [{ plain_text: blockText }], language: "yaml" } }],
+        has_more: false,
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+}
 
 test("stripObjectNameField: removes a multi-word Hat name field (the exact false positive found live on sales.call_qualification_handoff)", () => {
   const content = "hat:\n  name: Sales Executive\n  unit: Sales\n  specialization: Sales Progression";
@@ -42,4 +69,31 @@ test("stripObjectNameField: collapses the resulting blank-line run instead of le
 test("stripObjectNameField: is a no-op on content with no name: field", () => {
   const content = "status: canonical\nscope: applies to every Hat";
   assert.strictEqual(stripObjectNameField(content), content);
+});
+
+test("getGovernance: wraps returned content in GOVERNANCE_CONTENT_START/END so outboundGate.ts can exempt it", async (t) => {
+  mockGovernancePageFetch(t, "hat:\n  name: Sales Executive\n  unit: Sales");
+  const env = { STATE_KV: fakeKv() } as any;
+
+  const result = await getGovernance(env, "test-page-id", "Test Hat Definition");
+
+  assert.ok(result);
+  assert.ok(result!.startsWith(GOVERNANCE_CONTENT_START), "content must be wrapped, not returned bare");
+  assert.ok(result!.trim().endsWith(GOVERNANCE_CONTENT_END));
+  assert.ok(result!.includes("unit: Sales"), "the surrounding content itself must survive intact");
+  // Defense in depth: stripObjectNameField still runs too, even though
+  // the wrapper alone would already exempt this from the gate.
+  assert.ok(!result!.includes("name: Sales Executive"));
+});
+
+test("getGovernance: the same wrapping applies on a cache-hit read, not only a fresh fetch", async () => {
+  const kv = fakeKv();
+  await kv.put("governance:test-page-id", "business_object:\n  name: Entity\n  status: canonical");
+  const env = { STATE_KV: kv } as any;
+
+  const result = await getGovernance(env, "test-page-id", "Test Business Object");
+
+  assert.ok(result!.startsWith(GOVERNANCE_CONTENT_START));
+  assert.ok(result!.trim().endsWith(GOVERNANCE_CONTENT_END));
+  assert.ok(!result!.includes("name: Entity"));
 });
