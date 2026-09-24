@@ -1,11 +1,9 @@
-import type { Env, WorkState } from "../../types";
+import type { Env, WorkState, Unit } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
-import type { SemanticTaskId } from "../../dataBoundary/types";
 import type { BDOpportunityState } from "./types";
 import type { HatManifest, UnitManifest } from "../unitManifest";
-import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { createHandoff } from "../../handoffWriter";
-import { title, richText } from "../../notion";
+import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
 
@@ -39,13 +37,24 @@ import { logActivity } from "../../log";
  *
  * STATUS: Opportunity Development is built out close to real -- its
  * qualify_opportunity hold/resume flow is real (against BDOpportunityState),
- * and handoff_to_sales/handoff_to_strategy create real Handoffs via the
- * same evaluateHandoffContext + createHandoff path Strategy uses.
+ * and handoff_to_sales/handoff_to_strategy follow the same preview +
+ * Martin-approval + createHandoff pattern Strategy's routeToUnit/
+ * handleStrategyHandoffApproval and R&I's routeToConsumingHat/
+ * handleResearchHandoffApproval already use -- not a parallel, weaker
+ * path for BD. (An earlier draft of this file called
+ * evaluateHandoffContext with a made-up SemanticTaskId here, which was
+ * simply the wrong pattern: that function validates *inbound* context
+ * for a Handoff pickup or direct request, e.g. strategy.diagnosis --
+ * it's never used to gate an *outbound* Handoff creation, which is a
+ * preview object + Telegram approve/reject buttons + createHandoff only
+ * on approval, no SemanticTaskId involved at all. Corrected here; no
+ * governance decision was actually needed.)
+ *
  * Partnership Development and Growth & Market Development are present --
  * so Hat resolution genuinely exercises three Hats, not one -- but their
  * handlers are explicit stubs pending the same treatment.
  *
- * Two things still not decided here, left as loud placeholders rather
+ * One thing still not decided here, left as a loud placeholder rather
  * than invented:
  *
  * TODO(intelligence): discover_opportunity/research_opportunity/
@@ -56,11 +65,15 @@ import { logActivity } from "../../log";
  * real, but what decides Qualified/Held/Blocked is still a placeholder
  * rule (non-empty evidence => Qualified), not real reasoning.
  *
- * TODO(governance): handoff_to_sales/handoff_to_strategy's
- * evaluateHandoffContext call below needs a `requiredCategory` that
- * matches an approved Data Boundary policy table entry (see
- * dataBoundary/policy.ts) -- placeholder value only, not yet an approved
- * category.
+ * NOTE: the approval callback itself (Martin tapping "Send handoff") is
+ * routed today by a hand-wired switch in session.ts (`case
+ * "researchhandoff":` / `case "strategyhandoff":`) -- a fourth hand-wired
+ * chokepoint beyond the three the design doc already names
+ * (dispatchCowork, WorkSession's per-Unit methods, handleTextReply's
+ * awaiting-switch). handleBDOpportunityHandoffApproval below is written
+ * to slot into that same pattern once BD is actually wired into
+ * dispatch; not fixed here, since wiring dispatch at all is a later,
+ * separate step per the design doc's rollout order.
  */
 
 type OpportunityDevelopmentAction =
@@ -150,13 +163,109 @@ async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string
 }
 
 /**
+ * Proposes (never auto-creates) a BD -> Sales/Strategy opportunity
+ * handoff -- mirrors Strategy's routeToUnit / R&I's routeToConsumingHat
+ * exactly: build a preview into pendingBDHandoff, present Telegram
+ * approve/reject buttons, and only create the Handoff in
+ * handleBDOpportunityHandoffApproval once Martin approves. No
+ * SemanticTaskId or evaluateHandoffContext involved -- that machinery is
+ * for validating inbound context, not gating an outbound Handoff.
+ */
+async function proposeOpportunityHandoff(env: Env, state: WorkState, targetUnit: Unit, targetHat: string, text: string): Promise<WorkState> {
+  const opportunity = state.bdOpportunity;
+  const opportunitySummary = (opportunity?.qualificationRationale ?? text).slice(0, 1900);
+  const reason = `Business Development's Opportunity Development Hat judged this opportunity ready for ${targetHat}'s ownership.`;
+
+  state.pendingBDHandoff = {
+    unit: targetUnit,
+    hat: targetHat,
+    handoffTitle: `Business Development -> ${targetHat}: opportunity handoff`,
+    reason,
+    opportunitySummary,
+  };
+
+  await logActivity(env, {
+    entry: `Business Development proposed handoff to ${targetHat} -- pending approval`,
+    type: "Decision",
+    area: "Business Development",
+    decisionRationale: reason,
+    outcome: "Blocked",
+  });
+
+  const handoffMessage = `This opportunity looks ready for *${targetHat}*: ${reason}\n\n*Preview of what would be sent:*\n${opportunitySummary}\n\nThis is a recommendation, not yet an approved decision. Send this handoff?`;
+  const handoffButtons = [
+    [
+      { text: "✅ Send handoff", callback_data: `bdopportunityhandoff:${state.workId}:approve` },
+      { text: "🚫 Don't send", callback_data: `bdopportunityhandoff:${state.workId}:reject` },
+    ],
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, handoffMessage, handoffButtons);
+  return state;
+}
+
+/**
+ * Resolves handoff_to_sales/handoff_to_strategy's approve/reject callback
+ * -- mirrors handleStrategyHandoffApproval/handleResearchHandoffApproval
+ * exactly. Pre-Entity, same as Lead Discovery's own pre-Entity Handoffs
+ * (leadGenerationDiscovery.ts): BD never resolves a real Entity/Matter,
+ * so this uses the same "E-UNBOUND"/"M-UNBOUND" placeholder tokens
+ * rather than leaving the required fields empty.
+ */
+export async function handleBDOpportunityHandoffApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const pending = state.pendingBDHandoff;
+
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, "There's no pending handoff to act on.");
+    return state;
+  }
+
+  if (!approved) {
+    state.pendingBDHandoff = undefined;
+    await logActivity(env, {
+      entry: `Business Development handoff to ${pending.hat} declined by Martin`,
+      type: "Decision",
+      area: "Business Development",
+      decisionRationale: "Martin chose not to send this opportunity to the proposed Hat.",
+      outcome: "Complete",
+    });
+    await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, `Okay -- this opportunity wasn't sent to *${pending.hat}*.`);
+    return state;
+  }
+
+  await createHandoff(
+    env,
+    {
+      Handoff: title(pending.handoffTitle),
+      "From Unit": select("Business Development"),
+      "From Hat": richText(OPPORTUNITY_DEVELOPMENT_HAT_NAME),
+      "To Unit": select(pending.unit),
+      "To Hat": richText(pending.hat),
+      Type: select("Work"),
+      Status: select("Pending"),
+      Reason: richText(pending.reason),
+      "Verified Facts & Sources": richText(pending.opportunitySummary),
+    },
+    { entityToken: "E-UNBOUND", matterToken: "M-UNBOUND" },
+  );
+  await logActivity(env, {
+    entry: `Business Development handed off opportunity to ${pending.hat}`,
+    type: "Activity",
+    area: "Business Development",
+    activity: `Opportunity Development Hat's handoff to ${pending.hat} approved by Martin.`,
+    outcome: "Active",
+  });
+  state.pendingBDHandoff = undefined;
+  await sendWorkspaceHatMessage(env, { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME }, `Sent to *${pending.hat}*.`);
+  return state;
+}
+
+/**
  * Entry handler for Opportunity Development's "internal" and "write"
  * actions. qualify_opportunity routes here (not readHandler) because it
  * needs the WorkSession to pause/resume on Held -- see
- * runQualifyOpportunity. handoff_to_sales/handoff_to_strategy create a
- * real Handoff via the same evaluateHandoffContext + createHandoff path
- * Strategy's handleDirectRequest uses, so the Handoff identity-write
- * boundary is enforced identically -- not a parallel, weaker path for BD.
+ * runQualifyOpportunity. handoff_to_sales/handoff_to_strategy only
+ * propose the handoff here -- the actual Handoff is created in
+ * handleBDOpportunityHandoffApproval once Martin approves.
  */
 async function opportunityDevelopmentEntryHandler(
   env: Env,
@@ -168,46 +277,12 @@ async function opportunityDevelopmentEntryHandler(
     return runQualifyOpportunity(env, state, OPPORTUNITY_DEVELOPMENT_HAT_NAME);
   }
 
-  if (actionName === "handoff_to_sales" || actionName === "handoff_to_strategy") {
-    const evalResult = evaluateHandoffContext(
-      {
-        entityToken: state.entityToken ?? "",
-        matterToken: state.matterToken,
-        sanitizedContext: text,
-        provenance: "business_development.opportunity_development",
-        // TODO(governance): placeholder -- needs an approved Data Boundary
-        // policy table entry before this is a real requiredCategory.
-        requiredCategory: "business_development_opportunity_handoff",
-      },
-      // TODO(governance): "sales.opportunity_handoff"/"strategy.opportunity_handoff"
-      // are not registered SemanticTaskIds yet -- this cast is a deliberate,
-      // loud placeholder so the draft typechecks, not an approved task.
-      (actionName === "handoff_to_sales" ? "sales.opportunity_handoff" : "strategy.opportunity_handoff") as unknown as SemanticTaskId,
-    );
-    if (!evalResult.success) {
-      await sendWorkspaceHatMessage(
-        env,
-        { ...state, hat: OPPORTUNITY_DEVELOPMENT_HAT_NAME },
-        `Couldn't prepare this handoff.\n\n${evalResult.insufficientContext.reason}`,
-      );
-      return state;
-    }
-    await createHandoff(
-      env,
-      {
-        Handoff: title(`Business Development -> ${actionName === "handoff_to_sales" ? "Sales" : "Strategy"}: opportunity handoff`),
-        Reason: richText(evalResult.contract.sanitizedContext),
-      },
-      { entityToken: evalResult.contract.entityToken, matterToken: evalResult.contract.matterToken ?? "" },
-    );
-    await logActivity(env, {
-      entry: `Business Development handed off opportunity to ${actionName === "handoff_to_sales" ? "Sales" : "Strategy"}`,
-      type: "Activity",
-      area: "Business Development",
-      activity: `Opportunity Development Hat prepared a governed transition via ${actionName}.`,
-      outcome: "Active",
-    });
-    return state;
+  if (actionName === "handoff_to_sales") {
+    return proposeOpportunityHandoff(env, state, "Sales", "Sales Executive", text);
+  }
+
+  if (actionName === "handoff_to_strategy") {
+    return proposeOpportunityHandoff(env, state, "Strategy", "Strategy Analyst", text);
   }
 
   // TODO: develop_opportunity/determine_next_move -- these mutate
