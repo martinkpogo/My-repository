@@ -74,11 +74,12 @@ function mockTelegramFetch(t: any) {
 }
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; handleIncomingEnquiry: string[]; handleMarketingRequest: string[]; handleResearchRequest: string[] } = {
+  const calls: { init: any[][]; handleIncomingEnquiry: string[]; handleMarketingRequest: string[]; handleResearchRequest: string[]; handleStrategyRequest: string[] } = {
     init: [],
     handleIncomingEnquiry: [],
     handleMarketingRequest: [],
     handleResearchRequest: [],
+    handleStrategyRequest: [],
   };
   const stub = {
     init: async (...args: any[]) => {
@@ -92,6 +93,9 @@ function createMockWorkSession() {
     },
     handleResearchRequest: async (text: string) => {
       calls.handleResearchRequest.push(text);
+    },
+    handleStrategyRequest: async (text: string) => {
+      calls.handleStrategyRequest.push(text);
     },
     getState: async () => undefined,
   };
@@ -355,6 +359,20 @@ test("T2. Cowork decision for Sales/Lead Generation Specialist routes to its own
   assert.strictEqual(calls.init.length, 0, "Lead Generation Specialist dispatch must never go through Sales's newWorkId/init/handleIncomingEnquiry path");
   assert.strictEqual(calls.handleIncomingEnquiry.length, 0, "must never misroute into enquiry-extraction");
   assert.ok(sent.length > 0, "some reply must still be sent (the capability's own fallback, since no real classifier is mocked here)");
+});
+
+test("T3. Cowork decision for Strategy routes to its own direct_request entry point (Migration path Step 4)", async (t) => {
+  mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({ WORK_SESSION: workSession as any });
+
+  await routeIncomingText(env, -1004435157576, "Strategy, diagnose MAT-20: recurring delivery complaints.", 604, {
+    resolveRouting: fixedDecision({ mode: "cowork", unit: "Strategy", hat: "Strategy Analyst" }),
+  });
+
+  assert.strictEqual(calls.init[0][2], "Strategy");
+  assert.strictEqual(calls.init[0][3], "Strategy Analyst");
+  assert.deepStrictEqual(calls.handleStrategyRequest, ["Strategy, diagnose MAT-20: recurring delivery complaints."]);
 });
 
 test("U. Cowork decision for a Unit with no existing chat-triggered governed entry point fails closed (UNSUPPORTED) -- never fabricates ownership, and notifies Operations", async (t) => {

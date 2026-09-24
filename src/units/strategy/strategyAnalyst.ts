@@ -1,5 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
+import { getPage, plainText, queryDataSource, richText, richTextLong, select, title, uniqueId } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
 import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -8,6 +8,7 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
+import { ENIG_TOKEN_PATTERN } from "../../ai/outboundGate";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -408,6 +409,123 @@ export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | nu
     return { valid: false, reason: "No recommended direction was given, and no reason was stated for why one isn't yet supported." };
   }
   return { valid: true };
+}
+
+interface ResolvedMatterIdentity {
+  matterToken: string;
+  entityToken: string;
+}
+
+/**
+ * Deterministically resolves an existing Matter from an ENIG token
+ * (e.g. "MAT-20") found in Martin's own text -- never AI-guessed, per the
+ * Handoff identity-write boundary's discipline that identity resolution
+ * stays deterministic. Returns null if no token is found, or the token
+ * doesn't resolve to a real, existing Matter with a related Entity --
+ * both are fail-closed, never a guess at which Matter was meant.
+ */
+async function resolveMatterFromText(env: Env, text: string): Promise<ResolvedMatterIdentity | null> {
+  const tokenMatches = text.match(ENIG_TOKEN_PATTERN);
+  const candidateToken = tokenMatches?.[0];
+  if (!candidateToken) return null;
+
+  const tokenShape = /^([A-Z]{1,6})-(\d{1,6})$/.exec(candidateToken);
+  if (!tokenShape) return null;
+  const number = Number(tokenShape[2]);
+
+  const candidates = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
+    property: "Matter_ID",
+    unique_id: { equals: number },
+  });
+  const matter = candidates.find((m) => uniqueId(m.properties.Matter_ID) === candidateToken);
+  if (!matter) return null;
+
+  const entityId = matter.properties.Entity?.relation?.[0]?.id;
+  if (!entityId) return null;
+  const entity = await getPage(env, entityId);
+  const entityToken = uniqueId(entity.properties["Entity ID"]);
+  if (!entityToken) return null;
+
+  return { matterToken: candidateToken, entityToken };
+}
+
+/**
+ * Entry point for a fresh Strategy diagnosis Martin originates directly in
+ * Cowork chat, with no upstream Handoff -- the direct_request origination
+ * path (ENIG Operating Model design doc, Migration path Step 4). Per that
+ * design, this constructs a Martin-originated context equivalent to a
+ * Handoff's own contract (opaque tokens, sanitized text, explicit
+ * category) and runs through evaluateHandoffContext exactly as
+ * resolveStrategyHandoffContext does, then joins the identical shared
+ * runDiagnosis every Handoff pickup already uses -- no parallel diagnosis
+ * implementation.
+ *
+ * Martin must always name an existing Matter explicitly (its ENIG token,
+ * e.g. "MAT-20") -- there is no upstream Unit here to have already
+ * established one, so this never proceeds on an unidentified or
+ * ambiguous Matter. Fails closed with a clarifying chat message if no
+ * token is present or it doesn't resolve to a real Matter.
+ */
+export async function handleDirectRequest(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const resolved = await resolveMatterFromText(env, text);
+  if (!resolved) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT_NAME },
+      "Which Matter is this about? Include its token (e.g. MAT-20) and I'll pick up the diagnosis from there.",
+    );
+    state.stage = "strategy_blocked";
+    state.awaiting = "strategy_direct_request_matter";
+    return state;
+  }
+
+  const evalResult = evaluateHandoffContext(
+    {
+      entityToken: resolved.entityToken,
+      matterToken: resolved.matterToken,
+      sanitizedContext: text,
+      provenance: "martin:direct_request",
+      requiredCategory: "strategic question and supplied business-situation context",
+    },
+    "strategy.diagnosis",
+  );
+  if (!evalResult.success) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT_NAME },
+      `Couldn't start this diagnosis.\n\n${evalResult.insufficientContext.reason}`,
+    );
+    state.stage = "strategy_blocked";
+    state.awaiting = "strategy_direct_request_matter";
+    return state;
+  }
+
+  state.entryType = "direct_request";
+  state.entityToken = evalResult.contract.entityToken;
+  state.matterToken = evalResult.contract.matterToken ?? "";
+  state.strategyQuestion = evalResult.contract.sanitizedContext;
+  state.strategyContext = evalResult.contract.sanitizedContext;
+
+  await logActivity(env, {
+    entry: `Strategy direct request received: ${state.matterToken}`,
+    type: "Activity",
+    area: "Strategy",
+    activity: "Strategy Analyst started a diagnosis directly from chat (no upstream Handoff).",
+    outcome: "Active",
+  });
+
+  await sendStrategyInProgressAck(env, state);
+  return runDiagnosis(env, state);
+}
+
+/**
+ * Continuation once a direct request was held for a missing/unresolved
+ * Matter token -- re-attempts resolution against Martin's follow-up text
+ * exactly as handleDirectRequest does on first entry, rather than a
+ * separate, drifting implementation.
+ */
+export async function handleDirectRequestClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  return handleDirectRequest(env, state, text);
 }
 
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
