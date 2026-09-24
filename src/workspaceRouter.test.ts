@@ -384,12 +384,17 @@ test("U. Cowork decision for a Unit with no existing chat-triggered governed ent
   const { calls, workSession } = createMockWorkSession();
   const env = fakeEnv({ WORK_SESSION: workSession as any });
 
-  const decision: WorkspaceDecision = { mode: "cowork", unit: "Business Development", hat: undefined };
-  await dispatchCowork(env, -1004435157576, 604, "Business Development, find us a new channel partner.", decision as any);
+  // Business Development is no longer UNSUPPORTED -- it's the first Unit
+  // wired to the Unit Registry manifest pattern (see units/dispatch.ts).
+  // Creative & Design and Operations remain genuinely unsupported (no
+  // manifest, no hand-written entry point), so this test now uses one of
+  // those instead of asserting behavior that's deliberately changed.
+  const decision: WorkspaceDecision = { mode: "cowork", unit: "Creative & Design", hat: undefined };
+  await dispatchCowork(env, -1004435157576, 604, "Creative & Design, mock up a new landing page.", decision as any);
 
   assert.strictEqual(calls.init.length, 0, "no WorkSession may be fabricated for a Unit with no existing chat-triggered governed entry point");
   assert.ok(
-    sent.some((m) => m.includes("Cowork resolved to Business Development") && m.includes("no existing chat-triggered governed entry point")),
+    sent.some((m) => m.includes("Cowork resolved to Creative & Design") && m.includes("no existing chat-triggered governed entry point")),
     "an UNSUPPORTED Cowork resolution must be visible in Operations, not just the originating Workspace topic",
   );
 });

@@ -17,6 +17,8 @@ import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/s
 import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
+import { findUnitManifest } from "./units/registry";
+import * as businessDevelopment from "./units/businessDevelopment/businessDevelopmentManifest";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -67,6 +69,35 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => finance.handleDirectRequest(this.env, state, text));
   }
 
+  /**
+   * Generic entry point for a Unit built on the Unit Registry manifest
+   * pattern (ENIG Operating Model design doc, "The Unit Registry") --
+   * replaces a per-Unit method like handleFinanceRequest above for any
+   * Unit registered in src/units/registry.ts. dispatchCowork has already
+   * resolved Hat + actionName via resolveUnitRequest before creating this
+   * WorkSession (an "internal"/"write" action only -- "read" never
+   * reaches here at all, per resolveUnitRequest's own contract). Fails
+   * closed if state.unit/state.hat don't resolve to a registered
+   * manifest/Hat rather than silently no-op'ing.
+   */
+  async handleUnitAction(actionName: string, text: string): Promise<WorkState> {
+    return this.execute((state) => {
+      const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
+      const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
+      if (!manifest || !hat) {
+        console.error(`handleUnitAction: no registered manifest/Hat for ${state.unit}/${state.hat} (work ${state.workId})`);
+        return sendMessage(
+          this.env,
+          state.chatId,
+          `${state.unit ?? "This Unit"} isn't wired for direct dispatch.`,
+          undefined,
+          state.threadId,
+        ).then(() => state);
+      }
+      return hat.entryHandler(this.env, state, actionName, text);
+    });
+  }
+
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (state.awaiting) {
@@ -106,7 +137,20 @@ export class WorkSession extends DurableObject<Env> {
           return strategy.handleStrategyFeedback(this.env, state, text);
         case "strategy_refinement_reason":
           return strategy.handleStrategyRefinement(this.env, state, text);
-        default:
+        default: {
+          // Generic manifest lookup for a Unit built on the Unit Registry
+          // pattern -- checked only as a fallback, after every existing
+          // hand-written case above, so no legacy Unit's behavior changes.
+          // Per the design doc's fail-closed manifest completeness: a
+          // state.awaiting value the resolved Hat doesn't declare in its
+          // own awaitingHandlers still falls through to the same "not
+          // awaiting" message below, never a silent no-op.
+          const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
+          const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
+          const awaitingHandler = hat && state.awaiting ? hat.awaitingHandlers[state.awaiting] : undefined;
+          if (awaitingHandler) {
+            return awaitingHandler(this.env, state, text);
+          }
           return sendMessage(
             this.env,
             state.chatId,
@@ -114,6 +158,7 @@ export class WorkSession extends DurableObject<Env> {
             undefined,
             state.threadId,
           ).then(() => state);
+        }
       }
     });
   }
@@ -273,6 +318,8 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
+        case "bdopportunityhandoff":
+          return businessDevelopment.handleBDOpportunityHandoffApproval(this.env, state, value === "approve");
         case "sprop": {
           // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
           // ":") specifically so it survives index.ts's plain

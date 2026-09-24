@@ -93,6 +93,17 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "action.google_sheet_comment_edit": "business_sensitive",
   "lead.discovery_ondemand_intake": "business_sensitive",
   "lead.discovery_ondemand_query_generation": "business_sensitive",
+  // Architect-reviewed: classified on the actual payload each classifier
+  // receives (Martin's direct Workspace request text + static Hat/action
+  // summaries built from responsibility/description strings), never a
+  // Handoff, Entity, or contact field -- structurally identical to
+  // marketing.intake_classification/marketing.hat_action_decision, which
+  // carry the same rationale. The fact that a BD Hat may later develop a
+  // commercially sensitive opportunity does not itself raise this
+  // classification -- these two tasks decide where/how ENIG routes the
+  // request, they never process the underlying opportunity content.
+  "business_development.intake_classification": "business_sensitive",
+  "business_development.hat_action_decision": "business_sensitive",
 };
 
 /**

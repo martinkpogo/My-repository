@@ -32,7 +32,17 @@ export type SemanticTaskId =
   | "action.google_sheet_intake"
   | "action.google_sheet_comment_edit"
   | "lead.discovery_ondemand_intake"
-  | "lead.discovery_ondemand_query_generation";
+  | "lead.discovery_ondemand_query_generation"
+  // Business Development's Stage 1 (which of its 3 Hats) / Stage 2 (which
+  // of that Hat's declared actions) classification -- the first real use
+  // of the generic Action Registry's action-resolution step. Sensitivity
+  // classification pending Architect review; UNCLASSIFIED in
+  // PRODUCTION_TASK_SENSITIVITY until then, which fails closed
+  // (UNRESOLVED_POLICY_HOLD) per DataBoundaryEvaluator.evaluate -- these
+  // are registered (so the type/registry are internally consistent) but
+  // not yet runnable in production.
+  | "business_development.intake_classification"
+  | "business_development.hat_action_decision";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely
