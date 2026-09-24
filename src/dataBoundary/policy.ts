@@ -203,6 +203,34 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "business_development.assess_partnership": "business_sensitive",
   "business_development.qualify_partnership": "business_sensitive",
   "business_development.develop_partnership": "business_sensitive",
+  // Architect-reviewed (Growth & Market Development batch): payload is
+  // Martin's raw Workspace message text (discover_growth_opportunity/
+  // research_market/assess_market_opportunity) or the growth
+  // opportunity's accumulated signal/evidence/qualification rationale
+  // (qualify_growth_opportunity/develop_growth_opportunity) -- same
+  // category and provenance as the already-classified Opportunity
+  // Development and Partnership Development tasks; research_market has
+  // no live external research input, same discipline as
+  // research_opportunity/research_partner. Architect's explicit ruling:
+  // business_sensitive holds on the payloads actually implemented; market
+  // or competitive subject matter does not by itself require a higher
+  // sensitivity class. Classification describes the data crossing this
+  // specific AI boundary, not the maximum sensitivity of everything the
+  // Hat might ever discuss -- if a later implementation sends non-public
+  // competitor information, confidential third-party material, protected
+  // client information, personal data, or another materially different
+  // data category, that is a change in the actual payload requiring its
+  // own fresh classification/policy review, not a pre-emptive bump here.
+  // determine_next_move and the two handoff_to_* actions reuse the
+  // existing Hat-agnostic business_development.determine_next_move task
+  // and the SemanticTaskId-free Handoff preview/approval pattern --
+  // Architect confirmed no separate SemanticTaskId or sensitivity entry
+  // is needed for their reuse.
+  "business_development.discover_growth_opportunity": "business_sensitive",
+  "business_development.research_market": "business_sensitive",
+  "business_development.assess_market_opportunity": "business_sensitive",
+  "business_development.qualify_growth_opportunity": "business_sensitive",
+  "business_development.develop_growth_opportunity": "business_sensitive",
 };
 
 /**
@@ -442,6 +470,41 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "action.google_doc_comment_edit": "TOKEN_SAFE_RUNTIME",
   "action.google_sheet_intake": "TOKEN_SAFE_RUNTIME",
   "action.google_sheet_comment_edit": "TOKEN_SAFE_RUNTIME",
+  // Business Development -- all 18 registered tasks across Stage 1/2
+  // classification and all three Hats (Opportunity Development,
+  // Partnership Development, Growth & Market Development). Same payload
+  // category as marketing.*/strategy.*/research.* above: Martin-authored
+  // Workspace text, or accumulated Martin-derived opportunity/partnership/
+  // growth signal+evidence+qualification state -- never a Handoff,
+  // Entity, contact record, or other structured identity data. This
+  // entry was missing for every one of these tasks from their original
+  // classification through the Growth & Market Development batch -- a
+  // gap discovered only now: PRODUCTION_TASK_SENSITIVITY classification
+  // and this outbound policy are two separate gates (see this file's own
+  // DataBoundaryEvaluator/OutboundDataGateEvaluator split), and a task
+  // absent from this table fails closed regardless of its sensitivity
+  // classification. Backfilling TOKEN_SAFE_RUNTIME here for all 18 tasks
+  // is what actually makes Business Development's AI calls reach a
+  // provider in production; before this, every BD task was silently
+  // blocked at this gate even once Architect-approved and classified.
+  "business_development.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "business_development.hat_action_decision": "TOKEN_SAFE_RUNTIME",
+  "business_development.opportunity_qualification": "TOKEN_SAFE_RUNTIME",
+  "business_development.discover_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.research_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.assess_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.develop_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.determine_next_move": "TOKEN_SAFE_RUNTIME",
+  "business_development.discover_partner": "TOKEN_SAFE_RUNTIME",
+  "business_development.research_partner": "TOKEN_SAFE_RUNTIME",
+  "business_development.assess_partnership": "TOKEN_SAFE_RUNTIME",
+  "business_development.qualify_partnership": "TOKEN_SAFE_RUNTIME",
+  "business_development.develop_partnership": "TOKEN_SAFE_RUNTIME",
+  "business_development.discover_growth_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.research_market": "TOKEN_SAFE_RUNTIME",
+  "business_development.assess_market_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.qualify_growth_opportunity": "TOKEN_SAFE_RUNTIME",
+  "business_development.develop_growth_opportunity": "TOKEN_SAFE_RUNTIME",
   // Explicit, narrow, inspected exception -- see this map's own doc comment.
   "sales.enquiry_extraction": "IDENTITY_AUTHORIZED",
 };
