@@ -4,15 +4,17 @@ import { dispatchAction, findAction, type ActionDefinition } from "./actionRegis
 
 // ---------------------------------------------------------------------------
 // Toy action set -- proves the mechanism works for a generic Unit, without
-// deciding or wiring any real Unit's action list (Sales/Marketing/Strategy/
-// Finance action lists remain an open product decision).
+// deciding or wiring any real Unit's action list beyond Business
+// Development (see businessDevelopmentManifest.ts).
 // ---------------------------------------------------------------------------
 
-type ToyAction = "lookup_status" | "update_record";
+type ToyAction = "lookup_status" | "hold_for_evidence" | "update_record" | "commit_external_change";
 
 const TOY_REGISTRY: ActionDefinition<ToyAction>[] = [
   { name: "lookup_status", consequence: "read", description: "Read-only status lookup, no side effects." },
-  { name: "update_record", consequence: "write", description: "Mutates governed state." },
+  { name: "hold_for_evidence", consequence: "internal", description: "May pause on missing evidence; mutates execution state only, never approval-gated." },
+  { name: "update_record", consequence: "write", description: "Mutates governed state; not privileged." },
+  { name: "commit_external_change", consequence: "write", requiresApproval: true, description: "Mutates governed state and is privileged -- needs Martin's sign-off." },
 ];
 
 test("dispatchAction: a registered read action runs the read handler immediately and returns its reply", async () => {
@@ -30,19 +32,29 @@ test("dispatchAction: a registered read action runs the read handler immediately
   assert.deepEqual(handlerCalledWith, ["lookup_status", "what's the status of MAT-20"]);
 });
 
-test("dispatchAction: a registered write action never invokes the read handler -- it only signals dispatch", async () => {
+test("dispatchAction: an internal action never invokes the read handler and never requires approval", async () => {
   let handlerCalled = false;
   const result = await dispatchAction<ToyAction>(
-    "update_record",
-    "set the price to 500",
+    "hold_for_evidence",
+    "still gathering evidence",
     TOY_REGISTRY,
     async () => {
       handlerCalled = true;
       return "should never be reached";
     },
   );
-  assert.deepEqual(result, { kind: "write", action: "update_record" });
-  assert.equal(handlerCalled, false, "write actions must never run the read handler -- writes stay on the existing WorkSession/approval pipeline");
+  assert.deepEqual(result, { kind: "continuable", action: "hold_for_evidence", consequence: "internal", requiresApproval: false });
+  assert.equal(handlerCalled, false, "internal actions must never run the read handler -- they stay on the WorkSession/entry-handler pipeline");
+});
+
+test("dispatchAction: a write action with no requiresApproval defaults to unprivileged (false), not automatically gated", async () => {
+  const result = await dispatchAction<ToyAction>("update_record", "set the price to 500", TOY_REGISTRY, async () => "unreachable");
+  assert.deepEqual(result, { kind: "continuable", action: "update_record", consequence: "write", requiresApproval: false });
+});
+
+test("dispatchAction: a write action explicitly marked requiresApproval: true signals the caller to gate on approval", async () => {
+  const result = await dispatchAction<ToyAction>("commit_external_change", "email the client", TOY_REGISTRY, async () => "unreachable");
+  assert.deepEqual(result, { kind: "continuable", action: "commit_external_change", consequence: "write", requiresApproval: true });
 });
 
 test("dispatchAction: an unregistered action name fails closed with null, never guessing a consequence level", async () => {
@@ -58,6 +70,16 @@ test("dispatchAction: an unregistered action name fails closed with null, never 
   );
   assert.equal(result, null);
   assert.equal(handlerCalled, false);
+});
+
+test("dispatchAction: an internal action that declares requiresApproval: true fails closed by throwing, never silently downgraded or upgraded", async () => {
+  const invalidRegistry: ActionDefinition<"broken">[] = [
+    { name: "broken", consequence: "internal", requiresApproval: true, description: "Invalid combination -- internal must never gate on approval." },
+  ];
+  await assert.rejects(
+    () => dispatchAction<"broken">("broken", "irrelevant", invalidRegistry, async () => "unreachable"),
+    /declared consequence "internal" but requiresApproval is true/,
+  );
 });
 
 test("findAction: returns the matching definition or undefined for an unregistered name", () => {
