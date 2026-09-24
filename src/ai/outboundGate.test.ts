@@ -216,6 +216,31 @@ test("Lead Discovery public-source tasks are TOKEN_SAFE_RUNTIME, and only the si
   assert.strictEqual(OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.size, 1, "the exemption is narrow, not blanket");
 });
 
+test("All 18 Business Development tasks (Stage 1/2 classification and all three Hats) are TOKEN_SAFE_RUNTIME", () => {
+  for (const id of [
+    "business_development.intake_classification",
+    "business_development.hat_action_decision",
+    "business_development.opportunity_qualification",
+    "business_development.discover_opportunity",
+    "business_development.research_opportunity",
+    "business_development.assess_opportunity",
+    "business_development.develop_opportunity",
+    "business_development.determine_next_move",
+    "business_development.discover_partner",
+    "business_development.research_partner",
+    "business_development.assess_partnership",
+    "business_development.qualify_partnership",
+    "business_development.develop_partnership",
+    "business_development.discover_growth_opportunity",
+    "business_development.research_market",
+    "business_development.assess_market_opportunity",
+    "business_development.qualify_growth_opportunity",
+    "business_development.develop_growth_opportunity",
+  ] as SemanticTaskId[]) {
+    assert.strictEqual(PRODUCTION_OUTBOUND_POLICY[id], "TOKEN_SAFE_RUNTIME", id);
+  }
+});
+
 test("Raw pre-tokenization Sales tasks and the routing classifiers are deliberately unresolved (blocked), not mislabeled TOKEN_SAFE_RUNTIME", () => {
   for (const id of [
     "routing.enquiry_classification",
