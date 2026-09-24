@@ -6,6 +6,7 @@ import { createHandoff } from "../../handoffWriter";
 import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
+import { aiJson } from "../../ai";
 
 /**
  * Business Development's Unit Manifest -- the first Unit built entirely
@@ -54,26 +55,28 @@ import { logActivity } from "../../log";
  * so Hat resolution genuinely exercises three Hats, not one -- but their
  * handlers are explicit stubs pending the same treatment.
  *
+ * qualify_opportunity's evidence-sufficiency judgment is now real
+ * (judgeOpportunityQualification, registered as
+ * business_development.opportunity_qualification) -- classified
+ * business_sensitive pending Architect review (same payload category as
+ * the Stage 1/2 tasks: Martin's own typed evidence text, never a
+ * Handoff/Entity/contact object), UNCLASSIFIED in
+ * PRODUCTION_TASK_SENSITIVITY until then, so real calls fail closed
+ * (UNRESOLVED_POLICY_HOLD) rather than running unreviewed.
+ *
  * One thing still not decided here, left as a loud placeholder rather
  * than invented:
  *
  * TODO(intelligence): discover_opportunity/research_opportunity/
- * assess_opportunity, and qualify_opportunity's actual evidence-sufficiency
- * judgment, all need real, registered AI tasks (matching how
+ * assess_opportunity still need real, registered AI tasks (matching how
  * marketing.hat_action_decision and strategy's diagnosis tasks are
- * registered) -- qualify_opportunity's hold/resume *mechanism* below is
- * real, but what decides Qualified/Held/Blocked is still a placeholder
- * rule (non-empty evidence => Qualified), not real reasoning.
+ * registered, and now how business_development.opportunity_qualification
+ * is registered above) -- their read handler still throws "not yet
+ * implemented."
  *
- * NOTE: the approval callback itself (Martin tapping "Send handoff") is
- * routed today by a hand-wired switch in session.ts (`case
- * "researchhandoff":` / `case "strategyhandoff":`) -- a fourth hand-wired
- * chokepoint beyond the three the design doc already names
- * (dispatchCowork, WorkSession's per-Unit methods, handleTextReply's
- * awaiting-switch). handleBDOpportunityHandoffApproval below is written
- * to slot into that same pattern once BD is actually wired into
- * dispatch; not fixed here, since wiring dispatch at all is a later,
- * separate step per the design doc's rollout order.
+ * NOTE: dispatch wiring (four chokepoints, including the approval
+ * callback) is done -- see units/dispatch.ts, units/registry.ts, and
+ * router.ts/session.ts's generic manifest lookups.
  */
 
 type OpportunityDevelopmentAction =
@@ -124,21 +127,59 @@ async function opportunityDevelopmentReadHandler(_env: Env, actionName: Opportun
   }
 }
 
-/** Placeholder qualification rule -- TODO(intelligence) above. Real reasoning replaces this once qualify_opportunity's AI task is registered. */
-function placeholderQualify(state: BDOpportunityState): { qualification: "Qualified" | "Held"; rationale: string; missingEvidence?: string[] } {
-  if (state.evidence.length === 0) {
+interface QualificationJudgment {
+  qualification: "Qualified" | "Held" | "Blocked";
+  rationale: string;
+  missingEvidence?: string[];
+}
+
+/**
+ * Real evidence-sufficiency judgment for qualify_opportunity, per the Hat
+ * Definition's own rule (Notion): "Qualification must not be based on
+ * enthusiasm, AI confidence, or superficial fit. If required evidence is
+ * missing, hold rather than infer." Ambiguity/AI failure fails closed to
+ * Held, never silently defaults to Qualified.
+ */
+async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
+  const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
+
+  const result = await aiJson<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
+    taskId: "business_development.opportunity_qualification",
+    system: `You apply Business Development's evidence threshold for whether a BD opportunity is sufficiently real to invest further effort in developing.
+
+Qualification must not be based on enthusiasm, confidence, or superficial fit -- it must be based on the actual evidence gathered. If required evidence is missing to make this judgment, hold rather than infer or guess.
+
+Return JSON:
+{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}
+- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this opportunity.
+- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.
+- Blocked: the evidence gathered actively indicates this opportunity should not be pursued.
+- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
+    user: `Opportunity signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}`,
+    light: true,
+  });
+
+  if (!result || (result.qualification !== "Qualified" && result.qualification !== "Held" && result.qualification !== "Blocked")) {
+    // Fails closed -- an AI/provider failure or unparsable response is
+    // never silently treated as Qualified. Held (not Blocked) since this
+    // is a failure to judge, not a negative judgment.
     return {
       qualification: "Held",
-      rationale: "No evidence gathered yet for this opportunity.",
-      missingEvidence: ["at least one piece of supporting evidence for this opportunity"],
+      rationale: "Couldn't complete the evidence assessment -- please try again or share more detail.",
+      missingEvidence: ["a retry of the evidence assessment"],
     };
   }
-  return { qualification: "Qualified", rationale: `Qualified on ${state.evidence.length} piece(s) of gathered evidence.` };
+
+  return {
+    qualification: result.qualification,
+    rationale: result.rationale ?? "(no rationale given)",
+    missingEvidence: result.qualification === "Held" ? (result.missingEvidence ?? []) : undefined,
+  };
 }
 
 async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string): Promise<WorkState> {
   const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
-  const result = placeholderQualify(opportunity);
+  const result = await judgeOpportunityQualification(env, opportunity);
 
   state.bdOpportunity = {
     ...opportunity,
@@ -152,12 +193,17 @@ async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: hatName },
-      `Held -- ${result.rationale}\n\nWhat evidence can you share for: ${result.missingEvidence?.join(", ")}?`,
+      `Held -- ${result.rationale}\n\nWhat evidence can you share for: ${result.missingEvidence?.join(", ") || "this opportunity"}?`,
     );
     return state;
   }
 
   state.awaiting = undefined;
+  if (result.qualification === "Blocked") {
+    await sendWorkspaceHatMessage(env, { ...state, hat: hatName }, `Blocked -- ${result.rationale}`);
+    return state;
+  }
+
   await sendWorkspaceHatMessage(env, { ...state, hat: hatName }, `Qualified -- ${result.rationale}`);
   return state;
 }

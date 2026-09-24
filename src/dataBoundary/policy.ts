@@ -104,6 +104,19 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // request, they never process the underlying opportunity content.
   "business_development.intake_classification": "business_sensitive",
   "business_development.hat_action_decision": "business_sensitive",
+  // Architect-reviewed: payload is opportunity.signal + opportunity.evidence[]
+  // only -- both free text Martin typed across the Workspace interaction,
+  // never a Handoff, Entity, contact object, or other identity-bearing
+  // structured data. The classification describes the sensitivity of what
+  // actually crosses the AI boundary, not the sensitivity of the subject
+  // being discussed (a prospective external organisation/market/
+  // partnership does not itself raise this above business_sensitive).
+  // Performing substantive judgment rather than simple routing does not
+  // escalate the classification either -- the AI is still assessing
+  // Martin-authored internal Workspace text, not protected client identity
+  // data. The Qualified/Held/Blocked outcome is a business-process result,
+  // not a data-sensitivity category, and never changes this rating.
+  "business_development.opportunity_qualification": "business_sensitive",
 };
 
 /**
