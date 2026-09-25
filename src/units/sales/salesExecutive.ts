@@ -29,6 +29,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
+import { resolveEntityMatterFromTokens } from "../../identityResolution";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -1430,6 +1431,25 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
   const rawFacts = plainText(handoff.properties["Verified Facts & Sources"]);
   const entityToken = plainText(handoff.properties.Entity_Token);
   const matterToken = plainText(handoff.properties.Matter_Token);
+
+  // A Finance -> Sales Handoff picked up without a continuing session (no
+  // handoff_workitem mapping -- see checkHandoffs.ts) starts with a fresh
+  // WorkState that never resolved real identity, so state.entityName/
+  // matterName/entityId/matterId are still unset here even though this IS
+  // Sales, which is authorized to know them. Re-derive them from the
+  // Handoff's own tokens before anything below references state.entityName
+  // -- confirmed live: without this, the "couldn't read the quote" and
+  // "Draft Proposal" messages below printed the literal string "undefined"
+  // instead of the client's name.
+  if (!state.entityName || !state.matterName) {
+    const resolved = await resolveEntityMatterFromTokens(env, entityToken, matterToken);
+    if (resolved) {
+      state.entityId = resolved.entityId;
+      state.entityName = resolved.entityName;
+      state.matterId = resolved.matterId;
+      state.matterName = resolved.matterName;
+    }
+  }
 
   const evalResult = evaluateHandoffContext(
     {
