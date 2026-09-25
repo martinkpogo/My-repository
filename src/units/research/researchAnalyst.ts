@@ -2,7 +2,7 @@ import type { Env, Unit, WorkState } from "../../types";
 import { getPage, plainText, richText, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
-import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
+import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -117,7 +117,7 @@ async function sendResearchInProgressAck(env: Env, state: WorkState): Promise<vo
  */
 async function advanceResearchProgress(env: Env, state: WorkState, stageText: string): Promise<void> {
   if (state.researchProgressMessageId === undefined) return;
-  await editHatMessage(env, state, state.researchProgressMessageId, `🔍 ${stageText}`);
+  await editWorkspaceHatMessage(env, state, state.researchProgressMessageId, `🔍 ${stageText}`);
 }
 
 interface ProtocolSelectionResult {

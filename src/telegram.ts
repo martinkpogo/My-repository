@@ -252,6 +252,33 @@ export async function editHatMessage(env: Env, target: HatMessageTarget, message
   return editMessageText(env, target.chatId, messageId, withHatLabel(target, text));
 }
 
+/**
+ * Like editHatMessage, but targets the Workspace Stream's own chat --
+ * the correct counterpart to sendWorkspaceHatMessage, which overrides
+ * target.chatId/threadId to the configured Workspace stream rather than
+ * using the caller's own. A caller that instead used plain editHatMessage
+ * (target.chatId) to edit a message sendWorkspaceHatMessage sent would
+ * edit the WRONG chat whenever target.chatId differs from the Workspace
+ * stream's chat -- confirmed live: a Strategy/R&I work item picked up via
+ * a Unit's own "no prior session" discovery fallback (checkHandoffs.ts)
+ * gets chatId set to Martin's DM, while its progress ack was actually
+ * sent to the Workspace group via sendWorkspaceHatMessage -- every
+ * subsequent progress edit then failed with Telegram's "message to edit
+ * not found" (wrong chat_id), silently (editMessageText only logs, never
+ * throws), so the mismatch was invisible until Worker logs were checked
+ * directly. Fails closed (logs, does not throw) exactly like
+ * sendWorkspaceHatMessage if the stream is unconfigured -- a missing
+ * progress update must never block the pipeline it's reporting on.
+ */
+export async function editWorkspaceHatMessage(env: Env, target: HatMessageTarget, messageId: number, text: string): Promise<void> {
+  const workspaceTarget = getWorkspaceTarget(env);
+  if (!workspaceTarget) {
+    console.error(`editWorkspaceHatMessage: Workspace stream unconfigured${target.hat ? ` for ${target.hat}` : ""}`);
+    return;
+  }
+  return editMessageText(env, workspaceTarget.chatId, messageId, withHatLabel(target, text));
+}
+
 async function extractMessageId(res: Response): Promise<number | undefined> {
   try {
     const data = (await res.json()) as { result?: { message_id?: number } };
