@@ -770,7 +770,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     `${FINANCE_JUDGMENT_START}\nAuthoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}\n${FINANCE_JUDGMENT_END}`,
   ].join("\n\n");
 
-  const followUp = await createHandoff(
+  const { page: followUp } = await createHandoff(
     env,
     {
       Handoff: title(`Draft Proposal — ${state.matterToken}`),

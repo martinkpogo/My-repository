@@ -194,6 +194,29 @@ function assertTokensPresent(identity: HandoffIdentity): void {
 }
 
 /**
+ * What createHandoff's own known-identity check actually covered for a
+ * given Handoff -- never the values themselves, only which known-identity
+ * field(s) (per identityFieldsPresent) were available and checked, and the
+ * id of the Handoff record they were checked against. A caller whose own
+ * WorkState survives through to that Handoff's downstream pickup (i.e. the
+ * caller also registers the handoff_workitem KV mapping under its own
+ * workId, so the same WorkSession continues) can store this on
+ * WorkState.strategySourceBoundaryAttestation so a later gate (e.g.
+ * presentStrategyProposalForApproval) can honestly attest the source
+ * boundary was already checked -- see that field's own doc comment. A
+ * caller whose WorkState does NOT survive to pickup (no handoff_workitem
+ * registration -- e.g. today's Research & Intelligence / Business
+ * Development dynamic-unit routing) gets this same result back but has
+ * nowhere durable to put it yet; that gap is a separate, still-open
+ * decision, not something this type or createHandoff resolves on its own.
+ */
+export interface HandoffSourceBoundaryAttestation {
+  handoffId: string;
+  checked: true;
+  identityFieldsChecked: KnownIdentityField[];
+}
+
+/**
  * The single production path for creating a Handoff. Validates the
  * identity boundary (tokens required, no prohibited identity in any
  * protected field) BEFORE calling notion.ts's createPage -- atomic from the
@@ -201,11 +224,29 @@ function assertTokensPresent(identity: HandoffIdentity): void {
  * repair. Throws HandoffWriteViolationError on any violation; callers must
  * treat that as a fail-closed refusal to write, not something to catch and
  * silently work around.
+ *
+ * Returns both the created page and the source-boundary attestation for
+ * exactly the identity this call validated against -- computed once, here,
+ * rather than each calling Unit re-deriving identityFieldsPresent(identity)
+ * by hand (previously only salesExecutive.ts did this, duplicating logic
+ * that belongs with the check itself).
  */
-export async function createHandoff(env: Env, properties: NotionProperties, identity: HandoffIdentity): Promise<NotionPage> {
+export async function createHandoff(
+  env: Env,
+  properties: NotionProperties,
+  identity: HandoffIdentity,
+): Promise<{ page: NotionPage; sourceBoundaryAttestation: HandoffSourceBoundaryAttestation }> {
   assertTokensPresent(identity);
   validateHandoffProperties(properties, identity);
-  return createPage(env, env.HANDOFFS_DATA_SOURCE_ID, properties);
+  const page = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, properties);
+  return {
+    page,
+    sourceBoundaryAttestation: {
+      handoffId: page.id,
+      checked: true,
+      identityFieldsChecked: identityFieldsPresent(identity),
+    },
+  };
 }
 
 /**

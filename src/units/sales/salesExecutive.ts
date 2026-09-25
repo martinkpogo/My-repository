@@ -21,7 +21,7 @@ import {
   uniqueId,
   updatePage,
 } from "../../notion";
-import { createHandoff, updateHandoff, identityFieldsPresent } from "../../handoffWriter";
+import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { aiJson, aiText } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, sendOperationsMessage } from "../../telegram";
@@ -1297,7 +1297,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     contactName: state.entityDraft?.type === "Individual" ? state.entityDraft?.name : undefined,
   };
 
-  const handoff = await createHandoff(
+  const { page: handoff, sourceBoundaryAttestation } = await createHandoff(
     env,
     {
       Handoff: title(`Commercial diagnosis — ${identityTokens.matterToken}`),
@@ -1330,21 +1330,14 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     strategyHandoffIdentity,
   );
 
-  // The Handoff write above already ran createHandoff's known-identity
-  // check (findViolation, via handoffWriter.ts) against exactly
-  // strategyHandoffIdentity -- reaching this line means it passed (a
-  // violation throws before createPage is ever called, so this line is
-  // never reached on failure). This records WHICH known-identity fields
-  // were actually available and checked at that moment -- never the
-  // values themselves -- so presentStrategyProposalForApproval can later
-  // honestly attest that the Strategy Proposal was checked against the
-  // same known-identity set the source boundary already was. See
+  // createHandoff already computed this attestation from exactly the
+  // identity it validated strategyHandoffIdentity against -- see
+  // handoffWriter.ts's HandoffSourceBoundaryAttestation. Stored here so
+  // presentStrategyProposalForApproval can later honestly attest that the
+  // Strategy Proposal was checked against the same known-identity set the
+  // source boundary already was. See
   // WorkState.strategySourceBoundaryAttestation's own doc comment.
-  state.strategySourceBoundaryAttestation = {
-    handoffId: handoff.id,
-    checked: true,
-    identityFieldsChecked: identityFieldsPresent(strategyHandoffIdentity),
-  };
+  state.strategySourceBoundaryAttestation = sourceBoundaryAttestation;
 
   state.handoffId = handoff.id;
   // Sales's execution ends here. Strategy is a separate Unit and must

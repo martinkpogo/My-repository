@@ -60,10 +60,24 @@ function validProperties(overrides: Record<string, unknown> = {}) {
 test("createHandoff: a token-only Handoff succeeds", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  const page = await createHandoff(env, validProperties(), baseIdentity);
+  const { page, sourceBoundaryAttestation } = await createHandoff(env, validProperties(), baseIdentity);
   assert.strictEqual(page.id, "page-1");
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(calls[0].body.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
+  assert.strictEqual(sourceBoundaryAttestation.handoffId, "page-1");
+  assert.strictEqual(sourceBoundaryAttestation.checked, true);
+  assert.deepStrictEqual(sourceBoundaryAttestation.identityFieldsChecked, []);
+});
+
+test("createHandoff: the returned source-boundary attestation records exactly which known-identity fields were present -- never the values themselves", async (t) => {
+  mockNotionFetch(t);
+  const env = fakeEnv();
+  const { sourceBoundaryAttestation } = await createHandoff(env, validProperties(), {
+    ...baseIdentity,
+    entityName: "Some Real Entity Name That Never Appears In Fields",
+    email: "someone@example.com",
+  });
+  assert.deepStrictEqual([...sourceBoundaryAttestation.identityFieldsChecked].sort(), ["email", "entityName"]);
 });
 
 test("createHandoff: normal sanitized business context succeeds", async (t) => {
