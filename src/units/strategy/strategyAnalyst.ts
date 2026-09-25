@@ -577,13 +577,18 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
  *   SemanticTaskIds' current UNCLASSIFIED PRODUCTION_TASK_SENSITIVITY /
  *   PRODUCTION_OUTBOUND_POLICY status: aiJson fails closed on every
  *   unclassified task, in every environment, before any provider is even
- *   attempted) degrades to the SAME path as a genuine zero-domains
- *   determination -- proceed directly to the unchanged runCoreDiagnosis.
- *   This is a deliberate exception to this Unit's usual fail-closed
- *   discipline: composition is a NEW layer sitting in front of Strategy's
- *   existing, already-approved, already-working diagnosis pipeline, and an
- *   inability to run the new selection step must never silently disable
- *   that pre-existing capability. It is logged explicitly (never silently
+ *   attempted) degrades to the SAME continuation as a genuine zero-domains
+ *   determination -- proceed directly to the unchanged runCoreDiagnosis --
+ *   but NOT to the same recorded state: state.strategySpecialistSelection
+ *   Unavailable is set to `true` specifically for this case (selection
+ *   itself could not run) and to `false` for a genuine zero-domains
+ *   determination, so the two are never conflated in persisted WorkState,
+ *   only in their downstream continuation. This is a deliberate exception
+ *   to this Unit's usual fail-closed discipline: composition is a NEW layer
+ *   sitting in front of Strategy's existing, already-approved, already-
+ *   working diagnosis pipeline, and an inability to run the new selection
+ *   step must never silently disable that pre-existing capability. It is
+ *   both logged (console.warn) and persisted on WorkState (never silently
  *   swallowed) so the gap is visible pending Architect classifying the new
  *   task IDs -- see this file's own final-report note on this point.
  * - Once selection DOES return one or more required domains, every
@@ -601,14 +606,24 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
     console.warn(
       `Strategy runDiagnosis: specialist selection unavailable for work ${state.workId} (classifier failure, or strategy.specialist_selection is not yet classified in PRODUCTION_TASK_SENSITIVITY/PRODUCTION_OUTBOUND_POLICY) -- proceeding directly to core diagnosis without specialist composition.`,
     );
+    state.strategySpecialistSelectionUnavailable = true;
     state.strategySpecialistFindings = [];
     return runCoreDiagnosis(env, state);
   }
 
   if (selection.domains.length === 0) {
+    state.strategySpecialistSelectionUnavailable = false;
     state.strategySpecialistFindings = [];
     return runCoreDiagnosis(env, state);
   }
+
+  // One or more specialists are actually required and about to run --
+  // explicitly clear any stale value a prior attempt on this same
+  // WorkState may have left (e.g. handleStrategyFeedback's direct-
+  // continuation retry path reuses the same state object), so this
+  // attempt's real per-domain findings are never shadowed by a leftover
+  // true/false from an earlier, differently-resolved attempt.
+  state.strategySpecialistSelectionUnavailable = undefined;
 
   await advanceStrategyProgress(env, state, `Running specialist diagnosis (${selection.domains.join(", ")})...`);
 

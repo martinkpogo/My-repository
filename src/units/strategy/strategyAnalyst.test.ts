@@ -1583,7 +1583,25 @@ test("composition: no specialist required proceeds directly to the unchanged cor
   const result = await handlePickup(env, state);
 
   assert.deepStrictEqual(result.strategySpecialistFindings, []);
+  assert.strictEqual(result.strategySpecialistSelectionUnavailable, false, "a genuine zero-domains determination must be recorded distinctly from selection being unavailable");
   assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: today's actual default (unclassified strategy.specialist_selection) is recorded as selection UNAVAILABLE, never conflated with a genuine no-specialist-required determination", async (t) => {
+  // No classifyCompositionTasksForTest(t) here -- this is the real,
+  // current production state (the 5 new SemanticTaskIds are still
+  // unclassified), exercised via the SAME fakeAi every pre-existing
+  // Strategy test already uses.
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.deepStrictEqual(result.strategySpecialistFindings, []);
+  assert.strictEqual(result.strategySpecialistSelectionUnavailable, true, "must be recorded as unavailable (governance hold), never as a genuine zero-domains determination");
+  assert.strictEqual(result.stage, "delivered", "the pre-existing no-specialist path must still complete normally despite the degraded composition step");
 });
 
 test("composition: a single selected specialist is diagnosed and its finding is folded into context before core diagnosis runs", async (t) => {
@@ -1612,6 +1630,7 @@ test("composition: a single selected specialist is diagnosed and its finding is 
   assert.strictEqual(result.strategySpecialistFindings?.length, 1);
   assert.strictEqual(result.strategySpecialistFindings?.[0].domain, "business");
   assert.strictEqual(result.strategySpecialistFindings?.[0].status, "completed");
+  assert.strictEqual(result.strategySpecialistSelectionUnavailable, undefined, "specialists genuinely ran -- this must never read as a no-specialist/unavailable state");
   assert.strictEqual(result.stage, "delivered", "synthesis folded into context, core diagnosis still completes normally");
 });
 

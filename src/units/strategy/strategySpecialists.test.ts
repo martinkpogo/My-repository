@@ -284,6 +284,46 @@ test("runSpecialistDiagnosesConcurrently: runs every selected domain and never l
   assert.strictEqual(byDomain.communication.status, "failed");
 });
 
+test("runSpecialistDiagnosesConcurrently: specialists are genuinely started together and awaited in parallel -- a runtime timing trace, not an inference from code shape or comments", async (t) => {
+  classifyCompositionTasksForTest(t);
+  mockGovernanceFetch(t);
+  const DELAY_MS = 60;
+  const startOffsets: Record<string, number> = {};
+  const t0 = Date.now();
+  const env = fakeEnv({
+    AI: {
+      run: async (_model: any, opts: any) => {
+        const system = String(opts?.messages?.[0]?.content ?? "");
+        const domain = system.includes("Business Strategist Hat") ? "business" : system.includes("Brand Strategist Hat") ? "brand" : system.includes("Communication Strategist Hat") ? "communication" : null;
+        if (!domain) throw new Error(`unexpected call -- system prompt: ${system.slice(0, 80)}`);
+        startOffsets[domain] = Date.now() - t0;
+        await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+        return {
+          response: JSON.stringify({ sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" }),
+        };
+      },
+    } as any,
+  });
+
+  const runStart = Date.now();
+  const findings = await runSpecialistDiagnosesConcurrently(env, ["business", "brand", "communication"], "context");
+  const totalElapsed = Date.now() - runStart;
+
+  assert.strictEqual(findings.length, 3);
+  assert.ok(findings.every((f) => f.status === "completed"));
+  // Sequential execution would take at least 3 * DELAY_MS (180ms). Genuine
+  // concurrent execution keeps total wall-clock time close to one delay
+  // period regardless of how many specialists were selected.
+  assert.ok(totalElapsed < DELAY_MS * 2, `expected concurrent execution (~${DELAY_MS}ms total), took ${totalElapsed}ms -- looks sequential`);
+  // Every specialist's own AI call must have STARTED within a tight window
+  // of the others -- proves they were kicked off together, not one only
+  // after a previous one's own call completed.
+  const starts = Object.values(startOffsets);
+  assert.strictEqual(starts.length, 3, "all three specialists must have actually been invoked");
+  const spread = Math.max(...starts) - Math.min(...starts);
+  assert.ok(spread < DELAY_MS / 2, `expected all three specialist calls to start within a tight window of each other, spread was ${spread}ms`);
+});
+
 test("synthesizeSpecialistFindings: sufficient findings produce a reconciled synthesizedContext", async (t) => {
   classifyCompositionTasksForTest(t);
   const env = fakeEnv({ AI: fakeSpecialistAi({ synthesis: { sufficient: true, synthesizedContext: "Business and brand findings agree the root cause is commercial, not brand.", agreements: "Both point to capacity.", crossDomainRelationships: "Brand perception issue is downstream of the capacity constraint." } }) });
