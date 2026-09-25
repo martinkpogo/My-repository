@@ -37,9 +37,6 @@ export interface Env {
   WORKER_ADMIN_KEY?: string;
   MARTIN_TELEGRAM_USER_ID: string;
   NOTION_TOKEN: string;
-  READAI_WEBHOOK_SECRET?: string;
-  READAI_OAUTH_CLIENT_ID?: string;
-  READAI_OAUTH_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;
   GOOGLE_OAUTH_CLIENT_SECRET?: string;
 

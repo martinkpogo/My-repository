@@ -14,7 +14,7 @@ Provider architecture: Provider abstraction implemented (Workers AI plus several
 System of record: Notion
 Operational interface: Telegram (two-stream: a Workspace topic for interactive decisions/approvals, an Operations topic for background telemetry/watchdogs)
 Live Units: Sales (Lead Generation Specialist), Marketing, Finance, Research & Intelligence
-Other integrations: Google Workspace (Docs/Sheets, controlled creation + comment-triggered editing), Read.ai (call notes)
+Other integrations: Google Workspace (Docs/Sheets, controlled creation + comment-triggered editing). Read.ai (call notes) is exclusively the isolated Sales Executive project's -- Runtime has no direct Read.ai integration.
 Deployment: Cloudflare Workers, via Cloudflare Workers Builds (see Deployment & CI/CD Automation below)
 Repository: martinkpogo/My-repository
 Tests: `npm test` (Node's built-in test runner via `tsx`) — 263 tests as of this writing, all passing; `npm run typecheck` clean
@@ -158,7 +158,6 @@ src/
 ├── googleOAuth.ts               — Google Workspace OAuth + controlled Doc/Sheet creation and approval
 ├── googleDocComments.ts, googleSheetComments.ts
 │                                — comment-triggered live editing (polled) for Docs and Sheets
-├── readai.ts, readaiOAuth.ts   — Read.ai call-notes integration
 ├── hats/
 │   ├── registry.ts             — Marketing Hat registry (name → definition)
 │   ├── executionEngine.ts      — Marketing Hat execution/routing/approval lifecycle
@@ -281,7 +280,6 @@ The runtime currently interfaces with:
 * Cloudflare Workers — runtime, Durable Objects (per-work-item session state), KV (routing pointers, `sessions_index`, watchdog bookkeeping)
 * Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Cerebras, Gemini, SambaNova, NVIDIA NIM) at the same protection tier
 * Google Workspace (Docs, Sheets, Drive) — OAuth-authorized, multi-account controlled Doc/Sheet creation with explicit approval before anything is written, plus comment-triggered live editing (polled)
-* Read.ai — pulls call summaries/notes into a work item via OAuth
 * Tavily — optional live web search backing Research & Intelligence and Lead Generation discovery; R&I stays closed-book (reasoning over supplied context only) if unset, rather than failing
 
 Additional integrations may be added when required by an approved responsibility.

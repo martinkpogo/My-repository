@@ -23,9 +23,7 @@ import { runCheckHandoffs } from "./checkHandoffs";
  * Notion signs every webhook event delivery with HMAC-SHA256 over the raw
  * request body, using the subscription's verification token as the key --
  * arriving hex-encoded, prefixed "sha256=", in the X-Notion-Signature
- * header. Mirrors readai.ts's verifyReadAiSignature exactly (same HMAC
- * verification shape, different key encoding: Notion's token is a plain
- * string, not base64).
+ * header.
  */
 export async function verifyNotionSignature(env: Env, rawBody: string, signatureHeader: string | null): Promise<boolean> {
   if (!signatureHeader || !env.NOTION_WEBHOOK_SECRET) return false;

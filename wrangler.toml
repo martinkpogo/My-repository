@@ -90,13 +90,10 @@ GOOGLE_OAUTH_CLIENT_ID = "495614288300-5k7fd812fk86jutgamtbhs5s1kbjvved.apps.goo
 # Secrets (set with `wrangler secret put <NAME>`, never committed):
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_WEBHOOK_SECRET (verifies inbound Telegram webhook deliveries only -- not reused for /admin/* auth, see WORKER_ADMIN_KEY below)
-#   WORKER_ADMIN_KEY (the ?key= every /admin/* diagnostic/operational endpoint and the /oauth/*/start endpoints check -- one shared operator key, distinct from TELEGRAM_WEBHOOK_SECRET)
+#   WORKER_ADMIN_KEY (the ?key= every /admin/* diagnostic/operational endpoint and the /oauth/google/start endpoint check -- one shared operator key, distinct from TELEGRAM_WEBHOOK_SECRET)
 #   MARTIN_TELEGRAM_USER_ID
 #   NOTION_TOKEN
 #   NOTION_WEBHOOK_SECRET (optional — only needed if you wire up the Notion webhook at /notion/webhook; unset means that endpoint fails closed)
-#   READAI_WEBHOOK_SECRET (optional — Read.ai integration is built (readai.ts/readaiOAuth.ts) but NOT currently configured live; unset means /readai/webhook fails closed and /oauth/readai/start throws)
-#   READAI_OAUTH_CLIENT_ID (optional — same Read.ai integration, also not currently set live)
-#   READAI_OAUTH_CLIENT_SECRET (optional — same Read.ai integration, also not currently set live)
 #   EMAIL_WEBHOOK_SECRET (optional — only needed if you wire up Gmail intake)
 #   TAVILY_API_KEY (optional — only needed for R&I's live web-search capability; unset means R&I stays closed-book)
 #   NVIDIA_NIM_API_KEY (optional — free-tier AI provider fallback if Workers AI's daily quota is exhausted)
@@ -106,3 +103,12 @@ GOOGLE_OAUTH_CLIENT_ID = "495614288300-5k7fd812fk86jutgamtbhs5s1kbjvved.apps.goo
 #   GEMINI_API_KEY (optional — same, additional fallback)
 #   SAMBANOVA_API_KEY (optional — same, additional fallback)
 #   GOOGLE_OAUTH_CLIENT_SECRET (required for Google Workspace OAuth -- confidential, unlike GOOGLE_OAUTH_CLIENT_ID above, which is a plain var)
+#
+# No Read.ai secrets: a live, direct Runtime<->Read.ai integration
+# (readai.ts/readaiOAuth.ts, /readai/webhook, /oauth/readai/*) previously
+# existed here and was removed -- Read.ai access is exclusively the
+# isolated Sales Executive project's, which retrieves and de-identifies
+# meeting content before Runtime ever sees it, per the Sales/Runtime
+# identity boundary (see Section 6A of its Project Instructions and
+# checkHandoffs.ts's isCallNotesHandoff). Runtime pulling a raw meeting
+# directly would have bypassed that boundary entirely.
