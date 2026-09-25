@@ -391,6 +391,108 @@ test("9. Finance quote authority remains unchanged -- Sales reads the quote verb
   assert.strictEqual(result.quote!.rationale, "Value-based on projected revenue lift.");
 });
 
+/**
+ * Regression coverage for a live-production bug: a Finance -> Sales
+ * Handoff picked up without a continuing session (no handoff_workitem
+ * mapping) starts with a fresh WorkState that never resolved real
+ * identity -- state.entityName/matterName/entityId/matterId are unset
+ * even though Sales IS authorized to know them. Confirmed live: the
+ * "couldn't read the quote" message printed the literal string
+ * "undefined" instead of the client's name, and (more seriously)
+ * handleProposalApproval's later createPage call would have used
+ * undefined entityId/matterId relations.
+ */
+test("9c. handleQuoteReceived resolves real Entity/Matter identity from the Handoff's own tokens when the WorkState doesn't already have it (fresh pickup, no continuing session)", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.includes("api.telegram.org")) {
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (typeof body.text === "string") sentTexts.push(body.text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/handoff-quote-3") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "handoff-quote-3",
+          url: "https://notion.so/handoff-quote-3",
+          properties: {
+            "Verified Facts & Sources": {
+              rich_text: [{ plain_text: "Authoritative quote: GHS 450000\nRationale: Value-based on avoided fulfillment losses." }],
+            },
+            Entity_Token: { rich_text: [{ plain_text: "E-21" }] },
+            Matter_Token: { rich_text: [{ plain_text: "MAT-21" }] },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/data_sources/entity-ds/query") && method === "POST") {
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "entity-page-21",
+              url: "https://notion.so/entity-page-21",
+              properties: { "Entity ID": { unique_id: { number: 21, prefix: "E" } }, Name: { title: [{ plain_text: "Anansi Pack Solutions" }] } },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/data_sources/matters-ds/query") && method === "POST") {
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-21",
+              url: "https://notion.so/matter-page-21",
+              properties: { Matter_ID: { unique_id: { number: 21, prefix: "MAT" } }, Matter: { title: [{ plain_text: "Anansi Pack Solutions — Capacity & Positioning" }] } },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
+      return new Response(
+        JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }),
+        { status: 200 },
+      );
+    }
+    if (method === "PATCH" || (method === "POST" && urlStr.endsWith("/pages"))) {
+      return new Response(JSON.stringify({ id: "page", url: "https://notion.so/page", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const state = fakeState({
+    handoffId: "handoff-quote-3",
+    stage: "awaiting_quote",
+    awaiting: undefined,
+    entityId: undefined,
+    entityName: undefined,
+    matterId: undefined,
+    matterName: undefined,
+  });
+  const result = await handleQuoteReceived(fakeEnv(), state);
+
+  assert.strictEqual(result.entityId, "entity-page-21", "entityId must be resolved from the Handoff's own Entity_Token");
+  assert.strictEqual(result.entityName, "Anansi Pack Solutions", "entityName must be resolved, never left undefined");
+  assert.strictEqual(result.matterId, "matter-page-21", "matterId must be resolved from the Handoff's own Matter_Token");
+  assert.strictEqual(result.matterName, "Anansi Pack Solutions — Capacity & Positioning");
+  assert.ok(
+    sentTexts.every((t) => !t.includes("undefined")),
+    `no Telegram message may contain the literal string "undefined" -- got: ${JSON.stringify(sentTexts)}`,
+  );
+});
+
 test("9b. A currency-coded quote (e.g. GHS) is read verbatim, not assumed to be USD", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init?: any) => {
