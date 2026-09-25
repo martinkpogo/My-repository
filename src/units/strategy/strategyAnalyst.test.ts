@@ -1600,6 +1600,49 @@ test("composition: an actual AI/infrastructure failure on the selection call its
   assert.strictEqual(result.stage, "delivered", "an unrelated selection-call failure must never block an otherwise-resolvable core diagnosis");
 });
 
+test("composition: which domains were selected and run is observable in logs -- otherwise execution is unreconstructable after the fact (nothing else persists it)", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business", "brand"], reasoning: "test" },
+    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
+    brand: { sufficient: true, domainExamined: "d2", problemOrIssue: "p2", supportingEvidence: "e2", diagnosis: "diag2", strategicImplication: "s2", uncertaintyAndLimitations: "u2", unresolvedQuestions: "q2" },
+    synthesis: { sufficient: true, synthesizedContext: "synthesis" },
+  });
+  const state = fakeState();
+
+  const originalLog = console.log;
+  const logged: string[] = [];
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  t.after(() => {
+    console.log = originalLog;
+  });
+
+  await handlePickup(env, state);
+
+  assert.ok(logged.some((l) => l.includes("determined 2 domain(s) required: business, brand")), "must log which domains were selected");
+  assert.ok(logged.some((l) => l.includes("business:completed") && l.includes("brand:completed")), "must log each domain's completion status");
+  assert.ok(logged.some((l) => l.includes("synthesis") && l.includes("sufficient")), "must log that synthesis was folded into the diagnosis");
+});
+
+test("composition: a genuine zero-domains determination is also observable in logs, distinct from the domains-selected case above", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+  const state = fakeState();
+
+  const originalLog = console.log;
+  const logged: string[] = [];
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  t.after(() => {
+    console.log = originalLog;
+  });
+
+  await handlePickup(env, state);
+
+  assert.ok(logged.some((l) => l.includes("determined zero specialists are required")), "must log the genuine zero-domains determination distinctly from a selection failure");
+});
+
 test("composition: a single selected specialist is diagnosed and its finding is folded into context before core diagnosis runs", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();

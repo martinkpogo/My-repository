@@ -614,6 +614,7 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
   }
 
   if (selection.domains.length === 0) {
+    console.log(`Strategy runDiagnosis: specialist selection ran for work ${state.workId} and determined zero specialists are required -- proceeding directly to core diagnosis.`);
     state.strategySpecialistSelectionUnavailable = false;
     state.strategySpecialistFindings = [];
     return runCoreDiagnosis(env, state);
@@ -627,10 +628,20 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
   // true/false from an earlier, differently-resolved attempt.
   state.strategySpecialistSelectionUnavailable = undefined;
 
+  // Metadata-only observability (domain names/counts/status labels, never
+  // situation content) -- without this, whether composition actually ran
+  // for a given work item is unreconstructable after the fact from
+  // anything persisted (Notion never receives specialist findings/
+  // synthesis; only the ephemeral in-progress Telegram message, which can
+  // be overwritten before anyone reads it, ever named the domains).
+  console.log(`Strategy runDiagnosis: specialist selection for work ${state.workId} determined ${selection.domains.length} domain(s) required: ${selection.domains.join(", ")}.`);
   await advanceStrategyProgress(env, state, `Running specialist diagnosis (${selection.domains.join(", ")})...`);
 
   const findings = await runSpecialistDiagnosesConcurrently(env, selection.domains, strategyContext);
   state.strategySpecialistFindings = findings;
+  console.log(
+    `Strategy runDiagnosis: specialist diagnosis for work ${state.workId} completed -- ${findings.map((f) => `${f.domain}:${f.status}`).join(", ")}.`,
+  );
 
   const allFailed = findings.every((f) => f.status === "failed");
   if (allFailed) {
@@ -646,6 +657,7 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
     return handleBlocked(env, state, synthesis.insufficiencyReason ?? "Specialist findings are not sufficient to responsibly proceed with the diagnosis.");
   }
 
+  console.log(`Strategy runDiagnosis: specialist synthesis for work ${state.workId} sufficient -- folding into strategyContext before core diagnosis.`);
   state.strategyContext = `${strategyContext}\n\nSpecialist synthesis:\n${synthesis.synthesizedContext ?? ""}`;
   return runCoreDiagnosis(env, state);
 }
