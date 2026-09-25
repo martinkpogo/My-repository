@@ -48,6 +48,14 @@ export interface HatManifest<A extends string = string> {
   name: string;
 
   /**
+   * Matches this Hat's HatIdentity.specialization in src/hats/registry.ts,
+   * when that Hat has one. Documentation/display only -- dispatch keys
+   * purely on `name` (manifest.hats is keyed by it, and state.hat stores
+   * it); this field is never used to resolve or distinguish Hats.
+   */
+  specialization?: string;
+
+  /**
    * This Hat's single responsibility statement -- lifted directly from
    * its Notion Hat Definition's Purpose/Core responsibility text, not
    * invented here. Deliberately one statement covering the whole action

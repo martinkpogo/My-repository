@@ -54,11 +54,21 @@ export const STRATEGY_ANALYST: HatIdentity = { name: "Strategy Analyst", unit: "
 // discovery/direct-addressing (resolveAddressee) -- their own governed
 // execution lives in the Unit Registry manifest, not in a
 // runDiagnosis/judgeQuote-shaped function like the Hats above.
-export const BD_OPPORTUNITY_DEVELOPMENT: HatIdentity = { name: "Business Development Manager — Opportunity Development", unit: "Business Development" };
-export const BD_PARTNERSHIP_DEVELOPMENT: HatIdentity = { name: "Partnerships Manager — Partnership Development", unit: "Business Development" };
+//
+// name/specialization split per Architect's confirmation: each is a
+// distinct Hat (job position the runtime assumes), not a specialization
+// fragmenting one shared Hat -- same shape as Sales Executive/Lead
+// Generation Specialist above (Hat name, then its one specialization),
+// not R&I's one-Hat/many-specializations pattern. Previously these three
+// carried the Hat name and specialization concatenated into one `name`
+// string ("X Manager — Y Development"); split out here to match the
+// canonical HatIdentity shape.
+export const BD_OPPORTUNITY_DEVELOPMENT: HatIdentity = { name: "Business Development Manager", unit: "Business Development", specialization: "Opportunity Development" };
+export const BD_PARTNERSHIP_DEVELOPMENT: HatIdentity = { name: "Partnerships Manager", unit: "Business Development", specialization: "Partnership Development" };
 export const BD_GROWTH_MARKET_DEVELOPMENT: HatIdentity = {
-  name: "Growth & Market Development Manager — Growth & Market Development",
+  name: "Growth & Market Development Manager",
   unit: "Business Development",
+  specialization: "Growth & Market Development",
 };
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {

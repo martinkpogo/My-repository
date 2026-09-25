@@ -105,7 +105,13 @@ type OpportunityDevelopmentAction =
   | "handoff_to_sales"
   | "handoff_to_strategy";
 
-const OPPORTUNITY_DEVELOPMENT_HAT_NAME = "Business Development Manager — Opportunity Development";
+// Matches BD_OPPORTUNITY_DEVELOPMENT's HatIdentity in ../../hats/registry.ts --
+// the Hat name (job position the runtime assumes), not concatenated with
+// its specialization ("Opportunity Development", tracked separately below
+// for documentation/display; never consumed by dispatch, which keys
+// purely on this Hat name).
+const OPPORTUNITY_DEVELOPMENT_HAT_NAME = "Business Development Manager";
+const OPPORTUNITY_DEVELOPMENT_SPECIALIZATION = "Opportunity Development";
 const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
 
 const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentAction>[] = [
@@ -742,6 +748,7 @@ const opportunityDevelopmentAwaitingHandlers: HatManifest<OpportunityDevelopment
 
 const opportunityDevelopmentHat: HatManifest<OpportunityDevelopmentAction> = {
   name: OPPORTUNITY_DEVELOPMENT_HAT_NAME,
+  specialization: OPPORTUNITY_DEVELOPMENT_SPECIALIZATION,
   responsibility:
     "Own the development of specific opportunities that could create meaningful growth for ENIG. Turn an observed market, organisation, partnership, channel, offering, or relationship signal into an evidenced BD opportunity that can either be developed further or handed to the appropriate ENIG Unit. Does not own the client/entity lifecycle once an opportunity becomes a genuine client-acquisition opportunity -- that boundary belongs to Sales.",
   actions: opportunityDevelopmentActions,
@@ -770,7 +777,11 @@ type PartnershipDevelopmentAction =
   | "handoff_to_sales"
   | "handoff_to_strategy";
 
-const PARTNERSHIP_DEVELOPMENT_HAT_NAME = "Partnerships Manager — Partnership Development";
+// Matches BD_PARTNERSHIP_DEVELOPMENT's HatIdentity -- see
+// OPPORTUNITY_DEVELOPMENT_HAT_NAME's comment above for the name/
+// specialization split rationale.
+const PARTNERSHIP_DEVELOPMENT_HAT_NAME = "Partnerships Manager";
+const PARTNERSHIP_DEVELOPMENT_SPECIALIZATION = "Partnership Development";
 
 const partnershipDevelopmentActions: ActionDefinition<PartnershipDevelopmentAction>[] = [
   { name: "discover_partner", consequence: "read", description: "Identify a potential partner or strategic relationship." },
@@ -1001,6 +1012,7 @@ const partnershipDevelopmentAwaitingHandlers: HatManifest<PartnershipDevelopment
 
 const partnershipDevelopmentHat: HatManifest<PartnershipDevelopmentAction> = {
   name: PARTNERSHIP_DEVELOPMENT_HAT_NAME,
+  specialization: PARTNERSHIP_DEVELOPMENT_SPECIALIZATION,
   responsibility:
     "Own the development of strategic relationships and partnership opportunities that could create meaningful value for ENIG. Identify, assess, and develop relationships where the relationship or partnership itself is the central business opportunity. Does not automatically own client acquisition, strategic diagnosis, or execution responsibilities belonging to another ENIG Unit.",
   actions: partnershipDevelopmentActions,
@@ -1019,7 +1031,11 @@ type GrowthMarketDevelopmentAction =
   | "handoff_to_sales"
   | "handoff_to_strategy";
 
-const GROWTH_MARKET_DEVELOPMENT_HAT_NAME = "Growth & Market Development Manager — Growth & Market Development";
+// Matches BD_GROWTH_MARKET_DEVELOPMENT's HatIdentity -- see
+// OPPORTUNITY_DEVELOPMENT_HAT_NAME's comment above for the name/
+// specialization split rationale.
+const GROWTH_MARKET_DEVELOPMENT_HAT_NAME = "Growth & Market Development Manager";
+const GROWTH_MARKET_DEVELOPMENT_SPECIALIZATION = "Growth & Market Development";
 
 const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAction>[] = [
   { name: "discover_growth_opportunity", consequence: "read", description: "Identify a potential market, channel, offering, or growth space." },
@@ -1249,6 +1265,7 @@ const growthMarketDevelopmentAwaitingHandlers: HatManifest<GrowthMarketDevelopme
 
 const growthMarketDevelopmentHat: HatManifest<GrowthMarketDevelopmentAction> = {
   name: GROWTH_MARKET_DEVELOPMENT_HAT_NAME,
+  specialization: GROWTH_MARKET_DEVELOPMENT_SPECIALIZATION,
   responsibility:
     "Own the identification and development of broader opportunities for ENIG's growth across markets, channels, offerings, and growth directions. Identify, research, assess, and develop growth directions where the central question concerns ENIG's broader market position, expansion, channels, offerings, or future sources of growth. Does not automatically own client acquisition, strategic diagnosis, or execution responsibilities belonging to another ENIG Unit.",
   actions: growthMarketDevelopmentActions,
