@@ -25,6 +25,16 @@ export interface Env {
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
+  /**
+   * The shared key every /admin/* diagnostic/operational endpoint checks
+   * (index.ts, googleOAuth.ts's handleGoogleDriveTest) via a ?key= query
+   * param. Previously these endpoints reused TELEGRAM_WEBHOOK_SECRET --
+   * conflating an inbound webhook-signature secret with admin-API auth,
+   * two different concerns. WORKER_ADMIN_KEY already existed live,
+   * unused, before this; it's now the one this whole surface actually
+   * checks. Unset means every /admin/* endpoint fails closed (403).
+   */
+  WORKER_ADMIN_KEY?: string;
   MARTIN_TELEGRAM_USER_ID: string;
   NOTION_TOKEN: string;
   READAI_WEBHOOK_SECRET?: string;

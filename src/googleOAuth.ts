@@ -226,7 +226,7 @@ export function base64url(bytes: Uint8Array): string {
 export async function handleGoogleOAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const key = url.searchParams.get("key");
-  if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+  if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
     return new Response("forbidden", { status: 403 });
   }
   const state = generateState();
@@ -381,7 +381,7 @@ export async function testGoogleDriveConnection(
 export async function handleGoogleDriveTest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const key = url.searchParams.get("key");
-  if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+  if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
     return new Response("forbidden", { status: 403 });
   }
 

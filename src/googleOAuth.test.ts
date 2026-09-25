@@ -81,6 +81,7 @@ function createFakeEnv() {
     WORK_SESSION: mockWorkSession as unknown as DurableObjectNamespace,
     STATE_KV: mockKv as unknown as KVNamespace,
     TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret-999",
+    WORKER_ADMIN_KEY: "test-admin-key-888",
     GOOGLE_OAUTH_CLIENT_ID: "mock-google-client-id.apps.googleusercontent.com",
     GOOGLE_OAUTH_CLIENT_SECRET: "mock-google-client-secret-777",
     ACTIVITY_LOG_DATA_SOURCE_ID: "mock-activity-log-ds",
@@ -146,7 +147,7 @@ test("Google Authorize URL construction includes exact required parameters and m
   assert.strictEqual(url.searchParams.get("scope"), GOOGLE_OAUTH_SCOPES);
 });
 
-test("GET /oauth/google/start requires key parameter matching TELEGRAM_WEBHOOK_SECRET", async () => {
+test("GET /oauth/google/start requires key parameter matching WORKER_ADMIN_KEY", async () => {
   const { fakeEnv, mockKv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () =>
@@ -165,7 +166,7 @@ test("GET /oauth/google/start requires key parameter matching TELEGRAM_WEBHOOK_S
 
     // Valid key parameter -> HTTP 302 Redirect to Google Auth
     const reqAuth = new Request(
-      `https://enig-agent.martnkpogo.workers.dev/oauth/google/start?key=${fakeEnv.TELEGRAM_WEBHOOK_SECRET}`,
+      `https://enig-agent.martnkpogo.workers.dev/oauth/google/start?key=${fakeEnv.WORKER_ADMIN_KEY}`,
     );
     const resAuth = await handleGoogleOAuthStart(reqAuth, fakeEnv);
     assert.strictEqual(resAuth.status, 302);
@@ -1152,7 +1153,7 @@ test("GET /admin/test-google-drive handles authorization key parameter and retur
 
     // 2. Valid secret key -> 200 OK with {"ok": true, "connected": true}
     const reqAuth = new Request(
-      `https://enig-agent.martnkpogo.workers.dev/admin/test-google-drive?key=${fakeEnv.TELEGRAM_WEBHOOK_SECRET}`,
+      `https://enig-agent.martnkpogo.workers.dev/admin/test-google-drive?key=${fakeEnv.WORKER_ADMIN_KEY}`,
     );
     const resAuth = await handleGoogleDriveTest(reqAuth, fakeEnv);
     assert.strictEqual(resAuth.status, 200);
