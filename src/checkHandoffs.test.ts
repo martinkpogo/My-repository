@@ -8,7 +8,15 @@ function fakeKv() {
   const store = new Map<string, string>();
   return {
     get: async (key: string) => store.get(key) ?? null,
-    put: async (key: string, val: string) => {
+    // Mirrors real Cloudflare KV's own hard minimum -- confirmed live:
+    // "KV PUT failed: 400 Invalid expiration_ttl of 30. Expiration TTL
+    // must be at least 60." This mock previously accepted any TTL
+    // silently, which is exactly why AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS
+    // being set to 30 was never caught by a test.
+    put: async (key: string, val: string, opts?: { expirationTtl?: number }) => {
+      if (opts?.expirationTtl !== undefined && opts.expirationTtl < 60) {
+        throw new Error(`KV PUT failed: 400 Invalid expiration_ttl of ${opts.expirationTtl}. Expiration TTL must be at least 60.`);
+      }
       store.set(key, val);
     },
     delete: async (key: string) => {
@@ -103,6 +111,19 @@ test("runCheckHandoffs (auto:true): clears its own in-flight guard once finished
   await runCheckHandoffs(env, 12345, undefined, { source: "runtime_auto" });
   const stillSet = await env.STATE_KV.get("checkhandoffs_auto_inflight");
   assert.strictEqual(stillSet, null, "the guard must be cleared after the automatic run completes");
+});
+
+test("runCheckHandoffs (auto:true / notion_webhook): the in-flight guard's own KV write uses a TTL Cloudflare KV actually accepts (>= 60s) -- regression for a live failure where every guarded run threw before discovery ever ran", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  await assert.doesNotReject(
+    () => runCheckHandoffs(env, 12345, undefined, { source: "runtime_auto" }),
+    "the guard KV write must never throw due to an invalid TTL",
+  );
+  await assert.doesNotReject(
+    () => runCheckHandoffs(env, Number(env.MARTIN_TELEGRAM_USER_ID), undefined, { source: "notion_webhook" }),
+    "the guard KV write must never throw due to an invalid TTL",
+  );
 });
 
 test("runCheckHandoffs (manual, no auto): ignores the automatic-invocation guard entirely -- Martin can always run the command directly", async (t) => {

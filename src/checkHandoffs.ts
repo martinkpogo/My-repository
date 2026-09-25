@@ -463,7 +463,13 @@ export async function checkStaleHandoffs(env: Env): Promise<void> {
 // exact same discovery functions, so overlapping either with the other is
 // exactly as wasteful/risky as overlapping it with itself.
 const AUTO_CHECKHANDOFFS_GUARD_KEY = "checkhandoffs_auto_inflight";
-const AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS = 30;
+// Cloudflare KV rejects any expirationTtl below 60 seconds (confirmed
+// live: "Invalid expiration_ttl of 30. Expiration TTL must be at least
+// 60.", which made every notion_webhook/runtime_auto-sourced
+// runCheckHandoffs call throw on the KV PUT below before ever reaching
+// the discovery sweep). 60 is the platform minimum and the closest
+// approximation to this guard's original short-lived intent.
+const AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS = 60;
 
 /** Which caller invoked runCheckHandoffs -- see runCheckHandoffs's doc comment for the semantics of each. */
 export type CheckHandoffsSource = "manual" | "runtime_auto" | "notion_webhook";

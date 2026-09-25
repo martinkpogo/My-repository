@@ -2,7 +2,7 @@ import type { Env, Unit, WorkState } from "../../types";
 import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
-import { editHatMessage, sendWorkspaceHatMessage } from "../../telegram";
+import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
@@ -335,7 +335,7 @@ async function sendStrategyRefinementInProgressAck(env: Env, state: WorkState): 
 
 async function advanceStrategyProgress(env: Env, state: WorkState, stageText: string): Promise<void> {
   if (state.strategyProgressMessageId === undefined) return;
-  await editHatMessage(env, state, state.strategyProgressMessageId, `🧭 ${stageText}`);
+  await editWorkspaceHatMessage(env, state, state.strategyProgressMessageId, `🧭 ${stageText}`);
 }
 
 interface StrategyGovernance {
