@@ -137,10 +137,12 @@ export type SemanticTaskId =
   // state.strategyContext already governed by evaluateHandoffContext/
   // resolveStrategyHandoffContext -- no new raw/identity-bearing input
   // introduced) or the specialists' own already-produced bounded
-  // findings (strategy.specialist_synthesis). Sensitivity classification
-  // pending Architect review; UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY
-  // until then (fails closed) -- these calls cannot run in production
-  // until classified, same discipline as every new task in this repo.
+  // findings (strategy.specialist_synthesis). Classified business_sensitive/
+  // TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
+  // PRODUCTION_OUTBOUND_POLICY per Martin's explicit direction, applying the
+  // exact same already-approved rationale as strategy.diagnosis/
+  // handoff_routing/proposal_drafting to this structurally identical
+  // payload category -- see those tables' own doc comments.
   | "strategy.specialist_selection"
   | "strategy.business_diagnosis"
   | "strategy.brand_diagnosis"

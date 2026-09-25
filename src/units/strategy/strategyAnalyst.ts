@@ -573,24 +573,26 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
  * deliberate:
  *
  * - Specialist SELECTION returning null (the classifier itself could not
- *   be run or produced no usable result -- this also covers the five new
- *   SemanticTaskIds' current UNCLASSIFIED PRODUCTION_TASK_SENSITIVITY /
- *   PRODUCTION_OUTBOUND_POLICY status: aiJson fails closed on every
- *   unclassified task, in every environment, before any provider is even
- *   attempted) degrades to the SAME continuation as a genuine zero-domains
- *   determination -- proceed directly to the unchanged runCoreDiagnosis --
- *   but NOT to the same recorded state: state.strategySpecialistSelection
- *   Unavailable is set to `true` specifically for this case (selection
- *   itself could not run) and to `false` for a genuine zero-domains
- *   determination, so the two are never conflated in persisted WorkState,
- *   only in their downstream continuation. This is a deliberate exception
- *   to this Unit's usual fail-closed discipline: composition is a NEW layer
- *   sitting in front of Strategy's existing, already-approved, already-
- *   working diagnosis pipeline, and an inability to run the new selection
- *   step must never silently disable that pre-existing capability. It is
- *   both logged (console.warn) and persisted on WorkState (never silently
- *   swallowed) so the gap is visible pending Architect classifying the new
- *   task IDs -- see this file's own final-report note on this point.
+ *   be run -- a genuine AI/infrastructure failure, or a transient provider
+ *   exhaustion; the five new SemanticTaskIds are now classified business_
+ *   sensitive/TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
+ *   PRODUCTION_OUTBOUND_POLICY -- see policy.ts's own doc comment -- so this
+ *   is no longer the standing, permanent case it was before that
+ *   classification) degrades to the SAME continuation as a genuine
+ *   zero-domains determination -- proceed directly to the unchanged
+ *   runCoreDiagnosis -- but NOT to the same recorded state:
+ *   state.strategySpecialistSelectionUnavailable is set to `true`
+ *   specifically for this case (selection itself could not run) and to
+ *   `false` for a genuine zero-domains determination, so the two are never
+ *   conflated in persisted WorkState, only in their downstream
+ *   continuation. This is a deliberate exception to this Unit's usual
+ *   fail-closed discipline: composition is a NEW layer sitting in front of
+ *   Strategy's existing, already-approved, already-working diagnosis
+ *   pipeline, and an inability to run the new selection step must never
+ *   silently disable that pre-existing capability -- even a transient
+ *   provider failure on the selection call must not block an otherwise-
+ *   resolvable diagnosis. It is both logged (console.warn) and persisted
+ *   on WorkState (never silently swallowed).
  * - Once selection DOES return one or more required domains, every
  *   subsequent failure mode (all selected specialists failed, synthesis
  *   judged insufficient) fails closed via the existing handleBlocked,
@@ -604,7 +606,7 @@ async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
   const selection = await selectRequiredSpecialists(env, strategyQuestion, strategyContext);
   if (!selection) {
     console.warn(
-      `Strategy runDiagnosis: specialist selection unavailable for work ${state.workId} (classifier failure, or strategy.specialist_selection is not yet classified in PRODUCTION_TASK_SENSITIVITY/PRODUCTION_OUTBOUND_POLICY) -- proceeding directly to core diagnosis without specialist composition.`,
+      `Strategy runDiagnosis: specialist selection unavailable for work ${state.workId} (AI/infrastructure failure on strategy.specialist_selection) -- proceeding directly to core diagnosis without specialist composition.`,
     );
     state.strategySpecialistSelectionUnavailable = true;
     state.strategySpecialistFindings = [];
