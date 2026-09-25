@@ -2,7 +2,6 @@ import type { Env } from "./types";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
-import { LeadOpportunityDiscoveryCapability } from "./units/sales/leadGenerationDiscovery";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { findUnitManifest } from "./units/registry";
 import { resolveUnitRequest } from "./units/dispatch";
@@ -188,24 +187,39 @@ export async function dispatchCowork(
       // intake -- independent of SALES_EXECUTIVE_PAUSED by design (see
       // sessionRouting.ts's own doc comment: Lead Discovery runs in this
       // shared Worker regardless of whether Sales Progression is paused,
-      // the two are independent). Calls the capability's own governed
-      // intake directly -- the same lead.discovery_ondemand_intake path
-      // the /lead command and the (now Cowork-only) capability dispatch
-      // already used, just entered deterministically via Cowork
-      // responsibility resolution instead of generic capability matching.
-      // No WorkSession is created here -- this capability never creates
-      // one (confirmed by the Chat capability boundary audit); it acts
-      // directly on chatId/threadId and queues its own Handoffs to R&I.
-      const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, chatId, text, threadId);
-      if (!handled) {
-        await sendMessage(
-          env,
-          chatId,
-          `That didn't look like a discovery request to Lead Generation Specialist -- try something like "find me 3 companies showing a positioning problem."`,
-          undefined,
-          threadId,
-        );
+      // the two are independent). Routed through the Unit Registry
+      // manifest (salesManifest.ts) with an explicit priorHat -- Stage 1
+      // Hat resolution is bypassed (this decision already came from
+      // direct-addressing or Unit-level routing, exactly like Business
+      // Development's own manifest branch below), Stage 2 action
+      // classification and the declared discover_leads "read" action both
+      // still run. No WorkSession is created here -- discover_leads is
+      // "read" (confirmed by workspaceRouter.test.ts); it acts directly
+      // and queues its own Handoffs to R&I.
+      const manifest = findUnitManifest("Sales");
+      if (!manifest) {
+        // Unreachable once salesManifest.ts is registered in
+        // units/registry.ts -- fail closed rather than silently
+        // misrouting to Sales Executive if it's ever missing.
+        console.error(`Lead Generation Specialist: Sales manifest not registered (chat ${chatId})`);
+        await sendMessage(env, chatId, "Lead Generation Specialist isn't available right now -- its manifest isn't registered. Nothing was started.", undefined, threadId);
+        return;
       }
+      const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, "Lead Generation Specialist");
+      if (dispatchResult.kind === "handled") {
+        return;
+      }
+      // "continue" would mean an internal/write action resolved -- Lead
+      // Generation Specialist declares none today (discover_leads is its
+      // only, "read" action). Fail closed rather than fabricating a
+      // WorkSession that contradicts that invariant.
+      console.error(
+        `Lead Generation Specialist: unexpected internal/write action "${dispatchResult.actionName}" resolved -- no such action is declared (chat ${chatId})`,
+      );
+      await sendOperationsMessage(
+        env,
+        `⚠️ Lead Generation Specialist resolved an unexpected internal/write action ("${dispatchResult.actionName}") -- no WorkSession created, nothing started. (chat ${chatId})`,
+      ).catch((err) => console.error("Failed to send Lead Generation Specialist unexpected-action Operations notice", err));
       return;
     }
 

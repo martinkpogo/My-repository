@@ -786,6 +786,40 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
 registerActionCapability(LeadOpportunityDiscoveryCapability);
 
 /**
+ * Adapts LeadOpportunityDiscoveryCapability's existing on-demand discovery
+ * intake to the Unit Registry manifest's readHandler shape (ENIG Operating
+ * Model design doc, "The Unit Registry") -- salesManifest.ts's
+ * discover_leads action. Deliberately reuses handleIntake unchanged rather
+ * than reimplementing it: same governance retrieval, same
+ * lead.discovery_ondemand_intake classification, same search/screening/R&I
+ * Handoff creation, same fail-closed messages for "no web search
+ * configured"/"couldn't generate a search strategy" -- this only adapts
+ * WHERE the result is delivered.
+ *
+ * handleIntake always sends its own message directly (via
+ * sendWorkspaceHatMessage) in every path where it returns true -- there is
+ * no "success with nothing to say" case. Returning "" for that case is
+ * therefore correct, not a loss of information: dispatch.ts's read-reply
+ * path skips sending an empty string, so nothing doubles up. Only the
+ * `false` case (not recognized as a discovery request at all) had its
+ * fallback message living in router.ts's dispatchCowork instead of here;
+ * that text is preserved verbatim below, just returned instead of sent
+ * separately by the caller.
+ *
+ * chatId/threadId are irrelevant to what actually gets sent -- every
+ * message handleIntake sends goes through sendWorkspaceHatMessage, which
+ * always overrides target.chatId/threadId with the configured Workspace
+ * stream target regardless of what's passed in (see telegram.ts). Martin's
+ * own DM id is passed only to satisfy handleIntake's signature.
+ */
+export async function discoverLeadsReadHandler(env: Env, text: string): Promise<string> {
+  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, Number(env.MARTIN_TELEGRAM_USER_ID), text, undefined);
+  return handled
+    ? ""
+    : `That didn't look like a discovery request to Lead Generation Specialist -- try something like "find me 3 companies showing a positioning problem."`;
+}
+
+/**
  * Sends the one-per-run Telegram digest to the Operations Stream
  * (never one message per Lead) and returns whether the notification succeeded.
  */

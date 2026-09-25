@@ -108,7 +108,15 @@ export async function resolveUnitRequest(env: Env, manifest: UnitManifest, targe
   }
 
   if (dispatchResult.kind === "read") {
-    await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
+    // An empty reply means the readHandler already sent its own message(s)
+    // directly (e.g. Lead Generation Specialist's discovery action, whose
+    // interstitial "searching..." ack must go out before its search loop
+    // completes, not after) -- nothing further to send. Every existing
+    // read handler always returns non-empty text, so this is additive,
+    // never a behavior change for them.
+    if (dispatchResult.reply.trim().length > 0) {
+      await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
+    }
     return { kind: "handled" };
   }
 

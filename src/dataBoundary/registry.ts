@@ -270,6 +270,16 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Business Development Develop Growth Opportunity",
     description: "Drafts value hypothesis, requirements, route, dependencies, and risks for a qualified growth opportunity, pending Martin's approval.",
   },
+  "sales.intake_classification": {
+    id: "sales.intake_classification",
+    name: "Sales Intake Classification",
+    description: "Routes an incoming Sales-Unit Cowork request among Sales's manifest-based Hats (currently only Lead Generation Specialist).",
+  },
+  "sales.hat_action_decision": {
+    id: "sales.hat_action_decision",
+    name: "Sales Hat Action Decision",
+    description: "Decides which of the resolved Sales Hat's declared actions a request needs.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
