@@ -29,7 +29,6 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
-import { resolveEntityMatterFromTokens } from "../../identityResolution";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -1434,21 +1433,38 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
 
   // A Finance -> Sales Handoff picked up without a continuing session (no
   // handoff_workitem mapping -- see checkHandoffs.ts) starts with a fresh
-  // WorkState that never resolved real identity, so state.entityName/
-  // matterName/entityId/matterId are still unset here even though this IS
-  // Sales, which is authorized to know them. Re-derive them from the
-  // Handoff's own tokens before anything below references state.entityName
-  // -- confirmed live: without this, the "couldn't read the quote" and
-  // "Draft Proposal" messages below printed the literal string "undefined"
-  // instead of the client's name.
+  // WorkState that never resolved real identity. Runtime, by design, only
+  // ever gets what it needs through the Handoff itself, de-identified --
+  // it has no connection to the Entity/Matters Engagement databases and
+  // must never try to read them to recover a real name (confirmed live:
+  // an earlier attempt to do exactly that failed with a 404, since
+  // Runtime's own Notion integration isn't shared with those databases at
+  // all). Everything below this point that references state.entityName/
+  // matterName requires a continuing session that already resolved them
+  // -- fail closed here, explicitly and by token, rather than let
+  // "undefined" leak into every message downstream.
   if (!state.entityName || !state.matterName) {
-    const resolved = await resolveEntityMatterFromTokens(env, entityToken, matterToken);
-    if (resolved) {
-      state.entityId = resolved.entityId;
-      state.entityName = resolved.entityName;
-      state.matterId = resolved.matterId;
-      state.matterName = resolved.matterName;
-    }
+    console.error(`Sales Executive proposal drafting blocked -- no continuing session for Handoff ${state.handoffId} (${entityToken}/${matterToken}); Runtime cannot resolve real identity from tokens.`);
+    await logActivity(env, {
+      entry: `Draft Proposal blocked — no continuing session: ${entityToken}/${matterToken}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale:
+        "This Handoff was picked up without a continuing WorkSession, so Sales has no real Entity/Matter identity in memory to draft a Proposal from. Runtime does not read the Entity/Matters databases directly -- this needs manual handling (e.g. re-triggering from a live session that already has the identity, or the isolated Sales Executive project).",
+      outcome: "Blocked",
+    });
+    await updateHandoff(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(
+        `No continuing Sales session was found for this Handoff (${entityToken}/${matterToken}) -- Runtime cannot resolve real identity from tokens by design. Needs manual handling.`,
+      ),
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Sales Executive" },
+      `Couldn't prepare the Draft Proposal for *${entityToken}/${matterToken}* — this Handoff has no continuing session, and I can't look up the real identity from tokens. Held for manual handling.`,
+    );
+    return state;
   }
 
   const evalResult = evaluateHandoffContext(
