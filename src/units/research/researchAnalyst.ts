@@ -817,7 +817,7 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
   }
 
   try {
-    const handoff = await createHandoff(
+    const { page: handoff } = await createHandoff(
       env,
       {
         Handoff: title(pending.handoffTitle),

@@ -1,5 +1,5 @@
 import type { InlineButton } from "./telegram";
-import type { KnownIdentityField } from "./handoffWriter";
+import type { HandoffSourceBoundaryAttestation, KnownIdentityField } from "./handoffWriter";
 
 export interface Env {
   AI: Ai;
@@ -553,11 +553,7 @@ export interface WorkState {
    * set, consistent with fail-closed) -- see salesExecutive.ts's
    * handleInterventionText.
    */
-  strategySourceBoundaryAttestation?: {
-    handoffId: string;
-    checked: true;
-    identityFieldsChecked: KnownIdentityField[];
-  };
+  strategySourceBoundaryAttestation?: HandoffSourceBoundaryAttestation;
   /**
    * The bounded, deterministic known-identity safety attestation for the
    * EXACT Strategy Proposal (proposalId, proposalVersion) currently

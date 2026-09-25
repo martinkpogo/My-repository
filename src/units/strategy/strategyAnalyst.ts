@@ -935,7 +935,7 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   }
 
   try {
-    const handoff = await createHandoff(
+    const { page: handoff } = await createHandoff(
       env,
       {
         Handoff: title(pending.handoffTitle),
@@ -1758,7 +1758,7 @@ export async function handleInterventionApproval(
 
   // decision === "approve"
   try {
-    const handoff = await createHandoff(
+    const { page: handoff } = await createHandoff(
       env,
       {
         Handoff: title(`Value-based quote request — ${state.matterToken || state.entityToken || state.workId}`),
