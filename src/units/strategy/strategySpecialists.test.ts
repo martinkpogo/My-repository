@@ -8,50 +8,18 @@ import {
   type SpecialistFinding,
 } from "./strategySpecialists";
 import { STRATEGY_ANALYST, BUSINESS_STRATEGIST, BRAND_STRATEGIST, COMMUNICATION_STRATEGIST, MARKETING_HAT_REGISTRY, ALL_HATS } from "../../hats/registry";
-import { PRODUCTION_TASK_SENSITIVITY, PRODUCTION_OUTBOUND_POLICY } from "../../dataBoundary/policy";
 import type { Env } from "../../types";
 
 /**
  * strategy.specialist_selection / strategy.business_diagnosis /
  * strategy.brand_diagnosis / strategy.communication_diagnosis /
- * strategy.specialist_synthesis are registered SemanticTaskIds but are
- * deliberately left UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY /
- * PRODUCTION_OUTBOUND_POLICY, pending Architect review -- same discipline
- * as every other new task this repo registers. aiJson fails closed
- * (returns null before any provider is even attempted) for an unclassified
- * task in EVERY environment, tests included, so these tests temporarily
- * classify the five tasks with the exact same category/rationale already
- * approved for strategy.diagnosis/handoff_routing/proposal_drafting
- * (business_sensitive, TOKEN_SAFE_RUNTIME -- Entity_Token/Matter_Token-
- * bound sanitized text, never real client identity) purely so this file's
- * own composition logic is exercisable in isolation from that separate,
- * pending governance decision. This mutates only this test process's
- * in-memory copy of the two policy maps, restored immediately after each
- * test -- it has no effect on production, and does not itself constitute
- * the Architect classification decision (see strategyAnalyst.ts's own
- * runDiagnosis doc comment, and the final implementation report, for that
- * open item).
+ * strategy.specialist_synthesis are classified business_sensitive/
+ * TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/PRODUCTION_OUTBOUND_
+ * POLICY (see policy.ts) -- the exact same category already approved for
+ * strategy.diagnosis/handoff_routing/proposal_drafting (Entity_Token/
+ * Matter_Token-bound sanitized text, never real client identity). No
+ * test-time policy override is needed or used here.
  */
-const COMPOSITION_TASK_IDS = [
-  "strategy.specialist_selection",
-  "strategy.business_diagnosis",
-  "strategy.brand_diagnosis",
-  "strategy.communication_diagnosis",
-  "strategy.specialist_synthesis",
-] as const;
-
-function classifyCompositionTasksForTest(t: any): void {
-  for (const id of COMPOSITION_TASK_IDS) {
-    (PRODUCTION_TASK_SENSITIVITY as any)[id] = "business_sensitive";
-    (PRODUCTION_OUTBOUND_POLICY as any)[id] = "TOKEN_SAFE_RUNTIME";
-  }
-  t.after(() => {
-    for (const id of COMPOSITION_TASK_IDS) {
-      delete (PRODUCTION_TASK_SENSITIVITY as any)[id];
-      delete (PRODUCTION_OUTBOUND_POLICY as any)[id];
-    }
-  });
-}
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -153,8 +121,7 @@ test("Marketing Strategist remains owned exclusively by Marketing -- Strategy ne
   );
 });
 
-test("selectRequiredSpecialists: a genuinely resolvable question returns zero domains -- a valid, expected outcome, not a fallback", async (t) => {
-  classifyCompositionTasksForTest(t);
+test("selectRequiredSpecialists: a genuinely resolvable question returns zero domains -- a valid, expected outcome, not a fallback", async () => {
   const env = fakeEnv({ AI: fakeSpecialistAi({ selection: { domains: [], reasoning: "Directly resolvable from established strategic reasoning." } }) });
 
   const result = await selectRequiredSpecialists(env, "Should we expand delivery capacity?", "Recurring delivery complaints, capacity constraint documented.");
@@ -163,8 +130,7 @@ test("selectRequiredSpecialists: a genuinely resolvable question returns zero do
   assert.deepStrictEqual(result!.domains, []);
 });
 
-test("selectRequiredSpecialists: selects one or multiple domains, filters invalid values, and dedupes", async (t) => {
-  classifyCompositionTasksForTest(t);
+test("selectRequiredSpecialists: selects one or multiple domains, filters invalid values, and dedupes", async () => {
   const env = fakeEnv({ AI: fakeSpecialistAi({ selection: { domains: ["business", "brand", "business", "not-a-real-domain"], reasoning: "test" } }) });
 
   const result = await selectRequiredSpecialists(env, "q", "c");
@@ -173,8 +139,7 @@ test("selectRequiredSpecialists: selects one or multiple domains, filters invali
   assert.deepStrictEqual(result!.domains.sort(), ["brand", "business"]);
 });
 
-test("selectRequiredSpecialists: returns null (never a fabricated empty result) when the classifier's own response is unusable", async (t) => {
-  classifyCompositionTasksForTest(t);
+test("selectRequiredSpecialists: returns null (never a fabricated empty result) when the classifier's own response is unusable", async () => {
   const env = fakeEnv({ AI: fakeSpecialistAi({ selection: { reasoning: "no domains field at all" } }) });
 
   const result = await selectRequiredSpecialists(env, "q", "c");
@@ -183,7 +148,6 @@ test("selectRequiredSpecialists: returns null (never a fabricated empty result) 
 });
 
 test("runSpecialistDiagnosis: returns a completed finding matching the bounded-finding schema", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockGovernanceFetch(t);
   const env = fakeEnv({
     AI: fakeSpecialistAi({
@@ -217,7 +181,6 @@ test("runSpecialistDiagnosis: returns a completed finding matching the bounded-f
 });
 
 test("runSpecialistDiagnosis: a specialist may conclude its own domain does not justify an intervention", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockGovernanceFetch(t);
   const env = fakeEnv({
     AI: fakeSpecialistAi({
@@ -242,7 +205,6 @@ test("runSpecialistDiagnosis: a specialist may conclude its own domain does not 
 });
 
 test("runSpecialistDiagnosis: never throws -- an AI/infrastructure failure becomes a failed finding with a reason, not an exception", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockGovernanceFetch(t);
   const env = fakeEnv({ AI: fakeSpecialistAi({ communication: "throw" }) });
 
@@ -254,7 +216,6 @@ test("runSpecialistDiagnosis: never throws -- an AI/infrastructure failure becom
 });
 
 test("runSpecialistDiagnosis: an insufficient specialist response is a failed finding, not a fabricated diagnosis", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockGovernanceFetch(t);
   const env = fakeEnv({ AI: fakeSpecialistAi({ business: { sufficient: false, blockedReason: "Supplied context does not distinguish business-model cause from a simple demand spike." } }) });
 
@@ -265,7 +226,6 @@ test("runSpecialistDiagnosis: an insufficient specialist response is a failed fi
 });
 
 test("runSpecialistDiagnosesConcurrently: runs every selected domain and never lets one failure short-circuit the batch", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockGovernanceFetch(t);
   const env = fakeEnv({
     AI: fakeSpecialistAi({
@@ -285,7 +245,6 @@ test("runSpecialistDiagnosesConcurrently: runs every selected domain and never l
 });
 
 test("runSpecialistDiagnosesConcurrently: specialists are genuinely started together and awaited in parallel -- a runtime timing trace, not an inference from code shape or comments", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockGovernanceFetch(t);
   const DELAY_MS = 60;
   const startOffsets: Record<string, number> = {};
@@ -324,8 +283,7 @@ test("runSpecialistDiagnosesConcurrently: specialists are genuinely started toge
   assert.ok(spread < DELAY_MS / 2, `expected all three specialist calls to start within a tight window of each other, spread was ${spread}ms`);
 });
 
-test("synthesizeSpecialistFindings: sufficient findings produce a reconciled synthesizedContext", async (t) => {
-  classifyCompositionTasksForTest(t);
+test("synthesizeSpecialistFindings: sufficient findings produce a reconciled synthesizedContext", async () => {
   const env = fakeEnv({ AI: fakeSpecialistAi({ synthesis: { sufficient: true, synthesizedContext: "Business and brand findings agree the root cause is commercial, not brand.", agreements: "Both point to capacity.", crossDomainRelationships: "Brand perception issue is downstream of the capacity constraint." } }) });
   const findings: SpecialistFinding[] = [
     { domain: "business", status: "completed", domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
@@ -339,8 +297,7 @@ test("synthesizeSpecialistFindings: sufficient findings produce a reconciled syn
   assert.ok(result!.synthesizedContext);
 });
 
-test("synthesizeSpecialistFindings: conflicting findings that cannot be reconciled are surfaced as insufficient, never silently resolved", async (t) => {
-  classifyCompositionTasksForTest(t);
+test("synthesizeSpecialistFindings: conflicting findings that cannot be reconciled are surfaced as insufficient, never silently resolved", async () => {
   const env = fakeEnv({
     AI: fakeSpecialistAi({
       synthesis: {
@@ -362,8 +319,7 @@ test("synthesizeSpecialistFindings: conflicting findings that cannot be reconcil
   assert.ok(result!.insufficiencyReason);
 });
 
-test("synthesizeSpecialistFindings: an unavailable (failed) specialist is passed through explicitly, never silently backfilled", async (t) => {
-  classifyCompositionTasksForTest(t);
+test("synthesizeSpecialistFindings: an unavailable (failed) specialist is passed through explicitly, never silently backfilled", async () => {
   let capturedUserPrompt = "";
   const env = fakeEnv({
     AI: {

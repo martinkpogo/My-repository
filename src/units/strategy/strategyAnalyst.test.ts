@@ -21,7 +21,6 @@ import {
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
 import type { WorkState, Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
-import { PRODUCTION_TASK_SENSITIVITY, PRODUCTION_OUTBOUND_POLICY } from "../../dataBoundary/policy";
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -189,11 +188,23 @@ const RAW_PROPOSAL = {
   },
 };
 
-/** Dispatches on the system prompt's own distinguishing text -- diagnosis vs. proposal drafting vs. handoff-routing classification. */
+/**
+ * Dispatches on the system prompt's own distinguishing text -- specialist
+ * selection, diagnosis, proposal drafting, or handoff-routing
+ * classification. strategy.specialist_selection is now classified (see
+ * policy.ts), so every test using this helper genuinely exercises the real
+ * composition entry point -- defaulting to zero domains required keeps
+ * every pre-existing test's behavior exactly as before (straight through
+ * to the unchanged core diagnosis), now via a real selection call rather
+ * than an infrastructure failure.
+ */
 function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" }, proposalJson: unknown = RAW_PROPOSAL, revisionJson: unknown = null): Ai {
   return {
     run: async (_model: any, opts: any) => {
       const system = String(opts?.messages?.[0]?.content ?? "");
+      if (system.includes("specialist-selection responsibility")) {
+        return { response: JSON.stringify({ domains: [], reasoning: "Directly resolvable from the available evidence -- no specialist required." }) };
+      }
       if (system.includes("canonical operating procedure")) {
         return { response: JSON.stringify(diagnosisJson) };
       }
@@ -1505,41 +1516,12 @@ test("handleDirectRequestClarification re-attempts resolution against Martin's f
  * Composition-path integration tests (LOG-845 specialist-diagnosis model).
  *
  * strategy.specialist_selection/business_diagnosis/brand_diagnosis/
- * communication_diagnosis/specialist_synthesis are registered but
- * deliberately UNCLASSIFIED pending Architect review (same discipline as
- * every other new task in this repo) -- so by default runDiagnosis's
- * composition step degrades gracefully to the pre-existing no-specialist
- * path (see every test above this point, all of which already exercise
- * that default path unchanged). These tests temporarily classify the five
- * tasks with the exact category/rationale already approved for
- * strategy.diagnosis itself (business_sensitive, TOKEN_SAFE_RUNTIME --
- * Entity_Token/Matter_Token-bound sanitized text, never real client
- * identity) purely to exercise the composition/synthesis code path in
- * isolation from that separate, still-pending governance decision. This
- * mutates only this test process's in-memory policy maps, restored after
- * each test.
+ * communication_diagnosis/specialist_synthesis are now classified
+ * business_sensitive/TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
+ * PRODUCTION_OUTBOUND_POLICY (see policy.ts), so composition genuinely runs
+ * against the real production policy tables here -- no test-time policy
+ * override is needed or used.
  */
-const COMPOSITION_TASK_IDS = [
-  "strategy.specialist_selection",
-  "strategy.business_diagnosis",
-  "strategy.brand_diagnosis",
-  "strategy.communication_diagnosis",
-  "strategy.specialist_synthesis",
-] as const;
-
-function classifyCompositionTasksForTest(t: any): void {
-  for (const id of COMPOSITION_TASK_IDS) {
-    (PRODUCTION_TASK_SENSITIVITY as any)[id] = "business_sensitive";
-    (PRODUCTION_OUTBOUND_POLICY as any)[id] = "TOKEN_SAFE_RUNTIME";
-  }
-  t.after(() => {
-    for (const id of COMPOSITION_TASK_IDS) {
-      delete (PRODUCTION_TASK_SENSITIVITY as any)[id];
-      delete (PRODUCTION_OUTBOUND_POLICY as any)[id];
-    }
-  });
-}
-
 type CompositionScript = {
   selection?: unknown;
   business?: unknown | "throw";
@@ -1574,7 +1556,6 @@ function fakeAiComposition(script: CompositionScript): Ai {
 }
 
 test("composition: no specialist required proceeds directly to the unchanged core diagnosis (explicit, though every prior test already relies on this default)", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({ selection: { domains: [], reasoning: "Directly resolvable." } });
@@ -1587,11 +1568,7 @@ test("composition: no specialist required proceeds directly to the unchanged cor
   assert.strictEqual(result.stage, "delivered");
 });
 
-test("composition: today's actual default (unclassified strategy.specialist_selection) is recorded as selection UNAVAILABLE, never conflated with a genuine no-specialist-required determination", async (t) => {
-  // No classifyCompositionTasksForTest(t) here -- this is the real,
-  // current production state (the 5 new SemanticTaskIds are still
-  // unclassified), exercised via the SAME fakeAi every pre-existing
-  // Strategy test already uses.
+test("composition: today's actual default (the shared fakeAi's zero-domains selection response) is a genuine no-specialist-required determination, not a degraded fallback -- exercised via the SAME fakeAi every pre-existing Strategy test already uses", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
@@ -1600,12 +1577,30 @@ test("composition: today's actual default (unclassified strategy.specialist_sele
   const result = await handlePickup(env, state);
 
   assert.deepStrictEqual(result.strategySpecialistFindings, []);
-  assert.strictEqual(result.strategySpecialistSelectionUnavailable, true, "must be recorded as unavailable (governance hold), never as a genuine zero-domains determination");
-  assert.strictEqual(result.stage, "delivered", "the pre-existing no-specialist path must still complete normally despite the degraded composition step");
+  assert.strictEqual(result.strategySpecialistSelectionUnavailable, false, "the five composition SemanticTaskIds are classified -- selection genuinely ran and determined zero domains, this must never read as 'unavailable'");
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: an actual AI/infrastructure failure on the selection call itself still degrades gracefully to the no-specialist path, recorded as unavailable (not a genuine zero-domains determination)", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      const system = String(opts?.messages?.[0]?.content ?? "");
+      if (system.includes("specialist-selection responsibility")) throw new Error("simulated provider outage on the selection call");
+      return { response: JSON.stringify(NO_RECOMMENDATION_DIAGNOSIS) };
+    },
+  } as any;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.deepStrictEqual(result.strategySpecialistFindings, []);
+  assert.strictEqual(result.strategySpecialistSelectionUnavailable, true, "a genuine AI/infrastructure failure on the selection call must be recorded as unavailable, never conflated with zero domains genuinely being determined");
+  assert.strictEqual(result.stage, "delivered", "an unrelated selection-call failure must never block an otherwise-resolvable core diagnosis");
 });
 
 test("composition: a single selected specialist is diagnosed and its finding is folded into context before core diagnosis runs", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({
@@ -1635,7 +1630,6 @@ test("composition: a single selected specialist is diagnosed and its finding is 
 });
 
 test("composition: multiple selected specialists run concurrently and are reconciled by one synthesis before core diagnosis", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({
@@ -1658,7 +1652,6 @@ test("composition: multiple selected specialists run concurrently and are reconc
 });
 
 test("composition: every selected specialist failing fails closed via the existing handleBlocked -- never proceeds as if synthesis were complete", async (t) => {
-  classifyCompositionTasksForTest(t);
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({
@@ -1676,7 +1669,6 @@ test("composition: every selected specialist failing fails closed via the existi
 });
 
 test("composition: a partial specialist failure still allows synthesis to proceed, with the unavailable specialist explicit rather than backfilled", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({
@@ -1696,7 +1688,6 @@ test("composition: a partial specialist failure still allows synthesis to procee
 });
 
 test("composition: synthesis judged insufficient (e.g. an unreconcilable conflict) fails closed and never produces a proposal", async (t) => {
-  classifyCompositionTasksForTest(t);
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({
@@ -1716,7 +1707,6 @@ test("composition: synthesis judged insufficient (e.g. an unreconcilable conflic
 });
 
 test("composition never lets a specialist touch the canonical Strategy Proposal -- state.strategyProposal is untouched immediately after composition/diagnosis, set only later by the existing approval-gated developStrategyProposal step", async (t) => {
-  classifyCompositionTasksForTest(t);
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAiComposition({
