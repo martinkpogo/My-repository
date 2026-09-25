@@ -122,12 +122,17 @@ function isFinanceQuoteHandoff(handoff: { properties?: Record<string, any> }): b
  * Identifies a call-notes Handoff created by the isolated Sales Executive
  * Claude project (per its Project Instructions' Section 6A) rather than by
  * this Worker's own Finance/Strategy code. Detected by a case-insensitive
- * match on "requiredCategory: call_notes" anywhere in Reason -- not a
- * strict opening-phrase prefix -- since Reason is free text a Claude
- * session composes itself and its exact wording/ordering isn't reliably
- * reproducible run to run (confirmed live: HO-69's Reason opened with
- * "requiredCategory: call_notes." rather than the literal example phrase
- * Section 6A's instructions gave). requiredCategory is the field name
+ * match on "requiredCategory: call_notes" anywhere in Reason OR the
+ * Handoff title -- not a strict opening-phrase prefix, and not a single
+ * fixed field -- since both are free text a Claude session composes
+ * itself and neither their exact wording nor which field carries the
+ * marker is reliably reproducible run to run (confirmed live: HO-69
+ * carried it in Reason, "requiredCategory: call_notes."; HO-73 carried it
+ * only in the Handoff title, "...for qualification review
+ * [requiredCategory: call_notes]", with Reason containing no such text at
+ * all -- checking Reason alone silently misrouted HO-73 into
+ * runProposalDrafting, which then failed trying to parse a Finance quote
+ * out of call notes). requiredCategory is the field name
  * HandoffContextContract already uses for this exact purpose, so this is
  * the same category marker the isolated project's own instructions ask it
  * to record, not a second convention. A Notion schema property was
@@ -135,7 +140,8 @@ function isFinanceQuoteHandoff(handoff: { properties?: Record<string, any> }): b
  * identifies the Handoff without a live database change.
  */
 function isCallNotesHandoff(handoff: { properties?: Record<string, any> }): boolean {
-  return /requiredCategory:\s*call_notes\b/i.test(plainText(handoff.properties?.Reason));
+  const marker = /requiredCategory:\s*call_notes\b/i;
+  return marker.test(plainText(handoff.properties?.Reason)) || marker.test(plainText(handoff.properties?.Handoff));
 }
 
 /**
