@@ -6,7 +6,7 @@ import type { MarketingHatDefinition } from "../../hats/types";
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Digital Marketer"; see Activity Log "Digital
  * Marketer Hat defined", LOG-242). Not fetched live — see
- * marketingEngine.ts for why.
+ * executionEngine.ts for why.
  */
 export const DIGITAL_MARKETER: MarketingHatDefinition = {
   name: "Digital Marketer",

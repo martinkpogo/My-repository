@@ -1,46 +1,41 @@
 import type { Env, WorkState } from "../types";
-import { aiJson } from "../ai";
 import { logActivity } from "../log";
 import { sendWorkspaceHatMessage } from "../telegram";
-import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 import { getPage, plainText, richText, select } from "../notion";
 import { updateHandoff } from "../handoffWriter";
-import type { MarketingHatDefinition, MarketingHatName } from "./types";
-import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from "./registry";
+import type { MarketingHatName } from "./types";
+import { isMarketingHat, marketingHatSummaryList } from "./registry";
 import {
   resolveMarketingCandidateRelationships,
   selectMarketingAmbiguityReasonCode,
 } from "./relationships";
 import { classifyCandidateHats } from "./intakeClassification";
+import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
 
 /**
  * Shared Marketing execution mechanics only — not a Hat registry, and not
  * a Hat-definition file. Each Marketing Hat remains independently defined
  * in its own file under src/units/marketing/ (purpose, owns,
  * doesNotOwn, routesTo); src/hats/registry.ts remains the one canonical
- * place every Hat is registered. This file contains only the runtime
- * lifecycle every one of the five Marketing Hats shares identically —
- * classify intake, then draft within ownership / propose a transition /
- * ask for clarification, always gated on Martin's explicit approval — the
- * same role governance.ts/ai.ts already play for every other Hat: shared
- * infrastructure a Hat's own file is called from, never a duplicate
- * authority system or a second source of Hat responsibilities.
+ * place every Hat is registered. This file owns Stage 1 (which Hat) and
+ * Stage 2 (deterministic relationship resolution) intake classification,
+ * plus the approval/feedback/clarification loops -- the actual per-Hat
+ * execution decision (draft/route/clarify) has moved to
+ * src/units/marketing/marketingManifest.ts's Unit Registry manifest
+ * (dispatchMarketingHat), since that decision is Marketing's declared
+ * "handle_request" action, not classification/routing mechanics. See
+ * marketingManifest.ts's own doc comment for why Stage 1/2 stayed here
+ * rather than migrating onto the generic manifest resolver too
+ * (deterministic relationship-based tie-breaking has no equivalent
+ * there).
  *
  * Stage 1 candidate-Hat classification (classifyCandidateHats,
  * intakeClassification.ts) and Stage 2 deterministic relationship
- * resolution (resolveCandidateRelationships, relationships.ts) are now
+ * resolution (resolveCandidateRelationships, relationships.ts) are
  * generic, reusable shapes a second Unit registers against directly --
  * this file calls them bound to Marketing's own taskId/Hat list/
  * relationships, rather than owning that classification logic itself.
  */
-
-interface HatActionDecision {
-  action: "draft" | "route" | "clarify";
-  draft?: string;
-  target_hat?: string;
-  reason?: string;
-  involves_spend?: boolean;
-}
 
 /**
  * Entry point for a Handoff addressed directly to Marketing Strategist --
@@ -49,7 +44,7 @@ interface HatActionDecision {
  * two-stage intake classification handleMarketingIntake runs for chat-
  * originated work, since the sender already determined which Hat this
  * belongs to; reads the Handoff's own Reason/Verified Facts & Sources as
- * the task text, the same shape runMarketingHat already expects from
+ * the task text, the same shape dispatchMarketingHat already expects from
  * state.marketingTaskText.
  */
 export async function handleHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
@@ -72,7 +67,7 @@ export async function handleHandoffPickup(env: Env, state: WorkState): Promise<W
     outcome: "Active",
   });
 
-  return runMarketingHat(env, state);
+  return dispatchMarketingHat(env, state);
 }
 
 /**
@@ -140,174 +135,7 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
     outcome: "Active",
   });
 
-  return runMarketingHat(env, state);
-}
-
-/**
- * Shared per-Hat execution, used by every one of the five Marketing Hats.
- * Loads only the current Hat's own full definition (never the other
- * four's) plus the Universal Role Contract. Asks the model to decide:
- * draft an output within this Hat's own ownership, propose a transition
- * to another Hat, or stop and ask for clarification. None of these is
- * itself authorization — each branch still requires Martin's explicit
- * approval before anything is treated as done.
- */
-async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
-  const hatName = state.hat as MarketingHatName;
-  const hat = MARKETING_HAT_REGISTRY[hatName];
-
-  const universalRoleContract = await getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract");
-  if (!universalRoleContract) {
-    console.error(`Marketing (${hatName}) blocked — Universal Role Contract retrieval failed for work ${state.workId}`);
-    await logActivity(env, {
-      entry: `Marketing task blocked — governance retrieval failed: ${hatName}`,
-      type: "Blocker",
-      area: "Marketing",
-      decisionRationale: "Could not retrieve the Universal Role Contract from Notion. Refusing to execute without it.",
-      outcome: "Blocked",
-    });
-    await sendWorkspaceHatMessage(env, state, `Couldn't process this task — couldn't retrieve canonical governance from Notion. Please try again once resolved.`);
-    return state;
-  }
-
-  const decision = await aiJson<HatActionDecision>(env, {
-    taskId: "marketing.hat_action_decision",
-    system: buildHatSystemPrompt(hat, universalRoleContract),
-    user: state.marketingTaskText ?? "",
-  });
-
-  if (!decision) {
-    console.error(`Marketing (${hatName}) action decision failed for work ${state.workId}`);
-    await logActivity(env, {
-      entry: `Marketing task blocked — action decision failed: ${hatName}`,
-      type: "Blocker",
-      area: "Marketing",
-      decisionRationale: "Could not determine how to proceed. Refusing to guess.",
-      outcome: "Blocked",
-    });
-    await sendWorkspaceHatMessage(env, state, `Couldn't determine how to handle this. Please try again or rephrase.`);
-    return state;
-  }
-
-  if (decision.action === "clarify") {
-    await logActivity(env, {
-      entry: `${hatName} needs clarification`,
-      type: "Blocker",
-      area: "Marketing",
-      decisionRationale: decision.reason ?? "Insufficient information to proceed.",
-      outcome: "Blocked",
-    });
-    await sendWorkspaceHatMessage(env, state, decision.reason ?? "I need more information before I can proceed.");
-    state.stage = "marketing_ambiguous";
-    state.awaiting = "marketing_clarification";
-    return state;
-  }
-
-  if (decision.action === "route") {
-    const target = decision.target_hat as MarketingHatName | undefined;
-    if (!target || !isMarketingHat(target) || !hat.routesTo.includes(target)) {
-      // The model proposed a transition outside this Hat's authorized
-      // routing list (or an invalid/hallucinated target) — code-level
-      // gate: never trust it, fail closed rather than route anywhere.
-      console.error(`Marketing (${hatName}) proposed an unauthorized transition target: ${decision.target_hat}`);
-      await logActivity(env, {
-        entry: `${hatName} proposed an unauthorized routing target`,
-        type: "Blocker",
-        area: "Marketing",
-        decisionRationale: `Proposed target "${decision.target_hat}" is not in ${hatName}'s authorized routing list. Refusing to route.`,
-        outcome: "Blocked",
-      });
-      await sendWorkspaceHatMessage(env, state, `Couldn't determine a valid next step for this — please clarify what's needed.`);
-      state.stage = "marketing_ambiguous";
-      state.awaiting = "marketing_clarification";
-      return state;
-    }
-
-    state.pendingTransition = { toHat: target, reason: decision.reason ?? "" };
-    await logActivity(env, {
-      entry: `${hatName} proposed routing to ${target}`,
-      type: "Decision",
-      area: "Marketing",
-      decisionRationale: decision.reason ?? "",
-      outcome: "Blocked",
-    });
-    const verb = target === "Marketing Strategist" ? "escalate to" : "route to";
-    const transitionMessage = `This needs to ${verb} *${target}* — ${decision.reason ?? "outside this Hat's ownership."}\n\nConfirm the transition?`;
-    const transitionButtons = [
-      [
-        { text: "✅ Confirm", callback_data: `markettransition:${state.workId}:approve` },
-        { text: "🔁 Redo", callback_data: `markettransition:${state.workId}:redo` },
-      ],
-    ];
-    await sendWorkspaceHatMessage(env, state, transitionMessage, transitionButtons);
-    state.pendingActionSummary = {
-      label: `Route to ${target}`,
-      message: transitionMessage,
-      buttons: transitionButtons,
-      createdAt: new Date().toISOString(),
-    };
-    state.stage = "awaiting_marketing_transition";
-    state.awaiting = undefined;
-    return state;
-  }
-
-  // action === "draft"
-  const isPaidMedia = hatName === "Digital Marketer" && decision.involves_spend === true;
-  state.marketingDraft = decision.draft ?? "";
-
-  if (isPaidMedia) {
-    state.pendingPaidMediaAction = { description: decision.draft ?? "" };
-    const paidMediaMessage = `*Paid media action*\n\n${decision.draft}\n\nThis involves spend and requires your explicit approval before anything runs. Approve this budget/spend?`;
-    const paidMediaButtons = [
-      [
-        { text: "✅ Approve spend", callback_data: `marketpaid:${state.workId}:approve` },
-        { text: "🔁 Redo", callback_data: `marketpaid:${state.workId}:redo` },
-      ],
-    ];
-    await sendWorkspaceHatMessage(env, state, paidMediaMessage, paidMediaButtons);
-    state.pendingActionSummary = {
-      label: `Paid media spend: ${state.hat}`,
-      message: paidMediaMessage,
-      buttons: paidMediaButtons,
-      createdAt: new Date().toISOString(),
-    };
-    state.stage = "awaiting_paid_media_approval";
-    state.awaiting = undefined;
-    return state;
-  }
-
-  const draftMessage = `${decision.draft}\n\nApprove this?`;
-  const draftButtons = [
-    [
-      { text: "✅ Approve", callback_data: `marketdraft:${state.workId}:approve` },
-      { text: "🔁 Redo", callback_data: `marketdraft:${state.workId}:redo` },
-    ],
-  ];
-  await sendWorkspaceHatMessage(env, state, draftMessage, draftButtons);
-  state.pendingActionSummary = {
-    label: `Marketing draft: ${state.hat}`,
-    message: draftMessage,
-    buttons: draftButtons,
-    createdAt: new Date().toISOString(),
-  };
-  state.stage = "awaiting_marketing_draft_approval";
-  state.awaiting = undefined;
-  return state;
-}
-
-function buildHatSystemPrompt(hat: MarketingHatDefinition, universalRoleContract: string): string {
-  return [
-    `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    `=== HAT DEFINITION: ${hat.name} ===`,
-    `Purpose: ${hat.purpose}`,
-    `Owns:\n${hat.owns.map((o) => `- ${o}`).join("\n")}`,
-    `Does NOT own (route/escalate instead of doing this work yourself):\n${hat.doesNotOwn.map((o) => `- ${o}`).join("\n")}`,
-    `Authorized routing targets from this Hat: ${hat.routesTo.length ? hat.routesTo.join(", ") : "none — if this isn't yours, ask for clarification instead."}`,
-    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"..."}. Never guess past missing information or invent authority you don\'t have.',
-  ].join("\n\n");
+  return dispatchMarketingHat(env, state);
 }
 
 export async function handleTransitionApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
@@ -338,7 +166,7 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
   });
   await sendWorkspaceHatMessage(env, state, `Routed to *${pending.toHat}*.`);
 
-  return runMarketingHat(env, state);
+  return dispatchMarketingHat(env, state);
 }
 
 export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
@@ -412,7 +240,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
 /** Redo loop: append Martin's reasoning to the task text and re-run the current Hat's decision from scratch. */
 export async function handleMarketingFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.marketingTaskText = `${state.marketingTaskText ?? ""}\n\nMartin's feedback: ${text}`;
-  return runMarketingHat(env, state);
+  return dispatchMarketingHat(env, state);
 }
 
 /** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
@@ -420,7 +248,7 @@ export async function handleMarketingClarification(env: Env, state: WorkState, t
   const augmented = `${state.marketingTaskText ?? ""}\n\nAdditional detail: ${text}`;
   if (isMarketingHat(state.hat)) {
     state.marketingTaskText = augmented;
-    return runMarketingHat(env, state);
+    return dispatchMarketingHat(env, state);
   }
   return handleMarketingIntake(env, state, augmented);
 }
