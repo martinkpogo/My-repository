@@ -112,7 +112,19 @@ export type SemanticTaskId =
   | "business_development.research_market"
   | "business_development.assess_market_opportunity"
   | "business_development.qualify_growth_opportunity"
-  | "business_development.develop_growth_opportunity";
+  | "business_development.develop_growth_opportunity"
+  // Sales's Stage 1 (which of its Hats -- currently only Lead Generation
+  // Specialist is manifest-based; Sales Executive stays on its own
+  // live-Notion-fetched pattern) / Stage 2 (which of that Hat's declared
+  // actions) classification -- the same generic Action Registry
+  // resolution BD's own Stage 1/2 tasks use. Payload is Martin's raw
+  // Workspace text plus static Hat/action summaries built from
+  // responsibility/description strings, same category as
+  // business_development.intake_classification/hat_action_decision.
+  // Sensitivity classification pending Architect review; UNCLASSIFIED in
+  // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
+  | "sales.intake_classification"
+  | "sales.hat_action_decision";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

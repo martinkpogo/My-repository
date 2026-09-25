@@ -351,7 +351,7 @@ test("T. Cowork decision dispatches to the resolved Unit's existing governed ent
   assert.strictEqual(calls.init[1][3], "Marketing Strategist");
 });
 
-test("T2. Cowork decision for Sales/Lead Generation Specialist routes to its own discovery capability, never Sales enquiry-extraction -- no WorkSession fabricated by this dispatch", async (t) => {
+test("T2. Cowork decision for Sales/Lead Generation Specialist routes through the Sales Unit Registry manifest (discover_leads, a 'read' action), never Sales Executive's enquiry-extraction -- no WorkSession fabricated by this dispatch", async (t) => {
   const sent = mockTelegramFetch(t);
   const { calls, workSession } = createMockWorkSession();
   const env = fakeEnv({ WORK_SESSION: workSession as any });
@@ -360,9 +360,15 @@ test("T2. Cowork decision for Sales/Lead Generation Specialist routes to its own
     resolveRouting: fixedDecision({ mode: "cowork", unit: "Sales", hat: "Lead Generation Specialist" }),
   });
 
-  assert.strictEqual(calls.init.length, 0, "Lead Generation Specialist dispatch must never go through Sales's newWorkId/init/handleIncomingEnquiry path");
+  assert.strictEqual(calls.init.length, 0, "Lead Generation Specialist dispatch must never go through Sales Executive's newWorkId/init/handleIncomingEnquiry path");
   assert.strictEqual(calls.handleIncomingEnquiry.length, 0, "must never misroute into enquiry-extraction");
-  assert.ok(sent.length > 0, "some reply must still be sent (the capability's own fallback, since no real classifier is mocked here)");
+  // Some reply must still be sent -- either Stage 2's own ambiguity message
+  // (since no AI classifier is mocked here, resolveUnitRequest's
+  // classifyAction gets no usable response and fails closed) or the
+  // discover_leads action's own fallback if Stage 2 somehow resolves it
+  // anyway. Either way, resolveUnitRequest's "read" path never creates a
+  // WorkSession, so calls.init stays empty regardless of which one fires.
+  assert.ok(sent.length > 0, "some reply must still be sent");
 });
 
 test("T3. Cowork decision for Strategy routes to its own direct_request entry point (Migration path Step 4)", async (t) => {
