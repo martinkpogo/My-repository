@@ -9,6 +9,7 @@ import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
 import { resolveMatterFromText } from "../../identityResolution";
+import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesizeSpecialistFindings } from "./strategySpecialists";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -555,10 +556,87 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   return runDiagnosis(env, state);
 }
 
+/**
+ * Strategy's composable specialist-diagnosis orchestration (LOG-845 --
+ * canonical operating_procedure steps 3-5: determine required strategic
+ * domains, coordinate specialist diagnosis (concurrently where
+ * independent), synthesize findings). Runs BEFORE the unchanged
+ * runCoreDiagnosis (steps 6-7, the existing Symptom -> Problem -> Cause ->
+ * Constraint -> Consequence diagnosis) and never replaces it -- this
+ * function's only effect on success is to enrich state.strategyContext in
+ * place with the reconciled specialist synthesis, exactly matching the
+ * existing accumulating-context pattern already used by
+ * handleStrategyClarification/handleStrategyFeedback, before delegating to
+ * runCoreDiagnosis unchanged.
+ *
+ * Failure handling is NOT uniform across the three new steps, and this is
+ * deliberate:
+ *
+ * - Specialist SELECTION returning null (the classifier itself could not
+ *   be run or produced no usable result -- this also covers the five new
+ *   SemanticTaskIds' current UNCLASSIFIED PRODUCTION_TASK_SENSITIVITY /
+ *   PRODUCTION_OUTBOUND_POLICY status: aiJson fails closed on every
+ *   unclassified task, in every environment, before any provider is even
+ *   attempted) degrades to the SAME path as a genuine zero-domains
+ *   determination -- proceed directly to the unchanged runCoreDiagnosis.
+ *   This is a deliberate exception to this Unit's usual fail-closed
+ *   discipline: composition is a NEW layer sitting in front of Strategy's
+ *   existing, already-approved, already-working diagnosis pipeline, and an
+ *   inability to run the new selection step must never silently disable
+ *   that pre-existing capability. It is logged explicitly (never silently
+ *   swallowed) so the gap is visible pending Architect classifying the new
+ *   task IDs -- see this file's own final-report note on this point.
+ * - Once selection DOES return one or more required domains, every
+ *   subsequent failure mode (all selected specialists failed, synthesis
+ *   judged insufficient) fails closed via the existing handleBlocked,
+ *   exactly like every other Strategy stop condition -- no new
+ *   failure-handling mechanism is introduced for those.
+ */
 async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
+  const strategyQuestion = state.strategyQuestion ?? "";
+  const strategyContext = state.strategyContext ?? "";
+
+  const selection = await selectRequiredSpecialists(env, strategyQuestion, strategyContext);
+  if (!selection) {
+    console.warn(
+      `Strategy runDiagnosis: specialist selection unavailable for work ${state.workId} (classifier failure, or strategy.specialist_selection is not yet classified in PRODUCTION_TASK_SENSITIVITY/PRODUCTION_OUTBOUND_POLICY) -- proceeding directly to core diagnosis without specialist composition.`,
+    );
+    state.strategySpecialistFindings = [];
+    return runCoreDiagnosis(env, state);
+  }
+
+  if (selection.domains.length === 0) {
+    state.strategySpecialistFindings = [];
+    return runCoreDiagnosis(env, state);
+  }
+
+  await advanceStrategyProgress(env, state, `Running specialist diagnosis (${selection.domains.join(", ")})...`);
+
+  const findings = await runSpecialistDiagnosesConcurrently(env, selection.domains, strategyContext);
+  state.strategySpecialistFindings = findings;
+
+  const allFailed = findings.every((f) => f.status === "failed");
+  if (allFailed) {
+    const reasons = findings.map((f) => `${f.domain}: ${f.failureReason ?? "unavailable"}`).join("; ");
+    return handleBlocked(env, state, `Specialist diagnosis could not be completed for any required domain (${reasons}).`);
+  }
+
+  const synthesis = await synthesizeSpecialistFindings(env, strategyQuestion, findings);
+  if (!synthesis) {
+    return handleBlocked(env, state, "Could not synthesize specialist findings into the strategic diagnosis.");
+  }
+  if (!synthesis.sufficient) {
+    return handleBlocked(env, state, synthesis.insufficiencyReason ?? "Specialist findings are not sufficient to responsibly proceed with the diagnosis.");
+  }
+
+  state.strategyContext = `${strategyContext}\n\nSpecialist synthesis:\n${synthesis.synthesizedContext ?? ""}`;
+  return runCoreDiagnosis(env, state);
+}
+
+async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
   const governance = await getStrategyGovernance(env);
   if (!governance) {
-    console.error(`Strategy runDiagnosis: governance retrieval failed for work ${state.workId}`);
+    console.error(`Strategy runCoreDiagnosis: governance retrieval failed for work ${state.workId}`);
     await logActivity(env, {
       entry: `Strategy diagnosis blocked — governance retrieval failed`,
       type: "Blocker",

@@ -412,6 +412,8 @@ export interface WorkState {
   strategyProgressMessageId?: number;
   /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
   strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
+  /** The bounded specialist findings (if any) selected and run for this diagnosis -- observability/testability only; synthesis is folded into strategyContext, never read back out of this field by the diagnosis pipeline itself. */
+  strategySpecialistFindings?: import("./units/strategy/strategySpecialists").SpecialistFinding[];
   /**
    * A proposed Strategy -> another-Unit handoff, pending Martin's explicit
    * approval before the Handoff record is created -- mirrors

@@ -124,7 +124,28 @@ export type SemanticTaskId =
   // Sensitivity classification pending Architect review; UNCLASSIFIED in
   // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
   | "sales.intake_classification"
-  | "sales.hat_action_decision";
+  | "sales.hat_action_decision"
+  // Strategy's specialist-diagnosis composition model (LOG-845, approved
+  // Notion architecture: Strategy Unit page + Strategy Analyst/Business
+  // Strategist/Brand Strategist/Communication Strategist Hat
+  // Definitions). Payload for all five is the same category as the
+  // already-classified strategy.diagnosis/handoff_routing/
+  // proposal_drafting: Entity_Token/Matter_Token-bound sanitized
+  // situation text (strategy.specialist_selection,
+  // strategy.business_diagnosis, strategy.brand_diagnosis,
+  // strategy.communication_diagnosis all receive the same sanitized
+  // state.strategyContext already governed by evaluateHandoffContext/
+  // resolveStrategyHandoffContext -- no new raw/identity-bearing input
+  // introduced) or the specialists' own already-produced bounded
+  // findings (strategy.specialist_synthesis). Sensitivity classification
+  // pending Architect review; UNCLASSIFIED in PRODUCTION_TASK_SENSITIVITY
+  // until then (fails closed) -- these calls cannot run in production
+  // until classified, same discipline as every new task in this repo.
+  | "strategy.specialist_selection"
+  | "strategy.business_diagnosis"
+  | "strategy.brand_diagnosis"
+  | "strategy.communication_diagnosis"
+  | "strategy.specialist_synthesis";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

@@ -55,7 +55,7 @@ import * as strategy from "./strategyAnalyst";
 type StrategyAction = "diagnose";
 
 const STRATEGY_ANALYST_HAT_NAME = "Strategy Analyst";
-const STRATEGY_ANALYST_SPECIALIZATION = "Strategy";
+const STRATEGY_ANALYST_SPECIALIZATION = "Strategic Assessment & Synthesis";
 
 const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
   {

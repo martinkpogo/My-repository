@@ -280,6 +280,31 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Sales Hat Action Decision",
     description: "Decides which of the resolved Sales Hat's declared actions a request needs.",
   },
+  "strategy.specialist_selection": {
+    id: "strategy.specialist_selection",
+    name: "Strategy Specialist Selection",
+    description: "Determines which strategic domains (business, brand, communication) require specialist diagnosis for a given situation -- one, multiple, or none.",
+  },
+  "strategy.business_diagnosis": {
+    id: "strategy.business_diagnosis",
+    name: "Strategy Business Strategist Diagnosis",
+    description: "Bounded diagnosis of business model, growth model, market opportunity, competitive position, commercial direction, and material commercial constraints.",
+  },
+  "strategy.brand_diagnosis": {
+    id: "strategy.brand_diagnosis",
+    name: "Strategy Brand Strategist Diagnosis",
+    description: "Bounded diagnosis of positioning, differentiation, perception, brand architecture, and brand relevance.",
+  },
+  "strategy.communication_diagnosis": {
+    id: "strategy.communication_diagnosis",
+    name: "Strategy Communication Strategist Diagnosis",
+    description: "Bounded diagnosis of messaging, narrative, audience communication, and communication architecture.",
+  },
+  "strategy.specialist_synthesis": {
+    id: "strategy.specialist_synthesis",
+    name: "Strategy Specialist Synthesis",
+    description: "Reconciles bounded specialist findings into a single synthesized context for the Strategy Analyst's diagnosis -- distinguishes evidence from inference, identifies agreement/disagreement and cross-domain relationships, and determines whether the findings are sufficient to proceed.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {

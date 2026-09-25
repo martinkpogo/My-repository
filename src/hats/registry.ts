@@ -47,7 +47,24 @@ export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
   unit: "Research & Intelligence",
   specialization: "Research Intelligence",
 };
-export const STRATEGY_ANALYST: HatIdentity = { name: "Strategy Analyst", unit: "Strategy", specialization: "Strategy" };
+// Strategy's composable specialist-diagnosis model (LOG-845, Notion
+// Activity & Decision Log -- "Strategy specialist diagnosis model
+// established"). Strategy Analyst's specialization changed from "Strategy"
+// to "Strategic Assessment & Synthesis" as part of this same approved
+// architecture update, reflecting its narrowed role: assessment,
+// specialist selection, coordination, synthesis, and the canonical
+// Strategy Proposal -- not standalone diagnosis of every strategic domain
+// itself. Business/Brand/Communication Strategist are new specialist Hats
+// that return bounded diagnostic findings to Strategy Analyst; they never
+// produce or modify the canonical Strategy Proposal (see
+// strategySpecialists.ts). Marketing Strategist is deliberately NOT
+// duplicated here -- it remains exclusively Marketing's own Hat (see
+// marketingStrategist.ts); Strategy's own Notion Unit page explicitly
+// says Strategy "may invoke" it rather than own a copy.
+export const STRATEGY_ANALYST: HatIdentity = { name: "Strategy Analyst", unit: "Strategy", specialization: "Strategic Assessment & Synthesis" };
+export const BUSINESS_STRATEGIST: HatIdentity = { name: "Business Strategist", unit: "Strategy", specialization: "Business & Commercial Strategy" };
+export const BRAND_STRATEGIST: HatIdentity = { name: "Brand Strategist", unit: "Strategy", specialization: "Brand & Positioning Strategy" };
+export const COMMUNICATION_STRATEGIST: HatIdentity = { name: "Communication Strategist", unit: "Strategy", specialization: "Communication & Messaging Strategy" };
 // Business Development's three parallel specialist Hats -- selected only
 // when their specialization is relevant, never mandatory workflow stages
 // (see businessDevelopmentManifest.ts). Registered here purely for
@@ -88,6 +105,9 @@ export const ALL_HATS: HatIdentity[] = [
   VALUE_BASED_PRICING_ASSESSOR,
   RESEARCH_INTELLIGENCE_ANALYST,
   STRATEGY_ANALYST,
+  BUSINESS_STRATEGIST,
+  BRAND_STRATEGIST,
+  COMMUNICATION_STRATEGIST,
   BD_OPPORTUNITY_DEVELOPMENT,
   BD_PARTNERSHIP_DEVELOPMENT,
   BD_GROWTH_MARKET_DEVELOPMENT,
