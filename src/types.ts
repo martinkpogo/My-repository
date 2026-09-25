@@ -412,8 +412,24 @@ export interface WorkState {
   strategyProgressMessageId?: number;
   /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
   strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
-  /** The bounded specialist findings (if any) selected and run for this diagnosis -- observability/testability only; synthesis is folded into strategyContext, never read back out of this field by the diagnosis pipeline itself. */
+  /** The bounded specialist findings (if any) selected and run for this diagnosis -- observability/testability only; synthesis is folded into strategyContext, never read back out of this field by the diagnosis pipeline itself. Populated only when specialists were actually selected and run -- see strategySpecialistSelectionUnavailable for why this may be [] without any specialist having genuinely been determined unnecessary. */
   strategySpecialistFindings?: import("./units/strategy/strategySpecialists").SpecialistFinding[];
+  /**
+   * Set only when composition's specialist-selection step itself could not
+   * run (classifier failure, or -- currently the standing case -- the
+   * still-pending Architect classification of the five new specialist
+   * SemanticTaskIds, which makes aiJson fail closed before any provider is
+   * even attempted). `true` means selection was unavailable and this
+   * diagnosis proceeded via the no-specialist path as a degraded fallback,
+   * NOT because zero specialists were genuinely determined necessary.
+   * `false` means selection ran and genuinely determined zero specialists
+   * were required. `undefined` means one or more specialists were actually
+   * selected and run (see strategySpecialistFindings for their outcomes).
+   * These three states must never be conflated -- a persisted WorkState (or
+   * a test) can always tell "no specialist needed" apart from "we don't
+   * actually know, selection itself couldn't run."
+   */
+  strategySpecialistSelectionUnavailable?: boolean;
   /**
    * A proposed Strategy -> another-Unit handoff, pending Martin's explicit
    * approval before the Handoff record is created -- mirrors
