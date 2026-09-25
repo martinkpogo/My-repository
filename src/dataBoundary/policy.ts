@@ -223,6 +223,30 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "business_development.assess_market_opportunity": "business_sensitive",
   "business_development.qualify_growth_opportunity": "business_sensitive",
   "business_development.develop_growth_opportunity": "business_sensitive",
+  // Architect-reviewed (Sales Stage 1/2 batch, Lead Generation Specialist's
+  // Unit Registry manifest migration): payload is Martin-authored
+  // Workspace text plus static, code-authored routing/action metadata --
+  // no Entity record, contact details, Handoff payload, client-confidential
+  // structured data, or Lead record content beyond what Martin literally
+  // types into the Workspace message. Architect's explicit ruling: the
+  // relevant classification dimension is the actual payload crossing this
+  // specific AI boundary, not the broader sensitivity of the Sales Unit --
+  // Sales having Hats with identity-sensitive authority (Sales Executive)
+  // does not make every Sales task more sensitive by association. This is
+  // materially the same boundary as business_development.
+  // intake_classification/hat_action_decision, already classified
+  // business_sensitive -- same precedent applies directly. No
+  // Sales-specific sensitivity dimension is warranted; Lead Generation
+  // Specialist's actual discovery reasoning is already separately
+  // classified under its own tasks (lead.discovery_ondemand_intake, etc.).
+  // sales.intake_classification is registered but currently bypassed at
+  // runtime (resolveHat's single-Hat shortcut, since only Lead Generation
+  // Specialist is manifest-based today, plus router.ts always passes an
+  // explicit priorHat) -- Architect confirmed this doesn't change its
+  // classification: the registry defines a permitted task boundary
+  // regardless of whether the current optimization happens to invoke it.
+  "sales.intake_classification": "business_sensitive",
+  "sales.hat_action_decision": "business_sensitive",
 };
 
 /**
@@ -476,6 +500,13 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "business_development.assess_market_opportunity": "TOKEN_SAFE_RUNTIME",
   "business_development.qualify_growth_opportunity": "TOKEN_SAFE_RUNTIME",
   "business_development.develop_growth_opportunity": "TOKEN_SAFE_RUNTIME",
+  // Sales Stage 1/2 (Lead Generation Specialist's manifest migration) --
+  // same payload category as business_development.intake_classification/
+  // hat_action_decision above (Martin-authored Workspace text plus static
+  // routing/action metadata), Architect-approved alongside their
+  // business_sensitive classification in PRODUCTION_TASK_SENSITIVITY.
+  "sales.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "sales.hat_action_decision": "TOKEN_SAFE_RUNTIME",
   "research.context_relevance": "TOKEN_SAFE_RUNTIME",
   "research.protocol_selection": "TOKEN_SAFE_RUNTIME",
   "research.plan_generation": "TOKEN_SAFE_RUNTIME",
