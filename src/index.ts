@@ -127,7 +127,7 @@ export default {
     // state are stashed in KV for the callback to consume.
     if (url.pathname === "/oauth/readai/start" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       const state = generateState();
@@ -164,7 +164,7 @@ export default {
     // is gone.
     if (url.pathname === "/admin/cleanup-default-google-account" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -209,7 +209,7 @@ export default {
     // webhook secret you already set, so only you can trigger it.
     if (url.pathname === "/admin/register-webhook" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       const webhookUrl = `${url.origin}/telegram/webhook`;
@@ -226,7 +226,7 @@ export default {
     // workaround. Gated the same as every other admin endpoint.
     if (url.pathname === "/admin/run-finance-discovery" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       // Best-effort diagnostic timestamp for /admin/last-cron-run and the
@@ -280,7 +280,7 @@ export default {
     // /lead command.
     if (url.pathname === "/admin/run-lead-discovery" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -332,7 +332,7 @@ export default {
     // fallback for a push mechanism that doesn't exist.
     if (url.pathname === "/admin/poll-google-doc-comments" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -353,7 +353,7 @@ export default {
     // Worker's own record - no live-watching required, check anytime.
     if (url.pathname === "/admin/last-cron-run" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await env.STATE_KV.get("last_cron_run");
@@ -369,7 +369,7 @@ export default {
     // is actually firing.
     if (url.pathname === "/admin/last-google-doc-comment-poll" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await env.STATE_KV.get("last_google_doc_comment_poll_run");
@@ -384,7 +384,7 @@ export default {
     // by a second cron-job.org schedule.
     if (url.pathname === "/admin/poll-google-sheet-comments" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -406,7 +406,7 @@ export default {
     // /admin/poll-google-sheet-comments.
     if (url.pathname === "/admin/last-google-sheet-comment-poll" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await env.STATE_KV.get("last_google_sheet_comment_poll_run");
@@ -425,7 +425,7 @@ export default {
     // doesn't spam.
     if (url.pathname === "/admin/watchdog" && request.method === "GET") {
       const key = url.searchParams.get("key");
-      if (!env.TELEGRAM_WEBHOOK_SECRET || key !== env.TELEGRAM_WEBHOOK_SECRET) {
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await env.STATE_KV.get("last_cron_run");
