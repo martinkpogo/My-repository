@@ -392,19 +392,24 @@ test("9. Finance quote authority remains unchanged -- Sales reads the quote verb
 });
 
 /**
- * Regression coverage for a live-production bug: a Finance -> Sales
- * Handoff picked up without a continuing session (no handoff_workitem
- * mapping) starts with a fresh WorkState that never resolved real
- * identity -- state.entityName/matterName/entityId/matterId are unset
- * even though Sales IS authorized to know them. Confirmed live: the
- * "couldn't read the quote" message printed the literal string
- * "undefined" instead of the client's name, and (more seriously)
- * handleProposalApproval's later createPage call would have used
- * undefined entityId/matterId relations.
+ * Regression coverage for a live-production bug and its correct fix: a
+ * Finance -> Sales Handoff picked up without a continuing session (no
+ * handoff_workitem mapping) starts with a fresh WorkState that never
+ * resolved real identity -- state.entityName/matterName/entityId/matterId
+ * are unset. Confirmed live: the "couldn't read the quote" message
+ * printed the literal string "undefined" instead of the client's name.
+ * An earlier fix attempted to resolve real identity by querying the
+ * Entity/Matters data sources directly -- also confirmed live to fail
+ * (404, Notion "object_not_found"), because Runtime's own Notion
+ * integration is deliberately not connected to those Engagement
+ * databases at all: by design, Runtime only ever gets what it needs
+ * through the Handoff itself, de-identified. The correct fix is to fail
+ * closed explicitly, by token, rather than guess or crash.
  */
-test("9c. handleQuoteReceived resolves real Entity/Matter identity from the Handoff's own tokens when the WorkState doesn't already have it (fresh pickup, no continuing session)", async (t) => {
+test("9c. handleQuoteReceived fails closed (Held, by token) when the WorkState has no continuing session -- never queries Entity/Matters directly, never prints \"undefined\"", async (t) => {
   const originalFetch = globalThis.fetch;
   const sentTexts: string[] = [];
+  let heldStatusSet = false;
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
     const method = init?.method ?? "GET";
@@ -429,39 +434,13 @@ test("9c. handleQuoteReceived resolves real Entity/Matter identity from the Hand
         { status: 200 },
       );
     }
-    if (urlStr.includes("/data_sources/entity-ds/query") && method === "POST") {
-      return new Response(
-        JSON.stringify({
-          results: [
-            {
-              id: "entity-page-21",
-              url: "https://notion.so/entity-page-21",
-              properties: { "Entity ID": { unique_id: { number: 21, prefix: "E" } }, Name: { title: [{ plain_text: "Anansi Pack Solutions" }] } },
-            },
-          ],
-        }),
-        { status: 200 },
-      );
+    if (urlStr.includes("/data_sources/entity-ds/query") || urlStr.includes("/data_sources/matters-ds/query")) {
+      throw new Error("must never query Entity/Matters directly -- Runtime has no connection to the Engagement databases");
     }
-    if (urlStr.includes("/data_sources/matters-ds/query") && method === "POST") {
-      return new Response(
-        JSON.stringify({
-          results: [
-            {
-              id: "matter-page-21",
-              url: "https://notion.so/matter-page-21",
-              properties: { Matter_ID: { unique_id: { number: 21, prefix: "MAT" } }, Matter: { title: [{ plain_text: "Anansi Pack Solutions — Capacity & Positioning" }] } },
-            },
-          ],
-        }),
-        { status: 200 },
-      );
-    }
-    if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
-      return new Response(
-        JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }),
-        { status: 200 },
-      );
+    if (method === "PATCH" && urlStr.endsWith("/pages/handoff-quote-3")) {
+      const body = JSON.parse(init.body);
+      if (body.properties?.Status?.select?.name === "Held") heldStatusSet = true;
+      return new Response(JSON.stringify({ id: "handoff-quote-3", url: "https://notion.so/handoff-quote-3", properties: {} }), { status: 200 });
     }
     if (method === "PATCH" || (method === "POST" && urlStr.endsWith("/pages"))) {
       return new Response(JSON.stringify({ id: "page", url: "https://notion.so/page", properties: {} }), { status: 200 });
@@ -483,13 +462,16 @@ test("9c. handleQuoteReceived resolves real Entity/Matter identity from the Hand
   });
   const result = await handleQuoteReceived(fakeEnv(), state);
 
-  assert.strictEqual(result.entityId, "entity-page-21", "entityId must be resolved from the Handoff's own Entity_Token");
-  assert.strictEqual(result.entityName, "Anansi Pack Solutions", "entityName must be resolved, never left undefined");
-  assert.strictEqual(result.matterId, "matter-page-21", "matterId must be resolved from the Handoff's own Matter_Token");
-  assert.strictEqual(result.matterName, "Anansi Pack Solutions — Capacity & Positioning");
+  assert.strictEqual(result.entityId, undefined, "must never fabricate/resolve an entityId from a direct DB read");
+  assert.strictEqual(result.matterId, undefined, "must never fabricate/resolve a matterId from a direct DB read");
+  assert.ok(heldStatusSet, "the Handoff must be explicitly set to Held, not left to retry forever");
   assert.ok(
     sentTexts.every((t) => !t.includes("undefined")),
     `no Telegram message may contain the literal string "undefined" -- got: ${JSON.stringify(sentTexts)}`,
+  );
+  assert.ok(
+    sentTexts.some((t) => t.includes("E-21") && t.includes("MAT-21")),
+    `the Held message must identify the work item by token -- got: ${JSON.stringify(sentTexts)}`,
   );
 });
 
