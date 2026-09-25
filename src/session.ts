@@ -5,6 +5,7 @@ import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
 import * as strategy from "./units/strategy/strategyAnalyst";
+import { dispatchStrategyHat } from "./units/strategy/strategyManifest";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
@@ -62,7 +63,7 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async handleStrategyRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => strategy.handleDirectRequest(this.env, state, text));
+    return this.execute((state) => dispatchStrategyHat(this.env, state, text));
   }
 
   async handleFinanceRequest(text: string): Promise<WorkState> {

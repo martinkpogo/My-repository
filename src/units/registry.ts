@@ -3,6 +3,7 @@ import type { UnitManifest } from "./unitManifest";
 import { businessDevelopmentManifest } from "./businessDevelopment/businessDevelopmentManifest";
 import { salesManifest } from "./sales/salesManifest";
 import { marketingManifest } from "./marketing/marketingManifest";
+import { strategyManifest } from "./strategy/strategyManifest";
 
 /**
  * The Unit Registry (ENIG Operating Model design doc, "The Unit
@@ -12,11 +13,11 @@ import { marketingManifest } from "./marketing/marketingManifest";
  * has no runtime filesystem, so this cannot be literal auto-discovery.
  *
  * Only Units actually built on the manifest pattern appear here.
- * Strategy/Finance/R&I are NOT registered -- they continue running
- * through their existing hand-written dispatchCowork branches/WorkSession
- * methods/handleTextReply switch cases, per the design doc's staged
- * rollout (new Units first, migrate existing ones only once the pattern
- * is proven). Sales and Marketing ARE registered, but only partially:
+ * Finance/R&I are NOT registered -- they continue running through their
+ * existing hand-written dispatchCowork branches/WorkSession methods/
+ * handleTextReply switch cases, per the design doc's staged rollout (new
+ * Units first, migrate existing ones only once the pattern is proven).
+ * Sales, Marketing, and Strategy ARE registered, but only partially:
  *
  * - Sales -- see salesManifest.ts's own doc comment: it declares Lead
  *   Generation Specialist only, never Sales Executive, which stays on its
@@ -30,14 +31,22 @@ import { marketingManifest } from "./marketing/marketingManifest";
  *   marketingManifest here is for discoverability/consistency, not
  *   because dispatchCowork's Marketing branch (still its own hardcoded
  *   branch, unchanged) ever calls findUnitManifest("Marketing") itself.
+ * - Strategy -- see strategyManifest.ts's own doc comment: it declares
+ *   exactly one action (diagnose) wrapping handleDirectRequest unchanged.
+ *   handlePickup (Handoff-originated, cron-triggered) stays entirely
+ *   outside this manifest -- its Handoff-specific context construction
+ *   has no equivalent in handleDirectRequest's free-text Matter-token
+ *   resolution, so folding it into the same declared action would be
+ *   semantically wrong, not just inconvenient.
  *
  * A Partial<Record<...>> lookup, not a total one, reflects that most
- * Units (and parts of Sales/Marketing) simply aren't here yet.
+ * Units (and parts of Sales/Marketing/Strategy) simply aren't here yet.
  */
 export const UNIT_MANIFESTS: Partial<Record<Unit, UnitManifest>> = {
   "Business Development": businessDevelopmentManifest,
   Sales: salesManifest,
   Marketing: marketingManifest,
+  Strategy: strategyManifest,
 };
 
 export function findUnitManifest(unit: Unit): UnitManifest | undefined {
