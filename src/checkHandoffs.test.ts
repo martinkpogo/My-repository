@@ -493,6 +493,25 @@ test("Detection matches on free-text Reason wording, not just the literal openin
   assert.strictEqual(calls.runProposalDrafting, 0);
 });
 
+test("Detection matches the marker in the Handoff title when Reason doesn't carry it -- regression test for HO-73's actual shape (marker only in the title, Reason free of it entirely)", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t, {
+    Handoff: { title: [{ plain_text: "Call notes: ENT-21 / MAT-21 for qualification review [requiredCategory: call_notes]" }] },
+    Reason: {
+      rich_text: [
+        { plain_text: "Sales call completed with the client for MAT-21. Delegating commercial qualification reasoning to Runtime Sales Executive per the Sales/Runtime split, since this isolated environment does not perform qualification reasoning." },
+      ],
+    },
+  });
+
+  await discoverPendingSalesHandoffs(env, false);
+
+  assert.strictEqual(calls.runCallNotesPickup, 1, "must route to call-notes pickup when the marker is only in the title, not Reason");
+  assert.strictEqual(calls.runProposalDrafting, 0, "must never fall through to the Finance-quote drafting path for a call-notes Handoff");
+});
+
 test("Paused: a call-notes Handoff follows the existing paused behaviour (detect + notify only, no pickup)", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
