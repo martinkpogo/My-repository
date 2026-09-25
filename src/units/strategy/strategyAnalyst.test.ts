@@ -21,6 +21,7 @@ import {
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
 import type { WorkState, Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
+import { PRODUCTION_TASK_SENSITIVITY, PRODUCTION_OUTBOUND_POLICY } from "../../dataBoundary/policy";
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -354,7 +355,7 @@ const NO_RECOMMENDATION_DIAGNOSIS: StrategyDiagnosisResult = {
 test("1. Strategy Analyst identity resolves correctly", () => {
   assert.strictEqual(STRATEGY_ANALYST.name, "Strategy Analyst");
   assert.strictEqual(STRATEGY_ANALYST.unit, "Strategy");
-  assert.strictEqual(STRATEGY_ANALYST.specialization, "Strategy");
+  assert.strictEqual(STRATEGY_ANALYST.specialization, "Strategic Assessment & Synthesis");
   assert.ok(ALL_HATS.some((h) => h.name === "Strategy Analyst" && h.unit === "Strategy"));
 });
 
@@ -1498,4 +1499,220 @@ test("handleDirectRequestClarification re-attempts resolution against Martin's f
   assert.strictEqual(result.matterToken, "MAT-20");
   assert.strictEqual(result.entityToken, "E-7");
   assert.strictEqual(result.stage, "delivered", "supplying the token on follow-up must unblock and complete the request");
+});
+
+/**
+ * Composition-path integration tests (LOG-845 specialist-diagnosis model).
+ *
+ * strategy.specialist_selection/business_diagnosis/brand_diagnosis/
+ * communication_diagnosis/specialist_synthesis are registered but
+ * deliberately UNCLASSIFIED pending Architect review (same discipline as
+ * every other new task in this repo) -- so by default runDiagnosis's
+ * composition step degrades gracefully to the pre-existing no-specialist
+ * path (see every test above this point, all of which already exercise
+ * that default path unchanged). These tests temporarily classify the five
+ * tasks with the exact category/rationale already approved for
+ * strategy.diagnosis itself (business_sensitive, TOKEN_SAFE_RUNTIME --
+ * Entity_Token/Matter_Token-bound sanitized text, never real client
+ * identity) purely to exercise the composition/synthesis code path in
+ * isolation from that separate, still-pending governance decision. This
+ * mutates only this test process's in-memory policy maps, restored after
+ * each test.
+ */
+const COMPOSITION_TASK_IDS = [
+  "strategy.specialist_selection",
+  "strategy.business_diagnosis",
+  "strategy.brand_diagnosis",
+  "strategy.communication_diagnosis",
+  "strategy.specialist_synthesis",
+] as const;
+
+function classifyCompositionTasksForTest(t: any): void {
+  for (const id of COMPOSITION_TASK_IDS) {
+    (PRODUCTION_TASK_SENSITIVITY as any)[id] = "business_sensitive";
+    (PRODUCTION_OUTBOUND_POLICY as any)[id] = "TOKEN_SAFE_RUNTIME";
+  }
+  t.after(() => {
+    for (const id of COMPOSITION_TASK_IDS) {
+      delete (PRODUCTION_TASK_SENSITIVITY as any)[id];
+      delete (PRODUCTION_OUTBOUND_POLICY as any)[id];
+    }
+  });
+}
+
+type CompositionScript = {
+  selection?: unknown;
+  business?: unknown | "throw";
+  brand?: unknown | "throw";
+  communication?: unknown | "throw";
+  synthesis?: unknown;
+  diagnosis?: unknown;
+  routing?: unknown;
+  proposal?: unknown;
+};
+
+/** Same dispatch as fakeAi, plus the three new composition steps (selection/specialist/synthesis). */
+function fakeAiComposition(script: CompositionScript): Ai {
+  return {
+    run: async (_model: any, opts: any) => {
+      const system = String(opts?.messages?.[0]?.content ?? "");
+      const respond = (val: unknown) => {
+        if (val === "throw") throw new Error("simulated specialist infrastructure failure");
+        return { response: JSON.stringify(val) };
+      };
+      if (system.includes("specialist-selection responsibility")) return respond(script.selection ?? { domains: [], reasoning: "test" });
+      if (system.includes("Business Strategist Hat")) return respond(script.business ?? { sufficient: false, blockedReason: "not configured for this test" });
+      if (system.includes("Brand Strategist Hat")) return respond(script.brand ?? { sufficient: false, blockedReason: "not configured for this test" });
+      if (system.includes("Communication Strategist Hat")) return respond(script.communication ?? { sufficient: false, blockedReason: "not configured for this test" });
+      if (system.includes("synthesis responsibility")) return respond(script.synthesis ?? { sufficient: true, synthesizedContext: "test synthesis" });
+      if (system.includes("canonical operating procedure")) return respond(script.diagnosis ?? NO_RECOMMENDATION_DIAGNOSIS);
+      if (system.includes("Expand it into the COMPLETE Strategic Intervention Proposal")) return respond(script.proposal ?? RAW_PROPOSAL);
+      if (system.includes("next responsibility belongs to another Unit")) return respond(script.routing ?? { target: "none" });
+      throw new Error(`Unexpected AI call in composition test -- system prompt: ${system.slice(0, 80)}`);
+    },
+  } as any;
+}
+
+test("composition: no specialist required proceeds directly to the unchanged core diagnosis (explicit, though every prior test already relies on this default)", async (t) => {
+  classifyCompositionTasksForTest(t);
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({ selection: { domains: [], reasoning: "Directly resolvable." } });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.deepStrictEqual(result.strategySpecialistFindings, []);
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: a single selected specialist is diagnosed and its finding is folded into context before core diagnosis runs", async (t) => {
+  classifyCompositionTasksForTest(t);
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business"], reasoning: "Situation requires commercial judgment." },
+    business: {
+      sufficient: true,
+      domainExamined: "Business model.",
+      problemOrIssue: "Capacity-constrained growth.",
+      supportingEvidence: "Two quarters of documented shortfall.",
+      diagnosis: "Fulfilment capacity has not scaled with demand.",
+      strategicImplication: "Root cause is commercial, not brand or communication.",
+      interventionImplication: "Expand capacity.",
+      uncertaintyAndLimitations: "Exact cost unknown.",
+      unresolvedQuestions: "Vendor capacity.",
+    },
+    synthesis: { sufficient: true, synthesizedContext: "Business Strategist established the root cause is a capacity constraint." },
+  });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategySpecialistFindings?.length, 1);
+  assert.strictEqual(result.strategySpecialistFindings?.[0].domain, "business");
+  assert.strictEqual(result.strategySpecialistFindings?.[0].status, "completed");
+  assert.strictEqual(result.stage, "delivered", "synthesis folded into context, core diagnosis still completes normally");
+});
+
+test("composition: multiple selected specialists run concurrently and are reconciled by one synthesis before core diagnosis", async (t) => {
+  classifyCompositionTasksForTest(t);
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business", "brand"], reasoning: "Situation has independent commercial and brand dimensions." },
+    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "Capacity-driven.", strategicImplication: "s", interventionImplication: "Expand capacity.", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
+    brand: { sufficient: true, domainExamined: "d2", problemOrIssue: "p2", supportingEvidence: "e2", diagnosis: "Perception is a downstream effect, not a separate cause.", strategicImplication: "s2", uncertaintyAndLimitations: "u2", unresolvedQuestions: "q2" },
+    synthesis: { sufficient: true, synthesizedContext: "Both specialists agree the brand-perception symptom is downstream of the capacity constraint.", crossDomainRelationships: "Brand perception <- business capacity." },
+  });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategySpecialistFindings?.length, 2);
+  assert.deepStrictEqual(
+    result.strategySpecialistFindings?.map((f) => f.domain).sort(),
+    ["brand", "business"],
+  );
+  assert.ok(result.strategySpecialistFindings?.every((f) => f.status === "completed"));
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: every selected specialist failing fails closed via the existing handleBlocked -- never proceeds as if synthesis were complete", async (t) => {
+  classifyCompositionTasksForTest(t);
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business", "brand"], reasoning: "test" },
+    business: "throw",
+    brand: { sufficient: false, blockedReason: "insufficient evidence" },
+  });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "core diagnosis must never run when every required specialist finding is unavailable");
+  assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Held"));
+});
+
+test("composition: a partial specialist failure still allows synthesis to proceed, with the unavailable specialist explicit rather than backfilled", async (t) => {
+  classifyCompositionTasksForTest(t);
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business", "brand"], reasoning: "test" },
+    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
+    brand: "throw",
+    synthesis: { sufficient: true, synthesizedContext: "Business finding is sufficient on its own; Brand Strategist's finding is unavailable but not material here." },
+  });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  const byDomain = Object.fromEntries((result.strategySpecialistFindings ?? []).map((f) => [f.domain, f]));
+  assert.strictEqual(byDomain.business.status, "completed");
+  assert.strictEqual(byDomain.brand.status, "failed");
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: synthesis judged insufficient (e.g. an unreconcilable conflict) fails closed and never produces a proposal", async (t) => {
+  classifyCompositionTasksForTest(t);
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business", "brand"], reasoning: "test" },
+    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "Capacity-driven.", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
+    brand: { sufficient: true, domainExamined: "d2", problemOrIssue: "p2", supportingEvidence: "e2", diagnosis: "Positioning-driven.", strategicImplication: "s2", uncertaintyAndLimitations: "u2", unresolvedQuestions: "q2" },
+    synthesis: { sufficient: false, insufficiencyReason: "Business and Brand findings materially conflict on root cause and cannot be reconciled from the supplied evidence." },
+  });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "must never proceed to core diagnosis/proposal on an unreconciled conflict");
+  assert.strictEqual(result.strategyProposal, undefined);
+  assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("conflict")));
+});
+
+test("composition never lets a specialist touch the canonical Strategy Proposal -- state.strategyProposal is untouched immediately after composition/diagnosis, set only later by the existing approval-gated developStrategyProposal step", async (t) => {
+  classifyCompositionTasksForTest(t);
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAiComposition({
+    selection: { domains: ["business"], reasoning: "test" },
+    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
+    synthesis: { sufficient: true, synthesizedContext: "synthesis" },
+  });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  // NO_RECOMMENDATION_DIAGNOSIS (this file's default composition-test
+  // diagnosis) never reaches developStrategyProposal at all -- confirming
+  // strategyProposal stays undefined throughout composition/diagnosis/
+  // routing, exactly like every existing no-recommendation test above.
+  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.stage, "delivered");
 });
