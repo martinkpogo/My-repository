@@ -23,18 +23,6 @@ import {
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
 import type { SessionSummary } from "./types";
-import { verifyReadAiSignature, formatCallNotesFromPayload } from "./readai";
-import type { ReadAiPayload } from "./readai";
-import {
-  buildAuthorizeUrl,
-  codeChallengeFromVerifier,
-  exchangeCodeForTokens,
-  generateCodeVerifier,
-  generateState,
-  getMeeting,
-  isAuthorized,
-  listRecentMeetings,
-} from "./readaiOAuth";
 import {
   handleGoogleOAuthStart,
   handleGoogleOAuthCallback,
@@ -82,24 +70,6 @@ export default {
       return new Response("ok");
     }
 
-    if (url.pathname === "/readai/webhook" && request.method === "POST") {
-      const rawBody = await request.text();
-      const valid = await verifyReadAiSignature(env, rawBody, request.headers.get("X-Read-Signature"));
-      if (!valid) return new Response("forbidden", { status: 403 });
-
-      const payload = JSON.parse(rawBody) as ReadAiPayload;
-      if (payload.trigger !== "meeting_end") return new Response("ok");
-
-      if (payload.request_id) {
-        const seenKey = `readai_seen:${payload.request_id}`;
-        if (await env.STATE_KV.get(seenKey)) return new Response("ok");
-        await env.STATE_KV.put(seenKey, "1", { expirationTtl: 60 * 60 * 24 * 7 });
-      }
-
-      await handleReadAiMeetingEnd(env, payload);
-      return new Response("ok");
-    }
-
     // Fed by a Gmail-polling Apps Script (or any other email source) —
     // treats the email body as a new incoming enquiry, exactly as if it had
     // been typed into the Sales topic. Shared-secret gated.
@@ -120,23 +90,6 @@ export default {
       const enquiryText = `Email enquiry${body.from ? ` from ${body.from}` : ""}${body.subject ? ` — "${body.subject}"` : ""}:\n\n${body.text}`;
       await routeIncomingText(env, chatId, enquiryText, threadId, { forceNewEnquiry: true });
       return new Response("ok");
-    }
-
-    // One-time bootstrap: starts the Read.ai OAuth authorization flow. Gated
-    // on the webhook secret so only you can trigger it. PKCE verifier and
-    // state are stashed in KV for the callback to consume.
-    if (url.pathname === "/oauth/readai/start" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
-        return new Response("forbidden", { status: 403 });
-      }
-      const state = generateState();
-      const verifier = generateCodeVerifier();
-      const challenge = await codeChallengeFromVerifier(verifier);
-      await env.STATE_KV.put(`readai_oauth_state:${state}`, verifier, { expirationTtl: 1800 });
-      const redirectUri = `${url.origin}/oauth/readai/callback`;
-      const authorizeUrl = buildAuthorizeUrl(env, redirectUri, state, challenge);
-      return Response.redirect(authorizeUrl, 302);
     }
 
     // Google Workspace OAuth start endpoint. Gated on the webhook secret key parameter.
@@ -179,28 +132,6 @@ export default {
           headers: { "content-type": "application/json" },
         });
       }
-    }
-
-    // Read.ai redirects the browser here after you sign in and consent.
-    // Exchanges the authorization code for tokens and stores them (with
-    // rotating-refresh handling) in KV. If Read.ai's hosted consent UI shows
-    // you a "code=...&state=..." pair to copy instead of auto-redirecting,
-    // just visit this same URL yourself with those two as query params.
-    if (url.pathname === "/oauth/readai/callback" && request.method === "GET") {
-      const code = url.searchParams.get("code");
-      const state = url.searchParams.get("state");
-      if (!code || !state) return new Response("Missing code or state", { status: 400 });
-      const stateKey = `readai_oauth_state:${state}`;
-      const verifier = await env.STATE_KV.get(stateKey);
-      if (!verifier) return new Response("Unknown or expired state — restart at /oauth/readai/start", { status: 400 });
-      await env.STATE_KV.delete(stateKey);
-      const redirectUri = `${url.origin}/oauth/readai/callback`;
-      try {
-        await exchangeCodeForTokens(env, code, redirectUri, verifier);
-      } catch (err) {
-        return new Response(`Token exchange failed: ${err}`, { status: 502 });
-      }
-      return new Response("Read.ai authorized. You can close this tab.");
     }
 
     // One-time setup helper: registers this Worker's own /telegram/webhook URL
@@ -642,16 +573,6 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       return;
     }
 
-    if (action === "pullcall") {
-      await handlePullReadAiCall(env, chatId, workId, threadId);
-      return;
-    }
-
-    if (action === "pullcallpick") {
-      await applyReadAiMeeting(env, chatId, workId, value, undefined, threadId);
-      return;
-    }
-
     if (action === "mode") {
       // Deterministic Telegram toggle -- the sole way Workspace mode
       // changes. Never creates, cancels, or mutates a WorkSession or
@@ -676,104 +597,6 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
     return;
   }
-}
-
-async function handlePullReadAiCall(env: Env, chatId: number, workId: string, threadId?: number): Promise<void> {
-  if (!(await isAuthorized(env))) {
-    await sendMessage(
-      env,
-      chatId,
-      "Read.ai isn't connected yet. Visit /oauth/readai/start?key=<your webhook secret> in a browser once to authorize it, then try again.",
-      undefined,
-      threadId,
-    );
-    return;
-  }
-  const stub = getSessionStub(env, workId);
-  const state = await stub.getState();
-  if (!state) {
-    await sendMessage(env, chatId, "That work item no longer exists.", undefined, threadId);
-    return;
-  }
-  let meetings;
-  try {
-    meetings = await listRecentMeetings(env, new Date(state.createdAt).getTime());
-  } catch (err) {
-    await sendMessage(env, chatId, `Couldn't reach Read.ai: ${err}`, undefined, threadId);
-    return;
-  }
-  if (meetings.length === 0) {
-    await sendMessage(
-      env,
-      chatId,
-      "No Read.ai meetings found since this enquiry started. Try again after the call ends, or type notes manually.",
-      undefined,
-      threadId,
-    );
-    return;
-  }
-  if (meetings.length === 1) {
-    await applyReadAiMeeting(env, chatId, workId, meetings[0].id, meetings[0].title, threadId);
-    return;
-  }
-  const buttons: InlineButton[][] = meetings.map((m) => [
-    {
-      text: `${m.title ?? "Untitled"}${m.start_time_ms ? ` — ${new Date(m.start_time_ms).toLocaleString()}` : ""}`,
-      callback_data: `pullcallpick:${workId}:${m.id}`,
-    },
-  ]);
-  await sendMessage(env, chatId, "Multiple recent Read.ai meetings found — which one?", buttons, threadId);
-}
-
-async function applyReadAiMeeting(
-  env: Env,
-  chatId: number,
-  workId: string,
-  meetingId: string,
-  knownTitle?: string,
-  threadId?: number,
-): Promise<void> {
-  let meeting;
-  try {
-    meeting = await getMeeting(env, meetingId);
-  } catch (err) {
-    await sendMessage(env, chatId, `Couldn't fetch that meeting from Read.ai: ${err}`, undefined, threadId);
-    return;
-  }
-  await sendMessage(
-    env,
-    chatId,
-    `Pulled *${meeting.title ?? knownTitle ?? "the meeting"}* from Read.ai — feeding it in as call notes.`,
-    undefined,
-    threadId,
-  );
-  const stub = getSessionStub(env, workId);
-  await setActiveWorkId(env, chatId, threadId, workId);
-  const result = await stub.handleTextReply(formatCallNotesFromPayload(meeting));
-  await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
-}
-
-async function handleReadAiMeetingEnd(env: Env, payload: ReadAiPayload): Promise<void> {
-  const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-  const title = payload.title ?? "a meeting";
-  const activeId = await getActiveWorkId(env, chatId);
-
-  if (activeId) {
-    const stub = getSessionStub(env, activeId);
-    const state = await stub.getState();
-    if (state && state.awaiting === "call_notes") {
-      await sendMessage(env, chatId, `Read.ai call ended: *${title}*. Feeding it in as call notes for the active work item.`);
-      const result = await stub.handleTextReply(formatCallNotesFromPayload(payload));
-      await maybeAutoContinueCheckHandoffs(env, chatId, undefined, result);
-      return;
-    }
-  }
-
-  await sendMessage(
-    env,
-    chatId,
-    `Read.ai sent a summary for *${title}*, but no work item is currently expecting call notes.${payload.report_url ? ` Report: ${payload.report_url}` : ""} Use /sessions to pick the right work item, then paste the notes in yourself.`,
-  );
 }
 
 // Work-item stages are internal code states (e.g. "awaiting_qualification_approval")
@@ -804,11 +627,10 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
 /**
  * Enumerates every KV key that represents routing/session state --
  * active/chat_history/handoff_workitem entries plus the sessions_index --
- * for /clearsessions. Deliberately excludes readai_oauth_tokens (a live
- * credential, not session state) and the cron/stale-digest bookkeeping
- * keys (harmless either way, not what "clear sessions" means). Notion is
- * never touched by this -- KV only holds routing pointers, never business
- * records.
+ * for /clearsessions. Deliberately excludes the cron/stale-digest
+ * bookkeeping keys (harmless either way, not what "clear sessions"
+ * means). Notion is never touched by this -- KV only holds routing
+ * pointers, never business records.
  */
 async function listSessionKvKeys(env: Env): Promise<string[]> {
   const keys: string[] = [];
