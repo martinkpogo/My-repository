@@ -111,13 +111,6 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
   );
 }
 
-function isFinanceQuoteHandoff(handoff: { properties?: Record<string, any> }): boolean {
-  return (
-    plainText(handoff.properties?.["From Unit"]) === "Finance" &&
-    plainText(handoff.properties?.["From Hat"]) === "Value-Based Pricing Assessor"
-  );
-}
-
 /**
  * Identifies a call-notes Handoff created by the isolated Sales Executive
  * Claude project (per its Project Instructions' Section 6A) rather than by
@@ -217,22 +210,10 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
       continue;
     }
 
-    // Not paused: a Finance -> Sales quote Handoff goes to the Runtime Sales
-    // Executive's token-safe Proposal flow instead of the older
-    // runProposalDrafting path. A call-notes Handoff from the isolated
-    // Sales Executive project goes to the qualification pickup. Every
-    // other Sales Handoff is unchanged.
-    if (isFinanceQuoteHandoff(handoff)) {
-      const stub = getSessionStub(env, workId);
-      try {
-        await stub.runTokenSafeProposal();
-        pickedUp++;
-      } catch (err) {
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-      }
-      continue;
-    }
-
+    // Not paused: a call-notes Handoff from the isolated Sales Executive
+    // project goes to the token-safe qualification pickup. Every other Sales
+    // Handoff (including Finance-quote and generic proposal Handoffs) goes to
+    // the Runtime Sales Executive's token-safe Proposal flow.
     if (isCallNotesHandoff(handoff)) {
       const stub = getSessionStub(env, workId);
       try {
@@ -246,7 +227,7 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
 
     const stub = getSessionStub(env, workId);
     try {
-      await stub.runProposalDrafting();
+      await stub.runTokenSafeProposal();
       pickedUp++;
     } catch (err) {
       await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
