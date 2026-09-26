@@ -419,7 +419,7 @@ test("Not paused: a Finance -> Sales Handoff runs the token-safe Proposal flow i
   assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });
 
-test("Not paused: a non-Finance Sales Handoff still uses the existing drafting path", async (t) => {
+test("Not paused: a non-Finance Sales Handoff routes to the token-safe Proposal flow", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
@@ -427,8 +427,8 @@ test("Not paused: a non-Finance Sales Handoff still uses the existing drafting p
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.strictEqual(calls.runTokenSafeProposal, 0);
-  assert.strictEqual(calls.runProposalDrafting, 1);
+  assert.strictEqual(calls.runTokenSafeProposal, 1);
+  assert.strictEqual(calls.runProposalDrafting, 0);
 });
 
 test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + notify only)", async (t) => {
