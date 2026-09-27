@@ -562,7 +562,10 @@ test("A fresh Strategy Proposal that passes both checks receives a complete stra
   assert.strictEqual(attestation?.sourceBoundary.checked, true);
   assert.deepStrictEqual([...attestation!.sourceBoundary.identityFieldsChecked].sort(), ["entityName", "matterName"]);
   assert.strictEqual(attestation?.proposalContent.checked, true);
-  assert.deepStrictEqual([...attestation!.proposalContent.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  // entityName/matterName are never checkable content-scan fields (see
+  // KnownIdentityCheckInput); this default fakeState has no entityDraft
+  // (contactName/email/phone), so nothing was available to check.
+  assert.deepStrictEqual(attestation!.proposalContent.identityFieldsChecked, []);
 });
 
 test("Missing source-boundary attestation fails closed -- the Proposal is never presented for approval", async (t) => {
@@ -597,19 +600,22 @@ test("A drafted Strategy Proposal containing a known identity value fails closed
   const env = fakeEnv();
   const leaked = {
     ...RAW_PROPOSAL,
-    executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Test Entity is pursuing larger accounts." },
+    executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Confirm with comfort@meridianfoods.com before proceeding." },
   };
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, leaked);
-  const state = fakeState(); // default fakeState entityName/matterName: "Test Entity" / "Test Matter"
+  // entityName/matterName are never checkable content-scan fields (they're
+  // always the token, never a real name) -- entityDraft.email is the real
+  // identity value this test needs to prove still leaks-detects correctly.
+  const state = fakeState({ entityDraft: { name: "", email: "comfort@meridianfoods.com", phone: "", type: "Organisation" } });
 
   const result = await handlePickup(env, state);
 
   assert.strictEqual(result.strategyProposal, undefined, "the leaked proposal must never become the current Proposal");
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
-  assert.ok(log.sentTexts.some((t) => /known identity value \(matched field: entityName\)/.test(t)));
+  assert.ok(log.sentTexts.some((t) => /known identity value \(matched field: email\)/.test(t)));
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
   // The violation detail is never echoed -- the actual matched value must never reach Telegram or the Handoff.
-  assert.ok(!log.sentTexts.join("").includes("Test Entity is pursuing larger accounts"));
+  assert.ok(!log.sentTexts.join("").includes("comfort@meridianfoods.com"));
 });
 
 test("Proposal contains every required structural section", async (t) => {
@@ -668,71 +674,71 @@ function cleanProposal(overrides: Partial<StrategyProposal> = {}): StrategyPropo
 }
 
 test("checkStrategyProposalForKnownIdentity: a clean token-safe proposal passes", () => {
-  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { entityName: "Acme Co", matterName: "Acme Co — Positioning" });
+  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { contactName: "Comfort Agyare" });
   assert.strictEqual(result.violation, null);
-  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["contactName"]);
 });
 
-test("checkStrategyProposalForKnownIdentity: a proposal containing the exact entityName fails", () => {
-  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "Meridian Foods Ghana Ltd is pursuing larger accounts." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
-  assert.match(result.violation ?? "", /matched field: entityName/);
-});
-
-test("checkStrategyProposalForKnownIdentity: a proposal containing the exact matterName fails", () => {
-  const proposal = cleanProposal({ strategicChallenge: { ...RAW_PROPOSAL.strategicChallenge, observedSituation: "Directly concerns the Cold Chain Logistics Redesign effort." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
-  assert.match(result.violation ?? "", /matched field: matterName/);
+// entityName/matterName are deliberately NOT checkable fields (see
+// KnownIdentityCheckInput's own doc comment): per the identity
+// architecture decision recorded in Notion (Sept 2026), those are always
+// the Entity/Matter's own token, never a real name, and a Strategy
+// Proposal legitimately references its own token throughout -- scanning
+// for it would false-positive-block ordinary content, not catch a leak.
+test("checkStrategyProposalForKnownIdentity: entityName/matterName are not accepted as identity fields at all -- a Matter token appearing in the proposal's own content is never flagged", () => {
+  const proposal = cleanProposal({ strategicChallenge: { ...RAW_PROPOSAL.strategicChallenge, observedSituation: "Directly concerns the MAT-20 Cold Chain Logistics Redesign effort." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, {});
+  assert.strictEqual(result.violation, null);
+  assert.deepStrictEqual(result.identityFieldsChecked, []);
 });
 
 test("checkStrategyProposalForKnownIdentity: a proposal containing a known email fails when email is part of the available identity set", () => {
   const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Confirm with comfort@meridianfoods.com before proceeding." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", email: "comfort@meridianfoods.com" });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { email: "comfort@meridianfoods.com" });
   assert.match(result.violation ?? "", /matched field: email/);
   assert.ok(result.identityFieldsChecked.includes("email"));
 });
 
 test("checkStrategyProposalForKnownIdentity: a proposal containing a known phone fails, with punctuation normalized like findViolation", () => {
   const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Contact reachable at +233 24 412 3456 if needed." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", phone: "+233-24-412-3456" });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { phone: "+233-24-412-3456" });
   assert.match(result.violation ?? "", /matched field: phone/);
 });
 
 test("checkStrategyProposalForKnownIdentity: a proposal containing a known contact name fails when contactName is supplied", () => {
   const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Follow up with Comfort Agyare about the timeline." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "X Co", matterName: "Y Matter", contactName: "Comfort Agyare" });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { contactName: "Comfort Agyare" });
   assert.match(result.violation ?? "", /matched field: contactName/);
 });
 
 test("checkStrategyProposalForKnownIdentity: matching is case-insensitive, consistent with findViolation's existing semantics", () => {
-  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "meridian foods ghana ltd is pursuing larger accounts." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Y Matter" });
-  assert.match(result.violation ?? "", /matched field: entityName/);
+  const proposal = cleanProposal({ executiveSummary: { ...RAW_PROPOSAL.executiveSummary, businessSituation: "comfort agyare is the primary contact." } });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { contactName: "Comfort Agyare" });
+  assert.match(result.violation ?? "", /matched field: contactName/);
 });
 
 test("checkStrategyProposalForKnownIdentity: nested fields (workstreams, deliverables, arrays) are inspected, not just top-level fields", () => {
   const proposal = cleanProposal({
     proposedIntervention: {
       ...RAW_PROPOSAL.proposedIntervention,
-      workstreams: [{ name: "Vendor onboarding", objective: "Bring Meridian Foods Ghana Ltd's preferred carrier online.", activities: [], output: "", dependencies: [], acceptanceCriteria: [] }],
+      workstreams: [{ name: "Vendor onboarding", objective: "Loop in Comfort Agyare as the preferred contact.", activities: [], output: "", dependencies: [], acceptanceCriteria: [] }],
     },
   });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Y Matter" });
-  assert.match(result.violation ?? "", /matched field: entityName/);
+  const result = checkStrategyProposalForKnownIdentity(proposal, { contactName: "Comfort Agyare" });
+  assert.match(result.violation ?? "", /matched field: contactName/);
 });
 
 test("checkStrategyProposalForKnownIdentity: an arbitrary unknown name is not falsely classified as a violation merely for being a name", () => {
   const proposal = cleanProposal({ diagnosis: { ...RAW_PROPOSAL.diagnosis, diagnosticConclusion: "Comparable to the approach a firm like Jonathan Osei Consulting might take." } });
-  const result = checkStrategyProposalForKnownIdentity(proposal, { entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
+  const result = checkStrategyProposalForKnownIdentity(proposal, { contactName: "Comfort Agyare" });
   assert.strictEqual(result.violation, null, "an unknown third-party name is out of scope for the bounded known-identity check");
 });
 
-test("checkStrategyProposalForKnownIdentity: only entityName/matterName present -- optional fields are not recorded as checked when absent", () => {
-  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { entityName: "X Co", matterName: "Y Matter" });
-  assert.deepStrictEqual([...result.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+test("checkStrategyProposalForKnownIdentity: only contactName present -- optional fields are not recorded as checked when absent", () => {
+  const result = checkStrategyProposalForKnownIdentity(cleanProposal(), { contactName: "Comfort Agyare" });
+  assert.deepStrictEqual(result.identityFieldsChecked, ["contactName"]);
   assert.ok(!result.identityFieldsChecked.includes("email"));
   assert.ok(!result.identityFieldsChecked.includes("phone"));
-  assert.ok(!result.identityFieldsChecked.includes("contactName"));
 });
 
 test("An incomplete AI-drafted proposal is held (not presented for approval) -- the deterministic completeness check overrides the AI's own JSON output", async (t) => {
@@ -1456,7 +1462,7 @@ test("handleDirectRequest resolves an explicit Matter token, runs the shared dia
   assert.strictEqual(result.stage, "delivered", "a diagnosis with no recommendation must complete, not hold");
 });
 
-test("handleDirectRequest: a diagnosis WITH a recommended direction is correctly held by the existing known-identity gate -- direct-entry work has no Sales-sourced source-boundary attestation", async (t) => {
+test("handleDirectRequest: a diagnosis WITH a recommended direction reaches an approvable Strategy Proposal -- direct_request sets entityName/matterName to the tokens themselves and is exempt from the Sales-sourced source-boundary attestation (nothing to attest to with no Handoff)", async (t) => {
   mockDirectRequestFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
@@ -1464,12 +1470,27 @@ test("handleDirectRequest: a diagnosis WITH a recommended direction is correctly
 
   const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
 
-  // Reaches the diagnosis pipeline (entryType/tokens are set) but the
-  // downstream proposal-approval flow legitimately fails closed here --
-  // this is pre-existing discipline (checkStrategyProposalForKnownIdentity),
-  // not something this step changes or bypasses.
   assert.strictEqual(result.entryType, "direct_request");
   assert.strictEqual(result.matterToken, "MAT-20");
+  assert.strictEqual(result.entityName, result.entityToken, "entityName is the token itself, never a real name");
+  assert.strictEqual(result.matterName, result.matterToken, "matterName is the token itself, never a real name");
+  assert.ok(result.pendingStrategyApproval, "must reach the approval gate, not be held");
+  assert.strictEqual(result.pendingStrategyApproval?.decisionOptions.includes("approve"), true);
+});
+
+test("handleDirectRequest: a Proposal that genuinely mentions its own Matter token in its content is NOT false-positive-blocked -- regression test for the risk introduced by setting entityName/matterName to the token", async (t) => {
+  mockDirectRequestFetch(t);
+  const env = fakeEnv();
+  const proposalMentioningOwnToken = {
+    ...RAW_PROPOSAL,
+    strategicChallenge: { ...RAW_PROPOSAL.strategicChallenge, observedSituation: "Recurring delivery complaints for MAT-20 stem from inconsistent handoff between warehouse and dispatch." },
+  };
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, proposalMentioningOwnToken);
+  const state = fakeDirectRequestState();
+
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
+
+  assert.ok(result.pendingStrategyApproval, "a Proposal mentioning its own token must still be presented, not blocked as a false identity leak");
 });
 
 test("handleDirectRequest fails closed with a clarifying message when no Matter token is present -- never guesses which Matter", async (t) => {

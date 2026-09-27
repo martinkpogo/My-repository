@@ -466,6 +466,14 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
   state.entryType = "direct_request";
   state.entityToken = evalResult.contract.entityToken;
   state.matterToken = evalResult.contract.matterToken ?? "";
+  // Per the identity architecture decision recorded in Notion (Sept 2026),
+  // entityName/matterName are never a real name -- they're set to the
+  // tokens themselves. This has no Sales -> Strategy Handoff to inherit an
+  // attestation from (see presentStrategyProposalForApproval's own
+  // entryType check), so this is what makes a direct_request diagnosis
+  // presentable at all.
+  state.entityName = evalResult.contract.entityToken;
+  state.matterName = state.matterToken;
   state.strategyQuestion = evalResult.contract.sanitizedContext;
   state.strategyContext = evalResult.contract.sanitizedContext;
 
@@ -1311,10 +1319,20 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   return presentStrategyProposalForApproval(env, state, proposal, "created");
 }
 
-/** The known-identity values checkStrategyProposalForKnownIdentity compares a Proposal's serialized content against -- never persisted or forwarded, only ever held locally for the duration of one comparison. */
+/**
+ * The known-identity values checkStrategyProposalForKnownIdentity compares
+ * a Proposal's serialized content against -- never persisted or forwarded,
+ * only ever held locally for the duration of one comparison. entityName/
+ * matterName are deliberately NOT checkable fields here: per the identity
+ * architecture decision recorded in Notion (Sept 2026), those are always
+ * the Entity/Matter's own token (e.g. "MAT-20"), never a real name, and a
+ * Strategy Proposal legitimately references its own token throughout --
+ * scanning for it would false-positive-block ordinary content, not catch
+ * a leak. Only contactName/email/phone (from entityDraft, real only if
+ * direct-entry intake is ever reactivated) are still real identity that
+ * could leak.
+ */
 export interface KnownIdentityCheckInput {
-  entityName?: string;
-  matterName?: string;
   contactName?: string;
   email?: string;
   phone?: string;
@@ -1346,8 +1364,6 @@ export function checkStrategyProposalForKnownIdentity(
   const haystack = JSON.stringify(proposal);
   const identityFieldsChecked: KnownIdentityField[] = [];
   const checks: Array<[KnownIdentityField, string | undefined, "name" | "email" | "phone"]> = [
-    ["entityName", identity.entityName, "name"],
-    ["matterName", identity.matterName, "name"],
     ["contactName", identity.contactName, "name"],
     ["email", identity.email, "email"],
     ["phone", identity.phone, "phone"],
@@ -1399,8 +1415,17 @@ async function presentStrategyProposalForApproval(
   proposal: StrategyProposal,
   logVerb: "created" | "revised",
 ): Promise<WorkState> {
-  const sourceBoundary = state.strategySourceBoundaryAttestation;
-  if (!sourceBoundary || sourceBoundary.checked !== true) {
+  // A direct_request diagnosis (Martin addressing Strategy directly, or
+  // R&I/BD routed in via resolveUnitRequest) has no Sales -> Strategy
+  // Handoff at all -- there is nothing for a source-boundary attestation
+  // to attest to, so this check only applies to a Handoff-originated
+  // diagnosis, where Sales's handleInterventionText sets it. "checked:
+  // true, identityFieldsChecked: []" for direct_request records honestly
+  // that nothing needed checking, rather than fabricating an attestation.
+  let sourceBoundary = state.strategySourceBoundaryAttestation;
+  if (state.entryType === "direct_request") {
+    sourceBoundary = { handoffId: state.handoffId ?? state.workId, checked: true, identityFieldsChecked: [] };
+  } else if (!sourceBoundary || sourceBoundary.checked !== true) {
     return handleBlocked(
       env,
       state,
@@ -1415,8 +1440,6 @@ async function presentStrategyProposalForApproval(
     );
   }
   const identityCheck = checkStrategyProposalForKnownIdentity(proposal, {
-    entityName: state.entityName,
-    matterName: state.matterName,
     contactName: state.entityDraft?.name,
     email: state.entityDraft?.email,
     phone: state.entityDraft?.phone,
