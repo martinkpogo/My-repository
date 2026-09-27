@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handleInterventionText, handleQuoteReceived, handleLeadToProspectApproval } from "./salesExecutive";
+import { handleInterventionText, handleQuoteReceived, handleLeadToProspectApproval, presentQualifiedCallNotesForApproval } from "./salesExecutive";
 import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {
@@ -800,4 +800,88 @@ test("S. Opaque-token boundary holds even with commercial evidence attached -- H
   assert.match(factsText, /Commercial-value evidence/);
   assert.match(factsText, /Investment tolerance/);
   assert.ok(!factsText.includes("Acme"), "structured evidence carry-forward must not reintroduce the real Entity name");
+});
+
+// ---------------------------------------------------------------------------
+// presentQualifiedCallNotesForApproval -- extracted from
+// handleCallNotesHandoffPickup's Qualified branch so it can be tested
+// directly (runQualificationAssessment's AI calls can't be driven through
+// in this environment -- see the "NOTE ON TEST STRATEGY" comment above).
+// ---------------------------------------------------------------------------
+
+function mockQualifiedApprovalFetch(t: any, opts: { matterFound?: boolean } = {}): { sentTexts: string[]; opsTexts: string[] } {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  const opsTexts: string[] = [];
+  const matterFound = opts.matterFound ?? true;
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      sentTexts.push(body.text ?? "");
+      // Operations topic is 14 per fakeEnv; Workspace topic is 100.
+      if (body.message_thread_id === 14 || String(body.message_thread_id) === "14") opsTexts.push(body.text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      if (!matterFound) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              properties: {
+                Matter_ID: { unique_id: { prefix: "M", number: 12 } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { Entity_ID: { unique_id: { prefix: "E", number: 47 } } } }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  return { sentTexts, opsTexts };
+}
+
+test("Qualified call-notes pickup presents the live Lead→Prospect Approve/Redo decision, resolving the Handoff's tokens to real page IDs", async (t) => {
+  const { sentTexts } = mockQualifiedApprovalFetch(t);
+  const state = fakeState({ handoffId: "handoff-1", entityId: undefined, entityName: undefined, matterId: undefined, matterName: undefined });
+
+  const result = await presentQualifiedCallNotesForApproval(fakeEnv(), state, "E-47", "M-12", "M-12", "All five conditions satisfied.");
+
+  assert.strictEqual(result.entityId, "entity-page-1", "must resolve the real entityId from the token");
+  assert.strictEqual(result.matterId, "matter-page-1", "must resolve the real matterId from the token");
+  assert.strictEqual(result.entityName, "E-47", "entityName is the token itself, never a real name");
+  assert.strictEqual(result.matterName, "M-12", "matterName is the token itself, never a real name");
+  assert.strictEqual(result.stage, "awaiting_qualification_approval");
+  assert.ok(result.pendingActionSummary, "a pending action summary must be recorded for the live decision");
+  assert.ok(sentTexts.some((t) => t.includes("Approve Lead") && t.includes("M-12")), "the live Approve/Redo message must be sent, identifying the work item by token");
+});
+
+test("Qualified call-notes pickup notifies Operations instead of presenting a decision it can't apply, when the tokens don't resolve to a real Matter", async (t) => {
+  const { opsTexts } = mockQualifiedApprovalFetch(t, { matterFound: false });
+  const state = fakeState({ handoffId: "handoff-1", entityId: undefined, entityName: undefined, matterId: undefined, matterName: undefined });
+
+  const result = await presentQualifiedCallNotesForApproval(fakeEnv(), state, "E-47", "M-12", "M-12", "All five conditions satisfied.");
+
+  assert.strictEqual(result.entityId, undefined, "must never fabricate an entityId when the token doesn't resolve");
+  assert.strictEqual(result.matterId, undefined, "must never fabricate a matterId when the token doesn't resolve");
+  assert.notStrictEqual(result.stage, "awaiting_qualification_approval", "must not present a live decision it has no real identity to apply");
+  assert.ok(opsTexts.some((t) => /Lead.Prospect approval couldn.t be presented/.test(t)), "Operations must be notified for manual handling");
 });
