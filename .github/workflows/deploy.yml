@@ -1,43 +1,40 @@
 name: Deploy Worker
 
+# Cloudflare Workers Builds (the Git-connected pipeline on the Cloudflare
+# side) does the actual deployment on every push -- this workflow does not
+# deploy anything itself. It exists purely to confirm, from GitHub's side,
+# that a deployment actually landed after a merge, since a completed run of
+# this workflow (success or failure) is what surfaces as a notification.
+#
+# Deliberately triggered by `workflow_run` off "Auto Merge" completing,
+# not `on: push`: auto-merge.yml merges using secrets.GITHUB_TOKEN, and
+# GitHub's anti-recursion rule means a GITHUB_TOKEN-authored push never
+# triggers another workflow's `on: push` -- confirmed live: this workflow
+# silently stopped firing entirely from PR #165 onward (10+ merges with
+# zero runs) once auto-merge.yml started performing the actual merge.
+# `workflow_run` is not subject to that same suppression (the same
+# mechanism auto-merge.yml itself relies on, chained off "PR Validation"),
+# so this fires reliably regardless of who authored the merge push.
 on:
-  push:
-    branches:
-      - claude/notion-cloudflare-telegram-agents-nsi40m
-      - main
+  workflow_run:
+    workflows: ["Auto Merge"]
+    types: [completed]
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: Deploy to Cloudflare Workers
+  verify:
+    name: Verify Cloudflare Deployment
     runs-on: ubuntu-latest
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Run test validation
-        run: npx tsx --test
-
-      - name: Deploy Worker to Cloudflare
-        run: npm run deploy
+      # Cloudflare Workers Builds deploys asynchronously on its own push
+      # trigger, not synchronously with this workflow -- give it a window
+      # to land before checking, rather than racing it.
+      - name: Wait for Cloudflare's deployment to land
+        run: sleep 45
 
       - name: Verify post-deployment health endpoint
         run: |
