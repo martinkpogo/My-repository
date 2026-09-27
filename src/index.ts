@@ -21,6 +21,7 @@ import {
   runCheckHandoffs,
 } from "./checkHandoffs";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
+import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
 import type { SessionSummary } from "./types";
 import {
@@ -450,7 +451,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format).",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly.",
         undefined,
         threadId,
       );
@@ -518,6 +519,23 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     if (LEAD_COMMAND_PATTERN.test(text)) {
       const body = text.replace(LEAD_COMMAND_PATTERN, "");
       await handleLeadDiscoverySignal(env, chatId, threadId, body);
+      return;
+    }
+    // Deterministic, read-only "what's in this database" lookup -- never
+    // AI-gated, never mode-dependent (works in Chat or Cowork, in a DM or
+    // any topic) since it never creates or touches governed work, only
+    // reads. See dataLookup.ts's own doc comment for the identity-safety
+    // reasoning behind which sources this covers.
+    const lookupMatch = text.trim().match(/^\/lookup(?:\s+(\S+))?(?:\s+(.+))?$/i);
+    if (lookupMatch) {
+      const [, sourceArg, filterArg] = lookupMatch;
+      const source = sourceArg?.toLowerCase() as LookupSource | undefined;
+      if (!source || !LOOKUP_SOURCES.includes(source)) {
+        await sendMessage(env, chatId, `Usage: /lookup <${LOOKUP_SOURCES.join("|")}> [filter]`, undefined, threadId);
+        return;
+      }
+      const reply = await runDataLookup(env, source, filterArg);
+      await sendMessage(env, chatId, reply, undefined, threadId);
       return;
     }
     if (text === "/checkhandoffs") {

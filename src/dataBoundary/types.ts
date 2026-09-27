@@ -4,6 +4,7 @@ export type SemanticTaskId =
   | "routing.enquiry_classification"
   | "routing.marketing_specialization_check"
   | "chat.general_reply"
+  | "chat.data_lookup"
   | "marketing.intake_classification"
   | "marketing.hat_action_decision"
   | "routing.research_specialization_check"
