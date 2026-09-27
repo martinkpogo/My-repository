@@ -485,7 +485,17 @@ test("X. A plain database lookup question in Cowork mode with no addressee answe
   const env = fakeEnv({
     WORK_SESSION: workSession as any,
     MATTERS_DATA_SOURCE_ID: "matters-ds",
-    AI: { run: async () => ({ response: JSON.stringify({ is_lookup: true, source: "matters" }) }) } as any,
+    AI: {
+      run: async (_model: any, opts: any) => {
+        const isClassification = String(opts?.messages?.[0]?.content ?? "").includes("Respond with a single valid JSON object only");
+        if (isClassification) return { response: JSON.stringify({ is_lookup: true, source: "matters" }) };
+        // Conversational reply: echo back the grounding snapshot handed to
+        // it in the system message, proving the AI turn is actually
+        // grounded in the live fetched rows rather than a canned string.
+        const systemContent = String(opts?.messages?.[0]?.content ?? "");
+        return { response: systemContent.includes("MAT-20") ? "Yes -- MAT-20 is currently Qualified." : "(no matching records)" };
+      },
+    } as any,
   });
   await setWorkspaceMode(env, -1004435157576, 604, "cowork");
 
@@ -499,7 +509,7 @@ test("X. A plain database lookup question in Cowork mode with no addressee answe
 
   assert.strictEqual(resolveCalled, false, "a data lookup match must short-circuit before resolveWorkspaceRouting ever runs");
   assert.strictEqual(calls.init.length, 0, "a read-only lookup must never create governed work");
-  assert.ok(sent.some((m) => m.includes("MAT-20")), "the reply must be the actual lookup result");
+  assert.ok(sent.some((m) => m.includes("MAT-20")), "the reply must be grounded in the actual lookup result");
   assert.ok(
     !sent.some((m) => m.includes("Who should own this work")),
     "the ownership clarification question must never be sent for a lookup question",

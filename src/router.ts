@@ -3,7 +3,7 @@ import { sendMessage, sendOperationsMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
-import { classifyDataLookupRequest, runDataLookup } from "./dataLookup";
+import { classifyDataLookupRequest, runConversationalDataLookup } from "./dataLookup";
 import { findUnitManifest } from "./units/registry";
 import { resolveUnitRequest } from "./units/dispatch";
 import {
@@ -121,7 +121,7 @@ export async function routeIncomingText(
     return;
   }
 
-  // Deterministic, read-only "what's in this database" lookup -- checked
+  // A conversation about what's in one of ENIG's own databases -- checked
   // here, before mode resolution, for the same reason the /lookup command
   // (index.ts) is never mode-dependent: it never creates or touches
   // governed work, only reads, so there is no reason a plain lookup
@@ -138,12 +138,13 @@ export async function routeIncomingText(
   // enquiry/Cowork dispatch -- fail open into ordinary routing below,
   // exactly like recentActivitySnapshot's own Notion-read fallback in
   // chat.ts, rather than letting the webhook's top-level catch turn every
-  // message into "something went wrong" whenever the classifier or a
-  // lookup's own Notion read has a transient failure.
+  // message into "something went wrong" whenever the classifier, the
+  // lookup's own Notion read, or the conversational reply has a transient
+  // failure.
   let lookupReply: string | undefined;
   try {
     const lookup = await classifyDataLookupRequest(env, text);
-    if (lookup) lookupReply = await runDataLookup(env, lookup.source, lookup.filter);
+    if (lookup) lookupReply = await runConversationalDataLookup(env, chatId, threadId, lookup.source, lookup.filter, text);
   } catch (err) {
     console.error("Data lookup check failed -- falling through to ordinary Workspace routing", err);
   }
