@@ -131,10 +131,24 @@ export async function routeIncomingText(
   // bypasses any pending Cowork clarification too -- the original governed
   // request that triggered it is untouched and will still be asked about
   // on the next non-lookup message.
-  const lookup = await classifyDataLookupRequest(env, text);
-  if (lookup) {
-    const reply = await runDataLookup(env, lookup.source, lookup.filter);
-    await sendMessage(env, chatId, reply, undefined, threadId);
+  //
+  // Runs unconditionally ahead of every other message in this stream now
+  // (not just Chat mode's own fallback, as before), so a failure here must
+  // never take down message processing for a completely unrelated
+  // enquiry/Cowork dispatch -- fail open into ordinary routing below,
+  // exactly like recentActivitySnapshot's own Notion-read fallback in
+  // chat.ts, rather than letting the webhook's top-level catch turn every
+  // message into "something went wrong" whenever the classifier or a
+  // lookup's own Notion read has a transient failure.
+  let lookupReply: string | undefined;
+  try {
+    const lookup = await classifyDataLookupRequest(env, text);
+    if (lookup) lookupReply = await runDataLookup(env, lookup.source, lookup.filter);
+  } catch (err) {
+    console.error("Data lookup check failed -- falling through to ordinary Workspace routing", err);
+  }
+  if (lookupReply !== undefined) {
+    await sendMessage(env, chatId, lookupReply, undefined, threadId);
     return;
   }
 

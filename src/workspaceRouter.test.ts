@@ -505,3 +505,46 @@ test("X. A plain database lookup question in Cowork mode with no addressee answe
     "the ownership clarification question must never be sent for a lookup question",
   );
 });
+
+test("Y. A failure in the lookup check (classifier matches, but the Notion read it triggers throws) falls open into ordinary Workspace routing instead of propagating -- regression: this check now runs for every message, so it must never take down unrelated message processing", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sent: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      try {
+        const body = JSON.parse(init?.body ?? "{}");
+        if (body.text) sent.push(body.text);
+      } catch {
+        // ignore
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (s.includes("/data_sources/")) {
+      // Simulate a Notion outage -- notionFetch throws on a non-ok response.
+      return new Response("Internal Server Error", { status: 500 });
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({
+    WORK_SESSION: workSession as any,
+    MATTERS_DATA_SOURCE_ID: "matters-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ is_lookup: true, source: "matters" }) }) } as any,
+  });
+  await setWorkspaceMode(env, -1004435157576, 604, "cowork");
+
+  await routeIncomingText(env, -1004435157576, "Finance, price MAT-20: recurring delivery complaints.", 604, {
+    resolveRouting: fixedDecision({ mode: "cowork", unit: "Finance", hat: "Value-Based Pricing Assessor" }),
+  });
+
+  assert.strictEqual(calls.init.length, 1, "the unrelated Cowork dispatch must still succeed despite the lookup check's Notion read failing");
+  assert.ok(
+    !sent.some((m) => m.includes("Something went wrong")),
+    "a lookup-check failure must never surface as a generic processing error",
+  );
+});
