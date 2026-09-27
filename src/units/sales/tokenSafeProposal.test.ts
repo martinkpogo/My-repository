@@ -220,6 +220,7 @@ function matches(props: Props, filter: any): boolean {
   if (filter.relation?.contains) return (p?.relation ?? []).some((r: any) => r.id === filter.relation.contains);
   if (filter.rich_text?.equals !== undefined) return text(p) === filter.rich_text.equals;
   if (filter.select?.equals !== undefined) return text(p) === filter.select.equals;
+  if (filter.unique_id?.equals !== undefined) return p?.unique_id?.number === filter.unique_id.equals;
   return false;
 }
 
@@ -371,17 +372,39 @@ test("4b. Contact details (email / phone) cannot enter the Runtime Proposal even
   assert.match(state.blockedReason ?? "", /identity-bearing value/);
 });
 
-test("16. Runtime never resolves Entity_Token/Matter_Token -- no Entity/Matters reads, no Drive/Gmail access", async (t) => {
+test("16. On approval, Runtime resolves Entity_Token/Matter_Token to their real page IDs and advances the Matter to Proposal status -- no Drive/Gmail access, no identity read outside Entity/Matters", async (t) => {
   const { world, env, state } = await createV1(t);
+  const entityPage = { id: "entity-page-20", url: "https://notion.so/entity-page-20", parent: "entity-ds", properties: { Entity_ID: { unique_id: { prefix: "E", number: 20 } } } };
+  world.pages.set(entityPage.id, entityPage);
+  world.pages.set("matter-page-20", {
+    id: "matter-page-20",
+    url: "https://notion.so/matter-page-20",
+    parent: "matters-ds",
+    properties: { Matter_ID: { unique_id: { prefix: "MAT", number: 20 } }, Entity: { relation: [{ id: entityPage.id }] } },
+  });
+
   const ready = await handleSalesProposalDecision(env, state, 7, 1, "approve");
+
   assert.strictEqual(ready.salesProposal?.approvalStatus, "Approved");
+  assert.strictEqual(text(world.pages.get("matter-page-20")!.properties.Status), "Proposal", "the Matter's operational Status must advance on approval");
   for (const f of world.fetches) {
-    assert.ok(!f.url.includes("entity-ds") && !f.url.includes("matters-ds"), `no Entity/Matters access: ${f.url}`);
     assert.ok(!/googleapis|gmail|drive/i.test(f.url), `no Google access: ${f.url}`);
     assert.ok(!f.url.includes("/search"), `no Notion search: ${f.url}`);
   }
   const pageReads = world.fetches.filter((f) => f.method === "GET" && f.url.includes("/pages/")).map((f) => f.url.split("/pages/")[1]);
-  assert.ok(pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds")), `only the Handoff and the Proposal are read: ${pageReads}`);
+  assert.ok(
+    pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds") || id === entityPage.id),
+    `only the Handoff, the Proposal, and the resolved Entity page are read: ${pageReads}`,
+  );
+});
+
+test("16b. On approval, an Entity_Token/Matter_Token that doesn't resolve fails to advance the Matter status without undoing the approval", async (t) => {
+  const { world, env, state } = await createV1(t);
+  // No Matter/Entity pages seeded -- tokens do not resolve.
+  const ready = await handleSalesProposalDecision(env, state, 7, 1, "approve");
+
+  assert.strictEqual(ready.salesProposal?.approvalStatus, "Approved", "Martin's approval itself still applies even when the Matter status can't be advanced");
+  assert.ok(world.telegram.some((m) => /Matter status NOT advanced/.test(m.text)), "Martin must be told the Matter status wasn't advanced");
 });
 
 test("Sales does not require state.strategyProposal for Proposal production -- the Finance -> Sales Handoff alone is the Strategy-facts source", async (t) => {

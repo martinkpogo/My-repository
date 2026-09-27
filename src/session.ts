@@ -211,7 +211,7 @@ export class WorkSession extends DurableObject<Env> {
    * call already returned before this ever runs.
    */
   async runProposalDrafting(): Promise<WorkState> {
-    return this.execute((state) => sales.handleQuoteReceived(this.env, state));
+    return this.execute((state) => salesProposal.handleProposalHandoffPickup(this.env, state));
   }
 
   /**

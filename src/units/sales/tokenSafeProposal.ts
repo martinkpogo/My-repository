@@ -22,6 +22,7 @@ import { updateHandoff, findIdentityViolation, type HandoffIdentity, type KnownI
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
+import { resolveEntityMatterFromTokens } from "../../identityResolution";
 
 /**
  * Runtime Sales Proposal production for a Finance -> Sales Handoff.
@@ -29,12 +30,20 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
  * HO (Finance -> Sales, Pending) -> this module -> exactly one canonical,
  * token-safe Proposal record (Approval Status: Pending Approval) -> Martin
  * reviews the complete Proposal in the Workspace (Conversation) stream ->
- * Martin authorizes the exact Proposal ID + Version -> Approved, Artifact
- * Status: Pending Identity Resolution. The Identity & Artifact environment
- * consumes the approved record from there; nothing in this module creates a
- * Handoff (no Sales -> Sales Work Handoff), resolves Entity_Token /
- * Matter_Token to a real identity, reads the Entity/Matters databases, or
- * touches Drive/Gmail.
+ * Martin authorizes the exact Proposal ID + Version -> Approved. Per the
+ * identity architecture decision recorded in Notion (Sept 2026), the
+ * Entity/Matters databases no longer carry any real-world identity fields
+ * at all -- real identity lives exclusively in the separate Identity
+ * Resolution Registry, which this module still never touches -- so on
+ * approval this module now resolves the Handoff's own Entity_Token/
+ * Matter_Token to their real operational page IDs directly and advances
+ * the Matter's operational Status itself, rather than leaving that for
+ * the isolated Identity & Artifact environment to do manually. Artifact
+ * Status still moves to Pending Identity Resolution: producing the actual
+ * client-facing artifact (a document, an email) still belongs to that
+ * environment, which alone can resolve real identity for delivery. This
+ * module still creates no Handoff (no Sales -> Sales Work Handoff) and
+ * still never touches Drive/Gmail.
  *
  * The Proposal is composed deterministically from upstream records only:
  * the authoritative Finance quote and rationale read from the Handoff's own
@@ -1030,12 +1039,32 @@ export async function handleSalesProposalDecision(
   sp.artifactStatus = "Pending Identity Resolution";
   state.pendingActionSummary = undefined;
 
+  // Now authorized (see this module's header comment): resolve the
+  // Handoff's own tokens to their real operational page IDs directly and
+  // advance the Matter to Proposal status, rather than leaving a routine
+  // status change for the isolated Identity & Artifact environment to do
+  // manually. Best-effort -- a token that doesn't resolve does not undo
+  // the approval Martin just made; it's logged and Operations is
+  // notified so the Matter status can be advanced by hand.
+  const resolved = await resolveEntityMatterFromTokens(env, sp.entityToken, sp.matterToken);
+  let matterStatusNote: string;
+  if (resolved) {
+    await updatePage(env, resolved.matterId, { Status: select("Proposal") });
+    matterStatusNote = "Matter status advanced to Proposal.";
+  } else {
+    matterStatusNote = "Matter status NOT advanced -- tokens did not resolve to a real, related record; needs manual handling.";
+    await sendOperationsMessage(
+      env,
+      `⚠️ ${sp.proposalId} ${versionLabel(version)} approved, but Matter status could not be advanced -- Entity_Token/Matter_Token (${sp.entityToken}/${sp.matterToken}) did not resolve to a real, related Entity/Matter record.`,
+    ).catch((err) => console.error("Failed to send Matter-status-not-advanced Operations notice", err));
+  }
+
   await logActivity(env, {
     entry: `Proposal approved: ${sp.proposalId} ${versionLabel(version)} — ${sp.matterToken}`,
     type: "Decision",
     area: "Sales",
     decisions: `Martin approved ${sp.proposalId} ${versionLabel(version)} (Entity ${sp.entityToken}, Matter ${sp.matterToken}).`,
-    decisionRationale: `Approval bound to Proposal ID ${sp.proposalId} + Version ${versionLabel(version)}; content SHA-256 ${shown.contentHash}. Artifact Status set to Pending Identity Resolution.`,
+    decisionRationale: `Approval bound to Proposal ID ${sp.proposalId} + Version ${versionLabel(version)}; content SHA-256 ${shown.contentHash}. Artifact Status set to Pending Identity Resolution. ${matterStatusNote}`,
     nextActions: "Identity & Artifact environment to resolve identity and produce the client-facing artifact from this approved Version.",
     outcome: "Complete",
   });
@@ -1043,7 +1072,7 @@ export async function handleSalesProposalDecision(
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: HAT },
-    `✅ Approved: *${sp.proposalId} ${versionLabel(version)}*.\nApproved Version: ${versionLabel(version)} · Artifact Status: Pending Identity Resolution.\n\nThe approved Version is now available to the Identity & Artifact environment. The runtime has not created any client-facing artifact or file.`,
+    `✅ Approved: *${sp.proposalId} ${versionLabel(version)}*.\nApproved Version: ${versionLabel(version)} · Artifact Status: Pending Identity Resolution.\n${matterStatusNote}\n\nThe approved Version is now available to the Identity & Artifact environment for the client-facing artifact. The runtime has not created any client-facing artifact or file.`,
     buttons,
   );
   state.stage = "sales_proposal_approved";
