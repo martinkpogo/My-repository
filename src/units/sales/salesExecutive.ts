@@ -1381,7 +1381,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 async function resolveIdentityTokens(env: Env, entityId: string, matterId: string): Promise<{ entityToken: string; matterToken: string }> {
   const [entity, matter] = await Promise.all([getPage(env, entityId), getPage(env, matterId)]);
   return {
-    entityToken: uniqueId(entity.properties["Entity ID"]),
+    entityToken: uniqueId(entity.properties.Entity_ID),
     matterToken: uniqueId(matter.properties.Matter_ID),
   };
 }

@@ -205,7 +205,7 @@ export default {
     // /admin/run-finance-discovery above (the native Cloudflare Cron
     // Trigger has never reliably fired on this account). Meant to be hit
     // three times a day by an external scheduler (cron-job.org), not by
-    // the native trigger. Independent of SALES_EXECUTIVE_PAUSED -- Lead
+    // the native trigger. Independent of SALES_DIRECT_ENTRY_PAUSED -- Lead
     // Generation Specialist runs in this shared Worker regardless of
     // whether Sales Executive's isolated pipeline is paused, same as the
     // /lead command.
@@ -511,7 +511,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     }
     // Lead Generation Specialist's own entry point (Sales Unit's Lead
     // Discovery specialization) -- deliberately outside
-    // routeIncomingText/SALES_EXECUTIVE_PAUSED. Sales is active and Lead
+    // routeIncomingText/SALES_DIRECT_ENTRY_PAUSED. Sales is active and Lead
     // Discovery runs in this shared "ENIG - Sales runtime" Worker regardless
     // of whether Sales Executive's isolated Sales Progression pipeline is
     // paused; the two are independent by design (see leadDiscovery.ts).

@@ -75,7 +75,7 @@ function mockFetch(t: any, opts: { entityUniqueId?: number; matterUniqueId?: num
 
     if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
       return new Response(
-        JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { "Entity ID": { unique_id: { number: entityUniqueId, prefix: "E" } } } }),
+        JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { Entity_ID: { unique_id: { number: entityUniqueId, prefix: "E" } } } }),
         { status: 200 },
       );
     }
