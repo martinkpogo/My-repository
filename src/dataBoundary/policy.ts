@@ -41,12 +41,20 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "routing.enquiry_classification": "client_confidential",
   "routing.marketing_specialization_check": "client_confidential",
   "chat.general_reply": "client_confidential",
-  // Classifies Martin's own free-text lookup question (e.g. "what's in the
-  // Matters database?") into a fixed {source, filter} shape -- the prompt
-  // never includes real fetched row content, only the question itself and
-  // static schema metadata naming the known sources. business_sensitive,
-  // not client_confidential, for the same reason routing.* classifiers of
-  // Martin's own Workspace text already are elsewhere in this table.
+  // Covers two AI calls: (1) classifying Martin's own free-text lookup
+  // question (e.g. "what's in the Matters database?") into a fixed
+  // {source, filter} shape -- that prompt never includes real fetched row
+  // content, only the question itself and static schema metadata naming
+  // the known sources -- and (2) the conversational reply grounded in the
+  // live rows a matched lookup then fetches (dataLookup.ts's
+  // runConversationalDataLookup), which DOES include real row content.
+  // business_sensitive still covers both: Matters/Entity/Handoffs/
+  // Proposals/Activity are pseudonymous operational records with no real
+  // identity in them at all (per the Sept 2026 identity architecture
+  // decision), and Leads' real Contact/Organisation fields are the same
+  // publicly-sourced business information lead.discovery_signal_evaluation's
+  // existing exemption already treats as non-confidential -- never ENIG's
+  // confidential client/contact identity.
   "chat.data_lookup": "business_sensitive",
   "marketing.intake_classification": "business_sensitive",
   "marketing.hat_action_decision": "business_sensitive",
