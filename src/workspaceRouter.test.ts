@@ -434,3 +434,74 @@ test("V. Mode selection itself never creates governed work -- switching to cowor
 test("W. routing.workspace_classification is no longer a registered SemanticTaskId", () => {
   assert.strictEqual(isSemanticTaskId("routing.workspace_classification"), false);
 });
+
+// --- Data lookup bypasses mode/clarification entirely (regression: a plain
+// "check the Matters database" question in Cowork mode, with no explicit
+// Unit/Hat addressee, must never hit the ownership clarification gate) ---
+
+function mockCombinedFetch(t: any, notionResultsByDataSource: Record<string, any[]> = {}) {
+  const originalFetch = globalThis.fetch;
+  const sentMessages: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      try {
+        const body = JSON.parse(init?.body ?? "{}");
+        if (body.text) sentMessages.push(body.text);
+      } catch {
+        // ignore
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    const match = /\/data_sources\/([^/]+)\/query/.exec(s);
+    if (match) {
+      const results = notionResultsByDataSource[match[1]] ?? [];
+      return new Response(JSON.stringify({ results }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return sentMessages;
+}
+
+test("X. A plain database lookup question in Cowork mode with no addressee answers directly -- never asks the ownership clarification question, and never calls resolveWorkspaceRouting at all", async (t) => {
+  const sent = mockCombinedFetch(t, {
+    "matters-ds": [
+      {
+        id: "p1",
+        archived: false,
+        in_trash: false,
+        properties: {
+          Matter_ID: { unique_id: { number: 20, prefix: "MAT" } },
+          Matter: { title: [{ plain_text: "Recurring delivery complaints" }] },
+          Status: { select: { name: "Qualified" } },
+        },
+      },
+    ],
+  });
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({
+    WORK_SESSION: workSession as any,
+    MATTERS_DATA_SOURCE_ID: "matters-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ is_lookup: true, source: "matters" }) }) } as any,
+  });
+  await setWorkspaceMode(env, -1004435157576, 604, "cowork");
+
+  let resolveCalled = false;
+  await routeIncomingText(env, -1004435157576, "Check matter Database and tell me if anything is there", 604, {
+    resolveRouting: async () => {
+      resolveCalled = true;
+      return { mode: "clarify", question: "Who should own this work? Name the Unit or Hat." };
+    },
+  });
+
+  assert.strictEqual(resolveCalled, false, "a data lookup match must short-circuit before resolveWorkspaceRouting ever runs");
+  assert.strictEqual(calls.init.length, 0, "a read-only lookup must never create governed work");
+  assert.ok(sent.some((m) => m.includes("MAT-20")), "the reply must be the actual lookup result");
+  assert.ok(
+    !sent.some((m) => m.includes("Who should own this work")),
+    "the ownership clarification question must never be sent for a lookup question",
+  );
+});
