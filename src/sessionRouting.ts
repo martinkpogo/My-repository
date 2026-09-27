@@ -16,26 +16,33 @@ import type { Env, Unit } from "./types";
  * needs getSessionStub/newWorkId/resolveUnitForThread to run discovery).
  */
 
-// Sales Executive/Business Development intake is paused by deliberate,
-// standing policy, not as a temporary state pending a rebuild. Real client
-// identity (Entity/Matter, names, contact details) is confirmed-sensitive
-// data that this Worker's AI provider (Cloudflare Workers AI) is not
-// approved to process -- Workers AI's training-data policy for personal
-// information hasn't been confirmed acceptable, the same reason
-// chat.general_reply is gated in dataBoundary/policy.ts. That work now
-// lives entirely in an isolated Sales Executive Claude project with its own
-// Notion (Entity/Matters/Proposals) and Gmail access, where Martin reviews
-// and approves every client-facing action (e.g. an email) directly -- it is
-// live and working, exchanging only opaque Entity_Token/Matter_Token values
-// with this Worker via the shared Handoffs database.
-//
-// Currently set to false: Sales runtime execution is enabled for the
-// controlled MAT-20 live validation, per Martin's explicit approval. This is
-// a deliberate, scoped exception to the standing pause described above, not
-// a reversal of the underlying policy -- the AI-provider personal-data/
-// training-policy concern this flag exists for has not been resolved. The
-// gate can be restored to true after MAT-20 validation if separately
-// decided.
+// Sales Executive/Business Development DIRECT ENTRY -- a real person typing
+// a raw enquiry straight into Telegram/Workspace chat, handled by
+// salesExecutive.ts's own handleIncomingEnquiry chain (real Entity/Matter
+// creation, real names/emails/phones, all in this Worker) -- is paused by
+// deliberate, standing policy, not as a temporary state pending a rebuild.
+// Real client identity is confirmed-sensitive data that this Worker's AI
+// provider (Cloudflare Workers AI) is not approved to process -- Workers
+// AI's training-data policy for personal information hasn't been confirmed
+// acceptable, the same reason chat.general_reply is gated in
+// dataBoundary/policy.ts. Every enquiry, whether it originates by email or
+// by someone manually entering it, now goes through the isolated Sales
+// Executive Claude project instead -- its own Notion (Entity/Matters/
+// Proposals) and Gmail access, with Martin reviewing and approving every
+// client-facing action directly. This code is intentionally left in place,
+// not removed, for when a paid AI provider with an acceptable
+// personal-data/no-training policy becomes available -- flip this back to
+// false to re-enable it then, not before.
+export const SALES_DIRECT_ENTRY_PAUSED = true;
+
+// Gates the Sales Handoff PICKUP mechanism only (checkHandoffs.ts's
+// discoverPendingSalesHandoffs -- runTokenSafeProposal/runCallNotesPickup/
+// runProposalDrafting). Unlike SALES_DIRECT_ENTRY_PAUSED above, this never
+// touches real client identity -- it only ever processes what's already
+// de-identified on a Handoff record (Entity_Token/Matter_Token, sanitized
+// context) -- so the AI-provider personal-data concern that keeps direct
+// entry paused does not apply here. Kept false (active) independently of
+// direct entry's pause state.
 export const SALES_EXECUTIVE_PAUSED = false;
 
 export function newWorkId(): string {

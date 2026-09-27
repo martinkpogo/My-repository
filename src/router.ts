@@ -11,14 +11,14 @@ import {
   getSessionStub,
   newWorkId,
   resolveStreamForThread,
-  SALES_EXECUTIVE_PAUSED,
+  SALES_DIRECT_ENTRY_PAUSED,
   setActiveWorkId,
 } from "./sessionRouting";
 
 // Every primitive previously defined directly in this file (newWorkId,
 // getActiveWorkId/setActiveWorkId, getReplyMessageWorkId/
 // setReplyMessageWorkId, getSessionStub, resolveStreamForThread/
-// resolveUnitForThread/threadIdForUnit, SALES_EXECUTIVE_PAUSED) now lives in
+// resolveUnitForThread/threadIdForUnit, SALES_DIRECT_ENTRY_PAUSED) now lives in
 // sessionRouting.ts -- re-exported here so every existing `from "./router"`
 // import keeps working unchanged. See sessionRouting.ts's doc comment for
 // why: checkHandoffs.ts needs these same primitives, and this file now
@@ -33,7 +33,7 @@ const AI_UNAVAILABLE_MESSAGE =
   "Couldn't generate a reply -- no AI provider is currently available. This points to a genuine provider failure, not an access restriction; please try again shortly.";
 
 // User-facing text for a Sales enquiry that arrives while
-// SALES_EXECUTIVE_PAUSED is true. Kept as one constant so the DM path and
+// SALES_DIRECT_ENTRY_PAUSED is true. Kept as one constant so the DM path and
 // the Workspace-stream path can't drift apart.
 const SALES_PAUSED_MESSAGE =
   "Sales Executive intake is paused here in this runtime by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here -- it is being handled by the isolated Sales Executive project in Claude (with its own Notion and Gmail access), which owns and actively works this domain now.";
@@ -184,7 +184,7 @@ export async function dispatchCowork(
   if (decision.unit === "Sales") {
     if (decision.hat === "Lead Generation Specialist") {
       // Lead Discovery is a separate specialization from Sales Progression
-      // intake -- independent of SALES_EXECUTIVE_PAUSED by design (see
+      // intake -- independent of SALES_DIRECT_ENTRY_PAUSED by design (see
       // sessionRouting.ts's own doc comment: Lead Discovery runs in this
       // shared Worker regardless of whether Sales Progression is paused,
       // the two are independent). Routed through the Unit Registry
@@ -223,8 +223,8 @@ export async function dispatchCowork(
       return;
     }
 
-    if (SALES_EXECUTIVE_PAUSED) {
-      console.error(`Sales Executive intake paused — enquiry not processed (chat ${chatId})`);
+    if (SALES_DIRECT_ENTRY_PAUSED) {
+      console.error(`Sales Executive direct entry paused — enquiry not processed (chat ${chatId})`);
       await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
       return;
     }

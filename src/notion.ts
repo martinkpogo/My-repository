@@ -176,7 +176,7 @@ export function relationIds(prop: any): string[] {
 }
 
 /**
- * Reads a Notion auto-incrementing Unique ID property (e.g. "Entity ID",
+ * Reads a Notion auto-incrementing Unique ID property (e.g. "Entity_ID",
  * "Matter_ID") as a display string, honoring a configured prefix if any.
  * Used as a stable, non-identifying stand-in for a real Name/title
  * property wherever code must reference an Entity/Matter without

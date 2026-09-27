@@ -651,7 +651,7 @@ function mockDirectRequestFetch(
         JSON.stringify({
           id: "entity-page-1",
           url: "https://notion.so/entity-page-1",
-          properties: { "Entity ID": { unique_id: { prefix: entityPrefix, number: entityNumber } } },
+          properties: { Entity_ID: { unique_id: { prefix: entityPrefix, number: entityNumber } } },
         }),
         { status: 200 },
       );
