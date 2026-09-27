@@ -236,6 +236,7 @@ interface FetchLog {
   handoffCreateBody: any;
   sentTexts: string[];
   sentButtons: any[];
+  matterPatchBodies: any[];
 }
 
 function mockFetch(
@@ -243,7 +244,7 @@ function mockFetch(
   opts: { verifiedFacts?: string; entityToken?: string; matterToken?: string; initialStatus?: string; requiredNextAction?: string } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [] };
+  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [] };
   const verifiedFacts = opts.verifiedFacts ?? "Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.";
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
@@ -293,6 +294,45 @@ function mockFetch(
         return new Response(JSON.stringify({ id: "handoff-new", url: "https://notion.so/handoff-new", properties: {} }), { status: 200 });
       }
       return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+    }
+    // Handoff pickup now resolves the Handoff's own tokens to their real
+    // Matter/Entity page IDs (resolveEntityMatterFromTokens) to advance the
+    // Matter's operational Status to Commercial Development. Mocked
+    // generically here so every existing handlePickup-based test doesn't
+    // need its own fixture for this.
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      const matterShape = /^([A-Z]{1,6})-(\d{1,6})$/.exec(matterToken);
+      if (!matterShape) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              properties: {
+                Matter_ID: { unique_id: { prefix: matterShape[1], number: Number(matterShape[2]) } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      const entityShape = /^([A-Z]{1,6})-(\d{1,6})$/.exec(entityToken);
+      return new Response(
+        JSON.stringify({
+          id: "entity-page-1",
+          url: "https://notion.so/entity-page-1",
+          properties: entityShape ? { Entity_ID: { unique_id: { prefix: entityShape[1], number: Number(entityShape[2]) } } } : {},
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
+      log.matterPatchBodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", properties: {} }), { status: 200 });
     }
     throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
   }) as typeof fetch;
@@ -381,6 +421,72 @@ test("3. Strategy picks up a Pending Handoff", async (t) => {
   assert.ok(result.strategyQuestion, "the strategic question/context must be populated from the Handoff");
   assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup must actually progress the work item");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Picked-up"), "the claim step must set Picked-up");
+});
+
+test("3b. Handoff pickup advances the Matter's operational Status to Commercial Development -- now authorized per the identity architecture decision", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  await handlePickup(env, state);
+
+  assert.ok(
+    log.matterPatchBodies.some((p) => p.properties?.Status?.select?.name === "Commercial Development"),
+    "the Matter's own operational Status must advance at Handoff pickup, not just the Handoff's",
+  );
+});
+
+test("3c. Handoff pickup still completes, and Operations is notified, when the Handoff's tokens don't resolve to a real Matter -- never blocks the diagnosis Martin is waiting on", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const opsMessages: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      opsMessages.push(body.text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/handoff-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "handoff-1",
+          url: "https://notion.so/handoff-1",
+          properties: {
+            Status: { select: { name: "Pending" } },
+            "Verified Facts & Sources": { rich_text: [{ plain_text: "Sales call notes: recurring client complaints." }] },
+            Entity_Token: { rich_text: [{ plain_text: "E-47" }] },
+            Matter_Token: { rich_text: [{ plain_text: "M-12" }] },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") return new Response(JSON.stringify({ id: "handoff-1", url: "x", properties: {} }), { status: 200 });
+    if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Gov." }] } }] }), { status: 200 });
+    }
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "p", url: "x", properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${method} ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.notStrictEqual(result.stage, "awaiting_pickup", "the diagnosis must still proceed even though the Matter status couldn't be advanced");
+  assert.ok(opsMessages.some((m) => /Matter status could not be advanced/.test(m)), "Operations must be notified so the status can be advanced by hand");
 });
 
 test("Required Next Action content is folded into the diagnosis context, not silently ignored", async (t) => {
@@ -1332,6 +1438,29 @@ test("Material events use the existing logActivity mechanism", async (t) => {
       const body = JSON.parse(init.body);
       if (body.parent?.data_source_id === "activity-log-ds") logEntries.push(body.properties);
       return new Response(JSON.stringify({ id: "p", url: "x", properties: {} }), { status: 200 });
+    }
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              properties: {
+                Matter_ID: { unique_id: { prefix: "M", number: 1 } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      return new Response(JSON.stringify({ id: "entity-page-1", url: "x", properties: { Entity_ID: { unique_id: { prefix: "E", number: 1 } } } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
+      return new Response(JSON.stringify({ id: "matter-page-1", url: "x", properties: {} }), { status: 200 });
     }
     throw new Error(`Unexpected fetch: ${method} ${urlStr}`);
   }) as typeof fetch;

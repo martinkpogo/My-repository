@@ -1,14 +1,14 @@
 import type { Env, Unit, WorkState } from "../../types";
-import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
+import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { aiJson } from "../../ai";
 import { logActivity } from "../../log";
-import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
+import { editWorkspaceHatMessage, sendOperationsMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
-import { resolveMatterFromText } from "../../identityResolution";
+import { resolveMatterFromText, resolveEntityMatterFromTokens } from "../../identityResolution";
 import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesizeSpecialistFindings } from "./strategySpecialists";
 
 /**
@@ -551,6 +551,31 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   state.matterToken = evalResult.contract.matterToken ?? "";
   state.strategyQuestion = evalResult.contract.sanitizedContext;
   state.strategyContext = evalResult.contract.sanitizedContext;
+
+  // Now authorized (identity architecture decision recorded in Notion,
+  // Sept 2026): advance the Matter's own operational Status to Commercial
+  // Development at Handoff pickup, the point substantive commercial
+  // development actually begins (see the Matter Business Object's
+  // Qualified_to_Commercial_Development transition). Previously this only
+  // ever happened inside Sales's own (now-paused) direct-entry flow before
+  // creating the Handoff; with the isolated project creating Sales ->
+  // Strategy Handoffs directly, nothing else advances it. Best-effort --
+  // a token that doesn't resolve does not block the diagnosis Martin is
+  // waiting on; it's logged and Operations is notified so the Matter
+  // status can be advanced by hand.
+  if (state.entityToken && state.matterToken) {
+    const resolved = await resolveEntityMatterFromTokens(env, state.entityToken, state.matterToken);
+    if (resolved) {
+      await updatePage(env, resolved.matterId, { Status: select("Commercial Development") }).catch((err) =>
+        console.error(`Strategy handlePickup: failed to advance Matter ${state.matterToken} to Commercial Development`, err),
+      );
+    } else {
+      await sendOperationsMessage(
+        env,
+        `⚠️ Strategy picked up Handoff ${state.handoffId} for ${state.matterToken || state.entityToken}, but Matter status could not be advanced to Commercial Development -- tokens did not resolve to a real, related Entity/Matter record.`,
+      ).catch((err) => console.error("Failed to send Matter-status-not-advanced Operations notice", err));
+    }
+  }
 
   await logActivity(env, {
     entry: `Strategy picked up request: ${state.matterToken || state.entityToken || state.workId}`,
