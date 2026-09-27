@@ -41,6 +41,13 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "routing.enquiry_classification": "client_confidential",
   "routing.marketing_specialization_check": "client_confidential",
   "chat.general_reply": "client_confidential",
+  // Classifies Martin's own free-text lookup question (e.g. "what's in the
+  // Matters database?") into a fixed {source, filter} shape -- the prompt
+  // never includes real fetched row content, only the question itself and
+  // static schema metadata naming the known sources. business_sensitive,
+  // not client_confidential, for the same reason routing.* classifiers of
+  // Martin's own Workspace text already are elsewhere in this table.
+  "chat.data_lookup": "business_sensitive",
   "marketing.intake_classification": "business_sensitive",
   "marketing.hat_action_decision": "business_sensitive",
   "routing.research_specialization_check": "business_sensitive",
@@ -502,6 +509,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  */
 export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId, OutboundDataPolicy>>> = {
   "chat.general_reply": "TOKEN_SAFE_RUNTIME",
+  "chat.data_lookup": "TOKEN_SAFE_RUNTIME",
   "marketing.intake_classification": "TOKEN_SAFE_RUNTIME",
   "marketing.hat_action_decision": "TOKEN_SAFE_RUNTIME",
   "business_development.intake_classification": "TOKEN_SAFE_RUNTIME",

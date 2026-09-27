@@ -22,6 +22,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "General Chat Reply",
     description: "Provides free-form conversational replies for Unit staff personas.",
   },
+  "chat.data_lookup": {
+    id: "chat.data_lookup",
+    name: "Data Lookup Classification",
+    description: "Classifies a chat message as a database lookup request (Matters/Entity/Handoffs/Proposals/Leads/Activity Log) and which one, or not.",
+  },
   "marketing.intake_classification": {
     id: "marketing.intake_classification",
     name: "Marketing Intake Classification",
