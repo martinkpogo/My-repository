@@ -4,7 +4,6 @@ import type { ChatTurn } from "./ai";
 import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
 import { marketingHatSummaryList } from "./hats/registry";
-import { classifyDataLookupRequest, runDataLookup } from "./dataLookup";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -173,9 +172,6 @@ export async function generalChatReply(
   threadId: number | undefined,
   userMessage: string,
 ): Promise<string> {
-  const lookup = await classifyDataLookupRequest(env, userMessage);
-  if (lookup) return runDataLookup(env, lookup.source, lookup.filter);
-
   const snapshot = await recentActivitySnapshot(env, unit);
   const system = `${REAL_STRUCTURE_FACTS}\n\n${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
   return runChatTurn(env, chatId, threadId, system, userMessage, chatSensitivityForUnit(unit));
@@ -198,9 +194,6 @@ const DM_PERSONA = `You are ENIG's general staff AI for direct-message conversat
  * the business, anything not tied to one Unit's live work).
  */
 export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
-  const lookup = await classifyDataLookupRequest(env, userMessage);
-  if (lookup) return runDataLookup(env, lookup.source, lookup.filter);
-
   const system = `${REAL_STRUCTURE_FACTS}\n\n${DM_PERSONA}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
   return runChatTurn(env, chatId, threadId, system, userMessage, "business_sensitive");
 }

@@ -3,6 +3,7 @@ import { sendMessage, sendOperationsMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
+import { classifyDataLookupRequest, runDataLookup } from "./dataLookup";
 import { findUnitManifest } from "./units/registry";
 import { resolveUnitRequest } from "./units/dispatch";
 import {
@@ -117,6 +118,23 @@ export async function routeIncomingText(
       undefined,
       threadId,
     );
+    return;
+  }
+
+  // Deterministic, read-only "what's in this database" lookup -- checked
+  // here, before mode resolution, for the same reason the /lookup command
+  // (index.ts) is never mode-dependent: it never creates or touches
+  // governed work, only reads, so there is no reason a plain lookup
+  // question ("check the Matters database") should ever hit Cowork's
+  // Unit/Hat ownership clarification gate just because free text with no
+  // explicit addressee is currently unresolved in that mode. Deliberately
+  // bypasses any pending Cowork clarification too -- the original governed
+  // request that triggered it is untouched and will still be asked about
+  // on the next non-lookup message.
+  const lookup = await classifyDataLookupRequest(env, text);
+  if (lookup) {
+    const reply = await runDataLookup(env, lookup.source, lookup.filter);
+    await sendMessage(env, chatId, reply, undefined, threadId);
     return;
   }
 
