@@ -6,18 +6,19 @@ import type { SensitivityLevel } from "./dataBoundary/types";
 import { marketingHatSummaryList } from "./hats/registry";
 import { classifyDataLookupRequest, runDataLookup } from "./dataLookup";
 
-// Every Unit's own database access is scoped by its Notion integration --
-// Entity/Matters/Proposals (the only place real client identity lives) are
-// exclusively the isolated Sales Executive project's now, so no Unit chat
-// persona other than Sales can be handed a real client name or contact
-// detail to begin with, whatever its casual conversation touches on. Sales
-// stays client_confidential (chat.general_reply's task-level default,
-// applied by passing undefined here) since Martin could still paste real
-// enquiry content into that topic's freeform chat. Every other Unit is
-// business_sensitive -- ENIG's own internal-operations tier, already
-// eligible for workers-ai -- so they behave like a normal LLM for ordinary
-// conversation instead of hitting the client_confidential gate meant for
-// the one Unit that can actually see client identity.
+// Per the identity architecture decision (Notion, Sept 2026), real-world
+// identity lives exclusively in the Identity Resolution Registry -- Entity
+// and Matters now hold only pseudonymous operational records (no Name,
+// Email, or Phone), so Runtime reading/writing them directly is no longer
+// an identity-boundary crossing. Sales still stays client_confidential
+// (chat.general_reply's task-level default, applied by passing undefined
+// here) since Martin could still paste real enquiry content -- a contact's
+// name, email, or phone number -- into that topic's freeform chat. Every
+// other Unit is business_sensitive -- ENIG's own internal-operations tier,
+// already eligible for workers-ai -- so they behave like a normal LLM for
+// ordinary conversation instead of hitting the client_confidential gate
+// meant for the one Unit whose freeform chat can still surface real
+// contact identity.
 function chatSensitivityForUnit(unit: Unit): SensitivityLevel | undefined {
   return unit === "Sales" ? undefined : "business_sensitive";
 }
