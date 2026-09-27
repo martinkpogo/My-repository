@@ -29,6 +29,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
+import { resolveEntityMatterFromTokens } from "../../identityResolution";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -1024,6 +1025,63 @@ export async function resolveCallNotesHandoffContext(env: Env, handoffId: string
 }
 
 /**
+ * Presents the live Telegram Lead->Prospect Approve/Redo decision for a
+ * Qualified call-notes Handoff pickup -- extracted from
+ * handleCallNotesHandoffPickup so it can be unit-tested directly, since
+ * runQualificationAssessment's AI calls are policy-gated to zero eligible
+ * providers in this environment today (pre-existing, out of scope; see
+ * this file's own test suite for that constraint's documentation) and so
+ * cannot be driven through in a test. Resolves the Handoff's own
+ * Entity_Token/Matter_Token to their real page IDs (now authorized, per
+ * the identity architecture decision recorded in Notion) and mirrors
+ * handleCallNotes's own Qualified branch exactly -- entityName/matterName
+ * are set to the tokens themselves, never a real name. A token that
+ * doesn't resolve notifies Operations rather than presenting a decision
+ * Runtime can't actually apply (it has no real entityId/matterId to write
+ * Prospect/Qualified status to).
+ */
+export async function presentQualifiedCallNotesForApproval(
+  env: Env,
+  state: WorkState,
+  entityToken: string,
+  matterToken: string,
+  displayToken: string,
+  evidenceText: string,
+): Promise<WorkState> {
+  const resolved = await resolveEntityMatterFromTokens(env, entityToken, matterToken);
+  if (!resolved) {
+    await sendOperationsMessage(
+      env,
+      `⚠️ Sales qualification Qualified for ${displayToken}, but Lead→Prospect approval couldn't be presented -- Entity_Token/Matter_Token did not resolve to a real, related Entity/Matter record. Needs manual handling.`,
+    ).catch((err) => console.error("Failed to send Lead-to-Prospect-not-presented Operations notice", err));
+    state.stage = "handoff_closed_qualification_complete";
+    return state;
+  }
+
+  state.entityId = resolved.entityId;
+  state.matterId = resolved.matterId;
+  state.entityName = entityToken;
+  state.matterName = matterToken;
+  const qualifyMessage = `*Qualification: Qualified* — all five conditions met.\n\n${evidenceText}\n\nApprove Lead → Prospect for *${displayToken}*?`;
+  const qualifyButtons = [
+    [
+      { text: "✅ Approve Lead→Prospect", callback_data: `qualify:${state.workId}:approve` },
+      { text: "🔁 Redo", callback_data: `qualify:${state.workId}:redo` },
+    ],
+  ];
+  await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, qualifyMessage, qualifyButtons);
+  state.pendingActionSummary = {
+    label: `Lead→Prospect: ${displayToken}`,
+    message: qualifyMessage,
+    buttons: qualifyButtons,
+    createdAt: new Date().toISOString(),
+  };
+  state.stage = "awaiting_qualification_approval";
+  state.awaiting = undefined;
+  return state;
+}
+
+/**
  * Runtime Sales Executive's pickup of a call-notes Handoff created by the
  * isolated Sales Executive Claude project (Section 6A of its Project
  * Instructions). The de-identified narrative it produced is already
@@ -1032,16 +1090,19 @@ export async function resolveCallNotesHandoffContext(env: Env, handoffId: string
  * against contract.sanitizedContext instead of raw enquiry/call-notes
  * text.
  *
- * Deliberately does NOT offer a live Telegram Approve/Redo button or
- * attempt a Lead->Prospect Entity.Status transition the way handleCallNotes
- * does: this session never resolves a real Entity/Matter page (only
- * entityToken/matterToken), and HandoffContextContract's own rule forbids
- * treating a token as a lookup key into a controlled database. Instead the
- * qualification result is written back to THIS Handoff only (Closed, token-
- * safe Work Completed) for the isolated Sales Executive project -- which
- * already holds legitimate real-identity access -- to pick up on its own
- * next Handoff check and complete any Lead->Prospect approval with Martin
- * itself, per the Entity Business Object's own lifecycle.
+ * On a Qualified result, this now presents the live Telegram Approve/Redo
+ * buttons directly (the same handleLeadToProspectApproval flow
+ * handleCallNotes uses) rather than only writing the result back to the
+ * Handoff for the isolated project to complete separately. Per the
+ * identity architecture decision recorded in Notion (Sept 2026), Runtime
+ * is authorized to resolve a Handoff's own Entity_Token/Matter_Token to
+ * their real operational page IDs directly (resolveEntityMatterFromTokens)
+ * -- the premise that blocked this (no real Entity/Matter page access) no
+ * longer holds. entityName/matterName are set to the tokens themselves,
+ * never a real name. A token that doesn't resolve still writes back to
+ * the Handoff (Held) for manual handling, exactly as before.
+ * More-Information-Required and Not-Qualified outcomes are unchanged --
+ * only Qualified needed a live Entity/Matter transition.
  *
  * Invoked only by checkHandoffs.ts's Sales discovery, never directly.
  */
@@ -1137,9 +1198,14 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
     area: "Sales",
     outcome: "Complete",
   });
+
+  if (qualification.overall === "Qualified") {
+    return presentQualifiedCallNotesForApproval(env, state, contract.entityToken, contract.matterToken ?? "", displayToken, evidenceText);
+  }
+
   await sendOperationsMessage(
     env,
-    `*Runtime Sales Executive qualification complete* — ${displayToken}: ${qualification.overall}.\n\nResult written back to the call-notes Handoff (${state.handoffId}) for the isolated Sales Executive project to review and, if Qualified, complete the Lead→Prospect approval with Martin.`,
+    `*Runtime Sales Executive qualification complete* — ${displayToken}: ${qualification.overall}.\n\nResult written back to the call-notes Handoff (${state.handoffId}).`,
   ).catch((err) => console.error("Failed to send qualification-complete Operations notice", err));
 
   state.stage = "handoff_closed_qualification_complete";
