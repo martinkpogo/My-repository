@@ -3,7 +3,6 @@ import assert from "node:assert";
 import { resolveAddressee, resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { routeIncomingText, dispatchCowork } from "./router";
 import { isSemanticTaskId } from "./dataBoundary/registry";
-import { registerActionCapability, clearRegisteredCapabilities, type ActionCapability } from "./actions/registry";
 import { setWorkspaceMode } from "./sessionRouting";
 import type { Env } from "./types";
 import type { UnitManifest, HatManifest } from "./units/unitManifest";
@@ -317,33 +316,6 @@ test("R. Chat mode never creates a WorkSession, even with capability-adjacent wo
 
   assert.strictEqual(calls.init.length, 0, "CHAT must never create a WorkSession");
   assert.ok(sent.length >= 0);
-});
-
-test("S. Ordinary Chat never dispatches through the generic Workspace capability registry -- a registered capability that could create governed state must not be reachable merely because a message arrived while mode is Chat", async (t) => {
-  mockTelegramFetch(t);
-  clearRegisteredCapabilities();
-  const { calls, workSession } = createMockWorkSession();
-  const env = fakeEnv({ WORK_SESSION: workSession as any });
-
-  let capabilityInvoked = false;
-  const capability: ActionCapability = {
-    id: "test-capability",
-    name: "Test Capability",
-    description: "test",
-    handleIntake: async () => {
-      capabilityInvoked = true;
-      return true;
-    },
-  };
-  registerActionCapability(capability);
-  t.after(() => clearRegisteredCapabilities());
-
-  await routeIncomingText(env, -1004435157576, "Create a Google Doc for this brief.", 604, {
-    resolveRouting: fixedDecision({ mode: "chat" }),
-  });
-
-  assert.strictEqual(capabilityInvoked, false, "Chat must never dispatch through the generic capability registry -- see the Chat capability boundary correction");
-  assert.strictEqual(calls.init.length, 0, "Chat must never create a WorkSession through generic capability dispatch");
 });
 
 // --- Chat is action-capable (ENIG Operating Model design doc, 2026-09-28

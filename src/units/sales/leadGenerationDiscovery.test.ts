@@ -867,7 +867,7 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and creates
     if (body.includes("distinct web search queries")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ queries: ["positioning problem query one", "positioning problem query two"] }) } }] }), { status: 200 });
     }
-    if (body.includes("several public web search results")) {
+    if (body.includes("evidence-threshold hard gate")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: PASS_EVALUATION } }] }), { status: 200 });
     }
     throw new Error(`Unexpected fetch: ${urlStr}`);

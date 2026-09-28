@@ -2,7 +2,6 @@ import type { Env, WorkState } from "./types";
 import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from "./telegram";
 import { aiJson } from "./ai";
-import { ActionCapability, registerActionCapability } from "./actions/registry";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -1140,7 +1139,7 @@ export async function consumeOpaqueOption(
   }
 }
 
-export const GoogleDocCreationCapability: ActionCapability = {
+export const GoogleDocCreationCapability = {
   id: "workspace.google_doc_creation",
   name: "Google Doc Creation Capability",
   description: "Creates Google Docs in Google Drive with user-selected account, folder, and explicit approval.",
@@ -1214,9 +1213,7 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
   },
 };
 
-registerActionCapability(GoogleDocCreationCapability);
-
-export const GoogleSheetCreationCapability: ActionCapability = {
+export const GoogleSheetCreationCapability = {
   id: "workspace.google_sheet_creation",
   name: "Google Sheet Creation Capability",
   description:
@@ -1299,8 +1296,6 @@ Return JSON: {"isGoogleSheetRequest": true | false, "title": "...", "rows": [["D
     return true;
   },
 };
-
-registerActionCapability(GoogleSheetCreationCapability);
 
 export async function handleGoogleAccountSelection(
   env: Env,

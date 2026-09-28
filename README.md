@@ -154,7 +154,7 @@ src/
 ├── chat.ts                     — general/DM conversational fallback
 ├── ai.ts, ai/                  — AiPolicyExecutor, provider adapters (Workers AI + OpenAI-compatible fallbacks), common response contract
 ├── dataBoundary/                — SemanticTaskId registry + sensitivity-tier policy every AI call is checked against
-├── actions/registry.ts         — generic ActionCapability hook (natural-language → proposed action), checked before Unit classification
+├── platform/                   — Data Source / Skill / Connector registries + the six shared primitive functions (read_record, fetch_skill, search, generate, request_approval, write_record)
 ├── googleOAuth.ts               — Google Workspace OAuth + controlled Doc/Sheet creation and approval
 ├── googleDocComments.ts, googleSheetComments.ts
 │                                — comment-triggered live editing (polled) for Docs and Sheets

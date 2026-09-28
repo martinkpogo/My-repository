@@ -7,6 +7,7 @@ import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
 import { aiJson } from "../../ai";
+import { fetchSkill, generate } from "../../platform/primitives";
 
 /**
  * Business Development's Unit Manifest -- the first Unit built entirely
@@ -139,20 +140,29 @@ const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentActi
  * missingEvidence. Stateless (a "read" action -- no WorkSession, nothing
  * persisted): if Martin wants to carry this forward into qualification,
  * that evidence has to be supplied again when he invokes qualify_opportunity.
+ *
+ * Migrated (Skills architecture proof, Build order Step 2) to fetch the
+ * shared `research-signal` Skill's evidence discipline instead of
+ * restating it inline -- the "never invent or infer evidence" rule above
+ * is now research-signal's own methodology, not duplicated prose here.
+ * Sales's Lead Generation Specialist (`evaluateCandidates` in
+ * leadGenerationDiscovery.ts) fetches the identical Skill under a
+ * materially different Persona, Data Source (public web search results
+ * vs. Martin's own request text), and consequence/approval shape --
+ * proving genuine cross-Hat reuse per the OS-analogy review's five-part
+ * test, not two copies of the same prompt under one label.
  */
 async function discoverOpportunity(env: Env, text: string): Promise<string> {
-  const result = await aiJson<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
+  const skillContent = await fetchSkill(env, "research_signal");
+  const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_opportunity",
-    system: `You identify potential Business Development opportunities for ENIG from explicit user direction, market signals, organisations, industries, geographies, partnerships, channels, offerings, or strategic relationships.
-
-Never invent or infer evidence that isn't in the request -- name what's still needed instead of assuming it.
-
-Return JSON:
-{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}
-- signal: a concise statement of the candidate opportunity itself.
-- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.
-- evidenceNeeded: what's still required to move this from a signal to a developed opportunity -- never empty; discovery alone is never sufficient evidence.`,
-    user: text,
+    mode: "json",
+    parts: {
+      persona:
+        "You identify potential Business Development opportunities for ENIG from explicit user direction, market signals, organisations, industries, geographies, partnerships, channels, offerings, or strategic relationships.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}\n- signal: a concise statement of the candidate opportunity itself.\n- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.\n- evidenceNeeded: what's still required to move this from a signal to a developed opportunity -- never empty; discovery alone is never sufficient evidence.`,
+    },
     light: true,
   });
 
@@ -174,20 +184,22 @@ Return JSON:
  * facts, statistics, or claims not present in the input. Anything not
  * actually stated is named as a limitation, not inferred or guessed.
  * Stateless (a "read" action), same as discoverOpportunity above.
+ *
+ * Migrated to fetch the shared `research-signal` Skill -- see
+ * discoverOpportunity's doc comment for the cross-Hat reuse proof this
+ * is part of.
  */
 async function researchOpportunity(env: Env, text: string): Promise<string> {
-  const result = await aiJson<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
+  const skillContent = await fetchSkill(env, "research_signal");
+  const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_opportunity",
-    system: `You research a named organisation, market, industry, relationship, partnership, channel, or offering to establish relevant facts and evidence for a Business Development opportunity.
-
-You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request. Never fabricate facts, statistics, claims, or sources not present in the input. Anything relevant but not actually stated must be named as a limitation, never inferred or assumed.
-
-Return JSON:
-{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for ENIG, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}
-- findings: only facts genuinely present in the input, restated clearly -- never invented.
-- limitations: what's still unknown or unverified; never empty if findings alone can't establish the opportunity.
-- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
-    user: text,
+    mode: "json",
+    parts: {
+      persona:
+        "You research a named organisation, market, industry, relationship, partnership, channel, or offering to establish relevant facts and evidence for a Business Development opportunity. You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for ENIG, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}\n- findings: only facts genuinely present in the input, restated clearly -- never invented.\n- limitations: what's still unknown or unverified; never empty if findings alone can't establish the opportunity.\n- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
+    },
     light: true,
   });
 
