@@ -3,7 +3,7 @@ import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest } from "../unitManifest";
 import type { MarketingHatDefinition, MarketingHatName } from "../../hats/types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat } from "../../hats/registry";
-import { aiJson } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -75,19 +75,22 @@ interface HatActionDecision {
   involves_spend?: boolean;
 }
 
-function buildHatSystemPrompt(hat: MarketingHatDefinition, universalRoleContract: string): string {
-  return [
-    `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    `=== HAT DEFINITION: ${hat.name} ===`,
-    `Purpose: ${hat.purpose}`,
-    `Owns:\n${hat.owns.map((o) => `- ${o}`).join("\n")}`,
-    `Does NOT own (route/escalate instead of doing this work yourself):\n${hat.doesNotOwn.map((o) => `- ${o}`).join("\n")}`,
-    `Authorized routing targets from this Hat: ${hat.routesTo.length ? hat.routesTo.join(", ") : "none — if this isn't yours, ask for clarification instead."}`,
-    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"..."}. Never guess past missing information or invent authority you don\'t have.',
-  ].join("\n\n");
+function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    persona: `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract].join("\n\n"),
+    skillContent: [
+      `=== HAT DEFINITION: ${hat.name} ===`,
+      `Purpose: ${hat.purpose}`,
+      `Owns:\n${hat.owns.map((o) => `- ${o}`).join("\n")}`,
+      `Does NOT own (route/escalate instead of doing this work yourself):\n${hat.doesNotOwn.map((o) => `- ${o}`).join("\n")}`,
+      `Authorized routing targets from this Hat: ${hat.routesTo.length ? hat.routesTo.join(", ") : "none — if this isn't yours, ask for clarification instead."}`,
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+      'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"..."}. Never guess past missing information or invent authority you don\'t have.',
+    ].join("\n\n"),
+  };
 }
 
 /**
@@ -118,10 +121,10 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
-  const decision = await aiJson<HatActionDecision>(env, {
+  const decision = await generate<HatActionDecision>(env, {
     taskId: "marketing.hat_action_decision",
-    system: buildHatSystemPrompt(hat, universalRoleContract),
-    user: state.marketingTaskText ?? "",
+    mode: "json",
+    parts: { ...buildHatPromptParts(hat, universalRoleContract), situation: state.marketingTaskText ?? "" },
   });
 
   if (!decision) {
