@@ -21,7 +21,6 @@ import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprov
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { findUnitManifest } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
-import * as businessDevelopment from "./units/businessDevelopment/businessDevelopmentManifest";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -321,8 +320,6 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
-        case "bdnextmove":
-          return businessDevelopment.handleBDNextMoveApproval(this.env, state, value === "approve");
         case "sprop": {
           // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
           // ":") specifically so it survives index.ts's plain

@@ -94,12 +94,13 @@ import { getSkillContent } from "../../platform/skillRegistry";
  * NOTE: dispatch wiring for entryHandler/readHandler/awaitingHandlers
  * (three chokepoints) is done -- see units/dispatch.ts, units/registry.ts,
  * and router.ts/session.ts's generic manifest lookups. The fourth
- * chokepoint, the approval callback, is now two-thirds migrated onto
- * HatManifest.callbackHandlers: bdopportunityhandoff (PR #203) and
- * bddevelop, both across all three Hats, dispatch generically through
- * session.ts's handleCallback default case instead of their own hardcoded
- * switch case. bdnextmove remains hardcoded, to migrate later once
- * warranted.
+ * chokepoint, the approval callback, is now fully migrated onto
+ * HatManifest.callbackHandlers: bdopportunityhandoff (PR #203), bddevelop
+ * (PR #204), and bdnextmove, all across all three Hats, dispatch
+ * generically through session.ts's handleCallback default case instead of
+ * their own hardcoded switch case. All four Unit Registry chokepoints are
+ * now genuinely wired for Business Development -- no hardcoded BD case
+ * remains in session.ts's handleCallback switch.
  */
 
 type OpportunityDevelopmentAction =
@@ -621,17 +622,6 @@ export async function handleBDDevelopApproval(env: Env, state: WorkState, approv
 // incremental-migration discipline as entryHandler's own rollout.
 export const BD_DEVELOP_CALLBACK_PREFIX = "bddevelop" as const;
 
-// Shared across all three BD Hats -- both handleBDHandoffApproval and
-// handleBDDevelopApproval are themselves already Hat-agnostic (derive
-// fromHat from state.hat), so one object covers all three Hats for both
-// prefixes. bdnextmove is NOT migrated by this change -- it remains its
-// own hardcoded handleCallback case until a later change proves this is
-// worth extending further.
-const businessDevelopmentHandoffCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
-  [BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX]: handleBDHandoffApproval,
-  [BD_DEVELOP_CALLBACK_PREFIX]: handleBDDevelopApproval,
-};
-
 /**
  * Real next-action reasoning for determine_next_move, per the Hat
  * Definition's own Output contract (Notion): "one governed next move,
@@ -747,6 +737,23 @@ export async function handleBDNextMoveApproval(env: Env, state: WorkState, appro
   await sendWorkspaceHatMessage(env, { ...state, hat: fromHat }, "Next move committed.");
   return state;
 }
+
+// The callback_data prefix proposeNextMove's own buttons are built with
+// (see its "bdnextmove:<workId>:approve/reject" literal above). Migrates
+// onto HatManifest.callbackHandlers same as bdopportunityhandoff (PR
+// #203) and bddevelop (PR #204) -- third and final BD approval-callback
+// prefix, all three now migrated off session.ts's hardcoded switch.
+export const BD_NEXT_MOVE_CALLBACK_PREFIX = "bdnextmove" as const;
+
+// Shared across all three BD Hats -- handleBDHandoffApproval,
+// handleBDDevelopApproval, and handleBDNextMoveApproval are themselves
+// already Hat-agnostic (derive fromHat from state.hat), so one object
+// covers all three Hats for all three prefixes.
+const businessDevelopmentHandoffCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+  [BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX]: handleBDHandoffApproval,
+  [BD_DEVELOP_CALLBACK_PREFIX]: handleBDDevelopApproval,
+  [BD_NEXT_MOVE_CALLBACK_PREFIX]: handleBDNextMoveApproval,
+};
 
 /**
  * Entry handler for Opportunity Development's "internal" and "write"
