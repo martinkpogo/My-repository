@@ -1,6 +1,6 @@
 import type { Env, WorkState } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
-import type { HatManifest, UnitManifest } from "../unitManifest";
+import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import type { MarketingHatDefinition, MarketingHatName } from "../../hats/types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat } from "../../hats/registry";
 import { generate, type GeneratePromptParts } from "../../ai";
@@ -39,9 +39,9 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
  * dispatchMarketingHat (exported below) wherever it used to call the
  * internal runMarketingHat function directly -- every call site
  * (handleHandoffPickup, handleMarketingIntake's success path,
- * handleTransitionApproval, handleMarketingFeedback,
- * handleMarketingClarification) is now routed through this manifest's
- * entryHandler, making it the genuine runtime execution point rather than
+ * handleMarketingFeedback, handleMarketingClarification) is now routed
+ * through this manifest's entryHandler, making it the genuine runtime
+ * execution point rather than
  * a decorative parallel structure. The actual decision logic below is
  * relocated from executionEngine.ts UNCHANGED, byte-for-byte -- this
  * migration makes zero behavioral changes to draft/route/clarify
@@ -246,6 +246,58 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   return state;
 }
 
+// The callback_data prefix runMarketingHat's own "route" branch buttons
+// are built with (see the "markettransition:<workId>:approve" literal
+// above). Migrates onto HatManifest.callbackHandlers same as Business
+// Development's three prefixes (PRs #203-205) and Sales's leadopportunity
+// (PR #206) -- relocated here (not left in executionEngine.ts, its former
+// home) to avoid a circular import, since this function's approval path
+// re-enters dispatchMarketingHat, defined in this same file.
+export const MARKET_TRANSITION_CALLBACK_PREFIX = "markettransition" as const;
+
+/**
+ * Resolves runMarketingHat's "route" branch approve/reject callback --
+ * relocated unchanged, byte-for-byte, from executionEngine.ts's former
+ * handleTransitionApproval. Rejecting asks Martin what to reconsider and
+ * holds on marketing_feedback (still executionEngine.ts's own
+ * handleMarketingFeedback, unchanged); approving commits the Hat
+ * transition and re-runs dispatchMarketingHat under the new Hat.
+ */
+export async function handleTransitionApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const pending = state.pendingTransition;
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, state, "This transition has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
+  if (!approved) {
+    await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what to reconsider and I'll take another look.");
+    state.pendingTransition = undefined;
+    state.awaiting = "marketing_feedback";
+    return state;
+  }
+
+  const fromHat = state.hat;
+  state.hat = pending.toHat;
+  state.pendingTransition = undefined;
+  await logActivity(env, {
+    entry: `Marketing work routed: ${fromHat} -> ${pending.toHat}`,
+    type: "Decision",
+    area: "Marketing",
+    decisions: `Confirmed by Martin.`,
+    decisionRationale: pending.reason,
+    outcome: "Active",
+  });
+  await sendWorkspaceHatMessage(env, state, `Routed to *${pending.toHat}*.`);
+
+  return dispatchMarketingHat(env, state);
+}
+
+const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+  [MARKET_TRANSITION_CALLBACK_PREFIX]: handleTransitionApproval,
+};
+
 async function marketingEntryHandler(env: Env, state: WorkState, _actionName: MarketingAction, _text: string): Promise<WorkState> {
   return runMarketingHat(env, state);
 }
@@ -274,6 +326,7 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
     readHandler: marketingReadHandler,
     entryHandler: marketingEntryHandler,
     awaitingHandlers: {},
+    callbackHandlers: marketingCallbackHandlers,
   };
 }
 
