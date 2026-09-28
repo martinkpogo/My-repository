@@ -6,6 +6,7 @@ import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import { dispatchStrategyHat } from "./units/strategy/strategyManifest";
+import { dispatchSalesExecutiveHat } from "./units/sales/salesManifest";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
@@ -51,7 +52,7 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async handleIncomingEnquiry(text: string): Promise<WorkState> {
-    return this.execute((state) => sales.handleIncomingEnquiry(this.env, state, text));
+    return this.execute((state) => dispatchSalesExecutiveHat(this.env, state, text));
   }
 
   async handleMarketingRequest(text: string): Promise<WorkState> {
