@@ -153,17 +153,20 @@ export const salesManifest: UnitManifest = {
     [leadGenerationSpecialistHat.name]: leadGenerationSpecialistHat,
     [salesExecutiveHat.name]: salesExecutiveHat,
   },
-  // Registered in dataBoundary/types.ts + registry.ts, but NOT yet
-  // classified in PRODUCTION_TASK_SENSITIVITY (dataBoundary/policy.ts) --
-  // pending Architect review, same discipline as every new BD task before
-  // it. Calls against these taskIds fail closed (UNRESOLVED_POLICY_HOLD)
-  // until classified; neither Hat actually reaches Stage 1 resolution in
-  // practice -- Lead Generation Specialist is dispatched via
-  // resolveUnitRequest with an explicit priorHat (router.ts's own
-  // comment), which bypasses resolveHat entirely regardless of how many
-  // Hats are registered, and Sales Executive is dispatched via
-  // dispatchSalesExecutiveHat below, entirely outside resolveUnitRequest
-  // -- it's declared only because UnitManifest requires it.
+  // Registered in dataBoundary/types.ts + registry.ts and already
+  // classified business_sensitive in PRODUCTION_TASK_SENSITIVITY
+  // (dataBoundary/policy.ts) -- Architect-reviewed as part of the Sales
+  // Stage 1/2 batch: the payload crossing this boundary is Martin-authored
+  // Workspace text plus static, code-authored routing/action metadata, the
+  // same boundary as business_development's own intake/action tasks, so no
+  // Sales-specific sensitivity dimension applies. Neither Hat actually
+  // reaches Stage 1 resolution in practice, though -- Lead Generation
+  // Specialist is dispatched via resolveUnitRequest with an explicit
+  // priorHat (router.ts's own comment), which bypasses resolveHat entirely
+  // regardless of how many Hats are registered, and Sales Executive is
+  // dispatched via dispatchSalesExecutiveHat below, entirely outside
+  // resolveUnitRequest -- these taskIds are declared only because
+  // UnitManifest requires them.
   intakeClassificationTaskId: "sales.intake_classification",
   intakeIntroLine: "You route incoming Sales requests for ENIG, among its manifest-based Hats.",
   actionClassificationTaskId: "sales.hat_action_decision",
