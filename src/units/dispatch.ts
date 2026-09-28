@@ -2,7 +2,7 @@ import type { Env } from "../types";
 import type { UnitManifest } from "./unitManifest";
 import { classifyCandidateHats, classifyAction } from "../hats/intakeClassification";
 import { dispatchAction, findAction } from "../hats/actionRegistry";
-import { sendWorkspaceHatMessage } from "../telegram";
+import { sendWorkspaceHatMessage, sendHatMessage } from "../telegram";
 import { logActivity } from "../log";
 
 /**
@@ -22,6 +22,7 @@ import { logActivity } from "../log";
  */
 export type UnitDispatchResult =
   | { kind: "handled" }
+  | { kind: "ambiguous" }
   | { kind: "continue"; hat: string; actionName: string };
 
 interface DispatchTarget {
@@ -116,6 +117,106 @@ export async function resolveUnitRequest(env: Env, manifest: UnitManifest, targe
     // never a behavior change for them.
     if (dispatchResult.reply.trim().length > 0) {
       await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
+    }
+    return { kind: "handled" };
+  }
+
+  return { kind: "continue", hat: hatName, actionName };
+}
+
+/**
+ * Chat-mode counterpart to resolveHat above: same Stage 1 candidate
+ * resolution, but never sends a clarifying message and never logs a
+ * Blocker Activity entry on ambiguity. Ordinary conversation not matching
+ * any action is Chat's expected, common case, not a blocker worth an
+ * audit trail entry the way an unresolved Cowork request is -- logging
+ * every miss here would flood the Activity Log with noise from normal
+ * chat. Returns null for anything not confidently resolved.
+ */
+async function resolveHatSilently(env: Env, manifest: UnitManifest, text: string): Promise<string | null> {
+  const hatNames = Object.keys(manifest.hats);
+  if (hatNames.length === 1) {
+    return hatNames[0];
+  }
+
+  const hatSummaryList = hatNames.map((name) => `- ${name}: ${manifest.hats[name].responsibility}`).join("\n");
+  const stage1 = await classifyCandidateHats<string>(
+    env,
+    { taskId: manifest.intakeClassificationTaskId, introLine: manifest.intakeIntroLine, hatSummaryList },
+    text,
+  );
+
+  const candidates = (stage1?.candidates ?? []).filter((name) => hatNames.includes(name));
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+/**
+ * Chat-mode counterpart to resolveUnitRequest (ENIG Operating Model
+ * design doc, "Chat is action-capable, not read-only", 2026-09-28
+ * decision). Same Stage 1/Stage 2/dispatch mechanism as Cowork's
+ * resolveUnitRequest -- the same Action Registry, the same read/write
+ * split, the same approval-gate semantics for write actions (a
+ * requiresApproval action is exactly as privileged reached from here as
+ * from Cowork; this function makes no approval decision itself, it only
+ * resolves and dispatches) -- but opposite ambiguity handling and reply
+ * targeting:
+ *
+ *   - Never sends a clarifying question and never creates a Blocker
+ *     Activity entry on a miss -- returns { kind: "ambiguous" } instead,
+ *     so the caller falls through to ordinary conversation. Cowork's
+ *     whole point is explicit direction (forcing ambiguity to resolve is
+ *     correct there); Chat's whole point is low-friction conversation
+ *     (blocking it with "I'm not sure what to do" for every message that
+ *     isn't an action would defeat that entirely).
+ *   - A "read" action's reply goes to `target` directly (wherever the
+ *     chat message actually came from -- a DM or a Unit's own topic),
+ *     never forced to the shared Workspace stream the way
+ *     resolveUnitRequest's replies are -- Cowork only ever runs inside
+ *     that one stream, so forcing it there is correct for Cowork and
+ *     would misroute Chat's reply to the wrong chat entirely.
+ */
+export async function tryResolveUnitAction(
+  env: Env,
+  manifest: UnitManifest,
+  target: DispatchTarget,
+  text: string,
+  priorHat?: string,
+): Promise<UnitDispatchResult> {
+  const hatName = priorHat ?? (await resolveHatSilently(env, manifest, text));
+  if (!hatName) {
+    return { kind: "ambiguous" };
+  }
+
+  const hat = manifest.hats[hatName];
+  if (!hat) {
+    // priorHat named a Hat this manifest doesn't declare -- Chat never
+    // had explicit confirmation of this Hat to begin with, so fail
+    // silent (fall through to conversation) rather than closed.
+    return { kind: "ambiguous" };
+  }
+
+  const stage2 = await classifyAction(
+    env,
+    { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${hatName} Hat.` },
+    hat.actions,
+    text,
+  );
+
+  const actionName = stage2?.action ?? undefined;
+  if (!actionName || !findAction(actionName, hat.actions)) {
+    return { kind: "ambiguous" };
+  }
+
+  const dispatchResult = await dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t));
+  if (!dispatchResult) {
+    // Unreachable given the findAction check above -- fail silent (not
+    // closed) anyway, consistent with this function's whole discipline.
+    return { kind: "ambiguous" };
+  }
+
+  if (dispatchResult.kind === "read") {
+    if (dispatchResult.reply.trim().length > 0) {
+      await sendHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
     }
     return { kind: "handled" };
   }
