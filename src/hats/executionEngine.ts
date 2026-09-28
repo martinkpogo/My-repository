@@ -19,7 +19,7 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * doesNotOwn, routesTo); src/hats/registry.ts remains the one canonical
  * place every Hat is registered. This file owns Stage 1 (which Hat) and
  * Stage 2 (deterministic relationship resolution) intake classification,
- * plus the approval/feedback/clarification loops -- the actual per-Hat
+ * plus the remaining feedback/clarification loops -- the actual per-Hat
  * execution decision (draft/route/clarify) has moved to
  * src/units/marketing/marketingManifest.ts's Unit Registry manifest
  * (dispatchMarketingHat), since that decision is Marketing's declared
@@ -27,7 +27,14 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * marketingManifest.ts's own doc comment for why Stage 1/2 stayed here
  * rather than migrating onto the generic manifest resolver too
  * (deterministic relationship-based tie-breaking has no equivalent
- * there).
+ * there). handleTransitionApproval has itself moved to
+ * marketingManifest.ts too (approval-callback dispatch mechanism,
+ * HatManifest.callbackHandlers) since it's the resolution of
+ * runMarketingHat's own "route" branch, defined in that same file --
+ * keeping it here would have required marketingManifest.ts to import
+ * back from this file, inverting the one-way dependency this file has on
+ * marketingManifest.ts (dispatchMarketingHat) and risking a circular
+ * import.
  *
  * Stage 1 candidate-Hat classification (classifyCandidateHats,
  * intakeClassification.ts) and Stage 2 deterministic relationship
@@ -134,37 +141,6 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
     activity: text,
     outcome: "Active",
   });
-
-  return dispatchMarketingHat(env, state);
-}
-
-export async function handleTransitionApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  const pending = state.pendingTransition;
-  if (!pending) {
-    await sendWorkspaceHatMessage(env, state, "This transition has already been resolved -- nothing to do.");
-    return state;
-  }
-  state.pendingActionSummary = undefined;
-
-  if (!approved) {
-    await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what to reconsider and I'll take another look.");
-    state.pendingTransition = undefined;
-    state.awaiting = "marketing_feedback";
-    return state;
-  }
-
-  const fromHat = state.hat;
-  state.hat = pending.toHat;
-  state.pendingTransition = undefined;
-  await logActivity(env, {
-    entry: `Marketing work routed: ${fromHat} -> ${pending.toHat}`,
-    type: "Decision",
-    area: "Marketing",
-    decisions: `Confirmed by Martin.`,
-    decisionRationale: pending.reason,
-    outcome: "Active",
-  });
-  await sendWorkspaceHatMessage(env, state, `Routed to *${pending.toHat}*.`);
 
   return dispatchMarketingHat(env, state);
 }
