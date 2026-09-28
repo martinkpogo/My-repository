@@ -4,7 +4,7 @@ import {
   MAX_RESEARCH_TEXT_LENGTH,
   MAX_SUPPLIED_EVIDENCE_LENGTH,
   buildEffectiveResearchContext,
-  buildSynthesisSystemPrompt,
+  buildSynthesisPromptParts,
   capResearchText,
   capSuppliedEvidence,
   formatSynthesisForHandoff,
@@ -14,6 +14,13 @@ import {
 } from "./researchAnalyst";
 import type { WorkState } from "../../types";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
+import type { ResearchProtocolId } from "./protocols";
+
+/** Reconstructs the same assembled string generate() would send as the system prompt, from buildSynthesisPromptParts's own parts -- mirrors ai.ts's assembleSystemPrompt exactly. */
+function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): string {
+  const parts = buildSynthesisPromptParts(hatDefinition, universalRoleContract, protocols, hasWebResults);
+  return [parts.persona, parts.behavior, parts.skillContent, parts.context].filter((s): s is string => Boolean(s && s.trim())).join("\n\n");
+}
 import { validateSynthesis, findUnverifiableSources } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";

@@ -1,6 +1,6 @@
 import type { Env, Unit, WorkState } from "../../types";
 import { getPage, plainText, richText, select, title } from "../../notion";
-import { aiJson } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -228,16 +228,19 @@ async function requireSafeContext(env: Env, state: WorkState): Promise<string | 
  * meaning caused selection to default to the wrong protocol.
  */
 async function deriveResearchRelevance(env: Env, categorySummary: string, question: string): Promise<string | null> {
-  const result = await aiJson<RelevanceResult>(env, {
+  const result = await generate<RelevanceResult>(env, {
     taskId: "research.context_relevance",
-    system: `Below is the ONLY authorized description of the consultancy this research concerns -- an abstracted category, not the consultancy's real identity. Never assume, infer, or introduce any specific company name, person name, proprietary detail, or information beyond what's written here.
+    mode: "json",
+    parts: {
+      persona: `Below is the ONLY authorized description of the consultancy this research concerns -- an abstracted category, not the consultancy's real identity. Never assume, infer, or introduce any specific company name, person name, proprietary detail, or information beyond what's written here.
 
 ${categorySummary}
 
 Given a research question, state in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This stage only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
 
 Return JSON: {"relevance": "<1-3 sentence reframing>"}`,
-    user: question,
+      situation: question,
+    },
     light: true,
   });
   const relevance = result?.relevance?.trim();
@@ -330,9 +333,11 @@ async function selectProtocolsAndRun(env: Env, state: WorkState): Promise<WorkSt
   }
   state.researchRelevance = relevance;
 
-  const stage1 = await aiJson<ProtocolSelectionResult>(env, {
+  const stage1 = await generate<ProtocolSelectionResult>(env, {
     taskId: "research.protocol_selection",
-    system: `You select research protocol(s) for a strategy-led consultancy's Research & Intelligence Unit. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:
+    mode: "json",
+    parts: {
+      persona: `You select research protocol(s) for a strategy-led consultancy's Research & Intelligence Unit. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:
 
 ${categorySummary}
 
@@ -353,7 +358,8 @@ Return JSON:
   "ambiguous": true | false,
   "reason": "<brief rationale, or what's ambiguous>"
 }`,
-    user: question,
+      situation: question,
+    },
     light: true,
   });
 
@@ -507,10 +513,10 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   const suppliedEvidence = capSuppliedEvidence([context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
-  const synthesis = await aiJson<ResearchSynthesis>(env, {
+  const synthesis = await generate<ResearchSynthesis>(env, {
     taskId: "research.synthesis",
-    system: buildSynthesisSystemPrompt(hatDefinition, universalRoleContract, protocols, webResultCount > 0),
-    user: effectiveResearchContext,
+    mode: "json",
+    parts: { ...buildSynthesisPromptParts(hatDefinition, universalRoleContract, protocols, webResultCount > 0), situation: effectiveResearchContext },
     // Raised from 2048 after live failures ("synthesis generation
     // failed") that started once evidence breadth grew to up to 8
     // dimensions x 5 results -- the fuller structured JSON output
@@ -596,27 +602,28 @@ export function buildEffectiveResearchContext(categorySummary: string, relevance
   ].join("\n\n");
 }
 
-export function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): string {
-  return [
-    "You are executing the Research & Intelligence Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, and stop conditions — follow them exactly.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== ACTIVE PROTOCOL(S) FOR THIS REQUEST ===",
-    researchProtocolDetail(protocols),
-    "=== RESEARCH OUTPUT CONTRACT ===",
-    "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique \"id\" (e.g. \"f1\", \"f2\"), and every Implication MUST reference the Finding id(s) it is based on via \"basedOnFindingIds\" — never a positional index, and never a Finding id that isn't actually present in \"findings\". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
-    "=== HARD RULE: EVIDENCE MUST ACTUALLY ANSWER THE RESEARCH DIMENSION IT'S CITED FOR ===",
-    "Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic \"businesses should analyze their competitors\" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. \"businesses should conduct regular competitor analysis\") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the \"SUPPLIED CONTEXT/EVIDENCE\" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.",
-    hasWebResults
-      ? "=== HARD RULE: YOU ONLY HAVE THE LIVE WEB SEARCH RESULTS SUPPLIED BELOW -- NO OTHER BROWSING ACCESS ==="
-      : "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
-    hasWebResults
-      ? "You do not have your own independent browsing beyond what has already been fetched for you below. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section (which includes real web search results, each with an exact title, URL, and snippet) or the research question itself. When citing a source, copy its \"url\" field EXACTLY as given below -- never paraphrase, shorten, or invent a URL. The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, statistic, or claim that is NOT grounded in the supplied search results is something you are making up, even if it sounds ordinary. If the fetched results don't contain enough to answer the question, return empty sources/evidence/findings/implications arrays and a Limitation stating plainly that the search results available didn't cover this -- never fill the gap with an invented example."
-      : "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section below (or the research question itself, if it already states facts). The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
-    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    `Return JSON exactly matching this shape:
+export function buildSynthesisPromptParts(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    persona:
+      "You are executing the Research & Intelligence Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, and stop conditions — follow them exactly.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+    skillContent: [
+      "=== ACTIVE PROTOCOL(S) FOR THIS REQUEST ===",
+      researchProtocolDetail(protocols),
+      "=== RESEARCH OUTPUT CONTRACT ===",
+      "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique \"id\" (e.g. \"f1\", \"f2\"), and every Implication MUST reference the Finding id(s) it is based on via \"basedOnFindingIds\" — never a positional index, and never a Finding id that isn't actually present in \"findings\". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
+      "=== HARD RULE: EVIDENCE MUST ACTUALLY ANSWER THE RESEARCH DIMENSION IT'S CITED FOR ===",
+      "Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic \"businesses should analyze their competitors\" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. \"businesses should conduct regular competitor analysis\") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the \"SUPPLIED CONTEXT/EVIDENCE\" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.",
+      hasWebResults
+        ? "=== HARD RULE: YOU ONLY HAVE THE LIVE WEB SEARCH RESULTS SUPPLIED BELOW -- NO OTHER BROWSING ACCESS ==="
+        : "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",
+      hasWebResults
+        ? "You do not have your own independent browsing beyond what has already been fetched for you below. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section (which includes real web search results, each with an exact title, URL, and snippet) or the research question itself. When citing a source, copy its \"url\" field EXACTLY as given below -- never paraphrase, shorten, or invent a URL. The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, statistic, or claim that is NOT grounded in the supplied search results is something you are making up, even if it sounds ordinary. If the fetched results don't contain enough to answer the question, return empty sources/evidence/findings/implications arrays and a Limitation stating plainly that the search results available didn't cover this -- never fill the gap with an invented example."
+        : "You cannot visit a website, look anything up, or know what a real company's current site/report/pricing page actually says. The ONLY facts you may treat as real are ones that literally appear in the \"SUPPLIED CONTEXT/EVIDENCE\" section below (or the research question itself, if it already states facts). The \"AUTHORIZED RESEARCH CATEGORY\" and \"RESEARCH RELEVANCE\" sections tell you what kind of consultancy and market this concerns -- use them for framing only, never as a source of specific facts to cite. A named company, competitor, website, report, or statistic that is NOT already written in the supplied context is not something you have researched — it is something you are making up, even if it sounds like a completely ordinary, generic example (\"Company A\", \"a market research report\", \"the vendor's website\" are exactly the kind of plausible-sounding fabrication that must never appear). If the supplied context does not already contain enough real source material to answer the question, you MUST return empty sources/evidence/findings/implications arrays and put a single Limitation stating plainly that no supplied source material was available to research this from. An honest empty result is the correct and expected output for most direct chat questions today — never fill the gap with an invented example.",
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+      `Return JSON exactly matching this shape:
 {
   "sources": [{"id": "s1", "source": "...", "sourceType": "...", "url": "...", "publicationDate": "...", "retrievalDate": "...", "passage": "...", "claimSupported": "...", "limitations": "...", "validationStatus": "validated" | "unvalidated" | "contradicted"}],
   "evidence": [{"id": "e1", "statement": "...", "sourceIds": ["s1"]}],
@@ -626,7 +633,8 @@ export function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleC
 }
 Every "source" and "url" value you return will be checked against the supplied context text and rejected outright if it doesn't literally appear there — so do not invent one, even a plausible-sounding placeholder.
 You may be given many search results across several research dimensions -- do NOT include every single one as a Source. Select and cite only the sources that materially support a real Finding; quietly omit redundant, weak, or unused ones. Keep passage/claimSupported/limitations fields concise (one sentence each). This keeps the response focused and, critically, lets it finish completely rather than being cut off mid-generation -- an incomplete/truncated response fails entirely, so a smaller, complete, well-cited synthesis is always better than an exhaustive one that doesn't finish.`,
-  ].join("\n\n");
+    ].join("\n\n"),
+  };
 }
 
 function formatSynthesisForTelegram(synthesis: ResearchSynthesis): string {
@@ -711,9 +719,11 @@ interface HandoffRoutingResult {
 
 async function classifyHandoffTarget(env: Env, relevance: string, synthesis: ResearchSynthesis): Promise<HandoffRoutingResult> {
   const findingsSummary = synthesis.findings.map((f) => f.statement).join("; ");
-  const result = await aiJson<HandoffRoutingResult>(env, {
+  const result = await generate<HandoffRoutingResult>(env, {
     taskId: "research.handoff_routing",
-    system: `You decide whether completed research should be automatically handed off to another team's Hat as direct input to that Hat's own work, or simply reported back with no further routing.
+    mode: "json",
+    parts: {
+      persona: `You decide whether completed research should be automatically handed off to another team's Hat as direct input to that Hat's own work, or simply reported back with no further routing.
 
 Research relevance: ${relevance}
 Key findings: ${findingsSummary || "(none)"}
@@ -721,7 +731,8 @@ Key findings: ${findingsSummary || "(none)"}
 The only Hat currently able to receive research automatically is Marketing Strategist, which owns marketing direction, positioning, brand, and channel strategy decisions. Return "marketing" ONLY if this research is genuinely direct input to a marketing-direction decision (e.g. market sizing/demand, competitor positioning, audience/customer insight relevant to marketing strategy). Return "none" for research that isn't marketing-relevant, or that's too general/exploratory to hand off to a specific Hat's decision yet.
 
 Return JSON: {"target": "marketing" | "none", "reason": "..."}`,
-    user: relevance,
+      situation: relevance,
+    },
     light: true,
   });
   return result ?? { target: "none" };
@@ -889,9 +900,11 @@ export async function handleResearchFeedback(env: Env, state: WorkState, text: s
     return selectProtocolsAndRun(env, state);
   }
 
-  const changeCheck = await aiJson<{ materiallyChanged: boolean; reason?: string }>(env, {
+  const changeCheck = await generate<{ materiallyChanged: boolean; reason?: string }>(env, {
     taskId: "research.protocol_selection",
-    system: `You evaluate whether a follow-up request materially changes the research question, scope, or research need compared to the original research task.
+    mode: "json",
+    parts: {
+      persona: `You evaluate whether a follow-up request materially changes the research question, scope, or research need compared to the original research task.
 
 Original Question: ${state.researchQuestion ?? ""}
 Active Protocols: ${state.selectedResearchProtocols.join(", ")}
@@ -901,7 +914,8 @@ Evaluate the follow-up text:
 - Set materiallyChanged to false if the follow-up is a minor refinement, clarification, or continuation within the existing research scope and active protocols.
 
 Return JSON: {"materiallyChanged": true | false, "reason": "..."}`,
-    user: text,
+      situation: text,
+    },
     light: true,
   });
 
