@@ -224,9 +224,16 @@ async function researchOpportunity(env: Env, text: string): Promise<string> {
  * gate. Same evidence discipline as discover/research above -- never
  * fabricates evidence, only assesses what's actually been stated.
  * Stateless (a "read" action).
+ *
+ * Migrated to fetch the shared `research-signal` Skill -- its third
+ * consumer alongside discoverOpportunity/researchOpportunity above,
+ * since judging strategic/commercial relevance and capability fit
+ * without inventing unstated capability claims or market facts is the
+ * same evidence discipline, not a distinct methodology.
  */
 async function assessOpportunity(env: Env, text: string): Promise<string> {
-  const result = await aiJson<{
+  const skillContent = await fetchSkill(env, "research_signal");
+  const result = await generate<{
     assessment?: string;
     strategicRelevance?: string;
     commercialRelevance?: string;
@@ -235,14 +242,13 @@ async function assessOpportunity(env: Env, text: string): Promise<string> {
     unresolvedQuestions?: string[];
   }>(env, {
     taskId: "business_development.assess_opportunity",
-    system: `You determine whether a researched Business Development signal has a substantive reason for ENIG to pursue it -- examining strategic relevance, commercial relevance, plausible value to ENIG, fit with ENIG's capabilities, evidence quality, and material unknowns.
-
-Base this only on what has actually been stated -- never invent evidence, capability claims, or market facts not present in the input. If a dimension can't be judged from what's given, say so as an unresolved question rather than guessing.
-
-Return JSON:
-{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "strategicRelevance": "<brief>", "commercialRelevance": "<brief>", "capabilityFit": "<brief -- does this fit ENIG's actual capabilities>", "evidenceQuality": "<brief -- how strong is what's been stated so far>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}
-- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
-    user: text,
+    mode: "json",
+    parts: {
+      persona:
+        "You determine whether a researched Business Development signal has a substantive reason for ENIG to pursue it -- examining strategic relevance, commercial relevance, plausible value to ENIG, fit with ENIG's capabilities, evidence quality, and material unknowns.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "strategicRelevance": "<brief>", "commercialRelevance": "<brief>", "capabilityFit": "<brief -- does this fit ENIG's actual capabilities>", "evidenceQuality": "<brief -- how strong is what's been stated so far>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}\n- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
+    },
     light: true,
   });
 
@@ -284,23 +290,24 @@ interface QualificationJudgment {
  * enthusiasm, AI confidence, or superficial fit. If required evidence is
  * missing, hold rather than infer." Ambiguity/AI failure fails closed to
  * Held, never silently defaults to Qualified.
+ *
+ * Migrated to fetch the shared `opportunity-qualification-gate` Skill --
+ * a deliberately separate Skill from `research-signal` since this is a
+ * threshold decision with its own consequence-level machinery (it pauses
+ * the WorkSession on Held), not an evidence-interpretation step.
  */
 async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
+  const skillContent = await fetchSkill(env, "opportunity_qualification_gate");
 
-  const result = await aiJson<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
+  const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.opportunity_qualification",
-    system: `You apply Business Development's evidence threshold for whether a BD opportunity is sufficiently real to invest further effort in developing.
-
-Qualification must not be based on enthusiasm, confidence, or superficial fit -- it must be based on the actual evidence gathered. If required evidence is missing to make this judgment, hold rather than infer or guess.
-
-Return JSON:
-{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}
-- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this opportunity.
-- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.
-- Blocked: the evidence gathered actively indicates this opportunity should not be pursued.
-- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
-    user: `Opportunity signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}`,
+    mode: "json",
+    parts: {
+      persona: "You apply Business Development's evidence threshold for whether a BD opportunity is sufficiently real to invest further effort in developing.",
+      skillContent,
+      situation: `Opportunity signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}\n\nReturn JSON:\n{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}\n- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this opportunity.\n- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.\n- Blocked: the evidence gathered actively indicates this opportunity should not be pursued.\n- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
+    },
     light: true,
   });
 
@@ -467,6 +474,15 @@ export async function handleBDHandoffApproval(env: Env, state: WorkState, approv
  * routes not implied by what's been gathered. This drafts only; it never
  * commits anything itself -- proposeDevelopOpportunity below presents it
  * for Martin's approval, matching requiresApproval: true.
+ *
+ * Migrated to fetch the shared `opportunity-forward-planning` Skill.
+ * Single consumer for now -- `draftNextMove` below shares this exact
+ * grounding discipline ("build only from established state, never
+ * invent") but is itself shared, Hat-agnostic plumbing across all three
+ * BD Hats (Opportunity/Partnership/Growth), out of scope for the
+ * established "Opportunity Development only" migration boundary; a
+ * natural second consumer once that boundary is revisited, not migrated
+ * here.
  */
 interface DevelopmentDraft {
   stakeholders?: string;
@@ -479,16 +495,16 @@ interface DevelopmentDraft {
 
 async function draftDevelopOpportunity(env: Env, opportunity: BDOpportunityState): Promise<DevelopmentDraft | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+  const skillContent = await fetchSkill(env, "opportunity_forward_planning");
 
-  return aiJson(env, {
+  return generate<DevelopmentDraft>(env, {
     taskId: "business_development.develop_opportunity",
-    system: `You take a qualified Business Development opportunity forward by drafting its stakeholders, value hypothesis, relationship or route, dependencies, risks, and a concrete next step.
-
-Ground everything only in the opportunity's actual signal, gathered evidence, and qualification rationale -- never invent stakeholders, routes, or facts not implied by what's actually been established. Where something can't be determined from what's given, say so plainly rather than guessing.
-
-Return JSON:
-{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<why this could create value for ENIG>", "route": "<the plausible path forward>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
-    user: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}`,
+    mode: "json",
+    parts: {
+      persona: "You take a qualified Business Development opportunity forward by drafting its stakeholders, value hypothesis, relationship or route, dependencies, risks, and a concrete next step.",
+      skillContent,
+      situation: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}\n\nReturn JSON:\n{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<why this could create value for ENIG>", "route": "<the plausible path forward>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
+    },
     light: true,
   });
 }

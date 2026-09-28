@@ -15,6 +15,8 @@ import type { Env } from "../../types";
  */
 
 const RESEARCH_SIGNAL_MARKER = "STUB_RESEARCH_SIGNAL_METHODOLOGY_MARKER";
+const QUALIFICATION_GATE_MARKER = "STUB_QUALIFICATION_GATE_METHODOLOGY_MARKER";
+const FORWARD_PLANNING_MARKER = "STUB_FORWARD_PLANNING_METHODOLOGY_MARKER";
 
 function createMockKv() {
   const store = new Map<string, string>();
@@ -40,14 +42,33 @@ function fakeEnv(): Env {
 function mockNotionFetch(t: any) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string) => {
-    if (String(url).includes("/blocks/")) {
-      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: RESEARCH_SIGNAL_MARKER }] } }] }), { status: 200 });
+    const urlStr = String(url);
+    if (urlStr.includes("/blocks/")) {
+      let marker = RESEARCH_SIGNAL_MARKER;
+      if (urlStr.includes("973b-c176")) marker = QUALIFICATION_GATE_MARKER;
+      else if (urlStr.includes("b8dc-c86f")) marker = FORWARD_PLANNING_MARKER;
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: marker }] } }] }), { status: 200 });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
     return new Response(JSON.stringify({}), { status: 200 });
   }) as any;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
+}
+
+function fakeWorkState(overrides: Record<string, unknown> = {}) {
+  return {
+    workId: "work-1",
+    chatId: 12345,
+    threadId: 777,
+    hat: "Business Development Manager",
+    unit: "Business Development",
+    bdOpportunity: { hatFamily: "opportunity_development" as const, signal: "A candidate signal", evidence: ["Some evidence"] },
+    ...overrides,
+  } as any;
 }
 
 const opportunityDevelopmentHat = businessDevelopmentManifest.hats["Business Development Manager"];
@@ -97,4 +118,77 @@ test("discover_opportunity: fails closed with a clarifying message when the mode
   const reply = await opportunityDevelopmentHat.readHandler(env, "discover_opportunity", "vague message");
 
   assert.match(reply, /Couldn't identify a clear opportunity signal/);
+});
+
+test("assess_opportunity: assembles a prompt carrying the shared research-signal Skill's methodology (its third consumer)", async (t) => {
+  const capturedSystems: string[] = [];
+  const env = fakeEnv();
+  mockNotionFetch(t);
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      capturedSystems.push(opts.messages[0].content);
+      return { response: JSON.stringify({ assessment: "Worth pursuing", strategicRelevance: "High", commercialRelevance: "Medium", capabilityFit: "Good", evidenceQuality: "Thin", unresolvedQuestions: ["budget"] }) };
+    },
+  } as any;
+
+  const reply = await opportunityDevelopmentHat.readHandler(env, "assess_opportunity", "Assess this opportunity");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assert.match(capturedSystems[0], new RegExp(RESEARCH_SIGNAL_MARKER));
+  assert.match(reply, /Assessment: Worth pursuing/);
+});
+
+test("qualify_opportunity: assembles a prompt carrying the shared opportunity-qualification-gate Skill's methodology, distinct from research-signal", async (t) => {
+  const capturedSystems: string[] = [];
+  const env = fakeEnv();
+  mockNotionFetch(t);
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      capturedSystems.push(opts.messages[0].content);
+      return { response: JSON.stringify({ qualification: "Qualified", rationale: "Strong evidence" }) };
+    },
+  } as any;
+
+  const state = fakeWorkState();
+  await opportunityDevelopmentHat.entryHandler(env, state, "qualify_opportunity", "qualify this");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assert.match(capturedSystems[0], new RegExp(QUALIFICATION_GATE_MARKER));
+  assert.doesNotMatch(capturedSystems[0], new RegExp(RESEARCH_SIGNAL_MARKER));
+  assert.strictEqual(state.bdOpportunity.qualification, "Qualified");
+  assert.strictEqual(state.awaiting, undefined);
+});
+
+test("qualify_opportunity: holds (pauses the WorkSession) rather than inferring when the model can't judge sufficiency", async (t) => {
+  const env = fakeEnv();
+  mockNotionFetch(t);
+  env.AI = { run: async () => ({ response: JSON.stringify({}) }) } as any;
+
+  const state = fakeWorkState();
+  await opportunityDevelopmentHat.entryHandler(env, state, "qualify_opportunity", "qualify this");
+
+  assert.strictEqual(state.bdOpportunity.qualification, "Held");
+  assert.strictEqual(state.awaiting, "bd_opportunity_evidence_gap");
+});
+
+test("develop_opportunity: assembles a prompt carrying the shared opportunity-forward-planning Skill's methodology, distinct from research-signal and the qualification gate", async (t) => {
+  const capturedSystems: string[] = [];
+  const env = fakeEnv();
+  mockNotionFetch(t);
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      capturedSystems.push(opts.messages[0].content);
+      return { response: JSON.stringify({ stakeholders: "Martin", valueHypothesis: "Clear value", route: "Direct outreach", dependencies: "None", risks: "Low", nextStep: "Reach out" }) };
+    },
+  } as any;
+
+  const state = fakeWorkState({ bdOpportunity: { hatFamily: "opportunity_development", signal: "A signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" } });
+  await opportunityDevelopmentHat.entryHandler(env, state, "develop_opportunity", "develop this");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assert.match(capturedSystems[0], new RegExp(FORWARD_PLANNING_MARKER));
+  assert.doesNotMatch(capturedSystems[0], new RegExp(RESEARCH_SIGNAL_MARKER));
+  assert.doesNotMatch(capturedSystems[0], new RegExp(QUALIFICATION_GATE_MARKER));
+  assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
+  assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
 });
