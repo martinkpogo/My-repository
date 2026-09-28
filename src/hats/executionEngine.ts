@@ -27,17 +27,19 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * marketingManifest.ts's own doc comment for why Stage 1/2 stayed here
  * rather than migrating onto the generic manifest resolver too
  * (deterministic relationship-based tie-breaking has no equivalent
- * there). handleTransitionApproval and handleDraftApproval have both
- * moved to marketingManifest.ts too (approval-callback dispatch
- * mechanism, HatManifest.callbackHandlers, markettransition and
- * marketdraft respectively) -- any function importable from this file
- * that a manifest-declared callbackHandlers entry needs must instead be
- * DEFINED in marketingManifest.ts, since importing it FROM this file
- * would require marketingManifest.ts to import back from here, inverting
- * this file's existing one-way dependency on marketingManifest.ts
- * (dispatchMarketingHat) and risking a circular import. handlePaidMediaApproval
- * remains here for now (marketpaid, not yet migrated) since it needs no
- * changes to stay working as a legacy handleCallback case.
+ * there). handleTransitionApproval, handleDraftApproval, and
+ * handlePaidMediaApproval have all moved to marketingManifest.ts too
+ * (approval-callback dispatch mechanism, HatManifest.callbackHandlers --
+ * markettransition, marketdraft, and marketpaid respectively) -- any
+ * function importable from this file that a manifest-declared
+ * callbackHandlers entry needs must instead be DEFINED in
+ * marketingManifest.ts, since importing it FROM this file would require
+ * marketingManifest.ts to import back from here, inverting this file's
+ * existing one-way dependency on marketingManifest.ts
+ * (dispatchMarketingHat) and risking a circular import. All three of
+ * Marketing's approval-callback prefixes are now migrated -- no
+ * hardcoded Marketing case remains in session.ts's handleCallback
+ * switch.
  *
  * Stage 1 candidate-Hat classification (classifyCandidateHats,
  * intakeClassification.ts) and Stage 2 deterministic relationship
@@ -146,36 +148,6 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
   });
 
   return dispatchMarketingHat(env, state);
-}
-
-export async function handlePaidMediaApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  if (state.stage !== "awaiting_paid_media_approval") {
-    await sendWorkspaceHatMessage(env, state, "This spend approval has already been resolved -- nothing to do.");
-    return state;
-  }
-  state.pendingActionSummary = undefined;
-
-  if (!approved) {
-    await sendWorkspaceHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
-    state.pendingPaidMediaAction = undefined;
-    state.awaiting = "marketing_feedback";
-    return state;
-  }
-
-  await logActivity(env, {
-    entry: `Digital Marketer paid media action approved`,
-    type: "Decision",
-    area: "Marketing",
-    decisions: state.pendingPaidMediaAction?.description.slice(0, 500) ?? "",
-    decisionRationale: "Budget/spend approved by Martin.",
-    outcome: "Complete",
-  });
-  await sendWorkspaceHatMessage(env, state, `Spend approved.`);
-  state.pendingPaidMediaAction = undefined;
-  state.marketingDraft = undefined;
-  state.stage = "complete";
-  state.awaiting = undefined;
-  return state;
 }
 
 /** Redo loop: append Martin's reasoning to the task text and re-run the current Hat's decision from scratch. */

@@ -355,9 +355,60 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   return state;
 }
 
+// The callback_data prefix runMarketingHat's own paid-media spend gate
+// buttons are built with (see the "marketpaid:<workId>:approve" literal
+// above). Migrates onto HatManifest.callbackHandlers same as
+// markettransition/marketdraft above, for the same reason: relocated
+// here (not left in executionEngine.ts, its former home) since a
+// callbackHandlers entry must be defined wherever it's registered, and
+// executionEngine.ts already imports from this file. Third and final
+// Marketing prefix -- no hardcoded Marketing case remains in
+// session.ts's handleCallback switch after this.
+export const MARKET_PAID_CALLBACK_PREFIX = "marketpaid" as const;
+
+/**
+ * Resolves runMarketingHat's paid-media spend gate approve/reject
+ * callback -- relocated unchanged, byte-for-byte, from
+ * executionEngine.ts's former handlePaidMediaApproval. Only ever reached
+ * for Digital Marketer's own involves_spend decisions (see
+ * runMarketingHat's isPaidMedia branch). Rejecting asks Martin what to
+ * reconsider and holds on marketing_feedback; approving records the
+ * spend decision and marks the work item complete.
+ */
+export async function handlePaidMediaApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_paid_media_approval") {
+    await sendWorkspaceHatMessage(env, state, "This spend approval has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
+  if (!approved) {
+    await sendWorkspaceHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
+    state.pendingPaidMediaAction = undefined;
+    state.awaiting = "marketing_feedback";
+    return state;
+  }
+
+  await logActivity(env, {
+    entry: `Digital Marketer paid media action approved`,
+    type: "Decision",
+    area: "Marketing",
+    decisions: state.pendingPaidMediaAction?.description.slice(0, 500) ?? "",
+    decisionRationale: "Budget/spend approved by Martin.",
+    outcome: "Complete",
+  });
+  await sendWorkspaceHatMessage(env, state, `Spend approved.`);
+  state.pendingPaidMediaAction = undefined;
+  state.marketingDraft = undefined;
+  state.stage = "complete";
+  state.awaiting = undefined;
+  return state;
+}
+
 const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_TRANSITION_CALLBACK_PREFIX]: handleTransitionApproval,
   [MARKET_DRAFT_CALLBACK_PREFIX]: handleDraftApproval,
+  [MARKET_PAID_CALLBACK_PREFIX]: handlePaidMediaApproval,
 };
 
 async function marketingEntryHandler(env: Env, state: WorkState, _actionName: MarketingAction, _text: string): Promise<WorkState> {
