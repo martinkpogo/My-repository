@@ -1,7 +1,7 @@
 import type { Env, WorkState } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
-import type { HatManifest, UnitManifest } from "../unitManifest";
-import { discoverLeadsReadHandler } from "./leadGenerationDiscovery";
+import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
+import { discoverLeadsReadHandler, handleLeadOpportunityApproval } from "./leadGenerationDiscovery";
 import * as sales from "./salesExecutive";
 
 /**
@@ -54,13 +54,16 @@ import * as sales from "./salesExecutive";
  * on-demand discovery request ("find me 3 companies showing a
  * positioning problem"). This is the only Lead Generation Specialist
  * capability reachable through a Cowork/Workspace chat message today;
- * the /lead Telegram command, cron-triggered runAutonomousLeadDiscovery
- * (leadGenerationDiscovery.ts), and the "leadopportunity" Telegram
- * approval callback (session.ts's handleCallback) all run entirely
- * outside dispatchCowork and have no manifest equivalent to move to --
- * Business Development's own approval flows are likewise still hardcoded
- * handleCallback cases, since the manifest pattern doesn't yet have a
- * generic approval-callback mechanism.
+ * the /lead Telegram command and cron-triggered runAutonomousLeadDiscovery
+ * (leadGenerationDiscovery.ts) run entirely outside dispatchCowork and
+ * have no manifest equivalent to move to (see docs/enig-operating-model.md's
+ * scoping notes on those two). The "leadopportunity" Telegram approval
+ * callback (proposeLeadOpportunity/handleLeadOpportunityApproval,
+ * leadGenerationDiscovery.ts) IS migrated below, onto
+ * HatManifest.callbackHandlers -- same generic approval-callback dispatch
+ * mechanism Business Development proved (PRs #203-205). This is the
+ * first non-BD prefix migrated, proving the mechanism generalizes beyond
+ * the Unit it was built against.
  *
  * discover_leads is "read": it never creates a WorkSession (confirmed by
  * workspaceRouter.test.ts's own assertion that this dispatch must never go
@@ -91,6 +94,17 @@ async function leadGenerationSpecialistEntryHandler(_env: Env, _state: WorkState
   throw new Error(`${actionName}: not an internal/write action on Lead Generation Specialist -- only discover_leads ("read") is declared.`);
 }
 
+// The callback_data prefix proposeLeadOpportunity's own buttons are built
+// with (see its "leadopportunity:<workId>:approve/reject" literal in
+// leadGenerationDiscovery.ts). Migrates onto HatManifest.callbackHandlers
+// same as Business Development's three prefixes (PRs #203-205) -- first
+// non-BD Unit to use this mechanism.
+export const LEAD_OPPORTUNITY_CALLBACK_PREFIX = "leadopportunity" as const;
+
+const leadGenerationSpecialistCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+  [LEAD_OPPORTUNITY_CALLBACK_PREFIX]: handleLeadOpportunityApproval,
+};
+
 const leadGenerationSpecialistHat: HatManifest<LeadGenerationSpecialistAction> = {
   name: LEAD_GENERATION_SPECIALIST_HAT_NAME,
   specialization: LEAD_GENERATION_SPECIALIST_SPECIALIZATION,
@@ -100,6 +114,7 @@ const leadGenerationSpecialistHat: HatManifest<LeadGenerationSpecialistAction> =
   readHandler: leadGenerationSpecialistReadHandler,
   entryHandler: leadGenerationSpecialistEntryHandler,
   awaitingHandlers: {},
+  callbackHandlers: leadGenerationSpecialistCallbackHandlers,
 };
 
 // Matches SALES_EXECUTIVE's HatIdentity in ../../hats/registry.ts -- see

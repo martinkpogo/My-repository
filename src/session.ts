@@ -15,7 +15,7 @@ import {
   handleGoogleFolderSelection,
   handleGoogleActionApproval,
 } from "./googleOAuth";
-import { proposeLeadOpportunity, handleLeadOpportunityApproval } from "./units/sales/leadGenerationDiscovery";
+import { proposeLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
@@ -359,8 +359,6 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
-        case "leadopportunity":
-          return handleLeadOpportunityApproval(this.env, state, value === "approve");
         default: {
           // Generic manifest lookup for an approval-callback prefix a Hat
           // has migrated onto HatManifest.callbackHandlers -- checked only
