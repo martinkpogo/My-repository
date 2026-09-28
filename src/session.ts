@@ -298,16 +298,8 @@ export class WorkSession extends DurableObject<Env> {
       switch (action) {
         case "entity":
           return sales.handleEntityChoice(this.env, state, value);
-        case "entitynew":
-          return sales.handleEntityCreationApproval(this.env, state, value === "approve");
         case "matter":
           return sales.handleMatterChoice(this.env, state, value);
-        case "matternew":
-          return sales.handleMatterCreationApproval(this.env, state, value === "approve");
-        case "qualify":
-          return sales.handleLeadToProspectApproval(this.env, state, value === "approve");
-        case "proposal":
-          return sales.handleProposalApproval(this.env, state, value === "approve");
         case "quote":
           return finance.handleQuoteApproval(this.env, state, value === "approve");
         case "researchhandoff":
