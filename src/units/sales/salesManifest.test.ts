@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
-import { salesManifest, dispatchSalesExecutiveHat } from "./salesManifest";
+import { salesManifest, dispatchSalesExecutiveHat, LEAD_OPPORTUNITY_CALLBACK_PREFIX } from "./salesManifest";
+import { findCallbackHandler } from "../unitManifest";
 import type { Env, WorkState } from "../../types";
 
 /**
@@ -99,6 +100,36 @@ test("salesManifest: entryHandler fails closed -- no internal/write action is de
 test("salesManifest: awaitingHandlers is empty -- Lead Generation Specialist has no multi-turn hold/resume flow", () => {
   const hat = salesManifest.hats["Lead Generation Specialist"];
   assert.deepStrictEqual(hat.awaitingHandlers, {});
+});
+
+test("salesManifest: Lead Generation Specialist declares exactly leadopportunity in callbackHandlers", () => {
+  const hat = salesManifest.hats["Lead Generation Specialist"];
+  assert.deepStrictEqual(Object.keys(hat.callbackHandlers ?? {}), [LEAD_OPPORTUNITY_CALLBACK_PREFIX]);
+});
+
+test("findCallbackHandler resolves leadopportunity on Lead Generation Specialist and genuinely delegates to handleLeadOpportunityApproval -- rejecting a pending finding clears it and replies, proving real delegation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (String(url).includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in salesManifest leadopportunity delegation test: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const hat = salesManifest.hats["Lead Generation Specialist"];
+  const handler = findCallbackHandler(LEAD_OPPORTUNITY_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "leadopportunity must resolve on Lead Generation Specialist's own manifest entry");
+
+  const state = fakeWorkState({
+    pendingLeadOpportunity: { organisation: "Acme Co", evidence: "Some evidence", reason: "Some reason", sourceUrl: "https://example.com", handoffId: "handoff-1" },
+  });
+
+  const result = await handler(fakeEnv(), state, false);
+
+  assert.strictEqual(result.pendingLeadOpportunity, undefined);
 });
 
 test("salesManifest: Sales Executive declares exactly one action, new_enquiry, as 'write' requiring approval", () => {
