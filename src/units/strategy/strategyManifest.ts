@@ -1,6 +1,6 @@
 import type { Env, WorkState } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
-import type { HatManifest, UnitManifest } from "../unitManifest";
+import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as strategy from "./strategyAnalyst";
 
 /**
@@ -51,6 +51,12 @@ import * as strategy from "./strategyAnalyst";
  * choice), and even if it did, resolveHat's single-Hat shortcut skips
  * Stage 1 entirely. No new SemanticTaskId registration or Architect
  * review needed.
+ *
+ * strategyAnalystHat.callbackHandlers declares strategyhandoff (the
+ * outbound-Handoff approve/reject callback strategy.ts's own routing
+ * branch sends) -- approval-callback dispatch mechanism (PRs #203-209),
+ * migrated off session.ts's hardcoded switch case onto the generic
+ * manifest lookup. handleStrategyHandoffApproval itself is unchanged.
  */
 type StrategyAction = "diagnose";
 
@@ -76,6 +82,20 @@ async function strategyReadHandler(_env: Env, actionName: StrategyAction, _text:
   throw new Error(`${actionName}: not a read action -- Strategy Analyst only declares "diagnose" ("write").`);
 }
 
+// The callback_data prefix strategy.ts's own outbound-handoff proposal
+// buttons are built with (see the "strategyhandoff:<workId>:approve"
+// literal in strategyAnalyst.ts). Migrates onto HatManifest.callbackHandlers
+// same as Business Development's/Sales's/Marketing's prefixes
+// (PRs #203-209) -- no relocation needed here, unlike Marketing: this
+// manifest already imports the whole strategyAnalyst.ts namespace
+// (`* as strategy`), and strategyAnalyst.ts never imports back from this
+// file, so there's no circular-import risk to design around.
+export const STRATEGY_HANDOFF_CALLBACK_PREFIX = "strategyhandoff" as const;
+
+const strategyAnalystCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+  [STRATEGY_HANDOFF_CALLBACK_PREFIX]: strategy.handleStrategyHandoffApproval,
+};
+
 const strategyAnalystHat: HatManifest<StrategyAction> = {
   name: STRATEGY_ANALYST_HAT_NAME,
   specialization: STRATEGY_ANALYST_SPECIALIZATION,
@@ -85,6 +105,7 @@ const strategyAnalystHat: HatManifest<StrategyAction> = {
   readHandler: strategyReadHandler,
   entryHandler: strategyEntryHandler,
   awaitingHandlers: {},
+  callbackHandlers: strategyAnalystCallbackHandlers,
 };
 
 export const strategyManifest: UnitManifest = {
