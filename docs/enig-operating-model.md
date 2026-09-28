@@ -1,6 +1,20 @@
 # ENIG Operating Model
 
-As of 2026-09-24.
+As of 2026-09-24. Extended 2026-09-28 (Chat is action-capable; Platform layer audit).
+
+## Binding, not aspirational
+
+This document is the authoritative description of ENIG Runtime's architecture -- not a proposal, not a suggestion a session is free to skip under time pressure. `AGENTS.md` points every session here before touching Units/Hats/Actions/routing/dispatch, precisely because a `docs/` file only gets read if someone happens to open it; this line is what makes that pointer mean something.
+
+Two rules that follow directly from that:
+
+* **The code must match this document.** A discrepancy between them is a bug in one of the two, not a shrug -- fix the code, or fix the doc, but never build around the mismatch as if it were acceptable. Left alone, drift here teaches every future session that this document is optional, which is the actual failure mode: not any single wrong decision, but the document quietly stopping being true.
+* **Any change that alters what this document describes updates the document in the same change**, not "someday" -- resolve or add to "Open questions" below, the same way the 2026-09-28 decisions were recorded here before being implemented.
+
+### Known drift (confirmed 2026-09-28 audit -- fix opportunistically, never treat as acceptable long-term)
+
+* **Business Development's manifest hardcodes its persona/instruction content.** `businessDevelopmentManifest.ts` (1292 lines) embeds its Hats' prompts directly in code instead of using `getGovernance`'s live-Notion-fetch pattern (`src/governance.ts`) -- the pattern six other Units (Sales, Finance, R&I, Marketing, Strategy x2) already follow. BD is the newest, most complete Unit; it should have followed the established pattern, not diverged from it.
+* **`src/actions/registry.ts`'s `ActionCapability`/`routeWorkspaceCapabilityAction` mechanism is dead code.** It has zero call sites in production (confirmed by grep) -- `GoogleDocCreationCapability`, `GoogleSheetCreationCapability`, and `LeadOpportunityDiscoveryCapability` all register themselves at module load, but nothing ever dispatches through this path. Lead Generation Specialist works correctly today through the newer `salesManifest.ts` Unit Manifest action instead, making its registration here vestigial. Google Doc/Sheet *creation* from natural language is currently unreachable (comment-*polling* is a separate mechanism and still works). To be retired: either re-register that capability as proper Unit Manifest actions, or remove the dead registrations explicitly.
 
 ## Why this isn't a contradiction
 
@@ -195,6 +209,21 @@ The manifest pattern is not proven merely because BD works end to end. It is pro
 
 This intentionally does not migrate working Units up front: it proves the plug-in shape once, cheaply, on a Unit with nothing to lose, before spending verification effort re-proving Units that already work.
 
+## Platform layer: resources by declared need, not by ownership (proposed 2026-09-28 -- NOT yet decided)
+
+Triggered by comparing ENIG Runtime to Claude Cowork's skills/plugins/connectors model. A full repository audit (not assumption) found the raw material for this mostly already exists, unevenly applied -- see "Known drift" above. This section is the proposed target shape if that were generalized and finished; it is not yet approved for implementation, and nothing below should be built without that confirmation first.
+
+**Core principle**: separate *what a resource is* from *who currently needs it*. Today, access is a side effect of file layout -- a Unit's code directly imports its own client, hardcodes its own Notion page ID. The proposed shift: register every resource once, generically, with its own eligibility rule; a Hat's manifest *declares* which resource IDs its actions draw on, resolved at dispatch time. This is not a new idea for this codebase -- `ai/policy.ts`'s `AiProvider` (`isEligible`/`execute`, a shared pool no Unit owns, resolved per task through the same Data Boundary evaluator regardless of caller) already proves the pattern; the proposal is to generalize it, not invent it.
+
+Four layers, same shape as the AI provider one:
+
+1. **Skill Registry** -- a catalog of skill ID -> Notion page ID -> eligible sensitivity tier, loaded through `getGovernance`. A Hat's manifest lists skill IDs; shared skills (e.g. a pricing methodology both Sales and Finance use) stop needing duplicate copies.
+2. **Connector Registry** -- generalizes `AiProvider`'s shape beyond AI calls to Notion/Google/Telegram/future integrations. A Hat declares a needed *capability*, not a specific client import; the registry resolves whichever connector is eligible and configured. Every call still carries a real `SemanticTaskId` through the same Data Boundary evaluator -- connectors never get a governance-free shortcut a hand-rolled client wouldn't have had either.
+3. **Data Source Registry** -- the honest resolution to the open question below about `dataLookup.ts`'s cross-Unit sources: each data source declares which Units/sensitivity tiers may touch it (Matters: Sales/Strategy/Finance; Activity Log: everyone; Leads: Sales only), rather than needing a pseudo-Unit. A Hat's read/write action declares which data sources it touches.
+4. **What does not change**: the read/internal/write + `requiresApproval` split remains the sole authority on what needs sign-off -- pooling a capability across Units never touches that gate. Same for the Handoff token-only identity boundary -- not a resource, a hard invariant, untouched by this proposal anywhere.
+
+Net effect, if built: adding a Hat becomes "declare which skills/connectors/data sources you need, from the existing catalog," not new glue code per feature. Per this doc's own "don't design the final manifest schema up front" discipline, this should be proven on one real slice (the BD hardcoded-content drift item above is the obvious first candidate for the Skill Registry specifically) before generalizing further, not attempted as one large rewrite.
+
 ## Open questions
 
 - [x] What is Sales's real action list beyond `new_enquiry`? One real answer is now built and validated end-to-end: `call_notes` -- the isolated Sales Executive project hands off de-identified call notes via a Handoff, and the Runtime Sales Executive runs commercial-value-evidence-extraction + qualification against them (`handleCallNotesHandoffPickup`). `status_check`, `follow_up`, `revise_draft` remain unconfirmed guesses.
@@ -202,4 +231,6 @@ This intentionally does not migrate working Units up front: it proves the plug-i
 - [ ] Does a "read" action ever need any lightweight audit trail (a log entry, no WorkSession), or is truly zero record acceptable for pure lookups?
 - [x] Which Unit proves the Unit Registry pattern first, and what should it actually *do*? Resolved: Business Development, structured as three Hats (Growth & Market Development, Partnership Development, Opportunity Development) -- see "The Unit Registry" above. Creative & Design and Operations remain undefined; built on the pattern once proven by BD, per the rollout order above.
 - [x] Is Chat mode allowed to invoke actions (read and write), or read-only? Resolved 2026-09-28: action-capable, same dispatch and approval-gate semantics as Cowork -- see "Chat is action-capable, not read-only" above.
-- [ ] `dataLookup.ts`'s six sources (Matters, Entity, Handoffs, Proposals, Leads, Activity) don't fit cleanly into any single Unit's manifest -- Handoffs and Activity are inherently cross-Unit. Fold into the Action Registry somehow (a dedicated cross-cutting pseudo-Unit? split per-source across the Units that actually own each one?), or keep it as a documented, deliberate exception to "actions are Unit/Hat-scoped"?
+- [ ] `dataLookup.ts`'s six sources (Matters, Entity, Handoffs, Proposals, Leads, Activity) don't fit cleanly into any single Unit's manifest -- Handoffs and Activity are inherently cross-Unit. Proposed answer: a Data Source Registry (see "Platform layer" above) rather than a pseudo-Unit -- not yet decided/built.
+- [ ] Is the Platform layer (Skill/Connector/Data Source Registry) actually worth building, and if so, in what order? Proposed 2026-09-28, not yet approved -- see "Platform layer" above.
+- [ ] Should `ActionCapability`/`routeWorkspaceCapabilityAction` (`src/actions/registry.ts`) be retired outright, or re-homed as proper Unit Manifest actions? It's dead code today either way (see "Known drift" above).

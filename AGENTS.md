@@ -19,6 +19,18 @@ Any Handoff created, updated, or resubmitted by hand (i.e. via a Notion tool cal
 * Jules does **not** redesign ENIG architecture, modify runtime behavior without authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
 * Jules **must stop** at any new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision and return to Architect rather than inventing a rule.
 
+## ENIG Runtime Architecture — mandatory reading
+
+`docs/enig-operating-model.md` is the authoritative, binding description of ENIG Runtime's architecture (Units/Hats/Actions, the Action Registry, the Unit Manifest pattern, Chat/Cowork's dispatch semantics) -- not a proposal, not background reading to skip under time pressure. Its own "binding, not aspirational" section states the same rule from the doc's side; this entry exists so every session sees the pointer automatically, since a file under `docs/` only gets read if someone happens to open it.
+
+Before creating or modifying a Unit, Hat, or Action, or touching `src/router.ts`, `src/units/dispatch.ts`, `src/units/unitManifest.ts`, `src/hats/actionRegistry.ts`, or `src/session.ts`'s dispatch/Handoff-adjacent code, read that doc first. Concretely:
+
+* **Never hardcode persona/governance content a Hat could instead load live from Notion.** `src/governance.ts`'s `getGovernance` (live-fetched, cached, fail-closed) is the established pattern six Units already use -- check for it before writing a new hardcoded prompt string of any real size.
+* **Never add a second mechanism for "how does a capability get triggered."** The Unit Manifest / Action Registry (`src/hats/actionRegistry.ts`, `src/units/unitManifest.ts`, `src/units/dispatch.ts`) is the only sanctioned one. `src/actions/registry.ts`'s `ActionCapability` mechanism is legacy/being retired -- do not register a new capability through it.
+* **A discrepancy between the doc and the code is a bug in one of them, not a shrug.** If you find one, fix it or flag it explicitly -- never silently build around it or treat it as acceptable drift.
+* **Any change that alters what the doc describes updates the doc in the same change** -- resolve or add to its "Open questions" list, not "someday."
+* This doesn't relax the Authority Model above: a genuinely new architectural or governance decision (not just applying what the doc already settled) still stops and returns to Architect.
+
 ## Claude Code Execution Contract
 
 Claude Code is trusted to run the full local pipeline -- inspect, implement, test, typecheck, self-audit -- autonomously, and does not need the Jules-specific Draft-PR-and-wait gate below. The same substantive rules still apply in full (Handoff identity-write boundary, Authority Model, Provider and Data-Boundary Constraints, and every "stop and report instead of guessing" instruction elsewhere in this repo's instructions) -- what's different is the submission mechanics:
