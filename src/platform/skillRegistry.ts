@@ -27,7 +27,7 @@ import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
  * own declared properties, per the OS-analogy review's Persona/Skill
  * separation.
  */
-export type SkillId = "universal_role_contract" | "research_signal";
+export type SkillId = "universal_role_contract" | "research_signal" | "opportunity_qualification_gate" | "opportunity_forward_planning";
 
 export interface SkillDefinition {
   id: SkillId;
@@ -111,6 +111,71 @@ export const SKILL_REGISTRY: Readonly<Record<SkillId, SkillDefinition>> = {
       "name_gaps_rather_than_guess_them",
       "attribute_claims_honestly",
       "confident_tone_is_not_evidence",
+    ],
+  },
+  /**
+   * opportunity-qualification-gate (Notion: ENIG HQ / 4. Skills /
+   * opportunity-qualification-gate,
+   * https://app.notion.com/p/3e9cb004e583815a973bc176023032d8) -- the
+   * evidence-sufficiency threshold discipline behind
+   * `qualify_opportunity`'s Qualified/Held/Blocked judgment
+   * (businessDevelopmentManifest.ts's judgeOpportunityQualification).
+   * Deliberately separate from `research_signal`: this Skill's job is a
+   * threshold *decision* over already-gathered evidence (and the
+   * consequence-level machinery that decision triggers -- pausing a
+   * WorkSession on Held -- genuinely differs from research_signal's
+   * "read"-only interpretation step), not evidence interpretation itself.
+   * Single-consumer today (Opportunity Development only, per Martin's own
+   * scope confirmation) -- registered as a real Skill regardless, since
+   * the point of this migration is moving methodology off hardcoded
+   * strings onto live-fetched Notion content, not forcing premature
+   * cross-Hat sharing before a second genuine consumer exists.
+   */
+  opportunity_qualification_gate: {
+    id: "opportunity_qualification_gate",
+    pageId: "3e9cb004-e583-815a-973b-c176023032d8",
+    sensitivity: "business_sensitive",
+    description: "Applies an evidence-sufficiency threshold (Qualified/Held/Blocked) to gathered evidence about a candidate opportunity -- never based on enthusiasm or confidence, holds rather than infers when evidence is missing, fails closed to Held on judgment failure.",
+    requiredDataSources: [],
+    requiredPrimitives: ["fetch_skill", "generate"],
+    outputContract: "Governed by the invoking action's own instruction -- this Skill's methodology constrains how the threshold judgment is reached, never the exact response shape.",
+    validation: [
+      "decision_is_about_evidence_not_enthusiasm",
+      "hold_rather_than_infer_missing_evidence",
+      "negative_indication_is_not_insufficient_evidence",
+      "judgment_failure_fails_closed_to_hold",
+      "name_what_is_missing_as_part_of_the_decision",
+    ],
+  },
+  /**
+   * opportunity-forward-planning (Notion: ENIG HQ / 4. Skills /
+   * opportunity-forward-planning,
+   * https://app.notion.com/p/3e9cb004e58381f3b8dcc86f83acc3b4) -- the
+   * grounding discipline behind `develop_opportunity`'s drafting
+   * (businessDevelopmentManifest.ts's draftDevelopOpportunity): build
+   * only from the opportunity's actual established state, never invent a
+   * stakeholder/route/dependency/next-action not implied by what's known.
+   * Named and scoped generally (not "opportunity-development-drafting")
+   * because `determine_next_move`'s draftNextMove shares this identical
+   * discipline and is its natural second consumer -- not migrated onto
+   * it yet only because draftNextMove is shared, Hat-agnostic plumbing
+   * across all three BD Hats, out of scope for the established
+   * "Opportunity Development only" migration boundary this pass respects.
+   */
+  opportunity_forward_planning: {
+    id: "opportunity_forward_planning",
+    pageId: "3e9cb004-e583-81f3-b8dc-c86f83acc3b4",
+    sensitivity: "business_sensitive",
+    description: "Grounds a forward-looking plan or next-action recommendation strictly in an opportunity's already-established signal/evidence/qualification state -- never inventing a stakeholder, route, dependency, or next action not implied by what's known.",
+    requiredDataSources: [],
+    requiredPrimitives: ["fetch_skill", "generate"],
+    outputContract: "Governed by the invoking action's own instruction (a multi-field development plan vs. a single next-action recommendation) -- this Skill's methodology constrains how that output is derived from established state, never its shape.",
+    validation: [
+      "build_only_from_what_is_already_established",
+      "never_invent_an_unimplied_plan_element",
+      "say_plainly_when_undeterminable",
+      "a_draft_is_never_a_commitment",
+      "surface_dependent_human_decisions_explicitly",
     ],
   },
 };

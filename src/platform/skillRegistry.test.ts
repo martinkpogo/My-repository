@@ -4,6 +4,8 @@ import { getSkill, SKILL_REGISTRY } from "./skillRegistry";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 
 const RESEARCH_SIGNAL_PAGE_ID = "3e9cb004-e583-81cb-8e42-fcdbc8ca1201";
+const QUALIFICATION_GATE_PAGE_ID = "3e9cb004-e583-815a-973b-c176023032d8";
+const FORWARD_PLANNING_PAGE_ID = "3e9cb004-e583-81f3-b8dc-c86f83acc3b4";
 
 test("getSkill: an unregistered id fails closed with a clear error", () => {
   assert.throws(() => getSkill("nonexistent" as any), /not a registered skill/);
@@ -39,4 +41,19 @@ test("research_signal declares its evidence-discipline invariants as named valid
   assert.ok(skill.validation && skill.validation.length >= 4, "research_signal must declare its core evidence-discipline invariants");
   assert.ok(skill.validation!.includes("never_fabricate_a_specific_fact"));
   assert.ok(skill.validation!.includes("distinguish_observation_from_diagnosis"));
+});
+
+test("opportunity_qualification_gate and opportunity_forward_planning each resolve to their own real, distinct Notion pages", () => {
+  const qualificationGate = getSkill("opportunity_qualification_gate");
+  const forwardPlanning = getSkill("opportunity_forward_planning");
+  assert.strictEqual(qualificationGate.pageId, QUALIFICATION_GATE_PAGE_ID);
+  assert.strictEqual(forwardPlanning.pageId, FORWARD_PLANNING_PAGE_ID);
+  const allPageIds = [qualificationGate.pageId, forwardPlanning.pageId, getSkill("research_signal").pageId, getSkill("universal_role_contract").pageId];
+  assert.strictEqual(new Set(allPageIds).size, allPageIds.length, "every registered skill must resolve to a distinct page");
+});
+
+test("opportunity_qualification_gate is a deliberately separate Skill from research_signal, not a duplicate registration", () => {
+  const qualificationGate = getSkill("opportunity_qualification_gate");
+  assert.ok(qualificationGate.validation!.includes("hold_rather_than_infer_missing_evidence"));
+  assert.doesNotMatch(qualificationGate.description, /observation-vs-diagnosis/);
 });
