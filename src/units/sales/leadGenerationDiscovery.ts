@@ -3,8 +3,8 @@ import { isWebSearchConfigured, searchWeb } from "../research/webSearch";
 import type { WebSearchResult } from "../research/webSearch";
 import { createPage, plainText, queryDataSource, richText, select, title } from "../../notion";
 import { createHandoff } from "../../handoffWriter";
-import { aiJson } from "../../ai";
-import { fetchSkill, generate } from "../../platform/primitives";
+import { aiJson, generate } from "../../ai";
+import { getSkillContent } from "../../platform/skillRegistry";
 import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import type { HatMessageTarget } from "../../telegram";
@@ -116,7 +116,7 @@ export async function evaluateCandidates(env: Env, results: WebSearchResult[]): 
     return [];
   }
 
-  const skillContent = await fetchSkill(env, "research_signal");
+  const skillContent = getSkillContent("research_signal");
 
   const candidatesText = results
     .map((r, i) => `[${i}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${r.publishedDate ? `\nPublished: ${r.publishedDate}` : ""}`)

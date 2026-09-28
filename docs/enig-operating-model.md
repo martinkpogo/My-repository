@@ -1,6 +1,6 @@
 # ENIG Operating Model
 
-As of 2026-09-24. Extended 2026-09-28 (Chat is action-capable; Platform layer confirmed as target architecture -- primitives, registries, skill-driven pipelines). Refined 2026-09-28, second pass (fresh per-call authority/eligibility resolution as a hard invariant; cross-Hat reuse folded into the primary build-order proof step rather than deferred to a later one).
+As of 2026-09-24. Extended 2026-09-28 (Chat is action-capable; Platform layer confirmed as target architecture -- primitives, registries, skill-driven pipelines). Refined 2026-09-28, second pass (fresh per-call authority/eligibility resolution as a hard invariant; cross-Hat reuse folded into the primary build-order proof step rather than deferred to a later one). **Superseded 2026-09-28, third pass: the "Platform layer" (six primitives + three registries) is retired as the target architecture, replaced by "The Runtime architecture: Kernel, Applications, Capabilities, Runtime Services" below.** That replacement follows a direct implementation inspection (four rounds: Skills/fetchSkill, generate/AiPolicyExecutor, a repo-native Skill contract, and a full Kernel-enforcement map) which found the six-primitive/three-registry model was never adopted by real traffic -- see that section for the evidence. Nothing about Units, Hats, the Action Registry, Handoff enforcement, or the AI execution/Data Boundary chain changes; those were independently confirmed as real, current architecture by the same inspection.
 
 ## Binding, not aspirational
 
@@ -13,8 +13,8 @@ Two rules that follow directly from that:
 
 ### Known drift (confirmed 2026-09-28 audit -- fix opportunistically, never treat as acceptable long-term)
 
-* **Business Development's manifest hardcodes most of its persona/instruction content.** `businessDevelopmentManifest.ts` embeds most of its Hats' prompts directly in code instead of using `getGovernance`'s live-Notion-fetch pattern (`src/governance.ts`) -- the pattern six other Units (Sales, Finance, R&I, Marketing, Strategy x2) already follow. Substantially addressed for Opportunity Development 2026-09-28: `discover_opportunity`/`research_opportunity`/`assess_opportunity` (three consumers of the shared `research-signal` Skill), `qualify_opportunity` (`opportunity-qualification-gate` Skill), and `develop_opportunity` (`opportunity-forward-planning` Skill) all now fetch their methodology live from Notion instead of restating it inline -- five of Opportunity Development's six AI-driven actions. Still hardcoded and open: Opportunity Development's Hat responsibility framing (one sentence, deliberately deferred -- see "Open questions"), `determine_next_move`'s `draftNextMove` (shared, Hat-agnostic plumbing across all three BD Hats -- out of scope for the established "Opportunity Development only" migration boundary, a natural consumer of `opportunity-forward-planning` once that boundary is revisited), and all of Partnership Development/Growth & Market Development's own prompts.
-* ~~`src/actions/registry.ts`'s `ActionCapability`/`routeWorkspaceCapabilityAction` mechanism is dead code.~~ **Resolved 2026-09-28 -- removed outright**, in the same pass as the `research-signal` Skill proof (Build order Step 2/3 below). It had zero production call sites (confirmed by grep before removal); `GoogleDocCreationCapability`/`GoogleSheetCreationCapability` (googleOAuth.ts) and `LeadOpportunityDiscoveryCapability` (leadGenerationDiscovery.ts) keep their own object shape and are still invoked directly where they always actually ran from, just without the dead registry wrapping them.
+* **Business Development's manifest hardcodes most of its persona/instruction content.** `businessDevelopmentManifest.ts` embeds most of its Hats' prompts directly in code instead of using `getGovernance`'s live-Notion-fetch pattern (`src/governance.ts`) -- the pattern six other Units (Sales, Finance, R&I, Marketing, Strategy x2) already follow. Substantially addressed for Opportunity Development 2026-09-28: `discover_opportunity`/`research_opportunity`/`assess_opportunity` (three consumers of the shared `research-signal` Skill), `qualify_opportunity` (`opportunity-qualification-gate` Skill), and `develop_opportunity` (`opportunity-forward-planning` Skill) all now fetch their methodology live from Notion instead of restating it inline -- five of Opportunity Development's six AI-driven actions. Still hardcoded and open: Opportunity Development's Hat responsibility framing (one sentence, deliberately deferred -- see "Open questions"), `determine_next_move`'s `draftNextMove` (shared, Hat-agnostic plumbing across all three BD Hats -- out of scope for the established "Opportunity Development only" migration boundary, a natural consumer of `opportunity-forward-planning` once that boundary is revisited), and all of Partnership Development/Growth & Market Development's own prompts. Note (2026-09-28, third pass): these three Skills currently live in Notion via `fetchSkill`, which remains accurate as a description of today's code; "The Runtime architecture" section below records the separate decision that Skills' *target* home is repo-native, not Notion -- that target is not yet built, and this drift item's facts are unaffected by it.
+* ~~`src/actions/registry.ts`'s `ActionCapability`/`routeWorkspaceCapabilityAction` mechanism is dead code.~~ **Resolved 2026-09-28 -- removed outright**, in the same pass as the `research-signal` Skill proof. It had zero production call sites (confirmed by grep before removal); `GoogleDocCreationCapability`/`GoogleSheetCreationCapability` (googleOAuth.ts) and `LeadOpportunityDiscoveryCapability` (leadGenerationDiscovery.ts) keep their own object shape and are still invoked directly where they always actually ran from, just without the dead registry wrapping them.
 
 ## Why this isn't a contradiction
 
@@ -93,7 +93,7 @@ Concretely:
 
 ## The Action Registry
 
-**Superseded by "Platform layer: primitives, registries, and skill-driven pipelines" below (confirmed 2026-09-28)** -- this section's per-Unit `ActionDefinition[]` shape (each Hat declaring and owning its own private, often-duplicated action list) is being replaced by a small set of shared primitives any Hat composes. Left in place as historical record of the reasoning that got the system this far (the consequence/approval split in "Read vs. write" below still holds exactly, just attached to primitives now instead of per-Unit actions) -- not because the mechanism it describes is still the target.
+**Current, verified architecture (confirmed 2026-09-28, third pass)** -- an earlier version of this doc marked this section superseded by a "Platform layer" of shared primitives that would let Hats stop declaring their own private `ActionDefinition[]`. That replacement was never built: a direct implementation inspection (see "The Runtime architecture" below) confirmed `hats/actionRegistry.ts`'s per-Hat `ActionDefinition[]`/`dispatchAction`, exactly as this section describes, remains the real, current, and only mechanism actually resolving and dispatching actions in production. This section is restored as accurate, not historical.
 
 Every Unit/Hat declares a small, finite list of named actions -- the same idea `ALL_HATS` already applies to Unit/Hat discovery, one level down. Marketing already does this informally: its Stage 1 intake (`marketing.intake_classification`) reads raw text and picks a Hat; a second, already-existing task (`marketing.hat_action_decision`) then picks what to do within that Hat. Generalizing this removes the need for each Unit to invent its own intent-reading:
 
@@ -122,6 +122,8 @@ Each registered action declares its own consequence level:
 - **Write** -- creates or mutates governed state (drafts a proposal, sets a price, creates a Handoff, contacts a client). Goes through the existing full pipeline, unchanged: WorkSession, governed execution, approval gate.
 
 This is what lets "my own GPT" ease coexist with real control: low-consequence actions get low friction, high-consequence actions get proportionate friction -- the split is on what the action *does*, not on which Unit it belongs to.
+
+**Current enforcement gap (confirmed 2026-09-28, third pass, via direct trace of every consumer of a `dispatchAction` result):** `requiresApproval` is declared on `ActionDefinition` and computed into `dispatchAction`'s return value, but is not read or checked by any shared code after that -- `dispatch.ts`, `router.ts`, and `session.ts`'s `handleUnitAction` all branch only on read-vs-continuable, never on `.requiresApproval`. Every write action built so far (Business Development, Marketing, Strategy) presents an approval gate anyway, but by each Hat's own hand-written propose/approve pair -- a followed convention, not something the Kernel currently checks or would notice the absence of. See "The Runtime architecture" below, "Kernel" subsection, for the full evidence and for what would make this a genuine Kernel enforcement boundary rather than a convention.
 
 ## Strategy and Finance: direct entry without bypassing the discipline
 
@@ -211,80 +213,160 @@ The manifest pattern is not proven merely because BD works end to end. It is pro
 
 This intentionally does not migrate working Units up front: it proves the plug-in shape once, cheaply, on a Unit with nothing to lose, before spending verification effort re-proving Units that already work.
 
-## Platform layer: primitives, registries, and skill-driven pipelines (confirmed 2026-09-28)
+## The Runtime architecture: Kernel, Applications, Capabilities, Runtime Services (confirmed 2026-09-28, third pass)
 
-Triggered by comparing ENIG Runtime to Claude Cowork's skills/plugins/connectors model, then pressure-tested across several rounds directly with Martin. This supersedes the same-day "proposed, NOT yet decided" version of this section after that discussion went further -- **this is now the confirmed target architecture**, not a proposal. It is a substantial rework of `hats/actionRegistry.ts`, `units/unitManifest.ts`, and `units/dispatch.ts`; build it staged (see "Build order" below), never as one large rewrite, per this doc's own "don't design the final schema up front" discipline.
+**Supersedes the "Platform layer" model above outright.** That model (six shared primitives + three registries, composed by Hat pipeline functions) was pressure-tested against the actual, deployed implementation across four rounds of direct inspection -- tracing every production caller of `fetchSkill`, `generate`, `readRecord`, `writeRecord`, `search`, `requestApproval`, `connectorRegistry.ts`, and `dataSourceRegistry.ts`, plus every path from a Hat to an external effect (AI generation, Notion read/write, Handoff write, Telegram, web search, Google Docs/Sheets). The finding, stated plainly: real production traffic never adopted the primitive/registry layer. Two of six primitives (`fetchSkill`, `generate`) have a handful of production callers and are thin convenience wrappers around mechanisms that already existed and that most of the codebase still calls directly; the other four have zero production callers; both non-Skill registries have zero production callers. Meanwhile, exactly two mechanisms in the whole Runtime are both genuinely universal and genuinely enforced today: the AI execution chain, and the Handoff identity boundary -- neither of which needed the primitive/registry layer to be true, and both of which the primitive/registry layer's own doc language already deferred to rather than reimplemented.
 
-**Core principle, unchanged from the original proposal**: separate *what a resource is* from *who currently needs it*. Today, access is a side effect of file layout -- a Unit's code directly imports its own client, hardcodes its own Notion page ID, and declares its own private, often-duplicated action list (BD's own doc comment admits `determine_next_move`/`handoff_to_sales`/`handoff_to_strategy` are each declared three times, once per Hat, despite being identical). The fix: register every resource and every action *once*, generically; a Hat *declares* which it draws on, resolved at dispatch time. Not a new idea for this codebase -- `ai/policy.ts`'s `AiProvider` (`isEligible`/`execute`, a shared pool no Unit owns, resolved per task through the same Data Boundary evaluator regardless of caller) already proves the pattern. This generalizes it, including to actions themselves, which the original proposal hadn't gone as far as.
+This section replaces the Platform layer with a model derived from that evidence, not from preference:
 
-### The Action Catalog: a small set of primitives, not per-Unit verbs
+```
+ENIG Runtime
+│
+├── Kernel
+│   └── Universal execution rules and enforcement
+│
+├── Applications
+│   └── Units
+│       └── Specializations
+│           └── Hats
+│               └── Responsibilities → Outputs
+│
+├── Capabilities
+│   └── Skills
+│
+└── Runtime Services
+    ├── AI Execution
+    ├── Notion
+    ├── Web Search
+    ├── Telegram
+    └── Google Workspace
+```
 
-Actions stop being Unit-owned entirely. A small, fixed set of primitives is registered once and composed by any Hat that needs them:
+Providers sit beneath the relevant Runtime Service -- they are the external implementation a Service uses, never the architectural abstraction itself:
 
-- **`read_record`** (read) -- fetch a record from a registered Data Source (a Handoff, a Matter, an Entity, a Proposal), parametrized by source and id.
-- **`fetch_skill`** (read) -- load a registered governance/methodology/format resource by id, through the existing `getGovernance` live-Notion pattern. Kept distinct from `read_record` because Skills are Architect-authored governance content with different outbound-leak-detector treatment (`governance.ts`'s `GOVERNANCE_CONTENT_START`/`END` wrapping) than ordinary business data -- collapsing the two would blur a distinction the system needs.
-- **`search`** (read) -- external or internal search (web, Notion). Kept distinct from `read_record` because the trust/provider-eligibility profile genuinely differs (an untrusted external source vs. our own governed, tokenized data) -- not because it "feels" different.
-- **`generate`** (internal or write, depending on what it produces) -- call the model with assembled context (see "How `generate` assembles a prompt" below), get output back. One primitive regardless of whether the output is JSON-shaped (a classification) or free text (a draft) -- both get identical Data Boundary/Outbound Gate treatment, so splitting them would be atomizing without a governance reason.
-- **`request_approval`** (the gate itself, explicit and composable) -- present output, pause, wait for Martin's Approve/Refine/Reject. Deliberately not folded into `write_record` as an implicit side effect: decoupling lets a pipeline request approval once and then write several records, or draft-then-approve before ever attempting a write, and it makes the privileged step directly testable in isolation rather than buried inside a bigger verb.
-- **`write_record`** (write) -- persist an outcome: create or update a record. Not split into "create" vs. "update" at this level -- where a resource has its own extra rule (Handoff's Entity_Token/Matter_Token-only enforcement, `handoffWriter.ts`), that rule lives on the *resource* in the Data Source Registry, not as a different action.
+```
+AI Execution
+    ↓
+Provider Policy / Selection
+    ↓
+Eligible AI Provider   (e.g. Workers AI / Gemini / Groq / OpenRouter / Cerebras / Sambanova / NVIDIA-NIM)
 
-**The test for whether something needs a new primitive, rather than becoming a parameter on an existing one: does the governance/boundary treatment genuinely differ, not does it feel conceptually different.** `search` earns its own primitive because its trust profile differs from `read_record`'s; `generate` does not split by output shape because the boundary treatment is identical either way; `write_record` does not split into create/update because the safety-critical check applies to both identically, and the one place a real distinction exists (Handoffs) is captured as a resource-level rule, not a new verb. Applying this test is exactly what keeps the catalog from either re-fragmenting into per-Unit verbs or over-atomizing into primitives with no real reason to be separate.
+Web Search      → Tavily
+Notion          → Notion API
+Telegram        → Telegram API
+Google Workspace → Google APIs
+```
 
-### Considered and rejected: a live, dynamic reasoning loop
+### Kernel
 
-The first draft of this section proposed a Hat's own model deciding, step by step at runtime, which primitive to call next (a ReAct-style agent loop). Rejected after further thought, for reasons specific to this system, not agent loops in general:
+The Kernel is universal execution rules and enforcement -- mechanisms every relevant execution actually passes through, verified by trace, not mechanisms merely intended as governance. A mechanism does not become Kernel by being under `src/platform/`, by having "governance" in a doc comment, or by being architecturally desirable; it becomes Kernel only where the trace shows every relevant path actually goes through it and nothing bypasses it in production.
 
-- **Cloudflare Workers has real execution-time limits.** A loop chaining several sequential AI calls, each waiting on the last, is exactly the shape that risks a wall-clock ceiling this design doesn't get to ignore.
-- **Reliability compounds across steps.** This session already needed few-shot examples and a model switch to make one single classification step (`dataLookup.ts`'s request classifier) reliable. A loop where the model decides the *sequence itself* multiplies that same unreliability at every step, not once.
-- **It would break the one thing this codebase is actually good at.** Every existing mechanism here is deterministic except the one narrow judgment call that genuinely needs AI (classify, draft, assess) -- fail-closed, testable, auditable, matching the discipline behind the existing 664-test suite. A live loop makes the *sequence itself* non-deterministic, so a Hat's behavior could no longer be pinned down by a test the way everything else here can be.
+**Current, verified Kernel enforcement:**
 
-### The confirmed shape instead: primitives as a shared function library, pipelines as ordinary code
+- **AI provider eligibility and fallback policy** -- `AiPolicyExecutor.executeTask` (`src/ai/policy.ts`). Every production AI call (whether reached via `generate()` or directly via `aiJson`/`aiChat`/`aiText` in `src/ai.ts`) passes through this; confirmed by trace that no production code calls a provider adapter or `executeTask` directly.
+- **AI Data Boundary enforcement** -- `DataBoundaryEvaluator.evaluate` (`src/dataBoundary/policy.ts`), invoked unconditionally inside `executeTask` for every provider attempt.
+- **Identity redaction and leftover-identity verification** -- `redactIdentityTerms`/`findLeftoverBannedTerms` (`src/ai/identityRedaction.ts`), invoked unconditionally inside `executeTask`, with a hard stop (the call is not sent) if verification finds a leftover term.
+- **AI Outbound Data Gate** -- `OutboundDataGateEvaluator.evaluate` (`src/ai/outboundGate.ts`), invoked unconditionally inside `executeTask`, on the exact post-redaction payload, per provider attempt.
+- **Handoff identity/token boundary** -- `validateHandoffProperties`/`assertTokensPresent` (`src/handoffWriter.ts`), invoked by every Handoff creation/update in the codebase; confirmed by trace that no production code writes to the Handoffs Data Source (`HANDOFFS_DATA_SOURCE_ID`) any other way.
+- **Routing/consequence handling, where currently enforced** -- `dispatchAction`/`ConsequenceLevel` (`src/hats/actionRegistry.ts`), invoked by `resolveUnitRequest`/`tryResolveUnitAction` (`src/units/dispatch.ts`) for every manifest-registered Unit (Sales, Marketing, Strategy, Business Development as of this writing) to decide read-vs-continuable. This is real and enforced for those Units specifically -- Units without a registered manifest (Finance, R&I, Creative & Design, Operations) don't route through it at all, which is a coverage gap, not a bypass of an otherwise-universal rule.
 
-The five/six primitives above are implemented once as callable functions, each resolving against the registries below and the existing Data Boundary evaluator. A Hat's actual task is **ordinary, deterministic TypeScript code -- a pipeline function -- built by composing these primitives**, written once at build time by whoever builds that Hat, not improvised live by a model. This is not a new shape for this codebase: Strategy's `handleDirectRequest` already *is* a fixed pipeline (diagnose -> causation-discipline check -> branch to develop-or-route -> completeness check -> Approve/Refine/Reject) -- the change is that such a pipeline gets built from shared primitive functions instead of bespoke duplicated implementations per Unit. Composition ("many actions chained for one task, as needed") happens exactly as much as any Hat's task requires; it just happens in code, at build time, exactly as testable as every other function in this codebase, rather than as a live, unpredictable loop.
+**Explicitly not yet universal Kernel enforcement, despite being declared or intended as governance** -- stated here so this document never claims more than the trace supports:
 
-### Three registries
+- **`requiresApproval`** is declared per action (`ActionDefinition.requiresApproval`, `src/hats/actionRegistry.ts`) and computed into `dispatchAction`'s result, but is not read or checked by any shared code downstream of that computation -- confirmed by tracing every consumer (`dispatch.ts`, `router.ts`, `session.ts`'s `handleUnitAction`). Every write action built so far presents an approval gate anyway, through each Hat's own hand-written propose/approve function pair (e.g. `proposeBDDevelopment`/`handleBDDevelopApproval` in `businessDevelopmentManifest.ts`) -- a followed convention across every Hat built to date, not something the Kernel currently checks, would notice the absence of, or could reject a non-conforming Hat for. Making this genuinely Kernel-enforced (e.g. `handleUnitAction` refusing to finalize a declared-`requiresApproval` write without a recorded approval) is a real, identified, not-yet-built enforcement point -- target architecture, explicitly not current fact.
+- **`logActivity`** (`src/log.ts`) is caller-dependent: ~150+ call sites across the codebase, each inserted individually by that file's own author at a point they judged an entry was warranted. No dispatch/entry/write path calls it automatically on a Hat's behalf. A Hat can structurally perform a material action without an Activity & Decision Log entry being written -- nothing currently prevents or detects that. In every Hat built so far, the entry is in fact written, by convention, not enforcement.
 
-1. **Data Source Registry** -- Matters, Entity, Handoffs, Proposals, Leads, Activity Log, each declaring which Units/sensitivity tiers may read/write it (Matters: Sales/Strategy/Finance; Activity Log: everyone; Leads: Sales only) -- the honest resolution to `dataLookup.ts`'s cross-Unit sources, instead of a pseudo-Unit. Handoff's token-only identity boundary is a rule declared *here*, on the resource, not re-implemented per Unit that happens to write one.
-2. **Skill Registry** -- skill id -> Notion page id -> eligible sensitivity tier, loaded through the existing `getGovernance`. A pipeline calls `fetch_skill` by id; shared skills (a pricing methodology both Sales and Finance use) stop needing duplicate copies.
-3. **Connector Registry** -- generalizes `AiProvider`'s shape beyond AI calls to Notion/Google/Telegram/future integrations. A pipeline calls a needed capability, not a specific client import; the registry resolves whichever connector is eligible and configured. Every call still carries a real `SemanticTaskId` through the same Data Boundary evaluator -- connectors never get a governance-free shortcut a hand-rolled client wouldn't have had either.
+### Applications
 
-### Unit Manifest's new shape: declaration only
+Applications are the business execution layer:
 
-A Hat's manifest no longer declares a private `ActionDefinition[]` with its own handlers. It declares: its name, its responsibility (loaded as a Skill via `fetch_skill`, never hardcoded -- closing the BD drift item above as a side effect of this migration, not separate cleanup), which Data Sources/Skills/Connectors it's granted, its own registered `SemanticTaskId`(s) for the `generate` calls its pipeline makes, and its pipeline function. That is the entire surface a new Hat needs to supply.
+```
+Unit
+ → Specialization
+  → Hat
+   → Responsibility
+    → Output
+```
 
-### How `generate` assembles a prompt
+A **Unit** is an organizational/business execution area (Sales, Marketing, Strategy, Finance, Research & Intelligence, Business Development, Creative & Design, Operations). A **Hat** is the governed responsibility that performs work within a Unit -- never described as an integration, a Skill, a primitive, or a provider; those are separate concepts entirely (see below). Runtime resolves the appropriate Application/Hat for a request according to the governed operating model already described above ("The OS metaphor," "The Action Registry," "Read vs. write," "The Unit Registry") -- none of that changes here. Runtime does not contain one hardcoded universal business workflow; which Unit/Hat/action a request resolves to, and what that Hat's own pipeline does, is declared per Unit/Hat, not fixed centrally.
 
-`generate`'s job is to assemble the same structure a well-written prompt always needs, automatically, from the declared pieces, so nobody hand-writes it per Hat:
+### Capabilities: Skills
 
-- **Role** -> the Hat's persona (its own voice/authority framing)
-- **Context** -> whatever this pipeline's `read_record`/`search` calls actually pulled in for this specific task
-- **Instruction** -> the fetched Skill's methodology/format content
-- **Behavior** -> cross-cutting rules that apply to every persona regardless of Unit (the Universal Role Contract, the evidence/no-invention rule) -- injected the same way for everyone, not re-pasted per Hat
-- **Situation** -> the incoming request plus wherever the pipeline currently is
-- **Example** -> can live inside a Skill's own content, the same way few-shot examples were added to `dataLookup.ts`'s classifier this session when plain instruction alone wasn't reliable
+A Skill is a reusable capability/methodology used by an Application. It answers **how should this type of work be performed**, never *who* is performing it (that's the Hat) or *what mechanism* carries it out (that's a Runtime Service). A Skill is not a Unit, a Hat, a provider, an integration, or a Kernel enforcement mechanism. Skills may be shared across Units/Hats where the underlying methodology is genuinely the same -- `research_signal` (shared today between Business Development's Opportunity Development and Sales's Lead Generation Specialist) is the one proven instance.
 
-`chat.ts` already does a hand-concatenated version of exactly this (`REAL_STRUCTURE_FACTS + persona + EVIDENCE_RULE + NO_ACTIONS_RULE`) -- this generalizes that pattern so updating "what every persona must follow" or "how a proposal should be formatted" happens once, not by re-editing every Hat's own hardcoded prompt.
+**Current fact:** Skills are repo-native -- `src/platform/skillRegistry.ts` exports a closed `SkillId` union and a synchronous `getSkillContent(id): string` lookup over a plain `Record<SkillId, string>` map of methodology content, resolved by an ordinary `import`, never fetched over the network at runtime. The minimum contract is deliberately just id + methodology content, nothing else -- confirmed by inspection before this model was adopted that no runtime code ever consulted a `SkillDefinition`'s `pageId`, `sensitivity`, `description`, `requiredDataSources`, `requiredPrimitives`, `outputContract`, or `validation` fields (`DataBoundaryEvaluator` resolves sensitivity from `SemanticTaskId`, never from a Skill's own declared field). `research_signal`, `opportunity_qualification_gate`, and `opportunity_forward_planning` (Business Development/Sales) are the three Skills registered this way today, migrated verbatim from the Notion pages they replace -- AI behavior/methodology content unchanged by the migration. The prior Notion-backed `fetchSkill`/`SkillDefinition`/`getSkill` arrangement no longer exists in the codebase.
 
-### What never changes
+### Runtime Services
 
-- `SemanticTaskId` sensitivity/outbound-policy classification, resolved per actual `generate` call (not once per action name) -- fails closed exactly as today if unregistered.
-- The Handoff token-only identity boundary, enforced in `handoffWriter.ts`, now anchored to the Handoffs resource entry rather than duplicated per Unit.
-- `requiresApproval` as the sole authority on what needs Martin's sign-off -- now an explicit, directly-testable `request_approval` step rather than an implicit side effect, but no less strict.
-- **Data Source eligibility (`canRead`/`canWrite`) and a Hat's own authority/persona framing are resolved fresh on every single primitive call, keyed to whichever Hat is actually invoking it that turn -- never cached or reused across Hats, even for the same registered resource or skill within the same request cycle.** A shared Skill/resource must never become a bridge that leaks one Hat's access into another's context; re-resolving on every call (not once per Skill, not once per session) is what keeps that true by construction rather than by convention. Two different Hats calling the same `fetch_skill`/`read_record` moments apart get two entirely independent resolutions, with no shared execution state carried over from one to the other.
+Runtime Services are the concrete capabilities Runtime exposes to Applications for carrying out work against internal or external systems: **AI Execution, Notion, Web Search, Telegram, Google Workspace**. An Application (a Hat's own pipeline code) invokes the Runtime Service appropriate to its responsibility. Runtime Services are not required to implement one generic `execute()` interface -- a Notion query and a Telegram send are nothing alike, and forcing a uniform shape across them was already tried (`connectorRegistry.ts`'s `ConnectorDefinition`) and never adopted by real traffic (see "The Connector/Data Source Registries are retired as active architecture" below). Multiple Runtime Services existing is not, by itself, a reason to introduce a universal abstraction over them.
 
-### What "plug and play" means once this exists
+```
+Application / Hat
+    ↓
+Skill, where applicable
+    ↓
+Runtime Service
+    ↓
+External system / provider
+```
 
-Adding a new subsystem (Creative & Design, Operations, or anything beyond) becomes: write a manifest (Hats, responsibility skill pages, resource grants), create the Notion skill pages, and write each Hat's pipeline function from the shared primitive library. Zero changes to the kernel, `router.ts`, `session.ts`, or the registries themselves.
+**AI is a special Runtime Service**, because it is also the execution mechanism a Hat uses to perform reasoning/generation, and it is the one Runtime Service with genuine, verified, universal Kernel enforcement underneath it. AI's path is not flattened into an ordinary provider call:
 
-### Build order
+```
+Application
+ → AI execution
+  → AiPolicyExecutor
+   → Data Boundary / identity controls / Outbound Gate
+    → eligible provider
+```
 
-Staged to prove the design on real, already-identified complexity rather than a big-bang rewrite:
+Every other Runtime Service (Notion, Web Search, Telegram, Google Workspace) is invoked today by ordinary application code calling that Service's own concrete client directly (`src/notion.ts`, `src/units/research/webSearch.ts`, `src/telegram.ts`, `src/googleOAuth.ts`) -- confirmed by trace to be the actual, dominant, production pattern, not a bypass of some other intended path. Handoff writes specifically route through `src/handoffWriter.ts` first, which is where that Service's one real Kernel-enforced rule (the identity/token boundary) actually lives.
 
-1. Build the kernel primitives (as callable functions) and the three registries as new infrastructure, alongside the existing system, touching no live Unit's behavior yet.
-2. ~~Prove it on Business Development~~ -- **first slice done 2026-09-28.** `research-signal` (Notion: ENIG HQ / 4. Skills / research-signal) is the first Skill built, and this step's own requirement -- that reuse be proven in the same step, not deferred -- is satisfied: BD's Opportunity Development `discover_opportunity`/`research_opportunity` (businessDevelopmentManifest.ts) and Sales's Lead Generation Specialist `evaluateCandidates` (leadGenerationDiscovery.ts) both fetch the identical Skill content, under materially different Persona (BD's own discover/research framing vs. Lead Generation Specialist's live-fetched Hat Definition), Data Source (Martin's own request text vs. public web search results), and consequence/approval shape (a standalone "read" action with no approval vs. a step feeding an eventual approval-gated Lead-creation write) -- proven directly in `src/platform/researchSignal.crossHat.test.ts`. Still open: BD's remaining hardcoded content (see "Known drift" above), and the rest of BD onto the full primitives+registries shape (only two functions have migrated so far).
-3. ~~Retire `ActionCapability`/`routeWorkspaceCapabilityAction`~~ -- **Done 2026-09-28**, in the same pass as the `research-signal` proof above (see "Known drift").
-4. Once BD runs clean with zero regressions, migrate Sales, Marketing, Strategy, and Finance one at a time, each deleting its old hand-wired path as it goes -- the existing "Migration path" discipline above, aimed at the new kernel instead of the old per-Unit-`ActionDefinition[]` shape.
-5. Build Creative & Design and Operations directly on the finished pattern -- the first genuine test of "plug and play" against a subsystem that didn't exist before.
+### The Action Catalog is retired
+
+The prior "Action Catalog" (six primitives: `read_record`, `fetch_skill`, `search`, `generate`, `request_approval`, `write_record`) was never a mandatory, universal architectural layer that every request passes through, verified by trace, and no longer exists in the codebase as a distinct layer at all:
+
+- **`readRecord`, `fetchSkill` (the Notion-backed version), `search`, `requestApproval`, and `writeRecord`** were removed outright -- each had no production callers, confirmed by direct grep across the codebase before removal (referenced only by their own test files). Their real work already happened directly against `queryDataSource`/`updatePage` (`src/notion.ts`), `handoffWriter.ts`, `searchWeb` (`src/units/research/webSearch.ts`), and each Hat's own hand-written propose/approve function pair.
+- **`generate`** is the one function from the six that had genuine callers (the same call sites now using `getSkillContent` for Skill content -- see "Capabilities: Skills" above). It was folded directly into `src/ai.ts`, alongside `aiJson`/`aiChat`/`aiText`, rather than kept as a separate `platform/primitives.ts` module -- there is no longer a dedicated "primitives" file or concept in the codebase. `generate` remains a convenience wrapper only (prompt-string assembly plus a typed call into `aiJson`/`aiChat`/`aiText`), never a distinct boundary of its own: every call still reaches the same `AiPolicyExecutor.executeTask` a direct `aiJson`/`aiChat`/`aiText` call would (see "Kernel" above). Roughly 34 other production call sites call `aiJson`/`aiChat`/`aiText` directly, without going through `generate` at all.
+
+### The Connector/Data Source Registries are removed
+
+`src/platform/connectorRegistry.ts` and `src/platform/dataSourceRegistry.ts` no longer exist in the codebase. Both were confirmed, by trace, to have had no production invocation path before removal:
+
+- **Connector Registry** -- `isConnectorEligible`/`getConnector`/`CONNECTOR_REGISTRY` were referenced only from within `src/platform/` itself. `ConnectorDefinition` also had no `execute()`/invocation method at all, by its own original design choice, which means it could not have served as an invocation layer even if something had called it.
+- **Data Source Registry** -- `canRead`/`canWrite`/`getDataSource` were referenced only from within `src/platform/` itself. No real Notion read or write anywhere in the codebase consulted it.
+- Actual Notion, Telegram, Web Search, and Google operations use their concrete Service/client implementations directly, as described under "Runtime Services" above.
+- Handoff writes have their real, enforced identity boundary in `src/handoffWriter.ts` -- not in the Data Source Registry, which was never wired to it.
+
+### Request execution: a conceptual model, not a fixed sequence
+
+```
+Request
+  ↓
+Runtime resolves governed next action
+  ↓
+Appropriate Unit / Hat
+  ↓
+Relevant Skill(s), where needed
+  ↓
+Hat performs responsibility
+  ↓
+Runtime Service(s), where needed
+  ↓
+Kernel enforcement at applicable boundaries
+  ↓
+Output / Handoff / Approval / State transition
+  ↓
+Runtime resolves the next governed action
+```
+
+This describes how execution is organized conceptually, not a hardcoded universal sequence every request must literally traverse in this order. Concretely, and already true today:
+
+- Some work is deterministic code with no AI step at all (e.g. `findDuplicateLeads`'s mechanical Notion query).
+- Some work uses AI once, or several times, depending on the Hat's own pipeline (e.g. R&I's diagnosis pipeline makes multiple sequential `aiJson` calls; a single classification makes one).
+- Some work invokes an external Runtime Service directly with no Skill involved (e.g. `searchWeb` inside Lead Generation Specialist's discovery loop).
+- Some work requires human approval before a state transition is final; some (declared "read", or "internal" with no `requiresApproval`) does not.
+
+Runtime must not be read as requiring AI for every request -- confirmed false by trace: `readRecord`-shaped Notion lookups, Handoff routing decisions already made by a prior AI step, and plenty of ordinary application logic (duplicate checks, token resolution, formatting) run with no AI call in their own path.
 
 ## Open questions
 
@@ -293,11 +375,14 @@ Staged to prove the design on real, already-identified complexity rather than a 
 - [ ] Does a "read" action ever need any lightweight audit trail (a log entry, no WorkSession), or is truly zero record acceptable for pure lookups?
 - [x] Which Unit proves the Unit Registry pattern first, and what should it actually *do*? Resolved: Business Development, structured as three Hats (Growth & Market Development, Partnership Development, Opportunity Development) -- see "The Unit Registry" above. Creative & Design and Operations remain undefined; built on the pattern once proven by BD, per the rollout order above.
 - [x] Is Chat mode allowed to invoke actions (read and write), or read-only? Resolved 2026-09-28: action-capable, same dispatch and approval-gate semantics as Cowork -- see "Chat is action-capable, not read-only" above.
-- [x] `dataLookup.ts`'s six sources (Matters, Entity, Handoffs, Proposals, Leads, Activity) don't fit cleanly into any single Unit's manifest -- Handoffs and Activity are inherently cross-Unit. Resolved 2026-09-28: a Data Source Registry (see "Platform layer" above), not a pseudo-Unit -- confirmed target, not yet built.
-- [x] Is the Platform layer worth building, and in what shape? Resolved 2026-09-28 after several rounds of direct discussion: confirmed as primitives (a shared function library, not a live agentic loop) + three registries (Data Source, Skill, Connector) + manifests reduced to declaration -- see "Platform layer: primitives, registries, and skill-driven pipelines" above. Not yet built; staged build order recorded there.
-- [x] Should `ActionCapability`/`routeWorkspaceCapabilityAction` (`src/actions/registry.ts`) be retired outright, or re-homed? Resolved 2026-09-28: retired, in the same pass as Business Development's migration to the Platform layer (see its "Build order" above) -- not carried forward into the new model.
-- [ ] Exact typed signatures for the six primitive functions (`read_record`, `fetch_skill`, `search`, `generate`, `request_approval`, `write_record`) and the three registries' interfaces -- an implementation detail to work out during Platform layer Build order step 1, not a design question still open.
-- [x] Should Data Source/authority resolution ever be cached or reused across Hats within one request cycle, for a shared Skill/resource? Resolved 2026-09-28: no -- resolved fresh on every primitive call, keyed to the actual invoking Hat, never cached across Hats or Personas. See "What never changes" above.
-- [x] Should cross-Hat Skill reuse be proven in the same build-order step as the first Hat, or as a later, separate step? Resolved 2026-09-28: the same step -- Build order step 2 now requires wiring a second Hat to any shared Skill built there, not deferring reuse to step 4. See "Build order" above.
-- [ ] Should `HatManifest.responsibility` (currently a plain hardcoded string, e.g. Opportunity Development's one-sentence framing) become a live-fetched Skill too, per "Unit Manifest's new shape" above? Deliberately deferred during Opportunity Development's own Skill migration (2026-09-28) -- it's one sentence, mostly documentation-purpose today (not yet consumed live per turn by any action-resolution AI task), and making it async at dispatch time is a real design change to `HatManifest`'s own contract, not a drop-in swap like the per-action prompts. Worth a deliberate pass of its own once that action-resolution task actually exists, not bundled into this one.
-- [ ] `determine_next_move`'s `draftNextMove` and all of Partnership Development/Growth & Market Development's own prompts remain hardcoded -- deliberately out of scope for the "Opportunity Development only" migration boundary (2026-09-28). `draftNextMove` is a natural second consumer of `opportunity-forward-planning` once that boundary is revisited; Partnership/Growth's own discover/research/assess/qualify/develop prompts would need their own Skills (partnership-/growth-flavored methodology, per the same reasoning that kept BD's Partnership Development a distinct Hat rather than an alias).
+- [x] `dataLookup.ts`'s six sources (Matters, Entity, Handoffs, Proposals, Leads, Activity) don't fit cleanly into any single Unit's manifest -- Handoffs and Activity are inherently cross-Unit. **Superseded 2026-09-28, third pass:** the Data Source Registry this was resolved toward was never adopted by production traffic (zero callers, confirmed by inspection) and is no longer presented as active architecture -- see "The Connector/Data Source Registries are retired as active architecture" above. `dataLookup.ts`'s own cross-Unit-source handling remains exactly as it is today; this question is open again in the sense that no replacement has been decided, not resolved.
+- [x] Is the Platform layer worth building, and in what shape? **Superseded 2026-09-28, third pass:** no -- a direct implementation inspection found it was never adopted by production traffic. Replaced by "The Runtime architecture: Kernel, Applications, Capabilities, Runtime Services" above.
+- [x] Should `ActionCapability`/`routeWorkspaceCapabilityAction` (`src/actions/registry.ts`) be retired outright, or re-homed? Resolved 2026-09-28: retired outright -- unaffected by the Platform layer's own retirement above; this decision and the removed code stand on their own (the mechanism had zero production call sites regardless of what replaced or didn't replace the Platform layer).
+- [ ] **Superseded 2026-09-28, third pass, by a narrower open question:** not "exact typed signatures for the six primitives," since they are no longer a foundational layer this document commits to building out. The real open design question is what a repo-native Skill's minimum contract should be (an id + methodology content/module, per "Capabilities: Skills" above) -- not yet decided in this document, deliberately, per this pass's own scope (documentation restructuring only, no new abstraction introduced).
+- [ ] **Superseded 2026-09-28, third pass:** fresh per-call Data Source/authority resolution (no caching across Hats) was a hard invariant *for the Platform layer specifically*, which is retired. The underlying principle -- a shared Skill/resource must never become a bridge that leaks one Hat's access into another's -- should still hold for whatever formalizes Kernel-enforced Data Source/Skill access next, but that mechanism doesn't exist yet (see "The Connector/Data Source Registries are retired" above), so there is nothing currently enforcing this to re-confirm as resolved.
+- [ ] **Superseded 2026-09-28, third pass:** cross-Hat Skill reuse being proven in the same build step (not deferred) was a Platform-layer build-order rule. `research_signal`'s real, already-proven cross-Hat reuse (Business Development + Sales, `src/platform/researchSignal.crossHat.test.ts`) stands on its own regardless of the Platform layer's retirement -- that evidence doesn't change. Whether a *future* Skill build should follow the same discipline is an open question again, since there's no longer a "Build order" section committing to it.
+- [ ] Should `HatManifest.responsibility` (currently a plain hardcoded string) become a live-fetched or repo-native Skill? Still open, unaffected by this pass -- see "Capabilities: Skills" above for the current repo-native-target direction this would need to follow if pursued.
+- [ ] `determine_next_move`'s `draftNextMove` and all of Partnership Development/Growth & Market Development's own prompts remain hardcoded -- still open, unaffected by this pass. `draftNextMove` remains a natural second consumer of `opportunity-forward-planning`'s methodology whenever it moves off Notion/hardcoding, whatever mechanism ends up fetching or importing it.
+- [ ] **New 2026-09-28, third pass:** should `requiresApproval` become genuinely Kernel-enforced (e.g. `handleUnitAction` refusing to finalize a declared-`requiresApproval` write without a recorded approval), rather than a followed convention? See "Kernel" above for the full evidence. Not decided here -- this pass is documentation restructuring only, no new enforcement code introduced.
+- [ ] **New 2026-09-28, third pass:** should material-action logging (`logActivity`) become mandatory/automatic at the dispatch or entry-handler boundary, rather than caller-dependent? See "Kernel" above. Not decided here, for the same reason.
+- [ ] **New 2026-09-28, third pass:** should Notion/Telegram/Web Search/Google Workspace gain a genuine Kernel-enforced boundary analogous to the AI execution chain (e.g. a real Data Source eligibility check actually consulted by `notion.ts` calls), or is direct application-level invocation, as already practiced everywhere, the intended permanent shape for those Runtime Services? Not decided here.
