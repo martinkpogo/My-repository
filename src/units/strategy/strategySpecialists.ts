@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { aiJson } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 
 /**
@@ -42,7 +42,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
  * "bounded context" without inventing a second redaction mechanism.
  *
  * Concurrency: implemented at the task/work-item level via Promise.all
- * over the selected specialists' own independent aiJson calls, all
+ * over the selected specialists' own independent generate() calls, all
  * within the same Cloudflare Worker invocation and the same parent
  * WorkState/workId -- no separate Worker, no separate WorkSession per
  * specialist, exactly per the canonical architecture's own
@@ -133,20 +133,23 @@ const VALID_DOMAINS: StrategySpecialistDomain[] = ["business", "brand", "communi
  * were a genuine determination when the classifier itself simply failed.
  */
 export async function selectRequiredSpecialists(env: Env, strategyQuestion: string, strategyContext: string): Promise<SpecialistSelectionResult | null> {
-  const result = await aiJson<{ domains?: string[]; reasoning?: string }>(env, {
+  const result = await generate<{ domains?: string[]; reasoning?: string }>(env, {
     taskId: "strategy.specialist_selection",
-    system: [
-      "You are executing the Strategy Analyst Hat's specialist-selection responsibility (step 3 of its canonical operating procedure), retrieved from ENIG's canonical Notion governance for the Strategy Unit's composable specialist-diagnosis model.",
-      "Three specialist Hats are available:",
-      "- \"business\" (Business Strategist): business model, growth model, market opportunity, competitive position, commercial direction, business objectives, material commercial constraints.",
-      "- \"brand\" (Brand Strategist): positioning, differentiation, perception, brand architecture, value proposition, brand relevance.",
-      "- \"communication\" (Communication Strategist): messaging, narrative, audience communication, communication hierarchy, communication architecture, value proposition expression.",
-      "Select a specialist because the situation genuinely requires that domain of judgment to responsibly diagnose the strategic question -- NEVER because a symptom merely touches that domain. For example, a situation may present a brand symptom (e.g. inconsistent visual identity) while the underlying problem is actually commercial (e.g. a business-model mismatch) -- in that case select \"business\", not \"brand\", or both if genuinely both domains of judgment are needed to resolve the question.",
-      "Valid outcomes: zero specialists (the Strategy Analyst can responsibly resolve the question directly from the available evidence and established strategic reasoning -- this is a normal, expected outcome, not a fallback), one specialist, or multiple specialists (when the situation has materially independent strategic dimensions).",
-      "Never select a specialist merely to be thorough, and never select all three by default.",
-      'Return JSON: {"domains": ["business" | "brand" | "communication", ...] (empty array if none are required), "reasoning": "..."}',
-    ].join("\n\n"),
-    user: `Strategic question: ${strategyQuestion}\n\nSituation/context:\n${strategyContext}`,
+    mode: "json",
+    parts: {
+      persona: [
+        "You are executing the Strategy Analyst Hat's specialist-selection responsibility (step 3 of its canonical operating procedure), retrieved from ENIG's canonical Notion governance for the Strategy Unit's composable specialist-diagnosis model.",
+        "Three specialist Hats are available:",
+        "- \"business\" (Business Strategist): business model, growth model, market opportunity, competitive position, commercial direction, business objectives, material commercial constraints.",
+        "- \"brand\" (Brand Strategist): positioning, differentiation, perception, brand architecture, value proposition, brand relevance.",
+        "- \"communication\" (Communication Strategist): messaging, narrative, audience communication, communication hierarchy, communication architecture, value proposition expression.",
+        "Select a specialist because the situation genuinely requires that domain of judgment to responsibly diagnose the strategic question -- NEVER because a symptom merely touches that domain. For example, a situation may present a brand symptom (e.g. inconsistent visual identity) while the underlying problem is actually commercial (e.g. a business-model mismatch) -- in that case select \"business\", not \"brand\", or both if genuinely both domains of judgment are needed to resolve the question.",
+        "Valid outcomes: zero specialists (the Strategy Analyst can responsibly resolve the question directly from the available evidence and established strategic reasoning -- this is a normal, expected outcome, not a fallback), one specialist, or multiple specialists (when the situation has materially independent strategic dimensions).",
+        "Never select a specialist merely to be thorough, and never select all three by default.",
+        'Return JSON: {"domains": ["business" | "brand" | "communication", ...] (empty array if none are required), "reasoning": "..."}',
+      ].join("\n\n"),
+      situation: `Strategic question: ${strategyQuestion}\n\nSituation/context:\n${strategyContext}`,
+    },
     light: true,
   });
 
@@ -158,18 +161,18 @@ export async function selectRequiredSpecialists(env: Env, strategyQuestion: stri
   return { domains: uniqueDomains, reasoning: result.reasoning ?? "" };
 }
 
-function buildSpecialistSystemPrompt(profile: SpecialistProfile, hatDefinition: string, universalRoleContract: string): string {
-  return [
-    `You are executing the ${profile.hatName} Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.`,
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution mechanics -- not part of the governance above) ===",
-    `Diagnose the ${profile.domain} dimensions of the strategic situation below -- ${profile.diagnosticDomainsSummary}. You were selected because the situation was judged to require this domain of judgment; this does NOT mean your domain is necessarily the required intervention -- you may conclude your domain does not justify one. Distinguish evidence from interpretation, inference, and recommendation throughout. Never assert causation without sufficient support. Never treat information supplied in the context as established fact merely because it was supplied.`,
-    "You do not produce the canonical Strategy Proposal, and you must not modify it -- only the Strategy Analyst does that, after reconciling every specialist's bounded finding.",
-    "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
-    `Return JSON exactly matching this shape:
+function buildSpecialistPromptParts(profile: SpecialistProfile, hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    persona: `You are executing the ${profile.hatName} Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.`,
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+    skillContent: [
+      "=== TASK (execution mechanics -- not part of the governance above) ===",
+      `Diagnose the ${profile.domain} dimensions of the strategic situation below -- ${profile.diagnosticDomainsSummary}. You were selected because the situation was judged to require this domain of judgment; this does NOT mean your domain is necessarily the required intervention -- you may conclude your domain does not justify one. Distinguish evidence from interpretation, inference, and recommendation throughout. Never assert causation without sufficient support. Never treat information supplied in the context as established fact merely because it was supplied.`,
+      "You do not produce the canonical Strategy Proposal, and you must not modify it -- only the Strategy Analyst does that, after reconciling every specialist's bounded finding.",
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
+      `Return JSON exactly matching this shape:
 {
   "sufficient": true | false,
   "blockedReason": "..." (only if sufficient=false -- state exactly what is missing/ambiguous, per your Hat's own stop conditions),
@@ -183,7 +186,8 @@ function buildSpecialistSystemPrompt(profile: SpecialistProfile, hatDefinition: 
   "unresolvedQuestions": "..."
 }
 Only include domainExamined/problemOrIssue/supportingEvidence/diagnosis/strategicImplication/uncertaintyAndLimitations/unresolvedQuestions if sufficient=true.`,
-  ].join("\n\n");
+    ].join("\n\n"),
+  };
 }
 
 /**
@@ -205,7 +209,7 @@ export async function runSpecialistDiagnosis(env: Env, domain: StrategySpecialis
       return { domain, status: "failed", failureReason: `Could not retrieve canonical ${profile.hatName} Hat Definition and/or Universal Role Contract from Notion.` };
     }
 
-    const result = await aiJson<{
+    const result = await generate<{
       sufficient?: boolean;
       blockedReason?: string;
       domainExamined?: string;
@@ -218,8 +222,8 @@ export async function runSpecialistDiagnosis(env: Env, domain: StrategySpecialis
       unresolvedQuestions?: string;
     }>(env, {
       taskId: profile.taskId,
-      system: buildSpecialistSystemPrompt(profile, hatDefinition, universalRoleContract),
-      user: strategyContext,
+      mode: "json",
+      parts: { ...buildSpecialistPromptParts(profile, hatDefinition, universalRoleContract), situation: strategyContext },
       light: true,
     });
 
@@ -300,17 +304,20 @@ export async function synthesizeSpecialistFindings(env: Env, strategyQuestion: s
     })
     .join("\n\n");
 
-  const result = await aiJson<SpecialistSynthesisResult>(env, {
+  const result = await generate<SpecialistSynthesisResult>(env, {
     taskId: "strategy.specialist_synthesis",
-    system: [
-      "You are executing the Strategy Analyst Hat's synthesis responsibility (step 5 of its canonical operating procedure) -- the sole synthesis authority for the Strategy Unit, reconciling bounded specialist findings before the unchanged Symptom -> Problem -> Cause -> Constraint -> Consequence diagnosis proceeds.",
-      "You are given one or more specialist findings below. Some may be marked UNAVAILABLE -- a specialist whose diagnosis could not be completed. Never substitute another specialist's assumptions for an unavailable one, and never treat an unavailable finding as if it were a negative/neutral result -- it is simply missing.",
-      "Reconcile the available findings: distinguish evidence from interpretation/inference, identify where findings agree, identify where findings materially disagree and whether that disagreement can be reconciled, identify cross-domain relationships (e.g. a business-model finding that explains a brand-perception finding), and identify material uncertainty across the findings as a whole.",
-      "Set sufficient=false if: a required specialist's finding is unavailable and its absence is material to responsibly proceeding, OR findings materially conflict and cannot be reconciled from what's given. Do not set sufficient=true merely because some findings are available -- judge whether what's available is actually enough.",
-      "synthesizedContext should be a plain-prose narrative (not the raw findings restated) that the strategic diagnosis step can use as additional grounded context -- state what the specialists established, what remains uncertain, and any cross-domain relationships, without asserting a diagnosis or recommendation yourself (that remains the diagnosis step's own responsibility).",
-      'Return JSON: {"sufficient": true|false, "insufficiencyReason": "..." (only if sufficient=false), "synthesizedContext": "..." (only if sufficient=true), "agreements": "...", "disagreements": "...", "crossDomainRelationships": "...", "materialUncertainty": "..."}',
-    ].join("\n\n"),
-    user: `Strategic question: ${strategyQuestion}\n\nSpecialist findings:\n${findingsText}`,
+    mode: "json",
+    parts: {
+      persona: [
+        "You are executing the Strategy Analyst Hat's synthesis responsibility (step 5 of its canonical operating procedure) -- the sole synthesis authority for the Strategy Unit, reconciling bounded specialist findings before the unchanged Symptom -> Problem -> Cause -> Constraint -> Consequence diagnosis proceeds.",
+        "You are given one or more specialist findings below. Some may be marked UNAVAILABLE -- a specialist whose diagnosis could not be completed. Never substitute another specialist's assumptions for an unavailable one, and never treat an unavailable finding as if it were a negative/neutral result -- it is simply missing.",
+        "Reconcile the available findings: distinguish evidence from interpretation/inference, identify where findings agree, identify where findings materially disagree and whether that disagreement can be reconciled, identify cross-domain relationships (e.g. a business-model finding that explains a brand-perception finding), and identify material uncertainty across the findings as a whole.",
+        "Set sufficient=false if: a required specialist's finding is unavailable and its absence is material to responsibly proceeding, OR findings materially conflict and cannot be reconciled from what's given. Do not set sufficient=true merely because some findings are available -- judge whether what's available is actually enough.",
+        "synthesizedContext should be a plain-prose narrative (not the raw findings restated) that the strategic diagnosis step can use as additional grounded context -- state what the specialists established, what remains uncertain, and any cross-domain relationships, without asserting a diagnosis or recommendation yourself (that remains the diagnosis step's own responsibility).",
+        'Return JSON: {"sufficient": true|false, "insufficiencyReason": "..." (only if sufficient=false), "synthesizedContext": "..." (only if sufficient=true), "agreements": "...", "disagreements": "...", "crossDomainRelationships": "...", "materialUncertainty": "..."}',
+      ].join("\n\n"),
+      situation: `Strategic question: ${strategyQuestion}\n\nSpecialist findings:\n${findingsText}`,
+    },
     light: true,
     maxTokens: 2000,
   });

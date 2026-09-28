@@ -1,6 +1,6 @@
 import type { Env, Unit, WorkState } from "../../types";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
-import { aiJson } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { editWorkspaceHatMessage, sendOperationsMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -352,20 +352,33 @@ async function getStrategyGovernance(env: Env): Promise<StrategyGovernance | nul
   return { hatDefinition, universalRoleContract };
 }
 
-function buildDiagnosisSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
-  return [
-    "You are executing the Strategy Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution mechanics -- not part of the governance above) ===",
-    "Work through the canonical operating procedure: (1) establish the strategic question -- stop if materially ambiguous; (2) establish the situation (symptoms, business conditions, constraints, consequences, stakeholders, objectives); (3) diagnose using Symptom -> Problem -> Cause -> Constraint -> Consequence, never asserting causation without sufficient support; (4) frame the strategic problem (what it is, why it matters, key drivers, the strategic tension/decision, material uncertainty); (5) develop strategic options only where genuinely warranted -- if only one direction is strategically reasonable, say so rather than manufacturing alternatives; (6) recommend a direction only when the evidence supports one, otherwise state explicitly what must be resolved first.",
-    "Information supplied in the context below is NOT automatically established fact merely because it came from another Hat or Unit -- distinguish evidence from interpretation, inference, implication, and recommendation throughout.",
-    "You do not own research, evidence validation, commercial progression, pricing, or creative production -- those belong to R&I, Sales, Finance, and Creative respectively. If the work genuinely requires one of those first (e.g. missing evidence a Handoff to R&I should gather), say so as the blocked/insufficient reason rather than inventing the missing material yourself.",
-    "Set causationSupported explicitly and honestly for the diagnosed cause -- true only if the supplied context actually supports that causal claim, never merely because it sounds plausible.",
-    "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
-    `Return JSON exactly matching this shape:
+/**
+ * Shared persona+behavior pair every Strategy Analyst prompt builder below
+ * uses identically -- the same governance framing text, byte-for-byte,
+ * that used to be the first five items of each function's own join array.
+ * Factored out once three builders needed the identical pair, not before.
+ */
+function strategyGovernancePersonaBehavior(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior"> {
+  return {
+    persona:
+      "You are executing the Strategy Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+  };
+}
+
+function buildDiagnosisPromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    ...strategyGovernancePersonaBehavior(hatDefinition, universalRoleContract),
+    skillContent: [
+      "=== TASK (execution mechanics -- not part of the governance above) ===",
+      "Work through the canonical operating procedure: (1) establish the strategic question -- stop if materially ambiguous; (2) establish the situation (symptoms, business conditions, constraints, consequences, stakeholders, objectives); (3) diagnose using Symptom -> Problem -> Cause -> Constraint -> Consequence, never asserting causation without sufficient support; (4) frame the strategic problem (what it is, why it matters, key drivers, the strategic tension/decision, material uncertainty); (5) develop strategic options only where genuinely warranted -- if only one direction is strategically reasonable, say so rather than manufacturing alternatives; (6) recommend a direction only when the evidence supports one, otherwise state explicitly what must be resolved first.",
+      "Information supplied in the context below is NOT automatically established fact merely because it came from another Hat or Unit -- distinguish evidence from interpretation, inference, implication, and recommendation throughout.",
+      "You do not own research, evidence validation, commercial progression, pricing, or creative production -- those belong to R&I, Sales, Finance, and Creative respectively. If the work genuinely requires one of those first (e.g. missing evidence a Handoff to R&I should gather), say so as the blocked/insufficient reason rather than inventing the missing material yourself.",
+      "Set causationSupported explicitly and honestly for the diagnosed cause -- true only if the supplied context actually supports that causal claim, never merely because it sounds plausible.",
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
+      `Return JSON exactly matching this shape:
 {
   "sufficient": true | false,
   "blockedCategory": "ambiguous_question | insufficient_evidence | evidence_interpretation_conflated | unresolved_assumption | wrong_unit | missing_approval | unresolved_interpretations | requires_invention" (only if sufficient=false),
@@ -382,7 +395,8 @@ function buildDiagnosisSystemPrompt(hatDefinition: string, universalRoleContract
   "unresolvedQuestions": "..."
 }
 Only include situation/diagnosis/strategicProblem/options/recommendation fields if sufficient=true.`,
-  ].join("\n\n");
+    ].join("\n\n"),
+  };
 }
 
 /**
@@ -720,10 +734,10 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
 
   await advanceStrategyProgress(env, state, "Establishing the situation and running the diagnosis...");
 
-  const result = await aiJson<StrategyDiagnosisResult>(env, {
+  const result = await generate<StrategyDiagnosisResult>(env, {
     taskId: "strategy.diagnosis",
-    system: buildDiagnosisSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
-    user: state.strategyContext ?? "",
+    mode: "json",
+    parts: { ...buildDiagnosisPromptParts(governance.hatDefinition, governance.universalRoleContract), situation: state.strategyContext ?? "" },
     maxTokens: 3000,
   });
 
@@ -870,9 +884,11 @@ interface HandoffRoutingResult {
 
 async function classifyHandoffTarget(env: Env, result: StrategyDiagnosisResult): Promise<HandoffRoutingResult> {
   const summary = `Strategic problem: ${result.strategicProblem?.statement ?? ""}\nNo recommendation yet: ${result.noRecommendationReason ?? ""}\nUnresolved questions: ${result.unresolvedQuestions ?? ""}`;
-  const classification = await aiJson<HandoffRoutingResult>(env, {
+  const classification = await generate<HandoffRoutingResult>(env, {
     taskId: "strategy.handoff_routing",
-    system: `You decide whether a completed Strategy diagnosis's next responsibility belongs to another Unit, per the Strategy Analyst Hat Definition's own handoff_rules:
+    mode: "json",
+    parts: {
+      persona: `You decide whether a completed Strategy diagnosis's next responsibility belongs to another Unit, per the Strategy Analyst Hat Definition's own handoff_rules:
 - "research": the diagnosis is blocked or weakened by missing evidence/validation that only Research & Intelligence can gather.
 - "marketing": the work is specifically marketing strategy/execution (positioning, campaign, content, channel decisions).
 - "sales": the next step is commercial progression of an opportunity (owned by Sales, not Strategy).
@@ -881,7 +897,8 @@ async function classifyHandoffTarget(env: Env, result: StrategyDiagnosisResult):
 Never return "finance" -- pricing is reached only through Martin's explicit approval of a recommended intervention, never through this classifier.
 
 Return JSON: {"target": "research" | "marketing" | "sales" | "none", "reason": "..."}`,
-    user: summary,
+      situation: summary,
+    },
     light: true,
   });
   return classification ?? { target: "none" };
@@ -1012,22 +1029,21 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   return state;
 }
 
-function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleContract: string, diagnosis: StrategyDiagnosisResult): string {
-  return [
-    "You are executing the Strategy Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution mechanics -- not part of the governance above) ===",
-    "A causation-disciplined diagnosis (below, already validated) has concluded a recommended direction is defensible. Expand it into the COMPLETE Strategic Intervention Proposal Martin will review to decide whether ENIG should do this work -- not a generic diagnosis report. It must be detailed enough for Martin to evaluate exactly what is being proposed, and specified enough for Finance to price the approved intervention later WITHOUT having to redesign it.",
-    "=== VALIDATED DIAGNOSIS (already produced -- expand this, do not re-diagnose or contradict it) ===",
-    JSON.stringify(diagnosis),
-    "=== DISCIPLINE (do not weaken) ===",
-    "Distinguish verified facts from interpretation; distinguish evidence from assumptions; never assert a causal claim beyond what the diagnosis already supports; never invent a numerical outcome; identify evidence limitations; surface conflicting evidence if any exists. If an exact timeline duration cannot be reliably supported by the evidence, set timeline.status to \"Indicative\" (never \"Confirmed\" merely to look complete) and let totalDuration/phase durations reflect that (e.g. \"approximately 6-8 weeks, indicative\").",
-    "You MAY design the strategic intervention itself (positioning, strategic messaging, audience considerations, communication strategy, customer journey strategy, strategic workstreams, required downstream outputs, implementation principles, strategic measurement, timelines, dependencies). You must NOT perform another Unit's execution responsibility -- e.g. if a marketing strategy is required, specify the strategic marketing intervention, but do not treat this as authorization to route the case to Marketing Strategist (that remains a separate, Martin-gated decision, never automatic).",
-    "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
-    `Return JSON exactly matching this shape (all string fields are prose, all array fields are lists of strings unless the array holds objects as shown; use "" or [] only where the diagnosis genuinely gives nothing to say, never as a placeholder for something you didn't bother filling in):
+function buildProposalDraftingPromptParts(hatDefinition: string, universalRoleContract: string, diagnosis: StrategyDiagnosisResult): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    ...strategyGovernancePersonaBehavior(hatDefinition, universalRoleContract),
+    skillContent: [
+      "=== TASK (execution mechanics -- not part of the governance above) ===",
+      "A causation-disciplined diagnosis (below, already validated) has concluded a recommended direction is defensible. Expand it into the COMPLETE Strategic Intervention Proposal Martin will review to decide whether ENIG should do this work -- not a generic diagnosis report. It must be detailed enough for Martin to evaluate exactly what is being proposed, and specified enough for Finance to price the approved intervention later WITHOUT having to redesign it.",
+      "=== VALIDATED DIAGNOSIS (already produced -- expand this, do not re-diagnose or contradict it) ===",
+      JSON.stringify(diagnosis),
+      "=== DISCIPLINE (do not weaken) ===",
+      "Distinguish verified facts from interpretation; distinguish evidence from assumptions; never assert a causal claim beyond what the diagnosis already supports; never invent a numerical outcome; identify evidence limitations; surface conflicting evidence if any exists. If an exact timeline duration cannot be reliably supported by the evidence, set timeline.status to \"Indicative\" (never \"Confirmed\" merely to look complete) and let totalDuration/phase durations reflect that (e.g. \"approximately 6-8 weeks, indicative\").",
+      "You MAY design the strategic intervention itself (positioning, strategic messaging, audience considerations, communication strategy, customer journey strategy, strategic workstreams, required downstream outputs, implementation principles, strategic measurement, timelines, dependencies). You must NOT perform another Unit's execution responsibility -- e.g. if a marketing strategy is required, specify the strategic marketing intervention, but do not treat this as authorization to route the case to Marketing Strategist (that remains a separate, Martin-gated decision, never automatic).",
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
+      `Return JSON exactly matching this shape (all string fields are prose, all array fields are lists of strings unless the array holds objects as shown; use "" or [] only where the diagnosis genuinely gives nothing to say, never as a placeholder for something you didn't bother filling in):
 {
   "executiveSummary": {"businessSituation":"...","strategicProblem":"...","recommendedDirection":"...","proposedIntervention":"...","expectedBusinessEffect":"...","decisionRequired":"..."},
   "businessContext": {"entityContext":"...","businessObjectives":"...","relevantMarketContext":"...","relevantAudienceOrCustomerContext":"...","currentState":"...","engagementTrigger":"...","relevantCommercialContext":"...","evidence":["..."]},
@@ -1048,11 +1064,12 @@ function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleC
   "commercialScope": {"included":["..."],"excluded":["..."],"expectedResources":["..."],"expectedDuration":"...","clientResponsibilities":["..."],"downstreamUnitResponsibilities":["..."]},
   "strategicRecommendation": {"recommendation":"...","rationale":"...","evidenceBasis":["..."],"conditionsOfApproval":["..."]}
 }`,
-  ].join("\n\n");
+    ].join("\n\n"),
+  };
 }
 
 /**
- * The revision counterpart to buildProposalDraftingSystemPrompt -- grounds
+ * The revision counterpart to buildProposalDraftingPromptParts -- grounds
  * the model in the CURRENT, already-produced proposal and asks it to apply
  * Martin's requested change to that artifact, never to re-diagnose or
  * invent new business facts. Deliberately distinct from the drafting
@@ -1071,22 +1088,22 @@ function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleC
  * (including Martin's instruction) under this same strategy.proposal_drafting
  * task's existing TOKEN_SAFE_RUNTIME policy, unchanged by this function.
  */
-function buildProposalRevisionSystemPrompt(hatDefinition: string, universalRoleContract: string, currentProposal: StrategyProposal): string {
-  return [
-    "You are executing the Strategy Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, boundaries, and stop conditions -- follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution mechanics -- not part of the governance above) ===",
-    "Below is the CURRENT, already-produced Strategic Intervention Proposal. The user message that follows this system prompt is Martin's requested change to it. Apply ONLY that requested change, as minimally as the change allows -- do not re-diagnose the underlying situation, do not invent a new business fact not already present in the current proposal below, and preserve every section the requested change does not touch exactly as it already reads.",
-    "=== CURRENT PROPOSAL (revise this artifact -- do not replace it wholesale, do not start over) ===",
-    JSON.stringify(currentProposal),
-    "=== IDENTITY DISCIPLINE (do not weaken) ===",
-    "Martin's requested change is an edit instruction, never new verified business evidence -- treat it exactly as you would treat a note in the margin of the proposal above, not as a new fact about the Entity/Matter. The current proposal above already refers to the Entity/Matter only by the context and tokens already present in it, never by a real company or person name. If Martin's requested change names a real company, person, email, phone number, or address, apply only the SUBSTANCE of what he's asking for (what should be different about the proposal) and do not copy that name or contact detail into any field of your output -- describe the change using only the terms, tokens, and context already used in the current proposal above.",
-    "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
-    `Return the COMPLETE revised proposal as JSON, in exactly the same shape as the current proposal above: {"executiveSummary": {...}, "businessContext": {...}, "strategicChallenge": {...}, "diagnosis": {...}, "strategicOpportunity": {...}, "strategicObjective": {...}, "recommendedDirection": {...}, "proposedIntervention": {...}, "deliverables": [...], "timeline": {...}, "entityInputs": {...}, "assumptions": [...], "dependencies": [...], "risksAndConstraints": {...}, "expectedBusinessEffect": {...}, "successCriteria": [...], "commercialScope": {...}, "strategicRecommendation": {...}}. Every field must be present -- use the current proposal's own existing value for anything the requested change doesn't affect, never an empty placeholder.`,
-  ].join("\n\n");
+function buildProposalRevisionPromptParts(hatDefinition: string, universalRoleContract: string, currentProposal: StrategyProposal): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    ...strategyGovernancePersonaBehavior(hatDefinition, universalRoleContract),
+    skillContent: [
+      "=== TASK (execution mechanics -- not part of the governance above) ===",
+      "Below is the CURRENT, already-produced Strategic Intervention Proposal. The user message that follows this system prompt is Martin's requested change to it. Apply ONLY that requested change, as minimally as the change allows -- do not re-diagnose the underlying situation, do not invent a new business fact not already present in the current proposal below, and preserve every section the requested change does not touch exactly as it already reads.",
+      "=== CURRENT PROPOSAL (revise this artifact -- do not replace it wholesale, do not start over) ===",
+      JSON.stringify(currentProposal),
+      "=== IDENTITY DISCIPLINE (do not weaken) ===",
+      "Martin's requested change is an edit instruction, never new verified business evidence -- treat it exactly as you would treat a note in the margin of the proposal above, not as a new fact about the Entity/Matter. The current proposal above already refers to the Entity/Matter only by the context and tokens already present in it, never by a real company or person name. If Martin's requested change names a real company, person, email, phone number, or address, apply only the SUBSTANCE of what he's asking for (what should be different about the proposal) and do not copy that name or contact detail into any field of your output -- describe the change using only the terms, tokens, and context already used in the current proposal above.",
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
+      `Return the COMPLETE revised proposal as JSON, in exactly the same shape as the current proposal above: {"executiveSummary": {...}, "businessContext": {...}, "strategicChallenge": {...}, "diagnosis": {...}, "strategicOpportunity": {...}, "strategicObjective": {...}, "recommendedDirection": {...}, "proposedIntervention": {...}, "deliverables": [...], "timeline": {...}, "entityInputs": {...}, "assumptions": [...], "dependencies": [...], "risksAndConstraints": {...}, "expectedBusinessEffect": {...}, "successCriteria": [...], "commercialScope": {...}, "strategicRecommendation": {...}}. Every field must be present -- use the current proposal's own existing value for anything the requested change doesn't affect, never an empty placeholder.`,
+    ].join("\n\n"),
+  };
 }
 
 function str(v: unknown, fallback = ""): string {
@@ -1317,10 +1334,10 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
 
   await advanceStrategyProgress(env, state, "Developing the full Strategic Intervention Proposal...");
 
-  const raw = await aiJson<RawStrategyProposal>(env, {
+  const raw = await generate<RawStrategyProposal>(env, {
     taskId: "strategy.proposal_drafting",
-    system: buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract, diagnosis),
-    user: state.strategyContext ?? "",
+    mode: "json",
+    parts: { ...buildProposalDraftingPromptParts(governance.hatDefinition, governance.universalRoleContract, diagnosis), situation: state.strategyContext ?? "" },
     maxTokens: 4000,
   });
   if (!raw) {
@@ -1576,10 +1593,10 @@ async function reviseStrategyProposal(
     return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while revising the proposal. Refusing to proceed without it.");
   }
 
-  const raw = await aiJson<RawStrategyProposal>(env, {
+  const raw = await generate<RawStrategyProposal>(env, {
     taskId: "strategy.proposal_drafting",
-    system: buildProposalRevisionSystemPrompt(governance.hatDefinition, governance.universalRoleContract, currentProposal),
-    user: instruction,
+    mode: "json",
+    parts: { ...buildProposalRevisionPromptParts(governance.hatDefinition, governance.universalRoleContract, currentProposal), situation: instruction },
     maxTokens: 4000,
   });
   if (!raw) {
