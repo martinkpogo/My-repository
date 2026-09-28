@@ -1,6 +1,6 @@
 import type { Env, Unit } from "./types";
-import { aiChat } from "./ai";
-import type { ChatTurn } from "./ai";
+import { generate } from "./ai";
+import type { ChatTurn, GeneratePromptParts } from "./ai";
 import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
 import { marketingHatSummaryList } from "./hats/registry";
@@ -149,9 +149,23 @@ async function appendChatHistory(env: Env, chatId: number, threadId: number | un
   await env.STATE_KV.put(historyKey(chatId, threadId), JSON.stringify(updated));
 }
 
-async function runChatTurn(env: Env, chatId: number, threadId: number | undefined, system: string, userMessage: string, sensitivity: SensitivityLevel | undefined): Promise<string> {
+async function runChatTurn(
+  env: Env,
+  chatId: number,
+  threadId: number | undefined,
+  promptParts: Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context">,
+  userMessage: string,
+  sensitivity: SensitivityLevel | undefined,
+): Promise<string> {
   const history = await getChatHistory(env, chatId, threadId);
-  const reply = await aiChat(env, "chat.general_reply", system, history, userMessage, 800, sensitivity);
+  const reply = await generate(env, {
+    taskId: "chat.general_reply",
+    mode: "text",
+    parts: { ...promptParts, situation: userMessage },
+    history,
+    maxTokens: 800,
+    sensitivity,
+  });
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
     { role: "assistant", content: reply || "(no response)" },
@@ -173,8 +187,13 @@ export async function generalChatReply(
   userMessage: string,
 ): Promise<string> {
   const snapshot = await recentActivitySnapshot(env, unit);
-  const system = `${REAL_STRUCTURE_FACTS}\n\n${UNIT_PERSONAS[unit]}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}\n\nRecent Activity & Decision Log entries for ${unit}:\n${snapshot}`;
-  return runChatTurn(env, chatId, threadId, system, userMessage, chatSensitivityForUnit(unit));
+  const parts = {
+    persona: REAL_STRUCTURE_FACTS,
+    behavior: UNIT_PERSONAS[unit],
+    skillContent: EVIDENCE_RULE,
+    context: [NO_ACTIONS_RULE, `Recent Activity & Decision Log entries for ${unit}:\n${snapshot}`].join("\n\n"),
+  };
+  return runChatTurn(env, chatId, threadId, parts, userMessage, chatSensitivityForUnit(unit));
 }
 
 // Martin's default, no-topic-required front door -- DM isn't scoped to one
@@ -194,6 +213,6 @@ const DM_PERSONA = `You are ENIG's general staff AI for direct-message conversat
  * the business, anything not tied to one Unit's live work).
  */
 export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
-  const system = `${REAL_STRUCTURE_FACTS}\n\n${DM_PERSONA}\n\n${EVIDENCE_RULE}\n\n${NO_ACTIONS_RULE}`;
-  return runChatTurn(env, chatId, threadId, system, userMessage, "business_sensitive");
+  const parts = { persona: REAL_STRUCTURE_FACTS, behavior: DM_PERSONA, skillContent: EVIDENCE_RULE, context: NO_ACTIONS_RULE };
+  return runChatTurn(env, chatId, threadId, parts, userMessage, "business_sensitive");
 }

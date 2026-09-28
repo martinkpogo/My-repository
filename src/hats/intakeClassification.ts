@@ -1,7 +1,7 @@
 import type { Env } from "../types";
 import type { SemanticTaskId } from "../dataBoundary/types";
 import type { ActionDefinition } from "./actionRegistry";
-import { aiJson } from "../ai";
+import { generate } from "../ai";
 
 /**
  * Generic Stage 1 candidate-Hat classification -- the reusable shape of
@@ -17,7 +17,7 @@ import { aiJson } from "../ai";
  * SemanticTaskId -- Data Boundary sensitivity/outbound policy are resolved
  * per task, so a Unit must never reuse marketing.intake_classification for
  * its own classification call) and its own hatSummaryList/introLine, not
- * by reimplementing this aiJson call and prompt shape.
+ * by reimplementing this classifyCandidateHats call and prompt shape.
  */
 export interface Stage1IntakeClassification<H extends string = string> {
   candidates?: H[];
@@ -61,10 +61,10 @@ export async function classifyCandidateHats<H extends string = string>(
   options: ClassifyCandidateHatsOptions,
   text: string,
 ): Promise<Stage1IntakeClassification<H> | null> {
-  return aiJson<Stage1IntakeClassification<H>>(env, {
+  return generate<Stage1IntakeClassification<H>>(env, {
     taskId: options.taskId,
-    system: buildStage1SystemPrompt(options.introLine, options.hatSummaryList),
-    user: text,
+    mode: "json",
+    parts: { persona: buildStage1SystemPrompt(options.introLine, options.hatSummaryList), situation: text },
     light: options.light,
   });
 }
@@ -110,10 +110,10 @@ export async function classifyAction<A extends string = string>(
   actions: ActionDefinition<A>[],
   text: string,
 ): Promise<ActionClassification<A> | null> {
-  return aiJson<ActionClassification<A>>(env, {
+  return generate<ActionClassification<A>>(env, {
     taskId: options.taskId,
-    system: buildActionClassificationSystemPrompt(options.introLine, actions),
-    user: text,
+    mode: "json",
+    parts: { persona: buildActionClassificationSystemPrompt(options.introLine, actions), situation: text },
     light: options.light,
   });
 }

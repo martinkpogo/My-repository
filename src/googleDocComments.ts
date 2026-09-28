@@ -5,7 +5,7 @@ import {
   listWatchedGoogleDocs,
   type WatchedGoogleDoc,
 } from "./googleOAuth";
-import { aiJson } from "./ai";
+import { generate } from "./ai";
 import { logActivity } from "./log";
 import { sendWorkspaceHatMessage } from "./telegram";
 
@@ -184,11 +184,14 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
     return { handled: true, outcome: "anchor_not_unique", detail: `quoted="${quoted}" occurrences=${occurrences}` };
   }
 
-  const instruction = await aiJson<{ understood: boolean; replacementText?: string }>(env, {
+  const instruction = await generate<{ understood: boolean; replacementText?: string }>(env, {
     taskId: "action.google_doc_comment_edit",
-    system:
-      'You interpret a Google Docs comment as an edit instruction. You are given the exact text the comment is anchored to ("selected text") and the comment\'s own text (the instruction). Determine the exact replacement text the selected text should become. Never invent content beyond what the comment reasonably implies, and never change anything the comment does not ask for. Return JSON: {"understood": true, "replacementText": "..."} if you can determine a specific, unambiguous replacement, or {"understood": false} if the comment does not request a text change, or the requested change is ambiguous.',
-    user: `Selected text: "${quoted}"\n\nComment: "${comment.content}"`,
+    mode: "json",
+    parts: {
+      persona:
+        'You interpret a Google Docs comment as an edit instruction. You are given the exact text the comment is anchored to ("selected text") and the comment\'s own text (the instruction). Determine the exact replacement text the selected text should become. Never invent content beyond what the comment reasonably implies, and never change anything the comment does not ask for. Return JSON: {"understood": true, "replacementText": "..."} if you can determine a specific, unambiguous replacement, or {"understood": false} if the comment does not request a text change, or the requested change is ambiguous.',
+      situation: `Selected text: "${quoted}"\n\nComment: "${comment.content}"`,
+    },
   });
 
   if (!instruction || !instruction.understood || !instruction.replacementText?.trim()) {
@@ -199,7 +202,7 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
       "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what the selected text should become?",
     );
     await markProcessed(env, comment.id);
-    return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "aiJson returned null" };
+    return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "generate() returned null" };
   }
 
   const replacementText = instruction.replacementText.trim();

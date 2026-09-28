@@ -5,7 +5,7 @@ import {
   listWatchedGoogleSheets,
   type WatchedGoogleSheet,
 } from "./googleOAuth";
-import { aiJson } from "./ai";
+import { generate } from "./ai";
 import { logActivity } from "./log";
 import { sendWorkspaceHatMessage } from "./telegram";
 
@@ -194,11 +194,14 @@ async function processSheetComment(
   const target = matches[0];
   const a1Cell = `${columnLetter(target.col + 1)}${target.row + 1}`;
 
-  const instruction = await aiJson<{ understood: boolean; replacementText?: string }>(env, {
+  const instruction = await generate<{ understood: boolean; replacementText?: string }>(env, {
     taskId: "action.google_sheet_comment_edit",
-    system:
-      'You interpret a Google Sheets comment as an edit instruction. You are given the exact content of the cell the comment is anchored to ("selected cell") and the comment\'s own text (the instruction). Determine the exact replacement value the cell should become. Never invent content beyond what the comment reasonably implies, and never change anything the comment does not ask for. Return JSON: {"understood": true, "replacementText": "..."} if you can determine a specific, unambiguous replacement, or {"understood": false} if the comment does not request a value change, or the requested change is ambiguous.',
-    user: `Selected cell content: "${quoted}"\n\nComment: "${comment.content}"`,
+    mode: "json",
+    parts: {
+      persona:
+        'You interpret a Google Sheets comment as an edit instruction. You are given the exact content of the cell the comment is anchored to ("selected cell") and the comment\'s own text (the instruction). Determine the exact replacement value the cell should become. Never invent content beyond what the comment reasonably implies, and never change anything the comment does not ask for. Return JSON: {"understood": true, "replacementText": "..."} if you can determine a specific, unambiguous replacement, or {"understood": false} if the comment does not request a value change, or the requested change is ambiguous.',
+      situation: `Selected cell content: "${quoted}"\n\nComment: "${comment.content}"`,
+    },
   });
 
   if (!instruction || !instruction.understood || !instruction.replacementText?.trim()) {
@@ -209,7 +212,7 @@ async function processSheetComment(
       "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what this cell should become?",
     );
     await markProcessed(env, comment.id);
-    return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "aiJson returned null" };
+    return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "generate() returned null" };
   }
 
   const replacementText = instruction.replacementText.trim();
