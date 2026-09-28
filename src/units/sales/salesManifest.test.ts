@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert";
-import { salesManifest, dispatchSalesExecutiveHat, LEAD_OPPORTUNITY_CALLBACK_PREFIX } from "./salesManifest";
+import {
+  salesManifest,
+  dispatchSalesExecutiveHat,
+  LEAD_OPPORTUNITY_CALLBACK_PREFIX,
+  ENTITY_NEW_CALLBACK_PREFIX,
+  MATTER_NEW_CALLBACK_PREFIX,
+  QUALIFY_CALLBACK_PREFIX,
+  PROPOSAL_CALLBACK_PREFIX,
+} from "./salesManifest";
 import { findCallbackHandler } from "../unitManifest";
 import type { Env, WorkState } from "../../types";
 
@@ -190,6 +198,79 @@ test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat ge
 
   const viaDispatch = await dispatchSalesExecutiveHat(env, fakeWorkState({ hat: "Sales Executive" }), "Another enquiry");
   assert.strictEqual(viaDispatch.stage, "awaiting_entity_pick");
+});
+
+test("salesManifest: Sales Executive declares exactly entitynew, matternew, qualify, and proposal in callbackHandlers", () => {
+  const hat = salesManifest.hats["Sales Executive"];
+  assert.deepStrictEqual(
+    new Set(Object.keys(hat.callbackHandlers ?? {})),
+    new Set([ENTITY_NEW_CALLBACK_PREFIX, MATTER_NEW_CALLBACK_PREFIX, QUALIFY_CALLBACK_PREFIX, PROPOSAL_CALLBACK_PREFIX]),
+  );
+});
+
+function mockTelegramFetch(t: any) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (String(url).includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in salesManifest Sales Executive callback delegation test: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+}
+
+test("findCallbackHandler resolves entitynew on Sales Executive and genuinely delegates to handleEntityCreationApproval -- rejecting a pending Entity draft holds on entity_redo_reason, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const hat = salesManifest.hats["Sales Executive"];
+  const handler = findCallbackHandler(ENTITY_NEW_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "entitynew must resolve on Sales Executive's own manifest entry");
+
+  const state = fakeWorkState({ hat: "Sales Executive", entityDraft: { name: "Acme Co", email: "", phone: "", type: "Company" } });
+  const result = await handler(fakeEnv(), state, false);
+
+  assert.strictEqual(result.stage, "entity_redo_requested");
+  assert.strictEqual(result.awaiting, "entity_redo_reason");
+});
+
+test("findCallbackHandler resolves matternew on Sales Executive and genuinely delegates to handleMatterCreationApproval -- rejecting a pending Matter draft holds on matter_redo_reason, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const hat = salesManifest.hats["Sales Executive"];
+  const handler = findCallbackHandler(MATTER_NEW_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "matternew must resolve on Sales Executive's own manifest entry");
+
+  const state = fakeWorkState({ hat: "Sales Executive", matterDraft: { name: "Website redesign", statedNeed: "Needs a new site" } });
+  const result = await handler(fakeEnv(), state, false);
+
+  assert.strictEqual(result.stage, "matter_redo_requested");
+  assert.strictEqual(result.awaiting, "matter_redo_reason");
+});
+
+test("findCallbackHandler resolves qualify on Sales Executive and genuinely delegates to handleLeadToProspectApproval -- rejecting a pending qualification holds on call_notes, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const hat = salesManifest.hats["Sales Executive"];
+  const handler = findCallbackHandler(QUALIFY_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "qualify must resolve on Sales Executive's own manifest entry");
+
+  const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_qualification_approval", entityName: "Acme Co" });
+  const result = await handler(fakeEnv(), state, false);
+
+  assert.strictEqual(result.stage, "qualification_hold");
+  assert.strictEqual(result.awaiting, "call_notes");
+});
+
+test("findCallbackHandler resolves proposal on Sales Executive and genuinely delegates to handleProposalApproval -- rejecting a pending proposal holds on proposal_feedback, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const hat = salesManifest.hats["Sales Executive"];
+  const handler = findCallbackHandler(PROPOSAL_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "proposal must resolve on Sales Executive's own manifest entry");
+
+  const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_proposal_approval" });
+  const result = await handler(fakeEnv(), state, false);
+
+  assert.strictEqual(result.stage, "awaiting_proposal_revision");
+  assert.strictEqual(result.awaiting, "proposal_feedback");
 });
 
 test("salesManifest: registers Stage 1/2 SemanticTaskIds required by UnitManifest's shape", () => {

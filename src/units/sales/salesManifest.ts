@@ -50,6 +50,16 @@ import * as sales from "./salesExecutive";
  * awaiting states already hardcoded there). Only the entry point moves;
  * every existing multi-turn flow is untouched.
  *
+ * salesExecutiveHat.callbackHandlers declares four of Sales Executive's
+ * own nested approval-gate prefixes -- entitynew, matternew, qualify,
+ * proposal -- migrated off session.ts's hardcoded switch cases onto the
+ * generic manifest lookup (approval-callback dispatch mechanism, PRs
+ * #203-210). entity/matter (N-way choice pickers, not approve/reject)
+ * and the sales-proposal decision callback (compound-encoded
+ * "<number>.<version>.<a|r>" value) are deliberately NOT migrated --
+ * they don't fit ApprovalCallbackHandler's plain boolean shape. All four
+ * migrated handlers are unchanged, byte-for-byte.
+ *
  * Lead Generation Specialist declares one action -- discover_leads, the
  * on-demand discovery request ("find me 3 companies showing a
  * positioning problem"). This is the only Lead Generation Specialist
@@ -143,6 +153,30 @@ async function salesExecutiveReadHandler(_env: Env, actionName: SalesExecutiveAc
   throw new Error(`${actionName}: not a read action -- Sales Executive only declares "new_enquiry" ("write").`);
 }
 
+// The callback_data prefixes Sales Executive's own nested approval gates
+// (inside new_enquiry's own multi-step flow -- see this file's top doc
+// comment) build their buttons with. Migrates onto
+// HatManifest.callbackHandlers same as every other Unit's prefixes so
+// far (PRs #203-210) -- no relocation needed, salesManifest.ts already
+// imports the whole salesExecutive.ts namespace (`* as sales`), and
+// salesExecutive.ts never imports back from salesManifest.ts. Four of
+// Sales Executive's boolean-shaped approve/reject callbacks migrate
+// together here (entitynew, matternew, qualify, proposal) -- entity/
+// matter (N-way choice, not approve/reject) and the sales-proposal
+// decision callback (compound-encoded value) are deliberately excluded;
+// they don't fit ApprovalCallbackHandler's plain boolean shape.
+export const ENTITY_NEW_CALLBACK_PREFIX = "entitynew" as const;
+export const MATTER_NEW_CALLBACK_PREFIX = "matternew" as const;
+export const QUALIFY_CALLBACK_PREFIX = "qualify" as const;
+export const PROPOSAL_CALLBACK_PREFIX = "proposal" as const;
+
+const salesExecutiveCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+  [ENTITY_NEW_CALLBACK_PREFIX]: sales.handleEntityCreationApproval,
+  [MATTER_NEW_CALLBACK_PREFIX]: sales.handleMatterCreationApproval,
+  [QUALIFY_CALLBACK_PREFIX]: sales.handleLeadToProspectApproval,
+  [PROPOSAL_CALLBACK_PREFIX]: sales.handleProposalApproval,
+};
+
 const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
   name: SALES_EXECUTIVE_HAT_NAME,
   specialization: SALES_EXECUTIVE_SPECIALIZATION,
@@ -160,6 +194,7 @@ const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
   // despite Strategy having its own awaiting states already hardcoded
   // there). Only the entry point moves; no multi-turn flow changes.
   awaitingHandlers: {},
+  callbackHandlers: salesExecutiveCallbackHandlers,
 };
 
 export const salesManifest: UnitManifest = {
