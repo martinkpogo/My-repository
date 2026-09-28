@@ -6,6 +6,8 @@ import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/researchAnalyst";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import { dispatchStrategyHat } from "./units/strategy/strategyManifest";
+import { dispatchResearchHat } from "./units/research/researchManifest";
+import { dispatchFinanceHat } from "./units/finance/financeManifest";
 import { dispatchSalesExecutiveHat } from "./units/sales/salesManifest";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
@@ -60,7 +62,7 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async handleResearchRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => research.handleDirectRequest(this.env, state, text));
+    return this.execute((state) => dispatchResearchHat(this.env, state, text));
   }
 
   async handleStrategyRequest(text: string): Promise<WorkState> {
@@ -68,7 +70,7 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async handleFinanceRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => finance.handleDirectRequest(this.env, state, text));
+    return this.execute((state) => dispatchFinanceHat(this.env, state, text));
   }
 
   /**
@@ -300,10 +302,6 @@ export class WorkSession extends DurableObject<Env> {
           return sales.handleEntityChoice(this.env, state, value);
         case "matter":
           return sales.handleMatterChoice(this.env, state, value);
-        case "quote":
-          return finance.handleQuoteApproval(this.env, state, value === "approve");
-        case "researchhandoff":
-          return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "sprop": {
           // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
           // ":") specifically so it survives index.ts's plain

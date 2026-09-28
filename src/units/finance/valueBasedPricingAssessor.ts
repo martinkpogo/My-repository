@@ -3,7 +3,7 @@ import { getPage, plainText, richText, richTextLong, select, title } from "../..
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
-import { setActiveWorkId } from "../../router";
+import { setActiveWorkId } from "../../sessionRouting";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";

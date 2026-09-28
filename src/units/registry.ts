@@ -4,6 +4,8 @@ import { businessDevelopmentManifest } from "./businessDevelopment/businessDevel
 import { salesManifest } from "./sales/salesManifest";
 import { marketingManifest } from "./marketing/marketingManifest";
 import { strategyManifest } from "./strategy/strategyManifest";
+import { researchManifest } from "./research/researchManifest";
+import { financeManifest } from "./finance/financeManifest";
 
 /**
  * The Unit Registry (ENIG Operating Model design doc, "The Unit
@@ -12,41 +14,50 @@ import { strategyManifest } from "./strategy/strategyManifest";
  * Unit is added or removed: one import, one entry. Cloudflare Workers
  * has no runtime filesystem, so this cannot be literal auto-discovery.
  *
- * Only Units actually built on the manifest pattern appear here.
- * Finance/R&I are NOT registered -- they continue running through their
- * existing hand-written dispatchCowork branches/WorkSession methods/
- * handleTextReply switch cases, per the design doc's staged rollout (new
- * Units first, migrate existing ones only once the pattern is proven).
- * Sales, Marketing, and Strategy ARE registered, but only partially:
+ * Only Units actually built on the manifest pattern appear here. Every
+ * Unit except Creative & Design and Operations (both undefined -- see the
+ * design doc's rollout order) is registered now, but several only
+ * partially:
  *
- * - Sales -- see salesManifest.ts's own doc comment: it declares Lead
- *   Generation Specialist only, never Sales Executive, which stays on its
- *   own live-Notion-fetched pattern.
- * - Marketing -- see marketingManifest.ts's own doc comment: it covers
- *   only post-Hat-resolution execution (the declared "handle_request"
- *   action each of its 5 Hats runs once a Hat is already known). Stage
- *   1/2 Hat resolution stays in src/hats/executionEngine.ts's own
- *   classifyCandidateHats + relationship-based tie-breaking, which has no
- *   equivalent in this registry's generic resolveHat -- registering
- *   marketingManifest here is for discoverability/consistency, not
- *   because dispatchCowork's Marketing branch (still its own hardcoded
- *   branch, unchanged) ever calls findUnitManifest("Marketing") itself.
- * - Strategy -- see strategyManifest.ts's own doc comment: it declares
- *   exactly one action (diagnose) wrapping handleDirectRequest unchanged.
- *   handlePickup (Handoff-originated, cron-triggered) stays entirely
- *   outside this manifest -- its Handoff-specific context construction
- *   has no equivalent in handleDirectRequest's free-text Matter-token
- *   resolution, so folding it into the same declared action would be
- *   semantically wrong, not just inconvenient.
+ * - Business Development -- fully migrated: all three Hats, every
+ *   chokepoint (entryHandler/readHandler/awaitingHandlers/
+ *   callbackHandlers) genuinely wired, no hardcoded BD case remains
+ *   anywhere in session.ts.
+ * - Sales -- see salesManifest.ts's own doc comment: both Lead Generation
+ *   Specialist and Sales Executive are declared (Sales Executive is a
+ *   thin wrap around handleIncomingEnquiry, unchanged); LGS's /lead
+ *   command and cron-triggered discovery deliberately stay outside the
+ *   manifest (see docs/enig-operating-model.md's Open questions).
+ * - Marketing -- see marketingManifest.ts's own doc comment: fully
+ *   migrated, all five Hats, every chokepoint including all three
+ *   approval-callback prefixes. Stage 1/2 Hat resolution stays in
+ *   src/hats/executionEngine.ts's own classifyCandidateHats +
+ *   relationship-based tie-breaking, which has no equivalent in this
+ *   registry's generic resolveHat -- registering marketingManifest here
+ *   is for discoverability/consistency and its callbackHandlers'
+ *   genuine dispatch, not because dispatchCowork's Marketing branch
+ *   (still its own hardcoded branch, unchanged) ever calls
+ *   findUnitManifest("Marketing") for Hat resolution itself.
+ * - Strategy, Research & Intelligence, Finance -- each a single-Hat Unit,
+ *   same thin-wrap shape: one declared action wrapping handleDirectRequest
+ *   unchanged, plus that one approval-callback prefix
+ *   (strategyhandoff/researchhandoff/quote respectively). handlePickup
+ *   (Handoff-originated) stays entirely outside each manifest for all
+ *   three -- its Handoff-specific context construction has no equivalent
+ *   in handleDirectRequest's free-text Matter-token resolution, so
+ *   folding it into the same declared action would be semantically
+ *   wrong, not just inconvenient. See each manifest's own doc comment.
  *
- * A Partial<Record<...>> lookup, not a total one, reflects that most
- * Units (and parts of Sales/Marketing/Strategy) simply aren't here yet.
+ * A Partial<Record<...>> lookup, not a total one, reflects that Creative
+ * & Design and Operations simply don't exist yet.
  */
 export const UNIT_MANIFESTS: Partial<Record<Unit, UnitManifest>> = {
   "Business Development": businessDevelopmentManifest,
   Sales: salesManifest,
   Marketing: marketingManifest,
   Strategy: strategyManifest,
+  "Research & Intelligence": researchManifest,
+  Finance: financeManifest,
 };
 
 export function findUnitManifest(unit: Unit): UnitManifest | undefined {
