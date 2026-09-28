@@ -427,8 +427,16 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * marketing.intake_classification / marketing.hat_action_decision: operate
  * only on Martin's own internal Marketing-task text, about ENIG's own
  * internal operations -- no Unit other than Sales can be handed a real
- * client identity to begin with (Entity/Matters/Proposals access is
- * exclusively the isolated Sales Executive project's now).
+ * client identity to begin with. Real-world identity (name/email/phone)
+ * lives exclusively in the separate Identity Resolution Registry, which
+ * only Isolated Sales / the Identity & Artifact environment is authorized
+ * to access for identity-resolution work; the Runtime agent is not
+ * connected to that Notion data source at all. Runtime Sales's own
+ * Entity/Matter/Proposal/Handoff record access is not exclusive to
+ * Isolated Sales -- Runtime Sales reads and writes those operational
+ * records directly, within its existing authorization boundary, but they
+ * are identity-safe (no real-world name/email/phone field) and are never
+ * the Identity Resolution Registry itself.
  *
  * business_development.*: all eighteen registered Business Development
  * tasks (intake_classification, hat_action_decision, and the five-task
