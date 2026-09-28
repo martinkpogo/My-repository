@@ -43,6 +43,17 @@ export type EntryHandler<A extends string = string> = (env: Env, state: WorkStat
 /** Resumes a WorkSession left paused on one of this Hat's own `awaiting` states. */
 export type AwaitingStateHandler = (env: Env, state: WorkState, text: string) => Promise<WorkState>;
 
+/**
+ * Resolves one of this Hat's own approval-callback prefixes -- the
+ * propose/approve-or-reject choreography every requiresApproval action
+ * already uses (a propose* function stores a domain-specific pending
+ * field + Telegram approve/reject buttons; approved is derived from
+ * which button Martin pressed). Not the same shape as AwaitingStateHandler:
+ * that resumes on a typed text reply, this resolves a callback_data button
+ * press, a mechanism the manifest had no field for at all until this one.
+ */
+export type ApprovalCallbackHandler = (env: Env, state: WorkState, approved: boolean) => Promise<WorkState>;
+
 export interface HatManifest<A extends string = string> {
   /** Matches this Hat's HatIdentity.name in src/hats/registry.ts -- not duplicated, only referenced. */
   name: string;
@@ -91,6 +102,21 @@ export interface HatManifest<A extends string = string> {
    * (per the design doc's fail-closed manifest completeness) rather than falling through to legacy handleTextReply behaviour.
    */
   awaitingHandlers: Record<string, AwaitingStateHandler>;
+
+  /**
+   * This Hat's own approval-callback prefixes, keyed exactly as the
+   * callback_data prefix a propose function or entryHandler sets when it
+   * sends its Telegram approve/reject buttons (e.g. "bdopportunityhandoff" for
+   * "bdopportunityhandoff:<workId>:approve"). Optional and defaults to
+   * none -- most Hats' approval callbacks are still hardcoded cases in
+   * session.ts's handleCallback switch; this migrates incrementally,
+   * same rollout discipline as entryHandler's own migration (one Hat/one
+   * prefix proves the shape before others follow). A prefix declared
+   * here is dispatched generically instead of needing its own switch
+   * case; a prefix NOT declared here simply isn't reachable through this
+   * mechanism yet, and stays exactly as it was.
+   */
+  callbackHandlers?: Record<string, ApprovalCallbackHandler>;
 }
 
 export interface UnitManifest {
@@ -142,4 +168,9 @@ export function findManifestAction<A extends string>(
 /** Consequence lookup convenience -- undefined means the action is not declared on this Hat at all (fail closed at the caller). */
 export function actionConsequence<A extends string>(actionName: string, hat: HatManifest<A>): ConsequenceLevel | undefined {
   return findManifestAction(actionName, hat)?.consequence;
+}
+
+/** Approval-callback lookup convenience -- undefined means this Hat declares no handler for this callback_data prefix (fail closed at the caller, e.g. fall through to a legacy switch case or a no-op). */
+export function findCallbackHandler(prefix: string, hat: HatManifest): ApprovalCallbackHandler | undefined {
+  return hat.callbackHandlers?.[prefix];
 }

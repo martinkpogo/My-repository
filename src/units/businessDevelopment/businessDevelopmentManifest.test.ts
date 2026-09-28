@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
-import { businessDevelopmentManifest } from "./businessDevelopmentManifest";
+import { businessDevelopmentManifest, handleBDHandoffApproval, BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX } from "./businessDevelopmentManifest";
+import { findCallbackHandler } from "../unitManifest";
 import type { Env } from "../../types";
 
 /**
@@ -191,4 +192,33 @@ test("develop_opportunity: assembles a prompt carrying the shared opportunity_fo
   assert.doesNotMatch(capturedSystems[0], new RegExp(QUALIFICATION_GATE_DISTINCTIVE_LINE));
   assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
   assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
+});
+
+/**
+ * Covers HatManifest.callbackHandlers -- the generic approval-callback
+ * dispatch mechanism (session.ts's handleCallback default case), first
+ * proven here on bdopportunityhandoff. handleBDDevelopApproval/
+ * handleBDNextMoveApproval are deliberately NOT covered here: bddevelop/
+ * bdnextmove remain hardcoded session.ts switch cases, not yet migrated.
+ */
+test("all three BD Hats declare bdopportunityhandoff, and only bdopportunityhandoff, in callbackHandlers", () => {
+  for (const hat of Object.values(businessDevelopmentManifest.hats)) {
+    assert.deepStrictEqual(Object.keys(hat.callbackHandlers ?? {}), [BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX]);
+    assert.strictEqual(hat.callbackHandlers?.[BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX], handleBDHandoffApproval);
+  }
+});
+
+test("findCallbackHandler resolves bdopportunityhandoff on Opportunity Development and genuinely delegates to handleBDHandoffApproval -- rejecting a pending handoff clears it and replies, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const env = fakeEnv();
+  const state = fakeWorkState({
+    pendingBDHandoff: { unit: "Sales", hat: "Sales Executive", handoffTitle: "Test handoff", reason: "Test reason", opportunitySummary: "Test summary" },
+  });
+
+  const handler = findCallbackHandler(BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX, opportunityDevelopmentHat);
+  assert.ok(handler, "bdopportunityhandoff must resolve on Opportunity Development's own manifest entry");
+
+  const result = await handler(env, state, false);
+
+  assert.strictEqual(result.pendingBDHandoff, undefined);
 });

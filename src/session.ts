@@ -20,6 +20,7 @@ import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscove
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { findUnitManifest } from "./units/registry";
+import { findCallbackHandler } from "./units/unitManifest";
 import * as businessDevelopment from "./units/businessDevelopment/businessDevelopmentManifest";
 
 export class WorkSession extends DurableObject<Env> {
@@ -320,8 +321,6 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
-        case "bdopportunityhandoff":
-          return businessDevelopment.handleBDHandoffApproval(this.env, state, value === "approve");
         case "bddevelop":
           return businessDevelopment.handleBDDevelopApproval(this.env, state, value === "approve");
         case "bdnextmove":
@@ -367,8 +366,20 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleActionApproval(this.env, state, value === "approve");
         case "leadopportunity":
           return handleLeadOpportunityApproval(this.env, state, value === "approve");
-        default:
+        default: {
+          // Generic manifest lookup for an approval-callback prefix a Hat
+          // has migrated onto HatManifest.callbackHandlers -- checked only
+          // as a fallback, after every existing hand-written case above, so
+          // no legacy prefix's behavior changes. Mirrors handleTextReply's
+          // own default-case manifest fallback for awaitingHandlers.
+          const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
+          const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
+          const callbackHandler = hat ? findCallbackHandler(action, hat) : undefined;
+          if (callbackHandler) {
+            return callbackHandler(this.env, state, value === "approve");
+          }
           return Promise.resolve(state);
+        }
       }
     });
   }
