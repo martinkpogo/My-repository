@@ -1,128 +1,105 @@
-# Jules Execution Contract
+# ENIG Agent Execution Contract
 
-This document establishes the execution contract and operating model for Jules (implementation agent) in the ENIG Agent Runtime repository.
+This document establishes the ENIG operating model and execution contracts for Claude Code and Jules. The architectural, governance, security, provider, data-boundary, fail-closed, evidence, and documentation rules bind every implementation agent.
 
-**Scope note:** the architectural/governance rules below (Handoff identity-write boundary, Authority Model, Provider and Data-Boundary Constraints) bind every implementation agent working in this repository, Claude Code included. The *process* mechanics -- the sandboxed submit action, the mandatory Draft PR, the multi-round pre-submission report/approval loop described in "Operating Model & Capability Distinctions," "Standard Execution Sequence," and the Jules-specific evidence states in "Evidence & Reporting Rule" -- are Jules-specific, because Jules is watched more closely here and makes mistakes more often. See "Claude Code Execution Contract" below for Claude Code's equivalent, simpler process.
+## Governing reasoning boundary
+
+ENIG uses two coding agents with the same architectural reasoning boundary but different execution ceilings. **Architect/Martin owns**:
+
+- architectural decisions;
+- governance decisions;
+- authority and approval rules;
+- security and data-boundary policy;
+- provider eligibility and fallback policy;
+- business-policy interpretation; and
+- changes to governing operating-model contracts.
+
+Both Claude Code and Jules may reason deeply about implementation inside an approved boundary. Neither may invent or silently resolve a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision.
+
+> **Think deeply inside the approved boundary; stop at the boundary instead of crossing it.**
+
+### Reasoning and task definition
+
+1. Architectural reasoning belongs to Architect/Martin.
+2. Implementation reasoning belongs to the coding agent once the governing intent is established.
+3. Implementation reasoning includes repository and file mapping, implementation structure, types and interfaces, dependencies, edge cases, failure modes, tests, regression analysis, and checking that the implementation fits existing contracts.
+4. A coding agent may challenge or report contradictions discovered during implementation, but must stop when resolving them would require a new architectural or governance decision.
+5. For non-trivial tasks, the task instruction should establish, where applicable: the problem, approved design/decision, scope, no-change scope, boundaries, acceptance criteria, verification requirements, and execution authority.
+6. An agent's plan is an implementation plan, not permission to redesign approved architecture.
+7. Neither agent should invent requirements, expand scope, introduce a second mechanism, or generalize a local implementation need into a new platform abstraction without approval.
 
 ## The Handoff identity-write boundary
 
-Every Handoff field that becomes another Unit's AI input context (Handoff title, Reason, Required Next Action, Expected Output, Acceptance Criteria, Assumptions, Open Questions, Verified Facts & Sources, Work Completed) may identify the Entity/Matter ONLY by its opaque Entity_Token/Matter_Token -- never a real Entity/company name, a real contact's name, an email address, a phone number, or any other detail that identifies who they actually are. Real identity may be read while preparing a Handoff; it must be resolved to tokens before anything is written to one.
+Every Handoff field that becomes another Unit's AI input context (Handoff title, Reason, Required Next Action, Expected Output, Acceptance Criteria, Assumptions, Open Questions, Verified Facts & Sources, and Work Completed) may identify the Entity/Matter only by its opaque `Entity_Token`/`Matter_Token`—never a real Entity/company name, contact name, email address, phone number, or other identifying detail. Real identity may be read while preparing a Handoff, but must be resolved to tokens before anything is written.
 
-The runtime enforces this in code: every production Handoff write goes through `src/handoffWriter.ts`'s `createHandoff`/`updateHandoff`, which require Entity_Token/Matter_Token and reject (fail closed) any protected field containing prohibited identity. Do not write to the Handoffs database (`HANDOFFS_DATA_SOURCE_ID`) any other way.
+Every production Handoff write goes through `src/handoffWriter.ts`'s `createHandoff`/`updateHandoff`, which require `Entity_Token`/`Matter_Token` and reject protected identity fields fail-closed. Do not write to the Handoffs database (`HANDOFFS_DATA_SOURCE_ID`) any other way. A Handoff created, updated, or resubmitted by hand through a Notion tool call bypasses that code path and must follow `handoff-writing-rules.yaml` in the repository root before writing anything, applying the same discipline every time.
 
-Any Handoff created, updated, or resubmitted by hand (i.e. via a Notion tool call, not by the deployed runtime's own code) bypasses that code path entirely and must follow `handoff-writing-rules.yaml` in this repo's root before writing anything, applying the same discipline manually, every time, before submitting.
+## Authority model
 
-## Authority Model
-
-* **Architect** remains the architectural and governance authority for ENIG.
-* **Jules** operates autonomously inside the boundary approved by Architect.
-* Jules does **not** redesign ENIG architecture, modify runtime behavior without authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
-* Jules **must stop** at any new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision and return to Architect rather than inventing a rule.
+- **Architect/Martin** remains the architectural and governance authority for ENIG.
+- Both agents operate autonomously inside the boundary approved by Architect; Jules is not incapable of reasoning, but has a lower platform execution ceiling.
+- Neither agent may redesign ENIG architecture, modify runtime behavior outside authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
+- Both agents must stop and report when a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision is required rather than inventing a rule.
 
 ## ENIG Runtime Architecture — mandatory reading
 
-`docs/enig-operating-model.md` is the authoritative, binding description of ENIG Runtime's architecture (Units/Hats/Actions, the Action Registry, the Unit Manifest pattern, Chat/Cowork's dispatch semantics) -- not a proposal, not background reading to skip under time pressure. Its own "binding, not aspirational" section states the same rule from the doc's side; this entry exists so every session sees the pointer automatically, since a file under `docs/` only gets read if someone happens to open it.
+`docs/enig-operating-model.md` is the authoritative, binding description of ENIG Runtime's architecture (Units/Hats/Actions, the Action Registry, the Unit Manifest pattern, and Chat/Cowork dispatch semantics), not a proposal or background reading. Before creating or modifying a Unit, Hat, or Action, or touching `src/router.ts`, `src/units/dispatch.ts`, `src/units/unitManifest.ts`, `src/hats/actionRegistry.ts`, or dispatch/Handoff-adjacent code in `src/session.ts`, read that document.
 
-Before creating or modifying a Unit, Hat, or Action, or touching `src/router.ts`, `src/units/dispatch.ts`, `src/units/unitManifest.ts`, `src/hats/actionRegistry.ts`, or `src/session.ts`'s dispatch/Handoff-adjacent code, read that doc first. Concretely:
+- Never hardcode persona/governance content a Hat could instead load live from Notion. `src/governance.ts`'s `getGovernance` (live-fetched, cached, fail-closed) is the established pattern.
+- Never add a second mechanism for how a capability gets triggered. The Unit Manifest / Action Registry (`src/hats/actionRegistry.ts`, `src/units/unitManifest.ts`, `src/units/dispatch.ts`) is the only sanctioned mechanism. `src/actions/registry.ts`'s `ActionCapability` mechanism has been retired; do not reintroduce it under any name.
+- A discrepancy between the document and code is a bug in one of them, not acceptable drift. Fix it or flag it explicitly; never silently build around it.
+- Any change that alters what the document describes updates the document in the same change, resolving the issue or adding it to the document's Open Questions list.
+- These rules do not relax the Authority Model: a genuinely new architectural or governance decision still stops and returns to Architect.
 
-* **Never hardcode persona/governance content a Hat could instead load live from Notion.** `src/governance.ts`'s `getGovernance` (live-fetched, cached, fail-closed) is the established pattern six Units already use -- check for it before writing a new hardcoded prompt string of any real size.
-* **Never add a second mechanism for "how does a capability get triggered."** The Unit Manifest / Action Registry (`src/hats/actionRegistry.ts`, `src/units/unitManifest.ts`, `src/units/dispatch.ts`) is the only sanctioned one. `src/actions/registry.ts`'s `ActionCapability` mechanism has been retired outright (2026-09-28, in the same pass as the `research-signal` Skill proof) -- it is gone from the codebase, not merely deprecated; do not reintroduce a second capability-dispatch mechanism under any name.
-* **A discrepancy between the doc and the code is a bug in one of them, not a shrug.** If you find one, fix it or flag it explicitly -- never silently build around it or treat it as acceptable drift.
-* **Any change that alters what the doc describes updates the doc in the same change** -- resolve or add to its "Open questions" list, not "someday."
-* This doesn't relax the Authority Model above: a genuinely new architectural or governance decision (not just applying what the doc already settled) still stops and returns to Architect.
+## Claude Code execution contract
 
-## Claude Code Execution Contract
+Claude Code is trusted to execute the full engineering lifecycle inside the approved boundary. Its execution authority is **task-scoped**.
 
-Claude Code is trusted to run the full local pipeline -- inspect, implement, test, typecheck, self-audit -- autonomously, and does not need the Jules-specific Draft-PR-and-wait gate below. The same substantive rules still apply in full (Handoff identity-write boundary, Authority Model, Provider and Data-Boundary Constraints, and every "stop and report instead of guessing" instruction elsewhere in this repo's instructions) -- what's different is the submission mechanics:
+- If Martin says **implement only**, Claude Code implements, verifies, self-audits, fixes in-scope findings, and stops.
+- If Martin explicitly authorizes **commit/push/open PR**, Claude Code may perform those actions after verification.
+- If Martin explicitly says to **watch/babysit the PR through merge**, Claude Code may monitor CI, review, and merge state and continue the authorized workflow through merge.
+- If Martin explicitly authorizes **deployment**, Claude Code may execute the approved deployment path and verify deployment and smoke tests.
+- If only part of the lifecycle is authorized, Claude Code stops at that authorized completion state.
+- Execution authorization never grants permission to make a new architectural or governance decision.
+- Claude Code must report actual states rather than assuming them: commit SHA, remote push, PR URL, CI state, merge state, deployment state, and smoke-test result.
+- If already-approved repository automation performs a later action, Claude Code may monitor it when the task explicitly asks it to watch the workflow, but must distinguish automated workflow progression from its own authority.
 
-* Claude Code still does not commit, push, or open a PR on its own initiative. Martin's explicit approval remains required before any of those actions, exactly as for Jules.
-* Once Martin gives that approval for a given piece of work, Claude Code may carry it through commit -> push -> PR creation in one pass, without an intermediate stop for a separate "approve the push" or "approve the PR" step, unless Martin's instruction says otherwise for that task.
-* Claude Code opens the PR **Ready for review**, not Draft, so the repository's configured GitHub Actions (`pr-validation.yml` -> `auto-merge.yml` -> `deploy.yml`) take over immediately according to their configured rules. Martin reviews on GitHub (or asks Claude Code to watch/babysit the PR) rather than manually flipping it from Draft.
-* Deployment authorization still follows the same rule as Jules: a merge is not itself authorization to deploy outside of what the repo's own Actions are already configured to do.
-* Claude Code still reports exact completion states (commit SHA, push confirmation, PR URL, CI/merge state) rather than assuming or claiming an unconfirmed outcome -- the Evidence & Reporting Rule's discipline applies here too, just without the Jules-specific Draft-PR step in the state list.
+Claude Code must not commit, push, open a PR, merge, or deploy merely because those actions would be convenient or customary. The task instruction itself may explicitly grant the relevant authority; no separate approval beyond that task instruction is required.
 
-## Operating Model & Capability Distinctions (Jules)
+## Jules execution contract and sandbox
 
-Jules operates inside a sandboxed environment with specific technical capability boundaries:
+Jules shares the same reasoning boundary above but has a deliberately lower platform execution ceiling. Jules may inspect, reason about implementation, implement, test, typecheck, build, self-audit, and create a local commit. After Martin's approval for submission, Jules may publish the approved work through its supported submission mechanism.
 
-1. **Sandbox Execution (Directly Invokable by Jules)**:
-   * Inspect, read, and write repository files.
-   * Execute local shell commands, tests, typechecks (`npx tsc --noEmit`), and build verifications.
-   * Create local git branches and commits inside the sandbox.
-   * Access remote git history (read-only operations like `git fetch`, `git log`).
-   * Execute Cloudflare API status checks (`npx wrangler deployments list`, `whoami`) and post-deployment HTTP smoke tests (`curl`).
+### Sandbox and submission mechanics
 
-2. **Platform Work-Submission Lifecycle**:
-   * Direct `git push` commands in bash are safety-blocked by the sandbox execution engine.
-   * Jules implements the approved change in its sandbox, then runs tests, typecheck, build verification, and self-audit.
-   * Jules creates a local commit, then stops and presents a pre-submission report to Architect/the session — scope covered, files changed, test/typecheck results, and any open questions. Jules must not invoke `submit` at this point.
-   * The implementation is reviewed and refined in the session from this report: Martin may request changes, Jules addresses them, re-runs tests/self-audit, and presents an updated report. This can repeat as many times as needed. All drafting and reviewing happens here, before submission — not after.
-   * Only after Martin explicitly approves the implementation for submission may Jules push the approved commit and invoke the built-in task submission action (`submit`) with:
-     * `branch_name`
-     * `commit_message`
-     * `title`
-     * `description`
-   * When submission is authorized, Jules MUST create the PR as a Draft PR. Jules must not mark the PR as Ready for review, and must not choose or offer the PR state as a decision of its own — Draft PR is the only outcome of an authorized submission.
-   * Martin is the human review gate. After Martin reviews and marks the Draft PR Ready for review, the repository's configured GitHub Actions (`pr-validation.yml` → `auto-merge.yml` → `deploy.yml`) take over for validation, merge, and deployment according to their configured rules.
-   * Jules must not independently alter the approved implementation during submission, except for a submission-specific issue explicitly within the approved scope (e.g. a mechanical fix needed to complete the push/PR itself).
-   * Jules must not claim that a PR has been created or merged merely because the branch was pushed.
-   * If the submission response only confirms a branch push and provides no PR URL or merge confirmation, Jules must report the PR and merge states as pending/unknown rather than claiming completion.
+- Jules may inspect, read, and write repository files; execute local shell commands, tests, typechecks such as `npx tsc --noEmit`, and builds; create local branches and commits; and read remote history with operations such as `git fetch` and `git log`.
+- Jules may execute Cloudflare API status checks such as `npx wrangler deployments list` and `whoami`, and post-deployment HTTP smoke tests with `curl`, but those checks do not authorize deployment.
+- Direct `git push` commands in the sandbox are safety-blocked. Jules implements the approved change, verifies it, self-audits, creates a local commit, and stops for a pre-submission report.
+- The pre-submission report covers scope, files changed, tests/typecheck/build results, self-audit results, and open questions. Martin may request changes; Jules addresses only approved in-scope changes, reruns verification, and reports again.
+- Only after Martin explicitly approves the implementation for submission may Jules push the approved commit and invoke the built-in `submit` action with `branch_name`, `commit_message`, `title`, and `description`.
+- Authorized Jules submission **MUST create a Draft PR**. Jules must stop at a Draft PR and must not independently mark it Ready for review, merge, deploy, or decide any later PR state. Draft PR is the only outcome of an authorized Jules submission.
+- Jules must not independently alter the approved implementation during submission except for a submission-specific mechanical issue explicitly within approved scope.
+- Jules must not claim that a PR was created or merged merely because a branch was pushed. If no PR URL or merge confirmation is returned, report those states as pending/unknown.
+- After Martin reviews and marks the Draft PR Ready for review, configured repository automation may validate, merge, and deploy according to its approved rules. Jules must not bypass, replace, or reinterpret that workflow.
 
-3. **Deployment Autonomy & Boundaries**:
-   * Cloudflare deployment remains a separate operation. A successful task submission, branch push, PR creation, or merge must never be interpreted as proof of deployment.
-   * Deployment may only occur when the task explicitly authorizes deployment or an already-approved repository release contract explicitly authorizes it.
+## Execution sequences
 
-## Standard Execution Sequence
+### Claude Code
 
-1. `inspect` — inspect the repository, existing files, and relevant architecture.
-2. `implement` — implement only the approved change within scope.
-3. `test` — run required tests, typecheck, and build verification.
-4. `self-audit` — audit implementation against task scope, governance, capability boundaries, and actual execution state.
-5. `fix in-scope findings` — fix any findings within approved task scope and retest.
-6. `local commit` — create local git commit in sandbox.
-7. `pre-submission report` — present scope, files changed, and test/typecheck results to Architect/the session; stop and wait. Loop back to step 5/3 on requested changes as the implementation is reviewed and refined — this is where drafting and reviewing happen, not after submission.
-8. `platform submission` — once Martin explicitly approves the implementation for submission, push the approved commit and invoke the built-in Jules task submission action with `branch_name`, `commit_message`, `title`, and `description`. The PR MUST be created as a Draft PR — Jules must not mark the PR as Ready for review.
-9. `human review & automated validation` — Martin reviews and marks the Draft PR Ready for review. The repository's configured GitHub Actions (`pr-validation.yml` → `auto-merge.yml` → `deploy.yml`) then take over according to their configured rules; Jules must not bypass, replace, or reinterpret this workflow.
-10. `smoke-test` — execute post-deployment verification if deployed.
-11. `final evidence report` — deliver the final report stating exact completion states without assuming unconfirmed PR, merge, or deployment actions.
+`inspect → reason → implement → test → self-audit → fix in-scope findings → execute the explicitly authorized lifecycle → final evidence report`
 
-## Self-Audit Requirements
+The authorized lifecycle may include, depending on Martin's instruction: `commit → push → PR → watch checks/merge → deploy → smoke test`.
 
-Jules must explicitly verify:
-* Task scope
-* Architectural boundaries
-* Governance constraints
-* Provider / data-boundary constraints
-* Regression risk
-* Tests
-* Typecheck / build where applicable
-* Configuration
-* Public interfaces
-* Actual local commit state
-* Actual remote branch pushed state
-* Actual PR state (created / pending / unknown)
-* Actual PR merge state (merged / pending / unknown)
-* Actual deployment state
-* Actual smoke-test result
+### Jules
 
-Jules may fix problems discovered during self-audit when the fix remains strictly inside the approved task scope.
+`inspect → reason → implement → test → self-audit → fix in-scope findings → local commit → pre-submission report → Martin approval → publish/create Draft PR → stop`
 
-Jules must stop and report when the solution requires a new architectural or governance decision.
+## Self-audit and evidence
 
-## Provider and Data-Boundary Constraints
+The responsible agent must verify task scope, architectural and governance boundaries, provider/data-boundary constraints, regression risk, tests, typecheck/build where applicable, configuration, public interfaces, and actual execution state. Findings may be fixed only when strictly inside approved task scope. A new architectural or governance decision requires stopping and reporting.
 
-* **Provider selection is infrastructure policy, not business authority.**
-* **AI output is not authority.**
-* Do not automatically send context to another provider merely because the primary provider fails.
-* Do not introduce provider eligibility rules that have not been approved.
-* Do not introduce automatic sanitization/redaction as an assumed universal solution.
-* Do not silently downgrade a task to a less protective provider.
-* Do not put provider-specific data handling inside individual Hats.
-* If no eligible execution path exists, stop, hold, or use an explicitly approved human-controlled path.
+Reports must explicitly distinguish:
 
-## Evidence & Reporting Rule
-
-Jules must explicitly distinguish between these exact states:
 1. `local commit created`
 2. `remote branch pushed`
 3. `PR created / pending`
@@ -130,14 +107,17 @@ Jules must explicitly distinguish between these exact states:
 5. `production deployment`
 6. `smoke test verified`
 
-Never report an intended or prospective action as completed.
+Never report an intended or prospective action as complete. Final evidence must include exact files changed, local commit SHA, confirmed remote branch state, PR URL if returned, merge confirmation, deployment state, validation/checks performed, and unresolved states or pending approvals.
 
-The final report must include:
-* Exact file(s) changed
-* Local commit SHA
-* Remote branch state if confirmed
-* Whether a PR URL was returned
-* Whether merge was confirmed
-* Whether deployment occurred
-* Validation / checks performed
-* Any unresolved state or pending approvals
+## Provider and data-boundary constraints
+
+- Provider selection is infrastructure policy, not business authority.
+- AI output is not authority.
+- Do not automatically send context to another provider merely because the primary provider fails.
+- Do not introduce provider eligibility or fallback rules that have not been approved.
+- Do not introduce automatic sanitization/redaction as an assumed universal solution.
+- Do not silently downgrade a task to a less protective provider.
+- Do not put provider-specific data handling inside individual Hats.
+- If no eligible execution path exists, stop, hold, or use an explicitly approved human-controlled path.
+
+These constraints, the Handoff identity-token boundary, fail-closed behavior, the Unit Manifest/Action Registry rule, mandatory operating-model reading, and synchronized documentation remain binding for both agents.
