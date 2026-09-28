@@ -3,7 +3,7 @@ import { isWebSearchConfigured, searchWeb } from "../research/webSearch";
 import type { WebSearchResult } from "../research/webSearch";
 import { createPage, plainText, queryDataSource, richText, select, title } from "../../notion";
 import { createHandoff } from "../../handoffWriter";
-import { aiJson, generate } from "../../ai";
+import { generate } from "../../ai";
 import { getSkillContent } from "../../platform/skillRegistry";
 import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
@@ -215,20 +215,21 @@ async function evaluateResearchAgainstAcquisitionCriteria(
     return null;
   }
 
-  return aiJson<AcquisitionCriteriaEvaluationResponse>(env, {
+  return generate<AcquisitionCriteriaEvaluationResponse>(env, {
     taskId: "lead.discovery_signal_evaluation",
-    system: [
-      "You are executing the Lead Generation Specialist Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition (including its Acquisition Criteria section) are authoritative for this role -- follow them exactly as written.",
-      "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-      governance.universalRoleContract,
-      "=== HAT DEFINITION ===",
-      governance.hatDefinition,
-      "=== TASK (execution mechanics -- not part of the governance above) ===",
-      "You are given candidate signal context and completed Research & Intelligence synthesis (findings, implications, limitations, sources). Evaluate whether the canonical Acquisition Criteria section above is genuinely satisfied by attributable evidence.",
-      "CRITICAL RULE ON DISTINCTION: Differentiate strictly between observable evidence, R&I findings, preliminary diagnosis/hypothesis, and the acquisition decision. An unsupported or speculative preliminary diagnosis/hypothesis from R&I is NOT a fact and CANNOT satisfy the Acquisition Criteria by itself. Only evidence-backed findings satisfy the criteria.",
-      'Return JSON: {"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the attributable evidence observation>", "reason": "..."}.',
-    ].join("\n\n"),
-    user: `Candidate Signal Context:\n${contextText}\n\nCompleted R&I Research Synthesis:\n${synthesisText}`,
+    mode: "json",
+    parts: {
+      persona:
+        "You are executing the Lead Generation Specialist Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition (including its Acquisition Criteria section) are authoritative for this role -- follow them exactly as written.",
+      behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", governance.universalRoleContract, "=== HAT DEFINITION ===", governance.hatDefinition].join("\n\n"),
+      skillContent: [
+        "=== TASK (execution mechanics -- not part of the governance above) ===",
+        "You are given candidate signal context and completed Research & Intelligence synthesis (findings, implications, limitations, sources). Evaluate whether the canonical Acquisition Criteria section above is genuinely satisfied by attributable evidence.",
+        "CRITICAL RULE ON DISTINCTION: Differentiate strictly between observable evidence, R&I findings, preliminary diagnosis/hypothesis, and the acquisition decision. An unsupported or speculative preliminary diagnosis/hypothesis from R&I is NOT a fact and CANNOT satisfy the Acquisition Criteria by itself. Only evidence-backed findings satisfy the criteria.",
+        'Return JSON: {"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the attributable evidence observation>", "reason": "..."}.',
+      ].join("\n\n"),
+      situation: `Candidate Signal Context:\n${contextText}\n\nCompleted R&I Research Synthesis:\n${synthesisText}`,
+    },
     light: true,
     maxTokens: 3000,
   });
@@ -678,19 +679,20 @@ async function generateOnDemandDiscoveryQueries(env: Env, focus: string, count: 
     return null;
   }
 
-  const response = await aiJson<OnDemandQueryGenerationResponse>(env, {
+  const response = await generate<OnDemandQueryGenerationResponse>(env, {
     taskId: "lead.discovery_ondemand_query_generation",
-    system: [
-      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition (including its Acquisition Criteria section) are authoritative for this role -- follow them exactly as written.",
-      "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-      governance.universalRoleContract,
-      "=== HAT DEFINITION ===",
-      governance.hatDefinition,
-      "=== TASK (execution mechanics -- not part of the governance above) ===",
-      `Martin has asked you to proactively search for organisations showing evidence of a problem worth investigating${focus ? `, specifically: "${focus}"` : ""}. Generate exactly ${count} distinct web search queries likely to surface real organisations exhibiting the kind of strategic/commercial problem signal the Acquisition Criteria describe (criterion 2) -- unclear/inconsistent positioning, difficulty explaining the offer, a market/model change without a corresponding positioning update, stagnant growth, a rebrand without evident strategic clarity, fragmented cross-channel messaging, or a perceived market position weaker than actual capability${focus ? ", scoped to the specific focus given above" : ""}. Each query must search for an observable situation or statement, never presuppose a negative diagnosis (never use words like poor/bad/confused/ineffective/weak/failing), and never name a specific organisation -- you are generating a search strategy, not a company list.`,
-      'Return JSON: {"queries": ["...", ...]} with exactly the requested number of distinct query strings.',
-    ].join("\n\n"),
-    user: focus || "No specific focus given -- search broadly across the Acquisition Criteria's problem-signal categories.",
+    mode: "json",
+    parts: {
+      persona:
+        "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition (including its Acquisition Criteria section) are authoritative for this role -- follow them exactly as written.",
+      behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", governance.universalRoleContract, "=== HAT DEFINITION ===", governance.hatDefinition].join("\n\n"),
+      skillContent: [
+        "=== TASK (execution mechanics -- not part of the governance above) ===",
+        `Martin has asked you to proactively search for organisations showing evidence of a problem worth investigating${focus ? `, specifically: "${focus}"` : ""}. Generate exactly ${count} distinct web search queries likely to surface real organisations exhibiting the kind of strategic/commercial problem signal the Acquisition Criteria describe (criterion 2) -- unclear/inconsistent positioning, difficulty explaining the offer, a market/model change without a corresponding positioning update, stagnant growth, a rebrand without evident strategic clarity, fragmented cross-channel messaging, or a perceived market position weaker than actual capability${focus ? ", scoped to the specific focus given above" : ""}. Each query must search for an observable situation or statement, never presuppose a negative diagnosis (never use words like poor/bad/confused/ineffective/weak/failing), and never name a specific organisation -- you are generating a search strategy, not a company list.`,
+        'Return JSON: {"queries": ["...", ...]} with exactly the requested number of distinct query strings.',
+      ].join("\n\n"),
+      situation: focus || "No specific focus given -- search broadly across the Acquisition Criteria's problem-signal categories.",
+    },
     light: true,
   });
 
@@ -724,14 +726,17 @@ export const LeadOpportunityDiscoveryCapability = {
   description:
     "Runs on-demand opportunity discovery when Martin asks Lead Generation Specialist to proactively find companies showing evidence of a problem worth investigating.",
   async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
-    const classification = await aiJson<OnDemandIntakeClassification>(env, {
+    const classification = await generate<OnDemandIntakeClassification>(env, {
       taskId: "lead.discovery_ondemand_intake",
-      system: `You classify incoming messages for ENIG's Lead Generation Specialist on-demand discovery capability.
+      mode: "json",
+      parts: {
+        persona: `You classify incoming messages for ENIG's Lead Generation Specialist on-demand discovery capability.
 Check if Martin is asking ENIG's own team to PROACTIVELY DISCOVER/FIND new potential companies/organisations to investigate as possible clients -- e.g. "find me 3 companies showing a positioning problem", "look for businesses with weak differentiation worth reaching out to", "search for organisations that might need our help".
 This is NOT: a prospective client's own enquiry about their own company (that is a Sales enquiry), a request to research a SPECIFIC NAMED company or market (that is Research & Intelligence), or general chat/small talk.
 If yes, set isDiscoveryRequest to true, extract the requested count as an integer if one was stated (otherwise omit the field), and a short restatement of the problem/situation focus requested (e.g. "positioning or communication problem"), or an empty string if no specific focus was given.
 Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not stated>, "focus": "..."}`,
-      user: text,
+        situation: text,
+      },
       light: true,
     });
 

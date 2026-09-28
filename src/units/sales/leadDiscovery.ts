@@ -1,6 +1,6 @@
 import type { Env } from "../../types";
 import { createPage, getPage, plainText, queryDataSource, relation, richText, select, title } from "../../notion";
-import { aiJson } from "../../ai";
+import { generate } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -131,19 +131,20 @@ async function classifyLeadSignal(env: Env, redactedSignal: string): Promise<Lea
     return null;
   }
 
-  return aiJson<LeadClassification>(env, {
+  return generate<LeadClassification>(env, {
     taskId: "lead.discovery_classification",
-    system: [
-      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for this role -- follow them exactly as written.",
-      "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-      governance.universalRoleContract,
-      "=== HAT DEFINITION ===",
-      governance.hatDefinition,
-      "=== TASK (execution mechanics -- not part of the governance above) ===",
-      "You are given only a sanitized description of a discovered signal and its public source -- never the discovered identity or contact, per this Hat's authority limits. Decide whether this reads like a genuine, in-scope business lead (a real organisation/person with an evident need this consultancy could address) as opposed to noise, spam, or an out-of-scope situation. Never invent detail not present in the evidence given.",
-      'Return JSON: {"genuine": true|false, "category": "<short industry/segment label, or empty string>", "reason": "..."}.',
-    ].join("\n\n"),
-    user: redactedSignal,
+    mode: "json",
+    parts: {
+      persona:
+        "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for this role -- follow them exactly as written.",
+      behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", governance.universalRoleContract, "=== HAT DEFINITION ===", governance.hatDefinition].join("\n\n"),
+      skillContent: [
+        "=== TASK (execution mechanics -- not part of the governance above) ===",
+        "You are given only a sanitized description of a discovered signal and its public source -- never the discovered identity or contact, per this Hat's authority limits. Decide whether this reads like a genuine, in-scope business lead (a real organisation/person with an evident need this consultancy could address) as opposed to noise, spam, or an out-of-scope situation. Never invent detail not present in the evidence given.",
+        'Return JSON: {"genuine": true|false, "category": "<short industry/segment label, or empty string>", "reason": "..."}.',
+      ].join("\n\n"),
+      situation: redactedSignal,
+    },
     light: true,
   });
 }
