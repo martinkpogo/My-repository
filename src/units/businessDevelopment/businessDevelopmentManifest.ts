@@ -1,7 +1,7 @@
 import type { Env, WorkState, Unit } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { BDOpportunityState } from "./types";
-import type { HatManifest, UnitManifest } from "../unitManifest";
+import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import { createHandoff } from "../../handoffWriter";
 import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
@@ -91,9 +91,18 @@ import { getSkillContent } from "../../platform/skillRegistry";
  *
  * All three Business Development Hats are now fully built.
  *
- * NOTE: dispatch wiring (four chokepoints, including the approval
- * callback) is done -- see units/dispatch.ts, units/registry.ts, and
- * router.ts/session.ts's generic manifest lookups.
+ * NOTE: dispatch wiring for entryHandler/readHandler/awaitingHandlers
+ * (three chokepoints) is done -- see units/dispatch.ts, units/registry.ts,
+ * and router.ts/session.ts's generic manifest lookups. The fourth
+ * chokepoint, the approval callback, was NOT done despite an earlier
+ * version of this comment claiming otherwise (stale/incorrect -- fixed
+ * here, doc/code drift per this repo's own discipline): session.ts's
+ * handleCallback kept every BD approval prefix as its own hardcoded
+ * switch case until this change, which migrates exactly one
+ * (bdopportunityhandoff, all three Hats, via the new
+ * HatManifest.callbackHandlers field) onto the generic manifest lookup.
+ * bddevelop/bdnextmove remain hardcoded cases, to migrate later once this
+ * first one proves the shape.
  */
 
 type OpportunityDevelopmentAction =
@@ -464,6 +473,23 @@ export async function handleBDHandoffApproval(env: Env, state: WorkState, approv
   return state;
 }
 
+// The callback_data prefix proposeBDHandoff's own buttons are built with
+// (see its "bdopportunityhandoff:<workId>:approve/reject" literal above).
+// First real use of HatManifest.callbackHandlers -- migrates this one
+// approval prefix off session.ts's hardcoded handleCallback switch case
+// onto the generic manifest lookup, same incremental-migration discipline
+// as entryHandler's own rollout (Strategy, then Sales Executive). Shared
+// across all three BD Hats since handleBDHandoffApproval itself is
+// already Hat-agnostic (derives fromHat from state.hat). bddevelop/
+// bdnextmove are NOT migrated by this change -- they remain their own
+// hardcoded handleCallback cases until a later change proves this is
+// worth extending further.
+export const BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX = "bdopportunityhandoff" as const;
+
+const businessDevelopmentHandoffCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+  [BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX]: handleBDHandoffApproval,
+};
+
 /**
  * Real drafting reasoning for develop_opportunity, per the Hat
  * Definition's own Output contract (Notion): "developed opportunity
@@ -786,6 +812,7 @@ const opportunityDevelopmentHat: HatManifest<OpportunityDevelopmentAction> = {
   readHandler: opportunityDevelopmentReadHandler,
   entryHandler: opportunityDevelopmentEntryHandler,
   awaitingHandlers: opportunityDevelopmentAwaitingHandlers,
+  callbackHandlers: businessDevelopmentHandoffCallbackHandlers,
 };
 
 // --- Partnership Development: built out real, mirroring Opportunity
@@ -1065,6 +1092,7 @@ const partnershipDevelopmentHat: HatManifest<PartnershipDevelopmentAction> = {
   readHandler: partnershipDevelopmentReadHandler,
   entryHandler: partnershipDevelopmentEntryHandler,
   awaitingHandlers: partnershipDevelopmentAwaitingHandlers,
+  callbackHandlers: businessDevelopmentHandoffCallbackHandlers,
 };
 
 type GrowthMarketDevelopmentAction =
@@ -1333,6 +1361,7 @@ const growthMarketDevelopmentHat: HatManifest<GrowthMarketDevelopmentAction> = {
   readHandler: growthMarketDevelopmentReadHandler,
   entryHandler: growthMarketDevelopmentEntryHandler,
   awaitingHandlers: growthMarketDevelopmentAwaitingHandlers,
+  callbackHandlers: businessDevelopmentHandoffCallbackHandlers,
 };
 
 export const businessDevelopmentManifest: UnitManifest = {
