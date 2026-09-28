@@ -4,11 +4,11 @@ import type { WebSearchResult } from "../research/webSearch";
 import { createPage, plainText, queryDataSource, richText, select, title } from "../../notion";
 import { createHandoff } from "../../handoffWriter";
 import { aiJson } from "../../ai";
+import { fetchSkill, generate } from "../../platform/primitives";
 import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
-import { ActionCapability, registerActionCapability } from "../../actions/registry";
 import { getSessionStub, newWorkId } from "../../router";
 
 /**
@@ -90,8 +90,24 @@ interface EvaluationBatchResponse {
  * never fabricates a decision-maker, contact, or fact the snippet doesn't
  * contain. Returns [] (not null) on governance/AI failure so one failed
  * query doesn't abort the rest of the run -- the caller logs the failure.
+ *
+ * Migrated (Skills architecture proof, Build order Step 2) to fetch the
+ * shared `research-signal` Skill for its evidence discipline (never
+ * fabricate a specific fact; observation, not diagnosis) instead of
+ * restating that discipline inline -- the same Skill Business
+ * Development's Opportunity Development Hat fetches for
+ * discoverOpportunity/researchOpportunity
+ * (businessDevelopmentManifest.ts), under a materially different
+ * Persona (this Hat's own Hat Definition, not BD's), Data Source (public
+ * web search results, not Martin's own request text), and consequence/
+ * approval shape (this call feeds an eventual Lead-creation approval
+ * gate; BD's discover_opportunity is a standalone "read" action with no
+ * approval at all). What's left in this call's own `situation` below is
+ * genuinely Hat/action-specific: the Acquisition Criteria evaluation
+ * mechanics and this action's own JSON output shape, neither of which
+ * belongs in a Skill meant to stay reusable beyond this one Hat.
  */
-async function evaluateCandidates(env: Env, results: WebSearchResult[]): Promise<CandidateEvaluation[]> {
+export async function evaluateCandidates(env: Env, results: WebSearchResult[]): Promise<CandidateEvaluation[]> {
   if (results.length === 0) return [];
 
   const governance = await getLeadDiscoveryGovernance(env);
@@ -100,23 +116,22 @@ async function evaluateCandidates(env: Env, results: WebSearchResult[]): Promise
     return [];
   }
 
+  const skillContent = await fetchSkill(env, "research_signal");
+
   const candidatesText = results
     .map((r, i) => `[${i}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${r.publishedDate ? `\nPublished: ${r.publishedDate}` : ""}`)
     .join("\n\n");
 
-  const response = await aiJson<EvaluationBatchResponse>(env, {
+  const response = await generate<EvaluationBatchResponse>(env, {
     taskId: "lead.discovery_signal_evaluation",
-    system: [
-      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition (including its Acquisition Criteria section) are authoritative for this role -- follow them exactly as written.",
-      "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-      governance.universalRoleContract,
-      "=== HAT DEFINITION ===",
-      governance.hatDefinition,
-      "=== TASK (execution mechanics -- not part of the governance above) ===",
-      "You are given several public web search results. Evaluate EACH one independently against the Acquisition Criteria section above -- operating business, strategic/commercial problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, and the evidence-threshold hard gate. Base every judgment strictly on the title/url/snippet given -- never invent a fact, a decision-maker, or a contact detail that isn't present in the text. If the snippet doesn't support a criterion, that criterion is not met -- do not assume it. Record an observation (e.g. \"expanded from X into Y but public positioning still emphasises X\"), never a diagnosis (never \"this company has bad marketing\"). A commodity request (logo/generic graphic design/social media graphics/basic branding) or mere existence/size/industry is never sufficient to pass.",
-      'Return JSON: {"candidates": [{"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the disciplined observation, or empty string if pass is false>", "decisionMakerOrRole": "<only if explicitly named/implied in the text, else empty string>", "category": "<short label, or empty string>", "reason": "..."}, ...]} -- exactly one entry per result given, in the same order.',
-    ].join("\n\n"),
-    user: candidatesText,
+    mode: "json",
+    parts: {
+      persona: `You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Hat Definition (including its Acquisition Criteria section) is authoritative for this role -- follow it exactly as written.\n\n=== HAT DEFINITION ===\n${governance.hatDefinition}`,
+      behavior: governance.universalRoleContract,
+      skillContent,
+      context: candidatesText,
+      situation: `Evaluate EACH of the search results above independently against the Acquisition Criteria section in the Hat Definition -- operating business, strategic/commercial problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, and the evidence-threshold hard gate. If the snippet doesn't support a criterion, that criterion is not met -- do not assume it. A commodity request (logo/generic graphic design/social media graphics/basic branding) or mere existence/size/industry is never sufficient to pass.\n\nReturn JSON: {"candidates": [{"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the disciplined observation, or empty string if pass is false>", "decisionMakerOrRole": "<only if explicitly named/implied in the text, else empty string>", "category": "<short label, or empty string>", "reason": "..."}, ...]} -- exactly one entry per result given, in the same order.`,
+    },
     light: true,
     maxTokens: 3000,
   });
@@ -703,7 +718,7 @@ interface OnDemandIntakeClassification {
  * evaluates it -- this never bypasses that, and never bypasses the
  * approval gate either, since Phase 2 is shared code.
  */
-export const LeadOpportunityDiscoveryCapability: ActionCapability = {
+export const LeadOpportunityDiscoveryCapability = {
   id: "sales.lead_opportunity_discovery",
   name: "Lead Generation Specialist On-Demand Discovery Capability",
   description:
@@ -782,8 +797,6 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
     return true;
   },
 };
-
-registerActionCapability(LeadOpportunityDiscoveryCapability);
 
 /**
  * Adapts LeadOpportunityDiscoveryCapability's existing on-demand discovery
