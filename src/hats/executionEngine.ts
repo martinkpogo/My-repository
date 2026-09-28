@@ -1,7 +1,7 @@
 import type { Env, WorkState } from "../types";
 import { logActivity } from "../log";
 import { sendWorkspaceHatMessage } from "../telegram";
-import { getPage, plainText, richText, select } from "../notion";
+import { getPage, plainText, select } from "../notion";
 import { updateHandoff } from "../handoffWriter";
 import type { MarketingHatName } from "./types";
 import { isMarketingHat, marketingHatSummaryList } from "./registry";
@@ -27,14 +27,17 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * marketingManifest.ts's own doc comment for why Stage 1/2 stayed here
  * rather than migrating onto the generic manifest resolver too
  * (deterministic relationship-based tie-breaking has no equivalent
- * there). handleTransitionApproval has itself moved to
- * marketingManifest.ts too (approval-callback dispatch mechanism,
- * HatManifest.callbackHandlers) since it's the resolution of
- * runMarketingHat's own "route" branch, defined in that same file --
- * keeping it here would have required marketingManifest.ts to import
- * back from this file, inverting the one-way dependency this file has on
- * marketingManifest.ts (dispatchMarketingHat) and risking a circular
- * import.
+ * there). handleTransitionApproval and handleDraftApproval have both
+ * moved to marketingManifest.ts too (approval-callback dispatch
+ * mechanism, HatManifest.callbackHandlers, markettransition and
+ * marketdraft respectively) -- any function importable from this file
+ * that a manifest-declared callbackHandlers entry needs must instead be
+ * DEFINED in marketingManifest.ts, since importing it FROM this file
+ * would require marketingManifest.ts to import back from here, inverting
+ * this file's existing one-way dependency on marketingManifest.ts
+ * (dispatchMarketingHat) and risking a circular import. handlePaidMediaApproval
+ * remains here for now (marketpaid, not yet migrated) since it needs no
+ * changes to stay working as a legacy handleCallback case.
  *
  * Stage 1 candidate-Hat classification (classifyCandidateHats,
  * intakeClassification.ts) and Stage 2 deterministic relationship
@@ -143,44 +146,6 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
   });
 
   return dispatchMarketingHat(env, state);
-}
-
-export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  if (state.stage !== "awaiting_marketing_draft_approval") {
-    await sendWorkspaceHatMessage(env, state, "This draft approval has already been resolved -- nothing to do.");
-    return state;
-  }
-  state.pendingActionSummary = undefined;
-
-  if (!approved) {
-    await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what's off or what to take into account, and I'll redo it.");
-    state.awaiting = "marketing_feedback";
-    return state;
-  }
-
-  // If this work item arrived via a Handoff (currently only from R&I's
-  // auto-routing to Marketing Strategist), close it out as the
-  // completion signal -- same pattern Finance/Sales/R&I already use.
-  if (state.handoffId) {
-    await updateHandoff(env, state.handoffId, {
-      Status: select("Closed"),
-      "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
-    }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
-  }
-
-  await logActivity(env, {
-    entry: `${state.hat} output approved`,
-    type: "Decision",
-    area: "Marketing",
-    decisions: state.marketingDraft?.slice(0, 500) ?? "",
-    decisionRationale: "Approved by Martin.",
-    outcome: "Complete",
-  });
-  await sendWorkspaceHatMessage(env, state, `Approved.`);
-  state.marketingDraft = undefined;
-  state.stage = "complete";
-  state.awaiting = undefined;
-  return state;
 }
 
 export async function handlePaidMediaApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
