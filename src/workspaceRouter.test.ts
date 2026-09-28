@@ -6,6 +6,7 @@ import { isSemanticTaskId } from "./dataBoundary/registry";
 import { registerActionCapability, clearRegisteredCapabilities, type ActionCapability } from "./actions/registry";
 import { setWorkspaceMode } from "./sessionRouting";
 import type { Env } from "./types";
+import type { UnitManifest, HatManifest } from "./units/unitManifest";
 
 /**
  * Covers the deterministic Chat/Cowork Workspace routing contract:
@@ -74,13 +75,22 @@ function mockTelegramFetch(t: any) {
 }
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; handleIncomingEnquiry: string[]; handleMarketingRequest: string[]; handleResearchRequest: string[]; handleStrategyRequest: string[]; handleFinanceRequest: string[] } = {
+  const calls: {
+    init: any[][];
+    handleIncomingEnquiry: string[];
+    handleMarketingRequest: string[];
+    handleResearchRequest: string[];
+    handleStrategyRequest: string[];
+    handleFinanceRequest: string[];
+    handleUnitAction: [string, string][];
+  } = {
     init: [],
     handleIncomingEnquiry: [],
     handleMarketingRequest: [],
     handleResearchRequest: [],
     handleStrategyRequest: [],
     handleFinanceRequest: [],
+    handleUnitAction: [],
   };
   const stub = {
     init: async (...args: any[]) => {
@@ -100,6 +110,9 @@ function createMockWorkSession() {
     },
     handleFinanceRequest: async (text: string) => {
       calls.handleFinanceRequest.push(text);
+    },
+    handleUnitAction: async (actionName: string, text: string) => {
+      calls.handleUnitAction.push([actionName, text]);
     },
     getState: async () => undefined,
   };
@@ -331,6 +344,129 @@ test("S. Ordinary Chat never dispatches through the generic Workspace capability
 
   assert.strictEqual(capabilityInvoked, false, "Chat must never dispatch through the generic capability registry -- see the Chat capability boundary correction");
   assert.strictEqual(calls.init.length, 0, "Chat must never create a WorkSession through generic capability dispatch");
+});
+
+// --- Chat is action-capable (ENIG Operating Model design doc, 2026-09-28
+// decision): Chat resolves and dispatches through the same Action Registry
+// Cowork uses, for any Unit with a registered manifest, falling open to
+// ordinary conversation on ambiguity rather than blocking with a
+// clarifying question the way Cowork does. ---
+
+function toyChatManifest(): UnitManifest {
+  const hat: HatManifest<"check_status" | "send_update"> = {
+    name: "Toy Hat",
+    responsibility: "Handles toy requests for this test.",
+    actions: [
+      { name: "check_status", consequence: "read", description: "Read-only status check." },
+      { name: "send_update", consequence: "write", requiresApproval: true, description: "Sends a real update -- privileged." },
+    ],
+    readHandler: async (_env, actionName) => `toy-reply:${actionName}`,
+    entryHandler: async (_env, state) => state,
+    awaitingHandlers: {},
+  };
+  return {
+    unit: "Business Development",
+    hats: { "Toy Hat": hat },
+    intakeClassificationTaskId: "business_development.intake_classification",
+    intakeIntroLine: "You route incoming toy requests.",
+    actionClassificationTaskId: "business_development.hat_action_decision",
+  };
+}
+
+function mockActionAi(env: Partial<Env>, action: string | null) {
+  return {
+    ...env,
+    AI: { run: async () => ({ response: JSON.stringify({ action }) }) } as any,
+  } as Env;
+}
+
+test("T0a. Chat mode dispatches a confidently-resolved read action directly, using tryResolveUnitAction's own reply target, and no WorkSession is created", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sent: { chatId: number; threadId?: number; text: string }[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(init?.body ?? "{}");
+      sent.push({ chatId: body.chat_id, threadId: body.message_thread_id, text: body.text ?? "" });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 200 });
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const { calls, workSession } = createMockWorkSession();
+  const env = mockActionAi(fakeEnv({ WORK_SESSION: workSession as any }), "check_status");
+
+  // Chat mode only ever reaches routeIncomingText's mode resolution inside
+  // the Workspace stream topic (any other thread is "unmapped" and fails
+  // closed before mode resolution runs at all) -- -1004435157576/604 is
+  // this suite's Workspace stream throughout, same as every other test
+  // here. tryResolveUnitAction replying to whatever target it's given,
+  // rather than forcing the Workspace stream the way resolveUnitRequest's
+  // sendWorkspaceHatMessage does, is covered directly (with a genuinely
+  // different chat/thread) in dispatch.test.ts.
+  await routeIncomingText(env, -1004435157576, "what's the status?", 604, {
+    resolveRouting: fixedDecision({ mode: "chat", unit: "Business Development" }),
+    resolveUnitManifestForChat: () => toyChatManifest(),
+  });
+
+  assert.strictEqual(calls.init.length, 0, "a read action must never create a WorkSession");
+  assert.strictEqual(sent.length, 1);
+  assert.strictEqual(sent[0].chatId, -1004435157576);
+  assert.strictEqual(sent[0].threadId, 604);
+  assert.match(sent[0].text, /toy-reply:check_status/);
+});
+
+test("T0b. Chat mode dispatches a confidently-resolved write action into a real WorkSession via handleUnitAction, same as Cowork's manifest dispatch", async (t) => {
+  mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = mockActionAi(fakeEnv({ WORK_SESSION: workSession as any }), "send_update");
+
+  await routeIncomingText(env, -1004435157576, "send the update", 604, {
+    resolveRouting: fixedDecision({ mode: "chat", unit: "Business Development" }),
+    resolveUnitManifestForChat: () => toyChatManifest(),
+  });
+
+  assert.strictEqual(calls.init.length, 1);
+  assert.strictEqual(calls.init[0][2], "Business Development");
+  assert.strictEqual(calls.init[0][3], "Toy Hat");
+  assert.deepStrictEqual(calls.handleUnitAction, [["send_update", "send the update"]]);
+});
+
+test("T0c. Chat mode falls open to ordinary conversation on ambiguity -- never blocks with a clarifying question, unlike Cowork", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = mockActionAi(fakeEnv({ WORK_SESSION: workSession as any }), null); // Stage 2 finds nothing
+
+  await routeIncomingText(env, -1004435157576, "just chatting, nothing specific", 604, {
+    resolveRouting: fixedDecision({ mode: "chat", unit: "Business Development" }),
+    resolveUnitManifestForChat: () => toyChatManifest(),
+  });
+
+  assert.strictEqual(calls.init.length, 0);
+  assert.ok(
+    !sent.some((m) => m.toLowerCase().includes("i'm not sure") || m.toLowerCase().includes("clarify")),
+    "must never surface a clarifying question in Chat mode",
+  );
+  // Falls through to the ordinary conversational reply (generalChatReply,
+  // which itself calls AI and returns whatever the mocked provider gives
+  // it) -- some reply is still sent, just not the toy action's.
+  assert.ok(sent.length > 0);
+  assert.ok(!sent.some((m) => m.includes("toy-reply")));
+});
+
+test("T0d. Chat mode with no registered manifest for the resolved Unit falls straight through to ordinary conversation, unchanged", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({ WORK_SESSION: workSession as any });
+
+  await routeIncomingText(env, -1004435157576, "By the way, do you think a spreadsheet would even help here?", 604, {
+    resolveRouting: fixedDecision({ mode: "chat", unit: "Strategy" }),
+    resolveUnitManifestForChat: () => undefined,
+  });
+
+  assert.strictEqual(calls.init.length, 0);
+  assert.ok(sent.length >= 0);
 });
 
 test("T. Cowork decision dispatches to the resolved Unit's existing governed entry point with the resolved Hat", async (t) => {

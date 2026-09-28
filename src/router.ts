@@ -5,7 +5,7 @@ import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { classifyDataLookupRequest, runConversationalDataLookup } from "./dataLookup";
 import { findUnitManifest } from "./units/registry";
-import { resolveUnitRequest } from "./units/dispatch";
+import { resolveUnitRequest, tryResolveUnitAction } from "./units/dispatch";
 import {
   getActiveWorkId,
   getReplyMessageWorkId,
@@ -54,6 +54,13 @@ export async function routeIncomingText(
     // logic (which Unit/capability a given WorkspaceDecision reaches)
     // without depending on real KV-backed mode/clarification state.
     resolveRouting?: typeof resolveWorkspaceRouting;
+    // Test-only injection seam for Chat's Unit manifest lookup, same
+    // rationale as resolveRouting above. Production callers never pass
+    // this -- the real findUnitManifest always runs. Exists so tests can
+    // exercise Chat mode's action-dispatch wiring (tryResolveUnitAction)
+    // against a toy UnitManifest instead of depending on a real Unit's
+    // full business logic and registered AI tasks.
+    resolveUnitManifestForChat?: typeof findUnitManifest;
   } = {},
 ): Promise<void> {
   if (text.startsWith("/")) return; // commands handled by caller
@@ -172,18 +179,36 @@ export async function routeIncomingText(
   }
 
   if (decision.mode === "chat") {
-    // 3. Workspace mode = Chat. Ordinary Chat is a plain conversational
-    // reply only -- it does not dispatch through the generic Workspace
-    // capability registry (routeWorkspaceCapabilityAction). The currently
-    // registered capabilities (Google Doc/Sheet creation, Lead Opportunity
-    // Discovery) can themselves create a WorkSession or a Handoff, which
-    // is governed state Chat must never create merely because an arbitrary
-    // message arrived while mode is Chat -- see the read-only Chat
-    // capability boundary inspection this correction resolves. Cowork
-    // remains the entry point into governed capability/workflow paths
-    // that are already wired to it (see dispatchCowork below); this
-    // restores the boundary that existed before this Workspace mode
-    // change, without altering the capabilities' own implementations.
+    // 3. Workspace mode = Chat. Per the ENIG Operating Model design doc's
+    // 2026-09-28 decision ("Chat is action-capable, not read-only"), Chat
+    // now attempts the same Unit/Hat/Action resolution and dispatch
+    // Cowork uses (tryResolveUnitAction -- same Action Registry, same
+    // approval-gate semantics for privileged writes) whenever an
+    // addressee resolved to a Unit with a registered manifest, before
+    // falling back to plain conversation. Unlike Cowork, an unresolved
+    // action never blocks with a clarifying question -- it falls straight
+    // through to the existing conversational reply, since low-friction
+    // chat (not forcing explicit direction) is the whole point of this
+    // mode. A Unit with no manifest yet (most of them, as of this
+    // decision) always falls through here, exactly as before.
+    if (decision.unit) {
+      const manifest = (options.resolveUnitManifestForChat ?? findUnitManifest)(decision.unit);
+      if (manifest) {
+        const dispatchResult = await tryResolveUnitAction(env, manifest, { chatId, threadId }, text);
+        if (dispatchResult.kind === "handled") {
+          return;
+        }
+        if (dispatchResult.kind === "continue") {
+          const workId = newWorkId();
+          const stub = getSessionStub(env, workId);
+          await stub.init(workId, chatId, decision.unit, dispatchResult.hat, threadId);
+          await setActiveWorkId(env, chatId, threadId, workId);
+          await stub.handleUnitAction(dispatchResult.actionName, text);
+          return;
+        }
+        // "ambiguous" -- fall through to ordinary conversation below.
+      }
+    }
     const reply = decision.unit
       ? await generalChatReply(env, decision.unit, chatId, threadId, text)
       : await generalDmReply(env, chatId, threadId, text);
@@ -239,7 +264,12 @@ export async function dispatchCowork(
         return;
       }
       const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, "Lead Generation Specialist");
-      if (dispatchResult.kind === "handled") {
+      if (dispatchResult.kind === "handled" || dispatchResult.kind === "ambiguous") {
+        // "ambiguous" is unreachable from resolveUnitRequest (Cowork's own
+        // ambiguity path always resolves to "handled" -- it replies with a
+        // clarifying question itself, per its own doc comment); handled
+        // alongside "handled" only so this narrows cleanly against
+        // tryResolveUnitAction's shared UnitDispatchResult type.
         return;
       }
       // "continue" would mean an internal/write action resolved -- Lead
@@ -324,11 +354,14 @@ export async function dispatchCowork(
   const manifest = findUnitManifest(decision.unit);
   if (manifest) {
     const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, decision.hat);
-    if (dispatchResult.kind === "handled") {
+    if (dispatchResult.kind === "handled" || dispatchResult.kind === "ambiguous") {
       // Stage 1/2 already replied directly (a "read" action's answer, or
       // an ambiguity/clarification message) -- no WorkSession needed, per
       // the design doc's read/write split ("Read -- no WorkSession
-      // created").
+      // created"). "ambiguous" is unreachable from resolveUnitRequest
+      // itself (see the Lead Generation Specialist branch's own note
+      // above) -- included only to narrow against the shared
+      // UnitDispatchResult type.
       return;
     }
     const workId = newWorkId();
