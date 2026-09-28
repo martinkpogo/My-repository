@@ -1,6 +1,6 @@
 import type { Env, WorkState } from "../../types";
 import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
-import { aiJson } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { setActiveWorkId } from "../../router";
@@ -124,25 +124,27 @@ function validateFinanceJudgement(judgement: PriceJudgement | null): { valid: tr
 // be attributable, not guessed at by name match).
 const FINANCE_HAT_DEFINITION_PAGE_ID = "3cecb004-e583-81f9-a52e-e24872a52eff";
 
-function buildFinanceSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
-  return [
-    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for your role, responsibilities, authority limits, and stop conditions — follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== COMMERCIAL VALUE & PRICING OPERATING MODEL — CANONICAL JUDGMENT SEQUENCE ===",
-    "Work through these six steps, in order, using only the value context supplied below. State your reasoning for each briefly in the corresponding JSON field.",
-    "1. Evidence quality: assess the attribution and quality of the numerical evidence supplied (directly_measured, client_estimated, derived, or assumption). Never treat an assumption as equivalent to measured or client-estimated evidence.",
-    "2. Value-at-stake assessment: establish a value-at-stake range (or a single figure only where the evidence genuinely supports one) with currency, applicable period, evidence type, and source, from the supplied evidence only. Never invent a figure not attributable to the supplied context, and never derive one from an unrelated figure (e.g. general company turnover) without the context itself making that derivation explicit.",
-    "3. Intervention/delivery assessment: identify the specific intervention or diagnostic being priced and what it requires to deliver. Diagnosis-first engagements may be priced without a predetermined downstream intervention — price the defined diagnostic itself (its commercial question, expected output, and required effort), not a downstream intervention that hasn't been selected yet.",
-    "4. Delivery floor: state the legitimate ENIG delivery/economic floor only if it can genuinely be grounded in actual delivery economics present in the supplied context. If no such delivery-economics data is available to you, say so explicitly rather than inventing a floor number — a floor is never an arbitrary market minimum.",
-    "5. Market/commercial modifiers: note any legitimate market, currency, or commercial conditions you are applying, in plain language with rationale — never a fixed percentage of value, PPP multiplier, hard-coded regional floor, or automatic currency conversion presented as pricing authority. No such universal rule is canonical unless separately established and approved.",
-    "6. Quote and rationale: produce a quoted price and a brief rationale that traces back to the evidence above, if and only if the evidence above is sufficient to price responsibly. Never use a disclosed budget or willingness-to-pay figure as the price or as a factor in setting it — if the context mentions one, treat it only as a scope/fit signal to note in passing, never as part of the pricing basis or rationale. Quote in the SAME currency the supplied value-at-stake evidence is denominated in (e.g. if the evidence is in Ghanaian cedis, quote in GHS) — never default to USD or any other currency not actually present in the supplied context, and never silently convert between currencies.",
-    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    'Return JSON: {"sufficient": true, "evidence_quality_assessment": "...", "value_at_stake": {"value": n|null, "low": n|null, "high": n|null, "currency": "...", "period": "...", "evidence_type": "directly_measured|client_estimated|derived|assumption", "source": "...", "evidence_quality": "..."}, "intervention_assessment": "...", "delivery_floor_rationale": "...", "market_modifiers_applied": "...", "price": <number>, "currency": "...", "rationale": "..."} only if every step above can be responsibly completed. Otherwise return {"sufficient": false, "reason_if_insufficient": "..."} naming the SPECIFIC missing evidence category (e.g. \'value-at-stake has no applicable time period\', \'value exists only as an unsupported assumption\', \'no evidence source provided\', \'diagnostic purpose is unclear\') — never a generic reason, and never a request for a budget or willingness-to-pay figure as a substitute.',
-    "If context is insufficient, state only the missing category of information required, without requesting, naming, or attempting to discover specific sensitive records or client entities.",
-  ].join("\n\n");
+function buildFinancePromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+  return {
+    persona:
+      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for your role, responsibilities, authority limits, and stop conditions — follow them exactly as written.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+    skillContent: [
+      "=== COMMERCIAL VALUE & PRICING OPERATING MODEL — CANONICAL JUDGMENT SEQUENCE ===",
+      "Work through these six steps, in order, using only the value context supplied below. State your reasoning for each briefly in the corresponding JSON field.",
+      "1. Evidence quality: assess the attribution and quality of the numerical evidence supplied (directly_measured, client_estimated, derived, or assumption). Never treat an assumption as equivalent to measured or client-estimated evidence.",
+      "2. Value-at-stake assessment: establish a value-at-stake range (or a single figure only where the evidence genuinely supports one) with currency, applicable period, evidence type, and source, from the supplied evidence only. Never invent a figure not attributable to the supplied context, and never derive one from an unrelated figure (e.g. general company turnover) without the context itself making that derivation explicit.",
+      "3. Intervention/delivery assessment: identify the specific intervention or diagnostic being priced and what it requires to deliver. Diagnosis-first engagements may be priced without a predetermined downstream intervention — price the defined diagnostic itself (its commercial question, expected output, and required effort), not a downstream intervention that hasn't been selected yet.",
+      "4. Delivery floor: state the legitimate ENIG delivery/economic floor only if it can genuinely be grounded in actual delivery economics present in the supplied context. If no such delivery-economics data is available to you, say so explicitly rather than inventing a floor number — a floor is never an arbitrary market minimum.",
+      "5. Market/commercial modifiers: note any legitimate market, currency, or commercial conditions you are applying, in plain language with rationale — never a fixed percentage of value, PPP multiplier, hard-coded regional floor, or automatic currency conversion presented as pricing authority. No such universal rule is canonical unless separately established and approved.",
+      "6. Quote and rationale: produce a quoted price and a brief rationale that traces back to the evidence above, if and only if the evidence above is sufficient to price responsibly. Never use a disclosed budget or willingness-to-pay figure as the price or as a factor in setting it — if the context mentions one, treat it only as a scope/fit signal to note in passing, never as part of the pricing basis or rationale. Quote in the SAME currency the supplied value-at-stake evidence is denominated in (e.g. if the evidence is in Ghanaian cedis, quote in GHS) — never default to USD or any other currency not actually present in the supplied context, and never silently convert between currencies.",
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+      'Return JSON: {"sufficient": true, "evidence_quality_assessment": "...", "value_at_stake": {"value": n|null, "low": n|null, "high": n|null, "currency": "...", "period": "...", "evidence_type": "directly_measured|client_estimated|derived|assumption", "source": "...", "evidence_quality": "..."}, "intervention_assessment": "...", "delivery_floor_rationale": "...", "market_modifiers_applied": "...", "price": <number>, "currency": "...", "rationale": "..."} only if every step above can be responsibly completed. Otherwise return {"sufficient": false, "reason_if_insufficient": "..."} naming the SPECIFIC missing evidence category (e.g. \'value-at-stake has no applicable time period\', \'value exists only as an unsupported assumption\', \'no evidence source provided\', \'diagnostic purpose is unclear\') — never a generic reason, and never a request for a budget or willingness-to-pay figure as a substitute.',
+      "If context is insufficient, state only the missing category of information required, without requesting, naming, or attempting to discover specific sensitive records or client entities.",
+    ].join("\n\n"),
+  };
 }
 
 /**
@@ -447,10 +449,10 @@ async function judgeQuote(
     outcome: "Active",
   });
 
-  const judgement = await aiJson<PriceJudgement>(env, {
+  const judgement = await generate<PriceJudgement>(env, {
     taskId: "finance.quote_judgment",
-    system: buildFinanceSystemPrompt(hatDefinition, universalRoleContract),
-    user: `Entity: ${entityToken}\nProposed intervention and value context:\n${judgmentContext}`,
+    mode: "json",
+    parts: { ...buildFinancePromptParts(hatDefinition, universalRoleContract), situation: `Entity: ${entityToken}\nProposed intervention and value context:\n${judgmentContext}` },
   });
 
   // The AI's own "sufficient: true" is never taken as final authority --
