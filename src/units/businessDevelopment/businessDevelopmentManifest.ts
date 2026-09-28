@@ -6,8 +6,7 @@ import { createHandoff } from "../../handoffWriter";
 import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
-import { aiJson } from "../../ai";
-import { generate } from "../../platform/primitives";
+import { aiJson, generate } from "../../ai";
 import { getSkillContent } from "../../platform/skillRegistry";
 
 /**

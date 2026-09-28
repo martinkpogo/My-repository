@@ -291,13 +291,9 @@ A **Unit** is an organizational/business execution area (Sales, Marketing, Strat
 
 ### Capabilities: Skills
 
-A Skill is a reusable capability/methodology used by an Application. It answers **how should this type of work be performed**, never *who* is performing it (that's the Hat) or *what mechanism* carries it out (that's a Runtime Service). A Skill is not a Unit, a Hat, a provider, an integration, or a Kernel enforcement mechanism -- confirmed by direct inspection that no `SkillDefinition` field is ever consulted by any governance/enforcement code (`DataBoundaryEvaluator` resolves sensitivity from `SemanticTaskId`, never from a Skill's own declared `sensitivity` field). Skills may be shared across Units/Hats where the underlying methodology is genuinely the same -- `research_signal` (shared today between Business Development's Opportunity Development and Sales's Lead Generation Specialist) is the one proven instance.
+A Skill is a reusable capability/methodology used by an Application. It answers **how should this type of work be performed**, never *who* is performing it (that's the Hat) or *what mechanism* carries it out (that's a Runtime Service). A Skill is not a Unit, a Hat, a provider, an integration, or a Kernel enforcement mechanism. Skills may be shared across Units/Hats where the underlying methodology is genuinely the same -- `research_signal` (shared today between Business Development's Opportunity Development and Sales's Lead Generation Specialist) is the one proven instance.
 
-**Target, not yet built:** Skills should be repo-native -- ordinary TypeScript modules/constants holding methodology content, resolved by an ordinary `import`, not fetched over the network from Notion at runtime. This doc no longer preserves the assumption that a Skill must be fetched from Notion to exist. This section does not invent a new Skill Registry architecture, a resource-loading mechanism, or any other new abstraction for repo-native Skills -- that is a separate, deliberate design pass, not a decision made here.
-
-**Current fact, unchanged by the above:** as of this writing, `research_signal`, `opportunity_qualification_gate`, and `opportunity_forward_planning` (Business Development/Sales) are live Notion pages, fetched via `fetchSkill`/`getGovernance` at runtime. This is accurate today; it is the thing the repo-native target eventually replaces, not something already replaced.
-
-`fetch_skill` is no longer presented as a foundational Runtime primitive -- see "The Action Catalog is retired" below.
+**Current fact:** Skills are repo-native -- `src/platform/skillRegistry.ts` exports a closed `SkillId` union and a synchronous `getSkillContent(id): string` lookup over a plain `Record<SkillId, string>` map of methodology content, resolved by an ordinary `import`, never fetched over the network at runtime. The minimum contract is deliberately just id + methodology content, nothing else -- confirmed by inspection before this model was adopted that no runtime code ever consulted a `SkillDefinition`'s `pageId`, `sensitivity`, `description`, `requiredDataSources`, `requiredPrimitives`, `outputContract`, or `validation` fields (`DataBoundaryEvaluator` resolves sensitivity from `SemanticTaskId`, never from a Skill's own declared field). `research_signal`, `opportunity_qualification_gate`, and `opportunity_forward_planning` (Business Development/Sales) are the three Skills registered this way today, migrated verbatim from the Notion pages they replace -- AI behavior/methodology content unchanged by the migration. The prior Notion-backed `fetchSkill`/`SkillDefinition`/`getSkill` arrangement no longer exists in the codebase.
 
 ### Runtime Services
 
@@ -327,24 +323,19 @@ Every other Runtime Service (Notion, Web Search, Telegram, Google Workspace) is 
 
 ### The Action Catalog is retired
 
-The prior "Action Catalog" (six primitives: `read_record`, `fetch_skill`, `search`, `generate`, `request_approval`, `write_record`) is no longer presented as a mandatory, universal architectural layer that every request passes through. It never was one, verified by trace:
+The prior "Action Catalog" (six primitives: `read_record`, `fetch_skill`, `search`, `generate`, `request_approval`, `write_record`) was never a mandatory, universal architectural layer that every request passes through, verified by trace, and no longer exists in the codebase as a distinct layer at all:
 
-- **`fetchSkill`** (`src/platform/primitives.ts`) is a real convenience mechanism, currently used by 6 call sites across 2 files -- a thin wrapper around `getGovernance` (`src/governance.ts`), which 7 other files call directly, unmediated, for the same kind of governance content.
-- **`generate`** (`src/platform/primitives.ts`) is a convenience wrapper around AI execution -- prompt-string assembly plus a typed call into `aiJson`/`aiChat`/`aiText`, used by the same 6 call sites. Roughly 34 other production call sites call `aiJson`/`aiChat`/`aiText` directly and reach the identical Kernel-enforced path (see "Kernel" above) without it.
-- **`readRecord`, `writeRecord`, `search`, and `requestApproval`** have no production callers, confirmed by direct grep across the codebase (referenced only by their own test files).
+- **`readRecord`, `fetchSkill` (the Notion-backed version), `search`, `requestApproval`, and `writeRecord`** were removed outright -- each had no production callers, confirmed by direct grep across the codebase before removal (referenced only by their own test files). Their real work already happened directly against `queryDataSource`/`updatePage` (`src/notion.ts`), `handoffWriter.ts`, `searchWeb` (`src/units/research/webSearch.ts`), and each Hat's own hand-written propose/approve function pair.
+- **`generate`** is the one function from the six that had genuine callers (the same call sites now using `getSkillContent` for Skill content -- see "Capabilities: Skills" above). It was folded directly into `src/ai.ts`, alongside `aiJson`/`aiChat`/`aiText`, rather than kept as a separate `platform/primitives.ts` module -- there is no longer a dedicated "primitives" file or concept in the codebase. `generate` remains a convenience wrapper only (prompt-string assembly plus a typed call into `aiJson`/`aiChat`/`aiText`), never a distinct boundary of its own: every call still reaches the same `AiPolicyExecutor.executeTask` a direct `aiJson`/`aiChat`/`aiText` call would (see "Kernel" above). Roughly 34 other production call sites call `aiJson`/`aiChat`/`aiText` directly, without going through `generate` at all.
 
-None of this is a claim that these functions must be deleted, or that using them today is wrong -- `src/platform/primitives.ts` is unchanged by this document, and `fetchSkill`/`generate` remain in active use exactly where they already are. The claim is narrower and evidence-based: they are not a required layer every request must pass through, and this document no longer describes them as one.
+### The Connector/Data Source Registries are removed
 
-### The Connector/Data Source Registries are retired as active architecture
+`src/platform/connectorRegistry.ts` and `src/platform/dataSourceRegistry.ts` no longer exist in the codebase. Both were confirmed, by trace, to have had no production invocation path before removal:
 
-`src/platform/connectorRegistry.ts` and `src/platform/dataSourceRegistry.ts` are not described here as active universal Runtime architecture. Confirmed by trace:
-
-- **Connector Registry** has no production invocation path -- `isConnectorEligible`/`getConnector`/`CONNECTOR_REGISTRY` are referenced only from within `src/platform/` itself. `ConnectorDefinition` also has no `execute()`/invocation method at all, by its own original design choice, which means it could not have served as an invocation layer even if something called it.
-- **Data Source Registry** has no production invocation path -- `canRead`/`canWrite`/`getDataSource` are referenced only from within `src/platform/` itself. No real Notion read or write anywhere in the codebase consults it.
+- **Connector Registry** -- `isConnectorEligible`/`getConnector`/`CONNECTOR_REGISTRY` were referenced only from within `src/platform/` itself. `ConnectorDefinition` also had no `execute()`/invocation method at all, by its own original design choice, which means it could not have served as an invocation layer even if something had called it.
+- **Data Source Registry** -- `canRead`/`canWrite`/`getDataSource` were referenced only from within `src/platform/` itself. No real Notion read or write anywhere in the codebase consulted it.
 - Actual Notion, Telegram, Web Search, and Google operations use their concrete Service/client implementations directly, as described under "Runtime Services" above.
 - Handoff writes have their real, enforced identity boundary in `src/handoffWriter.ts` -- not in the Data Source Registry, which was never wired to it.
-
-As with the primitives, this is not an instruction to delete either registry file -- both remain in the codebase, correctly implemented, unmodified by this document. The claim is that neither should continue to be described here as required, universally-enforced Runtime architecture, since neither is.
 
 ### Request execution: a conceptual model, not a fixed sequence
 

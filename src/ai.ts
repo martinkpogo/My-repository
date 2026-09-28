@@ -161,6 +161,69 @@ export async function aiChat(
   return response ? response.rawText : "";
 }
 
+/**
+ * The pieces `generate` assembles into one prompt automatically, so no
+ * pipeline hand-writes a full role+context+instruction+behavior+
+ * situation+example prompt itself:
+ *   - persona    -> Role: the Hat's own voice/authority framing
+ *   - behavior   -> Behavior: cross-cutting rules for every persona
+ *     (typically the Universal Role Contract's own content, fetched once by
+ *     the caller via getGovernance so pipelines control their own
+ *     caching/reuse -- generate() does not fetch it again itself)
+ *   - skillContent -> Instruction (+ Example, if the Skill's own content
+ *     includes worked examples)
+ *   - context    -> Context: whatever this pipeline actually pulled in for
+ *     this task
+ *   - situation  -> Situation: the actual request/task text
+ */
+export interface GeneratePromptParts {
+  persona: string;
+  behavior?: string;
+  skillContent?: string;
+  context?: string;
+  situation: string;
+}
+
+interface BaseGenerateOptions {
+  /** This use's own registered SemanticTaskId -- resolved per actual call. */
+  taskId: SemanticTaskId;
+  parts: GeneratePromptParts;
+  history?: ChatTurn[];
+  sensitivity?: SensitivityLevel;
+  light?: boolean;
+  maxTokens?: number;
+}
+
+function assembleSystemPrompt(parts: GeneratePromptParts): string {
+  return [parts.persona, parts.behavior, parts.skillContent, parts.context].filter((s): s is string => Boolean(s && s.trim())).join("\n\n");
+}
+
+/**
+ * generate -- call the model with an assembled prompt, get output back. A
+ * convenience wrapper around aiJson/aiChat/aiText for callers that want
+ * persona/behavior/skillContent/context/situation assembled into one system
+ * prompt rather than building that string by hand -- not a distinct
+ * boundary of its own: every call still runs through the same
+ * AiPolicyExecutor.executeTask as a direct aiJson/aiChat/aiText call would.
+ * One function regardless of output shape (json classification vs.
+ * free-text draft) -- both get identical Data Boundary/Outbound Gate
+ * treatment, so TypeScript overloads keep this one exported function name
+ * while still typing each call site's return correctly.
+ */
+export async function generate<T = Record<string, unknown>>(env: Env, options: BaseGenerateOptions & { mode: "json" }): Promise<T | null>;
+export async function generate(env: Env, options: BaseGenerateOptions & { mode: "text" }): Promise<string>;
+export async function generate(env: Env, options: BaseGenerateOptions & { mode: "json" | "text" }): Promise<unknown> {
+  const system = assembleSystemPrompt(options.parts);
+  const situation = options.parts.situation;
+  if (options.mode === "json") {
+    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens });
+  }
+  if (options.history) {
+    return aiChat(env, options.taskId, system, options.history, situation, options.maxTokens ?? 800, options.sensitivity);
+  }
+  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens });
+}
+
 function isParsableJson(rawText: string): boolean {
   const jsonText = extractJson(rawText);
   if (!jsonText) return false;

@@ -1,15 +1,16 @@
 import test from "node:test";
 import assert from "node:assert";
-import { generate } from "./primitives";
-import type { Env } from "../types";
+import { generate } from "./ai";
+import type { Env } from "./types";
 
 /**
- * `generate` is the sole surviving primitive from the retired six-primitive
- * Action Catalog model (see primitives.ts's own doc comment) -- the other
- * five (readRecord, fetchSkill, search, requestApproval, writeRecord) had
- * zero production callers and were removed outright as part of the
- * 2026-09-28 Kernel/Applications/Capabilities/Runtime Services migration.
- * This file now only covers generate's own prompt-assembly contract.
+ * Covers `generate` -- the prompt-assembly convenience wrapper folded into
+ * ai.ts (migrated 2026-09-28 from the now-removed platform/primitives.ts,
+ * which existed only to hold this one function after the retired
+ * six-primitive Action Catalog model's other five were removed outright).
+ * `generate` is not a distinct boundary: every call still runs through
+ * aiJson/aiChat/aiText -> AiPolicyExecutor.executeTask exactly as a direct
+ * call to those would.
  */
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
