@@ -3,7 +3,7 @@ import assert from "node:assert";
 import {
   MAX_DIMENSIONS_PER_PROTOCOL,
   MAX_DIMENSIONS_PER_REQUEST,
-  buildResearchPlanPrompt,
+  buildResearchPlanPromptParts,
   capResearchPlan,
   generateResearchPlan,
 } from "./researchPlan";
@@ -11,6 +11,12 @@ import type { ResearchPlanDimension } from "./researchPlan";
 
 function dim(protocol: ResearchPlanDimension["protocol"], n: number): ResearchPlanDimension {
   return { protocol, subQuestion: `Sub-question ${n} for ${protocol}` };
+}
+
+/** Reconstructs the same assembled string generate() would send as the system prompt, from buildResearchPlanPromptParts's own parts -- mirrors ai.ts's assembleSystemPrompt exactly (persona/skillContent joined by "\n\n"). */
+function buildResearchPlanPrompt(categorySummary: string, relevance: string, protocols: ResearchPlanDimension["protocol"][]): string {
+  const parts = buildResearchPlanPromptParts(categorySummary, relevance, protocols);
+  return [parts.persona, parts.skillContent].filter((s): s is string => Boolean(s && s.trim())).join("\n\n");
 }
 
 test("capResearchPlan enforces the per-protocol cap", () => {

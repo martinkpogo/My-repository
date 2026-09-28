@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { aiJson } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import type { ResearchProtocolId } from "./protocols";
 import { researchProtocolDetail } from "./protocols";
 
@@ -64,14 +64,16 @@ export function capResearchPlan(dimensions: ResearchPlanDimension[]): ResearchPl
  * created this stage -- they illustrate the KIND of dimension expected,
  * never a fixed checklist to copy verbatim onto an unrelated question.
  */
-export function buildResearchPlanPrompt(categorySummary: string, relevance: string, protocols: ResearchProtocolId[]): string {
-  return [
-    "You generate a bounded research plan for ENIG's Research & Intelligence Unit -- a strategy-led consultancy's own R&I capability. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:",
-    categorySummary,
-    `This research question has been interpreted, in relation to that authorized category, as:\n"${relevance}"`,
-    "Below are the protocol(s) already selected for this request, with their method and evidence requirements (already governed -- read and apply them, don't invent your own):",
-    researchProtocolDetail(protocols),
-    `For EACH protocol listed above, generate 2-${MAX_DIMENSIONS_PER_PROTOCOL} specific research sub-questions ("dimensions") that this protocol's own method and evidence requirements call for, tailored to what the actual research question asks -- never generic filler, and never the same dimensions regardless of the question.
+export function buildResearchPlanPromptParts(categorySummary: string, relevance: string, protocols: ResearchProtocolId[]): Pick<GeneratePromptParts, "persona" | "skillContent"> {
+  return {
+    persona:
+      "You generate a bounded research plan for ENIG's Research & Intelligence Unit -- a strategy-led consultancy's own R&I capability. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:",
+    skillContent: [
+      categorySummary,
+      `This research question has been interpreted, in relation to that authorized category, as:\n"${relevance}"`,
+      "Below are the protocol(s) already selected for this request, with their method and evidence requirements (already governed -- read and apply them, don't invent your own):",
+      researchProtocolDetail(protocols),
+      `For EACH protocol listed above, generate 2-${MAX_DIMENSIONS_PER_PROTOCOL} specific research sub-questions ("dimensions") that this protocol's own method and evidence requirements call for, tailored to what the actual research question asks -- never generic filler, and never the same dimensions regardless of the question.
 
 Illustrative examples of the KIND of dimension expected (not a checklist to copy verbatim -- tailor to the actual question):
 - Market / Industry Intelligence: market structure, demand conditions, relevant market indicators or benchmarks, service categories, purchasing organisations/demand segments where evidence supports it, market developments and trends, geography-specific evidence (e.g. a named country), relevant comparison geography where useful, evidence gaps.
@@ -79,14 +81,15 @@ Illustrative examples of the KIND of dimension expected (not a checklist to copy
 - Customer / Audience Intelligence: actual evidence about buyers/audiences, needs, behaviour, purchase drivers, perceptions, reviews, public feedback.
 
 Each dimension should be phrased as a concrete, searchable research sub-question (a complete question, not a topic label).`,
-    `Return JSON:
+      `Return JSON:
 {
   "dimensions": [
     {"protocol": "<exact protocol name from above>", "subQuestion": "<a concrete, searchable research sub-question>"},
     ...
   ]
 }`,
-  ].join("\n\n");
+    ].join("\n\n"),
+  };
 }
 
 /**
@@ -112,10 +115,10 @@ async function generateProtocolPlan(
   question: string,
   protocol: ResearchProtocolId,
 ): Promise<ResearchPlanDimension[]> {
-  const result = await aiJson<PlanResult>(env, {
+  const result = await generate<PlanResult>(env, {
     taskId: "research.plan_generation",
-    system: buildResearchPlanPrompt(categorySummary, relevance, [protocol]),
-    user: question,
+    mode: "json",
+    parts: { ...buildResearchPlanPromptParts(categorySummary, relevance, [protocol]), situation: question },
     maxTokens: 1536,
   });
 
