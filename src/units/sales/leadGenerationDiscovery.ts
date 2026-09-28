@@ -9,7 +9,7 @@ import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
-import { getSessionStub, newWorkId } from "../../router";
+import { getSessionStub, newWorkId } from "../../sessionRouting";
 
 /**
  * Autonomous counterpart to the Martin-supplied /lead command in

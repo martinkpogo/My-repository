@@ -12,14 +12,13 @@ import {
   getSessionStub,
   newWorkId,
   resolveStreamForThread,
-  SALES_DIRECT_ENTRY_PAUSED,
   setActiveWorkId,
 } from "./sessionRouting";
 
 // Every primitive previously defined directly in this file (newWorkId,
 // getActiveWorkId/setActiveWorkId, getReplyMessageWorkId/
 // setReplyMessageWorkId, getSessionStub, resolveStreamForThread/
-// resolveUnitForThread/threadIdForUnit, SALES_DIRECT_ENTRY_PAUSED) now lives in
+// resolveUnitForThread/threadIdForUnit) now lives in
 // sessionRouting.ts -- re-exported here so every existing `from "./router"`
 // import keeps working unchanged. See sessionRouting.ts's doc comment for
 // why: checkHandoffs.ts needs these same primitives, and this file now
@@ -32,12 +31,6 @@ export * from "./sessionRouting";
 // points to a genuine provider failure, not policy.
 const AI_UNAVAILABLE_MESSAGE =
   "Couldn't generate a reply -- no AI provider is currently available. This points to a genuine provider failure, not an access restriction; please try again shortly.";
-
-// User-facing text for a Sales enquiry that arrives while
-// SALES_DIRECT_ENTRY_PAUSED is true. Kept as one constant so the DM path and
-// the Workspace-stream path can't drift apart.
-const SALES_PAUSED_MESSAGE =
-  "Sales Executive intake is paused here in this runtime by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here -- it is being handled by the isolated Sales Executive project in Claude (with its own Notion and Gmail access), which owns and actively works this domain now.";
 
 export async function routeIncomingText(
   env: Env,
@@ -239,65 +232,6 @@ export async function dispatchCowork(
   text: string,
   decision: Extract<WorkspaceDecision, { mode: "cowork" }>,
 ): Promise<void> {
-  if (decision.unit === "Sales") {
-    if (decision.hat === "Lead Generation Specialist") {
-      // Lead Discovery is a separate specialization from Sales Progression
-      // intake -- independent of SALES_DIRECT_ENTRY_PAUSED by design (see
-      // sessionRouting.ts's own doc comment: Lead Discovery runs in this
-      // shared Worker regardless of whether Sales Progression is paused,
-      // the two are independent). Routed through the Unit Registry
-      // manifest (salesManifest.ts) with an explicit priorHat -- Stage 1
-      // Hat resolution is bypassed (this decision already came from
-      // direct-addressing or Unit-level routing, exactly like Business
-      // Development's own manifest branch below), Stage 2 action
-      // classification and the declared discover_leads "read" action both
-      // still run. No WorkSession is created here -- discover_leads is
-      // "read" (confirmed by workspaceRouter.test.ts); it acts directly
-      // and queues its own Handoffs to R&I.
-      const manifest = findUnitManifest("Sales");
-      if (!manifest) {
-        // Unreachable once salesManifest.ts is registered in
-        // units/registry.ts -- fail closed rather than silently
-        // misrouting to Sales Executive if it's ever missing.
-        console.error(`Lead Generation Specialist: Sales manifest not registered (chat ${chatId})`);
-        await sendMessage(env, chatId, "Lead Generation Specialist isn't available right now -- its manifest isn't registered. Nothing was started.", undefined, threadId);
-        return;
-      }
-      const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, "Lead Generation Specialist");
-      if (dispatchResult.kind === "handled" || dispatchResult.kind === "ambiguous") {
-        // "ambiguous" is unreachable from resolveUnitRequest (Cowork's own
-        // ambiguity path always resolves to "handled" -- it replies with a
-        // clarifying question itself, per its own doc comment); handled
-        // alongside "handled" only so this narrows cleanly against
-        // tryResolveUnitAction's shared UnitDispatchResult type.
-        return;
-      }
-      // "continue" would mean an internal/write action resolved -- Lead
-      // Generation Specialist declares none today (discover_leads is its
-      // only, "read" action). Fail closed rather than fabricating a
-      // WorkSession that contradicts that invariant.
-      console.error(
-        `Lead Generation Specialist: unexpected internal/write action "${dispatchResult.actionName}" resolved -- no such action is declared (chat ${chatId})`,
-      );
-      await sendOperationsMessage(
-        env,
-        `⚠️ Lead Generation Specialist resolved an unexpected internal/write action ("${dispatchResult.actionName}") -- no WorkSession created, nothing started. (chat ${chatId})`,
-      ).catch((err) => console.error("Failed to send Lead Generation Specialist unexpected-action Operations notice", err));
-      return;
-    }
-
-    if (SALES_DIRECT_ENTRY_PAUSED) {
-      console.error(`Sales Executive direct entry paused — enquiry not processed (chat ${chatId})`);
-      await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
-      return;
-    }
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Sales", decision.hat ?? "Sales Executive", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleIncomingEnquiry(text);
-    return;
-  }
 
   if (decision.unit === "Marketing") {
     const workId = newWorkId();

@@ -50,10 +50,6 @@ export class WorkSession extends DurableObject<Env> {
     return this.ctx.storage.get<WorkState>("state");
   }
 
-  async handleIncomingEnquiry(text: string): Promise<WorkState> {
-    return this.execute((state) => sales.handleIncomingEnquiry(this.env, state, text));
-  }
-
   async handleMarketingRequest(text: string): Promise<WorkState> {
     return this.execute((state) => marketing.handleMarketingIntake(this.env, state, text));
   }
@@ -102,22 +98,8 @@ export class WorkSession extends DurableObject<Env> {
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (state.awaiting) {
-        case "call_notes":
-          return sales.handleCallNotes(this.env, state, text);
-        case "intervention":
-          return sales.handleInterventionText(this.env, state, text);
-        case "value_context_more":
-          return sales.handleMoreValueContext(this.env, state, text);
         case "quote_redo_reason":
           return finance.handleQuoteRedoReason(this.env, state, text);
-        case "matter_redo_reason":
-          return sales.handleMatterRedoReason(this.env, state, text);
-        case "entity_redo_reason":
-          return sales.handleEntityRedoReason(this.env, state, text);
-        case "proposal_feedback":
-          return sales.handleProposalFeedback(this.env, state, text);
-        case "sales_proposal_revision":
-          return salesProposal.handleSalesProposalRevisionText(this.env, state, text);
         case "marketing_feedback":
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":

@@ -39,12 +39,15 @@ import { discoverLeadsReadHandler } from "./leadGenerationDiscovery";
  * exactly matching the existing capability's behavior, which this manifest
  * reuses unchanged (see discoverLeadsReadHandler's own doc comment).
  */
-type SalesAction = "discover_leads";
+import { sendMessage } from "../../telegram";
+import { SALES_DIRECT_ENTRY_PAUSED } from "../../sessionRouting";
+
+type LGSAction = "discover_leads";
 
 const LEAD_GENERATION_SPECIALIST_HAT_NAME = "Lead Generation Specialist";
 const LEAD_GENERATION_SPECIALIST_SPECIALIZATION = "Lead Discovery";
 
-const leadGenerationSpecialistActions: ActionDefinition<SalesAction>[] = [
+const leadGenerationSpecialistActions: ActionDefinition<LGSAction>[] = [
   {
     name: "discover_leads",
     consequence: "read",
@@ -52,16 +55,16 @@ const leadGenerationSpecialistActions: ActionDefinition<SalesAction>[] = [
   },
 ];
 
-async function leadGenerationSpecialistReadHandler(env: Env, _actionName: SalesAction, text: string): Promise<string> {
+async function leadGenerationSpecialistReadHandler(env: Env, _actionName: LGSAction, text: string): Promise<string> {
   return discoverLeadsReadHandler(env, text);
 }
 
 /** No internal/write actions are declared on this Hat today -- reaching either of these would mean dispatchAction resolved a consequence this manifest never declared. Fails closed rather than silently no-opping. */
-async function leadGenerationSpecialistEntryHandler(_env: Env, _state: WorkState, actionName: SalesAction): Promise<WorkState> {
+async function leadGenerationSpecialistEntryHandler(_env: Env, _state: WorkState, actionName: LGSAction): Promise<WorkState> {
   throw new Error(`${actionName}: not an internal/write action on Lead Generation Specialist -- only discover_leads ("read") is declared.`);
 }
 
-const leadGenerationSpecialistHat: HatManifest<SalesAction> = {
+const leadGenerationSpecialistHat: HatManifest<LGSAction> = {
   name: LEAD_GENERATION_SPECIALIST_HAT_NAME,
   specialization: LEAD_GENERATION_SPECIALIST_SPECIALIZATION,
   responsibility:
@@ -72,21 +75,99 @@ const leadGenerationSpecialistHat: HatManifest<SalesAction> = {
   awaitingHandlers: {},
 };
 
+type SalesExecutiveAction = "new_enquiry" | "process_call_notes" | "route_to_strategy" | "draft_proposal";
+
+const SALES_EXECUTIVE_HAT_NAME = "Sales Executive";
+const SALES_EXECUTIVE_SPECIALIZATION = "Sales Progression";
+
+const SALES_PAUSED_MESSAGE =
+  "Sales Executive intake is paused here in this runtime by standing policy until an AI provider with an acceptable personal-data/training policy is available. This enquiry was not processed here -- it is being handled by the isolated Sales Executive project in Claude (with its own Notion and Gmail access), which owns and actively works this domain now.";
+
+const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
+  {
+    name: "new_enquiry",
+    consequence: "write",
+    requiresApproval: true,
+    description: "Process a new incoming client enquiry, extract contact details, and identify or match an Entity and Matter.",
+  },
+  {
+    name: "process_call_notes",
+    consequence: "write",
+    requiresApproval: true,
+    description: "Process sales call notes, extract commercial-value evidence, and evaluate Lead-to-Prospect qualification criteria.",
+  },
+  {
+    name: "route_to_strategy",
+    consequence: "write",
+    requiresApproval: true,
+    description: "Route a qualified commercial situation to Strategy for strategic diagnosis.",
+  },
+  {
+    name: "draft_proposal",
+    consequence: "write",
+    requiresApproval: true,
+    description: "Prepare and present a client-facing draft proposal based on an authoritative quote.",
+  },
+];
+
+async function salesExecutiveReadHandler(_env: Env, actionName: SalesExecutiveAction, _text: string): Promise<string> {
+  throw new Error(`${actionName}: not a read action on Sales Executive.`);
+}
+
+async function salesExecutiveEntryHandler(env: Env, state: WorkState, actionName: SalesExecutiveAction, text: string): Promise<WorkState> {
+  const sales = await import("./salesExecutive");
+  if (actionName === "new_enquiry") {
+    if (SALES_DIRECT_ENTRY_PAUSED) {
+      console.error(`Sales Executive direct entry paused — enquiry not processed (chat ${state.chatId})`);
+      await sendMessage(env, state.chatId, SALES_PAUSED_MESSAGE, undefined, state.threadId);
+      return state;
+    }
+    return sales.handleIncomingEnquiry(env, state, text);
+  }
+
+  if (actionName === "process_call_notes") {
+    return sales.handleCallNotes(env, state, text);
+  }
+
+  if (actionName === "route_to_strategy") {
+    return sales.handleInterventionText(env, state, text);
+  }
+
+  if (actionName === "draft_proposal") {
+    return sales.handleQuoteReceived(env, state);
+  }
+
+  throw new Error(`${actionName}: unsupported action on Sales Executive.`);
+}
+
+const salesExecutiveAwaitingHandlers: HatManifest<SalesExecutiveAction>["awaitingHandlers"] = {
+  call_notes: async (env, state, text) => (await import("./salesExecutive")).handleCallNotes(env, state, text),
+  intervention: async (env, state, text) => (await import("./salesExecutive")).handleInterventionText(env, state, text),
+  value_context_more: async (env, state, text) => (await import("./salesExecutive")).handleMoreValueContext(env, state, text),
+  proposal_feedback: async (env, state, text) => (await import("./salesExecutive")).handleProposalFeedback(env, state, text),
+  matter_redo_reason: async (env, state, text) => (await import("./salesExecutive")).handleMatterRedoReason(env, state, text),
+  entity_redo_reason: async (env, state, text) => (await import("./salesExecutive")).handleEntityRedoReason(env, state, text),
+  sales_proposal_revision: async (env, state, text) => (await import("./tokenSafeProposal")).handleSalesProposalRevisionText(env, state, text),
+};
+
+const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
+  name: SALES_EXECUTIVE_HAT_NAME,
+  specialization: SALES_EXECUTIVE_SPECIALIZATION,
+  responsibility:
+    "Manage commercial relationships and progress sales pipeline opportunities from initial enquiry to proposal agreement. Own Entity/Matter identification, Lead-to-Prospect qualification, and client proposal presentation.",
+  actions: salesExecutiveActions,
+  readHandler: salesExecutiveReadHandler,
+  entryHandler: salesExecutiveEntryHandler,
+  awaitingHandlers: salesExecutiveAwaitingHandlers,
+};
+
 export const salesManifest: UnitManifest = {
   unit: "Sales",
   hats: {
     [leadGenerationSpecialistHat.name]: leadGenerationSpecialistHat,
+    [salesExecutiveHat.name]: salesExecutiveHat,
   },
-  // Registered in dataBoundary/types.ts + registry.ts, but NOT yet
-  // classified in PRODUCTION_TASK_SENSITIVITY (dataBoundary/policy.ts) --
-  // pending Architect review, same discipline as every new BD task before
-  // it. Calls against these taskIds fail closed (UNRESOLVED_POLICY_HOLD)
-  // until classified; router.ts's dispatchCowork calls resolveUnitRequest
-  // with an explicit priorHat (see its own comment), so Stage 1's
-  // intakeClassificationTaskId is never actually invoked in practice while
-  // only one Hat is registered here (resolveHat's own single-Hat
-  // shortcut) -- it's declared only because UnitManifest requires it.
   intakeClassificationTaskId: "sales.intake_classification",
-  intakeIntroLine: "You route incoming Sales requests for ENIG, among its manifest-based Hats.",
+  intakeIntroLine: "You route incoming Sales requests for ENIG, among its specialist Hats.",
   actionClassificationTaskId: "sales.hat_action_decision",
 };
