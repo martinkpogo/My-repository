@@ -1,6 +1,6 @@
 # ENIG Operating Model
 
-As of 2026-09-24. Extended 2026-09-28 (Chat is action-capable; Platform layer confirmed as target architecture -- primitives, registries, skill-driven pipelines).
+As of 2026-09-24. Extended 2026-09-28 (Chat is action-capable; Platform layer confirmed as target architecture -- primitives, registries, skill-driven pipelines). Refined 2026-09-28, second pass (fresh per-call authority/eligibility resolution as a hard invariant; cross-Hat reuse folded into the primary build-order proof step rather than deferred to a later one).
 
 ## Binding, not aspirational
 
@@ -270,6 +270,7 @@ A Hat's manifest no longer declares a private `ActionDefinition[]` with its own 
 - `SemanticTaskId` sensitivity/outbound-policy classification, resolved per actual `generate` call (not once per action name) -- fails closed exactly as today if unregistered.
 - The Handoff token-only identity boundary, enforced in `handoffWriter.ts`, now anchored to the Handoffs resource entry rather than duplicated per Unit.
 - `requiresApproval` as the sole authority on what needs Martin's sign-off -- now an explicit, directly-testable `request_approval` step rather than an implicit side effect, but no less strict.
+- **Data Source eligibility (`canRead`/`canWrite`) and a Hat's own authority/persona framing are resolved fresh on every single primitive call, keyed to whichever Hat is actually invoking it that turn -- never cached or reused across Hats, even for the same registered resource or skill within the same request cycle.** A shared Skill/resource must never become a bridge that leaks one Hat's access into another's context; re-resolving on every call (not once per Skill, not once per session) is what keeps that true by construction rather than by convention. Two different Hats calling the same `fetch_skill`/`read_record` moments apart get two entirely independent resolutions, with no shared execution state carried over from one to the other.
 
 ### What "plug and play" means once this exists
 
@@ -280,7 +281,7 @@ Adding a new subsystem (Creative & Design, Operations, or anything beyond) becom
 Staged to prove the design on real, already-identified complexity rather than a big-bang rewrite:
 
 1. Build the kernel primitives (as callable functions) and the three registries as new infrastructure, alongside the existing system, touching no live Unit's behavior yet.
-2. Prove it on Business Development -- simultaneously the most complete manifest-based Unit and the source of two of the three "Known drift" items above (hardcoded content, duplicated `determine_next_move`/`handoff_to_*`). Migrating BD onto primitives+registries fixes that drift as a side effect of proving the design, not as separate cleanup.
+2. Prove it on Business Development -- simultaneously the most complete manifest-based Unit and the source of two of the three "Known drift" items above (hardcoded content, duplicated `determine_next_move`/`handoff_to_*`). Migrating BD onto primitives+registries fixes that drift as a side effect of proving the design, not as separate cleanup. **This step is not complete on a single-Hat proof alone.** A shared Skill built here (e.g. a `research-signal`-shaped methodology drawn from BD's `research_opportunity`/`discover_opportunity`) must also be wired to a second Hat outside Business Development in this same step -- not deferred to step 4 -- with that second Hat exercising materially different Data Sources, consequence level, approval requirement, and output shape, while touching neither the Skill's own methodology content nor adding any Skill-specific branch to the kernel. Proving reuse only after the fact risks the Skill quietly having been BD-shaped all along; the reuse test belongs inside the proof, not after it.
 3. Retire `ActionCapability`/`routeWorkspaceCapabilityAction` in the same pass -- it's dead code already; don't carry it forward into the new model.
 4. Once BD runs clean with zero regressions, migrate Sales, Marketing, Strategy, and Finance one at a time, each deleting its old hand-wired path as it goes -- the existing "Migration path" discipline above, aimed at the new kernel instead of the old per-Unit-`ActionDefinition[]` shape.
 5. Build Creative & Design and Operations directly on the finished pattern -- the first genuine test of "plug and play" against a subsystem that didn't exist before.
@@ -296,3 +297,5 @@ Staged to prove the design on real, already-identified complexity rather than a 
 - [x] Is the Platform layer worth building, and in what shape? Resolved 2026-09-28 after several rounds of direct discussion: confirmed as primitives (a shared function library, not a live agentic loop) + three registries (Data Source, Skill, Connector) + manifests reduced to declaration -- see "Platform layer: primitives, registries, and skill-driven pipelines" above. Not yet built; staged build order recorded there.
 - [x] Should `ActionCapability`/`routeWorkspaceCapabilityAction` (`src/actions/registry.ts`) be retired outright, or re-homed? Resolved 2026-09-28: retired, in the same pass as Business Development's migration to the Platform layer (see its "Build order" above) -- not carried forward into the new model.
 - [ ] Exact typed signatures for the six primitive functions (`read_record`, `fetch_skill`, `search`, `generate`, `request_approval`, `write_record`) and the three registries' interfaces -- an implementation detail to work out during Platform layer Build order step 1, not a design question still open.
+- [x] Should Data Source/authority resolution ever be cached or reused across Hats within one request cycle, for a shared Skill/resource? Resolved 2026-09-28: no -- resolved fresh on every primitive call, keyed to the actual invoking Hat, never cached across Hats or Personas. See "What never changes" above.
+- [x] Should cross-Hat Skill reuse be proven in the same build-order step as the first Hat, or as a later, separate step? Resolved 2026-09-28: the same step -- Build order step 2 now requires wiring a second Hat to any shared Skill built there, not deferring reuse to step 4. See "Build order" above.
