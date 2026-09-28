@@ -321,8 +321,6 @@ export class WorkSession extends DurableObject<Env> {
           return research.handleResearchHandoffApproval(this.env, state, value === "approve");
         case "strategyhandoff":
           return strategy.handleStrategyHandoffApproval(this.env, state, value === "approve");
-        case "bddevelop":
-          return businessDevelopment.handleBDDevelopApproval(this.env, state, value === "approve");
         case "bdnextmove":
           return businessDevelopment.handleBDNextMoveApproval(this.env, state, value === "approve");
         case "sprop": {

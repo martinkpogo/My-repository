@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert";
-import { businessDevelopmentManifest, handleBDHandoffApproval, BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX } from "./businessDevelopmentManifest";
+import {
+  businessDevelopmentManifest,
+  handleBDHandoffApproval,
+  handleBDDevelopApproval,
+  BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX,
+  BD_DEVELOP_CALLBACK_PREFIX,
+} from "./businessDevelopmentManifest";
 import { findCallbackHandler } from "../unitManifest";
 import type { Env } from "../../types";
 
@@ -196,15 +202,16 @@ test("develop_opportunity: assembles a prompt carrying the shared opportunity_fo
 
 /**
  * Covers HatManifest.callbackHandlers -- the generic approval-callback
- * dispatch mechanism (session.ts's handleCallback default case), first
- * proven here on bdopportunityhandoff. handleBDDevelopApproval/
- * handleBDNextMoveApproval are deliberately NOT covered here: bddevelop/
- * bdnextmove remain hardcoded session.ts switch cases, not yet migrated.
+ * dispatch mechanism (session.ts's handleCallback default case), proven
+ * on bdopportunityhandoff (PR #203) and now bddevelop.
+ * handleBDNextMoveApproval is deliberately NOT covered here: bdnextmove
+ * remains a hardcoded session.ts switch case, not yet migrated.
  */
-test("all three BD Hats declare bdopportunityhandoff, and only bdopportunityhandoff, in callbackHandlers", () => {
+test("all three BD Hats declare exactly bdopportunityhandoff and bddevelop in callbackHandlers", () => {
   for (const hat of Object.values(businessDevelopmentManifest.hats)) {
-    assert.deepStrictEqual(Object.keys(hat.callbackHandlers ?? {}), [BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX]);
+    assert.deepStrictEqual(new Set(Object.keys(hat.callbackHandlers ?? {})), new Set([BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX, BD_DEVELOP_CALLBACK_PREFIX]));
     assert.strictEqual(hat.callbackHandlers?.[BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX], handleBDHandoffApproval);
+    assert.strictEqual(hat.callbackHandlers?.[BD_DEVELOP_CALLBACK_PREFIX], handleBDDevelopApproval);
   }
 });
 
@@ -221,4 +228,20 @@ test("findCallbackHandler resolves bdopportunityhandoff on Opportunity Developme
   const result = await handler(env, state, false);
 
   assert.strictEqual(result.pendingBDHandoff, undefined);
+});
+
+test("findCallbackHandler resolves bddevelop on Opportunity Development and genuinely delegates to handleBDDevelopApproval -- rejecting a pending draft discards it without committing developedState, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const env = fakeEnv();
+  const state = fakeWorkState({
+    pendingBDDevelop: { draftSummary: "Test draft" },
+  });
+
+  const handler = findCallbackHandler(BD_DEVELOP_CALLBACK_PREFIX, opportunityDevelopmentHat);
+  assert.ok(handler, "bddevelop must resolve on Opportunity Development's own manifest entry");
+
+  const result = await handler(env, state, false);
+
+  assert.strictEqual(result.pendingBDDevelop, undefined);
+  assert.strictEqual(result.bdOpportunity?.developedState, undefined, "must not commit before approval");
 });
