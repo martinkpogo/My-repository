@@ -22,7 +22,7 @@ import {
   updatePage,
 } from "../../notion";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
-import { aiJson, aiText } from "../../ai";
+import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, sendOperationsMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -137,34 +137,39 @@ async function getSalesExecutiveGovernance(
   return { hatDefinition, universalRoleContract, entitySpecification: entitySpecification ?? undefined };
 }
 
-function buildSalesCallPrepSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
-  return [
-    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for this role — follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution context — not part of the governance above) ===",
-    "Prepare Martin for a sales call: what we know, what's still unknown, and questions to ask to test the Hat Definition's canonical qualification conditions above. Keep it under 200 words, plain text, no markdown headers.",
-  ].join("\n\n");
+function buildSalesCallPrepPromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent"> {
+  return {
+    persona:
+      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for this role — follow them exactly as written.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+    skillContent: [
+      "=== TASK (execution context — not part of the governance above) ===",
+      "Prepare Martin for a sales call: what we know, what's still unknown, and questions to ask to test the Hat Definition's canonical qualification conditions above. Keep it under 200 words, plain text, no markdown headers.",
+    ].join("\n\n"),
+  };
 }
 
-function buildQualificationSystemPrompt(
+function buildQualificationPromptParts(
   hatDefinition: string,
   universalRoleContract: string,
   entitySpecification: string,
-): string {
-  return [
-    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract, Hat Definition, and Entity Business Object specification are authoritative for evaluating the four canonical qualification conditions — follow them exactly as written. Never infer missing evidence.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== ENTITY BUSINESS OBJECT SPECIFICATION ===",
-    entitySpecification,
-    "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
-    'Evaluate the within_specialization, allows_diagnosis_first, open_to_ballpark_amount_and_time, and ready_to_commit_required_resources conditions named above, strictly from the evidence given. Do NOT evaluate commercial_value_evidence -- that condition is assessed separately by a deterministic process and any assessment you give for it will be discarded. Return JSON: {"conditions":[{"condition":"<canonical condition key, exactly as given above>","evidence":"...","assessment":"Satisfied|Not Satisfied|Insufficient Evidence"}, ...for the four conditions listed above only...], "overall":"Qualified|Not Qualified|More Information Required"}. Your "overall" value is advisory only and will be recomputed once the commercial_value_evidence condition is spliced in.',
-  ].join("\n\n");
+): Pick<GeneratePromptParts, "persona" | "behavior" | "context"> {
+  return {
+    persona:
+      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract, Hat Definition, and Entity Business Object specification are authoritative for evaluating the four canonical qualification conditions — follow them exactly as written. Never infer missing evidence.",
+    behavior: [
+      "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
+      universalRoleContract,
+      "=== HAT DEFINITION ===",
+      hatDefinition,
+      "=== ENTITY BUSINESS OBJECT SPECIFICATION ===",
+      entitySpecification,
+    ].join("\n\n"),
+    context: [
+      "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+      'Evaluate the within_specialization, allows_diagnosis_first, open_to_ballpark_amount_and_time, and ready_to_commit_required_resources conditions named above, strictly from the evidence given. Do NOT evaluate commercial_value_evidence -- that condition is assessed separately by a deterministic process and any assessment you give for it will be discarded. Return JSON: {"conditions":[{"condition":"<canonical condition key, exactly as given above>","evidence":"...","assessment":"Satisfied|Not Satisfied|Insufficient Evidence"}, ...for the four conditions listed above only...], "overall":"Qualified|Not Qualified|More Information Required"}. Your "overall" value is advisory only and will be recomputed once the commercial_value_evidence condition is spliced in.',
+    ].join("\n\n"),
+  };
 }
 
 interface RawValueAtStake {
@@ -408,28 +413,28 @@ function formatCommercialEvidenceForHandoff(
   return lines.join("\n");
 }
 
-function buildProposalDraftingSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
-  return [
-    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for the Draft Proposal's required content, structure, and authority limits — follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution context — not part of the governance above) ===",
-    "Draft the complete client-facing Draft Proposal for the entity/matter/quote data given below, following the Hat Definition's proposal_content_standard exactly (section headers, order, and content rules) and its authority_limits (the quoted price must not be altered, converted, or reinterpreted; internal Finance reasoning not intended for the client must not be disclosed). Keep it concise and professional.",
-  ].join("\n\n");
+function buildProposalDraftingPromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent"> {
+  return {
+    persona:
+      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for the Draft Proposal's required content, structure, and authority limits — follow them exactly as written.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+    skillContent: [
+      "=== TASK (execution context — not part of the governance above) ===",
+      "Draft the complete client-facing Draft Proposal for the entity/matter/quote data given below, following the Hat Definition's proposal_content_standard exactly (section headers, order, and content rules) and its authority_limits (the quoted price must not be altered, converted, or reinterpreted; internal Finance reasoning not intended for the client must not be disclosed). Keep it concise and professional.",
+    ].join("\n\n"),
+  };
 }
 
-function buildProposalRevisionSystemPrompt(hatDefinition: string, universalRoleContract: string): string {
-  return [
-    "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for how this Draft Proposal may be revised and for the authority limits that apply — follow them exactly as written.",
-    "=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===",
-    universalRoleContract,
-    "=== HAT DEFINITION ===",
-    hatDefinition,
-    "=== TASK (execution context — not part of the governance above) ===",
-    "Revise the current Draft Proposal below according to Martin's feedback, keeping the same section structure per the Hat Definition's proposal_content_standard. Per the Hat Definition's authority_limits, you have no authority to change the quoted price — if Martin's feedback appears to require a price change, do not apply it: keep the existing price and add a note prefixed 'NOTE TO MARTIN:' explaining the conflict.",
-  ].join("\n\n");
+function buildProposalRevisionPromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent"> {
+  return {
+    persona:
+      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for how this Draft Proposal may be revised and for the authority limits that apply — follow them exactly as written.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+    skillContent: [
+      "=== TASK (execution context — not part of the governance above) ===",
+      "Revise the current Draft Proposal below according to Martin's feedback, keeping the same section structure per the Hat Definition's proposal_content_standard. Per the Hat Definition's authority_limits, you have no authority to change the quoted price — if Martin's feedback appears to require a price change, do not apply it: keep the existing price and add a note prefixed 'NOTE TO MARTIN:' explaining the conflict.",
+    ].join("\n\n"),
+  };
 }
 
 export async function handleIncomingEnquiry(env: Env, state: WorkState, text: string): Promise<WorkState> {
@@ -443,11 +448,13 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
     outcome: "Active",
   });
 
-  const extracted = await aiJson<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
+  const extracted = await generate<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
     taskId: "sales.enquiry_extraction",
-    system:
-      "Extract the sender's identifying details from an incoming business enquiry. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
-    user: text,
+    mode: "json",
+    parts: {
+      persona: "Extract the sender's identifying details from an incoming business enquiry. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
+      situation: text,
+    },
     light: true,
   });
 
@@ -591,11 +598,13 @@ export async function handleEntityCreationApproval(env: Env, state: WorkState, a
 
 export async function handleEntityRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
   const previous = state.entityDraft;
-  const extracted = await aiJson<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
+  const extracted = await generate<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
     taskId: "sales.enquiry_extraction",
-    system:
-      "Extract the sender's identifying details for a business Entity record. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
-    user: `Original enquiry: ${state.enquiryText ?? ""}\n\nPrevious draft: ${JSON.stringify(previous ?? {})}\n\nMartin's redo reasoning: ${reasonText}`,
+    mode: "json",
+    parts: {
+      persona: "Extract the sender's identifying details for a business Entity record. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
+      situation: `Original enquiry: ${state.enquiryText ?? ""}\n\nPrevious draft: ${JSON.stringify(previous ?? {})}\n\nMartin's redo reasoning: ${reasonText}`,
+    },
     light: true,
   });
   const name = extracted?.organisation || extracted?.name || previous?.name || "New contact";
@@ -657,11 +666,13 @@ export async function handleMatterChoice(env: Env, state: WorkState, choice: str
  * handleMatterCreationApproval confirms it.
  */
 async function draftNewMatter(env: Env, state: WorkState, guidance: string): Promise<WorkState> {
-  const summary = await aiJson<{ name: string; stated_need: string }>(env, {
+  const summary = await generate<{ name: string; stated_need: string }>(env, {
     taskId: "sales.matter_summary_drafting",
-    system:
-      "From the enquiry text, produce a short Matter title (max 8 words) and a one-sentence Stated_need. Return JSON {name, stated_need}.",
-    user: guidance,
+    mode: "json",
+    parts: {
+      persona: "From the enquiry text, produce a short Matter title (max 8 words) and a one-sentence Stated_need. Return JSON {name, stated_need}.",
+      situation: guidance,
+    },
     light: true,
   });
   const name = summary?.name || `Enquiry — ${state.entityName}`;
@@ -773,12 +784,11 @@ async function prepareSalesCall(env: Env, state: WorkState): Promise<WorkState> 
     return state;
   }
 
-  const brief = await aiText(
-    env,
-    "sales.call_prep_briefing",
-    buildSalesCallPrepSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
-    `Entity: ${state.entityName}\nMatter: ${state.matterName}\nEnquiry: ${state.enquiryText}`,
-  );
+  const brief = await generate(env, {
+    taskId: "sales.call_prep_briefing",
+    mode: "text",
+    parts: { ...buildSalesCallPrepPromptParts(governance.hatDefinition, governance.universalRoleContract), situation: `Entity: ${state.entityName}\nMatter: ${state.matterName}\nEnquiry: ${state.enquiryText}` },
+  });
 
   await sendWorkspaceHatMessage(
     env,
@@ -833,10 +843,10 @@ async function runQualificationAssessment(
   // deterministic evidence gate below has something to judge. Extraction
   // failure (null) is treated as "no evidence extracted," not a blocker --
   // evaluateCommercialValueEvidence already fails closed on empty input.
-  const extraction = await aiJson<RawCommercialEvidenceExtraction>(env, {
+  const extraction = await generate<RawCommercialEvidenceExtraction>(env, {
     taskId: taskIds.evidenceExtraction,
-    system: buildCommercialEvidenceExtractionSystemPrompt(),
-    user: combinedText,
+    mode: "json",
+    parts: { persona: buildCommercialEvidenceExtractionSystemPrompt(), situation: combinedText },
     light: true,
   });
   state.commercialEvidence = normalizeCommercialEvidence(extraction);
@@ -850,10 +860,10 @@ async function runQualificationAssessment(
     outcome: "Active",
   });
 
-  const qualification = await aiJson<QualificationResult>(env, {
+  const qualification = await generate<QualificationResult>(env, {
     taskId: taskIds.qualification,
-    system: buildQualificationSystemPrompt(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!),
-    user: combinedText,
+    mode: "json",
+    parts: { ...buildQualificationPromptParts(governance.hatDefinition, governance.universalRoleContract, governance.entitySpecification!), situation: combinedText },
   });
 
   const aiConditions = (qualification?.conditions ?? []).filter((c) => AI_JUDGED_CONDITIONS.includes(c.condition));
@@ -1606,13 +1616,15 @@ export async function handleQuoteReceived(env: Env, state: WorkState): Promise<W
   state.quote = quote;
   await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
 
-  const draft = await aiText(
-    env,
-    "sales.proposal_drafting",
-    buildProposalDraftingSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
-    `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: ${state.quote.currency ?? ""} ${state.quote.price} — rationale: ${state.quote.rationale}`,
-    { maxTokens: 3000 },
-  );
+  const draft = await generate(env, {
+    taskId: "sales.proposal_drafting",
+    mode: "text",
+    parts: {
+      ...buildProposalDraftingPromptParts(governance.hatDefinition, governance.universalRoleContract),
+      situation: `Entity: ${state.entityName}\nMatter: ${state.matterName}\nProposed intervention: ${state.proposedIntervention}\nVerified context: ${state.enquiryText}\n${state.callNotes}\nAuthoritative quote: ${state.quote.currency ?? ""} ${state.quote.price} — rationale: ${state.quote.rationale}`,
+    },
+    maxTokens: 3000,
+  });
 
   state.proposalDraft = draft;
   state.proposalRevisionCount = 0;
@@ -1717,13 +1729,15 @@ export async function handleProposalFeedback(env: Env, state: WorkState, feedbac
     return state;
   }
 
-  const revised = await aiText(
-    env,
-    "sales.proposal_revision",
-    buildProposalRevisionSystemPrompt(governance.hatDefinition, governance.universalRoleContract),
-    `Current draft:\n${state.proposalDraft}\n\nMartin's feedback:\n${feedback}`,
-    { maxTokens: 3000 },
-  );
+  const revised = await generate(env, {
+    taskId: "sales.proposal_revision",
+    mode: "text",
+    parts: {
+      ...buildProposalRevisionPromptParts(governance.hatDefinition, governance.universalRoleContract),
+      situation: `Current draft:\n${state.proposalDraft}\n\nMartin's feedback:\n${feedback}`,
+    },
+    maxTokens: 3000,
+  });
   state.proposalDraft = revised;
   state.proposalRevisionCount = (state.proposalRevisionCount ?? 0) + 1;
   const revisedProposalMessage = `*Revised Draft Proposal*\n\n${revised}`;
