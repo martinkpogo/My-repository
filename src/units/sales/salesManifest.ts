@@ -66,8 +66,12 @@ import * as sales from "./salesExecutive";
  * capability reachable through a Cowork/Workspace chat message today;
  * the /lead Telegram command and cron-triggered runAutonomousLeadDiscovery
  * (leadGenerationDiscovery.ts) run entirely outside dispatchCowork and
- * have no manifest equivalent to move to (see docs/enig-operating-model.md's
- * scoping notes on those two). The "leadopportunity" Telegram approval
+ * have no manifest equivalent to move to -- deliberately, not an
+ * oversight: see docs/enig-operating-model.md's "Open questions" entry
+ * resolving this (2026-09-28) as "leave alone," since neither is a
+ * chat-triggered request and building new manifest schema against
+ * exactly one existing caller each would repeat the design doc's own
+ * "don't design the final schema up front" warning. The "leadopportunity" Telegram approval
  * callback (proposeLeadOpportunity/handleLeadOpportunityApproval,
  * leadGenerationDiscovery.ts) IS migrated below, onto
  * HatManifest.callbackHandlers -- same generic approval-callback dispatch
