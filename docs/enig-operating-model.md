@@ -37,24 +37,45 @@ The existing pieces already map cleanly onto an operating system; the redesign b
 | Handoff | Inter-process communication (IPC) |
 | Approval gate | The permission prompt, only for privileged syscalls |
 | Data Boundary / Outbound Gate | The sandbox / capability security model |
-| Chat | A read-only REPL over the same subsystems |
+| Chat | A REPL over the same subsystems -- can invoke any syscall directly (2026-09-28 decision, see "Chat is action-capable" below), not read-only |
 
 ```mermaid
 flowchart TD
     A[Message arrives] --> B{Existing WorkSession?}
     B -- yes --> C[Continue: awaiting handler]
     B -- no --> D{Workspace mode}
-    D -- Chat --> E[Reply only, no state change]
-    D -- Cowork --> F[Resolve Unit / Hat]
-    F --> G[Resolve Action]
+    D -- Chat --> E[Resolve Unit / Hat -- best effort, never blocks]
+    D -- Cowork --> F[Resolve Unit / Hat -- explicit, blocks on ambiguity]
+    E -- resolved --> G[Resolve Action]
+    E -- ambiguous --> M[Ordinary conversational reply]
+    F --> G
     G --> H{Read or write?}
     H -- Read --> I[Answer immediately]
     H -- Write --> J[WorkSession + governed execution]
-    J --> K[Approval gate]
-    K --> L[Handoff / Business Object]
+    J --> K{action.requiresApproval?}
+    K -- yes --> N[Approval gate]
+    K -- no --> L[Handoff / Business Object]
+    N --> L
 ```
 
 Resolving Unit/Hat stays exactly as built (deterministic addressing, no AI). What's new is the step right after it: resolving *which action*, and branching on whether that action reads or writes.
+
+## Chat is action-capable, not read-only (2026-09-28 decision)
+
+Martin's ruling, superseding this doc's original "Chat | A read-only REPL" framing: Chat mode should feel like an ordinary assistant (Claude, ChatGPT) that can actually do things mid-conversation, not just answer questions about state someone else changed. Cowork is not "the only mode where actions happen" -- it's specifically where Martin is *explicitly* directing a Unit/Hat and, when the work spans more than one Unit, where a Handoff coordinates the handoff itself. The distinction is about explicitness of addressing and cross-Unit coordination, not about which mode is allowed to touch governed state.
+
+Concretely:
+
+* **Same dispatch mechanism, both modes.** Chat resolves Unit/Hat/Action and calls `dispatchAction` through the exact same Action Registry Cowork already uses (`src/hats/actionRegistry.ts`, `src/units/dispatch.ts`) -- no second, Chat-specific action mechanism, no generic/open-ended tool-calling either. An action is still never invented on the spot; it is always one of a Unit's own registered, finite verbs, consistent with this doc's original Action Registry section.
+* **The approval gate is a property of the action, not of the mode.** `requiresApproval` on a write action fires identically whether the action was reached through Chat or Cowork (confirmed directly with Martin -- the alternative, Chat being fully autonomous even for privileged actions, was explicitly rejected). Nothing about being "just chatting" ever bypasses a privileged write's sign-off.
+* **Ambiguity is handled oppositely by design, not by oversight.** Cowork's whole point is explicit direction, so an unresolved Unit/Hat still blocks with the existing clarification question -- forcing ambiguity to resolve is correct there. Chat's whole point is low-friction conversation, so an unresolved Unit/Hat (no confident addressee, no confident action) must never block; it falls through to an ordinary conversational reply instead (the existing `generalChatReply`/`generalDmReply`), exactly as today. Chat fails open to conversation; Cowork fails closed to a clarifying question. Same underlying resolution step, opposite fallback.
+* **Read actions answer immediately in both modes** -- this was already true for Cowork and doesn't change; Chat gains it for the first time.
+
+### What this does not change
+
+* The Data Boundary, Outbound Gate, WorkSession, and Handoff machinery are untouched -- this is purely about which mode is allowed to *reach* the Action Registry, not a new execution path.
+* A Unit with no manifest yet (everything except Business Development, and Sales for `discover_leads` only, as of this decision) gains nothing from this immediately -- Chat has no actions to resolve against for an unmigrated Unit, the same way Cowork doesn't today. This decision's benefit compounds as more Units migrate onto the manifest pattern (see "Migration path" -- migrating a Unit now unlocks Chat-mode action dispatch for it for free, no Chat-specific work required per Unit).
+* `dataLookup.ts` (the six-source "what's in this database" conversational capability, shipped 2026-09-27) is a known, temporary exception to "actions are always Unit/Hat-scoped" -- Handoffs and the Activity & Decision Log are inherently cross-Unit records that don't fit cleanly into any single Unit's manifest. Left as-is for now rather than forced into a shape that doesn't fit; how (or whether) to fold it into the Action Registry, versus keeping it as a deliberate cross-subsystem exception, is still an open question below.
 
 ## The Action Registry
 
@@ -180,3 +201,5 @@ This intentionally does not migrate working Units up front: it proves the plug-i
 - [x] Should Strategy/Finance direct requests be gated any differently than Handoff-originated ones? Resolved: yes -- Martin must always name an existing Matter explicitly (its token); there is no "identity-free general question" path. Applied to Strategy in `handleDirectRequest`; Finance direct entry still needs to apply the same rule when built.
 - [ ] Does a "read" action ever need any lightweight audit trail (a log entry, no WorkSession), or is truly zero record acceptable for pure lookups?
 - [x] Which Unit proves the Unit Registry pattern first, and what should it actually *do*? Resolved: Business Development, structured as three Hats (Growth & Market Development, Partnership Development, Opportunity Development) -- see "The Unit Registry" above. Creative & Design and Operations remain undefined; built on the pattern once proven by BD, per the rollout order above.
+- [x] Is Chat mode allowed to invoke actions (read and write), or read-only? Resolved 2026-09-28: action-capable, same dispatch and approval-gate semantics as Cowork -- see "Chat is action-capable, not read-only" above.
+- [ ] `dataLookup.ts`'s six sources (Matters, Entity, Handoffs, Proposals, Leads, Activity) don't fit cleanly into any single Unit's manifest -- Handoffs and Activity are inherently cross-Unit. Fold into the Action Registry somehow (a dedicated cross-cutting pseudo-Unit? split per-source across the Units that actually own each one?), or keep it as a documented, deliberate exception to "actions are Unit/Hat-scoped"?
