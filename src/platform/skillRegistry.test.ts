@@ -1,59 +1,44 @@
 import test from "node:test";
 import assert from "node:assert";
-import { getSkill, SKILL_REGISTRY } from "./skillRegistry";
-import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
+import { getSkillContent } from "./skillRegistry";
 
-const RESEARCH_SIGNAL_PAGE_ID = "3e9cb004-e583-81cb-8e42-fcdbc8ca1201";
-const QUALIFICATION_GATE_PAGE_ID = "3e9cb004-e583-815a-973b-c176023032d8";
-const FORWARD_PLANNING_PAGE_ID = "3e9cb004-e583-81f3-b8dc-c86f83acc3b4";
+/**
+ * Covers the repo-native Skill model (migrated 2026-09-28 from the retired
+ * Notion-backed SkillDefinition/SKILL_REGISTRY/getSkill arrangement -- see
+ * skillRegistry.ts's own doc comment). The minimum contract is now just
+ * id -> methodology content string, so these tests assert the content
+ * itself, not registry metadata (pageId/sensitivity/requiredDataSources/
+ * validation) that no longer exists because no runtime code ever read it.
+ */
 
-test("getSkill: an unregistered id fails closed with a clear error", () => {
-  assert.throws(() => getSkill("nonexistent" as any), /not a registered skill/);
+test("getSkillContent: research_signal returns its own evidence-discipline methodology, distinct from the other two Skills", () => {
+  const content = getSkillContent("research_signal");
+  assert.match(content, /research-signal/);
+  assert.match(content, /Only use evidence actually given/);
+  assert.match(content, /Distinguish observation from diagnosis/);
 });
 
-test("getSkill: universal_role_contract resolves to governance.ts's canonical page id", () => {
-  const skill = getSkill("universal_role_contract");
-  assert.strictEqual(skill.pageId, UNIVERSAL_ROLE_CONTRACT_PAGE_ID);
+test("getSkillContent: opportunity_qualification_gate returns its own threshold-discipline methodology, distinct from research_signal", () => {
+  const content = getSkillContent("opportunity_qualification_gate");
+  assert.match(content, /opportunity-qualification-gate/);
+  assert.match(content, /hold -- never infer/);
+  assert.doesNotMatch(content, /observation from diagnosis/);
 });
 
-test("Every registered skill declares a non-empty description, sensitivity, and output contract", () => {
-  for (const id of Object.keys(SKILL_REGISTRY) as (keyof typeof SKILL_REGISTRY)[]) {
-    const skill = SKILL_REGISTRY[id];
-    assert.ok(skill.description.trim().length > 0, `${id} must have a description`);
-    assert.ok(skill.sensitivity, `${id} must declare a sensitivity tier`);
-    assert.ok(skill.outputContract.trim().length > 0, `${id} must declare an output contract`);
-  }
+test("getSkillContent: opportunity_forward_planning returns its own grounding-discipline methodology, distinct from the other two Skills", () => {
+  const content = getSkillContent("opportunity_forward_planning");
+  assert.match(content, /opportunity-forward-planning/);
+  assert.match(content, /Build only from what's already established/);
+  assert.doesNotMatch(content, /threshold discipline/);
 });
 
-test("getSkill: research_signal resolves to its own real Notion page, distinct from universal_role_contract", () => {
-  const skill = getSkill("research_signal");
-  assert.strictEqual(skill.pageId, RESEARCH_SIGNAL_PAGE_ID);
-  assert.notStrictEqual(skill.pageId, UNIVERSAL_ROLE_CONTRACT_PAGE_ID);
+test("getSkillContent: every Skill's content is distinct (no accidental duplicate registration)", () => {
+  const ids = ["research_signal", "opportunity_qualification_gate", "opportunity_forward_planning"] as const;
+  const contents = ids.map((id) => getSkillContent(id));
+  assert.strictEqual(new Set(contents).size, contents.length, "every Skill must resolve to distinct content");
 });
 
-test("research_signal declares no fixed Data Source -- evidence provenance is caller-supplied, never a Skill-level access grant", () => {
-  const skill = getSkill("research_signal");
-  assert.deepStrictEqual(skill.requiredDataSources, []);
-});
-
-test("research_signal declares its evidence-discipline invariants as named validation rules, not free prose", () => {
-  const skill = getSkill("research_signal");
-  assert.ok(skill.validation && skill.validation.length >= 4, "research_signal must declare its core evidence-discipline invariants");
-  assert.ok(skill.validation!.includes("never_fabricate_a_specific_fact"));
-  assert.ok(skill.validation!.includes("distinguish_observation_from_diagnosis"));
-});
-
-test("opportunity_qualification_gate and opportunity_forward_planning each resolve to their own real, distinct Notion pages", () => {
-  const qualificationGate = getSkill("opportunity_qualification_gate");
-  const forwardPlanning = getSkill("opportunity_forward_planning");
-  assert.strictEqual(qualificationGate.pageId, QUALIFICATION_GATE_PAGE_ID);
-  assert.strictEqual(forwardPlanning.pageId, FORWARD_PLANNING_PAGE_ID);
-  const allPageIds = [qualificationGate.pageId, forwardPlanning.pageId, getSkill("research_signal").pageId, getSkill("universal_role_contract").pageId];
-  assert.strictEqual(new Set(allPageIds).size, allPageIds.length, "every registered skill must resolve to a distinct page");
-});
-
-test("opportunity_qualification_gate is a deliberately separate Skill from research_signal, not a duplicate registration", () => {
-  const qualificationGate = getSkill("opportunity_qualification_gate");
-  assert.ok(qualificationGate.validation!.includes("hold_rather_than_infer_missing_evidence"));
-  assert.doesNotMatch(qualificationGate.description, /observation-vs-diagnosis/);
+test("getSkillContent: is a plain synchronous lookup -- no Promise returned", () => {
+  const result = getSkillContent("research_signal");
+  assert.strictEqual(typeof result, "string");
 });

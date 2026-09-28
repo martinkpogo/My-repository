@@ -7,7 +7,8 @@ import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
 import { aiJson } from "../../ai";
-import { fetchSkill, generate } from "../../platform/primitives";
+import { generate } from "../../platform/primitives";
+import { getSkillContent } from "../../platform/skillRegistry";
 
 /**
  * Business Development's Unit Manifest -- the first Unit built entirely
@@ -153,7 +154,7 @@ const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentActi
  * test, not two copies of the same prompt under one label.
  */
 async function discoverOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = await fetchSkill(env, "research_signal");
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_opportunity",
     mode: "json",
@@ -190,7 +191,7 @@ async function discoverOpportunity(env: Env, text: string): Promise<string> {
  * is part of.
  */
 async function researchOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = await fetchSkill(env, "research_signal");
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_opportunity",
     mode: "json",
@@ -232,7 +233,7 @@ async function researchOpportunity(env: Env, text: string): Promise<string> {
  * same evidence discipline, not a distinct methodology.
  */
 async function assessOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = await fetchSkill(env, "research_signal");
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{
     assessment?: string;
     strategicRelevance?: string;
@@ -298,7 +299,7 @@ interface QualificationJudgment {
  */
 async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
-  const skillContent = await fetchSkill(env, "opportunity_qualification_gate");
+  const skillContent = getSkillContent("opportunity_qualification_gate");
 
   const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.opportunity_qualification",
@@ -495,7 +496,7 @@ interface DevelopmentDraft {
 
 async function draftDevelopOpportunity(env: Env, opportunity: BDOpportunityState): Promise<DevelopmentDraft | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
-  const skillContent = await fetchSkill(env, "opportunity_forward_planning");
+  const skillContent = getSkillContent("opportunity_forward_planning");
 
   return generate<DevelopmentDraft>(env, {
     taskId: "business_development.develop_opportunity",
