@@ -1,7 +1,7 @@
 import type { Env, WorkState } from "./types";
 import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from "./telegram";
-import { aiJson } from "./ai";
+import { generate } from "./ai";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -1144,14 +1144,17 @@ export const GoogleDocCreationCapability = {
   name: "Google Doc Creation Capability",
   description: "Creates Google Docs in Google Drive with user-selected account, folder, and explicit approval.",
   async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
-    const classification = await aiJson<{ isGoogleDocRequest: boolean; title?: string; content?: string }>(env, {
+    const classification = await generate<{ isGoogleDocRequest: boolean; title?: string; content?: string }>(env, {
       taskId: "action.google_doc_intake",
-      system: `You classify incoming messages for ENIG's Google Doc creation capability.
+      mode: "json",
+      parts: {
+        persona: `You classify incoming messages for ENIG's Google Doc creation capability.
 Check if the message requests creating a Google Doc / Document.
 If yes, set isGoogleDocRequest to true and extract the document title and content text if present.
 If title or content is missing, leave them empty/undefined.
 Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..."}`,
-      user: text,
+        situation: text,
+      },
       light: true,
     });
 
@@ -1219,19 +1222,22 @@ export const GoogleSheetCreationCapability = {
   description:
     "Creates Google Sheets (e.g. content calendars, trackers) in Google Drive with user-selected account, folder, and explicit approval.",
   async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
-    const classification = await aiJson<{
+    const classification = await generate<{
       isGoogleSheetRequest: boolean;
       title?: string;
       rows?: string[][];
     }>(env, {
       taskId: "action.google_sheet_intake",
-      system: `You classify incoming messages for ENIG's Google Sheet creation capability.
+      mode: "json",
+      parts: {
+        persona: `You classify incoming messages for ENIG's Google Sheet creation capability.
 Check if the message requests creating a Google Sheet / spreadsheet / content calendar / tracker.
 If yes, set isGoogleSheetRequest to true, extract a sheet title, and produce an initial 2D array of rows: the FIRST row must be column headers, and any subsequent rows are starting data (use just the header row if no data rows were given).
 If the request is a content calendar with no explicit columns specified, default the header row to: ["Date", "Content Piece", "Channel", "Status", "Owner"].
 If title is missing, leave it empty/undefined.
 Return JSON: {"isGoogleSheetRequest": true | false, "title": "...", "rows": [["Date","Content Piece","Channel","Status","Owner"]]}`,
-      user: text,
+        situation: text,
+      },
       light: true,
     });
 

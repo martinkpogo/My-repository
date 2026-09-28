@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { queryDataSource, plainText, uniqueId } from "./notion";
-import { aiJson, aiChat } from "./ai";
+import { generate } from "./ai";
 import type { ChatTurn } from "./ai";
 
 /**
@@ -225,10 +225,10 @@ function buildDataLookupClassifierPrompt(): string {
  * falls through to ordinary chat.
  */
 export async function classifyDataLookupRequest(env: Env, userMessage: string): Promise<DataLookupClassification | null> {
-  const raw = await aiJson<{ is_lookup?: boolean; source?: string; filter?: string }>(env, {
+  const raw = await generate<{ is_lookup?: boolean; source?: string; filter?: string }>(env, {
     taskId: "chat.data_lookup",
-    system: buildDataLookupClassifierPrompt(),
-    user: userMessage,
+    mode: "json",
+    parts: { persona: buildDataLookupClassifierPrompt(), situation: userMessage },
   });
   if (!raw || raw.is_lookup !== true) return null;
   const source = raw.source?.toLowerCase().trim();
@@ -281,7 +281,7 @@ export async function runConversationalDataLookup(
   userMessage: string,
 ): Promise<string> {
   const snapshot = await runDataLookup(env, source, filter);
-  const system = [
+  const persona = [
     `You are ENIG's data assistant for the ${source} database. Below is the current live snapshot of matching records, fetched directly from Notion just now -- not generated or paraphrased by you.`,
     "",
     snapshot,
@@ -290,7 +290,7 @@ export async function runConversationalDataLookup(
   ].join("\n");
 
   const history = await getLookupHistory(env, chatId, threadId, source);
-  const reply = await aiChat(env, "chat.data_lookup", system, history, userMessage, 800);
+  const reply = await generate(env, { taskId: "chat.data_lookup", mode: "text", parts: { persona, situation: userMessage }, history, maxTokens: 800 });
   await appendLookupHistory(env, chatId, threadId, source, [
     { role: "user", content: userMessage },
     { role: "assistant", content: reply || "(no response)" },
