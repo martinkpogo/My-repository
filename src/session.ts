@@ -310,8 +310,6 @@ export class WorkSession extends DurableObject<Env> {
           return sales.handleProposalApproval(this.env, state, value === "approve");
         case "quote":
           return finance.handleQuoteApproval(this.env, state, value === "approve");
-        case "marketdraft":
-          return marketing.handleDraftApproval(this.env, state, value === "approve");
         case "marketpaid":
           return marketing.handlePaidMediaApproval(this.env, state, value === "approve");
         case "researchhandoff":

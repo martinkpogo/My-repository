@@ -7,6 +7,8 @@ import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
+import { richText, select } from "../../notion";
+import { updateHandoff } from "../../handoffWriter";
 
 /**
  * Marketing's Unit Registry manifest (ENIG Operating Model design doc,
@@ -294,8 +296,68 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
   return dispatchMarketingHat(env, state);
 }
 
+// The callback_data prefix runMarketingHat's own "draft" branch buttons
+// are built with (see the "marketdraft:<workId>:approve" literal above).
+// Migrates onto HatManifest.callbackHandlers same as markettransition
+// above -- relocated here for the same reason: keeping it in
+// executionEngine.ts (its former home) would have required
+// marketingManifest.ts to import it back from there, since a
+// callbackHandlers entry must be defined wherever it's registered.
+// Unlike handleTransitionApproval, this one doesn't itself re-enter
+// dispatchMarketingHat, but the circular-import risk is about which file
+// imports which, not which functions call which -- executionEngine.ts
+// already imports dispatchMarketingHat from this file, so any import in
+// the reverse direction creates the cycle regardless.
+export const MARKET_DRAFT_CALLBACK_PREFIX = "marketdraft" as const;
+
+/**
+ * Resolves runMarketingHat's "draft" branch approve/reject callback --
+ * relocated unchanged, byte-for-byte, from executionEngine.ts's former
+ * handleDraftApproval. Rejecting asks Martin what to reconsider and holds
+ * on marketing_feedback; approving closes the originating Handoff (if
+ * any) and marks the work item complete.
+ */
+export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  if (state.stage !== "awaiting_marketing_draft_approval") {
+    await sendWorkspaceHatMessage(env, state, "This draft approval has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
+  if (!approved) {
+    await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what's off or what to take into account, and I'll redo it.");
+    state.awaiting = "marketing_feedback";
+    return state;
+  }
+
+  // If this work item arrived via a Handoff (currently only from R&I's
+  // auto-routing to Marketing Strategist), close it out as the
+  // completion signal -- same pattern Finance/Sales/R&I already use.
+  if (state.handoffId) {
+    await updateHandoff(env, state.handoffId, {
+      Status: select("Closed"),
+      "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
+    }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
+  }
+
+  await logActivity(env, {
+    entry: `${state.hat} output approved`,
+    type: "Decision",
+    area: "Marketing",
+    decisions: state.marketingDraft?.slice(0, 500) ?? "",
+    decisionRationale: "Approved by Martin.",
+    outcome: "Complete",
+  });
+  await sendWorkspaceHatMessage(env, state, `Approved.`);
+  state.marketingDraft = undefined;
+  state.stage = "complete";
+  state.awaiting = undefined;
+  return state;
+}
+
 const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_TRANSITION_CALLBACK_PREFIX]: handleTransitionApproval,
+  [MARKET_DRAFT_CALLBACK_PREFIX]: handleDraftApproval,
 };
 
 async function marketingEntryHandler(env: Env, state: WorkState, _actionName: MarketingAction, _text: string): Promise<WorkState> {

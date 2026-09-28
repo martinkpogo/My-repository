@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert";
-import { marketingManifest, handleTransitionApproval, MARKET_TRANSITION_CALLBACK_PREFIX } from "./marketingManifest";
+import {
+  marketingManifest,
+  handleTransitionApproval,
+  handleDraftApproval,
+  MARKET_TRANSITION_CALLBACK_PREFIX,
+  MARKET_DRAFT_CALLBACK_PREFIX,
+} from "./marketingManifest";
 import { findCallbackHandler } from "../unitManifest";
 import type { Env, WorkState } from "../../types";
 
@@ -13,8 +19,9 @@ import type { Env, WorkState } from "../../types";
  * scope for this file). This file tests only the manifest/Hat shape and
  * the callback-dispatch mechanism (HatManifest.callbackHandlers,
  * introduced by PRs #203-206) -- that every Marketing Hat declares
- * markettransition, and that findCallbackHandler's resolved handler
- * genuinely reaches handleTransitionApproval's real logic.
+ * markettransition/marketdraft, and that findCallbackHandler's resolved
+ * handler genuinely reaches handleTransitionApproval's/
+ * handleDraftApproval's real logic.
  */
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
@@ -65,10 +72,11 @@ test("marketingManifest: declares all five Marketing Hats", () => {
   );
 });
 
-test("marketingManifest: every Hat declares exactly markettransition in callbackHandlers, all pointing to the same handleTransitionApproval", () => {
+test("marketingManifest: every Hat declares exactly markettransition and marketdraft in callbackHandlers, both pointing to their shared handlers", () => {
   for (const hat of Object.values(marketingManifest.hats)) {
-    assert.deepStrictEqual(Object.keys(hat.callbackHandlers ?? {}), [MARKET_TRANSITION_CALLBACK_PREFIX]);
+    assert.deepStrictEqual(new Set(Object.keys(hat.callbackHandlers ?? {})), new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX]));
     assert.strictEqual(hat.callbackHandlers?.[MARKET_TRANSITION_CALLBACK_PREFIX], handleTransitionApproval);
+    assert.strictEqual(hat.callbackHandlers?.[MARKET_DRAFT_CALLBACK_PREFIX], handleDraftApproval);
   }
 });
 
@@ -88,6 +96,25 @@ test("findCallbackHandler resolves markettransition on Marketing Strategist and 
   assert.strictEqual(result.pendingTransition, undefined);
   assert.strictEqual(result.awaiting, "marketing_feedback");
   assert.strictEqual(result.hat, "Marketing Strategist", "must not commit the Hat transition on rejection");
+});
+
+test("findCallbackHandler resolves marketdraft on Marketing Strategist and genuinely delegates to handleDraftApproval -- rejecting a pending draft holds on marketing_feedback without closing the stage, proving real delegation", async (t) => {
+  mockTelegramFetch(t);
+  const env = fakeEnv();
+  const state = fakeWorkState({
+    stage: "awaiting_marketing_draft_approval",
+    marketingDraft: "Some drafted output",
+  });
+
+  const hat = marketingManifest.hats["Marketing Strategist"];
+  const handler = findCallbackHandler(MARKET_DRAFT_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "marketdraft must resolve on Marketing Strategist's own manifest entry");
+
+  const result = await handler(env, state, false);
+
+  assert.strictEqual(result.awaiting, "marketing_feedback");
+  assert.strictEqual(result.stage, "awaiting_marketing_draft_approval", "must not advance to complete on rejection");
+  assert.strictEqual(result.marketingDraft, "Some drafted output", "must not discard the draft on rejection -- only on approval");
 });
 
 test("marketingManifest: awaitingHandlers is empty for every Hat -- Marketing's own continuation states stay in executionEngine.ts's handleTextReply cases", () => {
