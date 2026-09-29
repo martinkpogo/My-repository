@@ -1,54 +1,64 @@
-import type { ResearchProtocolId } from "./protocols";
+import { RESEARCH_PROTOCOL_IDS, RESEARCH_PROTOCOL_REGISTRY, type ResearchProtocolId } from "./protocols";
 
 /**
- * Deterministic correction layer on top of AI protocol selection. Confirmed
- * live: a research question fundamentally about market structure/demand
- * ("market and industry intelligence for a strategy-led consultancy...
- * market structure, demand, buyers, service packaging... trends, Ghana vs
- * Africa") was classified as [Competitive Intelligence, Customer / Audience
- * Intelligence] -- Market / Industry Intelligence, the protocol the
- * question was actually centered on, was silently dropped. The
- * protocol-selection prompt already instructs the model not to do this;
- * nothing enforced it.
+ * Deterministic correction layer on top of AI Procedure selection.
+ * Confirmed live: a research question fundamentally about market
+ * structure/demand ("market and industry intelligence for a
+ * strategy-led consultancy... market structure, demand, buyers, service
+ * packaging... trends, Ghana vs Africa") was classified as [Competitive
+ * Intelligence, Customer / Audience Intelligence] -- Market / Industry
+ * Intelligence, the Procedure the question was actually centered on, was
+ * silently dropped. The selection prompt already instructs the model not
+ * to do this; nothing enforced it.
  *
- * These patterns are purely ADDITIVE and never remove a protocol the AI
+ * Ownership split (Core Structure v2.4): the SIGNALS are
+ * PROCEDURE-OWNED -- each Procedure declares its own applicability
+ * criteria as `applicabilitySignals`/`primaryWhenApplicable` in
+ * protocols.ts. The EVALUATION stays CAPABILITY-PACKAGE-OWNED -- this
+ * module, applied by the Package's selection stage for every Procedure
+ * the same way. No individual Procedure evaluates, rejects, or reorders
+ * itself.
+ *
+ * These patterns are purely ADDITIVE and never remove a Procedure the AI
  * selected -- a broad market question that also explicitly asks about
- * competitors legitimately activates both (per the Unit's own "multiple
- * protocols" contract); the bug was omission, not over-selection, so the
+ * competitors legitimately activates both (per the Package's "multiple
+ * Procedures" contract); the bug was omission, not over-selection, so the
  * fix is insurance against omission, not a second opinion that overrides
  * the AI on everything.
  */
-const PROTOCOL_SIGNAL_PATTERNS: Partial<Record<ResearchProtocolId, RegExp>> = {
-  market_industry: /\b(market (size|structure|demand|growth|dynamics|conditions|share)|industry (dynamics|conditions|structure|trends|benchmarks?)|demand conditions|market for|growth (rate|trends)|market benchmarks?)\b/i,
-  competitive: /\b(competitors?|competition|competitive (landscape|positioning|analysis|crowding)|rivals?|substitutes?|market positioning|observable offers?)\b/i,
-  customer_audience: /\b(customers?|buyers?|audience(s)?|purchase drivers?|customer (needs?|perceptions?|behaviour|behavior)|public feedback|user reviews?)\b/i,
-};
 
 /**
- * Applies the deterministic guardrails to an AI-selected protocol list.
- * Any protocol whose signal pattern matches the question and isn't
- * already selected is added. Market / Industry Intelligence additionally
- * gets promoted to index 0 (primary) whenever its own signal matches --
- * per the governance contract, a broad market question must have it as
- * the PRIMARY protocol, not merely present alongside others.
+ * Applies the deterministic guardrails to an AI-selected Procedure list.
+ * Any Procedure whose declared applicability signal matches the question
+ * and isn't already selected is added. A Procedure declaring
+ * `primaryWhenApplicable` additionally gets promoted to index 0 (primary)
+ * whenever its own signal matches -- per the governance contract, a broad
+ * market question must have Market / Industry as the PRIMARY Procedure,
+ * not merely present alongside others.
  */
 export function applyProtocolSelectionGuardrails(question: string, aiSelected: ResearchProtocolId[]): ResearchProtocolId[] {
   const result = [...aiSelected];
 
-  for (const [id, pattern] of Object.entries(PROTOCOL_SIGNAL_PATTERNS) as [ResearchProtocolId, RegExp][]) {
-    if (pattern.test(question) && !result.includes(id)) {
+  for (const id of RESEARCH_PROTOCOL_IDS) {
+    const procedure = RESEARCH_PROTOCOL_REGISTRY[id];
+    const matched = (procedure.applicabilitySignals ?? []).some((signal) => signal.test(question));
+    if (matched && !result.includes(id)) {
       result.push(id);
     }
   }
 
-  const marketPattern = PROTOCOL_SIGNAL_PATTERNS.market_industry!;
-  if (marketPattern.test(question)) {
-    const idx = result.indexOf("market_industry");
+  for (const id of RESEARCH_PROTOCOL_IDS) {
+    const procedure = RESEARCH_PROTOCOL_REGISTRY[id];
+    if (!procedure.primaryWhenApplicable) continue;
+    const matched = (procedure.applicabilitySignals ?? []).some((signal) => signal.test(question));
+    if (!matched) continue;
+
+    const idx = result.indexOf(id);
     if (idx > 0) {
       result.splice(idx, 1);
-      result.unshift("market_industry");
+      result.unshift(id);
     } else if (idx === -1) {
-      result.unshift("market_industry");
+      result.unshift(id);
     }
   }
 
