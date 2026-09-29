@@ -1,59 +1,65 @@
 import type { Env, WorkState } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
-import * as research from "./researchAnalyst";
+import * as research from "./capabilityPackage";
 
 /**
- * Research & Intelligence's Unit Registry manifest (ENIG Operating Model
- * design doc, "The Unit Registry") -- deliberately partial by design,
- * mirroring strategyManifest.ts exactly. R&I has exactly one Hat
- * (Research & Intelligence Analyst -- see hats/registry.ts's
- * RESEARCH_INTELLIGENCE_ANALYST; research "protocols," selected per
- * request, are not separate Hats -- see researchAnalyst.ts's own doc
- * comment), so there is no Stage 1 Hat-ambiguity to preserve. There is
- * also no "which action" decision Martin's message selects between --
- * handleDirectRequest is the only chat-triggered entry, every time. So
- * this manifest declares exactly one action, research ("write",
- * requiresApproval: true), whose entryHandler calls
- * research.handleDirectRequest UNCHANGED -- the entire protocol-
- * selection/synthesis/Handoff-routing chain inside it (spanning its own
- * downstream gates: outbound Handoff approval) is untouched, zero
- * behavioral changes.
+ * Invocation/registry surface for the Research & Intelligence Capability
+ * Package (Core Structure v2.4).
  *
- * R&I's OTHER entry point, handlePickup (Handoff-originated, called from
- * session.ts's own dedicated method), is deliberately left OUTSIDE this
- * manifest -- same reasoning as Strategy's own handlePickup: it resolves
+ * WHAT THIS FILE IS -- still-required technical manifest/invocation
+ * infrastructure, preserved (not deleted) because it is referenced:
+ * - `dispatchResearchHat` is the chat-triggered entry session.ts calls;
+ * - the manifest's Hat key is the existing routing/registry label used by
+ *   router.ts's fallback, `findCallbackHandler`, and WorkState;
+ * - the Unit Manifest / Action Registry is the only sanctioned mechanism
+ *   by which a capability is triggered, so the Package keeps exactly one
+ *   declared action (`research`, "write", requiresApproval: true) and its
+ *   outbound-Handoff approval callback.
+ *
+ * WHAT THIS FILE IS NOT -- not an organizational Unit/Hat definition, not
+ * a second dispatcher, and not a Procedure registry. The six canonical
+ * Procedure contracts live in protocols.ts; all execution lives in
+ * capabilityPackage.ts (one shared pipeline); nothing here routes work to
+ * a per-Procedure engine. The `Research & Intelligence` unit label and
+ * the `Research & Intelligence Analyst` hat key are the existing registry
+ * labels those callers depend on -- routing identity, NOT a claim that a
+ * retired organizational R&I Unit or R&I Analyst Hat owns this
+ * capability. The capability's ownership language that DID claim that
+ * (persona/responsibility text) has been rewritten to the Capability
+ * Package boundary.
+ *
+ * R&I declares no second entry point through this manifest:
+ * handlePickup (Handoff-originated, called from session.ts's own
+ * dedicated method) stays outside it because it resolves
  * Handoff-specific context (resolveResearchHandoffContext) that
- * handleDirectRequest's own free-text resolution has no equivalent for,
- * so wrapping it through this manifest's entryHandler would be
- * semantically wrong.
+ * handleDirectRequest's free-text path has no equivalent for -- wrapping
+ * it through this manifest's entryHandler would be semantically wrong.
+ * `awaitingHandlers` stays empty: the Package's own continuation states
+ * (research_clarification, research_feedback) remain hardcoded in
+ * session.ts, matching Strategy's own precedent.
  *
- * researchAnalystHat.callbackHandlers declares researchhandoff (the
- * outbound-Handoff approve/reject callback research.ts's own routing
- * sends) -- approval-callback dispatch mechanism (PRs #203-211), the
- * first prefix migrated for R&I now that a manifest exists to attach it
- * to.
- *
- * intakeClassificationTaskId/actionClassificationTaskId reuse
- * research.synthesis purely as a type-satisfying placeholder -- required
- * by UnitManifest's shape, but never actually invoked through this
- * manifest: dispatchCowork's R&I branch (unchanged) never calls
- * resolveUnitRequest for R&I at all, and even if it did, resolveHat's
- * single-Hat shortcut skips Stage 1 entirely. No new SemanticTaskId
- * registration or Architect review needed.
+ * `intakeClassificationTaskId`/`actionClassificationTaskId` reuse
+ * `research.synthesis` purely as a type-satisfying placeholder -- required
+ * by UnitManifest's shape, never actually invoked through this manifest
+ * (dispatchCowork's R&I branch never calls resolveUnitRequest for R&I,
+ * and resolveHat's single-Hat shortcut skips Stage 1 anyway). No new
+ * SemanticTaskId registration or Architect review needed.
  */
+
+// The `research` action is Package invocation: "write" consequence,
+// approval required before an outbound Handoff is treated as final.
 type ResearchAction = "research";
 
-const RESEARCH_ANALYST_HAT_NAME = "Research & Intelligence Analyst";
-const RESEARCH_ANALYST_SPECIALIZATION = "Research Intelligence";
+const RESEARCH_PACKAGE_HAT_LABEL = "Research & Intelligence Analyst";
 
-const researchAnalystActions: ActionDefinition<ResearchAction>[] = [
+const researchPackageActions: ActionDefinition<ResearchAction>[] = [
   {
     name: "research",
     consequence: "write",
     requiresApproval: true,
     description:
-      "Investigate a research question using the appropriate protocol(s), synthesize evidence-backed findings, and either present them for Martin's review or route them to the responsible Hat via a governed Handoff -- always gated on Martin's explicit approval before any outbound Handoff is treated as final.",
+      "Invoke the Research & Intelligence Capability Package to execute the applicable canonical research Procedure(s), synthesize evidence-backed findings, and either present them for Martin's review or route them to the responsible Hat via a governed Handoff -- always gated on Martin's explicit approval before any outbound Handoff is treated as final.",
   },
 ];
 
@@ -66,55 +72,49 @@ async function researchReadHandler(_env: Env, actionName: ResearchAction, _text:
   throw new Error(`${actionName}: not a read action -- Research & Intelligence Analyst only declares "research" ("write").`);
 }
 
-// The callback_data prefix research.ts's own outbound-handoff proposal
-// buttons are built with (see the "researchhandoff:<workId>:approve"
-// literal in researchAnalyst.ts). Migrates onto
-// HatManifest.callbackHandlers same as Business Development's/Sales's/
-// Marketing's/Strategy's prefixes (PRs #203-211) -- no relocation
-// needed, this manifest already imports the whole researchAnalyst.ts
-// namespace (`* as research`), and researchAnalyst.ts never imports back.
+// The callback_data prefix capabilityPackage.ts's own outbound-handoff
+// proposal buttons are built with (see the "researchhandoff:<workId>:approve"
+// literal there). Approval-callback dispatch mechanism (PRs #203-211).
+// This manifest imports the whole capabilityPackage.ts namespace
+// (`* as research`), and capabilityPackage.ts never imports back.
 export const RESEARCH_HANDOFF_CALLBACK_PREFIX = "researchhandoff" as const;
 
-const researchAnalystCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
+const researchPackageCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [RESEARCH_HANDOFF_CALLBACK_PREFIX]: research.handleResearchHandoffApproval,
 };
 
-const researchAnalystHat: HatManifest<ResearchAction> = {
-  name: RESEARCH_ANALYST_HAT_NAME,
-  specialization: RESEARCH_ANALYST_SPECIALIZATION,
+const researchInvocationHat: HatManifest<ResearchAction> = {
+  // Registry label, not an organizational claim -- see the header.
+  name: RESEARCH_PACKAGE_HAT_LABEL,
+  specialization: "Research Intelligence",
   responsibility:
-    "Investigate research questions for ENIG using the appropriate protocol(s), producing evidence-backed synthesis grounded only in verifiable sources -- never a fabricated fact, an unverifiable source, or a preliminary hypothesis presented as a finding. Routes synthesis to the responsible Hat via a governed Handoff when the question originated there, or presents it directly to Martin otherwise. Never treats an outbound Handoff as final without Martin's explicit approval.",
-  actions: researchAnalystActions,
+    "Invoke the Research & Intelligence Capability Package's canonical research Procedures to investigate research questions for ENIG, producing evidence-backed synthesis grounded only in verifiable sources -- never a fabricated fact, an unverifiable source, or a preliminary hypothesis presented as a finding. Route synthesis to the responsible Hat via a governed Handoff when the question originated there, or present it directly to Martin otherwise. Never treat an outbound Handoff as final without Martin's explicit approval. Business ownership, authority to act, and accountability for the resulting Output stay with the Responsibility that requested the research.",
+  actions: researchPackageActions,
   readHandler: researchReadHandler,
   entryHandler: researchEntryHandler,
-  // Every one of R&I's own continuation states (research_clarification,
-  // research_feedback) remains a hardcoded case in session.ts's
-  // handleTextReply switch, exactly as before this migration -- matching
-  // Strategy's own precedent. Only the entry point moves; no multi-turn
-  // flow changes.
   awaitingHandlers: {},
-  callbackHandlers: researchAnalystCallbackHandlers,
+  callbackHandlers: researchPackageCallbackHandlers,
 };
 
 export const researchManifest: UnitManifest = {
   unit: "Research & Intelligence",
   hats: {
-    [researchAnalystHat.name]: researchAnalystHat,
+    [researchInvocationHat.name]: researchInvocationHat,
   },
   intakeClassificationTaskId: "research.synthesis",
-  intakeIntroLine: "You route incoming Research & Intelligence requests for ENIG, to its Research & Intelligence Analyst Hat.",
+  intakeIntroLine: "You route incoming Research & Intelligence requests for ENIG, to the Research & Intelligence Capability Package's research invocation.",
   actionClassificationTaskId: "research.synthesis",
 };
 
 /**
- * The genuine runtime execution point for R&I's chat-triggered entry
- * point -- session.ts's handleResearchRequest calls this instead of
+ * The genuine runtime execution point for the Package's chat-triggered
+ * entry point -- session.ts's handleResearchRequest calls this instead of
  * research.handleDirectRequest directly, making the manifest the actual
- * dispatch surface rather than a decorative parallel structure. R&I has
- * only one Hat/one action, so no Stage 1/2 resolution is needed here --
- * mirrors dispatchStrategyHat exactly.
+ * dispatch surface rather than a decorative parallel structure. One
+ * invocation path, no Stage 1/2 resolution needed here -- mirrors
+ * dispatchStrategyHat.
  */
 export async function dispatchResearchHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const hat = researchManifest.hats[RESEARCH_ANALYST_HAT_NAME];
+  const hat = researchManifest.hats[RESEARCH_PACKAGE_HAT_LABEL];
   return hat.entryHandler(env, state, "research", text);
 }

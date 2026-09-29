@@ -10,24 +10,54 @@ import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import type { ResearchProtocolId } from "./protocols";
 import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
 import type { ResearchSynthesis } from "./evidence";
-import { findUnverifiableSources, validateSynthesis } from "./evidence";
+import { applyEvidenceSourceValidationGate } from "./evidence";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { generateResearchPlan } from "./researchPlan";
 import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
 
 /**
- * R&I execution mechanics -- one dedicated runtime for the single active
- * Research & Intelligence Analyst Hat, per the Unit's own Notion contract
- * ("one dedicated AI Workspace... a specialization-aware execution
- * environment rather than... a separate runtime, Telegram topic, agent, or
- * workspace for each research specialization"). Research types are
- * protocols (see protocols.ts), selected per request, never separate Hats.
+ * Research & Intelligence Capability Package -- the single shared
+ * execution boundary for research work (Core Structure v2.4). This module
+ * is the Package executor; the six canonical Procedures (protocols.ts)
+ * are contracts it consumes, never execution paths of their own.
+ *
+ * Executor sequence, owned end-to-end by the Package:
+ *   1. Resolve invocation context        (resolveResearchHandoffContext / handleDirectRequest)
+ *   2. Validate authorized/safe context  (requireSafeContext)
+ *   3. Derive research relevance         (deriveResearchRelevance)
+ *   4. Select applicable Procedures      (selectProtocolsAndRun)
+ *   5. Apply deterministic selection guardrails (applyProtocolSelectionGuardrails)
+ *   6. Generate the research plan        (generateResearchPlan)
+ *   7. Gather evidence                   (gatherDimensionEvidence)
+ *   8. Assess coverage                   (assessDimensionCoverage)
+ *   9. Synthesize                        (runSynthesis)
+ *  10. Apply Evidence & Source Validation (applyEvidenceSourceValidationGate -- mandatory, cross-cutting)
+ *  11. Return the structured research result (deliverSynthesis)
+ *  12. Package-level routing where the existing workflow requires it (routeToConsumingHat)
+ *
+ * What is deliberately NOT owned here: why the research is needed,
+ * business ownership of the request, authority to act on it, downstream
+ * business decisions, required approvals, and accountability for the
+ * resulting business Output -- those stay with the invoking
+ * Hat/Responsibility. This module therefore does not require an R&I
+ * organizational Hat to execute: the `Research & Intelligence` unit/hat
+ * strings it passes to the message/log helpers are routing labels for the
+ * existing Workspace stream and Activity area, not capability ownership
+ * (the retired R&I Unit / R&I Analyst Hat are organizational history).
+ *
+ * There is exactly one research pipeline. Procedures are selected per
+ * request and executed here; they are never separate runtimes, Hats,
+ * Telegram topics, agents, or Workspaces.
  */
 
-// Canonical Notion governance source for this Hat, matching the pattern
-// FINANCE_HAT_DEFINITION_PAGE_ID already established for Value-Based
-// Pricing Assessor -- explicit page ID, not title search.
+// Canonical Notion governance source for the research role/authority
+// contract this Package's synthesis stage runs under (matching the
+// pattern FINANCE_HAT_DEFINITION_PAGE_ID already established for
+// Value-Based Pricing Assessor -- explicit page ID, not title search).
+// This is governance retrieval, NOT Procedure retrieval: the six
+// Procedure definitions are repo-native (protocols.ts) and are never
+// fetched from Notion during an execution.
 const RESEARCH_HAT_DEFINITION_PAGE_ID = "3ddcb004-e583-8161-96ba-cdec357c5b5b";
 
 // Canonical governance source for the abstracted consultancy category R&I
@@ -135,9 +165,9 @@ interface RelevanceResult {
  * the Handoff's own canonical Notion record, evaluated through the same
  * closed-context contract Finance uses. Identity is read as the
  * Entity_Token / Matter_Token the creating Unit embedded on the Handoff,
- * never a real Name -- this Hat never resolves those tokens by traversing
- * or discovering unrelated records, per the R&I Unit's own closed-context
- * rule.
+ * never a real Name -- this Package never resolves those tokens by
+ * traversing or discovering unrelated records, per the closed-context
+ * rule the R&I Capability Package executes under.
  */
 export async function resolveResearchHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
   try {
@@ -276,7 +306,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     entry: `R&I picked up research request: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Activity",
     area: "Research & Intelligence",
-    activity: "Research & Intelligence Analyst picked up the request.",
+    activity: "Research & Intelligence Capability Package picked up the research request.",
     outcome: "Active",
   });
 
@@ -306,12 +336,24 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
 }
 
 /**
- * Stage 1: question-driven protocol selection. Per the Unit's Notion
- * contract, selection must be based on the actual research question, not
- * keywords, and must stop and surface ambiguity rather than guess when
- * protocol choice materially affects the research. Multiple protocols may
- * be active at once; the selection is preserved on WorkState (the
- * execution record) per that same contract.
+ * Maps the selection stage's returned Procedure names to canonical
+ * Procedure ids, dropping anything that does not clearly resolve --
+ * "couldn't determine" is never guessed into a nearest neighbor. An empty
+ * result is what drives the fail-closed AMBIGUOUS_PROTOCOL_SELECTION stop
+ * in selectProtocolsAndRun; exported so that deterministic filter is
+ * testable without standing up the whole pipeline.
+ */
+export function resolveSelectedProcedures(names: string[]): ResearchProtocolId[] {
+  return names.map((name) => nameToProtocolId(name)).filter((id): id is ResearchProtocolId => id !== null);
+}
+
+/**
+ * Stage 1: question-driven Procedure selection (Package-owned -- no
+ * individual Procedure selects itself). Selection must be based on the
+ * actual research question, not keywords, and must stop and surface
+ * ambiguity rather than guess when the Procedure choice materially
+ * affects the research. Multiple Procedures may be active at once; the
+ * selection is preserved on WorkState (the execution record).
  */
 async function selectProtocolsAndRun(env: Env, state: WorkState): Promise<WorkState> {
   const safeContext = await requireSafeContext(env, state);
@@ -369,9 +411,7 @@ Return JSON:
     return state;
   }
 
-  const selected = stage1.protocols
-    .map((name) => nameToProtocolId(name))
-    .filter((id): id is ResearchProtocolId => id !== null);
+  const selected = resolveSelectedProcedures(stage1.protocols);
 
   if (stage1.ambiguous || selected.length === 0) {
     const reasonText = stage1.reason ?? "The research question could plausibly require more than one protocol, or none of the available protocols clearly apply.";
@@ -423,12 +463,13 @@ async function handleBlockedOrAmbiguous(env: Env, state: WorkState, reasonText: 
 }
 
 /**
- * Stage 2: executes the selected protocol(s) and synthesizes the result
- * into the Evidence -> Finding -> Implication -> Limitation -> Source
- * structure, validated by validateSynthesis before anything is shown to
- * Martin or written back to a Handoff. A synthesis that fails validation
- * is treated as a failed execution, never a lower-confidence result shown
- * anyway.
+ * Stage 2: executes the selected Procedure contract(s) through the
+ * Package's shared plan -> gather -> synthesize machinery, producing the
+ * Evidence -> Finding -> Implication -> Limitation -> Source structure,
+ * and only then applies the mandatory Evidence & Source Validation gate.
+ * Nothing is shown to Martin or written back to a Handoff before that
+ * gate passes; a result that fails it is treated as a failed execution,
+ * never a lower-confidence result shown anyway.
  */
 async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   const safeContext = await requireSafeContext(env, state);
@@ -440,13 +481,13 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   const relevance = state.researchRelevance ?? "";
   const categorySummary = extractAuthorizedContextSummary(safeContext);
 
-  const [hatDefinition, universalRoleContract] = await Promise.all([
-    getGovernance(env, RESEARCH_HAT_DEFINITION_PAGE_ID, "Research & Intelligence Analyst Hat Definition"),
+  const [researchRoleDefinition, universalRoleContract] = await Promise.all([
+    getGovernance(env, RESEARCH_HAT_DEFINITION_PAGE_ID, "R&I research role & authority contract"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
   ]);
 
-  if (!hatDefinition || !universalRoleContract) {
-    const missing = [!hatDefinition ? "R&I Hat Definition" : null, !universalRoleContract ? "Universal Role Contract" : null].filter(Boolean).join(" and ");
+  if (!researchRoleDefinition || !universalRoleContract) {
+    const missing = [!researchRoleDefinition ? "R&I research role contract" : null, !universalRoleContract ? "Universal Role Contract" : null].filter(Boolean).join(" and ");
     console.error(`R&I runSynthesis: governance retrieval failed (${missing}) for work ${state.workId}`);
     await logActivity(env, {
       entry: `R&I synthesis blocked — governance retrieval failed`,
@@ -516,7 +557,7 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   const synthesis = await generate<ResearchSynthesis>(env, {
     taskId: "research.synthesis",
     mode: "json",
-    parts: { ...buildSynthesisPromptParts(hatDefinition, universalRoleContract, protocols, webResultCount > 0), situation: effectiveResearchContext },
+    parts: { ...buildSynthesisPromptParts(researchRoleDefinition, universalRoleContract, protocols, webResultCount > 0), situation: effectiveResearchContext },
     // Raised from 2048 after live failures ("synthesis generation
     // failed") that started once evidence breadth grew to up to 8
     // dimensions x 5 results -- the fuller structured JSON output
@@ -535,25 +576,31 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   }
 
   synthesis.protocolsUsed = protocols;
-  const validation = validateSynthesis(synthesis);
-  if (!validation.valid) {
-    console.error(`R&I synthesis failed validation for work ${state.workId}: ${validation.reason}`);
-    await handleSynthesisFailure(env, state, `The research output didn't meet the evidence bar and was not delivered: ${validation.reason}`);
+
+  // Step 10: Evidence & Source Validation -- the Package's mandatory,
+  // cross-cutting gate. It runs for every execution regardless of which
+  // Procedures were selected, and no result reaches delivery without
+  // passing it (see evidence.ts).
+  const gate = applyEvidenceSourceValidationGate(synthesis, effectiveResearchContext);
+  if (!gate.valid && gate.failure === "invalid_synthesis") {
+    console.error(`R&I synthesis failed validation for work ${state.workId}: ${gate.reason}`);
+    await handleSynthesisFailure(env, state, `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
     return state;
   }
 
-  // This Hat has no live browsing/search tool -- the only facts it could
-  // honestly have are whatever was in `context` above. A source that
-  // doesn't appear there could not have been obtained honestly, so it's
-  // treated as fabricated regardless of how well-formed the rest of the
-  // output is (see findUnverifiableSources for why this exists).
-  const unverifiable = findUnverifiableSources(synthesis, effectiveResearchContext);
-  if (unverifiable.length > 0) {
+  // Provenance half of the same gate: the research capability has no live
+  // browsing/search tool -- the only facts it could honestly have are
+  // whatever was in `context` above. A source that doesn't appear there
+  // could not have been obtained honestly, so it's treated as fabricated
+  // regardless of how well-formed the rest of the output is (see
+  // findUnverifiableSources for why this exists).
+  if (!gate.valid && gate.failure === "unverifiable_sources") {
+    const unverifiable = gate.unverifiableSources;
     console.error(`R&I synthesis cited unverifiable source(s) for work ${state.workId}: ${unverifiable.map((s) => s.source).join(", ")}`);
     await handleSynthesisFailure(
       env,
       state,
-      `This Hat has no live browsing/search access, so it can only cite sources actually supplied to it — it returned source(s) not present in the supplied context (${unverifiable.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. If you have real source material, paste it in and I'll work from that.`,
+      `This research has no live browsing/search access, so it can only cite sources actually supplied to it — it returned source(s) not present in the supplied context (${unverifiable.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. If you have real source material, paste it in and I'll work from that.`,
     );
     return state;
   }
@@ -586,8 +633,9 @@ async function handleSynthesisFailure(env: Env, state: WorkState, reasonText: st
  * safe-context page, which also carries meta/policy sections irrelevant
  * to the research itself), the relevance framing, the actual question,
  * and whatever evidence/context was actually supplied. Deliberately does
- * NOT include the Hat Definition or Universal Role Contract (those stay
- * system-side governance, unchanged) or any unrelated Handoff record.
+ * NOT include the research role/authority contract or Universal Role
+ * Contract (those stay system-side governance, unchanged) or any
+ * unrelated Handoff record.
  */
 export function buildEffectiveResearchContext(categorySummary: string, relevance: string, question: string, supplied: string): string {
   return [
@@ -602,16 +650,16 @@ export function buildEffectiveResearchContext(categorySummary: string, relevance
   ].join("\n\n");
 }
 
-export function buildSynthesisPromptParts(hatDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+export function buildSynthesisPromptParts(researchRoleDefinition: string, universalRoleContract: string, protocols: ResearchProtocolId[], hasWebResults: boolean): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
     persona:
-      "You are executing the Research & Intelligence Analyst Hat, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for role, authority limits, and stop conditions — follow them exactly.",
-    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
+      "You are executing ENIG's Research & Intelligence Capability Package — the selected research Procedure(s) below — on behalf of the Responsibility that requested this research, under ENIG's canonical Notion governance. The Universal Role Contract and the research role/authority contract below are authoritative for role, authority limits, and stop conditions — follow them exactly.",
+    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every role in ENIG) ===", universalRoleContract, "=== RESEARCH ROLE & AUTHORITY CONTRACT (canonical Notion governance) ===", researchRoleDefinition].join("\n\n"),
     skillContent: [
       "=== ACTIVE PROTOCOL(S) FOR THIS REQUEST ===",
       researchProtocolDetail(protocols),
       "=== RESEARCH OUTPUT CONTRACT ===",
-      "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique \"id\" (e.g. \"f1\", \"f2\"), and every Implication MUST reference the Finding id(s) it is based on via \"basedOnFindingIds\" — never a positional index, and never a Finding id that isn't actually present in \"findings\". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. This Hat does not make downstream strategic, financial, marketing, sales, creative, or operational decisions — provide intelligence only.",
+      "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique \"id\" (e.g. \"f1\", \"f2\"), and every Implication MUST reference the Finding id(s) it is based on via \"basedOnFindingIds\" — never a positional index, and never a Finding id that isn't actually present in \"findings\". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. Provide intelligence only: this research makes no downstream strategic, financial, marketing, sales, creative, or operational decision — those remain with the Responsibility that requested it.",
       "=== HARD RULE: EVIDENCE MUST ACTUALLY ANSWER THE RESEARCH DIMENSION IT'S CITED FOR ===",
       "Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic \"businesses should analyze their competitors\" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. \"businesses should conduct regular competitor analysis\") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the \"SUPPLIED CONTEXT/EVIDENCE\" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.",
       hasWebResults
@@ -658,8 +706,10 @@ function formatSynthesisForTelegram(synthesis: ResearchSynthesis): string {
 /**
  * Delivers the validated synthesis. No approval gate on the delivery
  * itself — intelligence is informational, not an action requiring
- * Martin's authorization, per the Unit's own contract ("R&I does not
- * make downstream decisions"). The separate downstream handoff to
+ * Martin's authorization: research delivery is Package mechanics, while
+ * authority over what happens next stays with the invoking
+ * Responsibility ("R&I provides intelligence only, never a downstream
+ * decision"). The separate downstream handoff to
  * another Hat (see routeToConsumingHat) DOES gate on Martin's approval,
  * per his own request — the two are independent: he always sees the
  * research immediately, and separately decides whether it gets routed

@@ -3,7 +3,7 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./units/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
-import * as research from "./units/research/researchAnalyst";
+import * as research from "./units/research/capabilityPackage";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import { dispatchStrategyHat } from "./units/strategy/strategyManifest";
 import { dispatchResearchHat } from "./units/research/researchManifest";

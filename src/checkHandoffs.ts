@@ -288,7 +288,7 @@ export async function discoverPendingResearchHandoffs(env: Env): Promise<number>
  * The Marketing side of the Research & Intelligence -> Marketing
  * execution boundary, mirroring discoverPendingResearchHandoffs exactly.
  * Currently the only creator of a To-Unit-Marketing Handoff is
- * researchAnalyst.ts's own auto-routing (routeToConsumingHat) once it
+ * capabilityPackage.ts's own auto-routing (routeToConsumingHat) once it
  * judges completed research directly relevant to Marketing Strategist's
  * work -- see Martin's "research has to find and feed the strategist hat
  * that needs it" direction.

@@ -124,6 +124,47 @@ export function validateSynthesis(synthesis: ResearchSynthesis): SynthesisValida
 }
 
 /**
+ * Evidence & Source Validation -- the Package's mandatory, cross-cutting
+ * validation gate (Core Structure v2.4). Every research result the
+ * Package returns passes through it exactly once, in this order, before
+ * anything is shown to Martin or written back to a Handoff:
+ *
+ * 1. structural citation contract (validateSynthesis): Evidence ->
+ *    Source, Finding -> Evidence, Implication -> Finding, and a recorded
+ *    protocol;
+ * 2. provenance check (findUnverifiableSources): every Source must
+ *    literally appear in the context the model was actually given, so a
+ *    fabricated name/URL can never be delivered as a source.
+ *
+ * Two things this gate deliberately is NOT:
+ * - It is not the `evidence_validation` Procedure. That Procedure is a
+ *   selectable research pass that investigates source quality for one
+ *   request; this gate runs for every execution whether it is selected
+ *   or not, and selecting it never bypasses, relaxes, or replaces this
+ *   gate.
+ * - It is not optional or warn-only. A failure here is a failed
+ *   execution, never a lower-confidence result delivered anyway.
+ */
+export type EvidenceSourceValidationResult =
+  | { valid: true }
+  | { valid: false; failure: "invalid_synthesis"; reason: string }
+  | { valid: false; failure: "unverifiable_sources"; unverifiableSources: SourceRecord[] };
+
+export function applyEvidenceSourceValidationGate(synthesis: ResearchSynthesis, suppliedContext: string): EvidenceSourceValidationResult {
+  const structure = validateSynthesis(synthesis);
+  if (!structure.valid) {
+    return { valid: false, failure: "invalid_synthesis", reason: structure.reason ?? "The synthesis did not satisfy the Evidence -> Finding -> Implication citation contract." };
+  }
+
+  const unverifiableSources = findUnverifiableSources(synthesis, suppliedContext);
+  if (unverifiableSources.length > 0) {
+    return { valid: false, failure: "unverifiable_sources", unverifiableSources };
+  }
+
+  return { valid: true };
+}
+
+/**
  * This Hat has no live browsing/search tool -- its only actual source of
  * facts is whatever text was supplied to it (a Handoff's sanitized
  * context, or Martin's own direct chat message). validateSynthesis alone

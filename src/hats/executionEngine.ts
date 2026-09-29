@@ -52,7 +52,7 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
 /**
  * Entry point for a Handoff addressed directly to Marketing Strategist --
  * currently only ever created by Research & Intelligence's own
- * auto-routing (see researchAnalyst.ts's routeToConsumingHat). Skips the
+ * auto-routing (see capabilityPackage.ts's routeToConsumingHat). Skips the
  * two-stage intake classification handleMarketingIntake runs for chat-
  * originated work, since the sender already determined which Hat this
  * belongs to; reads the Handoff's own Reason/Verified Facts & Sources as
