@@ -546,8 +546,9 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   // Per the "Research execution boundary" contract: the research-facing
   // content receives only the minimum safe context required (the
   // Authorized Context category summary, never the full governed page or
-  // the entire Hat/Universal Role Contract governance) plus the
-  // relevance framing, the question, and whatever was actually supplied
+  // the entire role/authority contract and Universal Role Contract
+  // governance) plus the relevance framing, the question, and whatever
+  // was actually supplied
   // (Martin's/Handoff's own context, any live web search results grouped
   // by research dimension, and an explicit warning for dimensions that
   // returned no evidence at all).

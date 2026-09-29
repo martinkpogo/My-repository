@@ -1,7 +1,8 @@
 import type { ResearchProtocolId } from "./protocols";
 
 /**
- * Research Output Contract, per the R&I Unit's Notion definition:
+ * Research Output Contract, per canonical R&I Notion governance -- now
+ * owned by the Research & Intelligence Capability Package, which enforces
  * Evidence -> Finding -> Implication -> Limitation -> Source, kept
  * explicitly distinguishable rather than collapsed into prose. This file
  * is the code-level enforcement of that contract's one hard rule -- "the
@@ -174,10 +175,10 @@ export function applyEvidenceSourceValidationGate(synthesis: ResearchSynthesis, 
  * and fabricated URLs, each internally well-formed and passing every
  * validateSynthesis check). This is the second, independent gate: a
  * Source is only trusted if its name or URL literally appears in the
- * context the model was actually given -- if it doesn't, this Hat could
- * not possibly have obtained it honestly, and it's treated as fabricated,
- * not published, regardless of how well-formed the rest of the synthesis
- * is.
+ * context the model was actually given -- if it doesn't, this research
+ * could not possibly have obtained it honestly, and it's treated as
+ * fabricated, not published, regardless of how well-formed the rest of
+ * the synthesis is.
  */
 export function findUnverifiableSources(synthesis: ResearchSynthesis, suppliedContext: string): SourceRecord[] {
   const normalizedContext = suppliedContext.toLowerCase();
