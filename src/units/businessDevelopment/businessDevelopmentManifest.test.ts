@@ -203,6 +203,188 @@ test("develop_opportunity: assembles a prompt carrying the shared opportunity_fo
 });
 
 /**
+ * A1 regression coverage: Partnership Development, Growth & Market
+ * Development, and the shared determine_next_move drafting prompt after
+ * their migration onto the same three repo-native Skills Opportunity
+ * Development already consumes. Each test asserts BOTH halves of the
+ * migration: the Skill's real methodology content reaches the assembled
+ * system prompt, and the retired inline copy of that methodology does
+ * not -- proving the runtime resolves methodology through getSkillContent
+ * rather than silently falling back to the old hardcoded prompt.
+ */
+const PARTNERSHIP_DISCOVER_OLD_INLINE_RULE = "Never invent or infer evidence that isn't in the request";
+const RESEARCH_OLD_INLINE_RULE = "Never fabricate facts, statistics, claims, or sources not present in the input";
+const ASSESS_OLD_INLINE_RULE = "Base this only on what has actually been stated";
+const QUALIFY_OLD_INLINE_RULE = "Qualification must not be based on enthusiasm, confidence, or superficial fit";
+const DEVELOP_OLD_INLINE_RULE = "Ground everything only in the";
+const NEXT_MOVE_OLD_INLINE_RULE = "Ground this only in the opportunity's actual signal";
+
+const partnershipDevelopmentHat = businessDevelopmentManifest.hats["Partnerships Manager"];
+const growthMarketDevelopmentHat = businessDevelopmentManifest.hats["Growth & Market Development Manager"];
+
+/** Mocks Workers AI to capture the assembled system prompt and return `response`, plus the Telegram/Notion fetch stub. */
+function captureSkillPrompt(t: any, response: Record<string, unknown>) {
+  const capturedSystems: string[] = [];
+  const env = fakeEnv();
+  mockTelegramFetch(t);
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      capturedSystems.push(opts.messages[0].content);
+      return { response: JSON.stringify(response) };
+    },
+  } as any;
+  return { env, capturedSystems };
+}
+
+function assertCarriesSkillAndNotRetiredRule(prompt: string, skillLine: string, retiredRule: string) {
+  assert.ok(prompt.includes(skillLine), `prompt must carry the Skill's methodology (${skillLine})`);
+  assert.ok(!prompt.includes(retiredRule), `prompt must not fall back to the retired inline copy (${retiredRule})`);
+}
+
+test("discover_partner: resolves research_signal through getSkillContent instead of its retired inline evidence rule", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { signal: "A regional banking partner", whyItMayMatter: "Reach into a new segment", evidenceNeeded: ["reference check"] });
+
+  const reply = await partnershipDevelopmentHat.readHandler(env, "discover_partner", "Consider partnering with a regional bank");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], RESEARCH_SIGNAL_DISTINCTIVE_LINE, PARTNERSHIP_DISCOVER_OLD_INLINE_RULE);
+  assert.match(reply, /Signal: A regional banking partner/);
+});
+
+test("research_partner: resolves research_signal through getSkillContent; keeps only the action's own no-live-search capability framing", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { findings: ["Stated fact"], implications: "Relevant to ENIG", limitations: [], sources: ["Martin's own account"] });
+
+  const reply = await partnershipDevelopmentHat.readHandler(env, "research_partner", "Research this prospective partner");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], RESEARCH_SIGNAL_DISTINCTIVE_LINE, RESEARCH_OLD_INLINE_RULE);
+  assert.match(capturedSystems[0], /no live search or external research capability/, "the action's own capability constraint is persona, not methodology, and must survive");
+  assert.match(reply, /Findings: Stated fact/);
+});
+
+test("assess_partnership: resolves research_signal through getSkillContent instead of its retired inline evidence rule", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { assessment: "Worth pursuing", mutualValue: "High", strategicFit: "Strong", complementaryCapabilities: "Yes", risksAndDependencies: "None", unresolvedQuestions: ["budget"] });
+
+  const reply = await partnershipDevelopmentHat.readHandler(env, "assess_partnership", "Assess this partnership");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], RESEARCH_SIGNAL_DISTINCTIVE_LINE, ASSESS_OLD_INLINE_RULE);
+  assert.match(reply, /Assessment: Worth pursuing/);
+});
+
+test("qualify_partnership: resolves opportunity_qualification_gate through getSkillContent, distinct from research_signal", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { qualification: "Qualified", rationale: "Strong evidence" });
+
+  const state = fakeWorkState({ hat: "Partnerships Manager", bdOpportunity: { hatFamily: "partnership_development", signal: "A partner signal", evidence: ["Evidence one"] } });
+  await partnershipDevelopmentHat.entryHandler(env, state, "qualify_partnership", "qualify this partnership");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], QUALIFICATION_GATE_DISTINCTIVE_LINE, QUALIFY_OLD_INLINE_RULE);
+  assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE), "the threshold decision must not carry the evidence-interpretation Skill");
+  assert.strictEqual(state.bdOpportunity.qualification, "Qualified");
+});
+
+test("develop_partnership: resolves opportunity_forward_planning through getSkillContent instead of its retired inline grounding rule", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { stakeholders: "Martin", valueHypothesis: "Mutual value", route: "Co-sell", dependencies: "None", risks: "Low", nextStep: "Intro call" });
+
+  const state = fakeWorkState({
+    hat: "Partnerships Manager",
+    bdOpportunity: { hatFamily: "partnership_development", signal: "A partner signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" },
+  });
+  await partnershipDevelopmentHat.entryHandler(env, state, "develop_partnership", "develop this partnership");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], FORWARD_PLANNING_DISTINCTIVE_LINE, DEVELOP_OLD_INLINE_RULE);
+  assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
+  assert.ok(!capturedSystems[0].includes(QUALIFICATION_GATE_DISTINCTIVE_LINE));
+  assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
+  assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
+});
+
+test("discover_growth_opportunity: resolves research_signal through getSkillContent instead of its retired inline evidence rule", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { signal: "A new channel", whyItMayMatter: "New demand", evidenceNeeded: ["demand data"] });
+
+  const reply = await growthMarketDevelopmentHat.readHandler(env, "discover_growth_opportunity", "Look at the LATAM market");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], RESEARCH_SIGNAL_DISTINCTIVE_LINE, PARTNERSHIP_DISCOVER_OLD_INLINE_RULE);
+  assert.match(reply, /Signal: A new channel/);
+});
+
+test("research_market: resolves research_signal through getSkillContent; keeps only the action's own no-live-search capability framing", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { findings: ["Stated market fact"], implications: "Relevant to growth", limitations: [], sources: ["Martin's own account"] });
+
+  const reply = await growthMarketDevelopmentHat.readHandler(env, "research_market", "Research this market");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], RESEARCH_SIGNAL_DISTINCTIVE_LINE, RESEARCH_OLD_INLINE_RULE);
+  assert.match(capturedSystems[0], /no live search or external research capability/, "the action's own capability constraint is persona, not methodology, and must survive");
+  assert.match(reply, /Findings: Stated market fact/);
+});
+
+test("assess_market_opportunity: resolves research_signal through getSkillContent instead of its retired inline evidence rule", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { assessment: "Worth pursuing", marketAttractiveness: "High", strategicCommercialRelevance: "Medium", capabilityFit: "Good", unresolvedQuestions: ["timing"] });
+
+  const reply = await growthMarketDevelopmentHat.readHandler(env, "assess_market_opportunity", "Assess this market opportunity");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], RESEARCH_SIGNAL_DISTINCTIVE_LINE, ASSESS_OLD_INLINE_RULE);
+  assert.match(reply, /Assessment: Worth pursuing/);
+});
+
+test("qualify_growth_opportunity: resolves opportunity_qualification_gate through getSkillContent, distinct from research_signal", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { qualification: "Qualified", rationale: "Strong evidence" });
+
+  const state = fakeWorkState({ hat: "Growth & Market Development Manager", bdOpportunity: { hatFamily: "growth_market_development", signal: "A growth signal", evidence: ["Evidence one"] } });
+  await growthMarketDevelopmentHat.entryHandler(env, state, "qualify_growth_opportunity", "qualify this growth opportunity");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], QUALIFICATION_GATE_DISTINCTIVE_LINE, QUALIFY_OLD_INLINE_RULE);
+  assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE), "the threshold decision must not carry the evidence-interpretation Skill");
+  assert.strictEqual(state.bdOpportunity.qualification, "Qualified");
+});
+
+test("develop_growth_opportunity: resolves opportunity_forward_planning through getSkillContent instead of its retired inline grounding rule", async (t) => {
+  const { env, capturedSystems } = captureSkillPrompt(t, { stakeholders: "Martin", valueHypothesis: "Growth value", route: "New channel", dependencies: "None", risks: "Low", nextStep: "Pilot" });
+
+  const state = fakeWorkState({
+    hat: "Growth & Market Development Manager",
+    bdOpportunity: { hatFamily: "growth_market_development", signal: "A growth signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" },
+  });
+  await growthMarketDevelopmentHat.entryHandler(env, state, "develop_growth_opportunity", "develop this growth opportunity");
+
+  assert.strictEqual(capturedSystems.length, 1);
+  assertCarriesSkillAndNotRetiredRule(capturedSystems[0], FORWARD_PLANNING_DISTINCTIVE_LINE, DEVELOP_OLD_INLINE_RULE);
+  assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
+  assert.ok(!capturedSystems[0].includes(QUALIFICATION_GATE_DISTINCTIVE_LINE));
+  assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
+  assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
+});
+
+test("determine_next_move on all three BD Hats: the shared draftNextMove resolves opportunity_forward_planning once, never its retired inline grounding rule", async (t) => {
+  const cases = [
+    { hat: opportunityDevelopmentHat, hatName: "Business Development Manager", hatFamily: "opportunity_development" },
+    { hat: partnershipDevelopmentHat, hatName: "Partnerships Manager", hatFamily: "partnership_development" },
+    { hat: growthMarketDevelopmentHat, hatName: "Growth & Market Development Manager", hatFamily: "growth_market_development" },
+  ];
+
+  for (const c of cases) {
+    const { env, capturedSystems } = captureSkillPrompt(t, { nextMove: "Reach out to the candidate", rationale: "Evidence supports it", requiresHumanDecision: null });
+
+    const state = fakeWorkState({
+      hat: c.hatName,
+      bdOpportunity: { hatFamily: c.hatFamily, signal: "A signal", evidence: ["Evidence one"], qualification: "Qualified", qualificationRationale: "Strong", developedState: "Stakeholders: Martin" },
+    });
+    await c.hat.entryHandler(env, state, "determine_next_move", "what's the next move?");
+
+    assert.strictEqual(capturedSystems.length, 1, `${c.hatName} must run exactly one drafting call`);
+    assertCarriesSkillAndNotRetiredRule(capturedSystems[0], FORWARD_PLANNING_DISTINCTIVE_LINE, NEXT_MOVE_OLD_INLINE_RULE);
+    assert.ok(state.pendingBDNextMove, `${c.hatName} should present a recommendation pending Martin's approval, never auto-commit`);
+    assert.strictEqual(state.bdOpportunity.nextMove, undefined, "must not commit before approval");
+  }
+});
+
+/**
  * Covers HatManifest.callbackHandlers -- the generic approval-callback
  * dispatch mechanism (session.ts's handleCallback default case), proven
  * on bdopportunityhandoff (PR #203), bddevelop (PR #204), and now
