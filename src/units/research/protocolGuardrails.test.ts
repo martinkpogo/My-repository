@@ -4,19 +4,19 @@ import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 
 // The exact regression this file exists to prevent: a question fundamentally
 // about market structure/demand, classified by the AI as only
-// [Competitive Intelligence, Customer / Audience Intelligence] with Market /
-// Industry Intelligence silently dropped.
+// [Competitive Research, Customer / Audience Research] with Market /
+// Industry Research silently dropped.
 const MARKET_QUESTION =
   "What is the market structure, demand, and growth for strategy, brand, and communications consulting in Ghana and Africa?";
 
-test("1. Broad market question forces Market / Industry Intelligence in as primary even when the AI omitted it entirely", () => {
+test("1. Broad market question forces Market / Industry Research in as primary even when the AI omitted it entirely", () => {
   const result = applyProtocolSelectionGuardrails(MARKET_QUESTION, ["competitive", "customer_audience"]);
   assert.strictEqual(result[0], "market_industry");
   assert.ok(result.includes("competitive"));
   assert.ok(result.includes("customer_audience"));
 });
 
-test("2. Market + competitor question can select Market / Industry plus Competitive Intelligence -- both retained, Market / Industry primary", () => {
+test("2. Market + competitor question can select Market / Industry plus Competitive Research -- both retained, Market / Industry primary", () => {
   const result = applyProtocolSelectionGuardrails(
     "What is the market size, and who are the named competitors and how do they position?",
     ["market_industry", "competitive"],
@@ -24,7 +24,7 @@ test("2. Market + competitor question can select Market / Industry plus Competit
   assert.deepStrictEqual(result, ["market_industry", "competitive"]);
 });
 
-test("3. Buyer/customer question activates Customer / Audience Intelligence when the AI didn't select it", () => {
+test("3. Buyer/customer question activates Customer / Audience Research when the AI didn't select it", () => {
   const result = applyProtocolSelectionGuardrails("What do buyers in this category actually need and how do they perceive available options?", []);
   assert.ok(result.includes("customer_audience"));
 });

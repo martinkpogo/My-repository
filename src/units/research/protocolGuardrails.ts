@@ -6,8 +6,8 @@ import { RESEARCH_PROTOCOL_IDS, RESEARCH_PROTOCOL_REGISTRY, type ResearchProtoco
  * structure/demand ("market and industry intelligence for a
  * strategy-led consultancy... market structure, demand, buyers, service
  * packaging... trends, Ghana vs Africa") was classified as [Competitive
- * Intelligence, Customer / Audience Intelligence] -- Market / Industry
- * Intelligence, the Procedure the question was actually centered on, was
+ * Research, Customer / Audience Research] -- Market / Industry
+ * Research, the Procedure the question was actually centered on, was
  * silently dropped. The selection prompt already instructs the model not
  * to do this; nothing enforced it.
  *

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
-import { RESEARCH_PROTOCOL_IDS, RESEARCH_PROTOCOL_REGISTRY, isResearchProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
+import { RESEARCH_PROTOCOL_IDS, RESEARCH_PROTOCOL_REGISTRY, isResearchProtocolId, nameToProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
+import type { ResearchProtocolId } from "./protocols";
 
 test("registry contains exactly the six approved protocol ids", () => {
   const expected = ["business_company", "market_industry", "competitive", "customer_audience", "environmental_regulatory", "evidence_validation"];
@@ -25,8 +26,8 @@ test("researchProtocolSummaryList includes every protocol name", () => {
 
 test("researchProtocolDetail includes only the requested protocols, not all six", () => {
   const detail = researchProtocolDetail(["competitive"]);
-  assert.ok(detail.includes("Competitive Intelligence"));
-  assert.ok(!detail.includes("Market / Industry Intelligence"));
+  assert.ok(detail.includes("Competitive Research"));
+  assert.ok(!detail.includes("Market / Industry Research"));
 });
 
 // --- Core Structure v2.4: the six canonical Procedure contracts as the Package consumes them ---
@@ -102,5 +103,26 @@ test("the selection stage consumes Procedure purpose; the plan/synthesis stages 
     for (const constraint of procedure.interpretationConstraints) {
       assert.ok(detail.includes(constraint), `${id}: constraints must reach execution`);
     }
+  }
+});
+
+// --- Canonical Notion Procedure titles (Core Structure v2.4) ---
+
+test("all six canonical Notion Procedure titles resolve to their Procedure ids", () => {
+  const canonicalTitles: Array<[string, ResearchProtocolId]> = [
+    ["Business / Company Research", "business_company"],
+    ["Market / Industry Research", "market_industry"],
+    ["Competitive Research", "competitive"],
+    ["Customer / Audience Research", "customer_audience"],
+    ["Environmental / Regulatory Research", "environmental_regulatory"],
+    ["Evidence & Source Validation", "evidence_validation"],
+  ];
+  assert.strictEqual(canonicalTitles.length, 6);
+
+  for (const [title, id] of canonicalTitles) {
+    assert.strictEqual(RESEARCH_PROTOCOL_REGISTRY[id].name, title, `runtime display name for ${id} must equal the canonical Notion title`);
+    assert.strictEqual(nameToProtocolId(title), id, `canonical Procedure title must resolve to its id: ${title}`);
+    assert.ok(researchProtocolSummaryList().includes(title), `selection summary must list the canonical title: ${title}`);
+    assert.ok(researchProtocolDetail([id]).includes(title), `Procedure detail must carry the canonical title: ${title}`);
   }
 });

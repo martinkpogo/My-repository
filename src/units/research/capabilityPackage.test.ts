@@ -43,13 +43,13 @@ test("1. Protocol Coverage: resolves all six approved protocol names to internal
 });
 
 test("2. Multi-protocol request: multiple distinct protocol names resolve independently and can be detailed together", () => {
-  const p1 = nameToProtocolId("Competitive Intelligence");
+  const p1 = nameToProtocolId("Competitive Research");
   const p2 = nameToProtocolId("Evidence & Source Validation");
   assert.strictEqual(p1, "competitive");
   assert.strictEqual(p2, "evidence_validation");
 
   const detail = researchProtocolDetail(["competitive", "evidence_validation"]);
-  assert.ok(detail.includes("Competitive Intelligence"));
+  assert.ok(detail.includes("Competitive Research"));
   assert.ok(detail.includes("Evidence & Source Validation"));
 });
 
@@ -364,7 +364,7 @@ test("23. Regression -- the representative failed live request: a Ghana market/i
   // Stage: AI protocol selection reproduced the live bug -- Market / Industry omitted entirely.
   const aiSelected: ("competitive" | "customer_audience")[] = ["competitive", "customer_audience"];
   const corrected = applyProtocolSelectionGuardrails(question, [...aiSelected]);
-  assert.strictEqual(corrected[0], "market_industry", "Market / Industry Intelligence must be primary, not omitted");
+  assert.strictEqual(corrected[0], "market_industry", "Market / Industry Research must be primary, not omitted");
   assert.ok(corrected.includes("competitive"));
   assert.ok(corrected.includes("customer_audience"));
 
@@ -807,7 +807,7 @@ test("ARCH 8. Ambiguous Procedure selection blocks: names that cannot be clearly
 });
 
 test("ARCH 9. Invalid selection is dropped, never guessed into a nearest neighbour", () => {
-  assert.deepStrictEqual(resolveSelectedProcedures(["Competitive Intelligence", "Random Keyword", ""]), ["competitive"]);
+  assert.deepStrictEqual(resolveSelectedProcedures(["Competitive Research", "Random Keyword", ""]), ["competitive"]);
   assert.deepStrictEqual(resolveSelectedProcedures(["Evidence & Source Validation"]), ["evidence_validation"]);
 });
 

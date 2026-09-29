@@ -87,7 +87,7 @@ test("assessDimensionCoverage splits dimensions into covered (has results) and u
 test("formatDimensionEvidenceForContext groups results by protocol and dimension, retaining domain and date", () => {
   const dims: DimensionEvidence[] = [withResults("market_industry", "What is the market size?", 1)];
   const formatted = formatDimensionEvidenceForContext(dims);
-  assert.ok(formatted.includes("Market / Industry Intelligence"));
+  assert.ok(formatted.includes("Market / Industry Research"));
   assert.ok(formatted.includes("What is the market size?"));
   assert.ok(formatted.includes("https://example.com/0"));
   assert.ok(formatted.includes("example.com"));
@@ -113,7 +113,7 @@ test("formatUncoveredDimensionsWarning names each uncovered dimension and instru
   const uncovered: DimensionEvidence[] = [withResults("environmental_regulatory", "What regulations apply?", 0)];
   const warning = formatUncoveredDimensionsWarning(uncovered);
   assert.ok(warning.includes("What regulations apply?"));
-  assert.ok(warning.includes("Environmental / Regulatory Intelligence"));
+  assert.ok(warning.includes("Environmental / Regulatory Research"));
   assert.ok(warning.toLowerCase().includes("limitation"));
 });
 

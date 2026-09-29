@@ -76,9 +76,9 @@ export function buildResearchPlanPromptParts(categorySummary: string, relevance:
       `For EACH protocol listed above, generate 2-${MAX_DIMENSIONS_PER_PROTOCOL} specific research sub-questions ("dimensions") that this protocol's own method and evidence requirements call for, tailored to what the actual research question asks -- never generic filler, and never the same dimensions regardless of the question.
 
 Illustrative examples of the KIND of dimension expected (not a checklist to copy verbatim -- tailor to the actual question):
-- Market / Industry Intelligence: market structure, demand conditions, relevant market indicators or benchmarks, service categories, purchasing organisations/demand segments where evidence supports it, market developments and trends, geography-specific evidence (e.g. a named country), relevant comparison geography where useful, evidence gaps.
-- Competitive Intelligence: demonstrable competitor/alternative overlap, named firms where evidence supports it, observable offers, positioning, public pricing where available, competitive crowding.
-- Customer / Audience Intelligence: actual evidence about buyers/audiences, needs, behaviour, purchase drivers, perceptions, reviews, public feedback.
+- Market / Industry Research: market structure, demand conditions, relevant market indicators or benchmarks, service categories, purchasing organisations/demand segments where evidence supports it, market developments and trends, geography-specific evidence (e.g. a named country), relevant comparison geography where useful, evidence gaps.
+- Competitive Research: demonstrable competitor/alternative overlap, named firms where evidence supports it, observable offers, positioning, public pricing where available, competitive crowding.
+- Customer / Audience Research: actual evidence about buyers/audiences, needs, behaviour, purchase drivers, perceptions, reviews, public feedback.
 
 Each dimension should be phrased as a concrete, searchable research sub-question (a complete question, not a topic label).`,
       `Return JSON:

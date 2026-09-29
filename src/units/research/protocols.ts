@@ -89,7 +89,7 @@ export interface ResearchProtocolDefinition {
 export const RESEARCH_PROTOCOL_REGISTRY: Record<ResearchProtocolId, ResearchProtocolDefinition> = {
   business_company: {
     id: "business_company",
-    name: "Business / Company Intelligence",
+    name: "Business / Company Research",
     purpose:
       "Establish what is publicly documented about a named organisation -- its situation, structure, offer, operating context, and material business evidence -- for the research need raised by the invoking Responsibility.",
     method:
@@ -103,7 +103,7 @@ export const RESEARCH_PROTOCOL_REGISTRY: Record<ResearchProtocolId, ResearchProt
   },
   market_industry: {
     id: "market_industry",
-    name: "Market / Industry Intelligence",
+    name: "Market / Industry Research",
     purpose:
       "Establish what the evidence shows about the structure, dynamics, demand, benchmarks, growth, and external forces of the market or industry the question is about.",
     method: "Investigate market structure, industry dynamics, demand conditions, growth, shifts, benchmarks, and relevant external forces.",
@@ -119,7 +119,7 @@ export const RESEARCH_PROTOCOL_REGISTRY: Record<ResearchProtocolId, ResearchProt
   },
   competitive: {
     id: "competitive",
-    name: "Competitive Intelligence",
+    name: "Competitive Research",
     purpose:
       "Establish what is observable about the competitors and substitutes relevant to the question -- their offers, positioning, public pricing where evidenced, and the gaps or crowding they reveal.",
     method:
@@ -136,7 +136,7 @@ export const RESEARCH_PROTOCOL_REGISTRY: Record<ResearchProtocolId, ResearchProt
   },
   customer_audience: {
     id: "customer_audience",
-    name: "Customer / Audience Intelligence",
+    name: "Customer / Audience Research",
     purpose:
       "Establish what the evidence shows about the customers or audience relevant to the question -- their characteristics, behaviour, needs, purchase drivers, perceptions, pain points, language, and public feedback.",
     method:
@@ -153,7 +153,7 @@ export const RESEARCH_PROTOCOL_REGISTRY: Record<ResearchProtocolId, ResearchProt
   },
   environmental_regulatory: {
     id: "environmental_regulatory",
-    name: "Environmental / Regulatory Intelligence",
+    name: "Environmental / Regulatory Research",
     purpose:
       "Establish the external conditions relevant to the question -- economic, technological, regulatory, policy, and social -- each with its jurisdiction and time period.",
     method:
