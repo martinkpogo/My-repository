@@ -91,6 +91,19 @@ import { getSkillContent } from "../../platform/skillRegistry";
  *
  * All three Business Development Hats are now fully built.
  *
+ * SKILLS (A1): every AI-driven action on all three Hats now resolves its
+ * methodology through getSkillContent instead of restating it inline --
+ * discover/research/assess actions fetch `research_signal`, qualify_*
+ * fetch `opportunity_qualification_gate`, develop_* and
+ * determine_next_move fetch `opportunity_forward_planning`. What stays
+ * hardcoded in each call is only its own persona framing and output
+ * contract (the Skill content itself explicitly leaves the output shape
+ * to the invoking action). The three HatManifest.responsibility strings
+ * are deliberately NOT migrated: whether responsibility framing should
+ * resolve through a Skill or getGovernance at all is still an open
+ * question in docs/enig-operating-model.md, not an implementation detail
+ * this migration may decide.
+ *
  * NOTE: dispatch wiring for entryHandler/readHandler/awaitingHandlers
  * (three chokepoints) is done -- see units/dispatch.ts, units/registry.ts,
  * and router.ts/session.ts's generic manifest lookups. The fourth
@@ -487,13 +500,11 @@ export const BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX = "bdopportunityhandoff" as 
  * for Martin's approval, matching requiresApproval: true.
  *
  * Migrated to fetch the shared `opportunity-forward-planning` Skill.
- * Single consumer for now -- `draftNextMove` below shares this exact
- * grounding discipline ("build only from established state, never
- * invent") but is itself shared, Hat-agnostic plumbing across all three
- * BD Hats (Opportunity/Partnership/Growth), out of scope for the
- * established "Opportunity Development only" migration boundary; a
- * natural second consumer once that boundary is revisited, not migrated
- * here.
+ * `draftNextMove` below shares this exact grounding discipline ("build
+ * only from established state, never invent") and is now its second
+ * consumer (A1) -- that boundary was revisited with the rest of
+ * Partnership Development/Growth & Market Development's prompts, so no
+ * in-scope copy of this methodology remains inline anywhere in BD.
  */
 interface DevelopmentDraft {
   stakeholders?: string;
@@ -625,26 +636,32 @@ export const BD_DEVELOP_CALLBACK_PREFIX = "bddevelop" as const;
 /**
  * Real next-action reasoning for determine_next_move, per the Hat
  * Definition's own Output contract (Notion): "one governed next move,
- * with rationale and any required human decision or approval." Grounded
- * only in the opportunity's actual signal/evidence/qualification/
- * developed state -- never invents a next move not implied by what's
- * been established. Drafts only; proposeNextMove below presents it for
- * Martin's approval, matching requiresApproval: true.
+ * with rationale and any required human decision or approval." Drafts
+ * only; proposeNextMove below presents it for Martin's approval,
+ * matching requiresApproval: true.
+ *
+ * Migrated (A1) to resolve the shared `opportunity_forward_planning`
+ * Skill through getSkillContent -- the second consumer predicted when
+ * that Skill was registered (see draftDevelopOpportunity's doc comment).
+ * The grounding rule ("build only from established state, never invent
+ * a next move") and the "surface any human decision the plan depends on
+ * explicitly" rule are the Skill's own methodology; this call keeps only
+ * its role framing and its single-next-move output contract. Shared,
+ * Hat-agnostic plumbing across all three BD Hats, so this one migration
+ * covers determine_next_move on Opportunity, Partnership, and Growth &
+ * Market Development at once.
  */
 async function draftNextMove(env: Env, opportunity: BDOpportunityState): Promise<{ nextMove?: string; rationale?: string; requiresHumanDecision?: string } | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+  const skillContent = getSkillContent("opportunity_forward_planning");
 
   return generate(env, {
     taskId: "business_development.determine_next_move",
     mode: "json",
     parts: {
-      persona: `You identify the single next concrete action required to advance an active Business Development opportunity, based on the evidence already established and remaining gates.
-
-Ground this only in the opportunity's actual signal, evidence, qualification, and development state -- never invent a next move not implied by what's actually been established. If a human decision or approval beyond this recommendation is required before the move can happen, name it explicitly.
-
-Return JSON:
-{"nextMove": "<one concrete next action>", "rationale": "<why this is the right next move, grounded in what's known>", "requiresHumanDecision": "<any decision or approval Martin still needs to make before this can happen, or null if none>"}`,
-      situation: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}\n\nDevelopment state: ${opportunity.developedState ?? "(not yet developed)"}`,
+      persona: "You identify the single next concrete action required to advance an active Business Development opportunity, based on the evidence already established and remaining gates.",
+      skillContent,
+      situation: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}\n\nDevelopment state: ${opportunity.developedState ?? "(not yet developed)"}\n\nReturn JSON:\n{"nextMove": "<one concrete next action>", "rationale": "<why this is the right next move, grounded in what's known>", "requiresHumanDecision": "<any decision or approval Martin still needs to make before this can happen, or null if none>"}`,
     },
     light: true,
   });
@@ -861,22 +878,29 @@ const partnershipDevelopmentActions: ActionDefinition<PartnershipDevelopmentActi
   { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the partnership needs strategic diagnosis." },
 ];
 
-/** Real signal-identification reasoning for discover_partner, per the Hat Definition's Output contract: "candidate partner or relationship with the signal, why it may matter, and evidence still required." Same discipline as discoverOpportunity -- never fabricates evidence. */
+/**
+ * Real signal-identification reasoning for discover_partner, per the Hat
+ * Definition's Output contract: "candidate partner or relationship with
+ * the signal, why it may matter, and evidence still required." Same
+ * discipline as discoverOpportunity -- never fabricates evidence.
+ *
+ * Migrated (A1) to resolve the shared `research_signal` Skill through
+ * getSkillContent instead of restating its evidence discipline inline --
+ * the identical Skill discoverOpportunity/researchOpportunity/
+ * assessOpportunity already consume, so the partnership flavor lives only
+ * in this call's own persona and output contract, never in a second copy
+ * of the methodology.
+ */
 async function discoverPartner(env: Env, text: string): Promise<string> {
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_partner",
     mode: "json",
     parts: {
-      persona: `You identify potential partners and strategic relationships relevant to ENIG, where the relationship or partnership itself is the central business opportunity.
-
-Never invent or infer evidence that isn't in the request -- name what's still needed instead of assuming it.
-
-Return JSON:
-{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}
-- signal: a concise statement of the candidate partner or relationship itself.
-- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.
-- evidenceNeeded: what's still required to move this from a signal to a developed partnership -- never empty; discovery alone is never sufficient evidence.`,
-      situation: text,
+      persona:
+        "You identify potential partners and strategic relationships relevant to ENIG, where the relationship or partnership itself is the central business opportunity.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}\n- signal: a concise statement of the candidate partner or relationship itself.\n- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.\n- evidenceNeeded: what's still required to move this from a signal to a developed partnership -- never empty; discovery alone is never sufficient evidence.`,
     },
     light: true,
   });
@@ -889,22 +913,30 @@ Return JSON:
   return `Signal: ${result.signal}\n\nWhy it may matter: ${result.whyItMayMatter ?? "(not stated)"}\n\nEvidence still needed: ${evidenceNeeded.join(", ")}`;
 }
 
-/** Real evidence-organization reasoning for research_partner, per the Hat Definition's Output contract: "evidence-backed findings, implications, limitations, and sources." Same no-fabrication discipline as researchOpportunity -- BD has no live web-search/external-research capability. */
+/**
+ * Real evidence-organization reasoning for research_partner, per the Hat
+ * Definition's Output contract: "evidence-backed findings, implications,
+ * limitations, and sources." Same no-fabrication discipline as
+ * researchOpportunity -- BD has no live web-search/external-research
+ * capability.
+ *
+ * Migrated (A1) to resolve the shared `research_signal` Skill through
+ * getSkillContent -- the "never fabricate facts/statistics/claims" and
+ * "name what isn't stated as a limitation" prose is the Skill's own
+ * methodology, not duplicated here; the no-live-search capability
+ * constraint stays in the persona since it is this action's own
+ * authority framing, not methodology.
+ */
 async function researchPartner(env: Env, text: string): Promise<string> {
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_partner",
     mode: "json",
     parts: {
-      persona: `You research a named organisation, its stakeholders, capabilities, relationship context, and track record to establish relevant facts and evidence for a potential ENIG partnership.
-
-You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request. Never fabricate facts, statistics, claims, or sources not present in the input. Anything relevant but not actually stated must be named as a limitation, never inferred or assumed.
-
-Return JSON:
-{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for a partnership with ENIG, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}
-- findings: only facts genuinely present in the input, restated clearly -- never invented.
-- limitations: what's still unknown or unverified; never empty if findings alone can't establish the relationship.
-- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
-      situation: text,
+      persona:
+        "You research a named organisation, its stakeholders, capabilities, relationship context, and track record to establish relevant facts and evidence for a potential ENIG partnership. You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for a partnership with ENIG, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}\n- findings: only facts genuinely present in the input, restated clearly -- never invented.\n- limitations: what's still unknown or unverified; never empty if findings alone can't establish the relationship.\n- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
     },
     light: true,
   });
@@ -918,8 +950,21 @@ Return JSON:
   return `Findings: ${result.findings.join("; ")}\n\nImplications: ${result.implications ?? "(not stated)"}\n\nLimitations: ${limitations}\n\nSources: ${sources}`;
 }
 
-/** Real mutual-value/relationship-viability judgment for assess_partnership, per the Hat Definition's Output contract: "partnership assessment with evidence, implications, limitations, and unresolved questions," examining mutual value, strategic fit, complementary capabilities, risks, dependencies, and relationship viability. Same evidence discipline as assessOpportunity. */
+/**
+ * Real mutual-value/relationship-viability judgment for
+ * assess_partnership, per the Hat Definition's Output contract:
+ * "partnership assessment with evidence, implications, limitations, and
+ * unresolved questions," examining mutual value, strategic fit,
+ * complementary capabilities, risks, dependencies, and relationship
+ * viability. Same evidence discipline as assessOpportunity.
+ *
+ * Migrated (A1) to resolve the shared `research_signal` Skill through
+ * getSkillContent -- its fourth research-side consumer, since judging
+ * mutual value/fit without inventing unstated capability claims is the
+ * same evidence discipline, not a distinct methodology.
+ */
 async function assessPartnership(env: Env, text: string): Promise<string> {
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{
     assessment?: string;
     mutualValue?: string;
@@ -931,14 +976,10 @@ async function assessPartnership(env: Env, text: string): Promise<string> {
     taskId: "business_development.assess_partnership",
     mode: "json",
     parts: {
-      persona: `You determine whether a researched partnership has a substantive reason for ENIG to pursue it -- examining mutual value, strategic fit, complementary capabilities, risks, dependencies, and relationship viability.
-
-Base this only on what has actually been stated -- never invent evidence, capability claims, or facts not present in the input. If a dimension can't be judged from what's given, say so as an unresolved question rather than guessing.
-
-Return JSON:
-{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "mutualValue": "<brief -- value for both ENIG and the partner>", "strategicFit": "<brief>", "complementaryCapabilities": "<brief -- do the two sides' capabilities complement each other>", "risksAndDependencies": "<brief>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}
-- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
-      situation: text,
+      persona:
+        "You determine whether a researched partnership has a substantive reason for ENIG to pursue it -- examining mutual value, strategic fit, complementary capabilities, risks, dependencies, and relationship viability.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "mutualValue": "<brief -- value for both ENIG and the partner>", "strategicFit": "<brief>", "complementaryCapabilities": "<brief -- do the two sides' capabilities complement each other>", "risksAndDependencies": "<brief>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}\n- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
     },
     light: true,
   });
@@ -964,25 +1005,27 @@ async function partnershipDevelopmentReadHandler(env: Env, actionName: Partnersh
   }
 }
 
-/** Real evidence-sufficiency judgment for qualify_partnership -- same rule and fail-closed-to-Held behaviour as judgeOpportunityQualification, partnership-flavored prompt. */
+/**
+ * Real evidence-sufficiency judgment for qualify_partnership -- same rule
+ * and fail-closed-to-Held behaviour as judgeOpportunityQualification,
+ * partnership-flavored persona/output contract.
+ *
+ * Migrated (A1) to resolve the shared `opportunity_qualification_gate`
+ * Skill through getSkillContent instead of restating the threshold
+ * discipline ("not enthusiasm/confidence/superficial fit; hold rather
+ * than infer") inline -- same Skill qualify_opportunity already consumes.
+ */
 async function judgePartnershipQualification(env: Env, partnership: BDOpportunityState): Promise<QualificationJudgment> {
   const evidenceText = partnership.evidence.length > 0 ? partnership.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
+  const skillContent = getSkillContent("opportunity_qualification_gate");
 
   const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.qualify_partnership",
     mode: "json",
     parts: {
-      persona: `You apply Business Development's evidence threshold for whether a potential partnership has sufficient evidence and value to justify further development.
-
-Qualification must not be based on enthusiasm, confidence, or superficial fit -- it must be based on the actual evidence gathered. If required evidence is missing to make this judgment, hold rather than infer or guess.
-
-Return JSON:
-{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}
-- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this partnership.
-- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.
-- Blocked: the evidence gathered actively indicates this partnership should not be pursued.
-- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
-      situation: `Partnership signal: ${partnership.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}`,
+      persona: "You apply Business Development's evidence threshold for whether a potential partnership has sufficient evidence and value to justify further development.",
+      skillContent,
+      situation: `Partnership signal: ${partnership.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}\n\nReturn JSON:\n{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}\n- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this partnership.\n- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.\n- Blocked: the evidence gathered actively indicates this partnership should not be pursued.\n- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
     },
     light: true,
   });
@@ -1039,21 +1082,29 @@ async function resumeQualifyPartnership(env: Env, state: WorkState, text: string
   return runQualifyPartnership(env, state);
 }
 
-/** Real drafting reasoning for develop_partnership, per the Hat Definition's Output contract: "developed partnership state and defined next action," establishing stakeholders, value proposition, relationship model, routes, dependencies, risks, and evidence gaps. Same grounding discipline as draftDevelopOpportunity, partnership-flavored prompt. */
+/**
+ * Real drafting reasoning for develop_partnership, per the Hat
+ * Definition's Output contract: "developed partnership state and defined
+ * next action," establishing stakeholders, value proposition,
+ * relationship model, routes, dependencies, risks, and evidence gaps.
+ * Same grounding discipline as draftDevelopOpportunity,
+ * partnership-flavored persona/output contract.
+ *
+ * Migrated (A1) to resolve the shared `opportunity_forward_planning`
+ * Skill through getSkillContent -- same Skill draftDevelopOpportunity
+ * already consumes.
+ */
 async function draftDevelopPartnership(env: Env, partnership: BDOpportunityState): Promise<DevelopmentDraft | null> {
   const evidenceText = partnership.evidence.length > 0 ? partnership.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+  const skillContent = getSkillContent("opportunity_forward_planning");
 
   return generate(env, {
     taskId: "business_development.develop_partnership",
     mode: "json",
     parts: {
-      persona: `You develop a qualified partnership opportunity by establishing its stakeholders, value proposition, relationship model, route, dependencies, and risks.
-
-Ground everything only in the partnership's actual signal, gathered evidence, and qualification rationale -- never invent stakeholders, relationship models, or facts not implied by what's actually been established. Where something can't be determined from what's given, say so plainly rather than guessing.
-
-Return JSON:
-{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<the value proposition for both sides>", "route": "<the plausible relationship model/path forward>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
-      situation: `Signal: ${partnership.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${partnership.qualification ?? "(not yet qualified)"} -- ${partnership.qualificationRationale ?? ""}`,
+      persona: "You develop a qualified partnership opportunity by establishing its stakeholders, value proposition, relationship model, route, dependencies, and risks.",
+      skillContent,
+      situation: `Signal: ${partnership.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${partnership.qualification ?? "(not yet qualified)"} -- ${partnership.qualificationRationale ?? ""}\n\nReturn JSON:\n{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<the value proposition for both sides>", "route": "<the plausible relationship model/path forward>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
     },
     light: true,
   });
@@ -1131,22 +1182,27 @@ const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAc
   { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
 ];
 
-/** Real signal-identification reasoning for discover_growth_opportunity, per the Hat Definition's Output contract: "candidate market/channel/offering with the signal, why it may matter, and evidence still required." Same discipline as discoverOpportunity/discoverPartner -- never fabricates evidence. */
+/**
+ * Real signal-identification reasoning for discover_growth_opportunity,
+ * per the Hat Definition's Output contract: "candidate
+ * market/channel/offering with the signal, why it may matter, and
+ * evidence still required." Same discipline as
+ * discoverOpportunity/discoverPartner -- never fabricates evidence.
+ *
+ * Migrated (A1) to resolve the shared `research_signal` Skill through
+ * getSkillContent -- the third Hat now consuming the same evidence
+ * discipline instead of restating it inline.
+ */
 async function discoverGrowthOpportunity(env: Env, text: string): Promise<string> {
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_growth_opportunity",
     mode: "json",
     parts: {
-      persona: `You identify potential markets, channels, offerings, or growth directions relevant to ENIG's broader market position and future sources of growth.
-
-Never invent or infer evidence that isn't in the request -- name what's still needed instead of assuming it.
-
-Return JSON:
-{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}
-- signal: a concise statement of the candidate market, channel, offering, or growth direction itself.
-- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.
-- evidenceNeeded: what's still required to move this from a signal to a developed growth opportunity -- never empty; discovery alone is never sufficient evidence.`,
-      situation: text,
+      persona:
+        "You identify potential markets, channels, offerings, or growth directions relevant to ENIG's broader market position and future sources of growth.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"signal": "<what was identified>", "whyItMayMatter": "<why this may matter to ENIG>", "evidenceNeeded": ["<specific evidence still missing>", ...]}\n- signal: a concise statement of the candidate market, channel, offering, or growth direction itself.\n- whyItMayMatter: the plausible reason ENIG should care, grounded only in what was actually stated.\n- evidenceNeeded: what's still required to move this from a signal to a developed growth opportunity -- never empty; discovery alone is never sufficient evidence.`,
     },
     light: true,
   });
@@ -1159,22 +1215,27 @@ Return JSON:
   return `Signal: ${result.signal}\n\nWhy it may matter: ${result.whyItMayMatter ?? "(not stated)"}\n\nEvidence still needed: ${evidenceNeeded.join(", ")}`;
 }
 
-/** Real evidence-organization reasoning for research_market, per the Hat Definition's Output contract: "evidence-backed findings, implications, limitations, and sources." Same no-fabrication discipline as researchOpportunity/researchPartner -- BD has no live web-search/external-research capability. */
+/**
+ * Real evidence-organization reasoning for research_market, per the Hat
+ * Definition's Output contract: "evidence-backed findings, implications,
+ * limitations, and sources." Same no-fabrication discipline as
+ * researchOpportunity/researchPartner -- BD has no live
+ * web-search/external-research capability.
+ *
+ * Migrated (A1) to resolve the shared `research_signal` Skill through
+ * getSkillContent; the no-live-search capability constraint stays in the
+ * persona as this action's own authority framing.
+ */
 async function researchMarket(env: Env, text: string): Promise<string> {
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_market",
     mode: "json",
     parts: {
-      persona: `You research a named market, industry, segment, channel, competitor landscape, or demand signal to establish relevant facts and evidence for ENIG's potential growth direction.
-
-You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request. Never fabricate facts, statistics, claims, or sources not present in the input. Anything relevant but not actually stated must be named as a limitation, never inferred or assumed.
-
-Return JSON:
-{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for ENIG's growth, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}
-- findings: only facts genuinely present in the input, restated clearly -- never invented.
-- limitations: what's still unknown or unverified; never empty if findings alone can't establish the opportunity.
-- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
-      situation: text,
+      persona:
+        "You research a named market, industry, segment, channel, competitor landscape, or demand signal to establish relevant facts and evidence for ENIG's potential growth direction. You have no live search or external research capability -- you may only organize, structure, and draw implications from facts Martin has actually stated in the request.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"findings": ["<fact actually stated, organized>", ...], "implications": "<what this may mean for ENIG's growth, grounded only in the findings>", "limitations": ["<relevant fact/evidence not available>", ...], "sources": ["<where each finding came from -- Martin's own account if no external source was cited>"]}\n- findings: only facts genuinely present in the input, restated clearly -- never invented.\n- limitations: what's still unknown or unverified; never empty if findings alone can't establish the opportunity.\n- sources: attribute each finding honestly -- "Martin's own account" is a valid and expected source when no external evidence was cited.`,
     },
     light: true,
   });
@@ -1188,8 +1249,19 @@ Return JSON:
   return `Findings: ${result.findings.join("; ")}\n\nImplications: ${result.implications ?? "(not stated)"}\n\nLimitations: ${limitations}\n\nSources: ${sources}`;
 }
 
-/** Real market-attractiveness/capability-fit judgment for assess_market_opportunity, per the Hat Definition's Output contract: "assessment with evidence, implications, limitations, and unresolved questions," examining market attractiveness, strategic/commercial relevance, and capability fit. Same evidence discipline as assessOpportunity/assessPartnership. */
+/**
+ * Real market-attractiveness/capability-fit judgment for
+ * assess_market_opportunity, per the Hat Definition's Output contract:
+ * "assessment with evidence, implications, limitations, and unresolved
+ * questions," examining market attractiveness, strategic/commercial
+ * relevance, and capability fit. Same evidence discipline as
+ * assessOpportunity/assessPartnership.
+ *
+ * Migrated (A1) to resolve the shared `research_signal` Skill through
+ * getSkillContent -- its research-side consumer on the third BD Hat.
+ */
 async function assessMarketOpportunity(env: Env, text: string): Promise<string> {
+  const skillContent = getSkillContent("research_signal");
   const result = await generate<{
     assessment?: string;
     marketAttractiveness?: string;
@@ -1200,14 +1272,10 @@ async function assessMarketOpportunity(env: Env, text: string): Promise<string> 
     taskId: "business_development.assess_market_opportunity",
     mode: "json",
     parts: {
-      persona: `You determine whether a researched market, channel, offering, or growth direction has a substantive reason for ENIG to pursue it -- examining market attractiveness, strategic/commercial relevance, and fit with ENIG's actual capabilities.
-
-Base this only on what has actually been stated -- never invent evidence, capability claims, or market facts not present in the input. If a dimension can't be judged from what's given, say so as an unresolved question rather than guessing.
-
-Return JSON:
-{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "marketAttractiveness": "<brief>", "strategicCommercialRelevance": "<brief>", "capabilityFit": "<brief -- does this fit ENIG's actual capabilities>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}
-- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
-      situation: text,
+      persona:
+        "You determine whether a researched market, channel, offering, or growth direction has a substantive reason for ENIG to pursue it -- examining market attractiveness, strategic/commercial relevance, and fit with ENIG's actual capabilities.",
+      skillContent,
+      situation: `${text}\n\nReturn JSON:\n{"assessment": "<one-line verdict: substantive reason to pursue, or not, or too early to tell>", "marketAttractiveness": "<brief>", "strategicCommercialRelevance": "<brief>", "capabilityFit": "<brief -- does this fit ENIG's actual capabilities>", "unresolvedQuestions": ["<material unknown that still needs answering>", ...]}\n- unresolvedQuestions: never empty if any dimension above couldn't be judged from the input alone.`,
     },
     light: true,
   });
@@ -1233,25 +1301,27 @@ async function growthMarketDevelopmentReadHandler(env: Env, actionName: GrowthMa
   }
 }
 
-/** Real evidence-sufficiency judgment for qualify_growth_opportunity -- same rule and fail-closed-to-Held behaviour as judgeOpportunityQualification/judgePartnershipQualification, growth/market-flavored prompt. */
+/**
+ * Real evidence-sufficiency judgment for
+ * qualify_growth_opportunity -- same rule and fail-closed-to-Held
+ * behaviour as judgeOpportunityQualification/judgePartnershipQualification,
+ * growth/market-flavored persona/output contract.
+ *
+ * Migrated (A1) to resolve the shared `opportunity_qualification_gate`
+ * Skill through getSkillContent -- the threshold discipline is the
+ * Skill's own methodology, not a third inline copy of it.
+ */
 async function judgeGrowthQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
+  const skillContent = getSkillContent("opportunity_qualification_gate");
 
   const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.qualify_growth_opportunity",
     mode: "json",
     parts: {
-      persona: `You apply Business Development's evidence threshold for whether a growth/market opportunity is sufficiently real to invest further effort in developing.
-
-Qualification must not be based on enthusiasm, confidence, or superficial fit -- it must be based on the actual evidence gathered. If required evidence is missing to make this judgment, hold rather than infer or guess.
-
-Return JSON:
-{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}
-- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this growth opportunity.
-- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.
-- Blocked: the evidence gathered actively indicates this growth opportunity should not be pursued.
-- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
-      situation: `Growth opportunity signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}`,
+      persona: "You apply Business Development's evidence threshold for whether a growth/market opportunity is sufficiently real to invest further effort in developing.",
+      skillContent,
+      situation: `Growth opportunity signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered so far:\n${evidenceText}\n\nReturn JSON:\n{"qualification": "Qualified" | "Held" | "Blocked", "rationale": "<brief rationale>", "missingEvidence": ["<specific missing evidence>", ...]}\n- Qualified: the evidence gathered gives a substantive, non-superficial reason to keep developing this growth opportunity.\n- Held: there isn't yet enough evidence to judge either way -- missingEvidence must name specifically what's needed.\n- Blocked: the evidence gathered actively indicates this growth opportunity should not be pursued.\n- missingEvidence: only when qualification is "Held"; omit or leave empty otherwise.`,
     },
     light: true,
   });
@@ -1308,21 +1378,29 @@ async function resumeQualifyGrowthOpportunity(env: Env, state: WorkState, text: 
   return runQualifyGrowthOpportunity(env, state);
 }
 
-/** Real drafting reasoning for develop_growth_opportunity, per the Hat Definition's Output contract: "developed growth opportunity state and defined next action," establishing value hypothesis, requirements, route, dependencies, and risks. Same grounding discipline as draftDevelopOpportunity/draftDevelopPartnership, growth/market-flavored prompt. */
+/**
+ * Real drafting reasoning for develop_growth_opportunity, per the Hat
+ * Definition's Output contract: "developed growth opportunity state and
+ * defined next action," establishing value hypothesis, requirements,
+ * route, dependencies, and risks. Same grounding discipline as
+ * draftDevelopOpportunity/draftDevelopPartnership, growth/market-flavored
+ * persona/output contract.
+ *
+ * Migrated (A1) to resolve the shared `opportunity_forward_planning`
+ * Skill through getSkillContent -- the forward-planning discipline is
+ * the Skill's own methodology, not a third inline copy of it.
+ */
 async function draftDevelopGrowthOpportunity(env: Env, opportunity: BDOpportunityState): Promise<DevelopmentDraft | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
+  const skillContent = getSkillContent("opportunity_forward_planning");
 
   return generate(env, {
     taskId: "business_development.develop_growth_opportunity",
     mode: "json",
     parts: {
-      persona: `You take a qualified growth/market opportunity forward by drafting its stakeholders, value hypothesis, requirements, route, dependencies, and risks.
-
-Ground everything only in the opportunity's actual signal, gathered evidence, and qualification rationale -- never invent stakeholders, routes, or facts not implied by what's actually been established. Where something can't be determined from what's given, say so plainly rather than guessing.
-
-Return JSON:
-{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<why this could create value for ENIG>", "route": "<the plausible path forward -- market entry, channel, offering build-out>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
-      situation: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}`,
+      persona: "You take a qualified growth/market opportunity forward by drafting its stakeholders, value hypothesis, requirements, route, dependencies, and risks.",
+      skillContent,
+      situation: `Signal: ${opportunity.signal || "(not stated)"}\n\nEvidence gathered:\n${evidenceText}\n\nQualification: ${opportunity.qualification ?? "(not yet qualified)"} -- ${opportunity.qualificationRationale ?? ""}\n\nReturn JSON:\n{"stakeholders": "<who's involved, grounded in what's known>", "valueHypothesis": "<why this could create value for ENIG>", "route": "<the plausible path forward -- market entry, channel, offering build-out>", "dependencies": "<what this depends on>", "risks": "<what could go wrong>", "nextStep": "<one concrete next action>"}`,
     },
     light: true,
   });
