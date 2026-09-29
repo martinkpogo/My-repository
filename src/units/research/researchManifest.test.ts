@@ -8,7 +8,7 @@ import type { Env, WorkState } from "../../types";
  * Covers researchManifest.ts's own declared contract -- the thin Unit
  * Registry wiring around Research & Intelligence Analyst's existing,
  * already-tested handleDirectRequest/handleResearchHandoffApproval (see
- * researchAnalyst.test.ts for that capability's own real behavior). This
+ * capabilityPackage.test.ts for that capability's own real behavior). This
  * file tests only what researchManifest.ts itself contributes: the
  * manifest/Hat shape, that entryHandler correctly delegates to its
  * wrapped implementation, and the callback-dispatch mechanism
@@ -63,7 +63,7 @@ function mockTelegramFetch(t: any) {
 // Context retrieval failure), the cheapest way to prove entryHandler
 // genuinely reaches the real function without re-testing its full
 // protocol-selection/synthesis pipeline (already covered by
-// researchAnalyst.test.ts).
+// capabilityPackage.test.ts).
 function mockTelegramAndFailingNotionFetch(t: any) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string) => {
@@ -124,7 +124,7 @@ test("findCallbackHandler resolves researchhandoff on Research & Intelligence An
   assert.strictEqual(result.pendingResearchHandoff, undefined);
 });
 
-test("researchManifest: entryHandler/dispatchResearchHat genuinely delegates to researchAnalyst.ts's handleDirectRequest -- sets researchQuestion/researchContext from the real text and fails closed when governance retrieval fails, proving real delegation", async (t) => {
+test("researchManifest: entryHandler/dispatchResearchHat genuinely delegates to capabilityPackage.ts's handleDirectRequest -- sets researchQuestion/researchContext from the real text and fails closed when governance retrieval fails, proving real delegation", async (t) => {
   mockTelegramAndFailingNotionFetch(t);
   const env = fakeEnv();
   const state = fakeWorkState();

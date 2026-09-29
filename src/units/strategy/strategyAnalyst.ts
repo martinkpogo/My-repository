@@ -13,7 +13,7 @@ import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesi
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
- * Unit's single active Hat, mirroring researchAnalyst.ts's own structure
+ * Unit's single active Hat, mirroring capabilityPackage.ts's own structure
  * exactly (governance retrieval -> Handoff context reconstruction ->
  * structured AI judgment -> deterministic post-check -> delivery ->
  * optional Martin-approved downstream Handoff). No parallel architecture
@@ -820,7 +820,7 @@ export function formatDiagnosisForHandoff(result: StrategyDiagnosisResult): stri
  * created. A diagnosis with NO recommendation (informational, or evidence
  * doesn't yet support one) closes the incoming Handoff immediately and may
  * still propose a non-commercial downstream handoff (research/marketing/
- * sales) via routeToUnit -- mirrors researchAnalyst.ts's deliverSynthesis.
+ * sales) via routeToUnit -- mirrors capabilityPackage.ts's deliverSynthesis.
  */
 async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiagnosisResult): Promise<WorkState> {
   if (result.recommendedDirection) {

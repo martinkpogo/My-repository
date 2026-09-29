@@ -87,7 +87,7 @@ test("assessDimensionCoverage splits dimensions into covered (has results) and u
 test("formatDimensionEvidenceForContext groups results by protocol and dimension, retaining domain and date", () => {
   const dims: DimensionEvidence[] = [withResults("market_industry", "What is the market size?", 1)];
   const formatted = formatDimensionEvidenceForContext(dims);
-  assert.ok(formatted.includes("Market / Industry Intelligence"));
+  assert.ok(formatted.includes("Market / Industry Research"));
   assert.ok(formatted.includes("What is the market size?"));
   assert.ok(formatted.includes("https://example.com/0"));
   assert.ok(formatted.includes("example.com"));
@@ -113,6 +113,57 @@ test("formatUncoveredDimensionsWarning names each uncovered dimension and instru
   const uncovered: DimensionEvidence[] = [withResults("environmental_regulatory", "What regulations apply?", 0)];
   const warning = formatUncoveredDimensionsWarning(uncovered);
   assert.ok(warning.includes("What regulations apply?"));
-  assert.ok(warning.includes("Environmental / Regulatory Intelligence"));
+  assert.ok(warning.includes("Environmental / Regulatory Research"));
   assert.ok(warning.toLowerCase().includes("limitation"));
+});
+
+// --- Core Structure v2.4: concurrency + identity boundary stay Package-owned ---
+
+test("gatherDimensionEvidence runs independent dimension searches concurrently -- Promise.all semantics preserved, never serialized", async () => {
+  const originalFetch = globalThis.fetch;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  globalThis.fetch = (async () => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    inFlight -= 1;
+    return new Response(JSON.stringify({ results: [{ title: "T", url: "https://example.com/r", content: "c" }] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const plan = [
+      { protocol: "market_industry" as const, subQuestion: "Market structure?" },
+      { protocol: "competitive" as const, subQuestion: "Named competitors?" },
+      { protocol: "customer_audience" as const, subQuestion: "Customer pain points?" },
+      { protocol: "environmental_regulatory" as const, subQuestion: "Applicable regulations?" },
+    ];
+    const evidence = await gatherDimensionEvidence({ TAVILY_API_KEY: "key" } as any, plan);
+    assert.strictEqual(evidence.length, 4);
+    assert.ok(maxInFlight > 1, `independent searches must overlap (max in-flight was ${maxInFlight})`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("gatherDimensionEvidence redacts identity terms from every outbound query -- token/privacy boundary intact at the Package's search edge", async () => {
+  const originalFetch = globalThis.fetch;
+  const queries: string[] = [];
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    queries.push(String(body.query ?? ""));
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const plan = [{ protocol: "market_industry" as const, subQuestion: "What is ENIG's market position in Ghana, Martin?" }];
+    await gatherDimensionEvidence({ TAVILY_API_KEY: "key" } as any, plan);
+
+    assert.strictEqual(queries.length, 1);
+    assert.ok(!queries[0].includes("ENIG"), `identity must not leave the runtime: ${queries[0]}`);
+    assert.ok(!queries[0].includes("Martin"), `identity must not leave the runtime: ${queries[0]}`);
+    assert.ok(queries[0].includes("the business"), "the canonical redaction replacement must be applied");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

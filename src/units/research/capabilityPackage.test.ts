@@ -10,8 +10,9 @@ import {
   formatSynthesisForHandoff,
   handleResearchHandoffApproval,
   resolveResearchHandoffContext,
+  resolveSelectedProcedures,
   routeToConsumingHat,
-} from "./researchAnalyst";
+} from "./capabilityPackage";
 import type { WorkState } from "../../types";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
 import type { ResearchProtocolId } from "./protocols";
@@ -21,13 +22,14 @@ function buildSynthesisSystemPrompt(hatDefinition: string, universalRoleContract
   const parts = buildSynthesisPromptParts(hatDefinition, universalRoleContract, protocols, hasWebResults);
   return [parts.persona, parts.behavior, parts.skillContent, parts.context].filter((s): s is string => Boolean(s && s.trim())).join("\n\n");
 }
-import { validateSynthesis, findUnverifiableSources } from "./evidence";
+import { applyEvidenceSourceValidationGate, findUnverifiableSources, validateSynthesis } from "./evidence";
 import type { ResearchSynthesis } from "./evidence";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
-import { capResearchPlan } from "./researchPlan";
+import { buildResearchPlanPromptParts, capResearchPlan } from "./researchPlan";
+import { RESEARCH_HANDOFF_CALLBACK_PREFIX, dispatchResearchHat, researchManifest } from "./researchManifest";
 import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning } from "./webSearch";
 import type { DimensionEvidence } from "./webSearch";
 
@@ -41,13 +43,13 @@ test("1. Protocol Coverage: resolves all six approved protocol names to internal
 });
 
 test("2. Multi-protocol request: multiple distinct protocol names resolve independently and can be detailed together", () => {
-  const p1 = nameToProtocolId("Competitive Intelligence");
+  const p1 = nameToProtocolId("Competitive Research");
   const p2 = nameToProtocolId("Evidence & Source Validation");
   assert.strictEqual(p1, "competitive");
   assert.strictEqual(p2, "evidence_validation");
 
   const detail = researchProtocolDetail(["competitive", "evidence_validation"]);
-  assert.ok(detail.includes("Competitive Intelligence"));
+  assert.ok(detail.includes("Competitive Research"));
   assert.ok(detail.includes("Evidence & Source Validation"));
 });
 
@@ -362,7 +364,7 @@ test("23. Regression -- the representative failed live request: a Ghana market/i
   // Stage: AI protocol selection reproduced the live bug -- Market / Industry omitted entirely.
   const aiSelected: ("competitive" | "customer_audience")[] = ["competitive", "customer_audience"];
   const corrected = applyProtocolSelectionGuardrails(question, [...aiSelected]);
-  assert.strictEqual(corrected[0], "market_industry", "Market / Industry Intelligence must be primary, not omitted");
+  assert.strictEqual(corrected[0], "market_industry", "Market / Industry Research must be primary, not omitted");
   assert.ok(corrected.includes("competitive"));
   assert.ok(corrected.includes("customer_audience"));
 
@@ -727,4 +729,172 @@ test("35. capSuppliedEvidence bounds long evidence to MAX_SUPPLIED_EVIDENCE_LENG
   assert.ok(capped.startsWith(head));
   assert.ok(capped.includes("truncated"));
   assert.ok(capped.length < long.length);
+});
+
+// =====================================================================================
+// Core Structure v2.4 architectural boundary: the Research & Intelligence Capability
+// Package + the six canonical Procedures. These cover the migration's required
+// boundary tests; the numbered tests above cover the behavior that had to be preserved
+// unchanged (citation contract, provenance, fail-closed stops, approval gate, caps).
+// =====================================================================================
+
+const FIVE_RESEARCH_PROCEDURES: ResearchProtocolId[] = ["business_company", "market_industry", "competitive", "customer_audience", "environmental_regulatory"];
+
+function planPromptFor(ids: ResearchProtocolId[]): string {
+  const parts = buildResearchPlanPromptParts("Category summary text.", "Relevance text.", ids);
+  return [parts.persona, parts.skillContent].filter((s): s is string => Boolean(s && s.trim())).join("\n\n");
+}
+
+test("ARCH 1-5. Each of the five research Procedures resolves by canonical name and is consumed by the SAME shared Package plan + synthesis path -- one pipeline, six contracts", () => {
+  for (const id of FIVE_RESEARCH_PROCEDURES) {
+    const procedure = RESEARCH_PROTOCOL_REGISTRY[id];
+    assert.strictEqual(nameToProtocolId(procedure.name), id, `${id} must resolve from its canonical Procedure name`);
+
+    const stagePrompts = [planPromptFor([id]), buildSynthesisSystemPrompt("Research role contract.", "Universal Role Contract text.", [id], true)];
+    for (const prompt of stagePrompts) {
+      assert.ok(prompt.includes(procedure.method), `${id}: method must reach the shared stage`);
+      assert.ok(prompt.includes(procedure.evidenceRequirements), `${id}: evidence requirements must reach the shared stage`);
+      for (const constraint of procedure.interpretationConstraints) {
+        assert.ok(prompt.includes(constraint), `${id}: interpretation constraint must reach the shared stage: ${constraint}`);
+      }
+    }
+  }
+});
+
+test("ARCH 6. Evidence & Source Validation is a cross-cutting Package gate: the Procedure flows through the same shared path, and selecting it never weakens the mandatory gate", () => {
+  const procedure = RESEARCH_PROTOCOL_REGISTRY.evidence_validation;
+  const plan = planPromptFor(["evidence_validation"]);
+  assert.ok(plan.includes(procedure.method), "the Procedure is consumed like any other -- no separate pipeline");
+  assert.ok(plan.includes(procedure.evidenceRequirements));
+
+  for (const constraint of procedure.interpretationConstraints) {
+    assert.ok(constraint.includes("does not replace the Package's universal Evidence & Source Validation gate"), "the Procedure's own contract must not claim the universal gate");
+  }
+
+  // A result attributed to evidence_validation still has to pass the gate.
+  const broken: ResearchSynthesis = {
+    protocolsUsed: ["evidence_validation"],
+    sources: [{ id: "s1", source: "Real Source", sourceType: "primary", url: "https://example.com", passage: "...", claimSupported: "x", validationStatus: "validated" }],
+    evidence: [{ id: "e1", statement: "Something", sourceIds: [] }],
+    findings: [],
+    implications: [],
+    limitations: [],
+  };
+  const gate = applyEvidenceSourceValidationGate(broken, "any supplied context");
+  if (gate.valid) assert.fail("an evidence_validation-attributed result must still fail the universal gate when a citation contract is broken");
+  assert.strictEqual(gate.failure, "invalid_synthesis");
+});
+
+test("ARCH 7. Multiple Procedures selected for one question each keep their own contract in the shared prompts, and unselected Procedures are not injected", () => {
+  const ids: ResearchProtocolId[] = ["market_industry", "competitive", "customer_audience"];
+  const prompt = [planPromptFor(ids), buildSynthesisSystemPrompt("role", "urc", ids, true)].join("\n");
+
+  for (const id of ids) {
+    const procedure = RESEARCH_PROTOCOL_REGISTRY[id];
+    assert.ok(prompt.includes(procedure.method), `${id}'s method must be present`);
+    assert.ok(prompt.includes(procedure.evidenceRequirements), `${id}'s evidence requirements must be present`);
+    for (const constraint of procedure.interpretationConstraints) {
+      assert.ok(prompt.includes(constraint), `${id}'s constraints must be present`);
+    }
+  }
+  assert.ok(!prompt.includes(RESEARCH_PROTOCOL_REGISTRY.business_company.method), "an unselected Procedure must not be injected into the shared stages");
+});
+
+test("ARCH 8. Ambiguous Procedure selection blocks: names that cannot be clearly resolved yield an empty selection -- the AMBIGUOUS_PROTOCOL_SELECTION precondition", () => {
+  assert.deepStrictEqual(resolveSelectedProcedures([]), []);
+  assert.deepStrictEqual(resolveSelectedProcedures(["Something that is not a registered Procedure"]), []);
+  assert.deepStrictEqual(resolveSelectedProcedures(["Random Keyword"]), []);
+});
+
+test("ARCH 9. Invalid selection is dropped, never guessed into a nearest neighbour", () => {
+  assert.deepStrictEqual(resolveSelectedProcedures(["Competitive Research", "Random Keyword", ""]), ["competitive"]);
+  assert.deepStrictEqual(resolveSelectedProcedures(["Evidence & Source Validation"]), ["evidence_validation"]);
+});
+
+function fakePackageEnv(): any {
+  return {
+    NOTION_TOKEN: "test-notion-token",
+    NOTION_VERSION: "2025-09-03",
+    TELEGRAM_BOT_TOKEN: "test-token",
+    TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
+    WORKSPACE_TOPIC_ID: "100",
+    OPERATIONS_TOPIC_ID: "14",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    STATE_KV: { get: async () => null, put: async () => {} } as any,
+  };
+}
+
+/** Notion unreachable (governance/safe-context retrieval fails) + Telegram answers normally -- drives the Package's fail-closed stop. */
+function mockFailingNotionAndTelegram(t: any): void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (urlArg: string) => {
+    const url = String(urlArg);
+    if (url.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (url.startsWith("https://api.notion.com")) {
+      return new Response(JSON.stringify({ object: "error", status: 404 }), { status: 404 });
+    }
+    throw new Error(`Unexpected fetch in test: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+}
+
+test("ARCH 10. Missing/invalid safe context blocks Package execution fail-closed -- stage research_blocked, never a warning and never a generic-assumption fallback", async (t) => {
+  mockFailingNotionAndTelegram(t);
+  const state = { workId: "work_arch10", chatId: 1, unit: "Research & Intelligence", hat: "Research & Intelligence Analyst" } as WorkState;
+
+  const result = await dispatchResearchHat(fakePackageEnv(), state, "What is the market structure for strategy consulting in Ghana?");
+
+  assert.strictEqual(result.stage, "research_blocked");
+  assert.strictEqual(result.researchQuestion, "What is the market structure for strategy consulting in Ghana?");
+});
+
+test("ARCH 17. Package invocation does not require an R&I organizational Hat -- any invoking Responsibility's session runs the same Package and keeps its own identity", async (t) => {
+  mockFailingNotionAndTelegram(t);
+  const state = { workId: "work_arch17", chatId: 2, unit: "Marketing", hat: "Marketing Strategist" } as WorkState;
+
+  const result = await dispatchResearchHat(fakePackageEnv(), state, "Competitor positioning for strategy agencies in Ghana");
+
+  assert.strictEqual(result.stage, "research_blocked", "the same Package path runs, fail-closed, for a non-R&I invoking Responsibility");
+  assert.strictEqual(result.hat, "Marketing Strategist", "the Package never requires or substitutes an R&I organizational Hat");
+  assert.strictEqual(result.unit, "Marketing");
+});
+
+test("ARCH 18. No Procedure creates a second execution mechanism -- no per-Procedure engine exists in the Package directory, and the manifest declares exactly one invocation action", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const perProcedureEngine = /export\s+(?:async\s+)?function\s+(?:run|execute|invoke)[A-Za-z]*(?:BusinessCompany|MarketIndustry|Competitive|CustomerAudience|EnvironmentalRegulatory|EvidenceValidation)\b/;
+
+  for (const file of fs.readdirSync(import.meta.dirname).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))) {
+    const source = fs.readFileSync(path.join(import.meta.dirname, file), "utf8");
+    assert.ok(!perProcedureEngine.test(source), `${file} must not export a per-Procedure research engine -- a Procedure is a contract, not a runtime`);
+  }
+
+  const hat = researchManifest.hats["Research & Intelligence Analyst"];
+  assert.strictEqual(hat.actions.length, 1, "exactly one Package invocation action, never one action per Procedure");
+  assert.strictEqual(hat.actions[0].name, "research");
+});
+
+test("ARCH 19. Approval/routing behavior remains intact: the Package's only action stays approval-gated and the outbound-Handoff callback prefix is unchanged", () => {
+  const hat = researchManifest.hats["Research & Intelligence Analyst"];
+  assert.strictEqual(hat.actions[0].consequence, "write");
+  assert.strictEqual(hat.actions[0].requiresApproval, true);
+  assert.strictEqual(RESEARCH_HANDOFF_CALLBACK_PREFIX, "researchhandoff");
+  assert.ok(hat.callbackHandlers?.[RESEARCH_HANDOFF_CALLBACK_PREFIX], "the outbound-Handoff approval callback must still resolve");
+});
+
+test("ARCH 20. Token/privacy boundaries remain intact: the research-facing context still carries only category + relevance + question + supplied evidence, never system-side governance", () => {
+  const context = buildEffectiveResearchContext("AUTHORIZED_CATEGORY_MARKER", "RELEVANCE_MARKER", "QUESTION_MARKER", "SUPPLIED_MARKER");
+  for (const marker of ["AUTHORIZED_CATEGORY_MARKER", "RELEVANCE_MARKER", "QUESTION_MARKER", "SUPPLIED_MARKER"]) {
+    assert.ok(context.includes(marker), `${marker} must reach the research context`);
+  }
+  assert.ok(!context.includes("Universal Role Contract"), "system-side governance must never reach the research-facing context");
+  assert.ok(!context.includes("RESEARCH ROLE & AUTHORITY"), "system-side governance must never reach the research-facing context");
+  // Outbound-query identity redaction is covered in webSearch.test.ts
+  // ("gatherDimensionEvidence redacts identity terms...") and by the
+  // redaction-gate test above (18).
 });
