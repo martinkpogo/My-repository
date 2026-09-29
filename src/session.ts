@@ -207,17 +207,6 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
-   * The return-leg mirror of runFinancePickup: invoked independently by
-   * index.ts's scheduled Sales-Handoff discovery (never by Finance
-   * directly) once a Pending Handoff addressed to Sales is found — the
-   * approved quote queued by finance.handleQuoteApproval. Finance's own
-   * call already returned before this ever runs.
-   */
-  async runProposalDrafting(): Promise<WorkState> {
-    return this.execute((state) => salesProposal.handleProposalHandoffPickup(this.env, state));
-  }
-
-  /**
    * Runtime Sales Executive pickup of a Finance -> Sales Handoff: produces
    * the one canonical token-safe Proposal and asks Martin to authorize its
    * exact Version (see units/sales/tokenSafeProposal.ts). Invoked only by
