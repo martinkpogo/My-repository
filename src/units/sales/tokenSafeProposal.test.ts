@@ -308,6 +308,29 @@ test("1. HO-64 produces exactly one canonical Proposal linked to HO-64", async (
   assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Closed");
 });
 
+test("1b. A Handoff picked up with no continuing WorkSession (only handoffId in state, as checkHandoffs.ts's init() produces for an externally-created Handoff) still produces a Proposal -- LOG-874 regression: entityName/matterName in state are never required", async (t) => {
+  const world = installWorld(t);
+  const env = fakeEnv();
+  const freshState: WorkState = {
+    workId: "11111111-2222-3333-4444-555555555555",
+    chatId: 9999,
+    unit: "Sales",
+    hat: "Sales Executive",
+    stage: "new",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    handoffId: HO64_ID,
+  };
+  assert.strictEqual((freshState as any).entityName, undefined);
+  assert.strictEqual((freshState as any).matterName, undefined);
+
+  const state = await handleProposalHandoffPickup(env, freshState);
+
+  assert.strictEqual(proposals(world).length, 1, "pickup must succeed and produce the canonical Proposal without any continuing-session identity");
+  assert.strictEqual(state.salesProposal?.proposalId, "PROP-7");
+  assert.strictEqual(state.blockedReason, undefined);
+});
+
 test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, same content", async (t) => {
   const { world, env, state } = await createV1(t);
   const contentBefore = text(proposals(world)[0].properties["Proposal Content"]);

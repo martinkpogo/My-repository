@@ -253,18 +253,14 @@ test("17. Manual /checkhandoffs behavior remains unchanged (default source)", as
 // --- Sales external-Handoff detection (items 11-13) -----------------------
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; runProposalDrafting: number; runTokenSafeProposal: number; runCallNotesPickup: number } = {
+  const calls: { init: any[][]; runTokenSafeProposal: number; runCallNotesPickup: number } = {
     init: [],
-    runProposalDrafting: 0,
     runTokenSafeProposal: 0,
     runCallNotesPickup: 0,
   };
   const stub = {
     init: async (...args: any[]) => {
       calls.init.push(args);
-    },
-    runProposalDrafting: async () => {
-      calls.runProposalDrafting++;
     },
     runTokenSafeProposal: async () => {
       calls.runTokenSafeProposal++;
@@ -340,7 +336,8 @@ test("12. External Sales detection does not execute identity-sensitive Sales wor
 
   await discoverPendingSalesHandoffs(env, true);
 
-  assert.strictEqual(calls.runProposalDrafting, 0, "Sales Executive's own AI-driven work must never run automatically from detection alone");
+  assert.strictEqual(calls.runTokenSafeProposal, 0, "Sales Executive's own AI-driven work must never run automatically from detection alone");
+  assert.strictEqual(calls.runCallNotesPickup, 0, "Sales Executive's own AI-driven work must never run automatically from detection alone");
 });
 
 test("13. Operations notification is generated for a newly detected Sales Handoff", async (t) => {
@@ -398,7 +395,6 @@ test("Paused: a Finance -> Sales Handoff follows the existing paused behaviour -
   const pickedUp = await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.runTokenSafeProposal, 0, "the token-safe Proposal flow must not run while Sales is paused");
-  assert.strictEqual(calls.runProposalDrafting, 0);
   assert.strictEqual(pickedUp, 0);
   assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "the existing paused notification is sent");
   // The mocked fetch throws on anything but the discovery query and Telegram,
@@ -414,7 +410,6 @@ test("Not paused: a Finance -> Sales Handoff runs the token-safe Proposal flow i
   const pickedUp = await discoverPendingSalesHandoffs(env, false);
 
   assert.strictEqual(calls.runTokenSafeProposal, 1);
-  assert.strictEqual(calls.runProposalDrafting, 0);
   assert.strictEqual(pickedUp, 1);
   assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });
@@ -428,7 +423,6 @@ test("Not paused: a non-Finance Sales Handoff routes to the token-safe Proposal 
   await discoverPendingSalesHandoffs(env, false);
 
   assert.strictEqual(calls.runTokenSafeProposal, 1);
-  assert.strictEqual(calls.runProposalDrafting, 0);
 });
 
 test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + notify only)", async (t) => {
@@ -440,7 +434,6 @@ test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + 
   await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.runTokenSafeProposal, 0);
-  assert.strictEqual(calls.runProposalDrafting, 0);
   assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });
 
@@ -468,7 +461,6 @@ test("Not paused: a call-notes Handoff (requiredCategory: call_notes) runs the c
 
   assert.strictEqual(calls.runCallNotesPickup, 1);
   assert.strictEqual(calls.runTokenSafeProposal, 0);
-  assert.strictEqual(calls.runProposalDrafting, 0);
   assert.strictEqual(pickedUp, 1);
 });
 
@@ -490,7 +482,6 @@ test("Detection matches on free-text Reason wording, not just the literal openin
   await discoverPendingSalesHandoffs(env, false);
 
   assert.strictEqual(calls.runCallNotesPickup, 1, "must still route to call-notes pickup even without the literal 'Call Notes (Matter:' opening phrase");
-  assert.strictEqual(calls.runProposalDrafting, 0);
 });
 
 test("Detection matches the marker in the Handoff title when Reason doesn't carry it -- regression test for HO-73's actual shape (marker only in the title, Reason free of it entirely)", async (t) => {
@@ -509,7 +500,6 @@ test("Detection matches the marker in the Handoff title when Reason doesn't carr
   await discoverPendingSalesHandoffs(env, false);
 
   assert.strictEqual(calls.runCallNotesPickup, 1, "must route to call-notes pickup when the marker is only in the title, not Reason");
-  assert.strictEqual(calls.runProposalDrafting, 0, "must never fall through to the Finance-quote drafting path for a call-notes Handoff");
 });
 
 test("Paused: a call-notes Handoff follows the existing paused behaviour (detect + notify only, no pickup)", async (t) => {

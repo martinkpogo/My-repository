@@ -36,8 +36,8 @@ import type { Env, Unit } from "./types";
 export const SALES_DIRECT_ENTRY_PAUSED = true;
 
 // Gates the Sales Handoff PICKUP mechanism only (checkHandoffs.ts's
-// discoverPendingSalesHandoffs -- runTokenSafeProposal/runCallNotesPickup/
-// runProposalDrafting). Unlike SALES_DIRECT_ENTRY_PAUSED above, this never
+// discoverPendingSalesHandoffs -- runTokenSafeProposal/runCallNotesPickup).
+// Unlike SALES_DIRECT_ENTRY_PAUSED above, this never
 // touches real client identity -- it only ever processes what's already
 // de-identified on a Handoff record (Entity_Token/Matter_Token, sanitized
 // context) -- so the AI-provider personal-data concern that keeps direct

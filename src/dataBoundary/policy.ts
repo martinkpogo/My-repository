@@ -386,15 +386,17 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * model) carry the identical rationale -- every one of the five operates on
  * the same already-sanitized state.strategyContext strategy.diagnosis
  * itself consumes, or a specialist's own bounded finding derived from it.
- * NOTE: sales.proposal_drafting/sales.proposal_revision's own current
- * runtime prompt construction (salesExecutive.ts's legacy handleQuoteReceived/
- * handleProposalFeedback -- the path used only for a non-Finance-origin
- * Sales Handoff while SALES_EXECUTIVE_PAUSED is false) still interpolates
- * state.entityName and raw state.enquiryText/callNotes directly into the
- * prompt, which the gate's own content detectors will correctly BLOCK if
- * that path is ever exercised with real identity present. That is an
- * existing gap in salesExecutive.ts, exposed rather than fixed by this
- * table -- fixing the prompt itself is out of this task's scope.
+ * sales.proposal_drafting now runs exclusively through
+ * tokenSafeProposal.ts's handleProposalHandoffPickup (see
+ * checkHandoffs.ts's discoverPendingSalesHandoffs -> runTokenSafeProposal),
+ * which reads Entity_Token/Matter_Token straight off the Handoff record and
+ * never touches real identity, with or without a continuing WorkSession --
+ * the older salesExecutive.ts handleQuoteReceived path this replaced (which
+ * interpolated state.entityName into its AI prompt and required a
+ * continuing session to resolve it, producing LOG-874 when picked up
+ * without one) has been retired. sales.proposal_revision's own
+ * handleProposalFeedback likewise never puts real identity into its AI
+ * prompt (only state.proposalDraft and Martin's feedback text).
  *
  * research.context_relevance / research.protocol_selection /
  * research.plan_generation / research.synthesis / research.handoff_routing:

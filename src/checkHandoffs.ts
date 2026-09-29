@@ -158,11 +158,12 @@ function isCallNotesHandoff(handoff: { properties?: Record<string, any> }): bool
  * and says "Check Handoff" -- a deliberate human activation boundary this
  * function does not and must not cross.
  *
- * When not paused: a Finance -> Sales quote Handoff runs the Runtime Sales
- * Executive's token-safe Proposal flow (runTokenSafeProposal, see
- * units/sales/tokenSafeProposal.ts), which replaces the older
- * runProposalDrafting path for those Handoffs; any other Sales Handoff
- * still goes to runProposalDrafting as before.
+ * When not paused: every non-call-notes Sales Handoff -- a Finance -> Sales
+ * quote Handoff included -- runs the Runtime Sales Executive's token-safe
+ * Proposal flow (runTokenSafeProposal, see units/sales/tokenSafeProposal.ts).
+ * The older runProposalDrafting/handleQuoteReceived path this replaced,
+ * which required a continuing WorkSession's in-memory entityName/matterName
+ * and produced LOG-874 when picked up without one, has been retired.
  *
  * `paused` defaults to SALES_EXECUTIVE_PAUSED and exists so the unpaused
  * path can be tested; production callers never pass it.
