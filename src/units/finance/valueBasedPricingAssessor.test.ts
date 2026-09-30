@@ -7,8 +7,16 @@ import {
   handleDirectRequestClarification,
   handleDirectRequestContext,
   validateFinanceJudgement,
+  FINANCE_JUDGMENT_START,
+  FINANCE_JUDGMENT_END,
 } from "./valueBasedPricingAssessor";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+// The Finance -> Sales quote contract is only meaningful END TO END: Finance
+// writes the labeled block, Sales parses it. Importing Sales's real parser here
+// is what stops the two halves drifting apart -- see the "writer-to-parser
+// contract" test below. (The production dependency already runs the same way:
+// tokenSafeProposal.ts imports these markers FROM this module.)
+import { parseFinanceJudgmentBlock } from "../sales/tokenSafeProposal";
 import type { WorkState, Env } from "../../types";
 
 /**
@@ -844,4 +852,136 @@ test("handleQuoteApproval: Redo on a direct-entry quote fails closed with a clea
 
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write may be attempted against a nonexistent Handoff");
   assert.ok(log.sentTexts.some((m) => m.includes("Redo isn't yet supported for a directly-requested quote")));
+});
+
+/**
+ * The Finance -> Sales quote contract, exercised END TO END.
+ *
+ * Every other test on both sides of this boundary tests one half in isolation:
+ * Finance's tests assert the writer's output with `assert.match` on the raw
+ * string, and Sales' tests rebuild the block with a hand-written fixture rather
+ * than calling the writer. Neither would notice if the other changed. That gap
+ * is not theoretical -- HO-64 (MAT-20) was held because its
+ * "Verified Facts & Sources" carried `Authoritative quote:` and `Rationale:`
+ * without the FINANCE COMMERCIAL JUDGMENT markers this parser requires.
+ *
+ * So this test takes the text the REAL writer produces, hands it to the REAL
+ * Sales parser, and asserts the quote survives intact. It is the only test that
+ * would fail if either half drifted.
+ */
+test("writer-to-parser contract: the real Finance writer's output is parseable by the real Sales parser, preserving currency, amount and rationale", async (t) => {
+  const log = mockFetch(t);
+  const rationale = "The price reflects the value at stake across the twelve-month engagement horizon.";
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityToken: "E-47",
+    matterToken: "MAT-20",
+    quote: { price: 420000, currency: "GHS", rationale },
+  });
+
+  await handleQuoteApproval(fakeEnv(), state, true);
+
+  assert.ok(log.handoffCreateBody, "the Finance -> Sales Handoff must be created");
+  // Read the text back exactly as Notion would return it: rich_text items
+  // concatenated. richTextLong splits long content into 2000-char items, so
+  // joining is what actually reproduces the stored value.
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  const writerText = items.map((i) => i.text.content).join("");
+
+  const parsed = parseFinanceJudgmentBlock(writerText);
+  assert.ok(!("error" in parsed), `the writer's own output must be parseable by Sales, but it was refused: ${(parsed as { error: string }).error}`);
+  assert.strictEqual(parsed.quote.currency, "GHS", "currency must survive the writer-to-parser round trip");
+  assert.strictEqual(parsed.quote.price, 420000, "the quoted amount must survive the round trip -- never re-derived or rounded");
+  assert.strictEqual(parsed.quote.rationale, rationale, "the rationale must survive verbatim, with no added financial justification");
+
+  // Provenance: the Strategy boundary block must still be present and intact
+  // alongside the Finance block. Carrying it forward is what keeps Sales's
+  // Strategy facts sourced from the Handoff rather than session state, so a
+  // change that made the quote parseable by discarding it would be a regression
+  // this assertion catches.
+  assert.strictEqual(
+    extractLabeledBlock(writerText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END),
+    extractLabeledBlock(FAKE_STRATEGY_BOUNDARY_BLOCK, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END),
+    "the Strategy boundary block must still be carried forward byte-for-byte",
+  );
+});
+
+/**
+ * The fail-closed half of the same contract.
+ *
+ * Each case mutates the REAL writer output rather than substituting a
+ * hand-written fixture, so it is guaranteed to differ from the writer only in
+ * the one respect under test. That matters for correctness of the assertions:
+ * an UNMARKED fixture fails at the marker check and returns before the parser
+ * ever looks at a currency, a rationale or an ambiguous quote, so a test
+ * claiming to exercise those branches with unmarked input would assert nothing
+ * about them. Every fixture below therefore keeps both markers.
+ */
+test("writer-to-parser contract: absent, malformed, ambiguous and incomplete Finance blocks all fail closed on the intended branch", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    stage: "awaiting_quote_approval",
+    entityToken: "E-47",
+    matterToken: "MAT-20",
+    quote: { price: 420000, currency: "GHS", rationale: "Value-based rationale." },
+  });
+  await handleQuoteApproval(fakeEnv(), state, true);
+
+  const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
+  const writerText = items.map((i) => i.text.content).join("");
+
+  // Rebuild the writer's own Finance block with different inner content. The
+  // markers are carried through verbatim from the real writer output.
+  const financeBlockWith = (inner: string): string => `${FINANCE_JUDGMENT_START}\n${inner}\n${FINANCE_JUDGMENT_END}`;
+  const withFinanceBlock = (inner: string): string => writerText.replace(/Authoritative quote:[\s\S]*?=== END FINANCE COMMERCIAL JUDGMENT ===/, financeBlockWith(inner));
+  // Sanity: the rewrite must actually have replaced the writer's block, or
+  // every case below would silently re-test the happy path.
+  assert.notStrictEqual(withFinanceBlock("X"), writerText, "the Finance block rewrite must actually replace the writer's own block");
+
+  const cases: { name: string; text: string; expected: RegExp }[] = [
+    {
+      name: "absent Finance block (neither marker present)",
+      text: writerText.replace(/=== FINANCE COMMERCIAL JUDGMENT ===[\s\S]*?=== END FINANCE COMMERCIAL JUDGMENT ===/, ""),
+      expected: /missing START\/END markers/,
+    },
+    {
+      name: "malformed Finance block (START present, END missing)",
+      text: writerText.replace(FINANCE_JUDGMENT_END, ""),
+      expected: /missing START\/END markers/,
+    },
+    {
+      name: "markers reversed (END before START)",
+      text: withFinanceBlock("Authoritative quote: GHS 420000\nRationale: Reversed.").replace(
+        `${FINANCE_JUDGMENT_START}\nAuthoritative quote: GHS 420000\nRationale: Reversed.\n${FINANCE_JUDGMENT_END}`,
+        `${FINANCE_JUDGMENT_END}\nAuthoritative quote: GHS 420000\nRationale: Reversed.\n${FINANCE_JUDGMENT_START}`,
+      ),
+      expected: /missing START\/END markers/,
+    },
+    {
+      name: "ambiguous quote (two 'Authoritative quote:' lines inside one properly marked block)",
+      text: withFinanceBlock("Authoritative quote: GHS 420000\nAuthoritative quote: GHS 900000\nRationale: Two prices."),
+      expected: /more than one 'Authoritative quote:' line/,
+    },
+    {
+      name: "missing currency (amount present, no currency code or symbol)",
+      text: withFinanceBlock("Authoritative quote: 420000\nRationale: No currency stated."),
+      expected: /the Finance quote currency/,
+    },
+    {
+      name: "missing rationale",
+      text: withFinanceBlock("Authoritative quote: GHS 420000"),
+      expected: /the Finance pricing rationale/,
+    },
+    {
+      name: "no quote line at all inside an otherwise well-formed block",
+      text: withFinanceBlock("Rationale: A rationale with no quote beside it."),
+      expected: /no 'Authoritative quote:' line/,
+    },
+  ];
+
+  for (const { name, text, expected } of cases) {
+    const parsed = parseFinanceJudgmentBlock(text);
+    assert.ok("error" in parsed, `${name}: must fail closed, but the parser accepted it as ${JSON.stringify((parsed as { quote: unknown }).quote)}`);
+    assert.match((parsed as { error: string }).error, expected, `${name}: must be refused on its own branch, not an incidental one`);
+  }
 });
