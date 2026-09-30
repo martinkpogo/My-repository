@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { systemContext } from "./access";
 import { getPageContent } from "./notion";
 
 // Kernel document, applies automatically to every Hat in every Unit — one
@@ -74,7 +75,7 @@ export async function getGovernance(env: Env, pageId: string, label: string): Pr
     console.error(`Governance cache read failed for ${label} (${pageId})`, err);
   }
   try {
-    const content = await getPageContent(env, pageId);
+    const content = await getPageContent(env, pageId, systemContext());
     if (!content.trim()) throw new Error("retrieved page content was empty");
     env.STATE_KV.put(cacheKey, content, { expirationTtl: GOVERNANCE_CACHE_TTL_SECONDS }).catch((err) => {
       console.error(`Governance cache write failed for ${label} (${pageId})`, err);

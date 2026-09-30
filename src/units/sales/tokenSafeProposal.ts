@@ -18,6 +18,8 @@ import {
   updatePage,
   type NotionPage,
 } from "../../notion";
+import { mintApprovalProofForWork, workSessionContext, workSessionReadContext } from "../../access";
+import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity, type KnownIdentityField } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
@@ -65,6 +67,27 @@ export type ProposalArtifactStatus = (typeof ARTIFACT_STATUSES)[number];
 
 /** Telegram callback action for a Runtime Sales Proposal decision. Value is "<proposalNumber>.<version>.<a|r>". */
 export const PROPOSAL_CALLBACK_ACTION = "salesprop";
+
+/**
+ * The four Runtime Proposal lifecycle Actions, as registered on Sales
+ * Executive (see salesManifest.ts).
+ *
+ * Named here as constants rather than repeated as string literals so that the
+ * Action a governed write is performed under, and the Action recorded on the
+ * Work at that moment, cannot drift apart: both sides reference the same
+ * value, and the value is validated against the manifest by
+ * `recordWorkAction` before it is ever stored.
+ *
+ * Their separation is the point. `proposal_approve` is the only one that
+ * requires an ApprovalProof, because it is the only one that commits an
+ * approval Martin gave. Drafting and submitting are pre-approval staging;
+ * revising produces a new Version that must be approved on its own, so an
+ * earlier approval can never authorize it.
+ */
+export const PROPOSAL_DRAFT_ACTION = "proposal_draft" as const;
+export const PROPOSAL_SUBMIT_ACTION = "proposal_submit" as const;
+export const PROPOSAL_APPROVE_ACTION = "proposal_approve" as const;
+export const PROPOSAL_REVISION_ACTION = "proposal_revision" as const;
 
 // Opaque token shape (e.g. "E-20", "MAT-20"). Anything else in a token field
 // is refused rather than written onto the Proposal as if it were a token.
@@ -527,6 +550,11 @@ async function failClosed(env: Env, state: WorkState, reason: string, opts: Fail
       env,
       opts.holdHandoffId,
       { Status: select("Held"), "Open Questions": richText(`Runtime Sales Proposal blocked: ${reason}`) },
+      // Judged as this Work item advancing its own Handoff, with the Handoff's
+      // real tokens supplied as the identity the write is validated against.
+      // (These were previously passed in the Access position, so the write was
+      // validated against an EMPTY identity and no Access decision was made.)
+      workSessionContext(state),
       opts.tokens ? { entityToken: opts.tokens.entityToken, matterToken: opts.tokens.matterToken } : undefined,
     ).catch((err) => console.error(`Runtime Sales Proposal: failed to hold Handoff ${opts.holdHandoffId}`, err));
   }
@@ -553,12 +581,12 @@ async function findExistingProposal(
   matterToken: string,
 ): Promise<{ page?: NotionPage } | { error: string }> {
   if (state.salesProposal?.handoffId === handoffId) {
-    return { page: await getPage(env, state.salesProposal.pageId) };
+    return { page: await getPage(env, state.salesProposal.pageId, workSessionContext(state)) };
   }
-  const linked = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, { property: "Handoff", relation: { contains: handoffId } });
+  const linked = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, workSessionReadContext(),  { property: "Handoff", relation: { contains: handoffId } });
   if (linked.length > 1) return { error: `${linked.length} Proposal records are linked to this Handoff; cannot determine the canonical one.` };
   if (linked.length === 1) return { page: linked[0] };
-  const sameMatter = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, { property: "Matter Token", rich_text: { equals: matterToken } });
+  const sameMatter = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, workSessionReadContext(),  { property: "Matter Token", rich_text: { equals: matterToken } });
   if (sameMatter.length > 0) {
     return { error: `a Proposal for ${matterToken} already exists but is not linked to this Handoff; cannot deterministically associate it.` };
   }
@@ -740,7 +768,7 @@ async function resolveFacts(
     // one Sales -> Strategy Handoff for this Matter. Never required, and no
     // other text from that record is used.
     try {
-      const salesToStrategy = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+      const salesToStrategy = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, workSessionReadContext(),  {
         and: [
           { property: "Matter_Token", rich_text: { equals: tokens.matterToken } },
           { property: "From Unit", select: { equals: "Sales" } },
@@ -787,7 +815,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
 
   let handoff: NotionPage;
   try {
-    handoff = await getPage(env, handoffId);
+    handoff = await getPage(env, handoffId, workSessionContext(state));
   } catch (err) {
     console.error(`Runtime Sales Proposal: Handoff ${handoffId} could not be read`, err);
     return failClosed(env, state, `Handoff ${handoffId} could not be resolved.`);
@@ -845,7 +873,13 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
     }
     state.salesProposal = sp;
     if (status !== "Closed") {
-      await updateHandoff(env, handoffId, { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} recorded (${sp.approvalStatus}).`) }, tokens);
+      await updateHandoff(
+        env,
+        handoffId,
+        { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} recorded (${sp.approvalStatus}).`) },
+        workSessionContext(state),
+        tokens,
+      );
     }
     await logActivity(env, {
       entry: `Runtime Sales Proposal reprocessed — no new record: ${sp.proposalId} ${versionLabel(sp.currentVersion)}`,
@@ -880,23 +914,42 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
     return failClosed(env, state, "an identity-bearing value (a real name or contact detail) would enter the Runtime Proposal; nothing was written.", { holdHandoffId: handoffId, tokens });
   }
 
-  await updateHandoff(env, handoffId, { Status: select("Picked-up") }, tokens);
+  // The Work is about to perform a DIFFERENT registered operation from the one
+  // it was performing. It arrived under one Action (the Finance Handoff pickup
+  // that brought it here, or new_enquiry for a direct request) and is now
+  // drafting the canonical Proposal -- which is its own operation, declared on
+  // the Hat, with its own consequence and its own (ungated) approval
+  // requirement.
+  //
+  // Recorded HERE, before the first governed write of the draft path, so every
+  // write below is judged against the operation actually being performed. The
+  // call sites additionally ASSERT this name, which turns a Work that had
+  // drifted to some other Action into a fail-closed denial rather than a write
+  // performed under the wrong operation.
+  recordWorkAction(state, PROPOSAL_DRAFT_ACTION);
+
+  await updateHandoff(env, handoffId, { Status: select("Picked-up") }, workSessionContext(state), tokens);
 
   // Two-step create: the Proposal ID is only known once the record exists,
   // and the content names it. The record stays Draft (never presented, never
   // approvable) until its content is written; a retry finds it by Handoff.
   const page =
     existing.page ??
-    (await createPage(env, env.PROPOSALS_DATA_SOURCE_ID, {
-      Proposal: title(`Proposal — ${matterToken}`),
-      "Entity Token": richText(entityToken),
-      "Matter Token": richText(matterToken),
-      Handoff: relation([handoffId]),
-      Status: select("Draft"),
-      "Approval Status": select("Draft"),
-      "Artifact Status": select("Not Requested"),
-    }));
-  const created = page.properties?.["Proposal ID"]?.unique_id ? page : await getPage(env, page.id);
+    (await createPage(
+      env,
+      env.PROPOSALS_DATA_SOURCE_ID,
+      {
+        Proposal: title(`Proposal — ${matterToken}`),
+        "Entity Token": richText(entityToken),
+        "Matter Token": richText(matterToken),
+        Handoff: relation([handoffId]),
+        Status: select("Draft"),
+        "Approval Status": select("Draft"),
+        "Artifact Status": select("Not Requested"),
+      },
+      workSessionContext(state, undefined, PROPOSAL_DRAFT_ACTION),
+    ));
+  const created = page.properties?.["Proposal ID"]?.unique_id ? page : await getPage(env, page.id, workSessionContext(state));
   const proposalId = uniqueId(created.properties["Proposal ID"]);
   const proposalNumber = created.properties["Proposal ID"]?.unique_id?.number;
   if (!proposalId || typeof proposalNumber !== "number") {
@@ -909,7 +962,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
   }
   const contentHash = await hashContent(content);
 
-  await appendTextBlocks(env, page.id, `${proposalId} ${versionLabel(1)} — snapshot`, content);
+  await appendTextBlocks(env, page.id, `${proposalId} ${versionLabel(1)} — snapshot`, content, workSessionContext(state, undefined, PROPOSAL_DRAFT_ACTION));
   await updatePage(env, page.id, {
     "Proposal Content": richTextLong(content),
     Version: richText(versionLabel(1)),
@@ -918,7 +971,16 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
     "Artifact Status": select("Not Requested"),
     "Quoted Price": number(facts.quote.price),
     "Quote Rationale": richText(`Currency: ${facts.quote.currency}. ${facts.quote.rationale}`),
-  });
+  }, workSessionContext(state, undefined, PROPOSAL_DRAFT_ACTION));
+
+  // The draft now exists with its content written, so the Work's Action
+  // advances from DRAFTING to SUBMITTING: this is the transition that puts
+  // the Proposal into Pending Approval and presents it to Martin. Submission
+  // requests approval; it is not approval, so it requires no proof. Recording
+  // it here -- by the code performing the transition, at the moment it
+  // happens -- is what lets Martin's later decision be judged against
+  // proposal_approve rather than against the Action that drafted the text.
+  recordWorkAction(state, PROPOSAL_SUBMIT_ACTION);
 
   const sp: RuntimeSalesProposal = {
     pageId: page.id,
@@ -944,6 +1006,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState): P
     env,
     handoffId,
     { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${proposalId} ${versionLabel(1)} created (Pending Approval) and presented to Martin.`) },
+    workSessionContext(state),
     tokens,
   );
   await logActivity(env, {
@@ -1015,7 +1078,7 @@ export async function handleSalesProposalDecision(
   const shown = sp.versions.find((v) => v.version === version);
   if (!shown) return staleDecision(env, state, `no record of the ${versionLabel(version)} content Martin was shown.`);
 
-  const live = await getPage(env, sp.pageId);
+  const live = await getPage(env, sp.pageId, workSessionContext(state));
   const liveState = await proposalFromRecord(live, sp);
   if ("error" in liveState) return failClosed(env, state, liveState.error);
   if (liveState.proposalNumber !== proposalNumber || liveState.currentVersion !== version || liveState.approvalStatus !== "Pending Approval") {
@@ -1029,11 +1092,34 @@ export async function handleSalesProposalDecision(
     return failClosed(env, state, `the Proposal record's content no longer matches the ${versionLabel(version)} Martin reviewed; approval not applied.`);
   }
 
-  await updatePage(env, sp.pageId, {
-    "Approval Status": select("Approved"),
-    "Approved Version": richText(versionLabel(version)),
-    "Artifact Status": select("Pending Identity Resolution"),
-  });
+  // Everything above has now verified, in order: this is a live Proposal
+  // record, it is the one Martin is deciding on, it is still Pending Approval
+  // at the current Version, its tokens have not changed since it was
+  // presented, and its content is byte-identical to what he was shown. Only
+  // now is Martin's decision consumed and the proof minted.
+  //
+  // The Work's Action advances to proposal_approve at this point, and the
+  // proof is bound to that action. Access will independently re-resolve
+  // proposal_approve from the Work, confirm it requires approval, and check
+  // the proof against this exact Work, this exact action, and this exact
+  // Proposals data source -- so a proof minted here cannot be spent on a
+  // different write, and this write cannot proceed without one.
+  recordWorkAction(state, PROPOSAL_APPROVE_ACTION);
+  // Bound to the Work's own recorded action, which was just advanced to
+  // PROPOSAL_APPROVE_ACTION above -- so the proof and the resolved Action cannot
+  // be two different names for this write.
+  const approvalProof = mintApprovalProofForWork(state, env.PROPOSALS_DATA_SOURCE_ID);
+
+  await updatePage(
+    env,
+    sp.pageId,
+    {
+      "Approval Status": select("Approved"),
+      "Approved Version": richText(versionLabel(version)),
+      "Artifact Status": select("Pending Identity Resolution"),
+    },
+    workSessionContext(state, approvalProof, PROPOSAL_APPROVE_ACTION),
+  );
   sp.approvalStatus = "Approved";
   sp.approvedVersion = version;
   sp.artifactStatus = "Pending Identity Resolution";
@@ -1046,10 +1132,27 @@ export async function handleSalesProposalDecision(
   // manually. Best-effort -- a token that doesn't resolve does not undo
   // the approval Martin just made; it's logged and Operations is
   // notified so the Matter status can be advanced by hand.
+  //
+  // The Matter status advance is a DOWNSTREAM consequence on a different
+  // governed source, not part of what Martin approved: it is a consequence
+  // of the approval already applied above, not a second thing the approval
+  // authorizes.
+  //
+  // It therefore does NOT reuse the Proposals proof above. A Proposal-scoped
+  // approval must never authorize a MATTERS write, and reusing that proof
+  // would make the Matter an undeclared second target of Martin's decision.
+  // So it mints its own proof, bound to the same Work and the same recorded
+  // Action but scoped to MATTERS -- which is exactly the shape of the
+  // authorization being relied on: Martin's approval of a Proposal is what
+  // carries that Proposal's Matter to Proposal status, not a general licence
+  // for the Work to write to Matters. Advance the stage under any other
+  // Action and no such proof can be minted, so the split stays enforced
+  // rather than merely documented.
   const resolved = await resolveEntityMatterFromTokens(env, sp.entityToken, sp.matterToken);
   let matterStatusNote: string;
   if (resolved) {
-    await updatePage(env, resolved.matterId, { Status: select("Proposal") });
+    const matterAdvanceProof = mintApprovalProofForWork(state, env.MATTERS_DATA_SOURCE_ID);
+    await updatePage(env, resolved.matterId, { Status: select("Proposal") }, workSessionContext(state, matterAdvanceProof, PROPOSAL_APPROVE_ACTION));
     matterStatusNote = "Matter status advanced to Proposal.";
   } else {
     matterStatusNote = "Matter status NOT advanced -- tokens did not resolve to a real, related record; needs manual handling.";
@@ -1109,7 +1212,7 @@ export async function handleSalesProposalRevisionText(env: Env, state: WorkState
     return failClosed(env, state, "the requested change would put an identity-bearing value (a real name or contact detail) into the Runtime Proposal; no new Version was created. Please restate it using tokens only.");
   }
 
-  const live = await getPage(env, sp.pageId);
+  const live = await getPage(env, sp.pageId, workSessionContext(state));
   const liveState = await proposalFromRecord(live, sp);
   if ("error" in liveState) return failClosed(env, state, liveState.error);
   if (liveState.currentVersion !== sp.currentVersion) {
@@ -1119,14 +1222,30 @@ export async function handleSalesProposalRevisionText(env: Env, state: WorkState
   const released = sp.artifactStatus !== "Not Requested";
   const artifactStatus: ProposalArtifactStatus = released ? "Held" : "Not Requested";
   const contentHash = await hashContent(content);
-  await appendTextBlocks(env, sp.pageId, `${sp.proposalId} ${versionLabel(newVersion)} — snapshot`, content);
-  await updatePage(env, sp.pageId, {
-    "Proposal Content": richTextLong(content),
-    Version: richText(versionLabel(newVersion)),
-    "Approval Status": select("Pending Approval"),
-    "Approved Version": { rich_text: [] },
-    "Artifact Status": select(artifactStatus),
-  });
+
+  // A revision is a new Version, never an edit of the approved one. The
+  // Work's Action advances to proposal_revision for exactly these writes, and
+  // needs no proof: Martin did not approve this content -- he asked for it to
+  // change. The point of the separate Action is what happens next: the
+  // revision is written Pending Approval, the Work advances to
+  // proposal_submit, and only a NEW approval of THIS Version can approve it.
+  // The prior approval is explicitly cleared below, so it cannot carry over.
+  recordWorkAction(state, PROPOSAL_REVISION_ACTION);
+  const revisionAccess = workSessionContext(state, undefined, PROPOSAL_REVISION_ACTION);
+
+  await appendTextBlocks(env, sp.pageId, `${sp.proposalId} ${versionLabel(newVersion)} — snapshot`, content, revisionAccess);
+  await updatePage(
+    env,
+    sp.pageId,
+    {
+      "Proposal Content": richTextLong(content),
+      Version: richText(versionLabel(newVersion)),
+      "Approval Status": select("Pending Approval"),
+      "Approved Version": { rich_text: [] },
+      "Artifact Status": select(artifactStatus),
+    },
+    revisionAccess,
+  );
 
   const previousApproved = sp.approvedVersion;
   sp.versions.push({ version: newVersion, content, contentHash, createdAt: new Date().toISOString(), origin: "revision" });
@@ -1136,6 +1255,12 @@ export async function handleSalesProposalRevisionText(env: Env, state: WorkState
   sp.approvedVersion = undefined;
   sp.artifactStatus = artifactStatus;
   state.pendingSalesProposalRevision = undefined;
+
+  // The revised Version is about to be presented for approval, so the Work's
+  // Action advances to proposal_submit -- the same transition the original
+  // draft went through. presentForApproval then sends Martin the new Version,
+  // and any approval of it is judged against proposal_approve.
+  recordWorkAction(state, PROPOSAL_SUBMIT_ACTION);
 
   await logActivity(env, {
     entry: `Proposal revised: ${sp.proposalId} ${versionLabel(newVersion)} — ${sp.matterToken}`,

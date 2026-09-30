@@ -1520,7 +1520,7 @@ test("handleGoogleActionApproval registers the created sheet for comment-trigger
     if (urlStr.includes("/values/") && init?.method === "PUT") {
       return new Response(JSON.stringify({ updatedRange: "A1:E1" }), { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (urlStr.includes("/values/") && (!init || init.method === undefined || init.method === "GET")) {
+    if (urlStr.includes("/values/") && (!init || init.method === undefined || (init?.method ?? "GET") === "GET")) {
       return new Response(JSON.stringify({ values: rows }), { status: 200, headers: { "content-type": "application/json" } });
     }
     return new Response(JSON.stringify({ ok: true }), { status: 200 });

@@ -9,6 +9,10 @@ import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
 import { resolveMatterFromText, resolveEntityMatterFromTokens } from "../../identityResolution";
+import type { AccessContext } from "../../access";
+import { mintApprovalProofForWork, workSessionContext } from "../../access";
+import { recordWorkAction } from "../dispatch";
+import type { ApprovalProof } from "../../types";
 import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesizeSpecialistFindings } from "./strategySpecialists";
 
 /**
@@ -27,6 +31,38 @@ import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesi
 const STRATEGY_ANALYST_HAT_DEFINITION_PAGE_ID = "3e2cb004-e583-8115-8b1c-e479690a1264";
 
 const HAT_NAME = "Strategy Analyst";
+
+/**
+ * The Access context for a write performed on behalf of this Work item's
+ * own recorded Action, optionally carrying an ApprovalProof that a
+ * verified approval callback has just minted by consuming the staged
+ * approval it corresponds to.
+ *
+ * The Action is NOT named here -- it is read off the Work by
+ * `workSessionContext(state)`, so this helper cannot choose which Action its
+ * write is judged by.
+ *
+ * `commit_diagnosis` is the only approval-gated Action Strategy declares (see
+ * strategyManifest.ts), so `proof` is supplied only at the two createHandoff
+ * sites reached from an approval callback. The Matter operational-status
+ * advance and the inbound Handoff this work item was picked up from are
+ * execution bookkeeping on records it already owns, and correctly need no
+ * proof.
+ */
+function strategyAnalystAccess(state: WorkState, proof?: ApprovalProof) {
+  return workSessionContext(state, proof);
+}
+
+/**
+ * The Action a Strategy Work is performing while it is diagnosing, and the one
+ * it is performing while it commits an approved diagnosis as an outbound Work
+ * Handoff. Declared here and mirrored by name in strategyManifest.ts, the same
+ * way tokenSafeProposal.ts owns the Proposal action names for salesManifest.ts
+ * -- the manifest declares the registry, this module owns the constant its own
+ * code records, and the dependency only ever points manifest -> module.
+ */
+export const DIAGNOSE_ACTION = "diagnose" as const;
+export const COMMIT_DIAGNOSIS_ACTION = "commit_diagnosis" as const;
 
 export interface StrategySituation {
   symptoms?: string;
@@ -274,9 +310,17 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
  * never a real Name -- this Hat never resolves those tokens by traversing
  * or discovering unrelated records.
  */
-export async function resolveStrategyHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
+/**
+ * Reads the Handoff this Work item was picked up from, and evaluates whether
+ * its recorded evidence is sufficient to diagnose the situation at all.
+ *
+ * Takes the caller's AccessContext rather than building one: this helper is
+ * a read performed on behalf of the Work, not a registered operation of its
+ * own, and the Work's recorded Action is what permits (or refuses) it.
+ */
+export async function resolveStrategyHandoffContext(env: Env, handoffId: string, access: AccessContext): Promise<HandoffContextEvaluationResult> {
   try {
-    const handoff = await getPage(env, handoffId);
+    const handoff = await getPage(env, handoffId, access);
     const verifiedFacts = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
     // Required Next Action is where a human naturally writes refinement
     // guidance when returning a Held Handoff to Pending directly in Notion
@@ -520,7 +564,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   // duplicate discovery trigger, a retried invocation, or a Handoff that
   // was Held/Closed out from under this call all fail closed here rather
   // than being reprocessed.
-  const claim = await claimPendingHandoff(env, state.handoffId!);
+  const claim = await claimPendingHandoff(env, state.handoffId!, workSessionContext(state));
   if (!claim.claimed) {
     console.error(`Strategy handlePickup: refused -- ${claim.reason}`);
     await logActivity(env, {
@@ -533,7 +577,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     return state;
   }
 
-  const evalResult = await resolveStrategyHandoffContext(env, state.handoffId!);
+  const evalResult = await resolveStrategyHandoffContext(env, state.handoffId!, strategyAnalystAccess(state));
   if (!evalResult.success) {
     console.error(`Strategy handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
     await logActivity(env, {
@@ -550,7 +594,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
-    }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
+    }, workSessionContext(state)).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: HAT_NAME },
@@ -580,7 +624,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   if (state.entityToken && state.matterToken) {
     const resolved = await resolveEntityMatterFromTokens(env, state.entityToken, state.matterToken);
     if (resolved) {
-      await updatePage(env, resolved.matterId, { Status: select("Commercial Development") }).catch((err) =>
+      await updatePage(env, resolved.matterId, { Status: select("Commercial Development") }, workSessionContext(state)).catch((err) =>
         console.error(`Strategy handlePickup: failed to advance Matter ${state.matterToken} to Commercial Development`, err),
       );
     } else {
@@ -724,7 +768,7 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
       await updateHandoff(env, state.handoffId, {
         Status: select("Held"),
         "Open Questions": richText("Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion."),
-      }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
+      }, strategyAnalystAccess(state)).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
     }
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Couldn't run this diagnosis — couldn't retrieve canonical governance from Notion. Send a message once resolved and I'll retry.`);
     state.stage = "strategy_blocked";
@@ -763,7 +807,7 @@ async function handleBlocked(env: Env, state: WorkState, reason: string): Promis
     await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText(reason.slice(0, 1900)),
-    }).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
+    }, strategyAnalystAccess(state)).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
   }
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `*Strategy diagnosis held.*\n\n${reason}\n\nSend the missing information/clarification and I'll re-run the diagnosis.`);
   state.stage = "strategy_blocked";
@@ -840,7 +884,7 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
     await updateHandoff(env, state.handoffId, {
       Status: select("Closed"),
       "Work Completed": richText(formatDiagnosisForHandoff(result).slice(0, 1900)),
-    });
+    }, strategyAnalystAccess(state));
   }
   await logActivity(env, {
     entry: `Strategy diagnosis completed: ${state.matterToken || state.entityToken || state.workId}`,
@@ -985,6 +1029,13 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   }
 
   try {
+    // Advancing the Work to the gated Action is what makes the proof below
+    // authorize THIS create. mintApprovalProofForWork binds to the Work's own
+    // recorded Action, so without this the proof would name `diagnose` --
+    // un-gated -- and Access would refuse the write. Recording the transition
+    // and minting the proof adjacently is deliberate: the two can never be
+    // two different names for the same write.
+    recordWorkAction(state, COMMIT_DIAGNOSIS_ACTION);
     const { page: handoff } = await createHandoff(
       env,
       {
@@ -1006,6 +1057,14 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
         "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
       },
       { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
+      strategyAnalystAccess(
+        state,
+        // The staged pending Handoff is consumed here and nowhere else, so
+        // a replayed Telegram callback finds state.pendingStrategyHandoff
+        // already undefined and returns before this line is ever reached.
+        // The proof it mints is what authorizes the governed create below.
+        mintApprovalProofForWork(state, env.HANDOFFS_DATA_SOURCE_ID),
+      ),
     );
     state.pendingStrategyHandoff = undefined;
     state.pendingActionSummary = undefined;
@@ -1024,6 +1083,14 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   } catch (err) {
     console.error(`Strategy: failed to create approved handoff to ${pending.unit}/${pending.hat} for work ${state.workId}`, err);
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Couldn't create the handoff to *${pending.hat}* -- please try approving again.`);
+  } finally {
+    // Return the Work to the un-gated Action. The commit is over, so the Work
+    // is diagnosing again, and every subsequent write it performs is
+    // bookkeeping that must not be judged against a gated Action just because
+    // it happens to share a Work item with a committed diagnosis. Restoring
+    // here rather than after the try means a FAILED commit also leaves the Work
+    // where it belongs.
+    recordWorkAction(state, DIAGNOSE_ACTION);
   }
 
   return state;
@@ -1806,6 +1873,7 @@ export async function handleInterventionApproval(
         env,
         state.handoffId,
         "Strategy Proposal rejected by Martin with no further direction -- a materially new strategic attempt requires a new Handoff.",
+        strategyAnalystAccess(state),
       ).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId} on rejection`, err));
     }
     await logActivity(env, {
@@ -1823,6 +1891,9 @@ export async function handleInterventionApproval(
 
   // decision === "approve"
   try {
+    // Same reason as handleStrategyHandoffApproval: the gated Action is the
+    // privileged effect, and the proof has to be bound to it.
+    recordWorkAction(state, COMMIT_DIAGNOSIS_ACTION);
     const { page: handoff } = await createHandoff(
       env,
       {
@@ -1850,6 +1921,14 @@ export async function handleInterventionApproval(
         "Verified Facts & Sources": richTextLong(serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal!))),
       },
       { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
+      // Same shape as handleStrategyHandoffApproval: consuming the staged
+      // proposal approval here is what mints the proof that authorizes this
+      // governed create. state.pendingStrategyApproval was cleared by the
+      // callback's own guard above, so a replay cannot reach this.
+      strategyAnalystAccess(
+        state,
+        mintApprovalProofForWork(state, env.HANDOFFS_DATA_SOURCE_ID),
+      ),
     );
 
     // Close the Sales -> Strategy Handoff only now that the approved
@@ -1860,7 +1939,7 @@ export async function handleInterventionApproval(
       await updateHandoff(env, state.handoffId, {
         Status: select("Closed"),
         "Work Completed": richText(`Proposal v${proposal!.proposalVersion} approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
-      }).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
+      }, strategyAnalystAccess(state)).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
     }
 
     await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
@@ -1893,6 +1972,13 @@ export async function handleInterventionApproval(
     // approving again actually retries, rather than silently having
     // nothing left to act on.
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "Couldn't create the Handoff to Finance -- please try approving again.");
+  } finally {
+    // Same reason as handleStrategyHandoffApproval: the gated Action describes
+    // the commit, not the Work. Leaving the Work on commit_diagnosis after this
+    // point would judge the remaining bookkeeping in this Work (the inbound
+    // Handoff close above already happened, but the Work outlives this call)
+    // against a gate it does not belong behind.
+    recordWorkAction(state, DIAGNOSE_ACTION);
   }
 
   return state;
@@ -1976,7 +2062,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
   await updateHandoff(env, state.handoffId, {
     "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
     Status: select("Pending"),
-  });
+  }, strategyAnalystAccess(state));
   await logActivity(env, {
     entry: `Strategy Handoff retry — returned Held to Pending`,
     type: "Decision",

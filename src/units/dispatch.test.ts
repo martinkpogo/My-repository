@@ -23,11 +23,12 @@ function toyManifest(overrides: Partial<HatManifest<ToyAction>> = {}): UnitManif
   const hat: HatManifest<ToyAction> = {
     name: "Toy Hat",
     responsibility: "Handles toy requests for this test.",
+    responsibilityId: "toy_responsibility",
     actions: [
-      { name: "check_status", consequence: "read", description: "Read-only status check." },
-      { name: "internal_hold", consequence: "internal", description: "May pause on missing input." },
-      { name: "update_price", consequence: "write", description: "Mutates a price, not privileged." },
-      { name: "send_proposal", consequence: "write", requiresApproval: true, description: "Sends a real proposal -- privileged." },
+      { name: "check_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, description: "Read-only status check." },
+      { name: "internal_hold", responsibility: "toy_responsibility", consequence: "internal", requiresApproval: false, description: "May pause on missing input." },
+      { name: "update_price", responsibility: "toy_responsibility", consequence: "write", requiresApproval: false, description: "Mutates a price, not privileged." },
+      { name: "send_proposal", responsibility: "toy_responsibility", consequence: "write", requiresApproval: true, description: "Sends a real proposal -- privileged." },
     ],
     readHandler: async (_env, actionName) => `handled:${actionName}`,
     entryHandler: async (_env, state) => state,

@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import type { NotionProperties, NotionPage } from "./notion";
 import { createPage, updatePage } from "./notion";
+import type { AccessContext } from "./access";
 
 /**
  * Single runtime enforcement point for the canonical Handoff identity-write
@@ -235,10 +236,17 @@ export async function createHandoff(
   env: Env,
   properties: NotionProperties,
   identity: HandoffIdentity,
+  access: AccessContext,
 ): Promise<{ page: NotionPage; sourceBoundaryAttestation: HandoffSourceBoundaryAttestation }> {
   assertTokensPresent(identity);
   validateHandoffProperties(properties, identity);
-  const page = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, properties);
+  // `access` is threaded straight through to notion.ts's createPage, which
+  // is what actually evaluates it. This module's own validation is
+  // deliberately unchanged and is NOT a substitute for it: identity safety
+  // (what may be written) and authorization (whether this execution may
+  // write at all, and with whose approval) are two different questions
+  // answered by two different boundaries. Both run, in that order.
+  const page = await createPage(env, env.HANDOFFS_DATA_SOURCE_ID, properties, access);
   return {
     page,
     sourceBoundaryAttestation: {
@@ -264,8 +272,9 @@ export async function updateHandoff(
   env: Env,
   handoffId: string,
   properties: NotionProperties,
+  access: AccessContext,
   identity?: HandoffIdentity,
 ): Promise<NotionPage> {
   validateHandoffProperties(properties, identity ?? { entityToken: "", matterToken: "" });
-  return updatePage(env, handoffId, properties);
+  return updatePage(env, handoffId, properties, access);
 }

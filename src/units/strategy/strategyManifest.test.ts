@@ -51,6 +51,20 @@ function mockTelegramFetch(t: any) {
     if (String(url).includes("api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
+    if (url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in strategyManifest test: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -63,19 +77,60 @@ test("strategyManifest: declares exactly Strategy's Strategy Analyst Hat", () =>
   assert.deepStrictEqual(Object.keys(strategyManifest.hats), ["Strategy Analyst"]);
 });
 
-test("strategyManifest: Strategy Analyst declares exactly one action, diagnose, as 'write' requiring approval", () => {
+test("strategyManifest: Strategy Analyst declares two actions -- ungated diagnose, and gated commit_diagnosis for the outbound Handoff", () => {
   const hat = strategyManifest.hats["Strategy Analyst"];
-  assert.strictEqual(hat.actions.length, 1);
-  assert.strictEqual(hat.actions[0].name, "diagnose");
-  assert.strictEqual(hat.actions[0].consequence, "write");
-  assert.strictEqual(hat.actions[0].requiresApproval, true);
+
+  // Two Actions, not one. `diagnose` carries the ungated analytical work;
+  // `commit_diagnosis` is the gated outbound effect -- committing the
+  // diagnosis and creating the Handoff that carries it. Gating `diagnose`
+  // itself would have silently disabled the Matter status advance, which runs
+  // there and swallows its own errors -- pickup would look successful while
+  // the stage stopped moving. So the gate is scoped to the privileged effect,
+  // which is the only shape that keeps both behaviours true.
+  //
+  // Architect-approved as described: `diagnose` stays ungated for pickup and
+  // the Matter status advance; `commit_diagnosis` is retained as the
+  // approval-gated Action for the two outbound Handoff creations only. Access
+  // is not broadened by this split, and the LGS writes remain fail-closed.
+  const expected = [
+    { name: "diagnose", requiresApproval: false },
+    { name: "commit_diagnosis", requiresApproval: true },
+  ];
+  assert.strictEqual(hat.actions.length, expected.length, `Strategy Analyst must declare exactly ${expected.map((a) => a.name).join(" and ")}`);
+
+  const byName = new Map(hat.actions.map((a) => [a.name, a]));
+  for (const { name, requiresApproval } of expected) {
+    const action = byName.get(name);
+    assert.ok(action, `Strategy Analyst must declare ${name}`);
+    assert.strictEqual(action.consequence, "write", `${name} must be a 'write' action`);
+    assert.strictEqual(
+      action.requiresApproval,
+      requiresApproval,
+      `${name} requiresApproval must be ${requiresApproval} -- it is ${action.requiresApproval}`,
+    );
+    assert.strictEqual(
+      action.responsibility,
+      hat.responsibilityId,
+      `${name} must serve the Hat's own responsibilityId`,
+    );
+    assert.ok(action.description.trim().length > 0, `${name} must carry a description`);
+  }
+
+  // The split is only sound if exactly one of the two is gated. If a second
+  // gate were added, or `diagnose` were re-gated, the ungated analysis would
+  // start demanding Martin's approval and the exemption would be lost.
+  assert.strictEqual(hat.actions.filter((a) => a.requiresApproval).length, 1, "exactly one Strategy action may be gated");
 });
 
 test("strategyManifest: readHandler fails closed -- no read action is declared", async () => {
   const hat = strategyManifest.hats["Strategy Analyst"];
   await assert.rejects(
     () => hat.readHandler(fakeEnv(), "diagnose", "text"),
-    /not a read action -- Strategy Analyst only declares "diagnose"/,
+    // Matched loosely on purpose: the historical string enumerated the Hat's
+    // actions ("only declares \"diagnose\"") and so broke every time the Action
+    // set changed. What is under test is that an ungated read is refused --
+    // not the particular inventory of the registry.
+    /not a read action/,
   );
 });
 

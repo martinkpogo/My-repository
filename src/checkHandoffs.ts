@@ -2,6 +2,7 @@ import type { Env, Unit, WorkState } from "./types";
 import { plainText, queryDataSource } from "./notion";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { getSessionStub, newWorkId, resolveUnitForThread, SALES_EXECUTIVE_PAUSED } from "./sessionRouting";
+import { discoveryCronContext } from "./access";
 
 /**
  * Handoff discovery -- the single implementation behind the /checkhandoffs
@@ -41,7 +42,7 @@ async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: 
  * independently, the same way a separate Finance AI Workspace would.
  */
 export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     and: [
       { property: "Status", select: { equals: "Pending" } },
       { property: "To Unit", select: { equals: "Finance" } },
@@ -67,7 +68,12 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
         // itself (via Matter_Token, the Handoffs schema no longer carries a
         // Matter relation) -- nothing to seed here.
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Finance", "Value-Based Pricing Assessor", threadId, { handoffId: handoff.id });
+        await stub.init(workId, chatId, "Finance", "Value-Based Pricing Assessor", threadId, {
+          handoffId: handoff.id,
+          // This Work exists to run Finance's pickup, and `price` is the
+          // registered operation that pickup performs.
+          actionName: "price",
+        });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
@@ -169,7 +175,7 @@ function isCallNotesHandoff(handoff: { properties?: Record<string, any> }): bool
  * path can be tested; production callers never pass it.
  */
 export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = SALES_EXECUTIVE_PAUSED): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     and: [
       { property: "Status", select: { equals: "Pending" } },
       { property: "To Unit", select: { equals: "Sales" } },
@@ -190,7 +196,13 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Sales", "Sales Executive", undefined, { handoffId: handoff.id });
+        await stub.init(workId, chatId, "Sales", "Sales Executive", undefined, {
+          handoffId: handoff.id,
+          // This Work exists to produce the canonical Proposal from a Sales
+          // Handoff; the flow advances the recorded Action to proposal_draft
+          // before its first governed write (see tokenSafeProposal.ts).
+          actionName: "proposal_draft",
+        });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Sales Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
@@ -244,7 +256,7 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
  * this runs on its own schedule and discovers it independently.
  */
 export async function discoverPendingResearchHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     and: [
       { property: "Status", select: { equals: "Pending" } },
       { property: "To Unit", select: { equals: "Research & Intelligence" } },
@@ -264,7 +276,11 @@ export async function discoverPendingResearchHandoffs(env: Env): Promise<number>
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId, { handoffId: handoff.id });
+        await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId, {
+          handoffId: handoff.id,
+          // This Work exists to run R&I's pickup, which IS the `research` Action.
+          actionName: "research",
+        });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Research Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
@@ -294,7 +310,7 @@ export async function discoverPendingResearchHandoffs(env: Env): Promise<number>
  * that needs it" direction.
  */
 export async function discoverPendingMarketingHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     and: [
       { property: "Status", select: { equals: "Pending" } },
       { property: "To Unit", select: { equals: "Marketing" } },
@@ -311,7 +327,11 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Marketing", "Marketing Strategist", threadId, { handoffId: handoff.id });
+        await stub.init(workId, chatId, "Marketing", "Marketing Strategist", threadId, {
+          handoffId: handoff.id,
+          // This Work exists to run Marketing's pickup, which IS `handle_request`.
+          actionName: "handle_request",
+        });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Marketing Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
@@ -339,7 +359,7 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
  * independently.
  */
 export async function discoverPendingStrategyHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     and: [
       { property: "Status", select: { equals: "Pending" } },
       { property: "To Unit", select: { equals: "Strategy" } },
@@ -356,7 +376,11 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Strategy", "Strategy Analyst", threadId, { handoffId: handoff.id });
+        await stub.init(workId, chatId, "Strategy", "Strategy Analyst", threadId, {
+          handoffId: handoff.id,
+          // This Work exists to run Strategy's pickup, which IS the `diagnose` Action.
+          actionName: "diagnose",
+        });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
@@ -385,7 +409,7 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
  * lack of that mapping.
  */
 export async function countPendingHandoffsForUnit(env: Env, unit: Unit): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     and: [
       { property: "To Unit", select: { equals: unit } },
       { property: "Status", select: { equals: "Pending" } },
@@ -404,7 +428,7 @@ const STALE_HANDOFF_DIGEST_BACKSTOP_MS = 24 * 60 * 60 * 1000;
 // set of outstanding (Pending/Held) Handoffs has changed since the last
 // digest, or the backstop interval has elapsed with no change at all.
 export async function checkStaleHandoffs(env: Env): Promise<void> {
-  const results = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+  const results = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
     or: [
       { property: "Status", select: { equals: "Pending" } },
       { property: "Status", select: { equals: "Held" } },

@@ -1,5 +1,6 @@
 import type { Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
+import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
 import type { ResearchPlanDimension } from "./researchPlan";
 
@@ -53,9 +54,23 @@ export function isWebSearchConfigured(env: Env): boolean {
  * available" and proceed with the same honest-limitation behavior as
  * when no search provider is configured at all; a provider hiccup is
  * never a reason to fabricate or to block the whole request.
+ *
+ * The request is evaluated by Access before it leaves, because it is an
+ * outbound disclosure of the query to a third party: the question is who is
+ * allowed to send it, and a bare `fetch` answers that question with whoever
+ * happened to call this. `access` must therefore name the Work doing the
+ * searching, so Access can resolve that Work's own recorded Action and check
+ * its declared consequence permits an outbound read. See
+ * EXTERNAL_EGRESS_TARGET.
+ *
+ * A refusal is NOT a provider hiccup: it is a governance decision, and it is
+ * reported (and re-thrown) rather than silently degraded to "no results
+ * available", which would be indistinguishable from an unconfigured provider
+ * and would let an unauthorized outbound request pass unnoticed.
  */
-export async function searchWeb(env: Env, query: string): Promise<WebSearchResult[]> {
+export async function searchWeb(env: Env, query: string, access: AccessContext): Promise<WebSearchResult[]> {
   if (!env.TAVILY_API_KEY) return [];
+  evaluateAccess(env, { operation: "read", dataSourceId: EXTERNAL_EGRESS_TARGET }, access);
   try {
     const res = await fetch(TAVILY_API_URL, {
       method: "POST",
@@ -109,11 +124,11 @@ export function extractDomain(url: string): string {
  * text, but this costs nothing to double-check. Degrades to empty results
  * per dimension when search isn't configured, exactly like before.
  */
-export async function gatherDimensionEvidence(env: Env, plan: ResearchPlanDimension[]): Promise<DimensionEvidence[]> {
+export async function gatherDimensionEvidence(env: Env, plan: ResearchPlanDimension[], access: AccessContext): Promise<DimensionEvidence[]> {
   return Promise.all(
     plan.map(async (dimension) => {
       const query = redactIdentityTerms(dimension.subQuestion);
-      const results = await searchWeb(env, query);
+      const results = await searchWeb(env, query, access);
       return { ...dimension, results };
     }),
   );

@@ -7,7 +7,6 @@ import {
   ENTITY_NEW_CALLBACK_PREFIX,
   MATTER_NEW_CALLBACK_PREFIX,
   QUALIFY_CALLBACK_PREFIX,
-  PROPOSAL_CALLBACK_PREFIX,
 } from "./salesManifest";
 import { findCallbackHandler } from "../unitManifest";
 import type { Env, WorkState } from "../../types";
@@ -85,6 +84,20 @@ test("salesManifest: readHandler delegates discover_leads to discoverLeadsReadHa
     if (body.includes("on-demand discovery capability")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ isDiscoveryRequest: false }) } }] }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in salesManifest readHandler test: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -121,6 +134,20 @@ test("findCallbackHandler resolves leadopportunity on Lead Generation Specialist
     if (String(url).includes("api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
+    if (url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in salesManifest leadopportunity delegation test: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -140,13 +167,50 @@ test("findCallbackHandler resolves leadopportunity on Lead Generation Specialist
   assert.strictEqual(result.pendingLeadOpportunity, undefined);
 });
 
-test("salesManifest: Sales Executive declares exactly one action, new_enquiry, as 'write' requiring approval", () => {
+test("salesManifest: Sales Executive declares one ungated workflow action plus the six privileged commits, each 'write' and each carrying a description", () => {
   const hat = salesManifest.hats["Sales Executive"];
-  assert.strictEqual(hat.actions.length, 1);
-  assert.strictEqual(hat.actions[0].name, "new_enquiry");
-  assert.strictEqual(hat.actions[0].consequence, "write");
-  assert.strictEqual(hat.actions[0].requiresApproval, true);
-  assert.ok(hat.actions[0].description.trim().length > 0);
+  const byName = new Map(hat.actions.map((a) => [a.name, a]));
+
+  // Sales Executive used to declare exactly one Action, new_enquiry, gated.
+  // That could not survive action-level `requiresApproval`: new_enquiry also
+  // performs un-gated bookkeeping, and it commits an Entity, a Matter, and a
+  // Proposal. Gating the whole Action would gate the bookkeeping too; leaving
+  // it ungated would leave the commits ungated. So the privileged effects are
+  // their own Actions.
+  assert.strictEqual(
+    hat.actions.length,
+    7,
+    `expected exactly the 7 declared Actions, got ${hat.actions.map((a) => a.name).join(", ")}`,
+  );
+
+  const expected = [
+    // The workflow Action: reads, and lifecycle bookkeeping on its own Handoff.
+    { name: "new_enquiry", requiresApproval: false },
+    // The three privileged commits.
+    { name: "create_entity", requiresApproval: true },
+    { name: "create_matter", requiresApproval: true },
+    { name: "proposal_draft", requiresApproval: false },
+    { name: "proposal_submit", requiresApproval: false },
+    { name: "proposal_approve", requiresApproval: true },
+    { name: "proposal_revision", requiresApproval: false },
+  ];
+
+  for (const { name, requiresApproval } of expected) {
+    const action = byName.get(name);
+    assert.ok(action, `Sales Executive must declare ${name}`);
+    assert.strictEqual(action.consequence, "write", `${name} must be a 'write' action`);
+    assert.strictEqual(
+      action.requiresApproval,
+      requiresApproval,
+      `${name} requiresApproval must be ${requiresApproval} -- it is ${action.requiresApproval}`,
+    );
+    assert.strictEqual(
+      action.responsibility,
+      hat.responsibilityId,
+      `${name} must serve the Hat's own responsibilityId`,
+    );
+    assert.ok(action.description.trim().length > 0, `${name} must carry a description`);
+  }
 });
 
 test("salesManifest: Sales Executive's responsibility statement is a real, non-empty description", () => {
@@ -156,10 +220,12 @@ test("salesManifest: Sales Executive's responsibility statement is a real, non-e
 
 test("salesManifest: Sales Executive's readHandler fails closed -- no read action is declared", async () => {
   const hat = salesManifest.hats["Sales Executive"];
-  await assert.rejects(
-    () => hat.readHandler(fakeEnv(), "new_enquiry", "text"),
-    /not a read action -- Sales Executive only declares "new_enquiry"/,
-  );
+  // Every Sales Executive Action is a 'write', so readHandler must refuse.
+  // Matched loosely on purpose: the message must not name one Action, or it
+  // would need rewriting every time a privileged commit is split out of
+  // new_enquiry -- exactly what happened while it read "...only declares
+  // \"new_enquiry\"".
+  await assert.rejects(() => hat.readHandler(fakeEnv(), "new_enquiry", "text"), /not a read action/);
 });
 
 test("salesManifest: Sales Executive's awaitingHandlers is empty -- continuation states stay hardcoded in session.ts", () => {
@@ -175,6 +241,20 @@ test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat ge
     }
     if (String(url).includes("api.notion.com") && String(url).includes("/pages")) {
       return new Response(JSON.stringify({ id: "log-page-1" }), { status: 200 });
+    }
+    if (url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch in salesManifest Sales Executive delegation test: ${url}`);
   }) as typeof fetch;
@@ -200,11 +280,21 @@ test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat ge
   assert.strictEqual(viaDispatch.stage, "awaiting_entity_pick");
 });
 
-test("salesManifest: Sales Executive declares exactly entitynew, matternew, qualify, and proposal in callbackHandlers", () => {
+test("salesManifest: Sales Executive declares exactly entitynew, matternew, and qualify in callbackHandlers -- the Proposal decision is a Token-Safe Action callback, not a manifest one", () => {
   const hat = salesManifest.hats["Sales Executive"];
   assert.deepStrictEqual(
     new Set(Object.keys(hat.callbackHandlers ?? {})),
-    new Set([ENTITY_NEW_CALLBACK_PREFIX, MATTER_NEW_CALLBACK_PREFIX, QUALIFY_CALLBACK_PREFIX, PROPOSAL_CALLBACK_PREFIX]),
+    new Set([ENTITY_NEW_CALLBACK_PREFIX, MATTER_NEW_CALLBACK_PREFIX, QUALIFY_CALLBACK_PREFIX]),
+  );
+  // The Proposal Approve/Refine/Reject decision is a compound-encoded
+  // ("<number>.<version>.<a|r>" value) callback handled by the canonical
+  // token-safe Proposal module under the proposal_approve / proposal_revision
+  // Actions. It has no manifest callback route, so no second Proposal
+  // lifecycle exists beside it.
+  assert.strictEqual(
+    (hat.callbackHandlers ?? {})["proposal"],
+    undefined,
+    "the Proposal decision must not have a second, manifest-declared route",
   );
 });
 
@@ -213,6 +303,20 @@ function mockTelegramFetch(t: any) {
   globalThis.fetch = (async (url: string) => {
     if (String(url).includes("api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch in salesManifest Sales Executive callback delegation test: ${url}`);
   }) as typeof fetch;
@@ -260,17 +364,17 @@ test("findCallbackHandler resolves qualify on Sales Executive and genuinely dele
   assert.strictEqual(result.awaiting, "call_notes");
 });
 
-test("findCallbackHandler resolves proposal on Sales Executive and genuinely delegates to handleProposalApproval -- rejecting a pending proposal holds on proposal_feedback, proving real delegation", async (t) => {
+test("findCallbackHandler resolves qualify on Sales Executive and genuinely delegates -- rejecting a pending qualification holds on call_notes, proving real delegation", async (t) => {
   mockTelegramFetch(t);
   const hat = salesManifest.hats["Sales Executive"];
-  const handler = findCallbackHandler(PROPOSAL_CALLBACK_PREFIX, hat);
-  assert.ok(handler, "proposal must resolve on Sales Executive's own manifest entry");
+  const handler = findCallbackHandler(QUALIFY_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "qualify must resolve on Sales Executive's own manifest entry");
 
-  const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_proposal_approval" });
+  const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_qualification_approval", entityName: "Acme Co" });
   const result = await handler(fakeEnv(), state, false);
 
-  assert.strictEqual(result.stage, "awaiting_proposal_revision");
-  assert.strictEqual(result.awaiting, "proposal_feedback");
+  assert.strictEqual(result.stage, "qualification_hold");
+  assert.strictEqual(result.awaiting, "call_notes");
 });
 
 test("salesManifest: registers Stage 1/2 SemanticTaskIds required by UnitManifest's shape", () => {

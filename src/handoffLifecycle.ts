@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { getPage, plainText, richText, select } from "./notion";
 import { updateHandoff } from "./handoffWriter";
+import type { AccessContext } from "./access";
 
 /**
  * Shared Handoff pickup-idempotency guard, used by every Unit pickup that
@@ -19,8 +20,8 @@ import { updateHandoff } from "./handoffWriter";
  */
 export type HandoffClaimResult = { claimed: true } | { claimed: false; currentStatus: string; reason: string };
 
-export async function claimPendingHandoff(env: Env, handoffId: string): Promise<HandoffClaimResult> {
-  const page = await getPage(env, handoffId);
+export async function claimPendingHandoff(env: Env, handoffId: string, access: AccessContext): Promise<HandoffClaimResult> {
+  const page = await getPage(env, handoffId, access);
   const status = plainText(page.properties.Status);
   if (status !== "Pending") {
     return {
@@ -29,7 +30,7 @@ export async function claimPendingHandoff(env: Env, handoffId: string): Promise<
       reason: `Handoff ${handoffId} is currently "${status || "unknown"}", not Pending -- refusing to process it again.`,
     };
   }
-  await updateHandoff(env, handoffId, { Status: select("Picked-up") });
+  await updateHandoff(env, handoffId, { Status: select("Picked-up") }, access);
   return { claimed: true };
 }
 
@@ -43,12 +44,17 @@ export async function claimPendingHandoff(env: Env, handoffId: string): Promise<
  * attempt after this must use a new Handoff, per the same discipline every
  * pickup boundary already enforces via claimPendingHandoff.
  */
-export async function closeHandoffIfOpen(env: Env, handoffId: string, reason: string): Promise<void> {
-  const page = await getPage(env, handoffId);
+export async function closeHandoffIfOpen(env: Env, handoffId: string, reason: string, access: AccessContext): Promise<void> {
+  const page = await getPage(env, handoffId, access);
   const status = plainText(page.properties.Status);
   if (status === "Closed") return;
-  await updateHandoff(env, handoffId, {
-    Status: select("Closed"),
-    "Open Questions": richText(reason.slice(0, 1900)),
-  });
+  await updateHandoff(
+    env,
+    handoffId,
+    {
+      Status: select("Closed"),
+      "Open Questions": richText(reason.slice(0, 1900)),
+    },
+    access,
+  );
 }

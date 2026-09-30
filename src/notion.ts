@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { evaluateAccess, NON_GOVERNED_PAGE_TARGET, type AccessContext } from "./access";
 
 const API = "https://api.notion.com/v1";
 
@@ -84,9 +85,15 @@ export function url(value: string): NotionPropertyValue {
 export async function queryDataSource(
   env: Env,
   dataSourceId: string,
+  access: AccessContext,
   filter?: Record<string, unknown>,
   options?: { pageSize?: number; sortByCreatedDescending?: boolean },
 ): Promise<NotionPage[]> {
+  // Access is evaluated before the network is touched at all -- an
+  // unauthorized read never reaches Notion. `access` is a required
+  // parameter precisely so no caller can reach this without declaring
+  // which kind of execution context it is running under.
+  evaluateAccess(env, { operation: "read", dataSourceId }, access);
   const body: Record<string, unknown> = { page_size: options?.pageSize ?? 20 };
   if (filter) body.filter = filter;
   if (options?.sortByCreatedDescending) {
@@ -112,7 +119,13 @@ export async function createPage(
   env: Env,
   dataSourceId: string,
   properties: NotionProperties,
+  access: AccessContext,
 ): Promise<NotionPage> {
+  // A create targets the data source the caller named, so that name IS
+  // the authoritative target -- there is no page to resolve. Access
+  // decides from the resolved ActionDefinition whether this particular
+  // governed source is one Martin's approval was required for.
+  evaluateAccess(env, { operation: "create", dataSourceId }, access);
   const data = await notionFetch(env, `/pages`, {
     method: "POST",
     body: JSON.stringify({
@@ -123,7 +136,36 @@ export async function createPage(
   return { id: data.id, url: data.url, properties: data.properties };
 }
 
-export async function updatePage(env: Env, pageId: string, properties: NotionProperties): Promise<NotionPage> {
+/**
+ * Resolves the data source a page ACTUALLY lives in, from Notion itself.
+ *
+ * This exists because updatePage receives only a pageId, and authorizing a
+ * mutation against a caller-supplied dataSourceId would be authorizing
+ * against the caller's own claim about what it is touching. An approval
+ * minted for HANDOFFS must never be able to authorize an update to
+ * MATTERS/ENTITIES/PROPOSALS (or any other governed source), and that is
+ * only mechanically true if the target comes from the page, not the
+ * caller. Fails closed when the parent cannot be resolved to a data
+ * source -- an unresolvable target is never treated as "whatever the
+ * caller said".
+ */
+async function resolvePageDataSourceId(env: Env, pageId: string): Promise<string> {
+  const page = await fetchPageUnchecked(env, pageId);
+  const parent = page.parent;
+  if (parent?.type === "data_source_id" && parent.data_source_id) {
+    return parent.data_source_id;
+  }
+  throw new Error(
+    `updatePage: could not resolve an authoritative data source for page ${pageId} (parent type "${parent?.type ?? "none"}") -- refusing to authorize a governed mutation against an unverified target.`,
+  );
+}
+
+export async function updatePage(env: Env, pageId: string, properties: NotionProperties, access: AccessContext): Promise<NotionPage> {
+  const dataSourceId = await resolvePageDataSourceId(env, pageId);
+  // Access is evaluated against the page's REAL data source, so an
+  // ApprovalProof's targetDataSourceId is compared against the actual
+  // target rather than anything the caller asserted.
+  evaluateAccess(env, { operation: "update", dataSourceId, pageId }, access);
   const data = await notionFetch(env, `/pages/${pageId}`, {
     method: "PATCH",
     body: JSON.stringify({ properties }),
@@ -131,9 +173,58 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
   return { id: data.id, url: data.url, properties: data.properties };
 }
 
-export async function getPage(env: Env, pageId: string): Promise<NotionPage> {
+/**
+ * Fetches a page WITHOUT consulting Access.
+ *
+ * This exists for one purpose only: determining what a page IS, so that the
+ * operation on it can be authorized against the page's real target rather
+ * than a caller's claim. It is never the way a caller reads a page -- it is
+ * module-private for exactly that reason, so that no call site outside this
+ * file can reach a governed read that Access never saw.
+ */
+async function fetchPageUnchecked(env: Env, pageId: string): Promise<NotionPage> {
   const data = await notionFetch(env, `/pages/${pageId}`);
   return { id: data.id, url: data.url, properties: data.properties, parent: data.parent, archived: data.archived, inTrash: data.in_trash };
+}
+
+/**
+ * The target a page-anchored operation is authorized against: the data
+ * source the page genuinely lives in, or the non-governed marker when it does
+ * not live in any governed data source at all (a standalone governance page,
+ * for instance).
+ *
+ * Reads of such a page are still routed through Access -- a page outside every
+ * governed source is a weaker target, not an unevaluated one. Writes never
+ * accept the marker (see evaluateAccess), because there is no such thing as a
+ * governed mutation of a page that belongs to no governed source.
+ */
+async function resolvePageTarget(env: Env, pageId: string, operation: string): Promise<{ target: string; page: NotionPage }> {
+  const page = await fetchPageUnchecked(env, pageId);
+  const parent = page.parent;
+  if (parent?.type === "data_source_id" && parent.data_source_id) {
+    return { target: parent.data_source_id, page };
+  }
+  if (operation === "read") {
+    return { target: NON_GOVERNED_PAGE_TARGET, page };
+  }
+  throw new Error(
+    `${operation}: could not resolve an authoritative governed source for page ${pageId} (parent type "${parent?.type ?? "none"}") -- refusing to ${operation} governed state on a target that belongs to no governed source.`,
+  );
+}
+
+/**
+ * Reads a Notion page, authorized against the data source the page actually
+ * lives in.
+ *
+ * The target is resolved from Notion itself rather than accepted from the
+ * caller, for the same reason updatePage does it: authorizing a read against
+ * a caller's claim about what it is touching would mean the read's scope was
+ * whatever the caller said it was.
+ */
+export async function getPage(env: Env, pageId: string, access: AccessContext): Promise<NotionPage> {
+  const { target, page } = await resolvePageTarget(env, pageId, "read");
+  evaluateAccess(env, { operation: "read", dataSourceId: target, pageId }, access);
+  return page;
 }
 
 /**
@@ -141,8 +232,19 @@ export async function getPage(env: Env, pageId: string): Promise<NotionPage> {
  * Notion's 2,000-char rich-text limit) to the end of a page's body. Used to
  * keep an immutable snapshot of each canonical record version in the page
  * itself, alongside whatever its properties currently hold.
+ *
+ * This is a governed WRITE, not a cosmetic one: it changes the canonical
+ * record's own content, and appending a version snapshot is part of committing
+ * that version. It is therefore authorized as an `update` against the page's
+ * real data source, and is gated exactly like any other update -- an Action
+ * that can append a version snapshot is the Action that can change the
+ * record, and no separate "just appending text" exemption exists.
  */
-export async function appendTextBlocks(env: Env, pageId: string, heading: string, text: string): Promise<void> {
+export async function appendTextBlocks(env: Env, pageId: string, heading: string, text: string, access: AccessContext): Promise<void> {
+  // Authorized before the first network write, and against the page's real
+  // data source rather than a caller-supplied one.
+  const { target } = await resolvePageTarget(env, pageId, "update");
+  evaluateAccess(env, { operation: "update", dataSourceId: target, pageId }, access);
   const paragraphs: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
     paragraphs.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
@@ -198,7 +300,11 @@ export function uniqueId(prop: any): string {
  * Notion renderer — just enough to make a governance page's own text usable
  * as authoritative context.
  */
-export async function getPageContent(env: Env, pageId: string): Promise<string> {
+export async function getPageContent(env: Env, pageId: string, access: AccessContext): Promise<string> {
+  // Same rule as getPage: the read is authorized against the page's real
+  // target, resolved from Notion rather than asserted by the caller.
+  const { target } = await resolvePageTarget(env, pageId, "read");
+  evaluateAccess(env, { operation: "read", dataSourceId: target, pageId }, access);
   const parts: string[] = [];
   let cursor: string | undefined;
   do {

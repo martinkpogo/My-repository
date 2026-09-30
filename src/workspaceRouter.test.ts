@@ -328,9 +328,10 @@ function toyChatManifest(): UnitManifest {
   const hat: HatManifest<"check_status" | "send_update"> = {
     name: "Toy Hat",
     responsibility: "Handles toy requests for this test.",
+    responsibilityId: "toy_responsibility",
     actions: [
-      { name: "check_status", consequence: "read", description: "Read-only status check." },
-      { name: "send_update", consequence: "write", requiresApproval: true, description: "Sends a real update -- privileged." },
+      { name: "check_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, description: "Read-only status check." },
+      { name: "send_update", responsibility: "toy_responsibility", consequence: "write", requiresApproval: true, description: "Sends a real update -- privileged." },
     ],
     readHandler: async (_env, actionName) => `toy-reply:${actionName}`,
     entryHandler: async (_env, state) => state,
@@ -593,6 +594,11 @@ test("X. A plain database lookup question in Cowork mode with no addressee answe
   const env = fakeEnv({
     WORK_SESSION: workSession as any,
     MATTERS_DATA_SOURCE_ID: "matters-ds",
+    ENTITY_DATA_SOURCE_ID: "entity-ds",
+    PROPOSALS_DATA_SOURCE_ID: "proposals-ds",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    LEADS_DATA_SOURCE_ID: "leads-ds",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     AI: {
       run: async (_model: any, opts: any) => {
         const isClassification = String(opts?.messages?.[0]?.content ?? "").includes("Respond with a single valid JSON object only");
@@ -652,6 +658,11 @@ test("Y. A failure in the lookup check (classifier matches, but the Notion read 
   const env = fakeEnv({
     WORK_SESSION: workSession as any,
     MATTERS_DATA_SOURCE_ID: "matters-ds",
+    ENTITY_DATA_SOURCE_ID: "entity-ds",
+    PROPOSALS_DATA_SOURCE_ID: "proposals-ds",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    LEADS_DATA_SOURCE_ID: "leads-ds",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     AI: { run: async () => ({ response: JSON.stringify({ is_lookup: true, source: "matters" }) }) } as any,
   });
   await setWorkspaceMode(env, -1004435157576, 604, "cowork");

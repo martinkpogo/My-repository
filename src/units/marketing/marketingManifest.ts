@@ -1,5 +1,6 @@
 import type { Env, WorkState } from "../../types";
 import type { ActionDefinition } from "../../hats/actionRegistry";
+import { workSessionContext } from "../../access";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import type { MarketingHatDefinition, MarketingHatName } from "../../hats/types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat } from "../../hats/registry";
@@ -334,10 +335,19 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   // auto-routing to Marketing Strategist), close it out as the
   // completion signal -- same pattern Finance/Sales/R&I already use.
   if (state.handoffId) {
-    await updateHandoff(env, state.handoffId, {
-      Status: select("Closed"),
-      "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
-    }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
+    // Authorized as a `write`-consequence Action (handle_request), and
+    // ungated because closing the Handoff THIS work item was picked up from is
+    // execution bookkeeping on a record it already owns -- not the operation
+    // handle_request's approval governs (producing Marketing's own output).
+    await updateHandoff(
+      env,
+      state.handoffId,
+      {
+        Status: select("Closed"),
+        "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
+      },
+      workSessionContext(state),
+    ).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
   }
 
   await logActivity(env, {
@@ -420,10 +430,40 @@ async function marketingReadHandler(_env: Env, actionName: MarketingAction, _tex
   throw new Error(`${actionName}: not a read action -- every Marketing Hat only declares "handle_request" ("write").`);
 }
 
+/**
+ * The Responsibility id each Marketing Hat owns, keyed by its registered Hat
+ * name.
+ *
+ * Marketing is the one Unit whose Hats are enumerated in a registry rather
+ * than written out as separate manifest objects, so the mapping is declared
+ * once here instead of being repeated per Hat. Every Hat's single Action
+ * associates with exactly the Responsibility its own Hat owns -- the lookup is
+ * fail-closed (see buildMarketingHatManifest), so a Hat added to the registry
+ * without an entry here is a manifest defect, not an Action with no
+ * Responsibility.
+ */
+const MARKETING_RESPONSIBILITY_IDS: Record<MarketingHatName, string> = {
+  "Marketing Strategist": "own_marketing_strategy",
+  "Brand & Communications Strategist": "own_brand_and_communications",
+  "Content Strategist": "own_content_strategy",
+  "Content Manager": "produce_content",
+  "Digital Marketer": "own_digital_demand",
+};
+
 function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<MarketingAction> {
+  const responsibilityId = MARKETING_RESPONSIBILITY_IDS[def.name];
+  if (!responsibilityId) {
+    // Fail closed rather than defaulting: a Marketing Hat with no declared
+    // Responsibility id would leave its Action associated with no
+    // Responsibility at all, which is exactly the manifest defect
+    // validateHatManifest exists to catch. Throwing here means the gap
+    // surfaces at first use instead of at some later authorization check.
+    throw new Error(`Marketing Hat "${def.name}" declares no Responsibility id -- its Action could not be associated with a Responsibility.`);
+  }
   const actions: ActionDefinition<MarketingAction>[] = [
     {
       name: "handle_request",
+      responsibility: responsibilityId,
       consequence: "write",
       requiresApproval: true,
       description:
@@ -435,6 +475,7 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
     name: def.name,
     specialization: def.specialization,
     responsibility: def.purpose,
+    responsibilityId,
     actions,
     readHandler: marketingReadHandler,
     entryHandler: marketingEntryHandler,

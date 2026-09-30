@@ -14,7 +14,27 @@ import {
   routeToConsumingHat,
 } from "./capabilityPackage";
 import type { WorkState } from "../../types";
+import { workSessionContext, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
+
+/**
+ * A Research Work item reading the very Handoff it was picked up from --
+ * the same `workSessionContext` the production path passes, so this test
+ * exercises the real Access decision rather than a hand-rolled stand-in.
+ */
+function researchReadAccess(handoffId: string): AccessContext {
+  return workSessionContext({
+    workId: "work-9",
+    chatId: 9999,
+    unit: "Research & Intelligence",
+    hat: "Research & Intelligence Analyst",
+    actionName: "research",
+    stage: "awaiting_pickup",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    handoffId,
+  });
+}
 import type { ResearchProtocolId } from "./protocols";
 
 /** Reconstructs the same assembled string generate() would send as the system prompt, from buildSynthesisPromptParts's own parts -- mirrors ai.ts's assembleSystemPrompt exactly. */
@@ -149,8 +169,10 @@ test("8. Malformed Handoff → fails closed", () => {
 });
 
 test("9. Unauthorized Handoff → fails closed safely", async () => {
-  const mockEnv: any = { NOTION_API_KEY: "invalid_key" };
-  const res = await resolveResearchHandoffContext(mockEnv, "unauthorized_handoff_id");
+  const mockEnv: any = { NOTION_API_KEY: "invalid_key", NOTION_VERSION: "2025-09-03" };
+  // A read of the Work's own inbound Handoff, named as the Work doing it
+  // rather than as an unlabelled caller.
+  const res = await resolveResearchHandoffContext(mockEnv, "unauthorized_handoff_id", researchReadAccess("unauthorized_handoff_id"));
   assert.strictEqual(res.success, false);
   if (!res.success) {
     assert.strictEqual(res.insufficientContext.category, "handoff record access");
@@ -483,6 +505,13 @@ function fakeStateWithPendingHandoff(): WorkState {
     chatId: 1,
     unit: "Research & Intelligence",
     hat: "Research & Intelligence Analyst",
+    // Access resolves authority from the Work's own record. An R&I Work that
+    // has staged a Handoff for Martin's approval is performing `research` --
+    // the Hat's single declared Action, and the gated one. Naming it here is
+    // what lets the approval mints its proof and the outbound Handoff create be
+    // evaluated as the governed effect that approval authorizes, rather than
+    // refused for want of any operation of record.
+    actionName: "research",
     stage: "awaiting_research_handoff_approval",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -519,6 +548,20 @@ function mockNotionAndTelegramFetch(notionShouldFail = false): { restore: () => 
     }
     if (url.startsWith("https://api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && urlArg.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(urlArg.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlArg.split("/v1/pages/").pop()!.split("?")[0],
+          url: urlArg,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch in test: ${url}`);
   }) as typeof fetch;
@@ -604,6 +647,20 @@ test("20. R&I -> downstream Unit creates a token-only Handoff, carrying the work
     if (url.startsWith("https://api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && urlArg.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(urlArg.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlArg.split("/v1/pages/").pop()!.split("?")[0],
+          url: urlArg,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in test: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -636,6 +693,20 @@ test("R&I -> downstream: a failed Handoff creation must not invoke the /checkhan
     if (url.startsWith("https://api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && urlArg.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(urlArg.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlArg.split("/v1/pages/").pop()!.split("?")[0],
+          url: urlArg,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in test: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -661,6 +732,20 @@ test("20b. R&I -> downstream Unit falls back to unbound placeholder tokens for a
     }
     if (url.startsWith("https://api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && urlArg.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(urlArg.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlArg.split("/v1/pages/").pop()!.split("?")[0],
+          url: urlArg,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch in test: ${url}`);
   }) as typeof fetch;
@@ -835,6 +920,20 @@ function mockFailingNotionAndTelegram(t: any): void {
     }
     if (url.startsWith("https://api.notion.com")) {
       return new Response(JSON.stringify({ object: "error", status: 404 }), { status: 404 });
+    }
+    if (urlArg.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(urlArg.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlArg.split("/v1/pages/").pop()!.split("?")[0],
+          url: urlArg,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch in test: ${url}`);
   }) as typeof fetch;

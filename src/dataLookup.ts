@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import { queryDataSource, plainText, uniqueId } from "./notion";
 import { generate } from "./ai";
 import type { ChatTurn } from "./ai";
+import { userLookupContext } from "./access";
 
 /**
  * A read-only "what's in this database" capability across every data
@@ -46,6 +47,7 @@ async function lookupMatters(env: Env, filter?: string): Promise<string[]> {
   const pages = await queryDataSource(
     env,
     env.MATTERS_DATA_SOURCE_ID,
+    userLookupContext(),
     filter ? { property: "Status", select: { equals: filter } } : undefined,
     { pageSize: 20, sortByCreatedDescending: true },
   );
@@ -62,6 +64,7 @@ async function lookupEntities(env: Env, filter?: string): Promise<string[]> {
   const pages = await queryDataSource(
     env,
     env.ENTITY_DATA_SOURCE_ID,
+    userLookupContext(),
     filter ? { property: "Status", select: { equals: filter } } : undefined,
     { pageSize: 20, sortByCreatedDescending: true },
   );
@@ -84,7 +87,7 @@ async function lookupHandoffs(env: Env, filter?: string): Promise<string[]> {
       ? { property: "Status", select: { equals: statusMatch } }
       : { property: "To Unit", select: { equals: filter } };
   }
-  const pages = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, notionFilter, { pageSize: 20, sortByCreatedDescending: true });
+  const pages = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, userLookupContext(),  notionFilter, { pageSize: 20, sortByCreatedDescending: true });
   return pages.map((p) => {
     const token = uniqueId(p.properties["Handoff ID"]) || "(no id)";
     const title = plainText(p.properties.Handoff) || "(untitled)";
@@ -105,7 +108,7 @@ async function lookupProposals(env: Env, filter?: string): Promise<string[]> {
       ? { property: "Approval Status", select: { equals: approvalMatch } }
       : { property: "Status", select: { equals: filter } };
   }
-  const pages = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, notionFilter, { pageSize: 20, sortByCreatedDescending: true });
+  const pages = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, userLookupContext(),  notionFilter, { pageSize: 20, sortByCreatedDescending: true });
   return pages.map((p) => {
     const token = uniqueId(p.properties["Proposal ID"]) || "(no id)";
     const entityToken = plainText(p.properties["Entity Token"]) || "?";
@@ -121,6 +124,7 @@ async function lookupLeads(env: Env, filter?: string): Promise<string[]> {
   const pages = await queryDataSource(
     env,
     env.LEADS_DATA_SOURCE_ID,
+    userLookupContext(),
     filter ? { property: "Status", select: { equals: filter } } : undefined,
     { pageSize: 20, sortByCreatedDescending: true },
   );
@@ -137,6 +141,7 @@ async function lookupActivity(env: Env, filter?: string): Promise<string[]> {
   const pages = await queryDataSource(
     env,
     env.ACTIVITY_LOG_DATA_SOURCE_ID,
+    userLookupContext(),
     filter ? { property: "Area", rich_text: { equals: filter } } : undefined,
     { pageSize: 20, sortByCreatedDescending: true },
   );

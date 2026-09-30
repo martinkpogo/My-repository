@@ -11,6 +11,9 @@ import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
 import { resolveMatterFromText } from "../../identityResolution";
+import type { AccessContext } from "../../access";
+import { mintApprovalProofForWork, workSessionContext } from "../../access";
+import type { ApprovalProof } from "../../types";
 
 /** Opens Finance's own commercial-judgment block within the Finance -> Sales Handoff's combined "Verified Facts & Sources" text -- see handleQuoteApproval. */
 export const FINANCE_JUDGMENT_START = "=== FINANCE COMMERCIAL JUDGMENT ===";
@@ -124,6 +127,25 @@ function validateFinanceJudgement(judgement: PriceJudgement | null): { valid: tr
 // be attributable, not guessed at by name match).
 const FINANCE_HAT_DEFINITION_PAGE_ID = "3cecb004-e583-81f9-a52e-e24872a52eff";
 
+/**
+ * The Access context for an operation performed on behalf of this Work item's
+ * own recorded Action, optionally carrying an ApprovalProof a verified
+ * approval callback has just minted by consuming the staged quote approval it
+ * corresponds to.
+ *
+ * The Action is NOT named here -- it is read off the Work by
+ * `workSessionContext(state)`, so this helper cannot choose which Action its
+ * write is judged by.
+ *
+ * `price`'s only approval-gated governed effect is the outbound
+ * Finance -> Sales Handoff it creates (see financeManifest.ts), so a proof is
+ * supplied only at that createHandoff. Lifecycle transitions on the inbound
+ * Handoff this work item already owns correctly need none.
+ */
+function financeAccess(state: WorkState, proof?: ApprovalProof) {
+  return workSessionContext(state, proof);
+}
+
 function buildFinancePromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
     persona:
@@ -159,12 +181,22 @@ function buildFinancePromptParts(hatDefinition: string, universalRoleContract: s
  * real name never enters this Hat's context, an AI prompt, or a Telegram
  * message it sends.
  */
+/**
+ * Reads the Handoff this Work item was picked up from, and evaluates whether
+ * its recorded tokens/evidence are sufficient to price the Matter at all.
+ *
+ * Takes the caller's AccessContext rather than building one: the read is
+ * judged by the Work that is performing it, and this helper is not itself a
+ * registered operation. It is a read, so the Work's recorded Action only has
+ * to permit reading -- which is checked, not assumed.
+ */
 export async function resolveHandoffBusinessContext(
   env: Env,
   handoffId: string,
+  access: AccessContext,
 ): Promise<HandoffContextEvaluationResult> {
   try {
-    const handoff = await getPage(env, handoffId);
+    const handoff = await getPage(env, handoffId, access);
     const verifiedFacts = plainText(handoff.properties["Verified Facts & Sources"]);
     // Required Next Action is where a human naturally writes refinement
     // guidance when returning a Held Handoff to Pending directly in Notion
@@ -313,7 +345,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   // This is the fresh-pickup entry point only -- handleQuoteRedoReason
   // re-invokes judgeQuote directly against an already Picked-up/Held
   // Handoff from an in-session redo, which correctly bypasses this guard.
-  const claim = await claimPendingHandoff(env, state.handoffId!);
+  const claim = await claimPendingHandoff(env, state.handoffId!, workSessionContext(state));
   if (!claim.claimed) {
     console.error(`Finance handlePickup: refused -- ${claim.reason}`);
     await logActivity(env, {
@@ -330,7 +362,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   // Notion outage during context read fails closed with the Handoff
   // already claimed (Picked-up) rather than reprocessed by a later
   // duplicate trigger while still nominally Pending.
-  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!);
+  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!, financeAccess(state));
   if (!evalResult.success) {
     console.error(`Finance handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
     await logActivity(env, {
@@ -347,7 +379,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
-    }).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
+    }, workSessionContext(state)).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
@@ -426,7 +458,7 @@ async function judgeQuote(
       await updateHandoff(env, state.handoffId!, {
         Status: select("Held"),
         "Open Questions": richText(`Governance retrieval failed (${missing}).`),
-      }).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
+      }, financeAccess(state)).catch((err) => console.error(`Finance: failed to mark Handoff ${state.handoffId} Held`, err));
     }
     await sendWorkspaceHatMessage(
       env,
@@ -439,7 +471,7 @@ async function judgeQuote(
   }
 
   if (state.handoffId) {
-    await updateHandoff(env, state.handoffId, { Status: select("Picked-up") });
+    await updateHandoff(env, state.handoffId, { Status: select("Picked-up") }, financeAccess(state));
   }
   await logActivity(env, {
     entry: `Finance ${activityLabel}: ${matterToken}`,
@@ -475,7 +507,7 @@ async function judgeQuote(
       await updateHandoff(env, state.handoffId, {
         Status: select("Held"),
         "Open Questions": richText(reason),
-      });
+      }, financeAccess(state));
     }
     await logActivity(env, {
       entry: `Handoff held — insufficient value context: ${matterToken}`,
@@ -514,7 +546,7 @@ async function judgeQuote(
           1900,
         ),
       ),
-    });
+    }, financeAccess(state));
   }
   await logActivity(env, {
     entry: `Quote judged: ${currency} ${price} — ${matterToken}`,
@@ -571,7 +603,7 @@ async function judgeQuote(
 export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
   const financeThreadId = state.financeThreadId ?? state.threadId;
 
-  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!);
+  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!, financeAccess(state));
   if (!evalResult.success) {
     console.error(`Finance redo blocked — context evaluation failed for handoff ${state.handoffId}`);
     await logActivity(env, {
@@ -592,7 +624,7 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
   const augmentedContext = `${evalResult.contract.sanitizedContext}\n\nMartin's redo reasoning: ${reasonText}`;
   await updateHandoff(env, state.handoffId!, {
     "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
-  });
+  }, financeAccess(state));
 
   return judgeQuote(env, state, {
     entityToken: evalResult.contract.entityToken,
@@ -644,7 +676,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText("Martin requested a redo of the quote. Awaiting his reasoning before reassessing."),
-    });
+    }, financeAccess(state));
     await logActivity(env, {
       entry: `Finance quote redo requested: ${state.matterToken ?? state.entityToken}`,
       type: "Decision",
@@ -694,7 +726,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     // record once before giving up, so correcting it in Notion and
     // re-approving actually is the working retry path the blocked message
     // below describes, rather than a permanent dead end.
-    const live = await getPage(env, state.handoffId).catch((err) => {
+    const live = await getPage(env, state.handoffId, workSessionContext(state)).catch((err) => {
       console.error(`Finance handleQuoteApproval: re-fetch of Handoff ${state.handoffId} failed`, err);
       return null;
     });
@@ -740,7 +772,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   const sourceHandoffId = state.handoffId;
   let strategyBoundaryBlock: string | null = null;
   if (sourceHandoffId) {
-    const sourceHandoff = await getPage(env, sourceHandoffId).catch((err) => {
+    const sourceHandoff = await getPage(env, sourceHandoffId, workSessionContext(state)).catch((err) => {
       console.error(`Finance handleQuoteApproval: could not re-read source Strategy Handoff ${sourceHandoffId}`, err);
       return null;
     });
@@ -789,6 +821,14 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       "Verified Facts & Sources": richTextLong(combinedVerifiedFactsAndSources),
     },
     { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
+    // The Finance -> Sales Handoff is the governed effect Martin's quote
+    // approval authorizes, so consuming the staged approval here is what
+    // mints the proof that permits this create. The callback's own guard
+    // has already rejected a replayed Approve by the time this runs.
+    financeAccess(
+      state,
+      mintApprovalProofForWork(state, env.HANDOFFS_DATA_SOURCE_ID),
+    ),
   );
   state.handoffId = followUp.id;
   await env.STATE_KV.put(`handoff_workitem:${followUp.id}`, state.workId);

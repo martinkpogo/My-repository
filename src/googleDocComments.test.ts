@@ -102,7 +102,7 @@ function mockFetchWith(handlers: {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
     }
 
-    if (urlStr.startsWith(driveCommentsUrl(DOC_ID)) && (!init || init.method === undefined || init.method === "GET")) {
+    if (urlStr.startsWith(driveCommentsUrl(DOC_ID)) && (!init || init.method === undefined || (init?.method ?? "GET") === "GET")) {
       return new Response(JSON.stringify({ comments: handlers.comments ?? [] }), {
         status: 200,
         headers: { "content-type": "application/json" },

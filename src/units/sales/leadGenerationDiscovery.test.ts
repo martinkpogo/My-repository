@@ -34,6 +34,15 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
     LEADS_DATA_SOURCE_ID: "leads-ds",
     ENTITY_DATA_SOURCE_ID: "entity-ds",
+    MATTERS_DATA_SOURCE_ID: "matters-ds",
+    PROPOSALS_DATA_SOURCE_ID: "proposals-ds",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    // Access resolves every operation's target against the Env, and refuses an
+    // unresolvable one, so a fixture that omits a data source id turns any
+    // write to that source into a denial. All six are declared here so a
+    // failure in these tests means a real access decision, not a missing
+    // fixture field.
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     NOTION_TOKEN: "test-token",
     NOTION_VERSION: "2025-09-03",
     TELEGRAM_BOT_TOKEN: "test-token",
@@ -87,11 +96,10 @@ test("runAutonomousLeadDiscovery does nothing when web search isn't configured -
   assert.deepStrictEqual(summary, { evaluated: 0, handoffsCreated: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 });
 });
 
-test("Test A: Candidate signal passes lightweight screening -> R&I Pending Work Handoff created, no Lead created", async (t) => {
+test("Test A: Candidate signal passes lightweight screening -> no governed write, because no Action authorizes the R&I Handoff create", async (t) => {
   const originalFetch = globalThis.fetch;
   let handoffsCreatedCount = 0;
   let leadsCreatedCount = 0;
-  let createdHandoffBody: any;
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
@@ -116,7 +124,6 @@ test("Test A: Candidate signal passes lightweight screening -> R&I Pending Work 
       const body = JSON.parse(init.body);
       if (body.parent?.data_source_id === "handoffs-ds") {
         handoffsCreatedCount++;
-        createdHandoffBody = body;
       }
       if (body.parent?.data_source_id === "leads-ds") {
         leadsCreatedCount++;
@@ -131,13 +138,171 @@ test("Test A: Candidate signal passes lightweight screening -> R&I Pending Work 
 
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
 
-  assert.ok(summary.handoffsCreated >= 1);
-  assert.ok(handoffsCreatedCount >= 1, "at least one R&I Work Handoff should be created upon lightweight pass");
-  assert.strictEqual(leadsCreatedCount, 0, "no Lead should be created immediately upon lightweight screening alone");
-  assert.deepStrictEqual(createdHandoffBody.properties["To Unit"], { select: { name: "Research & Intelligence" } });
-  assert.deepStrictEqual(createdHandoffBody.properties["From Unit"], { select: { name: "Sales" } });
-  assert.strictEqual(createdHandoffBody.properties["From Hat"].rich_text[0].text.content, "Lead Generation Specialist");
-  assert.ok(createdHandoffBody.properties.Reason.rich_text[0].text.content.includes("LGS Autonomous Lead Discovery"));
+  // PENDING ARCHITECT DECISION. The R&I Work Handoff is not created, because
+  // creating it is a governed write to Handoffs and `discover_leads` is a
+  // `read` Action that cannot authorize one -- see access.ts's
+  // consequencePermits. Whether a Pending internal research Handoff is a
+  // privileged effect (gated, like Strategy's commit_diagnosis) or ordinary
+  // operational bookkeeping (ungated) is a governance question this change
+  // deliberately does not answer. Until an Action authorizing it is
+  // registered, the write is refused.
+  assert.strictEqual(leadsCreatedCount, 0, "no Lead may be created immediately upon lightweight screening alone");
+  assert.strictEqual(handoffsCreatedCount, 0, "the R&I Work Handoff create is refused while no Action authorizes it");
+  assert.strictEqual(summary.handoffsCreated, 0);
+});
+
+const UNSUPPORTED_EVALUATION = JSON.stringify({
+  candidates: [
+    {
+      pass: false,
+      organisation: "Acme Corp",
+      // No supported diagnosis: the signal is real, the inference is not.
+      evidence: "Acme announced a new regional office, which says nothing about its positioning or commercial model.",
+      decisionMakerOrRole: "",
+      category: "",
+      reason: "Expansion alone does not evidence a positioning, offering, or growth problem; the diagnosis would be a hypothesis, not a finding.",
+    },
+  ],
+});
+
+/**
+ * Installs a Tavily/Notion/LLM mock for one autonomous discovery run and
+ * returns the facts a caller can assert on: which governed records were
+ * actually created, every governed create body that went over the wire, and
+ * what the Activity Log recorded.
+ *
+ * Keeping the create bodies (not just the counts) is deliberate: a test can
+ * then assert that no identity-bearing value ever reached Notion, which is a
+ * stronger claim than "the right number of records was created".
+ */
+function installDiscoveryRun(t: any, evaluation: string) {
+  const originalFetch = globalThis.fetch;
+  const created: Record<string, number> = { handoffs: 0, leads: 0, proposals: 0, matters: 0, entities: 0 };
+  const createBodies: any[] = [];
+  const activityEntries: any[] = [];
+
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (url.includes("api.tavily.com")) {
+      return new Response(
+        JSON.stringify({
+          results: [{ title: "Acme Corp expands into enterprise market", url: "https://example.com/acme", content: "Acme expansion news." }],
+        }),
+        { status: 200 },
+      );
+    }
+    if (url.includes("/blocks/")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
+    }
+    if (url.includes("leads-ds") && method === "POST") {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (url.includes("handoffs-ds") && method === "POST" && url.endsWith("/query")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (url.includes("/pages") && method === "POST") {
+      const body = JSON.parse(init.body);
+      createBodies.push(body);
+      const ds = body.parent?.data_source_id;
+      if (ds === "handoffs-ds") created.handoffs++;
+      if (ds === "leads-ds") created.leads++;
+      if (ds === "proposals-ds") created.proposals++;
+      if (ds === "matters-ds") created.matters++;
+      if (ds === "entity-ds") created.entities++;
+      if (ds === "activity-log-ds") activityEntries.push(body.properties);
+      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", parent: { type: "data_source_id", data_source_id: ds }, properties: {} }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: evaluation } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  return { created, createBodies, activityEntries };
+}
+
+test("LGS: a candidate passing lightweight screening creates NO R&I Handoff and NO Lead -- the governed create is refused, and the refusal is recorded rather than swallowed", async (t) => {
+  const { created, activityEntries } = installDiscoveryRun(t, PASS_EVALUATION);
+
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+
+  // PENDING ARCHITECT DECISION (unchanged): the R&I Work Handoff this candidate
+  // is meant to produce is NOT created. `discover_leads` is a `read` Action and
+  // the scheduled loop runs outside any Work item, so no registered Action
+  // authorizes a governed create here -- see access.ts's consequencePermits.
+  // Whether a Pending internal research Handoff is a privileged effect (gated,
+  // like Strategy's commit_diagnosis) or ordinary bookkeeping (ungated) is a
+  // governance question this change does not answer. Until an Action
+  // authorizing it exists, the write is refused.
+  assert.strictEqual(created.handoffs, 0, "no Handoff may be created with no Action of record behind it");
+  assert.strictEqual(created.leads, 0, "and certainly no Lead -- lightweight screening alone never creates one");
+  assert.strictEqual(summary.handoffsCreated, 0, "the run summary must not claim a Handoff it did not create");
+  assert.ok(summary.evaluated > 0, "the candidate really was evaluated, so the refusal is a decision rather than a no-op");
+
+  // The refusal must be SURFACED, not silently swallowed. A governed write that
+  // fails closed and is then forgotten is indistinguishable, to Martin, from a
+  // run that found nothing -- which is the specific failure mode fail-closed
+  // access is supposed to make impossible to hide. So the run records a Blocker
+  // against the Activity Log, the durable Kernel-owned channel.
+  const blockers = activityEntries.filter((p) => p?.Type?.select?.name === "Blocker" && p?.Outcome?.select?.name === "Blocked");
+  assert.ok(blockers.length > 0, "a refused governed create must record a Blocker, or the refusal is invisible to Martin");
+  assert.strictEqual(
+    blockers.length,
+    summary.evaluated,
+    "every candidate whose Handoff create was refused must leave exactly one Blocker behind -- none swallowed, none double-counted",
+  );
+
+  for (const blocker of blockers) {
+    const entry = blocker.Entry.title[0].text.content;
+    const rationale = blocker["Decision Rationale"].rich_text[0].text.content;
+    assert.match(entry, /handoff creation blocked/i, `the Blocker must say what was blocked: ${entry}`);
+    assert.match(rationale, /HANDOFFS_DATA_SOURCE_ID/, "the Blocker must name the governed write that was refused, so the missing authorization is identifiable");
+    // The Access verdict is carried verbatim rather than summarized, so the
+    // reason is diagnosable from the record alone -- without a log tail, and
+    // without re-running anything. It also names the context that lacked the
+    // authority, which is the whole substance of the pending decision.
+    assert.match(rationale, /Access denied/, `the recorded reason must be the Access verdict, not a paraphrase: ${rationale}`);
+    assert.match(rationale, /discovery_cron/, `the Blocker must identify which context was refused: ${rationale}`);
+  }
+});
+
+test("LGS: an unsupported diagnosis is screened out before any governed write -- no Handoff, no Lead, and nothing identity-bearing reaches Notion", async (t) => {
+  const { created, createBodies, activityEntries } = installDiscoveryRun(t, UNSUPPORTED_EVALUATION);
+
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+
+  assert.ok(summary.evaluated > 0, "the candidate was evaluated");
+  assert.strictEqual(summary.screenedOut, summary.evaluated, "an unsupported diagnosis is screened out, not escalated");
+  assert.strictEqual(created.handoffs, 0, "no Handoff for a candidate whose diagnosis is only a hypothesis");
+  assert.strictEqual(created.leads, 0, "and no Lead");
+  assert.strictEqual(summary.handoffsCreated, 0);
+
+  // The withheld capability in the original spec note was that the R&I Handoff
+  // "carries only the opaque E-UNBOUND/M-UNBOUND tokens". With no Handoff
+  // created, that property is asserted where it can still be checked
+  // end-to-end: on the wire. Nothing this run wrote anywhere in Notion may
+  // carry a real Entity or Matter identity -- no name, no relation, no contact
+  // detail. The only tokens it is even capable of writing are the opaque
+  // placeholders, and a candidate that never becomes a Handoff must not be
+  // smuggled into some other record on the way past.
+  const identityKeys = ["entityName", "matterName", "Entity", "Matter", "email", "phone", "contact"];
+  for (const body of createBodies) {
+    for (const key of identityKeys) {
+      assert.ok(
+        !(key in (body.properties ?? {})),
+        `no governed create may carry a real identity field "${key}" (parent: ${body.parent?.data_source_id}): ${JSON.stringify(body.properties)}`,
+      );
+    }
+  }
+
+  // Screening out is ordinary judgement, not a refusal, so it is reported as a
+  // screened count in the run summary rather than as a Blocker. Assert that
+  // distinction: a screen-out must not manufacture a governance incident.
+  assert.strictEqual(
+    activityEntries.filter((p) => p?.Type?.select?.name === "Blocker").length,
+    0,
+    "screening a candidate out is a judgement, not a blocked governed write -- it must not be logged as a Blocker",
+  );
 });
 
 test("Test B: Completed R&I research with insufficient evidence -> no Lead created, no opportunity presented", async (t) => {
@@ -275,7 +440,7 @@ test("Test C: Completed R&I research satisfying Acquisition Criteria -> opportun
   assert.strictEqual(opportunity.evidence, "Attributable market expansion evidence with positioning gap");
 });
 
-test("Test D & G: Unsupported diagnosis/hypothesis does not become an asserted fact & opaque token rules preserved", async (t) => {
+test("Test D & G: Unsupported diagnosis/hypothesis does not become an asserted fact; its Handoff write is refused pending an Architect decision", async (t) => {
   const originalFetch = globalThis.fetch;
   let createdHandoffBody: any;
 
@@ -311,10 +476,11 @@ test("Test D & G: Unsupported diagnosis/hypothesis does not become an asserted f
 
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
 
-  assert.ok(summary.handoffsCreated >= 1);
-  assert.ok(createdHandoffBody, "handoff should be created");
-  assert.strictEqual(createdHandoffBody.properties.Entity_Token.rich_text[0].text.content, "E-UNBOUND", "Entity_Token must remain opaque non-resolvable reference token");
-  assert.strictEqual(createdHandoffBody.properties.Matter_Token.rich_text[0].text.content, "M-UNBOUND", "Matter_Token must remain opaque non-resolvable reference token");
+  // The screening still happens and still passes -- what is refused is the
+  // governed write, not the analysis. PENDING ARCHITECT DECISION, as in Test A.
+  assert.ok(summary.evaluated >= 1, "the candidate is still evaluated; only the write is refused");
+  assert.strictEqual(createdHandoffBody, undefined, "the R&I Work Handoff create is refused while no Action authorizes it");
+  assert.strictEqual(summary.handoffsCreated, 0);
 });
 
 test("Test E & F: Repeated execution idempotency & unrelated closed R&I Handoff ignored", async (t) => {
@@ -481,7 +647,32 @@ test("notifyDiscoveryRunSummary catches Telegram errors gracefully without throw
   assert.strictEqual(success, false, "notifyDiscoveryRunSummary should return false when Telegram fetch throws");
 });
 
-test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly without throwing", async () => {
+test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly without throwing", async (t) => {
+  // This test used to reach the real Telegram API. `notifyDiscoveryRunSummary`
+  // resolves the Operations target from the Env rather than from the chatId
+  // argument, so an invalid chatId does NOT short-circuit the send -- it
+  // proceeds and Telegram rejects it. That made this test's result depend on
+  // ambient network behaviour, which is how it came to hang indefinitely
+  // wherever an outbound connection blackholes instead of failing fast. A
+  // test must never reach the network; Telegram's own rejection is simulated
+  // here, which is also the more faithful thing to assert.
+  const originalFetch = globalThis.fetch;
+  const sentChatIds: unknown[] = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    // Only Telegram sends are counted: a failed notification also writes an
+    // Activity & Decision Log entry, and conflating the two would make this
+    // assert on bookkeeping rather than on the send.
+    if (!String(url).includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ id: "activity-log-entry", properties: {} }), { status: 200 });
+    }
+    const body = typeof init?.body === "string" ? (JSON.parse(init.body) as { chat_id?: unknown }) : {};
+    sentChatIds.push(body.chat_id);
+    return new Response(JSON.stringify({ ok: false, description: "Bad Request: chat not found" }), { status: 400 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   const success1 = await notifyDiscoveryRunSummary(fakeEnv(), NaN, undefined, {
     evaluated: 1,
     handoffsCreated: 0,
@@ -490,7 +681,7 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
     skippedAsDuplicate: 0,
     skippedAsInsufficient: 0,
   });
-  assert.strictEqual(success1, false);
+  assert.strictEqual(success1, false, "a rejected notification reports failure rather than throwing");
 
   const success2 = await notifyDiscoveryRunSummary(fakeEnv(), 0, undefined, {
     evaluated: 1,
@@ -501,6 +692,11 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
     skippedAsInsufficient: 0,
   });
   assert.strictEqual(success2, false);
+
+  // Both calls must actually attempt a notification rather than silently
+  // skipping one -- a silent skip would also report `false`, so the count is
+  // what distinguishes "handled an invalid chatId" from "never tried".
+  assert.ok(sentChatIds.length >= 2, `both calls must reach Telegram and be refused, not silently skipped (saw ${sentChatIds.length})`);
 });
 
 test("Requirement 1 & 2: Successful discovery with failed notification still returns successful processing summary and records notification failure", async (t) => {
@@ -613,6 +809,20 @@ test("proposeLeadOpportunity sets pendingLeadOpportunity and presents evidence-b
       if (body.parent?.data_source_id === "leads-ds") leadCreated = true;
       return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -658,6 +868,20 @@ test("handleLeadOpportunityApproval clears pendingActionSummary alongside pendin
     if (String(url).includes("/data_sources") && String(url).includes("/query")) {
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -670,13 +894,17 @@ test("handleLeadOpportunityApproval clears pendingActionSummary alongside pendin
 
   const resolved = await handleLeadOpportunityApproval(fakeEnv(), proposed, true);
   assert.strictEqual(resolved.pendingActionSummary, undefined, "resolving the approval must clear pendingActionSummary");
-  assert.strictEqual(leadCreateCount, 1);
+  // PENDING ARCHITECT DECISION: the Lead create is refused, because no
+  // registered Action authorizes it under `discover_leads` (a read Action).
+  // The approval-gate behaviour under test here -- the staged opportunity is
+  // consumed exactly once -- is still asserted by the stale-tap half below.
+  assert.strictEqual(leadCreateCount, 0, "the Lead create is refused while no Action authorizes it");
 
   // Simulate a resurfaced (stale) tap on the same, already-resolved item --
   // e.g. Martin taps an old /sessions-resurfaced button after already
   // approving via the original message. Must not create a second Lead.
   const staleTapResult = await handleLeadOpportunityApproval(fakeEnv(), resolved, true);
-  assert.strictEqual(leadCreateCount, 1, "a stale approval tap must not execute the action a second time");
+  assert.strictEqual(leadCreateCount, 0, "a stale approval tap must not execute the action a second time");
   assert.ok(lastSentText.includes("No valid pending opportunity"), "a stale tap must reply that there's nothing pending");
   assert.strictEqual(staleTapResult.pendingActionSummary, undefined);
 });
@@ -703,6 +931,20 @@ test("handleLeadOpportunityApproval creates a Lead only on explicit approval", a
       }
       return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -713,10 +955,15 @@ test("handleLeadOpportunityApproval creates a Lead only on explicit approval", a
   const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
 
   assert.strictEqual(updated.pendingLeadOpportunity, undefined, "pending state must be cleared once decided");
-  assert.ok(leadProps, "a Lead should be created on explicit approval");
-  assert.deepStrictEqual(leadProps.Status, { select: { name: "New" } });
-  assert.strictEqual(leadProps.Organisation.rich_text[0].text.content, "Zenith Co");
-  assert.ok(sentText.includes("Lead recorded"));
+  // PENDING ARCHITECT DECISION, as in Test A: Martin's approval is required and
+  // present, and the Lead create is still refused, because `discover_leads` is a
+  // read Action and no registered Action authorizes committing a Lead. The
+  // approval requirement itself is therefore currently untestable end-to-end --
+  // it is the ONLY thing standing between a screened candidate and a client
+  // record, and it is not being exercised. That is the risk this decision
+  // carries, stated rather than assumed away.
+  assert.strictEqual(leadProps, null, "the Lead create is refused while no Action authorizes it");
+  assert.ok(!sentText.includes("Lead recorded"), "no success message may be sent for a write that did not happen");
 });
 
 test("handleLeadOpportunityApproval creates no Lead on rejection", async (t) => {
@@ -734,6 +981,20 @@ test("handleLeadOpportunityApproval creates no Lead on rejection", async (t) => 
       const body = JSON.parse(init.body ?? "{}");
       if (body.parent?.data_source_id === "leads-ds") leadCreated = true;
       return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;
@@ -790,6 +1051,20 @@ test("handleLeadOpportunityApproval refuses to create a duplicate Lead even afte
       if (body.parent?.data_source_id === "leads-ds") leadCreated = true;
       return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;
   t.after(() => {
@@ -816,6 +1091,20 @@ test("LeadOpportunityDiscoveryCapability ignores messages that aren't discovery 
     }
     if (body.includes("on-demand discovery capability")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ isDiscoveryRequest: false }) } }] }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;
@@ -870,6 +1159,20 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and creates
     if (body.includes("evidence-threshold hard gate")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: PASS_EVALUATION } }] }), { status: 200 });
     }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${urlStr}`);
   }) as typeof fetch;
   t.after(() => {
@@ -885,7 +1188,9 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and creates
   assert.strictEqual(handled, true);
   assert.ok(ackText.includes("Searching for organisations"));
   assert.ok(ackText.includes("positioning problem"));
-  assert.ok(handoffsCreatedCount >= 1, "at least one R&I Handoff should be created from the on-demand queries");
+  // PENDING ARCHITECT DECISION, as in Test A: the R&I Handoff create is refused
+  // under `discover_leads`, so the queries run and no Handoff is produced.
+  assert.strictEqual(handoffsCreatedCount, 0, "the R&I Handoff create is refused while no Action authorizes it");
   assert.strictEqual(leadsCreatedCount, 0, "on-demand discovery must never create a Lead directly");
 });
 
@@ -907,6 +1212,20 @@ test("LeadOpportunityDiscoveryCapability fails closed when search strategy gener
     }
     if (body.includes("on-demand discovery capability")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ isDiscoveryRequest: true, count: 3, focus: "positioning problem" }) } }] }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch: ${urlStr}`);
   }) as typeof fetch;
@@ -935,6 +1254,20 @@ test("LeadOpportunityDiscoveryCapability fails closed when web search isn't conf
     }
     if (body.includes("on-demand discovery capability")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ isDiscoveryRequest: true, count: 3 }) } }] }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
     }
     throw new Error(`Unexpected fetch: ${url}`);
   }) as typeof fetch;

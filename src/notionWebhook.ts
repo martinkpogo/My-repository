@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { systemContext } from "./access";
 import { getPage, plainText } from "./notion";
 import { runCheckHandoffs } from "./checkHandoffs";
 
@@ -203,7 +204,7 @@ export async function handleNotionWebhookRequest(request: Request, env: Env, ctx
 
   let page;
   try {
-    page = await getPage(env, pageId);
+    page = await getPage(env, pageId, systemContext());
   } catch (err) {
     console.error(`Notion webhook: failed to retrieve page ${pageId}`, err);
     // The event itself was authentic; retrieval failing is an operational

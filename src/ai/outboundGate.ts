@@ -84,10 +84,22 @@ function escapeForRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const GOVERNANCE_CONTENT_PATTERN = new RegExp(
-  `${escapeForRegExp(GOVERNANCE_CONTENT_START)}[\\s\\S]*?${escapeForRegExp(GOVERNANCE_CONTENT_END)}`,
-  "g",
-);
+// Built on first use, not at module scope. governance.ts needs Access (it
+// reads governance pages through src/notion.ts), Access needs the Unit
+// registry, and every manifest in that registry ends up importing this module
+// -- so the two are in a cycle, and reading governance's exported marker
+// constants while that cycle is still being entered leaves them in their
+// temporal dead zone. Deferring the read to call time makes the value depend
+// on nothing but the markers themselves; the pattern is identical either way.
+let governanceContentPattern: RegExp | undefined;
+
+function governanceContentPatternOnce(): RegExp {
+  governanceContentPattern ??= new RegExp(
+    `${escapeForRegExp(GOVERNANCE_CONTENT_START)}[\\s\\S]*?${escapeForRegExp(GOVERNANCE_CONTENT_END)}`,
+    "g",
+  );
+  return governanceContentPattern;
+}
 
 /**
  * Strips every Architect-authored governance block (see
@@ -109,7 +121,11 @@ const GOVERNANCE_CONTENT_PATTERN = new RegExp(
  * sanitizedContext) is never wrapped and stays fully scanned.
  */
 function stripGovernanceContent(text: string): string {
-  return text.replace(GOVERNANCE_CONTENT_PATTERN, "");
+  // lastIndex must be reset: this is a /g pattern held in a module-level
+  // cache, and String.replace leaves it mid-string for the next caller.
+  const pattern = governanceContentPatternOnce();
+  pattern.lastIndex = 0;
+  return text.replace(pattern, "");
 }
 
 // ---------------------------------------------------------------------------

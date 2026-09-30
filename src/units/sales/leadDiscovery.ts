@@ -4,6 +4,7 @@ import { generate } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
+import { discoveryCronContext, workSessionReadContext } from "../../access";
 
 /**
  * Canonical Notion governance for this Hat. Explicit page ID, not title
@@ -170,7 +171,7 @@ export interface LeadDuplicateMatch {
 export async function findDuplicateLeads(env: Env, name: string, contact: string): Promise<LeadDuplicateMatch[]> {
   const matches: LeadDuplicateMatch[] = [];
 
-  const existingLeads = await queryDataSource(env, env.LEADS_DATA_SOURCE_ID, {
+  const existingLeads = await queryDataSource(env, env.LEADS_DATA_SOURCE_ID, workSessionReadContext(),  {
     property: "Lead",
     title: { contains: name },
   });
@@ -179,7 +180,7 @@ export async function findDuplicateLeads(env: Env, name: string, contact: string
   }
 
   if (contact) {
-    const byContactDetails = await queryDataSource(env, env.LEADS_DATA_SOURCE_ID, {
+    const byContactDetails = await queryDataSource(env, env.LEADS_DATA_SOURCE_ID, workSessionReadContext(),  {
       property: "Contact Details",
       rich_text: { contains: contact },
     });
@@ -230,7 +231,7 @@ async function resolveExplicitEntity(env: Env, entityRef: string, leadName: stri
   }
 
   try {
-    const page = await getPage(env, pageId);
+    const page = await getPage(env, pageId, workSessionReadContext());
     const entityName = plainText(page.properties.Name);
     const a = entityName.toLowerCase();
     const b = leadName.toLowerCase();
@@ -330,7 +331,7 @@ export async function handleLeadDiscoverySignal(env: Env, chatId: number, thread
       // belongs to Sales Executive's own authority to set, not this Hat's.
       Status: select("New"),
       ...(entityResolution.status === "matched" ? { Entity: relation([entityResolution.entityId]) } : {}),
-    });
+    }, discoveryCronContext());
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Lead Generation Specialist: Leads database write/query failed for ${signal.name}`, err);

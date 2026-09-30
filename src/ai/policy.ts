@@ -36,12 +36,29 @@ const DEFAULT_PROVIDERS: AiProvider[] = [
 export class AiPolicyExecutor {
   private providers: AiProvider[];
   private dataBoundaryEvaluator: DataBoundaryEvaluator;
-  private outboundDataGate: OutboundDataGateEvaluator;
+  private outboundDataGateOverride?: OutboundDataGateEvaluator;
 
   constructor(providers?: AiProvider[], dataBoundaryEvaluator?: DataBoundaryEvaluator, outboundDataGate?: OutboundDataGateEvaluator) {
     this.providers = providers ?? DEFAULT_PROVIDERS;
     this.dataBoundaryEvaluator = dataBoundaryEvaluator ?? defaultDataBoundaryEvaluator;
-    this.outboundDataGate = outboundDataGate ?? defaultOutboundDataGateEvaluator;
+    this.outboundDataGateOverride = outboundDataGate;
+  }
+
+  /**
+   * The gate this executor evaluates with, resolved on use rather than in the
+   * constructor.
+   *
+   * `defaultPolicyExecutor` is built at module scope below, and this module
+   * sits in the cycle src/access.ts -> src/units/registry.ts -> every Unit
+   * manifest -> src/ai (this file) -> src/ai/outboundGate.ts -> src/governance.ts
+   * -> src/notion.ts -> src/access.ts. Reading the default gate's binding while
+   * that cycle is still being entered would leave it in its temporal dead zone,
+   * so the default is resolved at first evaluate instead. An explicitly
+   * injected gate still wins, exactly as before -- only when one was omitted
+   * does this fall back to the module default.
+   */
+  private get outboundDataGate(): OutboundDataGateEvaluator {
+    return this.outboundDataGateOverride ?? defaultOutboundDataGateEvaluator;
   }
 
   /**

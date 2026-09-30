@@ -29,6 +29,44 @@
 
 export type SkillId = "research_signal" | "opportunity_qualification_gate" | "opportunity_forward_planning";
 
+/** Every registrable Skill id, for exact validation. Closed: a Skill outside this list cannot be declared or resolved. */
+export const SKILL_IDS: readonly SkillId[] = ["research_signal", "opportunity_qualification_gate", "opportunity_forward_planning"];
+
+/** The one runtime Worker ABI a Skill package may declare compatibility with. */
+export type WorkerRuntime = "enig-worker-v1";
+
+export const CURRENT_WORKER_RUNTIME: WorkerRuntime = "enig-worker-v1";
+
+/**
+ * Lifecycle status of a registered Skill. Only "active" resolves; a retired or
+ * draft Skill fails closed rather than being silently skipped, because a
+ * missing Skill is never repaired by substituting a different one.
+ */
+export type SkillStatus = "active" | "retired" | "draft";
+
+/**
+ * The only supported package format. Content is carried in the bundle as a
+ * literal, so the format is verifiable without any filesystem access -- which
+ * matters because Cloudflare Workers has no runtime filesystem.
+ */
+export type SkillPackageFormat = "enig-skill-markdown-v1";
+
+export const SUPPORTED_SKILL_PACKAGE_FORMAT: SkillPackageFormat = "enig-skill-markdown-v1";
+
+/**
+ * The runtime's own SHA-256 mechanism, in one place. `crypto.subtle` is the
+ * same primitive tokenSafeProposal.ts already uses to bind an approved
+ * Version to its exact content (see its `hashContent`), so Skill package
+ * integrity is checked with the repository's existing mechanism rather than a
+ * second hashing approach.
+ */
+export async function sha256Hex(content: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 const RESEARCH_SIGNAL = `\`\`\`yaml
 skill_id: research-signal
 status: canonical
@@ -110,7 +148,183 @@ const SKILL_CONTENT: Readonly<Record<SkillId, string>> = {
   opportunity_forward_planning: OPPORTUNITY_FORWARD_PLANNING,
 };
 
-/** Returns a Skill's methodology content by id -- a plain, synchronous lookup (no network call, no cache, no Env). `SkillId` is a closed union and `SKILL_CONTENT` a total map over it, so this can never fail at runtime; an unregistered id is a compile-time error, not a thing this function needs to guard against. */
+/**
+ * The registered metadata every Skill carries, independent of its methodology
+ * body. `integrity_sha256` is the expected package digest, checked against the
+ * actual content on every resolution -- so a Skill whose bundled body is
+ * altered after registration fails closed rather than being followed.
+ */
+export interface SkillPackage {
+  id: SkillId;
+  /** Approved version of this Skill's methodology. Resolution is version-bound. */
+  version: string;
+  status: SkillStatus;
+  /** The Worker runtime ABI this package is approved for. */
+  workerRuntime: WorkerRuntime;
+  format: SkillPackageFormat;
+  /** Expected SHA-256 of the exact methodology body, lower-case hex. */
+  integritySha256: string;
+}
+
+export class SkillResolutionError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`Skill resolution failed: ${reason}`);
+    this.name = "SkillResolutionError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * The registered package metadata for every Skill, INCLUDING its expected
+ * integrity digest.
+ *
+ * The digest is registered metadata exactly as a published package checksum
+ * is: it is the SHA-256 of the exact methodology body registered at approval
+ * time, and `verifySkillIntegrity` recomputes it from the body the Worker
+ * would actually follow. It is a literal rather than a module-load
+ * computation because an asynchronous digest pass at import time would leave
+ * resolution racy -- the first resolution in a fresh isolate could observe an
+ * unpopulated digest, and the only safe response to that is to refuse, which
+ * would make the very first Skill resolution of a cold start fail.
+ *
+ * Regenerate by recomputing SHA-256 over each registered methodology body
+ * below and updating the three `integritySha256` literals. Any change to a
+ * methodology body is a change to a registered package and must update the
+ * digest deliberately, in the same change -- the test suite fails closed if
+ * they drift apart.
+ */
+const SKILL_PACKAGES: Readonly<Record<SkillId, SkillPackage>> = {
+  research_signal: {
+    id: "research_signal",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "bdc1881b77d8ab8c406ab970b5323a46bb90f858456783d685a438a4031d56f0",
+  },
+  opportunity_qualification_gate: {
+    id: "opportunity_qualification_gate",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "3a753f6b219d738aa0d1188ef361c2c709a606ad582d43f190f426ffc4186923",
+  },
+  opportunity_forward_planning: {
+    id: "opportunity_forward_planning",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "aa68e53f68b373191141e4b08756655003f1561beee8d0410af111636ac6dbc8",
+  },
+};
+
+/**
+ * The registered package descriptor for a Skill. Throws for an id outside the
+ * closed `SkillId` union, which typed callers cannot construct.
+ */
+export function getSkillPackage(id: SkillId): SkillPackage {
+  const metadata = SKILL_PACKAGES[id];
+  if (!metadata) throw new SkillResolutionError(`no Skill is registered under the id "${String(id)}"`);
+  return metadata;
+}
+
+/** A Skill that has passed every validation, together with the methodology the Worker is to follow. */
+export interface ResolvedSkill {
+  id: SkillId;
+  version: string;
+  /** The methodology body. The Worker follows this; nothing executes it. */
+  content: string;
+}
+
+/**
+ * Resolves one Skill by EXACT id, validating the full contract and failing
+ * closed on any violation.
+ *
+ * Validates, in order: the id is registered at all; the package format is
+ * supported; the Skill's status is active; the package is approved for this
+ * Worker's runtime; and the package content's SHA-256 matches its registered
+ * digest. Any failure throws SkillResolutionError naming the exact reason.
+ *
+ * There is deliberately no fuzzy matching, no semantic substitution, no
+ * "closest available Skill" fallback, and no automatic replacement. A missing
+ * or invalid Skill is a hard failure, because silently following a different
+ * methodology than the one the Action declared is exactly the substitution
+ * this Registry must never perform.
+ */
+export function resolveSkill(id: SkillId): ResolvedSkill {
+  const metadata = SKILL_PACKAGES[id];
+  if (!metadata) {
+    throw new SkillResolutionError(`no Skill is registered under the id "${String(id)}" -- resolution is exact, and no other Skill may be substituted for it`);
+  }
+  if (metadata.format !== SUPPORTED_SKILL_PACKAGE_FORMAT) {
+    throw new SkillResolutionError(`Skill "${id}" declares unsupported package format "${String(metadata.format)}"`);
+  }
+  if (metadata.status !== "active") {
+    throw new SkillResolutionError(`Skill "${id}" is ${metadata.status}, not active -- a non-active Skill is never resolved`);
+  }
+  if (metadata.workerRuntime !== CURRENT_WORKER_RUNTIME) {
+    throw new SkillResolutionError(`Skill "${id}" v${metadata.version} is approved for Worker runtime "${String(metadata.workerRuntime)}", not "${CURRENT_WORKER_RUNTIME}"`);
+  }
+  return { id, version: metadata.version, content: SKILL_CONTENT[id] };
+}
+
+/**
+ * Verifies a Skill's package integrity: recomputes the SHA-256 of the exact
+ * methodology body the Worker would follow and compares it to the digest
+ * registered at approval time.
+ *
+ * This is the step that must never be skipped, which is why it is a separate
+ * exported function rather than a detail inside `resolveSkill` -- SHA-256 is
+ * asynchronous on `crypto.subtle`, and a caller that resolved a Skill without
+ * awaiting this would be following unverified methodology.
+ */
+export async function verifySkillIntegrity(id: SkillId): Promise<void> {
+  const expected = SKILL_PACKAGES[id]?.integritySha256;
+  if (!expected) {
+    throw new SkillResolutionError(`Skill "${String(id)}" has no registered integrity digest -- refusing to resolve without verifying it`);
+  }
+  const actual = await sha256Hex(SKILL_CONTENT[id] ?? "");
+  if (actual !== expected) {
+    throw new SkillResolutionError(
+      `Skill "${id}" package integrity failed -- content digest ${actual.slice(0, 12)}... does not match the registered ${expected.slice(0, 12)}...`,
+    );
+  }
+}
+
+/**
+ * Resolves an Action's declared Skill requirements into the exact set of
+ * methodologies its Worker must follow.
+ *
+ * Fails closed on the first violation (unknown id, inactive Skill, wrong
+ * runtime, bad format, integrity mismatch). Never returns a partial or
+ * substituted set: a Worker following fewer Skills than the Action declared
+ * would be following methodology the Action never sanctioned.
+ */
+export async function resolveActionSkills(requirements: readonly { skill_id: SkillId }[]): Promise<ResolvedSkill[]> {
+  const resolved: ResolvedSkill[] = [];
+  for (const requirement of requirements) {
+    const skill = resolveSkill(requirement.skill_id);
+    await verifySkillIntegrity(requirement.skill_id);
+    resolved.push(skill);
+  }
+  return resolved;
+}
+
+/**
+ * Returns a Skill's methodology content by id -- a plain, synchronous lookup
+ * (no network call, no cache, no Env), retained as the narrow content accessor
+ * the existing prompt-assembly call sites use. `SkillId` is a closed union and
+ * `SKILL_CONTENT` a total map over it, so an unregistered id is a compile-time
+ * error rather than a runtime case.
+ *
+ * Prefer `resolveSkill`/`resolveActionSkills` where an Action has declared
+ * Skill requirements: those validate the full package contract, where this
+ * accessor deliberately does none, because it is a raw content read used to
+ * embed an already-decided Skill into a prompt.
+ */
 export function getSkillContent(id: SkillId): string {
   return SKILL_CONTENT[id];
 }

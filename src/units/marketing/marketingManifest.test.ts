@@ -59,6 +59,20 @@ function mockTelegramFetch(t: any) {
     if (String(url).includes("api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
+    if (url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in marketingManifest test: ${url}`);
   }) as typeof fetch;
   t.after(() => {

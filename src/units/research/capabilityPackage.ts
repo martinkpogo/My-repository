@@ -12,6 +12,30 @@ import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, r
 import type { ResearchSynthesis } from "./evidence";
 import { applyEvidenceSourceValidationGate } from "./evidence";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
+import type { AccessContext } from "../../access";
+import { mintApprovalProofForWork, workSessionContext } from "../../access";
+import type { ApprovalProof } from "../../types";
+
+/**
+ * The Access context for an operation performed on behalf of this Work item's
+ * own recorded Action, optionally carrying an ApprovalProof a verified
+ * approval callback has just minted by consuming the staged research handoff
+ * approval it corresponds to.
+ *
+ * The Action is NOT named here. It is read off the Work by
+ * `workSessionContext(state)`, which is the whole point: a helper in this
+ * module cannot choose which Action its write is judged by, and so cannot
+ * quietly perform a privileged step under a laxer one.
+ *
+ * `research`'s only approval-gated governed effect is the outbound Handoff
+ * it creates (see researchManifest.ts), so a proof is supplied only at that
+ * createHandoff. The inbound Handoff's lifecycle transitions need none -- the
+ * Action is `write`, so they are permitted, and ungated because the Action
+ * that commits them is not itself the gated one.
+ */
+function researchAccess(state: WorkState, proof?: ApprovalProof) {
+  return workSessionContext(state, proof);
+}
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { generateResearchPlan } from "./researchPlan";
 import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
@@ -169,9 +193,9 @@ interface RelevanceResult {
  * traversing or discovering unrelated records, per the closed-context
  * rule the R&I Capability Package executes under.
  */
-export async function resolveResearchHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
+export async function resolveResearchHandoffContext(env: Env, handoffId: string, access: AccessContext): Promise<HandoffContextEvaluationResult> {
   try {
-    const handoff = await getPage(env, handoffId);
+    const handoff = await getPage(env, handoffId, access);
     const sanitizedContext = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
@@ -231,7 +255,7 @@ async function requireSafeContext(env: Env, state: WorkState): Promise<string | 
       await updateHandoff(env, state.handoffId, {
         Status: select("Held"),
         "Open Questions": richText("Research-Safe Consultancy Context unavailable or invalid in Notion -- blocked pending resolution."),
-      }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
+      }, researchAccess(state)).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
     }
     await sendWorkspaceHatMessage(
       env,
@@ -278,7 +302,7 @@ Return JSON: {"relevance": "<1-3 sentence reframing>"}`,
 }
 
 export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
-  const evalResult = await resolveResearchHandoffContext(env, state.handoffId!);
+  const evalResult = await resolveResearchHandoffContext(env, state.handoffId!, workSessionContext(state));
   if (!evalResult.success) {
     console.error(`R&I handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
     await logActivity(env, {
@@ -301,7 +325,7 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   state.researchQuestion = capResearchText(evalResult.contract.sanitizedContext);
   state.researchContext = capResearchText(evalResult.contract.sanitizedContext);
 
-  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, researchAccess(state));
   await logActivity(env, {
     entry: `R&I picked up research request: ${state.matterToken || state.entityToken || state.workId}`,
     type: "Activity",
@@ -455,7 +479,7 @@ async function handleBlockedOrAmbiguous(env: Env, state: WorkState, reasonText: 
     await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText(reasonText.slice(0, 1900)),
-    }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
+    }, researchAccess(state)).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
   }
   await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `${reasonText}\n\nCan you clarify what's needed?`);
   state.stage = "research_ambiguous";
@@ -519,7 +543,7 @@ async function runSynthesis(env: Env, state: WorkState): Promise<WorkState> {
   // search provider is configured, exactly like the old behavior. Real
   // fetched URLs/snippets become part of the supplied evidence below, so
   // findUnverifiableSources naturally extends to verify against them.
-  const dimensionEvidence = await gatherDimensionEvidence(env, plan);
+  const dimensionEvidence = await gatherDimensionEvidence(env, plan, researchAccess(state));
   const { covered, uncovered } = assessDimensionCoverage(dimensionEvidence);
   const webResultCount = covered.reduce((sum, d) => sum + d.results.length, 0);
   const webEvidence = formatDimensionEvidenceForContext(dimensionEvidence);
@@ -621,7 +645,7 @@ async function handleSynthesisFailure(env: Env, state: WorkState, reasonText: st
     await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
       "Open Questions": richText(reasonText.slice(0, 1900)),
-    }).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
+    }, researchAccess(state)).catch((err) => console.error(`R&I: failed to mark Handoff ${state.handoffId} Held`, err));
   }
   await sendWorkspaceHatMessage(env, { ...state, hat: "Research & Intelligence Analyst" }, `${reasonText}\n\nTell me more about what's needed and I'll try again.`);
   state.stage = "research_synthesis_failed";
@@ -724,7 +748,7 @@ async function deliverSynthesis(env: Env, state: WorkState, synthesis: ResearchS
     await updateHandoff(env, state.handoffId, {
       Status: select("Closed"),
       "Work Completed": richText(JSON.stringify(synthesis).slice(0, 1900)),
-    });
+    }, researchAccess(state));
   }
   await logActivity(env, {
     entry: `R&I research completed: ${state.matterToken || state.entityToken || state.workId}`,
@@ -902,6 +926,15 @@ export async function handleResearchHandoffApproval(env: Env, state: WorkState, 
         "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
       },
       { entityToken: state.entityToken || "E-UNBOUND", matterToken: state.matterToken || "M-UNBOUND" },
+      // The outbound research Handoff is the governed effect Martin's
+      // approval authorizes. Consuming the staged pending Handoff here is
+      // what mints the proof that permits this create; a replayed callback
+      // finds state.pendingResearchHandoff already undefined and returns
+      // above before reaching this line.
+      researchAccess(
+        state,
+        mintApprovalProofForWork(state, env.HANDOFFS_DATA_SOURCE_ID),
+      ),
     );
     state.pendingResearchHandoff = undefined;
     state.pendingActionSummary = undefined;

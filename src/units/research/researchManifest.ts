@@ -56,8 +56,21 @@ const RESEARCH_PACKAGE_HAT_LABEL = "Research & Intelligence Analyst";
 const researchPackageActions: ActionDefinition<ResearchAction>[] = [
   {
     name: "research",
+    responsibility: "produce_research_packages",
     consequence: "write",
     requiresApproval: true,
+    // Martin's approval gates the outbound Handoff this action creates
+    // (R&I -> the consuming Hat), and creating that Handoff is this
+    // action's only governed effect -- so the action-level
+    // requiresApproval above accurately describes it. The inbound Handoff
+    // this work item was picked up from is execution bookkeeping on a
+    // record it already owns: NOT an approval-gated effect, and needing no
+    // exemption, because no Action here performs it under a gated Action.
+    // (That separation used to be expressed by an `approvalGatedTargets`
+    // list narrowing the gate to handoffs/create. It was removed: a second
+    // field able to silence `requiresApproval` split one authority in two,
+    // and failed open whenever an Action declared the flag but omitted the
+    // list.)
     description:
       "Invoke the Research & Intelligence Capability Package to execute the applicable canonical research Procedure(s), synthesize evidence-backed findings, and either present them for Martin's review or route them to the responsible Hat via a governed Handoff -- always gated on Martin's explicit approval before any outbound Handoff is treated as final.",
   },
@@ -90,6 +103,7 @@ const researchInvocationHat: HatManifest<ResearchAction> = {
   responsibility:
     "Invoke the Research & Intelligence Capability Package's canonical research Procedures to investigate research questions for ENIG, producing evidence-backed synthesis grounded only in verifiable sources -- never a fabricated fact, an unverifiable source, or a preliminary hypothesis presented as a finding. Route synthesis to the responsible Hat via a governed Handoff when the question originated there, or present it directly to Martin otherwise. Never treat an outbound Handoff as final without Martin's explicit approval. Business ownership, authority to act, and accountability for the resulting Output stay with the Responsibility that requested the research.",
   actions: researchPackageActions,
+  responsibilityId: "produce_research_packages",
   readHandler: researchReadHandler,
   entryHandler: researchEntryHandler,
   awaitingHandlers: {},

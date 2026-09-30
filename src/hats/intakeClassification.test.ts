@@ -29,8 +29,8 @@ test("buildStage1SystemPrompt: is Unit-agnostic -- no Marketing-specific wording
 type ToyAction = "lookup_status" | "update_record";
 
 const TOY_ACTIONS: ActionDefinition<ToyAction>[] = [
-  { name: "lookup_status", consequence: "read", description: "Read-only status lookup." },
-  { name: "update_record", consequence: "write", description: "Mutates governed state." },
+  { name: "lookup_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, description: "Read-only status lookup." },
+  { name: "update_record", responsibility: "toy_responsibility", consequence: "write", requiresApproval: false, description: "Mutates governed state." },
 ];
 
 test("buildActionClassificationSystemPrompt: embeds the caller's intro line and every action's name/description verbatim", () => {

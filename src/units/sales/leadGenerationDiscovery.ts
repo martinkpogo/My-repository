@@ -10,6 +10,7 @@ import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegra
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
 import { getSessionStub, newWorkId } from "../../sessionRouting";
+import { discoveryCronContext, workSessionContext, type AccessContext } from "../../access";
 
 /**
  * Autonomous counterpart to the Martin-supplied /lead command in
@@ -166,7 +167,7 @@ export const LGS_HANDOFF_ORIGIN_MARKER = "LGS Autonomous Lead Discovery";
  */
 async function findExistingLGSResearchHandoff(env: Env, organisation: string, sourceUrl: string): Promise<boolean> {
   try {
-    const handoffs = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    const handoffs = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
       and: [
         { property: "From Unit", select: { equals: "Sales" } },
         { property: "To Unit", select: { equals: "Research & Intelligence" } },
@@ -242,7 +243,7 @@ async function evaluateResearchAgainstAcquisitionCriteria(
  */
 export async function processCompletedLGSResearchHandoffs(env: Env, summary: DiscoveryRunSummary): Promise<void> {
   try {
-    const completedHandoffs = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, {
+    const completedHandoffs = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
       and: [
         { property: "From Unit", select: { equals: "Sales" } },
         { property: "To Unit", select: { equals: "Research & Intelligence" } },
@@ -332,6 +333,12 @@ export async function processCompletedLGSResearchHandoffs(env: Env, summary: Dis
         // is purely the WorkState's own identity, not where the message lands.
         await stub.init(workId, Number(env.MARTIN_TELEGRAM_USER_ID), "Sales", "Lead Generation Specialist", undefined, {
           handoffId: handoff.id,
+          // `discover_leads` is Lead Generation Specialist's one registered
+          // Action: finding, screening and presenting candidate opportunities.
+          // The Work records it so Access can resolve it; see the report for
+          // the consequence that committing an approved Lead is a separate
+          // operation with no registered Action behind it.
+          actionName: "discover_leads",
         });
         await stub.proposeLeadOpportunity({
           organisation: evalResult.organisation,
@@ -482,6 +489,13 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
   }
 
   try {
+    // Authorized as a governed write, judged against the Action this Work
+    // records. That Action is discover_leads -- a READ action -- because
+    // searching for and screening opportunities is exactly what it is, and
+    // a read Action must never authorize a write (see access.ts's
+    // consequencePermits). Access refuses this create for that reason, by
+    // design: committing a Lead record is a different operation from finding
+    // candidates, and the registry declares no Action for it yet.
     const page = await createPage(env, env.LEADS_DATA_SOURCE_ID, {
       Lead: title(opportunity.organisation),
       Organisation: richText(opportunity.organisation),
@@ -490,7 +504,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
       Source: richText(opportunity.sourceUrl || ""),
       "Discovery Evidence": richText(opportunity.evidence),
       Status: select("New"),
-    });
+    }, workSessionContext(state));
 
     await logActivity(env, {
       entry: `Lead recorded (Martin-approved opportunity): ${opportunity.organisation}`,
@@ -535,8 +549,8 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
  * share the exact same screening discipline and the exact same downstream
  * approval gate (Phase 2 -- see processCompletedLGSResearchHandoffs).
  */
-async function searchAndHandoffForQuery(env: Env, query: string, summary: DiscoveryRunSummary): Promise<void> {
-  const results = (await searchWeb(env, query)).slice(0, MAX_RESULTS_PER_QUERY);
+async function searchAndHandoffForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext): Promise<void> {
+  const results = (await searchWeb(env, query, access)).slice(0, MAX_RESULTS_PER_QUERY);
   if (results.length === 0) return;
 
   const evaluations = await evaluateCandidates(env, results);
@@ -589,6 +603,11 @@ async function searchAndHandoffForQuery(env: Env, query: string, summary: Discov
       // real Entity_Token/Matter_Token, and no entityName/matterName
       // identity is passed to the validator (none exists yet to check
       // against). See handoffWriter.ts's HandoffIdentity doc comment.
+      // The scheduled/on-demand discovery run executes outside any Work item,
+      // so there is no recorded Action behind this governed create. Access will
+      // refuse it rather than let a Kernel-run loop write a governed Handoff
+      // with no operation of record -- see the report for the Architect decision
+      // this now requires.
       await createHandoff(
         env,
         {
@@ -608,6 +627,7 @@ async function searchAndHandoffForQuery(env: Env, query: string, summary: Discov
           ),
         },
         { entityToken: "E-UNBOUND", matterToken: "M-UNBOUND" },
+        discoveryCronContext(),
       );
       summary.handoffsCreated++;
       await logActivity(env, {
@@ -645,9 +665,12 @@ export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRun
     return summary;
   }
 
-  // Phase 1: Search & lightweight screening -> create R&I Work Handoffs
+  // Phase 1: Search & lightweight screening -> create R&I Work Handoffs.
+  // This is the Kernel's own scheduled loop, not a Unit's Work item, so the
+  // outbound search is authorized as a Kernel-owned read rather than under any
+  // registered Action -- see evaluateExternalEgress.
   for (const query of DISCOVERY_QUERIES) {
-    await searchAndHandoffForQuery(env, query, summary);
+    await searchAndHandoffForQuery(env, query, summary, discoveryCronContext());
   }
 
   // Phase 2: Consume completed R&I research -> evaluate criteria -> present for Martin's approval
@@ -786,7 +809,10 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
 
     const runSummary = emptyDiscoveryRunSummary();
     for (const query of queries) {
-      await searchAndHandoffForQuery(env, query, runSummary);
+      // Same Kernel-owned read as the scheduled loop above: an on-demand
+      // discovery request runs the same discovery capability, so it is
+      // authorized the same way.
+      await searchAndHandoffForQuery(env, query, runSummary, discoveryCronContext());
     }
 
     await logActivity(env, {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { uniqueId, queryDataSource } from "./notion";
 import type { Env } from "./types";
+import { systemContext } from "./access";
 
 function fakeEnv(): Env {
   return {
@@ -70,7 +71,7 @@ test("queryDataSource excludes archived/trashed pages from results", async (t) =
     globalThis.fetch = originalFetch;
   });
 
-  const results = await queryDataSource(fakeEnv(), "handoffs-ds", { property: "Status", select: { equals: "Pending" } });
+  const results = await queryDataSource(fakeEnv(), "handoffs-ds", systemContext(),  { property: "Status", select: { equals: "Pending" } });
 
   assert.deepStrictEqual(results.map((r) => r.id), ["live-page"], "archived/trashed pages must never be returned as discoverable work");
 });

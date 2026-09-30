@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { createHandoff, updateHandoff, validateHandoffProperties, HandoffWriteViolationError } from "./handoffWriter";
 import { richText, select, title } from "./notion";
 import type { Env } from "./types";
+import { mintApprovalProof, type AccessContext } from "./access";
 
 function fakeEnv(): Env {
   return {
@@ -25,12 +26,34 @@ function fakeEnv(): Env {
   };
 }
 
-/** Mocks global fetch to capture the outgoing Notion request body and return a minimal successful page response. */
+/**
+ * Mocks global fetch to capture the outgoing Notion request body and return a
+ * minimal successful page response.
+ *
+ * A GET of an existing page carries its `parent`, because that is now how
+ * src/notion.ts resolves a page's real target: an update is authorized against
+ * the data source the page actually lives in, read back from Notion, rather
+ * than against anything the caller claims. A page with no parent resolves to
+ * no governed source at all, which is exactly what these updates must refuse
+ * to do -- so the mock has to be shaped like the real API, not flatter than it.
+ */
 function mockNotionFetch(t: any) {
   const calls: { method: string; path: string; body: any }[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
-    calls.push({ method: init.method ?? "GET", path: String(url), body: init.body ? JSON.parse(init.body as string) : undefined });
+    const method = init.method ?? "GET";
+    calls.push({ method, path: String(url), body: init.body ? JSON.parse(init.body as string) : undefined });
+    if (method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "page-1",
+          url: "https://notion.so/page-1",
+          parent: { type: "data_source_id", data_source_id: "handoffs-ds" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     return new Response(JSON.stringify({ id: "page-1", url: "https://notion.so/page-1", properties: {} }), { status: 200 });
   }) as typeof fetch;
   t.after(() => {
@@ -40,6 +63,54 @@ function mockNotionFetch(t: any) {
 }
 
 const baseIdentity = { entityToken: "E-20", matterToken: "MAT-20" };
+
+/**
+ * The Access context a Handoff CREATE is made under: Strategy Analyst's own
+ * `diagnose` Action, whose only approval-gated governed effect is precisely the
+ * outbound Handoff it creates -- so the create carries the proof Martin's
+ * approval of that button produced.
+ *
+ * These cases are about the identity-write boundary, not about gating, so the
+ * gating is satisfied properly here rather than worked around: minting a real
+ * proof means every create below is authorized exactly as production is.
+ */
+function createAccess(env: Env): AccessContext {
+  return {
+    kind: "work_session",
+    workId: "work-1",
+    unit: "Strategy",
+    hat: "Strategy Analyst",
+    actionName: "diagnose",
+    proof: mintApprovalProof({
+      workId: "work-1",
+      actionName: "diagnose",
+      targetDataSourceId: env.HANDOFFS_DATA_SOURCE_ID,
+      // Fixed so a failure is reproducible rather than dependent on a fresh uuid.
+      token: "test-approval-token-0001",
+    }),
+  };
+}
+
+/**
+ * The Access context a Handoff LIFECYCLE UPDATE is made under.
+ *
+ * Names the Handoff as the one this Work item was picked up from, which is
+ * what distinguishes a Work advancing its own Handoff from a Unit committing a
+ * governed effect (see isWorkItemHandoffProgression). The writes below are
+ * Status/Work Completed bookkeeping on that inbound Handoff, so they are not
+ * approval-gated -- not because they opted out of gating, but because they
+ * were never the gated operation.
+ */
+function lifecycleAccess(handoffId: string): AccessContext {
+  return {
+    kind: "work_session",
+    workId: "work-1",
+    unit: "Strategy",
+    hat: "Strategy Analyst",
+    actionName: "diagnose",
+    inboundHandoffId: handoffId,
+  };
+}
 
 function validProperties(overrides: Record<string, unknown> = {}) {
   return {
@@ -60,7 +131,7 @@ function validProperties(overrides: Record<string, unknown> = {}) {
 test("createHandoff: a token-only Handoff succeeds", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  const { page, sourceBoundaryAttestation } = await createHandoff(env, validProperties(), baseIdentity);
+  const { page, sourceBoundaryAttestation } = await createHandoff(env, validProperties(), baseIdentity, createAccess(env));
   assert.strictEqual(page.id, "page-1");
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(calls[0].body.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
@@ -76,7 +147,7 @@ test("createHandoff: the returned source-boundary attestation records exactly wh
     ...baseIdentity,
     entityName: "Some Real Entity Name That Never Appears In Fields",
     email: "someone@example.com",
-  });
+  }, createAccess(env));
   assert.deepStrictEqual([...sourceBoundaryAttestation.identityFieldsChecked].sort(), ["email", "entityName"]);
 });
 
@@ -92,6 +163,7 @@ test("createHandoff: normal sanitized business context succeeds", async (t) => {
         ),
       }),
       baseIdentity,
+      createAccess(env),
     ),
   );
 });
@@ -100,10 +172,15 @@ test("updateHandoff: an existing lifecycle update with safe Work Completed succe
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.doesNotReject(() =>
-    updateHandoff(env, "handoff-1", {
-      Status: select("Closed"),
-      "Work Completed": richText("Quoted price: GHS 420000. Rationale: value-based pricing applied to the approved intervention."),
-    }),
+    updateHandoff(
+      env,
+      "handoff-1",
+      {
+        Status: select("Closed"),
+        "Work Completed": richText("Quoted price: GHS 420000. Rationale: value-based pricing applied to the approved intervention."),
+      },
+      lifecycleAccess("handoff-1"),
+    ),
   );
 });
 
@@ -113,7 +190,7 @@ test("createHandoff: real Entity/company name in Handoff title fails", async (t)
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.rejects(
-    () => createHandoff(env, validProperties({ Handoff: title("Commercial diagnosis — Meridian Foods Ghana Ltd") }), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }),
+    () => createHandoff(env, validProperties({ Handoff: title("Commercial diagnosis — Meridian Foods Ghana Ltd") }), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }, createAccess(env)),
     HandoffWriteViolationError,
   );
 });
@@ -122,7 +199,7 @@ test("createHandoff: real Matter name in Handoff title fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.rejects(
-    () => createHandoff(env, validProperties({ Handoff: title("Draft Proposal — Cold Chain Logistics Redesign") }), { ...baseIdentity, matterName: "Cold Chain Logistics Redesign" }),
+    () => createHandoff(env, validProperties({ Handoff: title("Draft Proposal — Cold Chain Logistics Redesign") }), { ...baseIdentity, matterName: "Cold Chain Logistics Redesign" }, createAccess(env)),
     HandoffWriteViolationError,
   );
 });
@@ -131,7 +208,7 @@ test("createHandoff: Entity/company name in Reason fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.rejects(
-    () => createHandoff(env, validProperties({ Reason: richText("Commercial fit approved for Meridian Foods Ghana Ltd.") }), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }),
+    () => createHandoff(env, validProperties({ Reason: richText("Commercial fit approved for Meridian Foods Ghana Ltd.") }), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }, createAccess(env)),
     HandoffWriteViolationError,
   );
 });
@@ -144,7 +221,9 @@ test("createHandoff: Matter name in Verified Facts & Sources fails", async (t) =
       createHandoff(env, validProperties({ "Verified Facts & Sources": richText("Situation concerns the Cold Chain Logistics Redesign matter specifically.") }), {
         ...baseIdentity,
         matterName: "Cold Chain Logistics Redesign",
-      }),
+      },
+      createAccess(env),
+    ),
     HandoffWriteViolationError,
   );
 });
@@ -157,7 +236,9 @@ test("createHandoff: known contact name in a protected field fails", async (t) =
       createHandoff(env, validProperties({ "Required Next Action": richText("Follow up with Comfort Agyare about the timeline.") }), {
         ...baseIdentity,
         contactName: "Comfort Agyare",
-      }),
+      },
+      createAccess(env),
+    ),
     HandoffWriteViolationError,
   );
 });
@@ -166,7 +247,7 @@ test("createHandoff: email address in a protected field fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.rejects(
-    () => createHandoff(env, validProperties({ "Open Questions": richText("Confirm with comfort@meridianfoods.com before proceeding.") }), baseIdentity),
+    () => createHandoff(env, validProperties({ "Open Questions": richText("Confirm with comfort@meridianfoods.com before proceeding.") }), baseIdentity, createAccess(env)),
     HandoffWriteViolationError,
   );
 });
@@ -175,7 +256,7 @@ test("createHandoff: phone number in a protected field fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.rejects(
-    () => createHandoff(env, validProperties({ Assumptions: richText("Contact reachable at +233 24 412 3456 if needed.") }), baseIdentity),
+    () => createHandoff(env, validProperties({ Assumptions: richText("Contact reachable at +233 24 412 3456 if needed.") }), baseIdentity, createAccess(env)),
     HandoffWriteViolationError,
   );
 });
@@ -183,19 +264,19 @@ test("createHandoff: phone number in a protected field fails", async (t) => {
 test("createHandoff: missing Entity_Token fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
-  await assert.rejects(() => createHandoff(env, validProperties(), { entityToken: "", matterToken: "MAT-20" }), HandoffWriteViolationError);
+  await assert.rejects(() => createHandoff(env, validProperties(), { entityToken: "", matterToken: "MAT-20" }, createAccess(env)), HandoffWriteViolationError);
 });
 
 test("createHandoff: missing Matter_Token fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
-  await assert.rejects(() => createHandoff(env, validProperties(), { entityToken: "E-20", matterToken: "" }), HandoffWriteViolationError);
+  await assert.rejects(() => createHandoff(env, validProperties(), { entityToken: "E-20", matterToken: "" }, createAccess(env)), HandoffWriteViolationError);
 });
 
 test("createHandoff: empty (whitespace-only) token fails", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
-  await assert.rejects(() => createHandoff(env, validProperties(), { entityToken: "   ", matterToken: "MAT-20" }), HandoffWriteViolationError);
+  await assert.rejects(() => createHandoff(env, validProperties(), { entityToken: "   ", matterToken: "MAT-20" }, createAccess(env)), HandoffWriteViolationError);
 });
 
 test("updateHandoff: prohibited identity in Work Completed fails", async (t) => {
@@ -207,6 +288,7 @@ test("updateHandoff: prohibited identity in Work Completed fails", async (t) => 
         env,
         "handoff-1",
         { Status: select("Closed"), "Work Completed": richText("Delivered to Meridian Foods Ghana Ltd as agreed.") },
+        lifecycleAccess("handoff-1"),
         { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" },
       ),
     HandoffWriteViolationError,
@@ -218,7 +300,7 @@ test("updateHandoff: prohibited identity in Assumptions fails", async (t) => {
   const env = fakeEnv();
   await assert.rejects(
     () =>
-      updateHandoff(env, "handoff-1", { Assumptions: richText("Assumes Meridian Foods Ghana Ltd confirms budget by month end.") }, { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }),
+      updateHandoff(env, "handoff-1", { Assumptions: richText("Assumes Meridian Foods Ghana Ltd confirms budget by month end.") }, lifecycleAccess("handoff-1"), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }),
     HandoffWriteViolationError,
   );
 });
@@ -228,7 +310,7 @@ test("updateHandoff: prohibited identity in Open Questions fails", async (t) => 
   const env = fakeEnv();
   await assert.rejects(
     () =>
-      updateHandoff(env, "handoff-1", { "Open Questions": richText("Does Meridian Foods Ghana Ltd want a phased rollout?") }, { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }),
+      updateHandoff(env, "handoff-1", { "Open Questions": richText("Does Meridian Foods Ghana Ltd want a phased rollout?") }, lifecycleAccess("handoff-1"), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }),
     HandoffWriteViolationError,
   );
 });
@@ -236,7 +318,7 @@ test("updateHandoff: prohibited identity in Open Questions fails", async (t) => 
 test("createHandoff: does not call Notion at all when validation fails (validate before write, not create-then-repair)", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  await assert.rejects(() => createHandoff(env, validProperties({ Reason: richText("For Meridian Foods Ghana Ltd.") }), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }));
+  await assert.rejects(() => createHandoff(env, validProperties({ Reason: richText("For Meridian Foods Ghana Ltd.") }), { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }, createAccess(env)));
   assert.strictEqual(calls.length, 0, "no Notion API call may happen once validation has failed");
 });
 
@@ -249,5 +331,5 @@ test("validateHandoffProperties: a short/generic needle (e.g. a 2-letter name) d
 test("updateHandoff: a plain Status-only lifecycle update with no identity supplied succeeds", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv();
-  await assert.doesNotReject(() => updateHandoff(env, "handoff-1", { Status: select("Picked-up") }));
+  await assert.doesNotReject(() => updateHandoff(env, "handoff-1", { Status: select("Picked-up") }, lifecycleAccess("handoff-1")));
 });
