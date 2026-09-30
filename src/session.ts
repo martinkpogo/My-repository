@@ -23,6 +23,8 @@ import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprov
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { findUnitManifest } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
+import { recordWorkAction } from "./units/dispatch";
+import { workSessionContext } from "./access";
 
 export class WorkSession extends DurableObject<Env> {
   async init(
@@ -31,7 +33,7 @@ export class WorkSession extends DurableObject<Env> {
     unit?: Unit,
     hat?: string,
     threadId?: number,
-    extra?: { handoffId?: string; matterId?: string },
+    extra?: { handoffId?: string; matterId?: string; actionName?: string },
   ): Promise<void> {
     const now = new Date().toISOString();
     const state: WorkState = {
@@ -46,6 +48,14 @@ export class WorkSession extends DurableObject<Env> {
       ...(extra?.handoffId ? { handoffId: extra.handoffId } : {}),
       ...(extra?.matterId ? { matterId: extra.matterId } : {}),
     };
+    // The resolved Action identity is recorded at creation, before anything
+    // can be performed, and validated against the Work's own manifest. Absent
+    // actionName is legitimate only for genuinely action-less Work (the
+    // standalone Google Workspace control Work) -- every Unit's Work must
+    // name the Action it was created for, including Handoff-driven Work.
+    if (extra?.actionName) {
+      recordWorkAction(state, extra.actionName);
+    }
     await this.save(state);
   }
 
@@ -53,24 +63,45 @@ export class WorkSession extends DurableObject<Env> {
     return this.ctx.storage.get<WorkState>("state");
   }
 
+  // The five per-Unit wrappers below each record their resolved Action on the
+  // Work before entering the Hat's handler, for the same reason
+  // handleUnitAction does (see its doc comment): resolve Hat -> resolve Action
+  // -> persist Action identity on Work -> execute. They remain the live
+  // dispatch path for their Units, so none of them may run without the Work
+  // knowing which Action it is performing.
   async handleIncomingEnquiry(text: string): Promise<WorkState> {
-    return this.execute((state) => dispatchSalesExecutiveHat(this.env, state, text));
+    return this.execute((state) => {
+      recordWorkAction(state, "new_enquiry");
+      return dispatchSalesExecutiveHat(this.env, state, text);
+    });
   }
 
   async handleMarketingRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => marketing.handleMarketingIntake(this.env, state, text));
+    return this.execute((state) => {
+      recordWorkAction(state, "handle_request");
+      return marketing.handleMarketingIntake(this.env, state, text);
+    });
   }
 
   async handleResearchRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => dispatchResearchHat(this.env, state, text));
+    return this.execute((state) => {
+      recordWorkAction(state, "research");
+      return dispatchResearchHat(this.env, state, text);
+    });
   }
 
   async handleStrategyRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => dispatchStrategyHat(this.env, state, text));
+    return this.execute((state) => {
+      recordWorkAction(state, "diagnose");
+      return dispatchStrategyHat(this.env, state, text);
+    });
   }
 
   async handleFinanceRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => dispatchFinanceHat(this.env, state, text));
+    return this.execute((state) => {
+      recordWorkAction(state, "price");
+      return dispatchFinanceHat(this.env, state, text);
+    });
   }
 
   /**
@@ -83,6 +114,13 @@ export class WorkSession extends DurableObject<Env> {
    * reaches here at all, per resolveUnitRequest's own contract). Fails
    * closed if state.unit/state.hat don't resolve to a registered
    * manifest/Hat rather than silently no-op'ing.
+   *
+   * RECORDS THE RESOLVED ACTION before running the entry handler. The Action
+   * dispatchCowork resolved IS the Work's Action, so it is persisted here --
+   * the architecturally required order is resolve Hat -> resolve Action ->
+   * persist Action identity on Work -> execute. Recording it here rather than
+   * trusting the init call site is what makes Work.actionName the authority
+   * Access later reads.
    */
   async handleUnitAction(actionName: string, text: string): Promise<WorkState> {
     return this.execute((state) => {
@@ -98,6 +136,7 @@ export class WorkSession extends DurableObject<Env> {
           state.threadId,
         ).then(() => state);
       }
+      recordWorkAction(state, actionName);
       return hat.entryHandler(this.env, state, actionName, text);
     });
   }
@@ -117,8 +156,6 @@ export class WorkSession extends DurableObject<Env> {
           return sales.handleMatterRedoReason(this.env, state, text);
         case "entity_redo_reason":
           return sales.handleEntityRedoReason(this.env, state, text);
-        case "proposal_feedback":
-          return sales.handleProposalFeedback(this.env, state, text);
         case "sales_proposal_revision":
           return salesProposal.handleSalesProposalRevisionText(this.env, state, text);
         case "marketing_feedback":
@@ -259,10 +296,17 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute(async (state) => {
       if (state.handoffId) {
         try {
+          // Closing the Handoff this Work item was picked up from is execution
+          // bookkeeping on a record it already owns -- Martin's /cancel is the
+          // instruction, and it advances no Unit's governed output. Judged
+          // against the Work's own recorded Action, whose consequence permits
+          // the write; ungated because the Action Martin approved is not this
+          // one.
           await closeHandoffIfOpen(
             this.env,
             state.handoffId,
             "Work item cancelled by Martin -- rejected with no further direction. A materially new attempt requires a new Handoff.",
+            workSessionContext(state),
           );
         } catch (err) {
           console.error(`WorkSession ${state.workId} cancel: failed to close Handoff ${state.handoffId}`, err);

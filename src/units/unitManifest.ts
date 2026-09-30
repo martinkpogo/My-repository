@@ -1,5 +1,6 @@
 import type { Env, Unit, WorkState } from "../types";
 import type { ActionDefinition, ConsequenceLevel } from "../hats/actionRegistry";
+import { validateActionDefinition } from "../hats/actionRegistry";
 import type { SemanticTaskId } from "../dataBoundary/types";
 
 /**
@@ -79,6 +80,21 @@ export interface HatManifest<A extends string = string> {
    * declarative Unit-specific fact, not kernel behaviour.
    */
   responsibility: string;
+
+  /**
+   * The stable identifier for the Responsibility this Hat owns -- the short
+   * slug its actions name in `ActionDefinition.responsibility`.
+   *
+   * A Hat owns exactly one Responsibility, so a single id is the truthful
+   * shape; the prose above is the same statement in human-readable form. Every
+   * Action this Hat declares must name this id, which is what makes "an Action
+   * is an executable operation associated with a Responsibility" checkable
+   * rather than aspirational -- and what stops an Action list from quietly
+   * becoming a second organizational hierarchy: an Action can only serve the
+   * Responsibility of a Hat that already declares it, and the Action Registry
+   * still never assigns a Hat or routes Work.
+   */
+  responsibilityId: string;
 
   /** This Hat's full action list, each declaring its own read/write consequence. Fail-closed: an action referenced anywhere but missing here is never guessed at. */
   actions: ActionDefinition<A>[];
@@ -173,4 +189,39 @@ export function actionConsequence<A extends string>(actionName: string, hat: Hat
 /** Approval-callback lookup convenience -- undefined means this Hat declares no handler for this callback_data prefix (fail closed at the caller, e.g. fall through to a legacy switch case or a no-op). */
 export function findCallbackHandler(prefix: string, hat: HatManifest): ApprovalCallbackHandler | undefined {
   return hat.callbackHandlers?.[prefix];
+}
+
+/**
+ * Validates one Hat's manifest in isolation, returning the first reason it is
+ * malformed or null when it is well-formed.
+ *
+ * Fail-closed manifest completeness extends to the Action/Responsibility
+ * relationship: an Action that does not name its own Hat's Responsibility, or
+ * a Hat that declares no Responsibility id at all, is a manifest defect. The
+ * Kernel must not resolve either by guessing -- an Action whose Responsibility
+ * is unresolvable is an Action whose authority framing is unresolvable, and
+ * silently proceeding would let the Action list drift into an independent
+ * organizational hierarchy.
+ */
+export function validateHatManifest(hat: HatManifest): string | null {
+  if (!hat.name || !hat.name.trim()) return "a Hat manifest must declare the Hat's registered name";
+  if (!hat.responsibilityId || !hat.responsibilityId.trim()) {
+    return `${hat.name}: a Hat must declare the id of the Responsibility it owns, for its Actions to be associated with`;
+  }
+  if (hat.actions.length === 0) {
+    return `${hat.name}: a Hat must declare at least one Action`;
+  }
+  const seen = new Set<string>();
+  for (const action of hat.actions) {
+    const defect = validateActionDefinition(action);
+    if (defect) return `${hat.name}: ${defect}`;
+    if (action.responsibility !== hat.responsibilityId) {
+      return `${hat.name}: action "${action.name}" declares Responsibility "${action.responsibility}", which is not the Responsibility this Hat owns ("${hat.responsibilityId}")`;
+    }
+    if (seen.has(action.name)) {
+      return `${hat.name}: action "${action.name}" is declared more than once -- resolution must be unambiguous`;
+    }
+    seen.add(action.name);
+  }
+  return null;
 }

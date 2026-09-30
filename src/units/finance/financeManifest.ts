@@ -45,8 +45,20 @@ const VALUE_BASED_PRICING_ASSESSOR_HAT_NAME = "Value-Based Pricing Assessor";
 const valueBasedPricingAssessorActions: ActionDefinition<FinanceAction>[] = [
   {
     name: "price",
+    responsibility: "value_based_pricing",
     consequence: "write",
     requiresApproval: true,
+    // Martin's quote approval gates the Finance -> Sales Handoff this
+    // action creates, and that Handoff create is this action's only
+    // governed effect -- so the action-level requiresApproval above is an
+    // accurate description of it. The inbound Handoff this work item was
+    // picked up from is execution bookkeeping on a record it already owns:
+    // it is NOT an approval-gated effect, and needs no exemption, because
+    // no Action here performs it under a gated Action. (That separation
+    // used to be expressed by an `approvalGatedTargets` list narrowing the
+    // gate to handoffs/create. It was removed: a second field able to
+    // silence `requiresApproval` split one authority in two, and failed
+    // open whenever an Action declared the flag but omitted the list.)
     description:
       "Assess value-at-stake and produce a governed price judgment for a Matter, grounded only in verifiable evidence -- always gated on Martin's explicit approval before any quote is treated as final.",
   },
@@ -80,6 +92,7 @@ const valueBasedPricingAssessorHat: HatManifest<FinanceAction> = {
   responsibility:
     "Assess the genuine value at stake for a Matter and produce a governed, evidence-grounded price judgment -- never inventing a value figure or evidence source not actually supplied or verifiable. Never treats a quote as final without Martin's explicit approval.",
   actions: valueBasedPricingAssessorActions,
+  responsibilityId: "value_based_pricing",
   readHandler: financeReadHandler,
   entryHandler: financeEntryHandler,
   // Every one of Finance's own continuation states (quote_redo_reason,

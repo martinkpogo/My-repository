@@ -9,6 +9,9 @@ import type {
   InvestmentToleranceContext,
   MeasurementBaseline,
 } from "../../types";
+import { mintApprovalProof, workSessionContext, workSessionReadContext } from "../../access";
+import { recordWorkAction } from "../dispatch";
+import type { ApprovalProof } from "../../types";
 import {
   createPage,
   getPage,
@@ -389,17 +392,31 @@ function formatCommercialEvidenceForHandoff(
   return lines.join("\n");
 }
 
-function buildProposalRevisionPromptParts(hatDefinition: string, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent"> {
-  return {
-    persona:
-      "You are executing the Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition are authoritative for how this Draft Proposal may be revised and for the authority limits that apply — follow them exactly as written.",
-    behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract, "=== HAT DEFINITION ===", hatDefinition].join("\n\n"),
-    skillContent: [
-      "=== TASK (execution context — not part of the governance above) ===",
-      "Revise the current Draft Proposal below according to Martin's feedback, keeping the same section structure per the Hat Definition's proposal_content_standard. Per the Hat Definition's authority_limits, you have no authority to change the quoted price — if Martin's feedback appears to require a price change, do not apply it: keep the existing price and add a note prefixed 'NOTE TO MARTIN:' explaining the conflict.",
-    ].join("\n\n"),
-  };
-}
+// REMOVED (2026-09-30, ENIG Operating Model implementation): the legacy
+// identity-bearing Proposal path.
+//
+//   handleProposalApproval, handleProposalFeedback, and
+//   buildProposalRevisionPromptParts
+//
+// It created Proposals DB records carrying Entity/Matter *relations* --
+// real page ids for real people and organisations -- which directly
+// contradicts the canonical token-safe Runtime Proposal model
+// (tokenSafeProposal.ts), whose records carry Entity Token / Matter Token
+// only. Two Proposal models writing structurally different records to one
+// data source is the contradiction this removal resolves: there is now
+// exactly one.
+//
+// It was also unreachable. The only code that ever sent a
+// "proposal:<workId>:approve|revise" button was handleProposalFeedback,
+// which is reachable only once state.awaiting === "proposal_feedback" --
+// and that is set only by handleProposalApproval's reject branch, which is
+// reachable only once state.stage === "awaiting_proposal_approval" --
+// which is set only by handleProposalFeedback. A closed cycle with no entry
+// point, so no legitimate Sales Executive responsibility is lost: proposal
+// drafting, submission, approval, and revision are all served by the
+// canonical flow, under the proposal_draft / proposal_submit /
+// proposal_approve / proposal_revision Actions.
+
 
 export async function handleIncomingEnquiry(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.enquiryText = text;
@@ -432,7 +449,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
   // phone match doesn't need a confirmation click per the Sales AI Project
   // Instructions' entity_identification outcomes.
   if (match.determinate) {
-    const page = await getPage(env, match.determinate.id);
+    const page = await getPage(env, match.determinate.id, workSessionContext(state));
     state.entityId = page.id;
     state.entityName = plainText(page.properties.Name);
     await logActivity(env, {
@@ -471,7 +488,7 @@ export async function handleEntityChoice(env: Env, state: WorkState, choice: str
     return presentEntityDraft(env, state);
   }
 
-  const page = await getPage(env, choice);
+  const page = await getPage(env, choice, workSessionContext(state));
   state.entityId = page.id;
   state.entityName = plainText(page.properties.Name);
   return proceedToMatterIdentification(env, state);
@@ -515,6 +532,47 @@ async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState
   return state;
 }
 
+/**
+ * The Access context for an operation performed on behalf of this Work item's
+ * own recorded Action, optionally carrying an ApprovalProof a verified
+ * approval callback has just minted.
+ *
+ * The Action is NOT named here -- it is read off the Work by
+ * `workSessionContext(state)`. The `new_enquiry` flow performs several
+ * distinct registered operations, and the Work records which one it is
+ * performing; this helper cannot choose a different one.
+ *
+ * `assertedActionName` is a cross-check for the privileged commits only:
+ * `handleEntityCreationApproval` and `handleMatterCreationApproval` advance
+ * the Work to `create_entity` / `create_matter` and then assert the name
+ * they just recorded. If the two ever disagree, Access fails closed instead
+ * of committing the record under an Action that was not the one approved.
+ *
+ * Everything else the flow touches -- status advances on records this work
+ * item already owns, its outbound Finance Handoff's lifecycle, the
+ * Sales -> Strategy Handoff -- is ungated bookkeeping, and is ungated because
+ * each of those is now the operation it actually is, not because it was
+ * exempted from a gate that applied to something else.
+ */
+function salesExecutiveAccess(state: WorkState, proof?: ApprovalProof, assertedActionName?: string) {
+  return workSessionContext(state, proof, assertedActionName);
+}
+
+/**
+ * Sales Executive's Action names, as registered on the Hat (see
+ * salesManifest.ts).
+ *
+ * Named as constants rather than repeated as literals so the Action a
+ * governed write is performed under, the Action recorded on the Work at that
+ * moment, the Action named in the ApprovalProof, and the Action the call site
+ * asserts as a cross-check all reference one value -- they cannot drift into
+ * four different names for the same operation, and `recordWorkAction`
+ * validates every one of them against the manifest before any is stored.
+ */
+const NEW_ENQUIRY_ACTION = "new_enquiry" as const;
+const CREATE_ENTITY_ACTION = "create_entity" as const;
+const CREATE_MATTER_ACTION = "create_matter" as const;
+
 export async function handleEntityCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (!state.entityDraft) {
     await sendWorkspaceHatMessage(
@@ -538,16 +596,42 @@ export async function handleEntityCreationApproval(env: Env, state: WorkState, a
   }
 
   const draft = state.entityDraft!;
+  // The Work is about to perform a DIFFERENT registered operation from the
+  // one it was performing: it was running `new_enquiry` (the enquiry
+  // workflow, which staged this draft) and is now committing the Entity
+  // record itself. `create_entity` is the operation Martin's approval is
+  // actually for, and recording it here -- by the code performing the
+  // transition, at the moment it happens -- is what makes Access judge the
+  // governed create against the right Action.
+  recordWorkAction(state, CREATE_ENTITY_ACTION);
+  // The Entity record only comes into existence on Martin's explicit
+  // approval of the drafted fields, so this is exactly the moment an
+  // ApprovalProof is minted: the staged entity draft is consumed by this
+  // verified callback, and the proof it produces is what authorizes the
+  // governed create below. `state.entityDraft` is cleared immediately
+  // after, so a replayed callback finds nothing to consume and never
+  // reaches minting.
+  const proof = mintApprovalProof({
+    workId: state.workId,
+    actionName: CREATE_ENTITY_ACTION,
+    targetDataSourceId: env.ENTITY_DATA_SOURCE_ID,
+  });
   const page = await createPage(env, env.ENTITY_DATA_SOURCE_ID, {
     Name: title(draft.name),
     "Entity Type": select(draft.type),
     Status: select("Lead"),
     ...(draft.email ? { Email: { email: draft.email } } : {}),
     ...(draft.phone ? { Phone: { phone_number: draft.phone } } : {}),
-  });
+  }, salesExecutiveAccess(state, proof, CREATE_ENTITY_ACTION));
   state.entityId = page.id;
   state.entityName = draft.name;
   state.entityDraft = undefined;
+  // The commit is done; the Work returns to the enquiry workflow, which is
+  // the next registered operation it performs. Recorded so a later write in
+  // the same flow is not judged against the Action that just committed the
+  // record, and so its ungated bookkeeping stays ungated for the right
+  // reason -- the right Action, not an exemption.
+  recordWorkAction(state, NEW_ENQUIRY_ACTION);
   await logActivity(env, {
     entry: `Entity created: ${draft.name}`,
     type: "Decision",
@@ -582,7 +666,7 @@ export async function handleEntityRedoReason(env: Env, state: WorkState, reasonT
 }
 
 async function proceedToMatterIdentification(env: Env, state: WorkState): Promise<WorkState> {
-  const matters = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
+  const matters = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, workSessionReadContext(),  {
     property: "Entity",
     relation: { contains: state.entityId },
   });
@@ -615,7 +699,7 @@ export async function handleMatterChoice(env: Env, state: WorkState, choice: str
     return draftNewMatter(env, state, state.enquiryText ?? "");
   }
 
-  const page = await getPage(env, choice);
+  const page = await getPage(env, choice, workSessionContext(state));
   state.matterId = page.id;
   state.matterName = plainText(page.properties.Matter);
   await ensureEntityIsAtLeastLead(env, state);
@@ -685,6 +769,18 @@ export async function handleMatterCreationApproval(env: Env, state: WorkState, a
   }
 
   const draft = state.matterDraft!;
+  // Same shape as the Entity gate above, for the same reason: the Work moves
+  // from the enquiry workflow to the distinct operation of committing the
+  // Matter record, and the proof is bound to that operation.
+  recordWorkAction(state, CREATE_MATTER_ACTION);
+  // The Matter record exists only because Martin approved this specific
+  // draft, so minting happens here and the resulting proof is what
+  // authorizes the governed create.
+  const proof = mintApprovalProof({
+    workId: state.workId,
+    actionName: CREATE_MATTER_ACTION,
+    targetDataSourceId: env.MATTERS_DATA_SOURCE_ID,
+  });
   const page = await createPage(env, env.MATTERS_DATA_SOURCE_ID, {
     Matter: title(draft.name),
     Entity: relation([state.entityId!]),
@@ -692,10 +788,11 @@ export async function handleMatterCreationApproval(env: Env, state: WorkState, a
     Stated_need: richText(draft.statedNeed),
     Next_action: richText("Arrange sales call with Martin"),
     Evidence_source: richText(`Telegram enquiry, ${new Date().toISOString()}`),
-  });
+  }, salesExecutiveAccess(state, proof, CREATE_MATTER_ACTION));
   state.matterId = page.id;
   state.matterName = draft.name;
   state.matterDraft = undefined;
+  recordWorkAction(state, NEW_ENQUIRY_ACTION);
   await logActivity(env, {
     entry: `Matter created: ${draft.name}`,
     type: "Decision",
@@ -718,10 +815,10 @@ export async function handleMatterRedoReason(env: Env, state: WorkState, reasonT
 }
 
 async function ensureEntityIsAtLeastLead(env: Env, state: WorkState): Promise<void> {
-  const page = await getPage(env, state.entityId!);
+  const page = await getPage(env, state.entityId!, workSessionContext(state));
   const status = plainText(page.properties.Status);
   if (!status) {
-    await updatePage(env, state.entityId!, { Status: select("Lead") });
+    await updatePage(env, state.entityId!, { Status: select("Lead") }, salesExecutiveAccess(state));
   }
 }
 
@@ -871,7 +968,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
 
   await updatePage(env, state.matterId!, {
     Current_understanding: richText(state.callNotes.slice(0, 1900)),
-  });
+  }, salesExecutiveAccess(state));
 
   const governance = await getSalesExecutiveGovernance(env, { includeEntitySpecification: true });
   if (!governance) {
@@ -969,7 +1066,7 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
  */
 export async function resolveCallNotesHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
   try {
-    const handoff = await getPage(env, handoffId);
+    const handoff = await getPage(env, handoffId, workSessionReadContext());
     const sanitizedContext = plainText(handoff.properties["Verified Facts & Sources"]);
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
@@ -1081,7 +1178,7 @@ export async function presentQualifiedCallNotesForApproval(
  * Invoked only by checkHandoffs.ts's Sales discovery, never directly.
  */
 export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
-  const claim = await claimPendingHandoff(env, state.handoffId!);
+  const claim = await claimPendingHandoff(env, state.handoffId!, workSessionContext(state));
   if (!claim.claimed) {
     console.error(`Sales call-notes pickup: refused -- ${claim.reason}`);
     await logActivity(env, {
@@ -1107,7 +1204,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
-    }).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    }, workSessionContext(state)).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
     await sendOperationsMessage(
       env,
       `⚠️ Sales couldn't pick up a call-notes Handoff (${state.handoffId}): ${evalResult.insufficientContext.reason}`,
@@ -1121,7 +1218,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
   state.matterToken = contract.matterToken;
   const displayToken = contract.matterToken ?? contract.entityToken;
 
-  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
 
   const governance = await getSalesExecutiveGovernance(env, { includeEntitySpecification: true });
   if (!governance) {
@@ -1131,7 +1228,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
       "Open Questions": richText(
         "Could not retrieve canonical Sales Executive Hat Definition, Universal Role Contract, and/or Entity Business Object specification from Notion.",
       ),
-    }).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    }, workSessionContext(state)).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
     await sendOperationsMessage(
       env,
       `⚠️ Sales couldn't evaluate call notes for ${displayToken}: governance retrieval failed. Handoff held for retry.`,
@@ -1151,7 +1248,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
       "Open Questions": richText(
         "Qualification assessment was inconclusive from the supplied call notes. Send additional de-identified call notes and re-submit.",
       ),
-    }).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    }, workSessionContext(state)).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
     await sendOperationsMessage(
       env,
       `Sales qualification inconclusive for ${displayToken} — Handoff held, needs additional call notes.`,
@@ -1165,7 +1262,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
   await updateHandoff(env, state.handoffId!, {
     Status: select("Closed"),
     "Work Completed": richText(`Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, 1900)),
-  });
+  }, workSessionContext(state));
   await logActivity(env, {
     entry: `Call-notes Handoff closed — Qualification: ${qualification.overall}: ${displayToken}`,
     type: "Activity",
@@ -1215,7 +1312,7 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
     return state;
   }
 
-  await updatePage(env, state.entityId!, { Status: select("Prospect") });
+  await updatePage(env, state.entityId!, { Status: select("Prospect") }, salesExecutiveAccess(state));
   await updatePage(env, state.matterId!, {
     Status: select("Qualified"),
     // Preserves the commercial baseline on the Matter record itself (not
@@ -1226,7 +1323,7 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
     ...(state.measurementBaseline
       ? { Current_understanding: richText(`${state.callNotes ?? ""}\n\n${formatMeasurementBaselineText(state.measurementBaseline)}`.slice(0, 1900)) }
       : {}),
-  });
+  }, salesExecutiveAccess(state));
   await logActivity(env, {
     entry: `Entity progressed to Prospect: ${state.entityName}`,
     type: "Decision",
@@ -1321,7 +1418,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   await updatePage(env, state.matterId!, {
     Status: select("Commercial Development"),
     Next_action: richText("Awaiting Strategy diagnosis"),
-  });
+  }, salesExecutiveAccess(state));
 
   const identityTokens = await resolveIdentityTokens(env, state.entityId!, state.matterId!);
   state.entityToken = identityTokens.entityToken;
@@ -1368,6 +1465,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
       ),
     },
     strategyHandoffIdentity,
+    salesExecutiveAccess(state),
   );
 
   // createHandoff already computed this attestation from exactly the
@@ -1419,7 +1517,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
  * carried on the Handoff, not resolved by the receiving Unit.
  */
 async function resolveIdentityTokens(env: Env, entityId: string, matterId: string): Promise<{ entityToken: string; matterToken: string }> {
-  const [entity, matter] = await Promise.all([getPage(env, entityId), getPage(env, matterId)]);
+  const [entity, matter] = await Promise.all([getPage(env, entityId, workSessionReadContext()), getPage(env, matterId, workSessionReadContext())]);
   return {
     entityToken: uniqueId(entity.properties.Entity_ID),
     matterToken: uniqueId(matter.properties.Matter_ID),
@@ -1443,6 +1541,7 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
       ),
       Status: select("Pending"),
     },
+    salesExecutiveAccess(state),
     {
       entityToken: state.entityToken ?? "",
       matterToken: state.matterToken ?? "",
@@ -1458,111 +1557,30 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
   return state;
 }
 
-export async function handleProposalApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  if (state.stage !== "awaiting_proposal_approval") {
-    await sendWorkspaceHatMessage(
-      env,
-      { ...state, hat: "Sales Executive" },
-      "This Proposal approval has already been resolved -- nothing to do.",
-    );
-    return state;
-  }
-  state.pendingActionSummary = undefined;
-
-  if (!approved) {
-    await sendWorkspaceHatMessage(
-      env,
-      { ...state, hat: "Sales Executive" },
-      "What should change in the draft? Send your feedback as a message.",
-    );
-    state.stage = "awaiting_proposal_revision";
-    state.awaiting = "proposal_feedback";
-    return state;
-  }
-
-  const page = await createPage(env, env.PROPOSALS_DATA_SOURCE_ID, {
-    Proposal: title(`Proposal — ${state.matterName}`),
-    Entity: relation([state.entityId!]),
-    Matter: relation([state.matterId!]),
-    Handoff: relation([state.handoffId!]),
-    Status: select("Draft"),
-    // No dedicated currency property exists on the Proposals database (not
-    // introduced here -- adding one is a schema change outside this fix's
-    // scope), so the currency is stated in the rationale text instead of
-    // being silently lost off the bare "Quoted Price" number.
-    "Quoted Price": { number: state.quote?.price ?? 0 },
-    "Quote Rationale": richText(`${state.quote?.currency ? `Currency: ${state.quote.currency}. ` : ""}${state.quote?.rationale ?? ""}`),
-  });
-
-  await updatePage(env, state.matterId!, { Status: select("Proposal") });
-  await logActivity(env, {
-    entry: `Proposal authorized and created (Draft): ${state.matterName}`,
-    type: "Decision",
-    area: "Sales",
-    decisions: "Martin authorized the complete Draft Proposal.",
-    outcome: "Complete",
-  });
-
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Sales Executive" },
-    `Proposal created in Draft status: ${page.url}`,
-  );
-  state.stage = "complete";
-  state.awaiting = undefined;
-  return state;
-}
-
-export async function handleProposalFeedback(env: Env, state: WorkState, feedback: string): Promise<WorkState> {
-  const governance = await getSalesExecutiveGovernance(env);
-  if (!governance) {
-    console.error(`Sales Executive proposal revision blocked — governance retrieval failed for work ${state.workId}`);
-    await logActivity(env, {
-      entry: `Proposal revision blocked — governance retrieval failed: ${state.entityName}`,
-      type: "Blocker",
-      area: "Sales",
-      decisionRationale:
-        "Could not retrieve canonical Sales Executive Hat Definition and/or Universal Role Contract from Notion. Refusing to revise the Proposal without it.",
-      outcome: "Blocked",
-    });
-    await sendWorkspaceHatMessage(
-      env,
-      { ...state, hat: "Sales Executive" },
-      `Couldn't revise the Draft Proposal for *${state.entityName}* — couldn't retrieve canonical governance from Notion. Send your feedback again once resolved and I'll re-apply it.`,
-    );
-    state.awaiting = "proposal_feedback";
-    return state;
-  }
-
-  const revised = await generate(env, {
-    taskId: "sales.proposal_revision",
-    mode: "text",
-    parts: {
-      ...buildProposalRevisionPromptParts(governance.hatDefinition, governance.universalRoleContract),
-      situation: `Current draft:\n${state.proposalDraft}\n\nMartin's feedback:\n${feedback}`,
-    },
-    maxTokens: 3000,
-  });
-  state.proposalDraft = revised;
-  state.proposalRevisionCount = (state.proposalRevisionCount ?? 0) + 1;
-  const revisedProposalMessage = `*Revised Draft Proposal*\n\n${revised}`;
-  const revisedProposalButtons = [
-    [
-      { text: "✅ Approve & create Proposal", callback_data: `proposal:${state.workId}:approve` },
-      { text: "✏️ Request changes", callback_data: `proposal:${state.workId}:revise` },
-    ],
-  ];
-  await sendWorkspaceHatMessage(env, { ...state, hat: "Sales Executive" }, revisedProposalMessage, revisedProposalButtons);
-  state.pendingActionSummary = {
-    label: `Draft Proposal: ${state.entityName}`,
-    message: revisedProposalMessage,
-    buttons: revisedProposalButtons,
-    createdAt: new Date().toISOString(),
-  };
-  state.stage = "awaiting_proposal_approval";
-  state.awaiting = undefined;
-  return state;
-}
+// REMOVED (2026-09-30, ENIG Operating Model implementation): the legacy
+// identity-bearing Proposal path.
+//
+//   handleProposalApproval, handleProposalFeedback, and
+//   buildProposalRevisionPromptParts
+//
+// It created Proposals DB records carrying Entity/Matter *relations* --
+// real page ids for real people and organisations -- which directly
+// contradicts the canonical token-safe Runtime Proposal model
+// (tokenSafeProposal.ts), whose records carry Entity Token / Matter Token
+// only. Two Proposal models writing structurally different records to one
+// data source is the contradiction this removal resolves: there is now
+// exactly one.
+//
+// It was also unreachable. The only code that ever sent a
+// "proposal:<workId>:approve|revise" button was handleProposalFeedback,
+// which is reachable only once state.awaiting === "proposal_feedback" --
+// and that is set only by handleProposalApproval's reject branch, which is
+// reachable only once state.stage === "awaiting_proposal_approval" --
+// which is set only by handleProposalFeedback. A closed cycle with no entry
+// point, so no legitimate Sales Executive responsibility is lost: proposal
+// drafting, submission, approval, and revision are all served by the
+// canonical flow, under the proposal_draft / proposal_submit /
+// proposal_approve / proposal_revision Actions.
 
 interface EntityMatchResult {
   // Set only when exactly one record matched on a determinate identity
@@ -1578,14 +1596,14 @@ interface EntityMatchResult {
 async function findEntityMatch(env: Env, name: string, email: string, phone: string): Promise<EntityMatchResult> {
   const determinateMatches: { id: string; name: string }[] = [];
   if (email) {
-    const byEmail = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
+    const byEmail = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, workSessionReadContext(),  {
       property: "Email",
       email: { equals: email },
     });
     for (const p of byEmail) determinateMatches.push({ id: p.id, name: plainText(p.properties.Name) });
   }
   if (phone) {
-    const byPhone = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
+    const byPhone = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, workSessionReadContext(),  {
       property: "Phone",
       phone_number: { equals: phone },
     });
@@ -1604,7 +1622,7 @@ async function findEntityMatch(env: Env, name: string, email: string, phone: str
   // evidence), so even a single result here still goes to Martin to
   // confirm rather than being auto-selected.
   if (name) {
-    const byName = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, {
+    const byName = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, workSessionReadContext(),  {
       property: "Name",
       title: { contains: name },
     });

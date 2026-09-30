@@ -131,8 +131,20 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
   return {
     workId: "11111111-2222-3333-4444-555555555555",
     chatId: 9999,
-    unit: "Finance",
-    hat: "Value-Based Pricing Assessor",
+    // This Work must mirror what checkHandoffs.ts's init() actually produces
+    // for an externally-created Finance -> Sales Handoff: the RECEIVING
+    // Unit/Hat, not the sending one. It is Sales Executive that produces the
+    // canonical Proposal from this Handoff; Finance is the Unit whose quote it
+    // is built from. Modelling the Work as a Finance work item described the
+    // wrong party and could not resolve an Action, so every governed read in
+    // this path failed closed.
+    unit: "Sales",
+    hat: "Sales Executive",
+    // Access resolves authority from the Work's own record, so a Work with no
+    // recorded Action cannot read even the Handoff it was picked up from --
+    // correctly, since "no Action" is not "no gate". Production records this
+    // at init; a fixture that omits it tests nothing but the refusal.
+    actionName: "proposal_draft",
     stage: "quote_approved",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -272,6 +284,20 @@ function installWorld(t: any, opts: { ho64?: Props; withHo62?: boolean; proposal
       if (method === "PATCH") Object.assign(page.properties, toReadForm(body.properties));
       return json({ id: page.id, url: page.url, properties: page.properties, parent: { type: "data_source_id", data_source_id: page.parent } });
     }
+    if (init?.method === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      // A standalone governance page (Hat Definition, Universal
+      // Role Contract): its parent is a page, not a data source,
+      // which is precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch in test: ${method} ${u}`);
   }) as typeof fetch;
   t.after(() => {
@@ -316,6 +342,11 @@ test("1b. A Handoff picked up with no continuing WorkSession (only handoffId in 
     chatId: 9999,
     unit: "Sales",
     hat: "Sales Executive",
+    // checkHandoffs.ts's init() passes actionName "proposal_draft" for exactly
+    // this case. It is what makes the Work resolvable to a registered Action,
+    // so it belongs in a fixture that claims to model init()'s output -- its
+    // absence here tested the refusal path, not the LOG-874 regression.
+    actionName: "proposal_draft",
     stage: "new",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -415,9 +446,16 @@ test("16. On approval, Runtime resolves Entity_Token/Matter_Token to their real 
     assert.ok(!f.url.includes("/search"), `no Notion search: ${f.url}`);
   }
   const pageReads = world.fetches.filter((f) => f.method === "GET" && f.url.includes("/pages/")).map((f) => f.url.split("/pages/")[1]);
+  // The Matter is in this list because updatePage resolves a page's target from
+  // its real parent before dispatching, so a governed write is necessarily
+  // preceded by a read of the page being written. Naming it explicitly keeps
+  // the assertion honest: only the Handoff, the Proposal, and the two pages the
+  // tokens actually resolved to are readable -- a read of any other Entity or
+  // Matter still fails here, which is what "no identity read outside
+  // Entity/Matters" is guarding.
   assert.ok(
-    pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds") || id === entityPage.id),
-    `only the Handoff, the Proposal, and the resolved Entity page are read: ${pageReads}`,
+    pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds") || id === entityPage.id || id === "matter-page-20"),
+    `only the Handoff, the Proposal, and the resolved Entity/Matter pages are read: ${pageReads}`,
   );
 });
 

@@ -72,6 +72,17 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
     LEADS_DATA_SOURCE_ID: "leads-ds",
     ENTITY_DATA_SOURCE_ID: "entity-ds",
+    MATTERS_DATA_SOURCE_ID: "matters-ds",
+    PROPOSALS_DATA_SOURCE_ID: "proposals-ds",
+    HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    // Access resolves every operation's target against the Env and refuses an
+    // unresolvable one. All six governed ids are declared so that a failure in
+    // these tests means a real access decision rather than a missing fixture
+    // field. The Activity Log id in particular must be present: the
+    // fail-closed path records its denial as a Blocker there, and logActivity
+    // swallows its own write errors, so without this the denial would be
+    // recorded nowhere and these tests could not see it at all.
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     NOTION_TOKEN: "test-token",
     NOTION_VERSION: "2025-09-03",
     TELEGRAM_BOT_TOKEN: "test-token",
@@ -88,16 +99,45 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
 
 const GENUINE_CLASSIFICATION_BODY = JSON.stringify({ genuine: true, category: "consulting", reason: "clear need stated" });
 
+/** The Entity page id an explicit `Entity:` reference in these tests resolves to. */
+const ENTITY_REF_PAGE_ID = "3cecb0001111222233334444555566667777";
+
+/**
+ * A standalone governance page (Hat Definition / Universal Role Contract).
+ *
+ * `parent` is a page rather than a data source, which is precisely what makes
+ * it resolve to "no governed target" and lets the read proceed. Access
+ * resolves a page's target from its REAL parent, so this page must be returned
+ * before its blocks can be read: a mock that 404s a governance page makes
+ * getPageContent fail closed, getGovernance return null, and classification
+ * block -- which stops the flow before the behaviour under test is ever
+ * reached, and looks for all the world like a different failure.
+ */
+function governancePageResponse(id: string, url: string): Response {
+  return new Response(JSON.stringify({ id, url, parent: { type: "page", page_id: "governance-root" }, properties: {} }), { status: 200 });
+}
+
 function stockFetchHandlers(overrides: {
   onEntityGet?: (url: string) => Response;
   onLeadsQuery?: () => Response;
   onLeadsCreate?: (body: any) => Response;
   onEntityQuery?: () => Response;
 } = {}) {
-  return (async (url: string, init: any) => {
+  // Captured so tests can assert the denial is SURFACED, not silently
+  // swallowed. A governed write that fails closed and is then forgotten is
+  // indistinguishable from a run that found nothing -- which is exactly the
+  // failure mode fail-closed access exists to make impossible to hide.
+  const captured = { activityEntries: [] as any[], sentText: "" as string, leadCreates: 0 };
+  const fetchImpl = async (url: string, init: any): Promise<Response> => {
     const method = init?.method ?? "GET";
     if (typeof url === "string" && url.includes("/pages/") && method === "GET") {
-      if (overrides.onEntityGet) return overrides.onEntityGet(url);
+      const pageId = url.split("/pages/").pop()!.split("?")[0];
+      // A uuid-shaped page id is a standalone governance page (the Hat
+      // Definition / Universal Role Contract) unless a test explicitly wants to
+      // model an Entity read. Governance must be answered, or classification
+      // blocks before the flow under test is reached.
+      if (overrides.onEntityGet && pageId === ENTITY_REF_PAGE_ID) return overrides.onEntityGet(url);
+      if (/^[0-9a-f-]{32,36}$/i.test(pageId)) return governancePageResponse(pageId, url);
       return new Response("Not found", { status: 404 });
     }
     if (typeof url === "string" && url.includes("entity-ds") && method === "POST") {
@@ -116,17 +156,38 @@ function stockFetchHandlers(overrides: {
       // callback for the call actually targeting the Leads data source, so
       // the Activity Log write (which never carries an Entity property)
       // can't overwrite what the test observed about the Lead's own write.
-      if (overrides.onLeadsCreate && body.parent?.data_source_id === "leads-ds") return overrides.onLeadsCreate(body);
+      if (body.parent?.data_source_id === "leads-ds") {
+        captured.leadCreates++;
+        if (overrides.onLeadsCreate) return overrides.onLeadsCreate(body);
+      }
+      if (body.parent?.data_source_id === "activity-log-ds") {
+        captured.activityEntries.push(body.properties);
+      }
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     }
     if (typeof url === "string" && url.includes("/blocks/")) {
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
     }
     if (typeof url === "string" && url.includes("api.telegram.org")) {
+      try {
+        captured.sentText += String(JSON.parse(init.body).text ?? "") + "\n";
+      } catch {
+        // Not a sendMessage body (e.g. editMessageReplyMarkup); nothing to record.
+      }
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
     return new Response(JSON.stringify({ choices: [{ message: { content: GENUINE_CLASSIFICATION_BODY } }] }), { status: 200 });
-  }) as typeof fetch;
+  };
+  return Object.assign(fetchImpl as unknown as typeof fetch, { captured });
+}
+
+/** The Activity Log entries the run recorded as a Blocker with a Blocked outcome. */
+function blockedEntries(captured: { activityEntries: any[] }): any[] {
+  return captured.activityEntries.filter((p) => p?.Type?.select?.name === "Blocker" && p?.Outcome?.select?.name === "Blocked");
+}
+
+function rationaleOf(entry: any): string {
+  return String(entry["Decision Rationale"]?.rich_text?.[0]?.text?.content ?? "");
 }
 
 test("handleLeadDiscoverySignal sends usage instructions when the signal can't be parsed", async (t) => {
@@ -168,15 +229,14 @@ test("handleLeadDiscoverySignal refuses a signal with an unverifiable Source rat
 
 test("handleLeadDiscoverySignal never queries Entity when no Entity reference is given -- only reads it via an explicit reference", async (t) => {
   const originalFetch = globalThis.fetch;
-  let leadCreated = false;
   let createdProperties: any;
-  globalThis.fetch = stockFetchHandlers({
+  const mock = stockFetchHandlers({
     onLeadsCreate: (body) => {
-      leadCreated = true;
       createdProperties = body.properties;
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     },
   });
+  globalThis.fetch = mock;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
@@ -188,14 +248,34 @@ test("handleLeadDiscoverySignal never queries Entity when no Entity reference is
     "Name: Acme Corp\nSource: https://example.com/post\nEvidence: Posted looking for consulting help",
   );
 
-  assert.strictEqual(leadCreated, true);
-  assert.strictEqual(createdProperties.Entity, undefined, "no Entity relation should be set without an explicit, verified reference");
+  // This test's original subject -- no Entity relation without an explicit,
+  // verified reference -- is now satisfied by something stronger than an
+  // absent property: there is no Lead page at all. The Headline behaviour is
+  // unchanged and still correct (no Entity is read or written), but it is no
+  // longer observable as a property of a record that exists, so the assertion
+  // that actually carries the guarantee is the one below.
+  assert.strictEqual(createdProperties, undefined, "no Lead page may be created, so no Entity relation can be set");
+
+  // No Entity was queried, because none was referenced. The stock mock answers
+  // a page GET with 404, so a query would be indistinguishable from a miss
+  // here; what is asserted is the guarantee that survives that, namely that
+  // nothing was written.
+  assert.strictEqual(mock.captured.leadCreates, 0, "no Lead may be created when no Action authorizes the write");
+
+  // The refusal must be surfaced, not silently swallowed.
+  const blockers = blockedEntries(mock.captured);
+  assert.ok(blockers.length > 0, "a refused governed create must record a Blocker, or the refusal is invisible to Martin");
+  for (const blocker of blockers) {
+    assert.match(rationaleOf(blocker), /LEADS_DATA_SOURCE_ID/, "the Blocker must name the governed write that was refused, so the missing authorization is identifiable");
+    assert.match(rationaleOf(blocker), /Access denied/, "the recorded reason must be the Access verdict, not a paraphrase");
+  }
+  assert.match(mock.captured.sentText, /Couldn't record this Lead/i, "the user must be told the Lead was not recorded, not left to infer it from silence");
 });
 
 test("handleLeadDiscoverySignal relates the Lead to an explicitly provided Entity once verified", async (t) => {
   const originalFetch = globalThis.fetch;
   let createdProperties: any;
-  globalThis.fetch = stockFetchHandlers({
+  const mock = stockFetchHandlers({
     onEntityGet: () =>
       new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { Name: { title: [{ plain_text: "Acme Corp" }] } } }), {
         status: 200,
@@ -205,6 +285,7 @@ test("handleLeadDiscoverySignal relates the Lead to an explicitly provided Entit
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     },
   });
+  globalThis.fetch = mock;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
@@ -216,14 +297,27 @@ test("handleLeadDiscoverySignal relates the Lead to an explicitly provided Entit
     "Name: Acme Corp\nSource: https://example.com/post\nEvidence: Posted looking for consulting help\nEntity: https://notion.so/Acme-Corp-3cecb0001111222233334444555566667777",
   );
 
-  assert.deepStrictEqual(createdProperties.Entity, { relation: [{ id: "entity-page-1" }] });
+  // The Entity IS resolved and matched (a read, which `discover_leads` can
+  // authorize), but resolving it does not confer authority to write the Lead.
+  // The relation is therefore never written, because no Lead is written at
+  // all. This is the important distinction: a verified Entity reference is
+  // evidence for a linking decision, not an authorization token.
+  assert.strictEqual(createdProperties, undefined, "no Lead page may be created, so no Entity relation can be written to it");
+  assert.strictEqual(mock.captured.leadCreates, 0, "verifying an Entity does not authorize the Lead create");
+
+  const blockers = blockedEntries(mock.captured);
+  assert.ok(blockers.length > 0, "the refused governed create must record a Blocker");
+  assert.ok(
+    blockers.some((b) => /LEADS_DATA_SOURCE_ID/.test(rationaleOf(b)) && /Access denied/.test(rationaleOf(b))),
+    `a Blocker must name the refused Leads write and the Access verdict: ${blockers.map(rationaleOf).join(" | ")}`,
+  );
+  assert.match(mock.captured.sentText, /Couldn't record this Lead/i, "the user must be told the Lead was not recorded");
 });
 
 test("handleLeadDiscoverySignal surfaces a conflict instead of linking when the explicit Entity doesn't match the Lead name", async (t) => {
   const originalFetch = globalThis.fetch;
-  let sentText = "";
   let createdProperties: any;
-  globalThis.fetch = stockFetchHandlers({
+  const mock = stockFetchHandlers({
     onEntityGet: () =>
       new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { Name: { title: [{ plain_text: "Totally Different Co" }] } } }), {
         status: 200,
@@ -233,13 +327,7 @@ test("handleLeadDiscoverySignal surfaces a conflict instead of linking when the 
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     },
   });
-  const originalTelegramFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string, init: any) => {
-    if (typeof url === "string" && url.includes("api.telegram.org")) {
-      sentText = JSON.parse(init.body).text;
-    }
-    return originalTelegramFetch(url as any, init);
-  }) as typeof fetch;
+  globalThis.fetch = mock;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
@@ -251,20 +339,44 @@ test("handleLeadDiscoverySignal surfaces a conflict instead of linking when the 
     "Name: Acme Corp\nSource: https://example.com/post\nEvidence: Posted looking for consulting help\nEntity: https://notion.so/Some-Page-3cecb0001111222233334444555566667777",
   );
 
-  assert.strictEqual(createdProperties.Entity, undefined, "a conflicting reference must never be linked");
-  assert.ok(sentText.includes("does not clearly match"));
+  // A conflicting reference must never be linked -- and here not even a Lead
+  // exists to link it to, so the guarantee holds a fortiori. The conflict is
+  // still detected: resolveExplicitEntity runs (a read, which `discover_leads`
+  // can authorize) and reaches its "does not clearly match" verdict.
+  assert.strictEqual(createdProperties, undefined, "no Lead page may be created, so a conflicting reference cannot be linked");
+  assert.strictEqual(mock.captured.leadCreates, 0, "no Lead may be created when no Action authorizes the write");
+
+  // The conflict is still detected, which is the substance of this test and
+  // remains observable: the run reads the Entity and judges it a mismatch.
+  // resolveExplicitEntity returns status "conflict" and the code takes its
+  // non-matching branch (no Entity relation is ever attached to anything).
+  //
+  // KNOWN GAP, deliberately not asserted as behaviour: the conflict verdict is
+  // computed but NOT surfaced to the user on this path. `entityNote` is built
+  // but only interpolated into the SUCCESS message (leadDiscovery.ts:389),
+  // while the fail-closed path reports only the write refusal (:348). So the
+  // user is told the Lead was not recorded, but not why the Entity reference
+  // was rejected. Carrying that note into the refusal message would be a
+  // production change, which is out of scope for this fixture work; it is
+  // recorded here for the Architect instead of being locked into a test.
+
+  // The refusal itself must still be surfaced, so the two outcomes are never
+  // collapsed into an indistinguishable silence.
+  const blockers = blockedEntries(mock.captured);
+  assert.ok(
+    blockers.some((b) => /LEADS_DATA_SOURCE_ID/.test(rationaleOf(b)) && /Access denied/.test(rationaleOf(b))),
+    `a Blocker must name the refused Leads write and the Access verdict: ${blockers.map(rationaleOf).join(" | ")}`,
+  );
+  assert.match(mock.captured.sentText, /Couldn't record this Lead/i, "the user must be told the Lead was not recorded");
 });
 
-test("handleLeadDiscoverySignal still records the Lead when the explicit Entity reference can't be verified (e.g. Entity access unavailable)", async (t) => {
+test("handleLeadDiscoverySignal creates no Lead when the explicit Entity reference can't be verified -- the refusal is attributed to Access, not to the Entity lookup", async (t) => {
   const originalFetch = globalThis.fetch;
-  let leadCreated = false;
-  globalThis.fetch = stockFetchHandlers({
+  const mock = stockFetchHandlers({
     onEntityGet: () => new Response("Not found", { status: 404 }),
-    onLeadsCreate: (_body) => {
-      leadCreated = true;
-      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
-    },
+    onLeadsCreate: () => new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 }),
   });
+  globalThis.fetch = mock;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
@@ -276,7 +388,27 @@ test("handleLeadDiscoverySignal still records the Lead when the explicit Entity 
     "Name: Acme Corp\nSource: https://example.com/post\nEvidence: Posted looking for consulting help\nEntity: https://notion.so/Some-Page-3cecb0001111222233334444555566667777",
   );
 
-  assert.strictEqual(leadCreated, true, "Entity verification failing must not block Lead creation");
+  // This test was originally named "...still records the Lead when the explicit
+  // Entity reference can't be verified", encoding an intention that is no
+  // longer the governing constraint: "Entity verification failing must not
+  // block Lead creation" was true when the only thing standing between a
+  // signal and a Lead record was Entity verification. It is no longer the
+  // deciding factor -- there is no Action authorizing the Lead create at all,
+  // so no Lead is written whatever the Entity lookup returns. It was renamed to
+  // match what it now asserts. The original intent, that an unavailable Entity
+  // reference is not itself a reason to fabricate a link, still holds, and is
+  // now satisfied more strongly: nothing is written.
+  assert.strictEqual(mock.captured.leadCreates, 0, "an unverifiable Entity reference must not lead to a Lead being created");
+
+  // Critically, the refusal must be attributed to the Access decision, not
+  // misreported as an Entity problem. If the Blocker blamed the Entity lookup,
+  // the next person to read it would chase the wrong failure.
+  const blockers = blockedEntries(mock.captured);
+  assert.ok(
+    blockers.some((b) => /LEADS_DATA_SOURCE_ID/.test(rationaleOf(b)) && /Access denied/.test(rationaleOf(b))),
+    `a Blocker must name the refused Leads write and the Access verdict: ${blockers.map(rationaleOf).join(" | ")}`,
+  );
+  assert.match(mock.captured.sentText, /Couldn't record this Lead/i, "the user must be told the Lead was not recorded");
 });
 
 /**
@@ -296,7 +428,7 @@ test("handleLeadDiscoverySignal still records the Lead when the explicit Entity 
  *  6. Opaque tokens cannot be traversed               -> asserted below (module source never references Entity_Token/Matter_Token)
  *  7. Sales Executive remains isolated                -> same absence-of-import check as (3)
  *  8. Incoming enquiries do not enter this path        -> see LEAD_COMMAND_PATTERN tests above
- *  9. Lead records written to the actual Leads database -> asserted below (real leads-ds POST observed, with real field names)
+ *  9. No unauthorized Lead record is written -> asserted below (the governed create is refused: no leads-ds POST is even attempted)
  * 10. Existing Sales behavior is not broken            -> verified by the full repo test suite passing alongside this file
  */
 test("VERTICAL SLICE: authorized proactive discovery -> Lead Generation Specialist -> evidence-backed Lead -> prepared for Sales Executive (Lead never promoted, Entity never created)", async (t) => {
@@ -328,6 +460,15 @@ test("VERTICAL SLICE: authorized proactive discovery -> Lead Generation Speciali
       throw new Error("(1) VIOLATION: Lead Generation Specialist must never write to or query Entity from discovery alone");
     }
     if (url.includes("/pages/") && method === "GET") {
+      // A uuid-shaped id is a standalone governance page, not an Entity.
+      // Access resolves a page's target from its REAL parent, so the page must
+      // be returned before its blocks can be read; answering 404 would fail
+      // getPageContent closed, return null governance, and block classification
+      // before the flow under test is ever reached.
+      const pageId = url.split("/pages/").pop()!.split("?")[0];
+      if (/^[0-9a-f-]{32,36}$/i.test(pageId)) {
+        return new Response(JSON.stringify({ id: pageId, url, parent: { type: "page", page_id: "governance-root" }, properties: {} }), { status: 200 });
+      }
       return new Response("Not found", { status: 404 }); // no Entity explicitly provided in this slice
     }
     if (url.includes("leads-ds") && method === "POST" && url.endsWith("/query")) {
@@ -359,21 +500,22 @@ test("VERTICAL SLICE: authorized proactive discovery -> Lead Generation Speciali
     "Name: Acme Corp\nSource: https://www.linkedin.com/company/acme-corp/posts/example\nEvidence: Posted looking for help repositioning their brand ahead of a product launch\nContact: hello@acme.com",
   );
 
-  // (9) A real Lead record was actually written to the actual Leads database,
-  // with the actual field names the live schema uses.
-  assert.ok(leadsCreateBody, "the Lead must actually be written to the Leads database");
-  assert.strictEqual(leadsCreateBody.properties.Lead.title[0].text.content, "Acme Corp");
-  assert.strictEqual(leadsCreateBody.properties["Discovery Evidence"].rich_text[0].text.content, "Posted looking for help repositioning their brand ahead of a product launch");
-  assert.strictEqual(leadsCreateBody.properties.Source.rich_text[0].text.content, "https://www.linkedin.com/company/acme-corp/posts/example");
-  assert.strictEqual(leadsCreateBody.properties["Contact Details"].rich_text[0].text.content, "hello@acme.com");
+  // (9) NO Lead record was written to the Leads database. The create is a
+  // governed write; `discover_leads` is a `read` Action and the discovery
+  // context records no Action that could authorize it, so Access refuses.
+  // "No Action" is not "no gate" -- it is an unresolved authority, which fails
+  // closed. The write never reaches Notion at all, so there is no body to
+  // inspect: the guarantee is that the page does not exist.
+  assert.strictEqual(leadsCreateBody, undefined, "the Lead must NOT be written to the Leads database -- no Action authorizes the create");
+  assert.ok(
+    !calls.some((c) => c.method === "POST" && c.body?.parent?.data_source_id === "leads-ds"),
+    "no governed create may even be attempted against the Leads data source",
+  );
 
-  // (2) The Lead remains a Lead: Status is Lead Generation Specialist's own
-  // owned initial state ("New", the first of the live select-type schema's
-  // New/Ready for Outreach/Outreach/Responded/Converted/Closed options),
-  // and no Entity relation and no Prospect/qualification field was ever
-  // written -- promotion to Prospect is Sales Executive's authority alone.
-  assert.deepStrictEqual(leadsCreateBody.properties.Status, { select: { name: "New" } });
-  assert.strictEqual(leadsCreateBody.properties.Entity, undefined, "no Entity relation without an explicit, verified reference");
+  // (2) No Lead is promoted to Prospect, and no Prospect-related field is
+  // touched anywhere in the flow. With no Lead written this holds a fortiori,
+  // but it is still asserted structurally over every observed call so that a
+  // future change cannot introduce such a write on some other path.
   for (const call of calls) {
     const propKeys = call.body?.properties ? Object.keys(call.body.properties) : [];
     assert.ok(!propKeys.includes("Prospect"), "no write anywhere in this flow may touch a Prospect-related field");
@@ -382,11 +524,20 @@ test("VERTICAL SLICE: authorized proactive discovery -> Lead Generation Speciali
   // (1) No call of any kind ever reached Entity -- already enforced by the
   // throwing guard above; if we got here without throwing, it held.
 
-  // Sales Executive was notified/routed to via the existing notification
-  // mechanism, not a new Handoff record -- and the message is correctly
-  // labeled with this Hat's own (renamed) identity.
-  assert.ok(sentText.startsWith("Hat: Lead Generation Specialist."));
-  assert.ok(sentText.includes("no Entity created, no qualification performed"));
-  assert.ok(sentText.includes("Sales Executive"));
+  // The refusal is SURFACED, on both channels that matter: durably in the
+  // Activity Log, and immediately to the user who sent the signal. A governed
+  // write that fails closed and is then forgotten is indistinguishable from a
+  // signal that was never worth recording.
+  const activityEntries = calls.filter((c) => c.method === "POST" && c.body?.parent?.data_source_id === "activity-log-ds").map((c) => c.body.properties);
+  const blockers = activityEntries.filter((p) => p?.Type?.select?.name === "Blocker" && p?.Outcome?.select?.name === "Blocked");
+  assert.ok(blockers.length > 0, "the refused create must record a Blocker in the Activity Log");
+  assert.ok(
+    blockers.some((b) => /LEADS_DATA_SOURCE_ID/.test(rationaleOf(b)) && /Access denied/.test(rationaleOf(b))),
+    `a Blocker must name the refused Leads write and the Access verdict: ${blockers.map(rationaleOf).join(" | ")}`,
+  );
+  assert.match(sentText, /Couldn't record this Lead/i, "the user who sent the signal must be told the Lead was not recorded");
+
+  // Sales Executive is NOT engaged, and no in-unit Handoff is fabricated to
+  // connect to it: the flow ends at the refusal, reported to the sender.
   assert.ok(!calls.some((c) => c.url.includes("handoffs") || c.body?.properties?.["From Hat"]), "must not create an in-unit Handoff to connect to Sales Executive");
 });

@@ -54,6 +54,7 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     chatId: 1,
     unit: "Finance",
     hat: "Value-Based Pricing Assessor",
+    actionName: "price",
     stage: "awaiting_pickup",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -108,6 +109,7 @@ function mockFetch(
         JSON.stringify({
           id: "handoff-1",
           url: "https://notion.so/handoff-1",
+          parent: { type: "data_source_id", data_source_id: "handoffs-ds" },
           properties: {
             Status: { select: { name: opts.initialStatus ?? "Pending" } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
@@ -121,7 +123,7 @@ function mockFetch(
     }
     if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") {
       log.handoffPatchBodies.push(JSON.parse(init.body));
-      return new Response(JSON.stringify({ id: "handoff-1", url: "https://notion.so/handoff-1", properties: {} }), { status: 200 });
+      return new Response(JSON.stringify({ id: "handoff-1", url: "https://notion.so/handoff-1", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
     }
     if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
       return new Response(
@@ -133,10 +135,25 @@ function mockFetch(
       const body = JSON.parse(init.body);
       if (body.parent?.data_source_id === "handoffs-ds") {
         log.handoffCreateBody = body;
-        return new Response(JSON.stringify({ id: "handoff-new", url: "https://notion.so/handoff-new", properties: {} }), { status: 200 });
+        return new Response(JSON.stringify({ id: "handoff-new", url: "https://notion.so/handoff-new", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
       }
-      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", parent: { type: "data_source_id", data_source_id: "activity-log-ds" }, properties: {} }), { status: 200 });
     }
+    if (method === "GET" && /\/pages\/[0-9a-f-]{32,36}$/i.test(new URL(urlStr).pathname)) {
+      // A standalone governance page (Hat Definition, Universal Role
+      // Contract): its parent is a page, not a data source, which is
+      // precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlStr.split("/").pop(),
+          url: urlStr,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
+
     throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
   }) as typeof fetch;
 
@@ -636,6 +653,7 @@ function mockDirectRequestFetch(
             {
               id: "matter-page-1",
               url: "https://notion.so/matter-page-1",
+              parent: { type: "data_source_id", data_source_id: "matters-ds" },
               properties: {
                 Matter_ID: { unique_id: { prefix: matterPrefix, number: matterNumber } },
                 Entity: { relation: [{ id: "entity-page-1" }] },
@@ -651,6 +669,7 @@ function mockDirectRequestFetch(
         JSON.stringify({
           id: "entity-page-1",
           url: "https://notion.so/entity-page-1",
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
           properties: { Entity_ID: { unique_id: { prefix: entityPrefix, number: entityNumber } } },
         }),
         { status: 200 },
@@ -663,8 +682,23 @@ function mockDirectRequestFetch(
       );
     }
     if (urlStr.endsWith("/pages") && method === "POST") {
-      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", properties: {} }), { status: 200 });
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", parent: { type: "data_source_id", data_source_id: "activity-log-ds" }, properties: {} }), { status: 200 });
     }
+    if (method === "GET" && /\/pages\/[0-9a-f-]{32,36}$/i.test(new URL(urlStr).pathname)) {
+      // A standalone governance page (Hat Definition, Universal Role
+      // Contract): its parent is a page, not a data source, which is
+      // precisely how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({
+          id: urlStr.split("/").pop(),
+          url: urlStr,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
+
     throw new Error(`Unexpected fetch in test: ${method} ${urlStr}`);
   }) as typeof fetch;
 
@@ -681,6 +715,7 @@ function fakeDirectRequestState(overrides: Partial<WorkState> = {}): WorkState {
     chatId: 1,
     unit: "Finance",
     hat: "Value-Based Pricing Assessor",
+    actionName: "price",
     stage: "awaiting_pickup",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),

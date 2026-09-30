@@ -19,6 +19,10 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     NOTION_VERSION: "2025-09-03",
     MATTERS_DATA_SOURCE_ID: "matters-ds",
     HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
+    ENTITY_DATA_SOURCE_ID: "entity-ds",
+    PROPOSALS_DATA_SOURCE_ID: "proposals-ds",
+    LEADS_DATA_SOURCE_ID: "leads-ds",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     ...overrides,
   } as Env;
 }

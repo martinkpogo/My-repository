@@ -10,6 +10,30 @@ import {
   searchWeb,
 } from "./webSearch";
 import type { DimensionEvidence } from "./webSearch";
+import { discoveryCronContext, workSessionContext, EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
+
+/** Calls the egress rule directly, so the refusal is proven at the boundary and not only through searchWeb's read path. */
+function evaluateAccessForTest(env: any, operation: "read" | "create" | "update", access: AccessContext): void {
+  evaluateAccess(env, { operation, dataSourceId: EXTERNAL_EGRESS_TARGET }, access);
+}
+
+/**
+ * The Kernel's own discovery loop, which is how the LGS cron searches.
+ * An outbound read with no Unit Action behind it.
+ */
+const KERNEL_SEARCH: AccessContext = discoveryCronContext();
+
+/** An R&I Work item running its own `research` Action, which is how the real research path searches. */
+const WORK_SEARCH: AccessContext = workSessionContext({
+  workId: "work-websearch",
+  chatId: 9999,
+  unit: "Research & Intelligence",
+  hat: "Research & Intelligence Analyst",
+  actionName: "research",
+  stage: "researching",
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+});
 
 test("isWebSearchConfigured is false when no API key is set, true when one is", () => {
   assert.strictEqual(isWebSearchConfigured({} as any), false);
@@ -17,8 +41,56 @@ test("isWebSearchConfigured is false when no API key is set, true when one is", 
 });
 
 test("searchWeb returns [] without throwing when no API key is configured -- graceful degradation to closed-book behavior", async () => {
-  const results = await searchWeb({} as any, "some query");
+  const results = await searchWeb({} as any, "some query", KERNEL_SEARCH);
   assert.deepStrictEqual(results, []);
+});
+
+test("searchWeb refuses to disclose a query when the context is a Work that records no Action -- a read of ENIG's own records is not authority to send one to a third party", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = 0;
+  globalThis.fetch = (async () => {
+    called++;
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    // workSessionReadContext carries no Action: correct for a read of ENIG's
+    // own records, and explicitly NOT authority for an outbound disclosure.
+    await assert.rejects(
+      () => searchWeb({ TAVILY_API_KEY: "key" } as any, "a query", { kind: "work_session", workId: "work-x" }),
+      /outbound read|no Action|Unit Action/,
+      "an action-less Work must not be able to disclose a query externally",
+    );
+    assert.strictEqual(called, 0, "the request must be refused BEFORE it leaves the runtime");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("An outbound create is refused outright -- no registered Action authorizes changing remote state, under any context", () => {
+  const env = { TAVILY_API_KEY: "key" } as any;
+  // Even a Kernel-owned context and even an approval-gated Work Action are
+  // refused: there is no Action anywhere that answers "change external state",
+  // and admitting one on the strength of a read Action is exactly the
+  // authority-laundering this boundary exists to prevent.
+  assert.throws(() => evaluateAccessForTest(env, "create", KERNEL_SEARCH), /outbound create/);
+  assert.throws(() => evaluateAccessForTest(env, "update", KERNEL_SEARCH), /outbound update/);
+  assert.throws(() => evaluateAccessForTest(env, "create", WORK_SEARCH), /outbound create/);
+});
+
+test("A Unit Work whose Action permits reading may search -- the real R&I research path, and the refusal above is specific to contexts that do not", async () => {
+  const originalFetch = globalThis.fetch;
+  let called = 0;
+  globalThis.fetch = (async () => {
+    called++;
+    return new Response(JSON.stringify({ results: [{ title: "T", url: "https://example.com", content: "c" }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const results = await searchWeb({ TAVILY_API_KEY: "key" } as any, "a query", WORK_SEARCH);
+    assert.strictEqual(called, 1, "a Work with a read-permitting Action must be able to search");
+    assert.strictEqual(results.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("searchWeb caps an oversized result snippet -- confirmed live root cause: Tavily's unbounded content field, across up to 8 dimensions x 5 results, pushed a single synthesis prompt to ~18,000 tokens", async () => {
@@ -32,7 +104,7 @@ test("searchWeb caps an oversized result snippet -- confirmed live root cause: T
       { status: 200 },
     )) as typeof fetch;
   try {
-    const results = await searchWeb({ TAVILY_API_KEY: "key" } as any, "some query");
+    const results = await searchWeb({ TAVILY_API_KEY: "key" } as any, "some query", KERNEL_SEARCH);
     assert.strictEqual(results.length, 1);
     assert.ok(results[0].snippet.length < oversized.length);
     assert.ok(results[0].snippet.endsWith("..."));
@@ -55,7 +127,7 @@ test("gatherDimensionEvidence returns empty results per dimension when search is
     { protocol: "market_industry" as const, subQuestion: "What is the market size for X?" },
     { protocol: "competitive" as const, subQuestion: "Who are the named competitors in X?" },
   ];
-  const evidence = await gatherDimensionEvidence({} as any, plan);
+  const evidence = await gatherDimensionEvidence({} as any, plan, KERNEL_SEARCH);
   assert.strictEqual(evidence.length, 2);
   assert.deepStrictEqual(evidence[0].results, []);
   assert.deepStrictEqual(evidence[1].results, []);
@@ -138,7 +210,7 @@ test("gatherDimensionEvidence runs independent dimension searches concurrently -
       { protocol: "customer_audience" as const, subQuestion: "Customer pain points?" },
       { protocol: "environmental_regulatory" as const, subQuestion: "Applicable regulations?" },
     ];
-    const evidence = await gatherDimensionEvidence({ TAVILY_API_KEY: "key" } as any, plan);
+    const evidence = await gatherDimensionEvidence({ TAVILY_API_KEY: "key" } as any, plan, KERNEL_SEARCH);
     assert.strictEqual(evidence.length, 4);
     assert.ok(maxInFlight > 1, `independent searches must overlap (max in-flight was ${maxInFlight})`);
   } finally {
@@ -157,7 +229,7 @@ test("gatherDimensionEvidence redacts identity terms from every outbound query -
 
   try {
     const plan = [{ protocol: "market_industry" as const, subQuestion: "What is ENIG's market position in Ghana, Martin?" }];
-    await gatherDimensionEvidence({ TAVILY_API_KEY: "key" } as any, plan);
+    await gatherDimensionEvidence({ TAVILY_API_KEY: "key" } as any, plan, KERNEL_SEARCH);
 
     assert.strictEqual(queries.length, 1);
     assert.ok(!queries[0].includes("ENIG"), `identity must not leave the runtime: ${queries[0]}`);

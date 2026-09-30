@@ -50,16 +50,55 @@ import { financeManifest } from "./finance/financeManifest";
  *
  * A Partial<Record<...>> lookup, not a total one, reflects that Creative
  * & Design and Operations simply don't exist yet.
+ *
+ * WHY THE TABLE IS BUILT LAZILY (do not "simplify" this back to a top-level
+ * object literal):
+ *
+ * There is a genuine cycle here. src/access.ts is the enforcement boundary and
+ * must resolve a Work's Action against the real registry rather than believing
+ * the caller -- so access.ts imports this module. Every Unit's manifest in turn
+ * builds its Access contexts by calling workSessionContext() /
+ * mintApprovalProofForWork() from access.ts, so every manifest imports access.ts
+ * too. That gives
+ *
+ *     access.ts -> registry.ts -> <each manifest> -> access.ts
+ *
+ * A top-level `export const UNIT_MANIFESTS = { Sales: salesManifest, ... }`
+ * reads each manifest's binding during module evaluation. When the cycle is
+ * entered from inside a manifest's own evaluation -- which is exactly what
+ * happens when a manifest module, or anything that reaches one, is the entry
+ * point (e.g. `tsx --test src/units/finance/financeManifest.test.ts`) -- the
+ * manifest being read is still in its temporal dead zone and the load dies with
+ * "Cannot access 'financeManifest' before initialization".
+ *
+ * Building the table on first lookup instead means nothing reads a manifest
+ * binding until every module in the cycle has finished evaluating, so ESM's
+ * live bindings resolve normally. The registry's contents are unchanged: it is
+ * still these six statically imported manifests, and still the one place that
+ * changes when a manifest-based Unit is added or removed.
  */
-export const UNIT_MANIFESTS: Partial<Record<Unit, UnitManifest>> = {
-  "Business Development": businessDevelopmentManifest,
-  Sales: salesManifest,
-  Marketing: marketingManifest,
-  Strategy: strategyManifest,
-  "Research & Intelligence": researchManifest,
-  Finance: financeManifest,
-};
+let manifestTable: Partial<Record<Unit, UnitManifest>> | undefined;
+
+/**
+ * Every registered manifest, built on first access.
+ *
+ * Exported for discoverability and for registry-level assertions; prefer
+ * findUnitManifest where a single Unit is wanted.
+ */
+export function getUnitManifests(): Partial<Record<Unit, UnitManifest>> {
+  if (manifestTable === undefined) {
+    manifestTable = {
+      "Business Development": businessDevelopmentManifest,
+      Sales: salesManifest,
+      Marketing: marketingManifest,
+      Strategy: strategyManifest,
+      "Research & Intelligence": researchManifest,
+      Finance: financeManifest,
+    };
+  }
+  return manifestTable;
+}
 
 export function findUnitManifest(unit: Unit): UnitManifest | undefined {
-  return UNIT_MANIFESTS[unit];
+  return getUnitManifests()[unit];
 }

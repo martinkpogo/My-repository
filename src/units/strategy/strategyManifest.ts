@@ -21,12 +21,19 @@ import * as strategy from "./strategyAnalyst";
  * deterministic post-checks plus a separate downstream propose-then-
  * approve Handoff gate. There is no "which action" decision Martin's
  * message selects between -- handleDirectRequest is the only entry, every
- * time. So this manifest declares exactly one action, diagnose ("write",
- * requiresApproval: true), whose entryHandler calls
- * strategy.handleDirectRequest UNCHANGED -- the entire diagnosis/
- * proposal/approval chain inside it is untouched, zero behavioral
- * changes, mirroring exactly how marketingManifest.ts wraps
- * runMarketingHat as a single opaque action.
+ * time. That entry point is therefore declared as ONE action, `diagnose`
+ * ("write", requiresApproval: false), whose entryHandler calls
+ * strategy.handleDirectRequest UNCHANGED, mirroring exactly how
+ * marketingManifest.ts wraps runMarketingHat as a single opaque action.
+ *
+ * A SECOND action, `commit_diagnosis`, is declared alongside it to carry the
+ * single gated effect Strategy performs -- creating the outbound Work Handoff
+ * that commits an approved decision on another Unit's behalf. Both are
+ * dispatched through this manifest and both resolve to the same
+ * strategyAnalyst.ts entry point; they differ only in the authority their
+ * governed writes are judged under. See the strategyAnalystActions doc
+ * comment below for why that authority difference is load-bearing rather than
+ * tidiness. Architect-approved.
  *
  * Strategy's OTHER entry point, handlePickup (Handoff-originated, called
  * from checkHandoffs.ts's cron discovery via session.ts's
@@ -58,18 +65,56 @@ import * as strategy from "./strategyAnalyst";
  * migrated off session.ts's hardcoded switch case onto the generic
  * manifest lookup. handleStrategyHandoffApproval itself is unchanged.
  */
-type StrategyAction = "diagnose";
+type StrategyAction = "diagnose" | "commit_diagnosis";
 
 const STRATEGY_ANALYST_HAT_NAME = "Strategy Analyst";
 const STRATEGY_ANALYST_SPECIALIZATION = "Strategic Assessment & Synthesis";
 
+/**
+ * Strategy declares TWO Actions, and the split is load-bearing rather than
+ * tidiness.
+ *
+ * `diagnose` is the operation of diagnosing: reading the situation, advancing
+ * the Matter's operational status to Commercial Development, and advancing the
+ * inbound Handoff's own Pending -> Picked-up -> Held -> Closed progression. It
+ * is UN-GATED, and that is a deliberate statement rather than an omission.
+ * Those are execution bookkeeping on records this Work already owns; they are
+ * not Martin's decisions, and they must not be made to wait on one. Gating
+ * them would also be wrong in a way nothing would report: the Matter advance is
+ * best-effort and its failure is swallowed with a logged error, so a
+ * wrongly-gated pickup would quietly stop advancing Matter status while
+ * appearing to succeed.
+ *
+ * `commit_diagnosis` is the operation that commits on Martin's behalf --
+ * creating the outbound Work Handoff to Finance after an approved intervention
+ * proposal, or to the responsible Unit after an approved diagnosis routing.
+ * That is the only Strategy effect that creates something another Unit will
+ * act on, and it is the only one gated by Martin's explicit approval.
+ *
+ * They are separate Actions rather than one Action with a per-target narrowing
+ * because `requiresApproval` is action-level: an Action performing un-gated
+ * bookkeeping alongside a privileged effect has to be split into the operation
+ * that IS its privileged effect. (Both call sites were already reached only
+ * after an approval callback had fired and consumed its staged approval, so
+ * this changes the authority under which the write is judged, not the
+ * conditions under which it happens.)
+ */
 const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
   {
     name: "diagnose",
+    responsibility: "own_strategic_diagnosis",
+    consequence: "write",
+    requiresApproval: false,
+    description:
+      "Diagnose a Matter/Entity situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and either develop a governed intervention proposal or route the diagnosis to the responsible Unit. Performs the Matter operational-status advance and the inbound Handoff's own lifecycle progression; commits nothing on another Unit's behalf.",
+  },
+  {
+    name: "commit_diagnosis",
+    responsibility: "own_strategic_diagnosis",
     consequence: "write",
     requiresApproval: true,
     description:
-      "Diagnose a Matter/Entity situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and either develop a governed intervention proposal or route the diagnosis to the responsible Unit -- always gated on Martin's explicit approval (Approve/Refine/Reject) before any intervention or Handoff is treated as final.",
+      "Commit an approved Strategy decision as an outbound Work Handoff -- to Finance after an approved intervention proposal, or to the responsible Unit after an approved diagnosis routing. Martin's explicit approval is required: an approved diagnosis is not a routed diagnosis until this Action records it.",
   },
 ];
 
@@ -77,9 +122,9 @@ async function strategyEntryHandler(env: Env, state: WorkState, _actionName: Str
   return strategy.handleDirectRequest(env, state, text);
 }
 
-/** Strategy declares no "read" action -- diagnose is always "write" (a WorkSession always exists by the time this manifest is consulted). Fails closed rather than silently no-opping. */
+/** Strategy declares no "read" action -- both its Actions are "write" (a WorkSession always exists by the time this manifest is consulted). Fails closed rather than silently no-opping. */
 async function strategyReadHandler(_env: Env, actionName: StrategyAction, _text: string): Promise<string> {
-  throw new Error(`${actionName}: not a read action -- Strategy Analyst only declares "diagnose" ("write").`);
+  throw new Error(`${actionName}: not a read action -- Strategy Analyst only declares "diagnose" and "commit_diagnosis" (both "write").`);
 }
 
 // The callback_data prefix strategy.ts's own outbound-handoff proposal
@@ -102,6 +147,7 @@ const strategyAnalystHat: HatManifest<StrategyAction> = {
   responsibility:
     "Diagnose Entity/Matter situations for ENIG using a disciplined Symptom -> Problem -> Cause -> Constraint -> Consequence model, develop governed intervention proposals once causation is adequately supported, and route diagnoses that need a different Unit's work rather than an intervention. Never treats an intervention or downstream Handoff as final without Martin's explicit approval.",
   actions: strategyAnalystActions,
+  responsibilityId: "own_strategic_diagnosis",
   readHandler: strategyReadHandler,
   entryHandler: strategyEntryHandler,
   awaitingHandlers: {},
@@ -123,7 +169,9 @@ export const strategyManifest: UnitManifest = {
  * entry point -- session.ts's handleStrategyRequest calls this instead of
  * strategy.handleDirectRequest directly, making the manifest the actual
  * dispatch surface rather than a decorative parallel structure. Strategy
- * has only one Hat/one action, so no Stage 1/2 resolution is needed here.
+ * has only one Hat, so no Stage 1/2 resolution is needed here; it declares
+ * two Actions, but both resolve to this one entry point, so the dispatch
+ * below names the un-gated one.
  */
 export async function dispatchStrategyHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = strategyManifest.hats[STRATEGY_ANALYST_HAT_NAME];

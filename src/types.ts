@@ -235,12 +235,79 @@ export interface PendingApproval {
   payload?: unknown;
 }
 
+/**
+ * The explicit, typed evidence that Martin personally approved one specific
+ * governed mutation of one specific Work item (ENIG Operating Model,
+ * ACCESS; see src/access.ts, which is the only thing that verifies one).
+ *
+ * WHY THIS EXISTS, AND WHAT IT REPLACES: approval used to be reachable as
+ * ambient mutable state on the WorkSession -- a flag that any later code
+ * anywhere in the same session could read, so "was this approved?" was a
+ * question about session-wide mood rather than about the mutation actually
+ * about to happen. An ApprovalProof is the opposite: a value minted at the
+ * single moment a *verified* approval callback consumes its staged
+ * approval, and passed explicitly down the call stack to the one governed
+ * mutation it authorizes. It is never stored on WorkState, never read back
+ * out of ambient state, and cannot outlive the call it was threaded
+ * through.
+ *
+ * The five fields are the whole authorization claim, and all five are
+ * checked by src/access.ts against the resolved Action and the resolved
+ * mutation target:
+ *   - workId -- the exact Work item Martin approved. A proof for one Work
+ *     never authorizes another.
+ *   - actionName -- the exact resolved Action the approval was for.
+ *   - targetDataSourceId -- the exact governed source the approval covers.
+ *     This is what makes "an approval for HANDOFFS must never authorize an
+ *     update to MATTERS/ENTITIES/PROPOSALS" mechanically true rather than
+ *     a convention.
+ *   - approvalToken -- an unguessable value generated at mint time, checked
+ *     for presence and shape by src/access.ts. It is NOT the replay barrier
+ *     and must not be described as one: the real replay protection is that
+ *     the staged approval is consumed as the proof is minted, so a replayed
+ *     Telegram callback finds nothing left to consume and never reaches
+ *     minting at all. The token is the proof's own identity for the audit
+ *     trail, not a nonce checked against a consumed-value store.
+ *   - approvedAt -- when Martin actually approved, for the audit trail.
+ */
+export interface ApprovalProof {
+  workId: string;
+  actionName: string;
+  targetDataSourceId: string;
+  approvalToken: string;
+  approvedAt: string;
+}
+
 export interface WorkState {
   workId: string;
   chatId: number;
   threadId?: number;
   unit?: Unit;
   hat?: string;
+  /**
+   * The authoritative resolved Action this Work item is an instance of --
+   * the runtime operation the Worker is currently performing (ENIG
+   * Operating Model: Work is the concrete instance of an Action being
+   * performed; Work owns "resolved Action identity").
+   *
+   * Recorded, never asserted: it is written once at Work creation/dispatch
+   * by the code that dispatched the Work, and thereafter only advanced by
+   * the code that legitimately performs a different registered operation on
+   * this Work -- exactly as `stage` and `awaiting` are. It is never
+   * supplied by a call site as part of an authorization claim, and never
+   * inferred from whichever Unit/Hat happens to be running.
+   *
+   * src/access.ts reads the Action from here (via `workSessionContext(state)`)
+   * rather than from anything a caller passes, so a call site cannot
+   * downgrade an operation by naming a laxer Action. A caller MAY pass
+   * `assertedActionName` purely as a cross-check; a conflict with this
+   * field fails closed rather than resolving to either value.
+   *
+   * Absent only for genuinely action-less Work (the standalone Google
+   * Workspace control Work in googleOAuth.ts). Access treats an absent
+   * action on a business-object write as a denial, never as "un-gated".
+   */
+  actionName?: string;
   stage: string;
   awaiting?:
     | "call_notes"

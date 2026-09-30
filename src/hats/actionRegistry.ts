@@ -28,18 +28,47 @@
  * requiresApproval: false.
  */
 
+// A value import, and safe: skillRegistry.ts has no imports of its own and
+// therefore no edge back to this module, so this creates no runtime cycle.
+// (The erased-type rule below that motivated the old import was about
+// *this* module importing Access; the Skill Registry is a leaf.)
+import { SKILL_IDS, type SkillId } from "../platform/skillRegistry";
+
 export type ConsequenceLevel = "read" | "internal" | "write";
+
+/**
+ * One exact Skill an Action requires the Worker to follow while performing
+ * it.
+ *
+ * This is a DECLARED REQUIREMENT, not a call. The Worker resolves the Action,
+ * resolves this list through the Skill Registry, and follows the resulting
+ * methodology. Nothing here invokes a Skill, and a Skill never invokes
+ * anything -- see skillRegistry.ts's own doc comment.
+ */
+export interface SkillRequirement {
+  /** Exact, closed-union Skill id. Resolution is exact: no fuzzy match, no substitution, no fallback. */
+  skill_id: SkillId;
+}
 
 export interface ActionDefinition<A extends string> {
   /** The action's own registered name -- e.g. "status_check". Never invented on the spot; always one of a Unit's own declared verbs. */
   name: A;
+  /**
+   * The organizational Responsibility this Action is associated with -- the
+   * duty owned by a Hat. Declaration only: the Action Registry records which
+   * duty an operation serves, and never assigns a Hat, routes Work, or
+   * becomes a second organizational hierarchy. A Hat's own registered name
+   * remains the authoritative statement of which Hat owns the duty; this is
+   * the operation-level restatement of it.
+   */
+  responsibility: string;
   /**
    * read -- no governed state mutation, no WorkSession, executes
    * immediately, never requires approval.
    * internal -- may need managed execution state (a WorkSession) and may
    * pause on an `awaiting` state for a later reply, but mutates only
    * execution/continuation state, not governed business state. Never
-   * requires approval -- requiresApproval must be false/omitted here;
+   * requires approval -- requiresApproval must be false here;
    * dispatchAction fails closed if it is not.
    * write -- creates or mutates governed business state. May need a
    * WorkSession the same way internal does. Whether it requires
@@ -48,15 +77,38 @@ export interface ActionDefinition<A extends string> {
    */
   consequence: ConsequenceLevel;
   /**
-   * Only ever meaningful (and only ever settable true) when consequence
-   * is "write" -- an action whose governed effect is privileged enough
-   * to need Martin's sign-off before it is considered final. Must be
-   * false or omitted for "read"/"internal"; dispatchAction fails closed
-   * if an "internal" action declares it true. Defaults to false when
-   * omitted on a "write" action -- a write is not privileged by default,
-   * it is privileged only when explicitly declared so.
+   * THE authoritative approval requirement for this Action -- the single
+   * source src/access.ts reads, per the ENIG Operating Model's Approval
+   * section: "the requirement originates from the resolved action definition
+   * and is resolved, not asserted."
+   *
+   * Only ever settable true when consequence is "write". When true, EVERY
+   * governed write performed under this Action requires a matching
+   * ApprovalProof. There is deliberately no per-target narrowing map:
+   * `approvalGatedTargets` was removed rather than kept, because a second
+   * field that could silence `requiresApproval` split one authority in two
+   * and failed open whenever a manifest declared the flag but omitted the
+   * list. An Action that performs un-gated execution bookkeeping (its own
+   * Work's Handoff lifecycle) alongside a privileged effect must therefore
+   * be declared as the operation that IS the privileged effect, with the
+   * bookkeeping living on a separate Action -- which is exactly the
+   * granularity Business Development already uses.
+   *
+   * Required (not optional): a write is not privileged by default, and an
+   * Action must state which it is rather than relying on omission.
    */
-  requiresApproval?: boolean;
+  requiresApproval: boolean;
+  /**
+   * Exact Skills the Worker must follow while performing this Action.
+   *
+   * Optional: a simple Action may require no Skill, and none is forced. When
+   * present, every entry is resolved through the Skill Registry by exact id
+   * and validated (active status, approved version, Worker compatibility,
+   * package format, package integrity) -- see `resolveActionSkills`. A Skill
+   * supplies methodology only: it grants no access, authorizes no Tool, and
+   * assigns no Work.
+   */
+  skill_requirements?: readonly SkillRequirement[];
   description: string;
 }
 
@@ -134,5 +186,45 @@ export async function dispatchAction<A extends string>(
     );
   }
 
-  return { kind: "continuable", action: def.name, consequence: def.consequence, requiresApproval: def.requiresApproval ?? false };
+  return { kind: "continuable", action: def.name, consequence: def.consequence, requiresApproval: def.requiresApproval };
 }
+
+/**
+ * Validates one registered Action definition in isolation.
+ *
+ * Fail-closed manifest completeness applies to an Action's own shape too: an
+ * Action that cannot state its Responsibility, its consequence, or its
+ * approval requirement unambiguously is an invalid Action, and a Kernel that
+ * silently accepted one would be reading a guess as a declaration. Returns
+ * the reason string on failure, or null when the definition is well-formed.
+ *
+ * Deliberately NOT checked here: whether a Hat is allowed to declare a given
+ * consequence or approval requirement. That is a governance question about
+ * the Unit's organizational model, not a shape question about one object.
+ */
+export function validateActionDefinition(action: ActionDefinition<string>): string | null {
+  if (!action.name || !action.name.trim()) return "an Action must have a non-empty registered name";
+  if (!action.responsibility || !action.responsibility.trim()) {
+    return `${action.name}: an Action must declare the organizational Responsibility it serves`;
+  }
+  if (!CONSEQUENCE_LEVELS.includes(action.consequence)) {
+    return `${action.name}: unknown consequence "${String(action.consequence)}"`;
+  }
+  if (typeof action.requiresApproval !== "boolean") {
+    return `${action.name}: requiresApproval must be stated explicitly as true or false -- omission is never a declaration`;
+  }
+  if (action.consequence === "read" && action.requiresApproval) {
+    return `${action.name}: declared consequence "read" but requiresApproval is true -- a read has no governed effect to approve`;
+  }
+  if (action.consequence === "internal" && action.requiresApproval) {
+    return `${action.name}: declared consequence "internal" but requiresApproval is true -- internal actions mutate execution state only and must never gate on approval`;
+  }
+  for (const requirement of action.skill_requirements ?? []) {
+    if (!SKILL_IDS.includes(requirement.skill_id)) {
+      return `${action.name}: declares an unknown Skill id "${String(requirement.skill_id)}" -- Skill requirements resolve by exact id only`;
+    }
+  }
+  return null;
+}
+
+const CONSEQUENCE_LEVELS: readonly ConsequenceLevel[] = ["read", "internal", "write"];

@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { getPage, queryDataSource, uniqueId } from "./notion";
 import { ENIG_TOKEN_PATTERN } from "./ai/outboundGate";
+import { workSessionReadContext } from "./access";
 
 export interface ResolvedMatterIdentity {
   matterToken: string;
@@ -28,7 +29,7 @@ export async function resolveMatterFromText(env: Env, text: string): Promise<Res
   if (!tokenShape) return null;
   const number = Number(tokenShape[2]);
 
-  const candidates = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
+  const candidates = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, workSessionReadContext(),  {
     property: "Matter_ID",
     unique_id: { equals: number },
   });
@@ -37,7 +38,7 @@ export async function resolveMatterFromText(env: Env, text: string): Promise<Res
 
   const entityId = matter.properties.Entity?.relation?.[0]?.id;
   if (!entityId) return null;
-  const entity = await getPage(env, entityId);
+  const entity = await getPage(env, entityId, workSessionReadContext());
   const entityToken = uniqueId(entity.properties.Entity_ID);
   if (!entityToken) return null;
 
@@ -76,7 +77,7 @@ export async function resolveEntityMatterFromTokens(
   if (!matterShape) return null;
   const matterNumber = Number(matterShape[2]);
 
-  const candidates = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, {
+  const candidates = await queryDataSource(env, env.MATTERS_DATA_SOURCE_ID, workSessionReadContext(),  {
     property: "Matter_ID",
     unique_id: { equals: matterNumber },
   });
@@ -86,7 +87,7 @@ export async function resolveEntityMatterFromTokens(
   const entityId = matter.properties.Entity?.relation?.[0]?.id;
   if (!entityId) return null;
 
-  const entity = await getPage(env, entityId);
+  const entity = await getPage(env, entityId, workSessionReadContext());
   if (uniqueId(entity.properties.Entity_ID) !== entityToken) return null;
 
   return { entityId, matterId: matter.id };

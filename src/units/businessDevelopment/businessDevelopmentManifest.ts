@@ -3,6 +3,8 @@ import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { BDOpportunityState } from "./types";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import { createHandoff } from "../../handoffWriter";
+import { mintApprovalProofForWork, workSessionContext } from "../../access";
+import { recordWorkAction } from "../dispatch";
 import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
@@ -136,18 +138,20 @@ const OPPORTUNITY_DEVELOPMENT_SPECIALIZATION = "Opportunity Development";
 const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
 
 const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentAction>[] = [
-  { name: "discover_opportunity", consequence: "read", description: "Identify a candidate BD opportunity from a signal, market, organisation, or relationship." },
-  { name: "research_opportunity", consequence: "read", description: "Gather evidence-backed findings on a named opportunity signal." },
-  { name: "assess_opportunity", consequence: "read", description: "Determine whether a researched signal has a substantive reason for ENIG to pursue it." },
+  { name: "discover_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, description: "Identify a candidate BD opportunity from a signal, market, organisation, or relationship." },
+  { name: "research_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, description: "Gather evidence-backed findings on a named opportunity signal." },
+  { name: "assess_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, description: "Determine whether a researched signal has a substantive reason for ENIG to pursue it." },
   {
     name: "qualify_opportunity",
+    responsibility: "develop_opportunities",
     consequence: "internal",
+    requiresApproval: false,
     description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated.",
   },
-  { name: "develop_opportunity", consequence: "write", requiresApproval: true, description: "Take a qualified opportunity forward: stakeholders, value hypothesis, route, dependencies, risks, next step." },
-  { name: "determine_next_move", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active opportunity." },
-  { name: "handoff_to_sales", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
-  { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
+  { name: "develop_opportunity", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Take a qualified opportunity forward: stakeholders, value hypothesis, route, dependencies, risks, next step." },
+  { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active opportunity." },
+  { name: "handoff_to_sales", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
+  { name: "handoff_to_strategy", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
 ];
 
 /**
@@ -438,6 +442,15 @@ async function proposeBDHandoff(env: Env, state: WorkState, targetUnit: Unit, ta
 export async function handleBDHandoffApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
   const pending = state.pendingBDHandoff;
+  // The Work is about to perform the HANDOFF itself, which is a different
+  // registered operation from the determine_next_move that proposed it. Both
+  // are approval-gated, but they are gated for different reasons, and only
+  // the handoff is the effect Martin's approval of this button commits. The
+  // Work records which one it is performing; Access then judges the create
+  // against that, and cannot be talked into judging it as something laxer.
+  if (approved && pending) {
+    recordWorkAction(state, pending.unit === "Sales" ? "handoff_to_sales" : "handoff_to_strategy");
+  }
 
   if (!pending) {
     await sendWorkspaceHatMessage(env, { ...state, hat: fromHat }, "There's no pending handoff to act on.");
@@ -471,6 +484,11 @@ export async function handleBDHandoffApproval(env: Env, state: WorkState, approv
       "Verified Facts & Sources": richText(pending.opportunitySummary),
     },
     { entityToken: "E-UNBOUND", matterToken: "M-UNBOUND" },
+    // The Handoff is created here, from a verified approval callback, and it is
+    // exactly what handoff_to_sales / handoff_to_strategy gate on. The Work has
+    // already been advanced to that Action by the code proposing the handoff, so
+    // the proof is bound to it rather than to a name chosen here.
+    workSessionContext(state, mintApprovalProofForWork(state, env.HANDOFFS_DATA_SOURCE_ID)),
   );
   await logActivity(env, {
     entry: `Business Development handed off opportunity to ${pending.hat}`,
@@ -835,6 +853,7 @@ const opportunityDevelopmentHat: HatManifest<OpportunityDevelopmentAction> = {
   responsibility:
     "Own the development of specific opportunities that could create meaningful growth for ENIG. Turn an observed market, organisation, partnership, channel, offering, or relationship signal into an evidenced BD opportunity that can either be developed further or handed to the appropriate ENIG Unit. Does not own the client/entity lifecycle once an opportunity becomes a genuine client-acquisition opportunity -- that boundary belongs to Sales.",
   actions: opportunityDevelopmentActions,
+  responsibilityId: "develop_opportunities",
   readHandler: opportunityDevelopmentReadHandler,
   entryHandler: opportunityDevelopmentEntryHandler,
   awaitingHandlers: opportunityDevelopmentAwaitingHandlers,
@@ -868,14 +887,14 @@ const PARTNERSHIP_DEVELOPMENT_HAT_NAME = "Partnerships Manager";
 const PARTNERSHIP_DEVELOPMENT_SPECIALIZATION = "Partnership Development";
 
 const partnershipDevelopmentActions: ActionDefinition<PartnershipDevelopmentAction>[] = [
-  { name: "discover_partner", consequence: "read", description: "Identify a potential partner or strategic relationship." },
-  { name: "research_partner", consequence: "read", description: "Research the organisation, stakeholders, capabilities, and relationship context." },
-  { name: "assess_partnership", consequence: "read", description: "Assess mutual value, strategic fit, and relationship viability." },
-  { name: "qualify_partnership", consequence: "internal", description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
-  { name: "develop_partnership", consequence: "write", requiresApproval: true, description: "Develop a qualified partnership: stakeholders, value proposition, relationship model, route, dependencies, risks." },
-  { name: "determine_next_move", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active partnership opportunity." },
-  { name: "handoff_to_sales", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the partnership becomes a genuine client-acquisition opportunity." },
-  { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the partnership needs strategic diagnosis." },
+  { name: "discover_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, description: "Identify a potential partner or strategic relationship." },
+  { name: "research_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, description: "Research the organisation, stakeholders, capabilities, and relationship context." },
+  { name: "assess_partnership", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, description: "Assess mutual value, strategic fit, and relationship viability." },
+  { name: "qualify_partnership", responsibility: "develop_partnerships", consequence: "internal", requiresApproval: false, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
+  { name: "develop_partnership", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Develop a qualified partnership: stakeholders, value proposition, relationship model, route, dependencies, risks." },
+  { name: "determine_next_move", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active partnership opportunity." },
+  { name: "handoff_to_sales", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the partnership becomes a genuine client-acquisition opportunity." },
+  { name: "handoff_to_strategy", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the partnership needs strategic diagnosis." },
 ];
 
 /**
@@ -1149,6 +1168,7 @@ const partnershipDevelopmentHat: HatManifest<PartnershipDevelopmentAction> = {
   responsibility:
     "Own the development of strategic relationships and partnership opportunities that could create meaningful value for ENIG. Identify, assess, and develop relationships where the relationship or partnership itself is the central business opportunity. Does not automatically own client acquisition, strategic diagnosis, or execution responsibilities belonging to another ENIG Unit.",
   actions: partnershipDevelopmentActions,
+  responsibilityId: "develop_partnerships",
   readHandler: partnershipDevelopmentReadHandler,
   entryHandler: partnershipDevelopmentEntryHandler,
   awaitingHandlers: partnershipDevelopmentAwaitingHandlers,
@@ -1172,14 +1192,14 @@ const GROWTH_MARKET_DEVELOPMENT_HAT_NAME = "Growth & Market Development Manager"
 const GROWTH_MARKET_DEVELOPMENT_SPECIALIZATION = "Growth & Market Development";
 
 const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAction>[] = [
-  { name: "discover_growth_opportunity", consequence: "read", description: "Identify a potential market, channel, offering, or growth space." },
-  { name: "research_market", consequence: "read", description: "Research market/industry signals, segments, channels, competitors, demand." },
-  { name: "assess_market_opportunity", consequence: "read", description: "Assess market attractiveness, strategic/commercial relevance, capability fit." },
-  { name: "qualify_growth_opportunity", consequence: "internal", description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
-  { name: "develop_growth_opportunity", consequence: "write", requiresApproval: true, description: "Develop a qualified growth opportunity: value hypothesis, requirements, route, risks." },
-  { name: "determine_next_move", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active growth opportunity." },
-  { name: "handoff_to_sales", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the growth opportunity becomes a genuine client-acquisition opportunity." },
-  { name: "handoff_to_strategy", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
+  { name: "discover_growth_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, description: "Identify a potential market, channel, offering, or growth space." },
+  { name: "research_market", responsibility: "develop_growth", consequence: "read", requiresApproval: false, description: "Research market/industry signals, segments, channels, competitors, demand." },
+  { name: "assess_market_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, description: "Assess market attractiveness, strategic/commercial relevance, capability fit." },
+  { name: "qualify_growth_opportunity", responsibility: "develop_growth", consequence: "internal", requiresApproval: false, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
+  { name: "develop_growth_opportunity", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Develop a qualified growth opportunity: value hypothesis, requirements, route, risks." },
+  { name: "determine_next_move", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active growth opportunity." },
+  { name: "handoff_to_sales", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the growth opportunity becomes a genuine client-acquisition opportunity." },
+  { name: "handoff_to_strategy", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
 ];
 
 /**
@@ -1445,6 +1465,7 @@ const growthMarketDevelopmentHat: HatManifest<GrowthMarketDevelopmentAction> = {
   responsibility:
     "Own the identification and development of broader opportunities for ENIG's growth across markets, channels, offerings, and growth directions. Identify, research, assess, and develop growth directions where the central question concerns ENIG's broader market position, expansion, channels, offerings, or future sources of growth. Does not automatically own client acquisition, strategic diagnosis, or execution responsibilities belonging to another ENIG Unit.",
   actions: growthMarketDevelopmentActions,
+  responsibilityId: "develop_growth",
   readHandler: growthMarketDevelopmentReadHandler,
   entryHandler: growthMarketDevelopmentEntryHandler,
   awaitingHandlers: growthMarketDevelopmentAwaitingHandlers,

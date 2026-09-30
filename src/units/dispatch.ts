@@ -1,9 +1,67 @@
-import type { Env } from "../types";
+import type { Env, Unit, WorkState } from "../types";
 import type { UnitManifest } from "./unitManifest";
 import { classifyCandidateHats, classifyAction } from "../hats/intakeClassification";
 import { dispatchAction, findAction } from "../hats/actionRegistry";
 import { sendWorkspaceHatMessage, sendHatMessage } from "../telegram";
 import { logActivity } from "../log";
+import { findUnitManifest } from "./registry";
+import { findManifestAction } from "./unitManifest";
+
+/**
+ * Records the registered Action a Work item is currently performing.
+ *
+ * ENIG Operating Model: "Work is the concrete instance of an Action being
+ * performed", and Work owns "resolved Action identity". This is the ONLY
+ * sanctioned way to set `WorkState.actionName`, and it exists so that every
+ * write to that field is visible in one place.
+ *
+ * It is called in two situations, and only these two:
+ *
+ *   1. AT CREATION/DISPATCH -- the code that creates the Work or dispatches a
+ *      request records the Action it resolved. This is resolution, in the
+ *      order the architecture requires: resolve Hat -> resolve Action ->
+ *      persist Action identity on Work.
+ *
+ *   2. AT A GOVERNED LIFECYCLE TRANSITION -- when the code performing an
+ *      operation is a *different* registered Action from the one already
+ *      recorded, and it is about to perform that operation. A Work that
+ *      drafts a Proposal and then submits it for approval is performing
+ *      `proposal_draft` and then `proposal_submit`; a Work whose
+ *      qualification has been approved and which is now committing the staged
+ *      Entity is performing `create_entity`. This is the Work's own lifecycle
+ *      advancing, in exactly the way `stage` and `awaiting` already advance,
+ *      and it is recorded by the code that owns the transition rather than
+ *      inferred by whatever runs next.
+ *
+ * What it is NOT: a way for a caller to name the Action its operation will be
+ * judged by at the point of the governed call. Access reads the recorded
+ * value; it never reads a name supplied alongside the call.
+ *
+ * Fail-closed: an Action that is not declared on the Work's own Hat is
+ * rejected here, so a typo or an invented action name can never be recorded
+ * as authority in the first place.
+ */
+export function recordWorkAction(state: WorkState, actionName: string): WorkState {
+  if (typeof actionName !== "string" || actionName.length === 0) {
+    throw new Error(`cannot record an empty Action on Work ${state.workId}.`);
+  }
+  if (state.unit === undefined || state.hat === undefined) {
+    throw new Error(`Work ${state.workId} has no Unit/Hat, so action "${actionName}" cannot be validated against a manifest.`);
+  }
+  const manifest = findUnitManifest(state.unit);
+  const hat = manifest?.hats[state.hat];
+  if (!hat) {
+    throw new Error(`Work ${state.workId}: ${state.unit} declares no Hat "${state.hat}", so action "${actionName}" cannot be recorded.`);
+  }
+  if (!findManifestAction(actionName, hat)) {
+    throw new Error(`Work ${state.workId}: ${state.unit}/${state.hat} declares no action "${actionName}" -- refusing to record an unregistered Action as authority.`);
+  }
+  state.actionName = actionName;
+  return state;
+}
+
+/** Type-narrowing helper for the Unit a Work belongs to, used by the creators above. */
+export type WorkUnit = Unit;
 
 /**
  * Generic Unit Registry dispatch orchestrator (ENIG Operating Model

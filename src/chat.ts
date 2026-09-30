@@ -4,6 +4,7 @@ import type { ChatTurn, GeneratePromptParts } from "./ai";
 import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
 import { marketingHatSummaryList } from "./hats/registry";
+import { systemContext } from "./access";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -85,6 +86,7 @@ async function recentActivitySnapshot(env: Env, unit: Unit): Promise<string> {
     const entries = await queryDataSource(
       env,
       env.ACTIVITY_LOG_DATA_SOURCE_ID,
+      systemContext(),
       { property: "Area", rich_text: { equals: unit } },
       { pageSize: 15, sortByCreatedDescending: true },
     );

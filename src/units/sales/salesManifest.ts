@@ -86,7 +86,57 @@ import * as sales from "./salesExecutive";
  * reuses unchanged (see discoverLeadsReadHandler's own doc comment).
  */
 type LeadGenerationSpecialistAction = "discover_leads";
-type SalesExecutiveAction = "new_enquiry";
+
+/**
+ * Sales Executive's declared Actions.
+ *
+ * The five Proposal-lifecycle actions are the canonical token-safe Runtime
+ * Proposal model (units/sales/tokenSafeProposal.ts) and exist as separate
+ * Actions because their authority genuinely differs, not for symmetry:
+ *
+ *   proposal_draft   -- create/refresh the Draft Proposal record and its
+ *                       first Version. Staging: never presented, never
+ *                       approvable, so it needs no approval.
+ *   proposal_submit  -- transition the Proposal to Pending Approval and
+ *                       present it. Requests approval; is not approval.
+ *   proposal_approve -- apply Martin's approval of the exact Version he was
+ *                       shown. The ONLY approval-gated Proposal operation.
+ *   proposal_revision-- build a new Version after a requested change and
+ *                       return it to Pending Approval. A prior approval
+ *                       never carries over to a revised Version.
+ *
+ * `create_entity` and `create_matter` likewise exist because committing a
+ * staged Entity or Matter draft is Martin's decision, and is the Action whose
+ * approval requirement therefore applies to that commit.
+ *
+ * `new_enquiry` is the workflow Action that carries the enquiry end to end.
+ * Its own governed effects -- reads, and the lifecycle bookkeeping on the
+ * Handoff this Work item was itself picked up from -- are not effects any
+ * approval governs, so it declares requiresApproval: false. Each privileged
+ * step inside its flow is the operation it actually performs, and is recorded
+ * on the Work as such (see WorkState.actionName). That is the granularity
+ * Business Development already uses, and it is what lets
+ * `approvalGatedTargets` be deleted: there is no longer any need for a second
+ * field narrowing a single Action's gate to a list of targets.
+ *
+ * ONE DISCLOSED ASYMMETRY, so it is not mistaken for an oversight: under
+ * `new_enquiry` this Action also creates the outbound Strategy Handoff, and
+ * that create is NOT independently approval-gated. Strategy's outbound Handoff
+ * create is gated (`commit_diagnosis`). The two differ because that is the
+ * behaviour each had before this change: Strategy's was gated by Martin's
+ * approval callback, Sales' was not independently gated at all. Splitting
+ * `new_enquiry` further would introduce a NEW gate on an effect that has never
+ * had one, which is a business-policy decision rather than a structural one.
+ * It is recorded as an open question rather than resolved here.
+ */
+type SalesExecutiveAction =
+  | "new_enquiry"
+  | "create_entity"
+  | "create_matter"
+  | "proposal_draft"
+  | "proposal_submit"
+  | "proposal_approve"
+  | "proposal_revision";
 
 const LEAD_GENERATION_SPECIALIST_HAT_NAME = "Lead Generation Specialist";
 const LEAD_GENERATION_SPECIALIST_SPECIALIZATION = "Lead Discovery";
@@ -94,7 +144,25 @@ const LEAD_GENERATION_SPECIALIST_SPECIALIZATION = "Lead Discovery";
 const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialistAction>[] = [
   {
     name: "discover_leads",
+    responsibility: "acquire_new_leads",
     consequence: "read",
+    // Declared `read` because that is exactly what this Action is: it searches,
+    // screens, and reports. A read Action can never authorize a governed write
+    // (see consequencePermits in access.ts), which means the three governed
+    // writes this capability used to perform -- a Lead create on a
+    // Martin-approved opportunity, the scheduled run's R&I research-Handoff
+    // create, and the /lead command's Lead create -- now FAIL CLOSED rather
+    // than proceeding under an Action the caller chose.
+    //
+    // That is deliberate, and it is a known gap rather than an oversight
+    // (see docs/enig-operating-model.md, "Known gaps and drift"). Each of
+    // those writes creates a record another Unit acts on, which is the same
+    // shape of effect as Strategy's gated commit_diagnosis -- but whether a
+    // Pending internal research Handoff or a Lead-on-approval is a *privileged*
+    // effect or ordinary operational bookkeeping is a governance question
+    // reserved to the Architect, and it is not answered here by inventing an
+    // Action. The refusal is logged at each site with that reasoning inline.
+    requiresApproval: false,
     description: "Proactively search for organisations showing evidence of a problem worth investigating, and send promising signals to Research & Intelligence.",
   },
 ];
@@ -125,6 +193,7 @@ const leadGenerationSpecialistHat: HatManifest<LeadGenerationSpecialistAction> =
   responsibility:
     "Identify and prepare potential commercial leads through proactive research and discovery, creating a reliable acquisition record that can be taken into the Sales process when appropriate. Owns the work of finding potential opportunities before a person or organisation has expressed interest in engaging with ENIG. Does not create or modify an Entity, qualify Lead-to-Prospect, or draft proposals/quotes -- those remain Sales Executive's authority.",
   actions: leadGenerationSpecialistActions,
+  responsibilityId: "acquire_new_leads",
   readHandler: leadGenerationSpecialistReadHandler,
   entryHandler: leadGenerationSpecialistEntryHandler,
   awaitingHandlers: {},
@@ -141,44 +210,127 @@ const SALES_EXECUTIVE_SPECIALIZATION = "Sales Progression";
 const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
   {
     name: "new_enquiry",
+    responsibility: "own_client_acquisition",
+    consequence: "write",
+    // The enquiry workflow itself is not an approval-gated operation. Its
+    // own governed effects are reads, and the lifecycle bookkeeping on the
+    // Handoff this Work item was itself picked up from (Pending -> Picked-up
+    // -> Closed) -- execution bookkeeping on a record the Work already owns,
+    // which no approval ever governed. Every privileged step inside the
+    // flow is the operation it actually performs, and is declared as its own
+    // Action below carrying its own approval requirement. That is what makes
+    // a per-target narrowing of THIS action unnecessary, and it is why
+    // `approvalGatedTargets` is gone rather than merely unused.
+    requiresApproval: false,
+    description:
+      "Process an incoming business enquiry: match or create the Entity, identify or create the Matter, prepare for the sales call, qualify, and route onward -- with each privileged step inside the flow (entity/matter creation, proposal approval, Finance's quote approval) performed as its own approval-gated Action.",
+  },
+  {
+    name: "create_entity",
+    responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: true,
     description:
-      "Process an incoming business enquiry: match or create the Entity, identify or create the Matter, prepare for the sales call, qualify, and draft a proposal -- gated throughout on Martin's explicit approval at each privileged step (entity/matter creation, proposal approval, Finance's quote approval) before anything is treated as final.",
+      "Commit the Entity record for a staged Entity draft Martin approved. The record exists only because he approved that specific draft, so committing it is his approved governed effect.",
+  },
+  {
+    name: "create_matter",
+    responsibility: "own_client_acquisition",
+    consequence: "write",
+    requiresApproval: true,
+    description:
+      "Commit the Matter record for a staged Matter draft Martin approved. The record exists only because he approved that specific draft, so committing it is his approved governed effect.",
+  },
+  {
+    name: "proposal_draft",
+    responsibility: "own_client_acquisition",
+    consequence: "write",
+    requiresApproval: false,
+    description:
+      "Create or refresh the canonical token-safe Runtime Proposal record and its first Version. Staging only -- the Proposal is Draft, never presented and never approvable until its content is written, so drafting it requires no approval.",
+  },
+  {
+    name: "proposal_submit",
+    responsibility: "own_client_acquisition",
+    consequence: "write",
+    requiresApproval: false,
+    description:
+      "Transition the Runtime Proposal to Pending Approval and present that exact Version to Martin. Submission requests approval; it is not approval, so it does not itself require an ApprovalProof.",
+  },
+  {
+    name: "proposal_approve",
+    responsibility: "own_client_acquisition",
+    consequence: "write",
+    requiresApproval: true,
+    description:
+      "Apply Martin's approval to the exact Proposal Version he reviewed, recording Approval Status = Approved and the Approved Version. The approval stays bound to that Work, that Proposal, that Version, and that content hash -- an earlier approval never authorizes a later Version.",
+  },
+  {
+    name: "proposal_revision",
+    responsibility: "own_client_acquisition",
+    consequence: "write",
+    requiresApproval: false,
+    description:
+      "Build a new Runtime Proposal Version from Martin's requested change and return it to Pending Approval, leaving the prior Version's content intact. A revised Version requires its own subsequent approval.",
   },
 ];
 
-async function salesExecutiveEntryHandler(env: Env, state: WorkState, _actionName: SalesExecutiveAction, text: string): Promise<WorkState> {
+/**
+ * Sales Executive's entry point.
+ *
+ * Only `new_enquiry` is entered as a dispatched Action. The other six are
+ * operations the Worker performs *inside* that flow (or, for the Proposal
+ * lifecycle, inside the Handoff-pickup run) -- each recorded on the Work as
+ * the operation it is performing, which is what gives Access its authority.
+ * They fail closed here rather than falling through to the enquiry handler,
+ * because running `new_enquiry` under any of their names would be performing
+ * one registered operation while claiming another.
+ */
+async function salesExecutiveEntryHandler(env: Env, state: WorkState, actionName: SalesExecutiveAction, text: string): Promise<WorkState> {
+  if (actionName !== "new_enquiry") {
+    throw new Error(
+      `${actionName}: not an entry-point Action on Sales Executive -- it is performed within new_enquiry's own flow (or the token-safe Proposal pickup) and is recorded on the Work there, never dispatched directly.`,
+    );
+  }
   return sales.handleIncomingEnquiry(env, state, text);
 }
 
-/** Sales Executive declares no "read" action -- new_enquiry is always "write" (a WorkSession always exists by the time this manifest is consulted). Fails closed rather than silently no-opping. */
+/** Sales Executive declares no "read" action -- every declared action is "write" (a WorkSession always exists by the time this manifest is consulted). Fails closed rather than silently no-opping. */
 async function salesExecutiveReadHandler(_env: Env, actionName: SalesExecutiveAction, _text: string): Promise<string> {
-  throw new Error(`${actionName}: not a read action -- Sales Executive only declares "new_enquiry" ("write").`);
+  throw new Error(`${actionName}: not a read action -- Sales Executive declares no "read" Actions.`);
 }
 
-// The callback_data prefixes Sales Executive's own nested approval gates
-// (inside new_enquiry's own multi-step flow -- see this file's top doc
-// comment) build their buttons with. Migrates onto
-// HatManifest.callbackHandlers same as every other Unit's prefixes so
-// far (PRs #203-210) -- no relocation needed, salesManifest.ts already
-// imports the whole salesExecutive.ts namespace (`* as sales`), and
-// salesExecutive.ts never imports back from salesManifest.ts. Four of
-// Sales Executive's boolean-shaped approve/reject callbacks migrate
-// together here (entitynew, matternew, qualify, proposal) -- entity/
-// matter (N-way choice, not approve/reject) and the sales-proposal
-// decision callback (compound-encoded value) are deliberately excluded;
-// they don't fit ApprovalCallbackHandler's plain boolean shape.
+// The callback_data prefixes Sales Executive's own approval gates build their
+// buttons with. Migrates onto HatManifest.callbackHandlers same as every
+// other Unit's prefixes so far (PRs #203-210) -- no relocation needed,
+// salesManifest.ts already imports the whole salesExecutive.ts namespace
+// (`* as sales`), and salesExecutive.ts never imports back from
+// salesManifest.ts.
+//
+// The "proposal" prefix is GONE, and its handler with it. It dispatched
+// salesExecutive.ts's handleProposalApproval, the older identity-bearing
+// Proposal path that wrote Entity/Matter *relations* into a Proposal record
+// and contradicted the canonical token-safe Runtime Proposal model. That path
+// was also unreachable: the only code that ever sent a "proposal:" button was
+// handleProposalFeedback, which is itself only reachable once
+// handleProposalApproval has rejected -- a closed cycle with no entry point.
+// The Runtime Proposal lifecycle now has exactly one implementation
+// (units/sales/tokenSafeProposal.ts, dispatched under the proposal_draft /
+// proposal_submit / proposal_approve / proposal_revision Actions) and exactly
+// one model.
+//
+// The entity/matter pickers (N-way choice, not approve/reject) and the
+// sales-proposal decision callback (compound-encoded
+// "<number>.<version>.<a|r>" value) remain outside
+// ApprovalCallbackHandler's plain boolean shape, as before.
 export const ENTITY_NEW_CALLBACK_PREFIX = "entitynew" as const;
 export const MATTER_NEW_CALLBACK_PREFIX = "matternew" as const;
 export const QUALIFY_CALLBACK_PREFIX = "qualify" as const;
-export const PROPOSAL_CALLBACK_PREFIX = "proposal" as const;
 
 const salesExecutiveCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [ENTITY_NEW_CALLBACK_PREFIX]: sales.handleEntityCreationApproval,
   [MATTER_NEW_CALLBACK_PREFIX]: sales.handleMatterCreationApproval,
   [QUALIFY_CALLBACK_PREFIX]: sales.handleLeadToProspectApproval,
-  [PROPOSAL_CALLBACK_PREFIX]: sales.handleProposalApproval,
 };
 
 const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
@@ -186,6 +338,7 @@ const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
   specialization: SALES_EXECUTIVE_SPECIALIZATION,
   responsibility:
     "Own the client-acquisition lifecycle from an incoming enquiry through to a proposal ready for Martin's review: Entity/Matter identification, sales-call preparation, evidence-based qualification, and proposal drafting. Never treats an Entity, Matter, or proposal as final without Martin's explicit approval at each privileged step.",
+  responsibilityId: "own_client_acquisition",
   actions: salesExecutiveActions,
   readHandler: salesExecutiveReadHandler,
   entryHandler: salesExecutiveEntryHandler,

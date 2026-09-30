@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../types";
+import { workSessionContext } from "../access";
 import { logActivity } from "../log";
 import { sendWorkspaceHatMessage } from "../telegram";
 import { getPage, plainText, select } from "../notion";
@@ -60,7 +61,7 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * state.marketingTaskText.
  */
 export async function handleHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
-  const handoff = await getPage(env, state.handoffId!);
+  const handoff = await getPage(env, state.handoffId!, workSessionContext(state));
   const taskText = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
   if (!taskText.trim()) {
     console.error(`Marketing handleHandoffPickup: empty task text for handoff ${state.handoffId}`);
@@ -68,7 +69,12 @@ export async function handleHandoffPickup(env: Env, state: WorkState): Promise<W
     return state;
   }
 
-  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") });
+  // Advancing the Handoff this Work item was picked up from, Pending -> Picked-up:
+  // execution bookkeeping on a record the Work already owns. Ungated because the
+  // Work records `handle_request` (Marketing Strategist's only Action), whose
+  // consequence permits the write and whose gated effect is its own output, not
+  // this Handoff's lifecycle.
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
   state.hat = "Marketing Strategist";
   state.marketingTaskText = taskText;
   await logActivity(env, {
