@@ -75,3 +75,37 @@ test("queryDataSource excludes archived/trashed pages from results", async (t) =
 
   assert.deepStrictEqual(results.map((r) => r.id), ["live-page"], "archived/trashed pages must never be returned as discoverable work");
 });
+
+test("every Notion request is authorized with env.NOTION_TOKEN from the Worker binding, not a hardcoded or cached value", async (t) => {
+  // Regression/verification test for the ENIG Notion secret blocker: the
+  // only way a Notion request could ever carry the wrong credential (or
+  // none) is if notionFetch read the token from somewhere other than the
+  // env binding handed to it per-call. This asserts the literal
+  // Authorization header Notion receives is derived from env.NOTION_TOKEN
+  // on each call, by varying it across two otherwise-identical calls and
+  // confirming the header varies with it -- never logging a real secret,
+  // only these test-fixture placeholder strings.
+  const seenAuthHeaders: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    const headers = init?.headers as Record<string, string>;
+    seenAuthHeaders.push(headers.Authorization);
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await queryDataSource(fakeEnv(), "handoffs-ds", systemContext(), { property: "Status", select: { equals: "Pending" } });
+  await queryDataSource({ ...fakeEnv(), NOTION_TOKEN: "a-different-fixture-token" }, "handoffs-ds", systemContext(), {
+    property: "Status",
+    select: { equals: "Pending" },
+  });
+
+  assert.equal(seenAuthHeaders[0], "Bearer test-notion-token", "the Authorization header must be built from env.NOTION_TOKEN, not a hardcoded value");
+  assert.equal(
+    seenAuthHeaders[1],
+    "Bearer a-different-fixture-token",
+    "changing env.NOTION_TOKEN between calls must change the Authorization header sent -- proves the token is read fresh from the binding on every request, never cached",
+  );
+});
