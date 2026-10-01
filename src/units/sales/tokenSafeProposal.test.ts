@@ -13,7 +13,7 @@ import {
 import type { Env, WorkState } from "../../types";
 import type { StrategyProposal } from "../strategy/strategyAnalyst";
 import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../strategy/strategyAnalyst";
-import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END, handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
 
 // ---------------------------------------------------------------------------
 // Fixtures: the live MAT-20 slice (HO-64, E-20/MAT-20, GHS 420,000).
@@ -942,3 +942,186 @@ test("S4. Reprocessing an existing Proposal without verification does not re-hyd
   assert.strictEqual(text(proposals(world)[0].properties.Version), "v1", "no new Version without verified facts");
   assert.match(fresh.blockedReason ?? "", /upstream facts .* not available/);
 });
+
+// ---------------------------------------------------------------------------
+// Integration (SYNTHETIC, continuous): Finance → Sales quote Handoff round-trip
+// ---------------------------------------------------------------------------
+//
+// Runs the REAL Finance quote-approval writer and then the REAL Sales pickup in
+// one process, with the persisted Handoff as the only thing crossing between
+// them: Phase 1 writes the Finance → Sales Handoff through handleQuoteApproval
+// (in-memory Notion fake), Phase 2 builds a FRESH Sales Work that knows only
+// that Handoff's id -- no Finance state, no identity-bearing context -- and
+// runs handleProposalHandoffPickup on it. Nothing is passed from Finance's
+// in-memory state into Sales: the Handoff record is the Unit boundary.
+//
+// SYNTHETIC, not the real live quote case: Notion, Telegram and the Work states
+// are fakes and no real quote request was run end to end. It establishes that
+// the two halves compose against the same persisted record; it does not
+// establish that the deployed Worker completes a real quote. That still
+// requires one real quote request through a real Handoff, with its result
+// logged.
+
+test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh Sales Work consumes into a token-safe Proposal", async (t) => {
+  const world = installWorld(t);
+
+  // --- Phase 0: the Strategy -> Finance Handoff, as Strategy would write it ---
+  const SRC = "handoff-strategy-src";
+  world.pages.set(SRC, {
+    id: SRC,
+    url: `https://notion.so/${SRC}`,
+    parent: "handoffs-ds",
+    properties: {
+      "Handoff ID": { unique_id: { prefix: "HO", number: 63 } },
+      Handoff: { title: [{ plain_text: "Quote request — MAT-20" }] },
+      "From Unit": { select: { name: "Strategy" } },
+      "From Hat": rt("Strategy Analyst"),
+      "To Unit": { select: { name: "Finance" } },
+      "To Hat": rt("Value-Based Pricing Assessor"),
+      Type: { select: { name: "Work" } },
+      Status: { select: { name: "Pending" } },
+      Entity_Token: rt("E-20"),
+      Matter_Token: rt("MAT-20"),
+      "Verified Facts & Sources": rt(`${strategyBlock(approvedStrategyProposal())}\n\nProposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.`),
+    },
+  });
+
+  // --- Phase 1: Finance's REAL quote approval ---
+  const env = fakeEnv();
+  const rationale = "Priced from the documented value at stake and the approved commercial scope for the engagement.";
+  const financeState: WorkState = {
+    workId: "11111111-2222-3333-4444-55555555aaaa",
+    chatId: 9999,
+    unit: "Finance",
+    hat: "Value-Based Pricing Assessor",
+    actionName: "price",
+    stage: "awaiting_quote_approval",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    handoffId: SRC,
+    entityToken: "E-20",
+    matterToken: "MAT-20",
+    quote: { price: 420000, currency: "GHS", rationale },
+  };
+
+  // Take the id back from the PERSISTED record, not from Finance's state: the
+  // world is seeded with HO64, which is itself a Finance -> Sales Handoff, so
+  // matching on From/To alone silently picks the fixture and makes Phase 2
+  // consume the seeded block instead of the real writer's output. Diffing the
+  // page ids is what guarantees Phase 1's write is the one under test.
+  const idsBeforeApproval = new Set(world.pages.keys());
+  await handleQuoteApproval(env, financeState, true);
+  assert.strictEqual(financeState.stage, "quote_approved", "Finance must approve the quote");
+
+  const fsHandoff = [...world.pages.values()].find(
+    (p) => !idsBeforeApproval.has(p.id) && p.parent === "handoffs-ds",
+  );
+  assert.ok(fsHandoff, "handleQuoteApproval must have persisted a Finance -> Sales Handoff");
+  assert.strictEqual(text(fsHandoff!.properties["From Unit"]), "Finance");
+  assert.strictEqual(text(fsHandoff!.properties["To Unit"]), "Sales");
+
+  const writtenFacts = text(fsHandoff!.properties["Verified Facts & Sources"]);
+  assert.match(writtenFacts, /=== FINANCE COMMERCIAL JUDGMENT ===/, "the real writer must have written the Finance markers");
+  assert.ok(writtenFacts.includes(strategyBlock(approvedStrategyProposal())), "the Strategy boundary block must be carried forward verbatim");
+
+  // --- Phase 2: a FRESH Sales Work -- Handoff id only, no Finance state ---
+  const freshSales: WorkState = {
+    workId: "99999999-8888-7777-6666-55555555bbbb",
+    chatId: 9999,
+    unit: "Sales",
+    hat: "Sales Executive",
+    actionName: "proposal_draft",
+    stage: "new",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    handoffId: fsHandoff!.id,
+  };
+  assert.strictEqual((freshSales as any).entityToken, undefined, "the fresh Work carries no Finance identity");
+
+  const salesState = await handleProposalHandoffPickup(env, freshSales);
+  assert.ok(!salesState.blockedReason, `pickup must succeed: ${salesState.blockedReason}`);
+  assert.strictEqual(salesState.salesProposal?.entityToken, "E-20", "entityToken taken from the Handoff");
+  assert.strictEqual(salesState.salesProposal?.matterToken, "MAT-20", "matterToken taken from the Handoff");
+
+  // Exactly one Proposal, linked to the originating Handoff, token-only identity
+  const recs = proposals(world);
+  assert.strictEqual(recs.length, 1, "exactly one canonical Proposal");
+  const rec = recs[0].properties;
+  assert.deepStrictEqual(rec.Handoff.relation, [{ id: fsHandoff!.id }], "linked to the originating Handoff");
+  assert.strictEqual(text(rec["Entity Token"]), "E-20");
+  assert.strictEqual(text(rec["Matter Token"]), "MAT-20");
+  assert.strictEqual(rec.Entity, undefined, "no identity-bearing Entity relation");
+  assert.strictEqual(rec.Matter, undefined, "no identity-bearing Matter relation");
+
+  // Quote, rationale and tokens unchanged
+  const content = text(rec["Proposal Content"]);
+  assert.strictEqual(rec["Quoted Price"].number, 420000, "currency and amount exactly as Finance quoted");
+  assert.match(text(rec["Quote Rationale"]), /^Currency: GHS\./, "currency exactly as Finance quoted");
+  assert.match(text(rec["Quote Rationale"]), /value at stake/);
+  assert.match(section(content, "COMMERCIAL TERMS"), /Currency: GHS/, "currency carried into the Proposal content");
+  assert.match(content, /Entity_Token: E-20/);
+  assert.match(content, /Matter_Token: MAT-20/);
+  assert.match(content, /\nInvestment: GHS 420,000\n/, "Investment section carries the exact amount");
+  assert.strictEqual(section(content, "BASIS FOR THE INVESTMENT"), rationale, "rationale verbatim, no added justification");
+
+  // Draft / Pending Approval -- not approved, no client artifact, no real identity
+  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval", "presented for approval, never auto-approved");
+  assert.ok(!world.fetches.some((f) => /googleapis|drive|gmail/i.test(f.url)), "no client artifact is created");
+  assert.ok(!/Acme|@client\.com|Acme Foods/i.test(JSON.stringify(rec)), "no real identity in the Proposal record");
+
+  // The Handoff is consumed
+  assert.strictEqual(text(world.pages.get(fsHandoff!.id)!.properties.Status), "Closed");
+
+  // Idempotent on reprocessing: still one Proposal, byte-identical content
+  const again = await handleProposalHandoffPickup(env, { ...freshSales });
+  assert.ok(!again.blockedReason, `reprocessing must stay clean: ${again.blockedReason}`);
+  assert.strictEqual(proposals(world).length, 1, "reprocessing must never create a second Proposal");
+  assert.strictEqual(text(proposals(world)[0].properties["Proposal Content"]), content, "content unchanged on reprocess");
+});
+
+// ---------------------------------------------------------------------------
+// Fail-closed at the integration level: a MARKED but malformed Finance block.
+//
+// Not redundant with 18b: its four fixtures are all unmarked, so every one of
+// them fails at the marker check and the assertion /missing or ambiguous/ only
+// matches the call-site prefix -- the ambiguity, currency and rationale
+// branches are never reached. Not redundant with the parser-level cases in
+// valueBasedPricingAssessor.test.ts either: those assert on the parser's return
+// value, not on the pickup's refusal plus the Handoff being held. This asserts
+// the SPECIFIC reason, which is what proves the intended branch was reached.
+//
+// Missing tokens (18c), malformed Strategy blocks (18e-2, 18e-3), an absent
+// Finance block (18e-4), an unreadable Handoff (18a) and a wrong route/type
+// are already adequately covered, so no cases are added for them here.
+// ---------------------------------------------------------------------------
+
+test("Ifc. Integration: a marked but malformed Finance block fails closed on its own branch and holds the Handoff", async (t) => {
+  const cases: { inner: string; reason: RegExp }[] = [
+    {
+      inner: "Authoritative quote: GHS 420000\nAuthoritative quote: GHS 400000\nRationale: x",
+      reason: /more than one 'Authoritative quote:' line/,
+    },
+    {
+      inner: "Authoritative quote: 420000\nRationale: no currency stated",
+      reason: /the Finance quote currency/,
+    },
+    {
+      inner: "Authoritative quote: GHS 420000",
+      reason: /the Finance pricing rationale/,
+    },
+  ];
+
+  for (const { inner, reason } of cases) {
+    const facts = `${strategyBlock(approvedStrategyProposal())}\n\n${financeBlock(inner)}`;
+    const world = installWorld(t, { ho64: ho64Props({ "Verified Facts & Sources": rt(facts) }) });
+    const state = await handleProposalHandoffPickup(fakeEnv(), fakeState());
+
+    assert.strictEqual(proposals(world).length, 0, inner);
+    assert.match(state.blockedReason ?? "", /missing or ambiguous/, inner);
+    // The specific branch, not just the call-site prefix.
+    assert.match(state.blockedReason ?? "", reason, inner);
+    assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Held", inner);
+  }
+});
+
+
