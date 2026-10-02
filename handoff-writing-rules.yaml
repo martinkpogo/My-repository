@@ -73,3 +73,66 @@ opaque_token_boundary:
     (test-engagement data, not a real client-data exposure) rather than
     scrubbed; see the Activity & Decision Log entry consolidating HO-58
     for the full account. This file exists to stop it happening again.
+
+# --- Sales -> Strategy source-boundary attestation (manual equivalent) ---
+#
+# The runtime enforces this in code at one point: src/handoffWriter.ts's
+# createHandoff establishes five source-boundary checks BEFORE writing a
+# Sales -> Strategy Handoff, refuses (throws) if any check fails or cannot
+# be established -- so no Pending Sales -> Strategy Handoff can exist
+# without an explicit Passed result -- and persists that result as an
+# attestation marker inside the Handoff creation payload itself (the Reason
+# field, the same free-text marker channel already used for
+# requiredCategory). A receiving Strategy execution reads that marker from
+# the record and fails closed when it is missing, malformed, Failed, or not
+# bound to the Handoff; it consumes the evidence and never re-runs the
+# Sales boundary check.
+#
+# The section below is the manual/agent equivalent for a Handoff written
+# directly in Notion (isolated Sales project, human operator, or AI agent),
+# which bypasses the runtime's code path entirely. It is PROCEDURAL
+# ATTESTATION: the operator applies the checks by hand and records the same
+# marker. It is NOT runtime validation -- the runtime does not and cannot
+# verify that a hand-applied check actually ran. Never write a Passed marker
+# unless every check below was genuinely performed for THIS Handoff.
+
+sales_to_strategy_source_boundary_attestation:
+  applies_when: >
+    From Unit is Sales AND To Unit is Strategy, on a Handoff written
+    directly in Notion rather than through the deployed runtime.
+
+  required_result: Passed
+
+  failure_rule: >
+    If any check fails or cannot be established, the Handoff must not be
+    left Pending -- record result=Failed in the marker (or omit the marker)
+    and hold the record for follow-up. Strategy fails closed on anything
+    other than an explicit Passed marker bound to the Handoff.
+
+  checks:
+    - operational_entity_reference_present   # Entity_Token filled in from the operational Entity ID -- never empty, never a real name
+    - operational_matter_reference_present   # Matter_Token filled in from the operational Matter ID
+    - identity_bearing_content_removed       # every protected field re-read: no real Entity/Matter/contact name, email address, or phone number (see opaque_token_boundary above)
+    - identity_resolution_registry_data_not_transferred   # no Identity Resolution Registry data was read into or copied into this Handoff
+    - handoff_context_identity_safe          # the final payload, re-read as a whole, contains only identity-safe content
+
+  marker:
+    channel: Reason free text (the same channel the runtime writes)
+    format: "[source_boundary_check result=Passed entity=<Entity_Token> matter=<Matter_Token> checks=operational_entity_reference_present,operational_matter_reference_present,identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared, e.g. entityName,matterName -- names only, never values>]"
+    binding: >
+      entity= and matter= must be exactly this Handoff's own Entity_Token /
+      Matter_Token values -- that is what binds the attestation to this
+      record. The receiving Strategy execution rejects a marker whose
+      references do not match the Handoff it was read from.
+    contains_no_identity: >
+      The marker carries tokens, the result, the five check names, and
+      known-identity FIELD names only -- never a real name, email address,
+      phone number, or any other identifying value.
+
+  distinction: >
+    A runtime-created Handoff's marker is produced by enforced code (the
+    validate-then-create sequence runs before any write). A marker written
+    by hand is an operator's attestation under this file's discipline --
+    the same evidence shape, but procedural assurance rather than runtime
+    validation. Never represent a hand-written marker as runtime-validated,
+    and never weaken the runtime check because a manual equivalent exists.

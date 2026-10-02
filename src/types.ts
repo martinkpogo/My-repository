@@ -615,16 +615,26 @@ export interface WorkState {
    */
   pendingSalesProposalRevision?: { proposalNumber: number; fromVersion: number };
   /**
-   * The result of the Sales-side known-identity check performed when the
+   * The result of the Sales-side source-boundary check performed when the
    * Sales -> Strategy Handoff was created (createHandoff already runs
-   * findViolation against the authoritative identity Sales supplied --
-   * see handoffWriter.ts's identityFieldsPresent). This records WHICH known-
-   * identity fields were actually available and checked at that moment --
-   * never the values themselves -- so a later Strategy Proposal-content
-   * check can honestly say its known-identity set matches what the source
-   * boundary was already checked against. Set once, immediately after that
-   * Handoff is successfully created (a throw there means this is never
-   * set, consistent with fail-closed) -- see salesExecutive.ts's
+   * assertTokensPresent + findViolation against the authoritative identity
+   * Sales supplied -- see handoffWriter.ts's HandoffSourceBoundaryAttestation
+   * for the explicit `result` (Passed/Failed) and the five named checks).
+   * This records WHICH known-identity fields were actually available and
+   * checked at that moment -- never the values themselves -- so a later
+   * Strategy Proposal-content check can honestly say its known-identity set
+   * matches what the source boundary was already checked against.
+   *
+   * DURABLE TRANSPORT: the authoritative, fail-closed copy of this evidence
+   * is the attestation marker createHandoff writes INTO the Handoff record
+   * itself at creation (the marker channel in handoffWriter.ts) -- that is
+   * what a fresh Strategy session reads and consumes at pickup (see
+   * strategyAnalyst.ts's readSourceBoundaryEvidence). This WorkState copy
+   * is a same-session convenience/audit copy only: it is set once,
+   * immediately after the Handoff write succeeds (a throw there means it is
+   * never set, consistent with fail-closed), and pickup re-seeds this field
+   * from the durable record so a missing/Failed/unbound marker can never be
+   * masked by a stale session copy. See salesExecutive.ts's
    * handleInterventionText.
    */
   strategySourceBoundaryAttestation?: HandoffSourceBoundaryAttestation;

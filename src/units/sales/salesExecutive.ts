@@ -1470,10 +1470,11 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 
   // createHandoff already computed this attestation from exactly the
   // identity it validated strategyHandoffIdentity against -- see
-  // handoffWriter.ts's HandoffSourceBoundaryAttestation. Stored here so
-  // presentStrategyProposalForApproval can later honestly attest that the
-  // Strategy Proposal was checked against the same known-identity set the
-  // source boundary already was. See
+  // handoffWriter.ts's HandoffSourceBoundaryAttestation. The DURABLE copy
+  // of the same evidence is the marker createHandoff wrote into the
+  // Handoff record itself (the fail-closed transport a fresh receiving
+  // session reads); this WorkState copy is kept because the same-session
+  // path still benefits from it, and for audit. See
   // WorkState.strategySourceBoundaryAttestation's own doc comment.
   state.strategySourceBoundaryAttestation = sourceBoundaryAttestation;
 
@@ -1488,7 +1489,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     entry: `Handoff to Strategy created: ${state.matterName}`,
     type: "Activity",
     area: "Sales",
-    activity: `Handoff ${handoff.id} — commercial diagnosis requested.`,
+    activity: `Handoff ${handoff.id} — commercial diagnosis requested. Source-boundary check result: ${sourceBoundaryAttestation.result} (secondary audit only -- the authoritative evidence is the attestation marker on the Handoff record itself).`,
     nextActions: "Strategy to pick up, diagnose, and propose an intervention for Martin's approval.",
     outcome: "Active",
   });

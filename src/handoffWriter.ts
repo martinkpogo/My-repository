@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import type { NotionProperties, NotionPage } from "./notion";
-import { createPage, updatePage } from "./notion";
+import { createPage, richText, updatePage } from "./notion";
 import type { AccessContext } from "./access";
 
 /**
@@ -195,26 +195,166 @@ function assertTokensPresent(identity: HandoffIdentity): void {
 }
 
 /**
- * What createHandoff's own known-identity check actually covered for a
- * given Handoff -- never the values themselves, only which known-identity
- * field(s) (per identityFieldsPresent) were available and checked, and the
- * id of the Handoff record they were checked against. A caller whose own
- * WorkState survives through to that Handoff's downstream pickup (i.e. the
- * caller also registers the handoff_workitem KV mapping under its own
- * workId, so the same WorkSession continues) can store this on
- * WorkState.strategySourceBoundaryAttestation so a later gate (e.g.
- * presentStrategyProposalForApproval) can honestly attest the source
- * boundary was already checked -- see that field's own doc comment. A
- * caller whose WorkState does NOT survive to pickup (no handoff_workitem
- * registration -- e.g. today's Research & Intelligence / Business
- * Development dynamic-unit routing) gets this same result back but has
- * nowhere durable to put it yet; that gap is a separate, still-open
- * decision, not something this type or createHandoff resolves on its own.
+ * The five named checks of the canonical source_boundary_check contract a
+ * Sales -> Strategy Handoff's sender must establish BEFORE the Handoff may
+ * be written with Status Pending. The names are fixed contract vocabulary:
+ * machine-readable, stable, and never carrying a value of any kind.
+ */
+export const SOURCE_BOUNDARY_CHECKS = [
+  "operational_entity_reference_present",
+  "operational_matter_reference_present",
+  "identity_bearing_content_removed",
+  "identity_resolution_registry_data_not_transferred",
+  "handoff_context_identity_safe",
+] as const;
+
+export type SourceBoundaryCheckName = (typeof SOURCE_BOUNDARY_CHECKS)[number];
+
+/** The explicit source-boundary result -- never a generic boolean such as `identitySafe: true`. */
+export type SourceBoundaryResult = "Passed" | "Failed";
+
+/**
+ * What createHandoff's own source-boundary check established for a given
+ * Handoff -- the explicit `result` (Passed/Failed), the five named checks
+ * that result covers, and which known-identity fields (per
+ * identityFieldsPresent) were available and compared -- never the values
+ * themselves -- plus the id of the Handoff record it belongs to.
+ *
+ * DURABLE TRANSPORT: for a Sales -> Strategy Handoff the same evidence is
+ * written INTO the Handoff itself at creation (the marker channel, see
+ * buildSourceBoundaryMarker) -- that record is the authoritative,
+ * fail-closed evidence source for a receiving Strategy execution in a
+ * FRESH session, which has no shared WorkState. WorkState's
+ * `strategySourceBoundaryAttestation` copy (set by the creating Unit, see
+ * salesExecutive.ts's handleInterventionText) remains a same-session
+ * convenience/audit copy only; it is not the transport, and missing durable
+ * evidence must never be inferred as Passed from the absence of
+ * identity-bearing content.
  */
 export interface HandoffSourceBoundaryAttestation {
   handoffId: string;
   checked: true;
+  /**
+   * The explicit result of the source-boundary check. createHandoff only
+   * ever RETURNS "Passed": a "Failed" or unverifiable check throws before
+   * the Handoff is written, so no Pending Sales -> Strategy Handoff can
+   * exist without an established Passed result. "Failed" remains a legal
+   * RECORDED value on a Handoff written by a manual/external sender;
+   * parseSourceBoundaryMarker rejects it fail-closed on the receiving side.
+   */
+  result: SourceBoundaryResult;
+  /**
+   * The five named checks this result covers. Empty only for the
+   * direct_request exemption (no Sales -> Strategy Handoff exists, so there
+   * is nothing for the five checks to attest to -- represented honestly as
+   * no checks, never as a fabricated five-check Passed).
+   */
+  checks: SourceBoundaryCheckName[];
   identityFieldsChecked: KnownIdentityField[];
+}
+
+/**
+ * The sanctioned durable marker channel for a Sales -> Strategy
+ * source-boundary attestation: a machine-readable bracket group appended to
+ * the Handoff's own `Reason` free text -- the same convention already used
+ * for the `requiredCategory: call_notes` marker (see checkHandoffs.ts), so
+ * no Notion schema change, no second record, and no new subsystem. The
+ * marker is written as part of the Handoff creation payload itself (a
+ * single atomic create), which is what binds it to this Handoff: it exists
+ * on exactly the record it was computed for, and its operational
+ * Entity/Matter references must equal that record's own Entity_Token /
+ * Matter_Token when read back. It carries no real-world identity: only the
+ * result, the binding references, the five named checks, and which
+ * known-identity FIELDS were compared (field names, never values).
+ */
+const SOURCE_BOUNDARY_MARKER_PATTERN = /\[source_boundary_check ([^\]]*)\]/;
+const SOURCE_BOUNDARY_MARKER_FIELD_PATTERN = /(\w+)=([^\s\]]*)/g;
+
+/** Parse-time whitelist for the marker's `fields=` list -- names only, see KnownIdentityField. */
+const KNOWN_IDENTITY_FIELD_NAMES: readonly KnownIdentityField[] = ["entityName", "matterName", "contactName", "email", "phone"];
+
+/** Builds the explicit, machine-readable source-boundary marker written into a Handoff's Reason at creation. */
+export function buildSourceBoundaryMarker(
+  identity: HandoffIdentity,
+  result: SourceBoundaryResult,
+  identityFieldsChecked: KnownIdentityField[],
+): string {
+  return (
+    `[source_boundary_check result=${result}` +
+    ` entity=${identity.entityToken.trim()}` +
+    ` matter=${identity.matterToken.trim()}` +
+    ` checks=${SOURCE_BOUNDARY_CHECKS.join(",")}` +
+    ` fields=${identityFieldsChecked.join(",")}]`
+  );
+}
+
+/** The outcome of reading a Handoff's recorded source-boundary evidence. */
+export type SourceBoundaryEvidence = { ok: true; attestation: HandoffSourceBoundaryAttestation } | { ok: false; reason: string };
+
+/**
+ * Reads and validates the durable source-boundary attestation a sender
+ * recorded on a Handoff (buildSourceBoundaryMarker's marker channel).
+ * This is CONSUMPTION of recorded evidence by the receiving execution --
+ * it re-runs no boundary check, scans no content, and queries no identity
+ * registry. Missing, malformed, Failed, or unbound evidence all return
+ * { ok: false } with a non-sensitive reason so the caller can fail closed;
+ * absence of identity-bearing content is never treated as proof the check
+ * happened. `expected` binds the marker to the Handoff being read: its own
+ * id and its own operational Entity/Matter references.
+ */
+export function parseSourceBoundaryMarker(
+  reasonText: string,
+  expected: { handoffId: string; entityToken: string; matterToken: string },
+): SourceBoundaryEvidence {
+  const match = SOURCE_BOUNDARY_MARKER_PATTERN.exec(reasonText ?? "");
+  if (!match) {
+    return { ok: false, reason: "no source_boundary_check attestation marker is recorded on this Handoff" };
+  }
+  const fields = new Map<string, string>();
+  for (const [, key, value] of match[1].matchAll(SOURCE_BOUNDARY_MARKER_FIELD_PATTERN)) {
+    fields.set(key, value);
+  }
+  const result = fields.get("result");
+  if (result !== "Passed" && result !== "Failed") {
+    return { ok: false, reason: "the recorded source_boundary_check result is missing or malformed" };
+  }
+  if (result === "Failed") {
+    return { ok: false, reason: "the recorded source_boundary_check result is Failed" };
+  }
+  const entity = fields.get("entity") ?? "";
+  const matter = fields.get("matter") ?? "";
+  if (!entity || !matter) {
+    return { ok: false, reason: "the recorded attestation carries no operational Entity/Matter reference" };
+  }
+  if (entity !== expected.entityToken || matter !== expected.matterToken) {
+    return { ok: false, reason: "the recorded attestation is not bound to this Handoff's operational Entity/Matter references" };
+  }
+  const recordedChecks = (fields.get("checks") ?? "").split(",").filter(Boolean);
+  const missingChecks = SOURCE_BOUNDARY_CHECKS.filter((c) => !recordedChecks.includes(c));
+  if (missingChecks.length > 0) {
+    return { ok: false, reason: `the recorded attestation does not evidence the required check(s): ${missingChecks.join(", ")}` };
+  }
+  const identityFields = (fields.get("fields") ?? "").split(",").filter(Boolean);
+  const unknownFields = identityFields.filter((f) => !(KNOWN_IDENTITY_FIELD_NAMES as readonly string[]).includes(f));
+  if (unknownFields.length > 0) {
+    return { ok: false, reason: "the recorded attestation names unknown known-identity fields" };
+  }
+  return {
+    ok: true,
+    attestation: {
+      handoffId: expected.handoffId,
+      checked: true,
+      result: "Passed",
+      checks: [...SOURCE_BOUNDARY_CHECKS],
+      identityFieldsChecked: identityFields as KnownIdentityField[],
+    },
+  };
+}
+
+/** Extracts a Notion select property's name for destination-fact checks (e.g. From Unit/To Unit). */
+function selectName(value: unknown): string | undefined {
+  const v = value as { select?: { name?: unknown } } | undefined;
+  return typeof v?.select?.name === "string" ? v.select.name : undefined;
 }
 
 /**
@@ -238,8 +378,63 @@ export async function createHandoff(
   identity: HandoffIdentity,
   access: AccessContext,
 ): Promise<{ page: NotionPage; sourceBoundaryAttestation: HandoffSourceBoundaryAttestation }> {
+  // Source-boundary checks 1 & 2 -- established first, fail closed: a
+  // Handoff with no operational Entity/Matter reference never reaches
+  // createPage. Not weakened; this IS the basis for both checks.
   assertTokensPresent(identity);
+  const established = new Set<SourceBoundaryCheckName>();
+  if (identity.entityToken.trim()) established.add("operational_entity_reference_present");
+  if (identity.matterToken.trim()) established.add("operational_matter_reference_present");
+
+  // Check 4 -- canonical structural guarantee, NOT a scan: this write path
+  // performs no identity resolution of any kind. The only identity input is
+  // the caller-supplied HandoffIdentity (see HandoffIdentity's doc), and
+  // real-world identity lives exclusively in the Identity Resolution
+  // Registry, which this Worker's Handoff write path never touches (see
+  // identityResolution.ts and dataBoundary/policy.ts). Recording that
+  // structural fact explicitly -- no IRR query, no second identity-safety
+  // subsystem.
+  established.add("identity_resolution_registry_data_not_transferred");
+
+  // Check 3 -- the existing validation, unchanged: throws HandoffWriteViolationError
+  // (fail closed) on the first identity-bearing value in any protected field.
   validateHandoffProperties(properties, identity);
+  established.add("identity_bearing_content_removed");
+  const identityFieldsChecked = identityFieldsPresent(identity);
+
+  const isSalesToStrategy =
+    selectName(properties["From Unit"]) === "Sales" && selectName(properties["To Unit"]) === "Strategy";
+  if (isSalesToStrategy) {
+    // Durable evidence, part of THIS creation event: the explicit Passed
+    // attestation travels inside the Handoff record itself, in Reason (the
+    // sanctioned free-text marker channel -- same convention as
+    // requiredCategory), so a receiving Strategy execution in a fresh
+    // session reads evidence instead of inferring it. Bound to this
+    // Handoff by its operational Entity/Matter references; no real-world
+    // identity: result, binding, and the five named checks only.
+    const marker = buildSourceBoundaryMarker(identity, "Passed", identityFieldsChecked);
+    const existingReason = extractPropertyText(properties.Reason).trim();
+    properties.Reason = richText(existingReason ? `${existingReason} ${marker}` : marker);
+    // Check 5 -- the full Handoff context (now including the marker text
+    // itself) must pass the same identity validation before it may be
+    // written. Order matters: the marker claims Passed, and it can only
+    // persist if this final validation -- and therefore every check --
+    // succeeds before createPage runs. A violation here throws, so a
+    // Handoff can never persist evidence whose result was not established.
+    validateHandoffProperties(properties, identity);
+  }
+  established.add("handoff_context_identity_safe");
+
+  // Fail-closed default: if ANY required check cannot be established, no
+  // Handoff is written at all -- in particular, no Pending Sales -> Strategy
+  // Handoff without an explicitly established Passed result.
+  const unestablished = SOURCE_BOUNDARY_CHECKS.filter((c) => !established.has(c));
+  if (unestablished.length > 0) {
+    throw new HandoffWriteViolationError(
+      `source-boundary check(s) could not be established before write: ${unestablished.join(", ")} -- refusing to create the Handoff.`,
+    );
+  }
+
   // `access` is threaded straight through to notion.ts's createPage, which
   // is what actually evaluates it. This module's own validation is
   // deliberately unchanged and is NOT a substitute for it: identity safety
@@ -252,7 +447,9 @@ export async function createHandoff(
     sourceBoundaryAttestation: {
       handoffId: page.id,
       checked: true,
-      identityFieldsChecked: identityFieldsPresent(identity),
+      result: "Passed",
+      checks: [...SOURCE_BOUNDARY_CHECKS],
+      identityFieldsChecked,
     },
   };
 }

@@ -19,6 +19,7 @@ import {
   type StrategyProposal,
 } from "./strategyAnalyst";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
+import { SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker } from "../../handoffWriter";
 import type { WorkState, Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 
@@ -68,10 +69,19 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     // already resident on the shared WorkState from Sales's own earlier
     // work, exactly as production has it. strategySourceBoundaryAttestation
     // mirrors what handleInterventionText (salesExecutive.ts) already sets
-    // once its own Sales -> Strategy Handoff write passes findViolation.
+    // once its own Sales -> Strategy Handoff write passes findViolation --
+    // NOTE: handlePickup RE-SEEDS this field from the durable marker on the
+    // Handoff record itself, so this session copy alone can never carry a
+    // proposal through the gate (see readSourceBoundaryEvidence).
     entityName: "Test Entity",
     matterName: "Test Matter",
-    strategySourceBoundaryAttestation: { handoffId: "handoff-1", checked: true, identityFieldsChecked: ["entityName", "matterName"] },
+    strategySourceBoundaryAttestation: {
+      handoffId: "handoff-1",
+      checked: true,
+      result: "Passed",
+      checks: [...SOURCE_BOUNDARY_CHECKS],
+      identityFieldsChecked: ["entityName", "matterName"],
+    },
     ...overrides,
   };
 }
@@ -242,7 +252,22 @@ interface FetchLog {
 
 function mockFetch(
   t: any,
-  opts: { verifiedFacts?: string; entityToken?: string; matterToken?: string; initialStatus?: string; requiredNextAction?: string } = {},
+  opts: {
+    verifiedFacts?: string;
+    entityToken?: string;
+    matterToken?: string;
+    initialStatus?: string;
+    requiredNextAction?: string;
+    /**
+     * The durable source-boundary marker recorded in the Handoff's Reason.
+     * Defaults to a valid Passed marker built by the same builder the
+     * runtime uses, bound to this fixture's own tokens (production shape).
+     * Pass `null` to simulate a Handoff with NO recorded evidence (e.g. one
+     * created outside the runtime before this contract existed), or a
+     * Failed/custom marker to exercise fail-closed handling.
+     */
+    sourceBoundaryMarker?: string | null;
+  } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
   const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [] };
@@ -251,6 +276,14 @@ function mockFetch(
   const matterToken = opts.matterToken ?? "M-12";
   const initialStatus = opts.initialStatus ?? "Pending";
   const requiredNextAction = opts.requiredNextAction ?? "";
+  const sourceBoundaryMarker =
+    opts.sourceBoundaryMarker === null
+      ? null
+      : (opts.sourceBoundaryMarker ??
+        buildSourceBoundaryMarker({ entityToken, matterToken }, "Passed", ["entityName", "matterName"]));
+  const reason = `Commercial fit/progression approved for ${matterToken}. Entry type: inbound_enquiry.${
+    sourceBoundaryMarker ? ` ${sourceBoundaryMarker}` : ""
+  }`;
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -272,6 +305,7 @@ function mockFetch(
             Status: { select: { name: initialStatus } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
             "Required Next Action": { rich_text: [{ plain_text: requiredNextAction }] },
+            Reason: { rich_text: [{ plain_text: reason }] },
             Entity_Token: { rich_text: [{ plain_text: entityToken }] },
             Matter_Token: { rich_text: [{ plain_text: matterToken }] },
           },
@@ -731,14 +765,20 @@ test("A fresh Strategy Proposal that passes both checks receives a complete stra
   assert.deepStrictEqual(attestation!.proposalContent.identityFieldsChecked, []);
 });
 
-test("Missing source-boundary attestation fails closed -- the Proposal is never presented for approval", async (t) => {
-  const log = mockFetch(t);
+test("Missing durable boundary evidence fails closed -- a Passed WorkState session copy cannot substitute for the Handoff's recorded attestation, and the Proposal is never presented", async (t) => {
+  const log = mockFetch(t, { sourceBoundaryMarker: null });
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
-  const state = fakeState({ strategySourceBoundaryAttestation: undefined });
+  // Deliberately NO state override: fakeState carries a Passed session copy
+  // (as a same-session Sales creation would leave behind). The durable
+  // marker on the Handoff is absent, so pickup must re-seed from the record
+  // and fail closed -- missing evidence is never inferred as Passed, and a
+  // stale session copy cannot mask it.
+  const state = fakeState();
 
   const result = await handlePickup(env, state);
 
+  assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "no usable durable evidence must leave the attestation unset");
   assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
   assert.strictEqual(result.stage, "strategy_blocked");
@@ -746,16 +786,61 @@ test("Missing source-boundary attestation fails closed -- the Proposal is never 
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
 });
 
-test("Missing authoritative entityName/matterName fails closed -- the Proposal is never presented for approval", async (t) => {
-  const log = mockFetch(t);
+test("Failed durable boundary evidence fails closed -- the Proposal is never presented for approval", async (t) => {
+  const log = mockFetch(t, {
+    sourceBoundaryMarker: buildSourceBoundaryMarker({ entityToken: "E-47", matterToken: "M-12" }, "Failed", ["entityName", "matterName"]),
+  });
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
-  const state = fakeState({ entityName: undefined });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state);
+
+  assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "a recorded Failed result must never be accepted as evidence");
+  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.ok(log.sentTexts.some((t) => /no Sales source-boundary identity check is on record/.test(t)));
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
+});
+
+test("Missing operational Entity/Matter reference fails closed -- the Proposal is never presented for approval", async (t) => {
+  const log = mockFetch(t, { matterToken: "" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
 
   const result = await handlePickup(env, state);
 
   assert.strictEqual(result.strategyProposal, undefined);
-  assert.ok(log.sentTexts.some((t) => /no authoritative Entity\/Matter identity is on record/.test(t)));
+  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.ok(log.sentTexts.some((t) => /no operational Entity\/Matter reference/.test(t)));
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
+});
+
+test("Fresh Strategy session consumes the durable attestation from the Handoff and reaches proposal approval using only Entity_ID/Matter_ID -- entityName/matterName never required or populated", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  // Fresh session: no shared Sales WorkState at all -- no attestation copy,
+  // no entityName/matterName. Evidence comes only from the Handoff record;
+  // operational context comes only from Entity_ID/Matter_ID.
+  const state = fakeState({ strategySourceBoundaryAttestation: undefined, entityName: undefined, matterName: undefined });
+
+  const result = await handlePickup(env, state);
+
+  assert.ok(result.pendingStrategyApproval, "a fresh session must reach the proposal-approval stage");
+  assert.strictEqual(result.strategyProposal!.proposalVersion, 1);
+  // The attestation was seeded from the durable marker, bound to this Handoff.
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.checked, true);
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.result, "Passed");
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.handoffId, "handoff-1");
+  assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
+  // Operational references only -- Strategy never resolves real-world identity.
+  assert.strictEqual(result.entityToken, "E-47");
+  assert.strictEqual(result.matterToken, "M-12");
+  assert.strictEqual(result.entityName, undefined, "Strategy must never populate entityName as a workaround");
+  assert.strictEqual(result.matterName, undefined, "Strategy must never populate matterName as a workaround");
 });
 
 test("A drafted Strategy Proposal containing a known identity value fails closed -- never presented, never routed downstream", async (t) => {
