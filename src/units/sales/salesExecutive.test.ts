@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handleInterventionText, handleLeadToProspectApproval, presentQualifiedCallNotesForApproval } from "./salesExecutive";
+import {
+  handleCallNotesHandoffPickup,
+  handleEntityCreationApproval,
+  handleIncomingEnquiry,
+  handleInterventionText,
+  handleLeadToProspectApproval,
+  presentQualifiedCallNotesForApproval,
+} from "./salesExecutive";
 import { SOURCE_BOUNDARY_CHECKS } from "../../handoffWriter";
 import type { WorkState, Env } from "../../types";
 
@@ -57,17 +64,20 @@ interface FetchLog {
   handoffCreateBody: any;
   matterUpdateBody: any;
   sentTexts: string[];
+  /** Every request the handler saw, as "METHOD url" -- lets a test prove a path issued NO lookup at all, not merely that a lookup missed. */
+  requests: string[];
 }
 
 function mockFetch(t: any, opts: { entityUniqueId?: number; matterUniqueId?: number } = {}): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffCreateBody: null, matterUpdateBody: null, sentTexts: [] };
+  const log: FetchLog = { handoffCreateBody: null, matterUpdateBody: null, sentTexts: [], requests: [] };
   const entityUniqueId = opts.entityUniqueId ?? 47;
   const matterUniqueId = opts.matterUniqueId ?? 12;
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
     const method = init?.method ?? "GET";
+    log.requests.push(`${method} ${urlStr}`);
 
     if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(init.body);
@@ -835,4 +845,377 @@ test("Qualified call-notes pickup notifies Operations instead of presenting a de
   assert.strictEqual(result.matterId, undefined, "must never fabricate a matterId when the token doesn't resolve");
   assert.notStrictEqual(result.stage, "awaiting_qualification_approval", "must not present a live decision it has no real identity to apply");
   assert.ok(opsTexts.some((t) => /Lead.Prospect approval couldn.t be presented/.test(t)), "Operations must be notified for manual handling");
+});
+
+// ---------------------------------------------------------------------------
+// Runtime Sales identity boundary (Architect decision): Runtime Sales is
+// permanently token/identity-safe only -- it never queries or writes
+// Name/Email/Phone, never stages identity from an enquiry, and resolves an
+// Entity only through the sanctioned token-safe mechanism (fail-closed when
+// there is no token).
+// ---------------------------------------------------------------------------
+
+test("Runtime Sales identity boundary: a raw enquiry is held without touching the Entity store or staging identity", async (t) => {
+  // mockFetch throws on any request it does not recognise, so an Entity
+  // data-source query (the old findEntityMatch path) fails this test rather
+  // than passing silently.
+  const log = mockFetch(t);
+  const state = fakeState({
+    stage: "new",
+    awaiting: undefined,
+    enquiryText: undefined,
+    entryType: undefined,
+    entityId: undefined,
+    entityName: undefined,
+    matterId: undefined,
+    matterName: undefined,
+    entityDraft: undefined,
+    candidateEntities: undefined,
+  });
+
+  const result = await handleIncomingEnquiry(fakeEnv(), state, "We run a bakery chain and our branding feels dated, can you help?");
+
+  assert.strictEqual(result.entryType, "inbound_enquiry", "the origin fact is still recorded -- it does not depend on identity");
+  assert.strictEqual(result.stage, "identity_boundary_hold", "an enquiry with no token cannot be resolved, so it must hold");
+  assert.strictEqual(result.entityId, undefined, "no Entity may be resolved or created from raw enquiry text");
+  assert.strictEqual(result.entityDraft, undefined, "no identity-bearing Entity draft may be staged");
+  assert.strictEqual(result.candidateEntities, undefined, "no identity-matched Entity candidates may be assembled");
+  assert.ok(log.sentTexts.some((m) => /identity boundary/i.test(m)), "the refusal must be explained in chat");
+});
+
+test("Runtime Sales identity boundary: a raw enquiry issues no database lookup at all -- no Entity read, no Identity Resolution Registry fallback", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    stage: "new",
+    awaiting: undefined,
+    enquiryText: undefined,
+    entryType: undefined,
+    entityId: undefined,
+    entityName: undefined,
+    entityDraft: undefined,
+    candidateEntities: undefined,
+  });
+
+  await handleIncomingEnquiry(fakeEnv(), state, "Contact me at comfort@meridianfoods.com or +233241234567 -- Meridian Foods, rebrand please.");
+
+  const notionRequests = log.requests.filter((r) => r.includes("api.notion.com"));
+  assert.ok(notionRequests.length > 0, "the enquiry must still write its own Activity Log entries");
+  for (const request of notionRequests) {
+    // Every read this runtime could perform is a data-source POST .../query or
+    // a page GET. An Entity match, a Name/Email/Phone query, or an Identity
+    // Resolution Registry fallback would each have to be one of those -- so
+    // asserting their absence is what proves the boundary, rather than proving
+    // that one particular lookup happened to miss.
+    assert.ok(/^POST .*\/pages$/.test(request), `the enquiry may only write its own Activity Log entry: ${request}`);
+    assert.ok(!request.includes("entity-ds"), `the Entity store must never be read for a raw enquiry: ${request}`);
+    assert.ok(!/\/query/.test(request), `no data-source query (Entity or Registry) may be issued: ${request}`);
+  }
+});
+
+test("Runtime Sales identity boundary: approving a drafted Entity refuses the create -- no record, no proof, no identity write", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    stage: "awaiting_entity_creation_approval",
+    awaiting: undefined,
+    entityId: undefined,
+    entityDraft: { name: "Meridian Foods Ghana Ltd", email: "comfort@meridianfoods.com", phone: "+233241234567", type: "Organisation" },
+  });
+
+  const result = await handleEntityCreationApproval(fakeEnv(), state, true);
+
+  // A create would have set entityId from the new page; strict undefined is
+  // what proves createPage was never called.
+  assert.strictEqual(result.entityId, undefined, "no operational Entity record may come into existence");
+  assert.strictEqual(result.entityDraft, undefined, "the identity-bearing draft must be consumed by the refusal");
+  assert.strictEqual(result.stage, "identity_boundary_hold");
+  assert.strictEqual(result.handoffId, undefined, "nothing may proceed downstream of a refused create");
+  assert.ok(log.sentTexts.some((m) => /identity boundary/i.test(m)), "the refusal must be explained in chat");
+});
+
+test("Runtime Sales identity boundary: rejecting a drafted Entity still routes to the redo path -- the approval callback itself is not removed", async (t) => {
+  mockFetch(t);
+  const state = fakeState({
+    stage: "awaiting_entity_creation_approval",
+    awaiting: undefined,
+    entityDraft: { name: "Acme Co", email: "", phone: "", type: "Organisation" },
+  });
+
+  const result = await handleEntityCreationApproval(fakeEnv(), state, false);
+
+  assert.strictEqual(result.stage, "entity_redo_requested");
+  assert.strictEqual(result.awaiting, "entity_redo_reason");
+});
+
+// ---------------------------------------------------------------------------
+// Pickup-origin provenance (Architect decision): a Handoff-pickup session's
+// provenance is read off the claim itself -- never asserted by a caller -- so
+// it survives in the DO-backed WorkState into handleInterventionText's
+// provenance gate, while an origin that was never proven stays fail-closed.
+// ---------------------------------------------------------------------------
+
+function mockPickupFetch(t: any, opts: { handoffStatus?: string; verifiedFacts?: string } = {}) {
+  const originalFetch = globalThis.fetch;
+  const handoffStatus = opts.handoffStatus ?? "Pending";
+  const verifiedFacts = opts.verifiedFacts ?? "De-identified call notes for a positioning engagement.";
+  const patches: string[] = [];
+  const sentTexts: string[] = [];
+  const created: { handoff: any } = { handoff: null };
+
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      sentTexts.push(body.text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (urlStr.endsWith("/pages/handoff-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "handoff-1",
+          url: "https://notion.so/handoff-1",
+          parent: { type: "data_source_id", data_source_id: "handoffs-ds" },
+          properties: {
+            Status: { select: { name: handoffStatus } },
+            // Real Notion rich_text items carry both `text.content` and
+            // `plain_text`; the mock must provide both or plainText() reads "".
+            "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts, text: { content: verifiedFacts } }] },
+            Entity_Token: { rich_text: [{ plain_text: "E-47", text: { content: "E-47" } }] },
+            Matter_Token: { rich_text: [{ plain_text: "M-12", text: { content: "M-12" } }] },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") {
+      patches.push(String(init.body));
+      return new Response(
+        JSON.stringify({ id: "handoff-1", url: "https://notion.so/handoff-1", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }),
+        { status: 200 },
+      );
+    }
+    // The Entity/Matter token reads a pickup session needs before it can write
+    // its downstream Handoff (resolveIdentityTokens).
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", parent: { type: "data_source_id", data_source_id: "entity-ds" }, properties: { Entity_ID: { unique_id: { number: 47, prefix: "E" } } } }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: { Matter_ID: { unique_id: { number: 12, prefix: "M" } } } }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
+      return new Response(
+        JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: {} }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages") && method === "POST") {
+      const body = JSON.parse(init.body);
+      if (body.parent?.data_source_id === "handoffs-ds") {
+        created.handoff = body;
+        return new Response(JSON.stringify({ id: "handoff-page-1", url: "https://notion.so/handoff-page-1", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", parent: { type: "data_source_id", data_source_id: "activity-log-ds" }, properties: {} }),
+        { status: 200 },
+      );
+    }
+    if (method === "GET" && /\/pages\/[0-9a-f-]{32,36}$/i.test(new URL(urlStr).pathname)) {
+      // A standalone governance page: its parent is a page, not a data
+      // source, which is how it resolves to "no governed target".
+      return new Response(
+        JSON.stringify({ id: urlStr.split("/").pop(), url: urlStr, parent: { type: "page", page_id: "governance-root" }, properties: {} }),
+        { status: 200 },
+      );
+    }
+
+    throw new Error(`Unexpected fetch in pickup provenance test: ${method} ${urlStr}`);
+  }) as typeof fetch;
+
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  return { patches, sentTexts, created };
+}
+
+function freshPickupState(overrides: Partial<WorkState> = {}): WorkState {
+  return fakeState({
+    handoffId: "handoff-1",
+    stage: "new",
+    awaiting: undefined,
+    entryType: undefined,
+    enquiryText: undefined,
+    entityId: undefined,
+    entityName: undefined,
+    matterId: undefined,
+    matterName: undefined,
+    ...overrides,
+  });
+}
+
+test("Pickup-origin provenance: claiming a real call-notes Handoff records handoff_pickup on the Work item", async (t) => {
+  const { patches } = mockPickupFetch(t);
+
+  // Seed a provenance value that would be WRONG for this origin: the recorded
+  // value must come from the successful claim itself, never from whatever the
+  // caller-supplied state already carried.
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState({ entryType: "inbound_enquiry" }));
+
+  assert.strictEqual(result.entryType, "handoff_pickup", "the successful claim is the provenance fact and must be recorded");
+  assert.ok(patches.some((p) => p.includes("Picked-up")), "the claim must still have happened before provenance was recorded");
+});
+
+test("Pickup-origin provenance: a claimed Handoff's sanitized context is persisted into the session business context", async (t) => {
+  mockPickupFetch(t);
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(
+    result.callNotes,
+    "De-identified call notes for a positioning engagement.",
+    "the claimed Handoff's own already-sanitized payload must become the session's value context -- copied from this Handoff and nowhere else",
+  );
+});
+
+test("Pickup-origin provenance: a refused claim persists no context either -- nothing unsanitized or unproven reaches the session", async (t) => {
+  mockPickupFetch(t, { handoffStatus: "Picked-up" });
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(result.callNotes, undefined, "an unclaimed Handoff's context must not be read into the session");
+});
+
+test("Pickup-origin provenance: a refused claim records no provenance -- an origin that was never proven stays fail-closed", async (t) => {
+  mockPickupFetch(t, { handoffStatus: "Picked-up" });
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(result.entryType, undefined, "a Handoff that was never claimed must not confer provenance");
+  assert.notStrictEqual(result.stage, "awaiting_qualification_approval", "a non-Pending Handoff must not be processed");
+});
+
+test("Pickup-origin provenance: a handoff_pickup session satisfies the provenance gate and the Handoff records that provenance", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    entryType: "handoff_pickup",
+    enquiryText: undefined,
+    // Gate 3 (value-relevant context) is a separate, unchanged gate: this
+    // test supplies the continuation's own context so that it exercises the
+    // provenance gate under test rather than the context gate.
+    callNotes: "Pickup continuation: de-identified call notes carried on the source Handoff.",
+  });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Reposition the value story for larger buyers.");
+
+  assert.ok(log.handoffCreateBody, "a legitimate Handoff-origin session must reach Handoff creation");
+  assert.match(richTextValue(handoffProps(log).Reason), /Entry type: handoff_pickup/);
+  assert.strictEqual(result.stage, "awaiting_strategy");
+
+  // LOG-965 source-boundary attestation remains mandatory for handoff_pickup.
+  assert.strictEqual(
+    result.strategySourceBoundaryAttestation?.result,
+    "Passed",
+    "a handoff_pickup session must still compute and record the source-boundary attestation",
+  );
+  const reason = richTextValue(handoffProps(log).Reason);
+  assert.match(reason, /\[source_boundary_check result=Passed\b/, "the durable LOG-965 marker must be on the Handoff itself");
+});
+
+test("Pickup provenance and Gate 3: a handoff_pickup session with no sanitized context still fails Gate 3 -- no Handoff, Blocker logged", async (t) => {
+  const log = mockFetch(t);
+  // Legitimate provenance, but the value-relevant context gate is independent:
+  // nothing was persisted because no context was ever claimed.
+  const state = fakeState({ entryType: "handoff_pickup", enquiryText: undefined, callNotes: undefined });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Reposition the value story for larger buyers.");
+
+  assert.strictEqual(log.handoffCreateBody, null, "Gate 3 must still refuse a pickup session that carries no value-relevant context");
+  assert.ok(log.sentTexts.some((m) => /no value-relevant context/i.test(m)), "the Gate 3 refusal must be explained in chat");
+  assert.strictEqual(result.handoffId, undefined);
+});
+
+test("Pickup provenance: an empty sanitized context never becomes session context -- the claim fails closed upstream", async (t) => {
+  // Whitespace is not context: evaluateHandoffContext trims it and rejects it
+  // (dataBoundary/policy.ts), so the Handoff is held and no context is ever
+  // persisted -- the continuation guard must not launder it either.
+  mockPickupFetch(t, { verifiedFacts: "   " });
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(result.stage, "handoff_held", "an empty sanitized context must still fail closed at the claim");
+  assert.strictEqual(result.callNotes, undefined, "an empty sanitized context must not be persisted as the session's value context");
+});
+
+test("Gate 3 continuation end to end: the claimed Handoff's sanitized context is what carries a pickup session through Gate 3", async (t) => {
+  const { created } = mockPickupFetch(t);
+
+  // Phase 1 -- the claim: the Handoff's own already-sanitized payload becomes
+  // the session's business context, and its origin becomes the provenance.
+  const pickedUp = await handleCallNotesHandoffPickup(
+    fakeEnv(),
+    freshPickupState({
+      enquiryText: undefined,
+      callNotes: undefined,
+      entityId: "entity-page-1",
+      entityName: "Acme Co",
+      matterId: "matter-page-1",
+      matterName: "Acme Co — Positioning",
+    }),
+  );
+
+  assert.strictEqual(pickedUp.entryType, "handoff_pickup");
+  assert.strictEqual(pickedUp.enquiryText, undefined, "a pickup has no enquiry text, so Gate 3 must rest on the persisted context alone");
+  assert.ok(pickedUp.callNotes?.trim(), "the claimed Handoff's sanitized context must be persisted onto the session");
+
+  // Phase 2 -- the downstream Handoff write: Gate 1 (provenance) and Gate 3
+  // (value-relevant context) both pass on facts the pickup itself proved, and
+  // LOG-965's source-boundary attestation is still recorded on the Handoff.
+  const result = await handleInterventionText(
+    fakeEnv(),
+    { ...pickedUp, stage: "awaiting_intervention", awaiting: "intervention" },
+    "Reposition the value story for larger buyers.",
+  );
+
+  assert.ok(created.handoff, "legitimately sanitized pickup context must be enough to pass Gate 3 and create the Handoff");
+  const reason = richTextValue(created.handoff.properties.Reason);
+  assert.match(reason, /Entry type: handoff_pickup/);
+  assert.match(reason, /\[source_boundary_check result=Passed\b/, "the LOG-965 attestation remains mandatory for handoff_pickup");
+  assert.strictEqual(result.stage, "awaiting_strategy");
+});
+
+test("Provenance distinction: direct_request remains its own value and does not bypass the Handoff source-boundary attestation", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({ entryType: "direct_request", enquiryText: undefined, callNotes: "Chat-originated commercial context." });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Reposition the value story for larger buyers.");
+
+  assert.ok(log.handoffCreateBody, "direct_request is still a declared provenance value that reaches Handoff creation");
+  const reason = richTextValue(handoffProps(log).Reason);
+  assert.match(reason, /Entry type: direct_request/, "direct_request stays distinct from handoff_pickup");
+  assert.doesNotMatch(reason, /handoff_pickup/, "the two provenance values must never be conflated");
+  assert.match(
+    reason,
+    /\[source_boundary_check result=Passed\b/,
+    "direct_request does NOT exempt the Sales -> Strategy Handoff from the LOG-965 source-boundary attestation",
+  );
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.result, "Passed");
+});
+
+test("Pickup-origin provenance: an undeclared provenance value is rejected exactly like a missing one -- no Handoff, Blocker logged", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({ entryType: "handoff_pickup_typo" as NonNullable<WorkState["entryType"]> });
+
+  const result = await handleInterventionText(fakeEnv(), state, "Reposition the value story for larger buyers.");
+
+  assert.strictEqual(log.handoffCreateBody, null, "must not create a Handoff on a provenance value the type does not declare");
+  assert.ok(log.sentTexts.some((m) => /entry type/i.test(m)), "the refusal must be explained in chat");
+  assert.strictEqual(result.handoffId, undefined);
+  assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "a refused Handoff must not trigger the /checkhandoffs continuation");
 });

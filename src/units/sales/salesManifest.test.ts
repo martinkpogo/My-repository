@@ -233,7 +233,7 @@ test("salesManifest: Sales Executive's awaitingHandlers is empty -- continuation
   assert.deepStrictEqual(hat.awaitingHandlers, {});
 });
 
-test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat genuinely delegates to salesExecutive.ts's handleIncomingEnquiry", async (t) => {
+test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat genuinely delegates to salesExecutive.ts's handleIncomingEnquiry, which holds the enquiry at the Runtime identity boundary instead of extracting or matching identity", async (t) => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string) => {
     if (String(url).includes("api.telegram.org")) {
@@ -262,22 +262,34 @@ test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat ge
     globalThis.fetch = originalFetch;
   });
 
+  let aiCalls = 0;
   const env = fakeEnv({
-    AI: { run: async () => ({ response: JSON.stringify({}) }) },
+    AI: {
+      run: async () => {
+        aiCalls++;
+        return { response: JSON.stringify({}) };
+      },
+    },
   } as any);
   const state = fakeWorkState({ hat: "Sales Executive" });
 
   const hat = salesManifest.hats["Sales Executive"];
   const result = await hat.entryHandler(env, state, "new_enquiry", "Some inbound enquiry text");
 
+  // Provenance of the origin is still recorded -- it is the fact that does
+  // not depend on identity -- but Runtime Sales no longer extracts or matches
+  // name/email/phone: no AI identity extraction runs, no Entity draft is
+  // staged, and the work item holds at the identity boundary.
   assert.strictEqual(result.enquiryText, "Some inbound enquiry text");
   assert.strictEqual(result.entryType, "inbound_enquiry");
-  assert.strictEqual(result.stage, "awaiting_entity_pick");
-  assert.strictEqual(result.awaiting, "entity_pick");
-  assert.ok(result.entityDraft);
+  assert.strictEqual(result.stage, "identity_boundary_hold");
+  assert.strictEqual(result.awaiting, undefined);
+  assert.strictEqual(result.entityDraft, undefined, "Runtime Sales must never stage an identity-bearing Entity draft");
+  assert.strictEqual(result.candidateEntities, undefined, "Runtime Sales must never assemble identity-matched Entity candidates");
+  assert.strictEqual(aiCalls, 0, "the sales.enquiry_extraction identity extraction must not run at all");
 
   const viaDispatch = await dispatchSalesExecutiveHat(env, fakeWorkState({ hat: "Sales Executive" }), "Another enquiry");
-  assert.strictEqual(viaDispatch.stage, "awaiting_entity_pick");
+  assert.strictEqual(viaDispatch.stage, "identity_boundary_hold");
 });
 
 test("salesManifest: Sales Executive declares exactly entitynew, matternew, and qualify in callbackHandlers -- the Proposal decision is a Token-Safe Action callback, not a manifest one", () => {

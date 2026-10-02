@@ -232,7 +232,13 @@ async function resolveExplicitEntity(env: Env, entityRef: string, leadName: stri
 
   try {
     const page = await getPage(env, pageId, workSessionReadContext());
-    const entityName = plainText(page.properties.Name);
+    // Sanctioned identity-safe field only: the operational Entity schema has
+    // no Name property (Identity Resolution Registry decision), so reading one
+    // here always returned "" and turned every reference into a mismatch.
+    // `Entity Record` is the identity-safe title the schema defines; an empty
+    // one leaves `entityName` empty, and `Boolean(a)` below then refuses to
+    // call it a match -- verification still fails closed, never invented.
+    const entityName = plainText(page.properties["Entity Record"]);
     const a = entityName.toLowerCase();
     const b = leadName.toLowerCase();
     const reliablyMatches = Boolean(a) && (a.includes(b) || b.includes(a));
