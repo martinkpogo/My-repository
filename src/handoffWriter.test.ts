@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createHandoff, updateHandoff, validateHandoffProperties, HandoffWriteViolationError } from "./handoffWriter";
+import { createHandoff, updateHandoff, validateHandoffProperties, HandoffWriteViolationError, SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker, parseSourceBoundaryMarker } from "./handoffWriter";
 import { richText, select, title } from "./notion";
 import type { Env } from "./types";
 import { mintApprovalProof, type AccessContext } from "./access";
@@ -332,4 +332,121 @@ test("updateHandoff: a plain Status-only lifecycle update with no identity suppl
   mockNotionFetch(t);
   const env = fakeEnv();
   await assert.doesNotReject(() => updateHandoff(env, "handoff-1", { Status: select("Picked-up") }, lifecycleAccess("handoff-1")));
+});
+
+// --- Sales -> Strategy source-boundary attestation (durable marker) -------
+
+function salesToStrategyProperties(overrides: Record<string, unknown> = {}) {
+  return validProperties({
+    Handoff: title("Commercial diagnosis — MAT-20"),
+    "From Unit": select("Sales"),
+    "To Unit": select("Strategy"),
+    ...overrides,
+  });
+}
+
+function propertyText(prop: any): string {
+  const parts = prop?.rich_text ?? [];
+  return parts.map((p: any) => p.plain_text ?? p.text?.content ?? "").join("");
+}
+
+test("createHandoff (Sales -> Strategy): the creation payload carries the durable Passed attestation marker -- result, Handoff binding, all five checks, no real-world identity", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const properties = salesToStrategyProperties({
+    Reason: richText("Commercial fit/progression approved for MAT-20. Entry type: inbound_enquiry."),
+  });
+  const identity = { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd", email: "comfort@meridianfoods.com" };
+
+  const { sourceBoundaryAttestation } = await createHandoff(env, properties, identity, createAccess(env));
+
+  // The marker is part of the Handoff creation event itself -- one atomic create.
+  const create = calls.find((c) => c.method === "POST" && c.body?.properties?.Reason);
+  assert.ok(create, "the Handoff must be created");
+  const reason = propertyText(create.body.properties.Reason);
+  const markerMatch = /\[source_boundary_check [^\]]*\]/.exec(reason);
+  assert.ok(markerMatch, `the durable attestation marker must be in the Handoff's Reason: ${reason}`);
+  const marker = markerMatch[0];
+
+  // Explicit result, bound to this Handoff's operational references.
+  assert.match(marker, /result=Passed/);
+  assert.ok(marker.includes("entity=E-20"), "marker must bind to the operational Entity reference");
+  assert.ok(marker.includes("matter=MAT-20"), "marker must bind to the operational Matter reference");
+
+  // All five named checks, verbatim contract vocabulary.
+  for (const check of SOURCE_BOUNDARY_CHECKS) {
+    assert.ok(marker.includes(check), `marker must evidence ${check}`);
+  }
+
+  // The marker itself contains no identity-bearing content.
+  for (const forbidden of ["Meridian Foods Ghana Ltd", "comfort@meridianfoods.com"]) {
+    assert.ok(!marker.includes(forbidden), `marker must not contain identity-bearing content: ${forbidden}`);
+  }
+  assert.ok(!marker.includes("@"), "the marker never carries contact details");
+
+  // Returned attestation: explicit result, the five checks, and this Handoff's id.
+  assert.strictEqual(sourceBoundaryAttestation.result, "Passed");
+  assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
+  assert.strictEqual(sourceBoundaryAttestation.handoffId, "page-1");
+
+  // The pre-existing Reason text is preserved (the marker is appended, never substituted).
+  assert.match(reason, /^Commercial fit\/progression approved for MAT-20\. Entry type: inbound_enquiry\./);
+});
+
+test("createHandoff (Sales -> Strategy): identity-bearing content still refuses the write -- no Handoff is created, so no Pending Sales -> Strategy Handoff can exist", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const properties = salesToStrategyProperties({
+    Reason: richText("Commercial fit approved for Meridian Foods Ghana Ltd."),
+  });
+  await assert.rejects(
+    () => createHandoff(env, properties, { ...baseIdentity, entityName: "Meridian Foods Ghana Ltd" }, createAccess(env)),
+    HandoffWriteViolationError,
+  );
+  assert.strictEqual(calls.length, 0, "a failed source-boundary check must never produce a Handoff write");
+});
+
+test("parseSourceBoundaryMarker: round-trips the sender's marker -- explicit Passed result bound to the Handoff, all five checks", () => {
+  const identity = { entityToken: "E-20", matterToken: "MAT-20" };
+  const marker = buildSourceBoundaryMarker(identity, "Passed", ["entityName", "matterName", "email"]);
+
+  const parsed = parseSourceBoundaryMarker(`Reason text before it. ${marker}`, { handoffId: "page-1", entityToken: "E-20", matterToken: "MAT-20" });
+
+  if (!parsed.ok) assert.fail(`expected to consume the marker, got: ${parsed.reason}`);
+  assert.strictEqual(parsed.attestation.handoffId, "page-1");
+  assert.strictEqual(parsed.attestation.checked, true);
+  assert.strictEqual(parsed.attestation.result, "Passed");
+  assert.deepStrictEqual([...parsed.attestation.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
+  assert.deepStrictEqual([...parsed.attestation.identityFieldsChecked].sort(), ["email", "entityName", "matterName"]);
+});
+
+test("parseSourceBoundaryMarker: missing, Failed, incomplete, malformed, and unbound evidence all fail closed -- absence of identity data is never inferred as Passed", () => {
+  const identity = { entityToken: "E-20", matterToken: "MAT-20" };
+  const expected = { handoffId: "page-1", entityToken: "E-20", matterToken: "MAT-20" };
+  const passedMarker = buildSourceBoundaryMarker(identity, "Passed", ["entityName", "matterName"]);
+
+  // Missing entirely.
+  assert.strictEqual(parseSourceBoundaryMarker("Commercial fit/progression approved for MAT-20.", expected).ok, false);
+  // Sanitized identity-free text with no marker at all is still not evidence.
+  assert.strictEqual(parseSourceBoundaryMarker("Sanitized context containing no identity whatsoever.", expected).ok, false);
+  // Explicitly Failed.
+  assert.strictEqual(parseSourceBoundaryMarker(buildSourceBoundaryMarker(identity, "Failed", ["entityName", "matterName"]), expected).ok, false);
+  // Missing one of the five required checks.
+  assert.strictEqual(
+    parseSourceBoundaryMarker(
+      "[source_boundary_check result=Passed entity=E-20 matter=MAT-20 checks=operational_entity_reference_present,operational_matter_reference_present]",
+      expected,
+    ).ok,
+    false,
+  );
+  // No explicit result at all (malformed).
+  assert.strictEqual(
+    parseSourceBoundaryMarker(
+      "[source_boundary_check checks=operational_entity_reference_present,operational_matter_reference_present,identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe]",
+      expected,
+    ).ok,
+    false,
+  );
+  // Bound to a different Handoff's operational references.
+  assert.strictEqual(parseSourceBoundaryMarker(passedMarker, { ...expected, matterToken: "MAT-99" }).ok, false);
 });

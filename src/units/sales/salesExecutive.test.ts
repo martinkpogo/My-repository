@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handleInterventionText, handleLeadToProspectApproval, presentQualifiedCallNotesForApproval } from "./salesExecutive";
+import { SOURCE_BOUNDARY_CHECKS } from "../../handoffWriter";
 import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {
@@ -197,8 +198,46 @@ test("Source-boundary attestation: the Sales -> Strategy Handoff write records e
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
   assert.strictEqual(result.strategySourceBoundaryAttestation?.checked, true);
+  assert.strictEqual(result.strategySourceBoundaryAttestation?.result, "Passed");
+  assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
   assert.strictEqual(result.strategySourceBoundaryAttestation?.handoffId, "handoff-page-1");
   assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+});
+
+test("Durable evidence: the created Sales -> Strategy Handoff itself carries the Passed source-boundary marker -- result, binding, five checks, and no identity-bearing content", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    entryType: "inbound_enquiry",
+    entityName: "Meridian Foods Ghana Ltd",
+    matterName: "Cold Chain Logistics Redesign",
+    entityDraft: { name: "Comfort Agyare", email: "comfort@meridianfoods.com", phone: "+233241234567", type: "Individual" },
+  });
+
+  await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
+
+  const props = handoffProps(log);
+  const reason = richTextValue(props.Reason);
+  const markerMatch = /\[source_boundary_check [^\]]*\]/.exec(reason);
+  assert.ok(markerMatch, `the attestation must be persisted as part of the Handoff creation event: ${reason}`);
+  const marker = markerMatch[0];
+
+  // Explicit Passed result, bound to this Handoff's operational references (E-47/M-12 from the fixture's Entity/Matter pages).
+  assert.match(marker, /result=Passed/);
+  assert.ok(marker.includes("entity=E-47"), "marker must bind to the operational Entity reference");
+  assert.ok(marker.includes("matter=M-12"), "marker must bind to the operational Matter reference");
+
+  // All five named checks.
+  for (const check of SOURCE_BOUNDARY_CHECKS) {
+    assert.ok(marker.includes(check), `marker must evidence ${check}`);
+  }
+
+  // The marker itself must contain no identity-bearing content.
+  for (const forbidden of ["Meridian Foods Ghana Ltd", "Cold Chain Logistics Redesign", "Comfort Agyare", "comfort@meridianfoods.com", "+233241234567"]) {
+    assert.ok(!marker.includes(forbidden), `marker must not contain identity-bearing content: ${forbidden}`);
+  }
+
+  // The Handoff is still created Pending, after the checks established.
+  assert.strictEqual(props.Status.select.name, "Pending");
 });
 
 test("Source-boundary attestation: optional email is recorded as checked when present on entityDraft", async (t) => {

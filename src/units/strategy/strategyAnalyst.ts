@@ -7,7 +7,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
-import { createHandoff, updateHandoff, textContainsIdentityValue, type KnownIdentityField } from "../../handoffWriter";
+import { createHandoff, updateHandoff, textContainsIdentityValue, parseSourceBoundaryMarker, type KnownIdentityField, type SourceBoundaryEvidence } from "../../handoffWriter";
 import { resolveMatterFromText, resolveEntityMatterFromTokens } from "../../identityResolution";
 import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
@@ -360,6 +360,38 @@ export async function resolveStrategyHandoffContext(env: Env, handoffId: string,
   }
 }
 
+/**
+ * Reads the durable source-boundary attestation the SENDING execution
+ * recorded on the Handoff itself at creation (handoffWriter's marker
+ * channel) and validates that it is an explicitly recorded Passed result
+ * BOUND to this Handoff's own operational Entity/Matter references.
+ *
+ * This is consumption of recorded evidence, not a re-performance of the
+ * Sales boundary check: Strategy never re-runs the five checks, never
+ * scans content for identity, and never queries the Identity Resolution
+ * Registry. Missing, malformed, Failed, or unbound evidence returns
+ * { ok: false } so the pickup fails closed -- absence of identity-bearing
+ * content is never treated as proof that Sales performed the check.
+ */
+async function readSourceBoundaryEvidence(
+  env: Env,
+  handoffId: string,
+  tokens: { entityToken: string; matterToken: string },
+  access: AccessContext,
+): Promise<SourceBoundaryEvidence> {
+  try {
+    const handoff = await getPage(env, handoffId, access);
+    return parseSourceBoundaryMarker(plainText(handoff.properties.Reason), {
+      handoffId,
+      entityToken: tokens.entityToken,
+      matterToken: tokens.matterToken,
+    });
+  } catch (err) {
+    console.error(`Strategy: source-boundary evidence read failed for handoff ${handoffId}`, err);
+    return { ok: false, reason: "the Handoff record could not be read to retrieve the recorded source-boundary attestation" };
+  }
+}
+
 async function sendStrategyInProgressAck(env: Env, state: WorkState): Promise<void> {
   state.strategyProgressMessageId = await sendWorkspaceHatMessage(
     env,
@@ -526,10 +558,12 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
   state.matterToken = evalResult.contract.matterToken ?? "";
   // Per the identity architecture decision recorded in Notion (Sept 2026),
   // entityName/matterName are never a real name -- they're set to the
-  // tokens themselves. This has no Sales -> Strategy Handoff to inherit an
-  // attestation from (see presentStrategyProposalForApproval's own
-  // entryType check), so this is what makes a direct_request diagnosis
-  // presentable at all.
+  // tokens themselves. NOTHING in Strategy's proposal gates reads them: the
+  // gates require the operational entityToken/matterToken set immediately
+  // above, and a direct_request is exempt from the source-boundary
+  // attestation on its own entryType (see presentStrategyProposalForApproval).
+  // These two remain as token mirrors for audit and compatibility only --
+  // Strategy must never populate them by resolving real-world identity.
   state.entityName = evalResult.contract.entityToken;
   state.matterName = state.matterToken;
   state.strategyQuestion = evalResult.contract.sanitizedContext;
@@ -609,6 +643,28 @@ export async function handlePickup(env: Env, state: WorkState): Promise<WorkStat
   state.matterToken = evalResult.contract.matterToken ?? "";
   state.strategyQuestion = evalResult.contract.sanitizedContext;
   state.strategyContext = evalResult.contract.sanitizedContext;
+
+  // Durable source-boundary evidence: seeded FROM THE HANDOFF RECORD the
+  // sender wrote it to at creation, so a fresh session (no shared WorkState
+  // with Sales) has the same evidence a same-session pickup has. The
+  // attestation recorded on any prior session copy is replaced by what the
+  // record actually says -- missing/malformed/Failed/unbound evidence
+  // leaves this undefined so presentStrategyProposalForApproval fails
+  // closed below the line. Strategy consumes this evidence; it never
+  // re-runs Sales's boundary check and never queries the Identity
+  // Resolution Registry.
+  const sourceBoundaryEvidence = await readSourceBoundaryEvidence(
+    env,
+    state.handoffId!,
+    { entityToken: state.entityToken, matterToken: state.matterToken },
+    strategyAnalystAccess(state),
+  );
+  state.strategySourceBoundaryAttestation = sourceBoundaryEvidence.ok ? sourceBoundaryEvidence.attestation : undefined;
+  if (!sourceBoundaryEvidence.ok) {
+    console.error(
+      `Strategy handlePickup: no usable source-boundary attestation for handoff ${state.handoffId} (${sourceBoundaryEvidence.reason}) -- the proposal gate will fail closed.`,
+    );
+  }
 
   // Now authorized (identity architecture decision recorded in Notion,
   // Sept 2026): advance the Matter's own operational Status to Commercial
@@ -1508,13 +1564,16 @@ export function checkStrategyProposalForKnownIdentity(
  * discipline the completeness check already applies one level up in both
  * callers.
  *
- * Reading state.entityName/matterName/entityDraft here is a deliberate,
+ * Reading state.entityDraft here (contact/email/phone) is a deliberate,
  * narrow exception to Strategy's own closed-context rule (Strategy's
  * diagnosis/drafting code never reads real identity, and still doesn't --
  * see resolveStrategyHandoffContext) -- this one local comparison exists
  * only because the same WorkSession/Durable Object happens to retain what
  * Sales already legitimately resolved, per the boundary-routing
- * inspection this implements. Nothing read here is written to
+ * inspection this implements. state.entityName/matterName are deliberately
+ * NOT read here anymore: they are stale dependencies whenever they carry
+ * real-world identity, and the gate below requires only the operational
+ * Entity_ID/Matter_ID references instead. Nothing read here is written to
  * state.strategyProposal, the Handoff, logs, or any Telegram message --
  * only which fields were checked, never the values.
  */
@@ -1528,24 +1587,44 @@ async function presentStrategyProposalForApproval(
   // R&I/BD routed in via resolveUnitRequest) has no Sales -> Strategy
   // Handoff at all -- there is nothing for a source-boundary attestation
   // to attest to, so this check only applies to a Handoff-originated
-  // diagnosis, where Sales's handleInterventionText sets it. "checked:
-  // true, identityFieldsChecked: []" for direct_request records honestly
-  // that nothing needed checking, rather than fabricating an attestation.
+  // diagnosis, whose durable evidence handlePickup seeds from the Handoff
+  // record (see readSourceBoundaryEvidence). For direct_request, result
+  // "Passed" with checks: [] records honestly that no Sales boundary check
+  // exists to run, rather than fabricating a five-check attestation.
+  //
+  // Gate 1 -- operational references: Entity_ID/Matter_ID are the
+  // authoritative identity a Strategy work item operates on (seeded from
+  // the Handoff at pickup, or resolved from Martin's explicit token for a
+  // direct request). The prior requirement on state.entityName/matterName
+  // is removed as a stale dependency: fresh sessions never have those, and
+  // Strategy must never populate them by resolving real-world identity.
+  if (!state.entityToken?.trim() || !state.matterToken?.trim()) {
+    return handleBlocked(
+      env,
+      state,
+      "no operational Entity/Matter reference (Entity_ID/Matter_ID) is on record for this work item -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
+    );
+  }
+  // Gate 2 -- source-boundary evidence: accept ONLY an explicitly recorded
+  // Passed result bound to this Handoff. Missing, malformed, Failed, or
+  // unbound evidence (left undefined at pickup) fails closed here. This
+  // gate CONSUMES evidence recorded by the sender; Strategy never re-runs
+  // the Sales boundary check, and the absence of identity-bearing content
+  // is never inferred as proof the check happened.
   let sourceBoundary = state.strategySourceBoundaryAttestation;
   if (state.entryType === "direct_request") {
-    sourceBoundary = { handoffId: state.handoffId ?? state.workId, checked: true, identityFieldsChecked: [] };
-  } else if (!sourceBoundary || sourceBoundary.checked !== true) {
+    sourceBoundary = { handoffId: state.handoffId ?? state.workId, checked: true, result: "Passed", checks: [], identityFieldsChecked: [] };
+  } else if (
+    !sourceBoundary ||
+    sourceBoundary.checked !== true ||
+    sourceBoundary.result !== "Passed" ||
+    !state.handoffId ||
+    sourceBoundary.handoffId !== state.handoffId
+  ) {
     return handleBlocked(
       env,
       state,
       "no Sales source-boundary identity check is on record for this work item's Sales -> Strategy Handoff -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
-    );
-  }
-  if (!state.entityName?.trim() || !state.matterName?.trim()) {
-    return handleBlocked(
-      env,
-      state,
-      "no authoritative Entity/Matter identity is on record for this work item -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
     );
   }
   const identityCheck = checkStrategyProposalForKnownIdentity(proposal, {
