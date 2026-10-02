@@ -353,10 +353,23 @@ export interface WorkState {
    * the back of an approved Lead Opportunity) but nothing sets it yet.
    * "direct_request" is set by a Unit's own handleDirectRequest for work
    * Martin originates directly in Cowork chat rather than via an upstream
-   * Handoff (see strategy.handleDirectRequest) -- exactly three values,
-   * no others.
+   * Handoff (see strategy.handleDirectRequest).
+   *
+   * "handoff_pickup" is set only by a Unit's own Handoff pickup handler, at
+   * the moment it has actually claimed the Handoff it was discovered for --
+   * the pickup is then the provenance fact and not a claim a caller can
+   * assert (Sales's handleCallNotesHandoffPickup is the current setter). It
+   * is deliberately NOT "direct_request": that value means the work was
+   * originated directly in chat "rather than via an upstream Handoff", so
+   * using it for a Handoff-origin session would record the opposite of what
+   * happened -- and would carry the wrong attestation consequence
+   * downstream, where "direct_request" is the exemption from source-boundary
+   * attestation and every Handoff-originated work item must still attest.
+   *
+   * Exactly four values, no others; handleInterventionText's provenance gate
+   * rejects anything outside this set rather than trusting a truthy string.
    */
-  entryType?: "inbound_enquiry" | "outbound_outreach" | "direct_request";
+  entryType?: "inbound_enquiry" | "outbound_outreach" | "direct_request" | "handoff_pickup";
   /**
    * Structured commercial-value evidence extracted from enquiry text/call
    * notes during discovery, per the Commercial Value & Pricing Operating

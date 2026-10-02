@@ -277,7 +277,7 @@ test("handleLeadDiscoverySignal relates the Lead to an explicitly provided Entit
   let createdProperties: any;
   const mock = stockFetchHandlers({
     onEntityGet: () =>
-      new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { Name: { title: [{ plain_text: "Acme Corp" }] } } }), {
+      new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { "Entity Record": { title: [{ plain_text: "Acme Corp" }] } } }), {
         status: 200,
       }),
     onLeadsCreate: (body) => {
@@ -319,7 +319,7 @@ test("handleLeadDiscoverySignal surfaces a conflict instead of linking when the 
   let createdProperties: any;
   const mock = stockFetchHandlers({
     onEntityGet: () =>
-      new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { Name: { title: [{ plain_text: "Totally Different Co" }] } } }), {
+      new Response(JSON.stringify({ id: "entity-page-1", url: "https://notion.so/entity-page-1", properties: { "Entity Record": { title: [{ plain_text: "Totally Different Co" }] } } }), {
         status: 200,
       }),
     onLeadsCreate: (body) => {

@@ -429,57 +429,37 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
     outcome: "Active",
   });
 
-  const extracted = await generate<{ name?: string; organisation?: string; email?: string; phone?: string }>(env, {
-    taskId: "sales.enquiry_extraction",
-    mode: "json",
-    parts: {
-      persona: "Extract the sender's identifying details from an incoming business enquiry. Return JSON: {name, organisation, email, phone}. Use empty string for anything not present. Never invent a value.",
-      situation: text,
-    },
-    light: true,
+  // RUNTIME SALES IDENTITY BOUNDARY (Architect decision): Runtime Sales is
+  // permanently token/identity-safe only. It used to extract name/email/phone
+  // from the enquiry (sales.enquiry_extraction) and query the Entity store by
+  // those properties -- both assumptions are stale: Name/Email/Phone were
+  // removed from the operational Entity schema when the Identity Resolution
+  // Registry was decided, and Runtime has no authority to establish or match
+  // real-world identity (that is the isolated Sales Executive project's job).
+  //
+  // The only sanctioned way this Worker identifies an Entity is the
+  // token-safe mechanism in identityResolution.ts (Entity_Token/Matter_Token
+  // -> page IDs, deterministic, never a guess). A raw enquiry carries no
+  // token, so there is nothing for that mechanism to resolve. Fail closed
+  // here: no identity query, no Registry fallback, no invented record.
+  await logActivity(env, {
+    entry: `Sales enquiry held at the Runtime identity boundary — work ${state.workId}`,
+    type: "Blocker",
+    area: "Sales",
+    decisionRationale:
+      "Runtime Sales is token/identity-safe only: a raw enquiry carries no Entity/Matter token, so no Entity can be resolved through the sanctioned token-safe mechanism. Establishing and matching real-world identity belongs to the isolated Sales Executive project.",
+    outcome: "Blocked",
   });
-
-  const name = extracted?.organisation || extracted?.name || "";
-  const email = extracted?.email || "";
-  const phone = extracted?.phone || "";
-
-  const match = await findEntityMatch(env, name, email, phone);
-
-  // one_determinate_match: use existing Entity directly — a clean email or
-  // phone match doesn't need a confirmation click per the Sales AI Project
-  // Instructions' entity_identification outcomes.
-  if (match.determinate) {
-    const page = await getPage(env, match.determinate.id, workSessionContext(state));
-    state.entityId = page.id;
-    state.entityName = plainText(page.properties.Name);
-    await logActivity(env, {
-      entry: `Entity matched: ${state.entityName}`,
-      type: "Activity",
-      area: "Sales",
-      activity: `Determinate match (email/phone) for incoming enquiry — using existing Entity.`,
-      outcome: "Active",
-    });
-    return proceedToMatterIdentification(env, state);
-  }
-
-  const candidates = match.plausible;
-  state.candidateEntities = candidates.map((c) => ({ id: c.id, name: c.name }));
-
-  const buttons = [
-    ...candidates.map((c) => [{ text: `Use: ${c.name}`, callback_data: `entity:${state.workId}:${c.id}` }]),
-    [{ text: `➕ Create new Entity${name ? `: ${name}` : ""}`, callback_data: `entity:${state.workId}:new` }],
-  ];
-
-  state.entityDraft = { name: name || "New contact", email, phone, type: extracted?.organisation ? "Organisation" : "Individual" };
-
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: "Sales Executive" },
-    `*New enquiry*\n\n${text}\n\nIs this an existing Entity, or should I create a new one?`,
-    buttons,
+    `*New enquiry held — Runtime Sales identity boundary*\n\n` +
+      `I can't take this further from here: Runtime Sales is token/identity-safe only, so it can't match or create an operational Entity from real-world identity (name / email / phone). ` +
+      `Establishing and matching identity belongs to the isolated Sales Executive project, which hands Runtime a token-safe Handoff to pick up.\n\n` +
+      `No Entity record was queried or created, and nothing was written to the Entity store.`,
   );
-  state.stage = "awaiting_entity_pick";
-  state.awaiting = "entity_pick";
+  state.stage = "identity_boundary_hold";
+  state.awaiting = undefined;
   return state;
 }
 
@@ -490,7 +470,11 @@ export async function handleEntityChoice(env: Env, state: WorkState, choice: str
 
   const page = await getPage(env, choice, workSessionContext(state));
   state.entityId = page.id;
-  state.entityName = plainText(page.properties.Name);
+  // Sanctioned identity-safe field only: the operational Entity schema has
+  // no Name property (Identity Resolution Registry decision), so reading one
+  // here would return nothing. `Entity Record` is the identity-safe title
+  // the schema actually defines.
+  state.entityName = plainText(page.properties["Entity Record"]);
   return proceedToMatterIdentification(env, state);
 }
 
@@ -542,11 +526,13 @@ async function presentEntityDraft(env: Env, state: WorkState): Promise<WorkState
  * distinct registered operations, and the Work records which one it is
  * performing; this helper cannot choose a different one.
  *
- * `assertedActionName` is a cross-check for the privileged commits only:
- * `handleEntityCreationApproval` and `handleMatterCreationApproval` advance
- * the Work to `create_entity` / `create_matter` and then assert the name
- * they just recorded. If the two ever disagree, Access fails closed instead
- * of committing the record under an Action that was not the one approved.
+ * `assertedActionName` is a cross-check for the privileged commit:
+ * `handleMatterCreationApproval` advances the Work to `create_matter` and
+ * then asserts the name it just recorded. If the two ever disagree, Access
+ * fails closed instead of committing the record under an Action that was not
+ * the one approved. (`handleEntityCreationApproval` no longer commits --
+ * Runtime Sales is token/identity-safe only, so the Entity create is refused
+ * rather than performed; see the Runtime Sales identity boundary note there.)
  *
  * Everything else the flow touches -- status advances on records this work
  * item already owns, its outbound Finance Handoff's lifecycle, the
@@ -568,9 +554,13 @@ function salesExecutiveAccess(state: WorkState, proof?: ApprovalProof, assertedA
  * asserts as a cross-check all reference one value -- they cannot drift into
  * four different names for the same operation, and `recordWorkAction`
  * validates every one of them against the manifest before any is stored.
+ *
+ * There is deliberately no `create_entity` constant here: Runtime Sales is
+ * token/identity-safe only, so it never performs the Entity create (the
+ * manifest still declares the Action and its approval handler, but that
+ * handler refuses the write -- see handleEntityCreationApproval).
  */
 const NEW_ENQUIRY_ACTION = "new_enquiry" as const;
-const CREATE_ENTITY_ACTION = "create_entity" as const;
 const CREATE_MATTER_ACTION = "create_matter" as const;
 
 export async function handleEntityCreationApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
@@ -595,53 +585,36 @@ export async function handleEntityCreationApproval(env: Env, state: WorkState, a
     return state;
   }
 
-  const draft = state.entityDraft!;
-  // The Work is about to perform a DIFFERENT registered operation from the
-  // one it was performing: it was running `new_enquiry` (the enquiry
-  // workflow, which staged this draft) and is now committing the Entity
-  // record itself. `create_entity` is the operation Martin's approval is
-  // actually for, and recording it here -- by the code performing the
-  // transition, at the moment it happens -- is what makes Access judge the
-  // governed create against the right Action.
-  recordWorkAction(state, CREATE_ENTITY_ACTION);
-  // The Entity record only comes into existence on Martin's explicit
-  // approval of the drafted fields, so this is exactly the moment an
-  // ApprovalProof is minted: the staged entity draft is consumed by this
-  // verified callback, and the proof it produces is what authorizes the
-  // governed create below. `state.entityDraft` is cleared immediately
-  // after, so a replayed callback finds nothing to consume and never
-  // reaches minting.
-  const proof = mintApprovalProof({
-    workId: state.workId,
-    actionName: CREATE_ENTITY_ACTION,
-    targetDataSourceId: env.ENTITY_DATA_SOURCE_ID,
-  });
-  const page = await createPage(env, env.ENTITY_DATA_SOURCE_ID, {
-    Name: title(draft.name),
-    "Entity Type": select(draft.type),
-    Status: select("Lead"),
-    ...(draft.email ? { Email: { email: draft.email } } : {}),
-    ...(draft.phone ? { Phone: { phone_number: draft.phone } } : {}),
-  }, salesExecutiveAccess(state, proof, CREATE_ENTITY_ACTION));
-  state.entityId = page.id;
-  state.entityName = draft.name;
   state.entityDraft = undefined;
-  // The commit is done; the Work returns to the enquiry workflow, which is
-  // the next registered operation it performs. Recorded so a later write in
-  // the same flow is not judged against the Action that just committed the
-  // record, and so its ungated bookkeeping stays ungated for the right
-  // reason -- the right Action, not an exemption.
-  recordWorkAction(state, NEW_ENQUIRY_ACTION);
-  await logActivity(env, {
-    entry: `Entity created: ${draft.name}`,
-    type: "Decision",
-    area: "Sales",
-    decisions: `Created new Entity for work ${state.workId}`,
-    decisionRationale: "No existing Entity record matched the incoming enquiry. Approved by Martin.",
-    outcome: "Complete",
-  });
 
-  return proceedToMatterIdentification(env, state);
+  // RUNTIME SALES IDENTITY BOUNDARY (Architect decision): Runtime Sales does
+  // not create operational Entity records. The operational Entity record holds
+  // no real-world identity, while the staged draft carries exactly the identity
+  // (name/email/phone) that only the isolated Sales Executive project is the
+  // authority to establish and match -- and the properties this create used to
+  // write (Name/Email/Phone) no longer exist on the Entity schema at all.
+  //
+  // So the governed create is refused fail-closed: no createPage, no
+  // ApprovalProof minted, no Action recorded for a write that never happens.
+  await logActivity(env, {
+    entry: `Sales Entity creation refused at the Runtime identity boundary — work ${state.workId}`,
+    type: "Blocker",
+    area: "Sales",
+    decisionRationale:
+      "Runtime Sales is token/identity-safe only: an operational Entity may not be created from identity drafted out of an enquiry, and the Entity schema carries no Name/Email/Phone to write. Identity establishment belongs to the isolated Sales Executive project.",
+    outcome: "Blocked",
+  });
+  await sendWorkspaceHatMessage(
+    env,
+    { ...state, hat: "Sales Executive" },
+    `*Entity creation refused — Runtime Sales identity boundary*\n\n` +
+      `Runtime Sales won't create this Entity: it's token/identity-safe only, and the operational Entity record doesn't carry real-world identity anyway. ` +
+      `Raise it with the isolated Sales Executive project, which establishes the Entity and hands Runtime a token-safe Handoff.\n\n` +
+      `No Entity record was created.`,
+  );
+  state.stage = "identity_boundary_hold";
+  state.awaiting = undefined;
+  return state;
 }
 
 export async function handleEntityRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
@@ -1191,6 +1164,21 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
     return state;
   }
 
+  // PICKUP-ORIGIN PROVENANCE (Architect decision): the claim above is the
+  // moment this Work item's origin becomes a fact -- Sales discovery created
+  // the session for THIS Handoff and the Handoff accepted the claim. Record
+  // it on the Work item now so it survives in the DO-backed WorkState through
+  // qualification, the approval callback, and into handleInterventionText's
+  // provenance gate.
+  //
+  // `handoff_pickup` is the existing provenance value for exactly this origin
+  // (WorkOrigin in runtime/workContract.ts); it is read off the claim, never
+  // synthesised, so a session that did not claim a real Handoff still has no
+  // provenance and stays fail-closed at that gate. It is deliberately not
+  // "direct_request": that value means work originated in chat rather than
+  // via an upstream Handoff -- the opposite of what happened here.
+  state.entryType = "handoff_pickup";
+
   const evalResult = await resolveCallNotesHandoffContext(env, state.handoffId!);
   if (!evalResult.success) {
     console.error(`Sales call-notes pickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
@@ -1216,6 +1204,25 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
   const { contract } = evalResult;
   state.entityToken = contract.entityToken;
   state.matterToken = contract.matterToken;
+  // GATE 3 CONTINUATION (Architect decision): the claimed Handoff's own
+  // already-sanitized payload becomes this session's business context, so a
+  // legitimate pickup can satisfy handleInterventionText's Gate 3 (value-
+  // relevant context) instead of reaching it with neither enquiry text nor
+  // call notes.
+  //
+  // Why this is permitted and nothing else is: `contract.sanitizedContext` is
+  // the text evaluateHandoffContext just validated -- already the sanitized
+  // Handoff payload, already trimmed and proven non-empty by the guard in
+  // dataBoundary/policy.ts (an empty or missing sanitizedContext never reaches
+  // here; it fails closed upstream and the Handoff is held). It is copied from
+  // this Handoff and nowhere else: nothing is queried from the Identity
+  // Resolution Registry, and no raw identity-bearing content is read into the
+  // session. The guard below keeps Gate 3 authoritative rather than bypassing
+  // it -- if the context were ever empty, callNotes simply stays unset and
+  // Gate 3 refuses as it always did.
+  if (contract.sanitizedContext && contract.sanitizedContext.trim()) {
+    state.callNotes = contract.sanitizedContext;
+  }
   const displayToken = contract.matterToken ?? contract.entityToken;
 
   await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
@@ -1343,6 +1350,22 @@ export async function handleLeadToProspectApproval(env: Env, state: WorkState, a
 }
 
 /**
+ * The entry provenance values handleInterventionText will accept on the
+ * Handoff. Typed against `WorkState["entryType"]` so the compiler rejects a
+ * value here the Work type does not declare. The gate below checks membership
+ * rather than mere truthiness, so a stray or fabricated provenance string
+ * fails closed instead of riding through as "present" -- and because the
+ * literal is checked against the union, removing a declared value is a
+ * compile error while adding one only ever widens what must be proven here.
+ */
+const VALID_ENTRY_TYPES: ReadonlyArray<NonNullable<WorkState["entryType"]>> = [
+  "inbound_enquiry",
+  "outbound_outreach",
+  "direct_request",
+  "handoff_pickup",
+];
+
+/**
  * Creates the Sales -> Strategy Handoff after Martin approves Entity/
  * Prospect progression -- per the canonical commercial flow (Inbound ->
  * Sales -> Strategy -> Finance -> Sales), this REPLACES the obsolete
@@ -1360,23 +1383,27 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
 
   // Fail-closed gate 1: entry_type is required on the Handoff and must never
   // be invented or defaulted. In this Worker's current code paths it's set
-  // by handleIncomingEnquiry (inbound_enquiry) -- if it's missing, that's a
-  // code-path defect, not something Martin can fix by sending a message, so
-  // this is logged as a Blocker rather than treated as an awaiting-reply gap.
-  if (!state.entryType) {
-    console.error(`Sales Executive Handoff blocked -- missing entry_type for work ${state.workId}`);
+  // either by handleIncomingEnquiry (inbound_enquiry) or by a Handoff pickup
+  // that actually claimed its Handoff (handoff_pickup) -- if it is missing or
+  // is not one of the declared provenance values, that's a code-path defect,
+  // not something Martin can fix by sending a message, so this is logged as a
+  // Blocker rather than treated as an awaiting-reply gap. The value is never
+  // echoed back into the log: only the fact that it is missing or invalid.
+  const entryTypeMissing = !state.entryType;
+  if (!state.entryType || !VALID_ENTRY_TYPES.includes(state.entryType)) {
+    console.error(`Sales Executive Handoff blocked -- ${entryTypeMissing ? "missing" : "invalid"} entry_type for work ${state.workId}`);
     await logActivity(env, {
-      entry: `Sales -> Strategy Handoff blocked -- missing entry_type: ${state.matterName ?? state.workId}`,
+      entry: `Sales -> Strategy Handoff blocked -- ${entryTypeMissing ? "missing" : "invalid"} entry_type: ${state.matterName ?? state.workId}`,
       type: "Blocker",
       area: "Sales",
       decisionRationale:
-        "entry_type (inbound_enquiry | outbound_outreach) was not set on this work item before Handoff creation was attempted -- refusing to invent one.",
+        `entry_type is ${entryTypeMissing ? "not set" : "not one of the declared provenance values"} on this work item before Handoff creation was attempted (${VALID_ENTRY_TYPES.join(" | ")}) -- refusing to invent one.`,
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Sales Executive" },
-      `Couldn't route *${state.matterName}* to Strategy -- this work item is missing its entry type (how it originated). Not proceeding without it.`,
+      `Couldn't route *${state.matterName}* to Strategy -- this work item is ${entryTypeMissing ? "missing" : "missing a valid"} entry type (how it originated). Not proceeding without it.`,
     );
     return state;
   }
@@ -1583,54 +1610,20 @@ export async function handleMoreValueContext(env: Env, state: WorkState, text: s
 // canonical flow, under the proposal_draft / proposal_submit /
 // proposal_approve / proposal_revision Actions.
 
-interface EntityMatchResult {
-  // Set only when exactly one record matched on a determinate identity
-  // signal (email or phone) — per the Entity identification rule's
-  // one_determinate_match outcome, this is used directly with no
-  // confirmation click. Multiple determinate-signal matches, or any
-  // name-only match, are never determinate — they always go to `plausible`
-  // for Martin to confirm or reject, per the "never auto-select" rule.
-  determinate?: { id: string; name: string };
-  plausible: { id: string; name: string }[];
-}
-
-async function findEntityMatch(env: Env, name: string, email: string, phone: string): Promise<EntityMatchResult> {
-  const determinateMatches: { id: string; name: string }[] = [];
-  if (email) {
-    const byEmail = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, workSessionReadContext(),  {
-      property: "Email",
-      email: { equals: email },
-    });
-    for (const p of byEmail) determinateMatches.push({ id: p.id, name: plainText(p.properties.Name) });
-  }
-  if (phone) {
-    const byPhone = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, workSessionReadContext(),  {
-      property: "Phone",
-      phone_number: { equals: phone },
-    });
-    for (const p of byPhone) {
-      if (!determinateMatches.some((m) => m.id === p.id)) {
-        determinateMatches.push({ id: p.id, name: plainText(p.properties.Name) });
-      }
-    }
-  }
-
-  if (determinateMatches.length === 1) return { determinate: determinateMatches[0], plausible: [] };
-  if (determinateMatches.length > 1) return { plausible: determinateMatches.slice(0, 5) };
-
-  // No determinate signal matched — fall back to a fuzzy name search. This
-  // is never determinate (a substring match isn't reliable identity
-  // evidence), so even a single result here still goes to Martin to
-  // confirm rather than being auto-selected.
-  if (name) {
-    const byName = await queryDataSource(env, env.ENTITY_DATA_SOURCE_ID, workSessionReadContext(),  {
-      property: "Name",
-      title: { contains: name },
-    });
-    return { plausible: byName.map((p) => ({ id: p.id, name: plainText(p.properties.Name) })).slice(0, 5) };
-  }
-  return { plausible: [] };
-}
+// REMOVED (2026-10-02, RUNTIME SALES IDENTITY BOUNDARY decision): the
+// identity-matching helpers
+//
+//   findEntityMatch, EntityMatchResult
+//
+// They queried the operational Entity store by Email, Phone, and Name -- all
+// three properties removed from the Entity schema by the Identity Resolution
+// Registry decision, so every query was a stale schema assumption (and a
+// Notion 400 when it ran). They also encoded the very act Runtime Sales is
+// now permanently barred from: establishing or matching real-world identity.
+// Entity identification at Runtime is the token-safe mechanism in
+// identityResolution.ts only; a work item that cannot be resolved through it
+// fails closed (see handleIncomingEnquiry) rather than falling back to
+// identity matching or the Identity Resolution Registry.
 
 // Exported for unit testing only -- these are the deterministic Commercial
 // Value & Pricing Operating Model helpers (evidence normalization, the
