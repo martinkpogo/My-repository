@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../types";
+import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
 import { workSessionContext } from "../access";
 import { logActivity } from "../log";
 import { sendWorkspaceHatMessage } from "../telegram";
@@ -60,7 +61,7 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * the task text, the same shape dispatchMarketingHat already expects from
  * state.marketingTaskText.
  */
-export async function handleHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handleHandoffPickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   const handoff = await getPage(env, state.handoffId!, workSessionContext(state));
   const taskText = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
   if (!taskText.trim()) {

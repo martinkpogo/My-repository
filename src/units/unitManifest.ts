@@ -49,6 +49,15 @@ export type EntryHandler<A extends string = string> = (
   skills: ResolvedActionSkillSet,
 ) => Promise<WorkState>;
 
+/**
+ * A Handoff-specific pickup executor for Work whose Action was already
+ * resolved and recorded from the Handoff's destination facts. Not an
+ * EntryHandler: it reconstructs Handoff context first. It receives the Skills
+ * its recorded Action declared, resolved and integrity-verified exactly as an
+ * entry would -- empty for an Action that declares none.
+ */
+export type PickupHandler = (env: Env, state: WorkState, skills: ResolvedActionSkillSet) => Promise<WorkState>;
+
 /** Resumes a WorkSession left paused on one of this Hat's own `awaiting` states. */
 export type AwaitingStateHandler = (
   env: Env,

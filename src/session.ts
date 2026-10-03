@@ -5,8 +5,8 @@ import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
-import { bindExecutionSkills, resolveRecordedActionSkills } from "./runtime/actionSkills";
-import { SkillResolutionError } from "./platform/skillRegistry";
+import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
+import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
@@ -206,14 +206,7 @@ export class WorkSession extends DurableObject<Env> {
             // The resumed Work runs under the Action it already recorded; that
             // Action's declared Skills are resolved through the Registry before
             // the handler runs, exactly as at entry.
-            return resolveRecordedActionSkills(hat, state.actionName).then(
-              (skills) => awaitingHandler(this.env, state, text, skills),
-              (err) => {
-                if (!(err instanceof SkillResolutionError)) throw err;
-                console.error(`handleTextReply: required Skill resolution failed for ${state.actionName} (work ${state.workId}): ${err.reason}`);
-                return sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId).then(() => state);
-              },
-            );
+            return this.runUnderRecordedSkills(state, (skills) => awaitingHandler(this.env, state, text, skills));
           }
           return sendMessage(
             this.env,
@@ -234,7 +227,7 @@ export class WorkSession extends DurableObject<Env> {
    * call already returned before this ever runs.
    */
   async runFinancePickup(): Promise<WorkState> {
-    return this.execute((state) => finance.handlePickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => finance.handlePickup(this.env, state, skills)));
   }
 
   /**
@@ -243,7 +236,7 @@ export class WorkSession extends DurableObject<Env> {
    * mirrors runFinancePickup exactly.
    */
   async runStrategyPickup(): Promise<WorkState> {
-    return this.execute((state) => strategy.handlePickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => strategy.handlePickup(this.env, state, skills)));
   }
 
   /**
@@ -253,7 +246,7 @@ export class WorkSession extends DurableObject<Env> {
    * mirrors runFinancePickup.
    */
   async runMarketingHandoffPickup(): Promise<WorkState> {
-    return this.execute((state) => marketing.handleHandoffPickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => marketing.handleHandoffPickup(this.env, state, skills)));
   }
 
   /**
@@ -263,7 +256,7 @@ export class WorkSession extends DurableObject<Env> {
    * checkHandoffs.ts's Sales discovery, never by Finance directly.
    */
   async runTokenSafeProposal(): Promise<WorkState> {
-    return this.execute((state) => salesProposal.handleProposalHandoffPickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => salesProposal.handleProposalHandoffPickup(this.env, state, skills)));
   }
 
   /**
@@ -275,7 +268,7 @@ export class WorkSession extends DurableObject<Env> {
    * directly. Mirrors runFinancePickup/runTokenSafeProposal exactly.
    */
   async runCallNotesPickup(): Promise<WorkState> {
-    return this.execute((state) => sales.handleCallNotesHandoffPickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => sales.handleCallNotesHandoffPickup(this.env, state, skills)));
   }
 
   /**
@@ -425,6 +418,31 @@ export class WorkSession extends DurableObject<Env> {
    * governance checks already inside each Hat function — those still run
    * first and produce their own explicit, specific messages.
    */
+  /**
+   * Runs a handler for Work whose Action is ALREADY recorded (an awaiting
+   * resume, or a Handoff pickup) under that Action's declared Skills,
+   * resolved through the Skill Registry before the handler runs. If they
+   * cannot be resolved or verified, nothing runs and Martin is told. Access
+   * and approval are not touched here: they remain what the handler's own
+   * governed operations evaluate from the recorded Action.
+   */
+  private async runUnderRecordedSkills(state: WorkState, run: (skills: ResolvedActionSkillSet) => Promise<WorkState>): Promise<WorkState> {
+    const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
+    const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
+    if (!hat) {
+      console.error(`runUnderRecordedSkills: no registered manifest/Hat for ${state.unit}/${state.hat} (work ${state.workId}) -- nothing was run`);
+      await sendMessage(this.env, state.chatId, `${state.unit ?? "This Unit"} isn't wired for this action -- nothing was run.`, undefined, state.threadId);
+      return state;
+    }
+    const outcome = await runWithRecordedActionSkills(hat, state.actionName, run);
+    if (outcome.kind === "refused") {
+      console.error(`required Skill resolution failed for ${state.actionName} (work ${state.workId}): ${outcome.reason}`);
+      await sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId);
+      return state;
+    }
+    return outcome.result;
+  }
+
   private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
     const state = await this.require();
     // Reset every call -- see WorkState.pendingHandoffAutoCheck's doc

@@ -1,4 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
@@ -590,7 +591,7 @@ export async function handleDirectRequestClarification(env: Env, state: WorkStat
   return handleDirectRequest(env, state, text);
 }
 
-export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handlePickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   // Idempotency guard: re-verifies the Handoff's live Status and claims it
   // (Pending -> Picked-up) at the actual processing boundary, not just
   // trusting the discovery query's Pending filter from moments earlier. A

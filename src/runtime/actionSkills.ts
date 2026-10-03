@@ -76,3 +76,29 @@ export async function resolveRecordedActionSkills(hat: Pick<HatManifest, "action
   const action = actionName ? hat.actions.find((a) => a.name === actionName) : undefined;
   return createResolvedActionSkillSet(await resolveActionSkills(action?.skill_requirements ?? []));
 }
+
+/** The outcome of running a handler under a recorded Action's Skills. */
+export type RecordedSkillRun<T> = { kind: "ran"; result: T } | { kind: "refused"; reason: string };
+
+/**
+ * Runs a handler for Work that ALREADY has a recorded Action -- a resumed
+ * awaiting reply, or a Handoff pickup -- under that Action's declared Skills.
+ * The Skills are resolved through `resolveRecordedActionSkills` (the Registry,
+ * integrity-verified); this adds no resolution of its own and selects no
+ * Action. If they cannot be resolved the handler is NEVER invoked and the run
+ * is `refused`. Errors the handler itself throws are not caught here.
+ */
+export async function runWithRecordedActionSkills<T>(
+  hat: Pick<HatManifest, "actions">,
+  actionName: string | undefined,
+  run: (skills: ResolvedActionSkillSet) => Promise<T>,
+): Promise<RecordedSkillRun<T>> {
+  let skills: ResolvedActionSkillSet;
+  try {
+    skills = await resolveRecordedActionSkills(hat, actionName);
+  } catch (err) {
+    if (!(err instanceof SkillResolutionError)) throw err;
+    return { kind: "refused", reason: err.reason };
+  }
+  return { kind: "ran", result: await run(skills) };
+}

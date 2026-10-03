@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import type { StrategyProposal, StrategyBoundaryRepresentation } from "../strategy/strategyAnalyst";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
@@ -806,7 +807,7 @@ async function resolveFacts(
  * and asks Martin to authorize its exact Version. Idempotent -- reprocessing
  * the same Handoff never creates a second record or a new Version.
  */
-export async function handleProposalHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handleProposalHandoffPickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   if (!getWorkspaceTarget(env)) {
     return failClosed(env, state, "the Telegram Conversation (Workspace) stream is not configured (TELEGRAM_GROUP_CHAT_ID / WORKSPACE_TOPIC_ID); the Proposal cannot be presented for approval, so none was produced.");
   }

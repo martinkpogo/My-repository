@@ -4,7 +4,7 @@ import type { ActionDefinition } from "../hats/actionRegistry";
 import type { HatManifest, UnitManifest } from "../units/unitManifest";
 import { NO_ACTION_SKILLS, SkillResolutionError, resolveSkill, type SkillId } from "../platform/skillRegistry";
 import { resolveActionExecution, type ActionExecutionContext, type ResolvedActionSkill } from "./actionResolution";
-import { bindExecutionSkills, resolveRecordedActionSkills } from "./actionSkills";
+import { bindExecutionSkills, resolveRecordedActionSkills, runWithRecordedActionSkills } from "./actionSkills";
 import { workContractForRequest } from "./workContract";
 import type { OrganizationContext } from "./organization";
 
@@ -218,4 +218,102 @@ test("The generic boundary names no Unit, Hat or research-specific concept: no U
     if (file !== "runtime/actionSkills.ts" && file !== "platform/skillRegistry.ts") continue;
     assert.ok(!/Business Development|Sales|Strategy|Finance|Marketing|Research & Intelligence|executeResearch|\bunit\s*===|\.unit\b/.test(code), `${file} must stay generic`);
   }
+});
+
+// --- Handoff pickup: the recorded Action's Skills reach the pickup handler -----
+
+
+test("Pickup: an Action declaring a Skill hands its pickup handler the registry-verified set", async () => {
+  const hat = toyHat([toyAction("pickup_action", ["research_signal"])]);
+  let received: Awaited<ReturnType<typeof resolveRecordedActionSkills>> | undefined;
+
+  const run = await runWithRecordedActionSkills(hat, "pickup_action", async (skills) => {
+    received = skills;
+    return "picked-up";
+  });
+
+  assert.deepStrictEqual(run, { kind: "ran", result: "picked-up" });
+  assert.deepStrictEqual(received?.declared, ["research_signal"]);
+  assert.strictEqual(received?.get("research_signal").content, resolveSkill("research_signal").content);
+  assert.throws(() => received?.get("opportunity_qualification_gate"), /was not declared by this Action/);
+});
+
+test("Pickup: a zero-Skill Action still runs, with the empty set", async () => {
+  const hat = toyHat([toyAction("plain_pickup")]);
+  const run = await runWithRecordedActionSkills(hat, "plain_pickup", async (skills) => skills.declared.length);
+  assert.deepStrictEqual(run, { kind: "ran", result: 0 });
+});
+
+test("Pickup: a Skill the Registry cannot resolve refuses the run -- the pickup handler never executes", async () => {
+  const hat = toyHat([toyAction("ghost_pickup", ["ghost_skill" as SkillId])]);
+  let executed = false;
+
+  const run = await runWithRecordedActionSkills(hat, "ghost_pickup", async () => {
+    executed = true;
+    return "should not happen";
+  });
+
+  assert.strictEqual(run.kind, "refused");
+  if (run.kind === "refused") assert.match(run.reason, /no Skill is registered under the id "ghost_skill"/);
+  assert.strictEqual(executed, false);
+});
+
+test("Pickup: integrity drift refuses the run before the pickup handler executes", async (t) => {
+  const hat = toyHat([toyAction("drift_pickup", ["research_signal"])]);
+  breakDigests(t);
+  let executed = false;
+
+  const run = await runWithRecordedActionSkills(hat, "drift_pickup", async () => {
+    executed = true;
+    return "should not happen";
+  });
+
+  assert.strictEqual(run.kind, "refused");
+  if (run.kind === "refused") assert.match(run.reason, /integrity failed/);
+  assert.strictEqual(executed, false);
+});
+
+test("Pickup: an error thrown by the handler itself is not swallowed as a Skill refusal", async () => {
+  const hat = toyHat([toyAction("throwing_pickup", ["research_signal"])]);
+  await assert.rejects(
+    () => runWithRecordedActionSkills(hat, "throwing_pickup", async () => {
+      throw new Error("handler failure");
+    }),
+    /handler failure/,
+  );
+});
+
+test("Pickup: the runner selects no Action -- it only resolves Skills of the Action the Work already recorded; an undeclared name yields the empty set", async () => {
+  const hat = toyHat([toyAction("only_one", ["research_signal"])]);
+  const run = await runWithRecordedActionSkills(hat, "someone_elses_action", async (skills) => skills.declared);
+  assert.deepStrictEqual(run, { kind: "ran", result: [] });
+});
+
+test("Pickup wiring: every production pickup executor is invoked only through WorkSession.runUnderRecordedSkills, and takes the Skill set", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const session = fs.readFileSync(path.join(import.meta.dirname, "..", "session.ts"), "utf8");
+  const pickups = ["finance.handlePickup", "strategy.handlePickup", "marketing.handleHandoffPickup", "salesProposal.handleProposalHandoffPickup", "sales.handleCallNotesHandoffPickup"];
+  for (const call of pickups) {
+    const re = new RegExp(`this\\.runUnderRecordedSkills\\(state, \\(skills\\) => ${call.replace(".", "\\.")}\\(this\\.env, state, skills\\)\\)`);
+    assert.ok(re.test(session), `${call} must run under the recorded Action's resolved Skills`);
+    assert.strictEqual(session.split(`${call}(`).length - 1, 1, `${call} must have exactly one production call site`);
+  }
+  // Pickup discovery still only resolves + records; it adds no Skill logic of its own.
+  const discovery = fs.readFileSync(path.join(import.meta.dirname, "..", "checkHandoffs.ts"), "utf8");
+  assert.ok(!/resolveRecordedActionSkills|runWithRecordedActionSkills|bindExecutionSkills|resolveSkill/.test(discovery));
+});
+
+// Compile-time proof that every production pickup executor satisfies the one pickup contract.
+import type { PickupHandler } from "../units/unitManifest";
+import { handlePickup as financePickup } from "../units/finance/valueBasedPricingAssessor";
+import { handlePickup as strategyPickup } from "../units/strategy/strategyAnalyst";
+import { handleHandoffPickup as marketingPickup } from "../hats/executionEngine";
+import { handleProposalHandoffPickup as proposalPickup } from "../units/sales/tokenSafeProposal";
+import { handleCallNotesHandoffPickup as callNotesPickup } from "../units/sales/salesExecutive";
+
+const PICKUP_EXECUTORS: PickupHandler[] = [financePickup, strategyPickup, marketingPickup, proposalPickup, callNotesPickup];
+
+test("Pickup contract: all five production pickup executors share the PickupHandler signature", () => {
+  assert.strictEqual(PICKUP_EXECUTORS.length, 5);
 });

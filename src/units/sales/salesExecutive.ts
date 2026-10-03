@@ -9,6 +9,7 @@ import type {
   InvestmentToleranceContext,
   MeasurementBaseline,
 } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { mintApprovalProof, workSessionContext, workSessionReadContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import type { ApprovalProof } from "../../types";
@@ -1164,7 +1165,7 @@ export async function presentQualifiedCallNotesForApproval(
  *
  * Invoked only by checkHandoffs.ts's Sales discovery, never directly.
  */
-export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   const claim = await claimPendingHandoff(env, state.handoffId!, workSessionContext(state));
   if (!claim.claimed) {
     console.error(`Sales call-notes pickup: refused -- ${claim.reason}`);

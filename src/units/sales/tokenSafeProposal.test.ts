@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -318,7 +319,7 @@ function approvalRequests(world: World) {
 async function createV1(t: any, stateOverrides: Partial<WorkState> = {}, worldOpts: Parameters<typeof installWorld>[1] = {}) {
   const world = installWorld(t, worldOpts);
   const env = fakeEnv();
-  const state = await handleProposalHandoffPickup(env, fakeState(stateOverrides));
+  const state = await handleProposalHandoffPickup(env, fakeState(stateOverrides), NO_ACTION_SKILLS);
   return { world, env, state };
 }
 
@@ -356,7 +357,7 @@ test("1b. A Handoff picked up with no continuing WorkSession (only handoffId in 
   assert.strictEqual((freshState as any).entityName, undefined);
   assert.strictEqual((freshState as any).matterName, undefined);
 
-  const state = await handleProposalHandoffPickup(env, freshState);
+  const state = await handleProposalHandoffPickup(env, freshState, NO_ACTION_SKILLS);
 
   assert.strictEqual(proposals(world).length, 1, "pickup must succeed and produce the canonical Proposal without any continuing-session identity");
   assert.strictEqual(state.salesProposal?.proposalId, "PROP-7");
@@ -369,9 +370,9 @@ test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, s
 
   // Same WorkSession reprocesses (e.g. HO-64 set back to Pending by hand).
   world.pages.get(HO64_ID)!.properties.Status = { select: { name: "Pending" } };
-  const again = await handleProposalHandoffPickup(env, state);
+  const again = await handleProposalHandoffPickup(env, state, NO_ACTION_SKILLS);
   // A fresh WorkSession with no memory of the Proposal also reprocesses.
-  const fresh = await handleProposalHandoffPickup(env, fakeState());
+  const fresh = await handleProposalHandoffPickup(env, fakeState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(proposals(world).length, 1, "reprocessing must never create a duplicate Proposal");
   const rec = proposals(world)[0];
@@ -387,7 +388,7 @@ test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, s
 test("2b. A Proposal for the same Matter not linked to HO-64 is ambiguous -- fails closed, no new record", async (t) => {
   const world = installWorld(t);
   world.pages.set("stray", { id: "stray", url: "u", parent: "proposals-ds", properties: { "Matter Token": rt("MAT-20"), Handoff: { relation: [] } } });
-  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState());
+  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 1, "only the pre-existing stray record");
   assert.match(state.blockedReason ?? "", /cannot deterministically associate/);
   assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Held");
@@ -738,7 +739,7 @@ test("17. No Handoff of any kind (including Sales -> Sales) is created anywhere 
 
 test("18a. HO-64 that cannot be resolved fails closed", async (t) => {
   const world = installWorld(t);
-  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState({ handoffId: "missing-handoff" }));
+  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState({ handoffId: "missing-handoff" }), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /could not be resolved/);
 });
@@ -746,7 +747,7 @@ test("18a. HO-64 that cannot be resolved fails closed", async (t) => {
 test("18b. A missing or ambiguous Finance quote fails closed and holds the Handoff", async (t) => {
   for (const facts of ["Rationale: something", "Authoritative quote: GHS 420000\nAuthoritative quote: GHS 400000\nRationale: x", "Authoritative quote: 420000\nRationale: no currency", "Authoritative quote: GHS 420000"]) {
     const world = installWorld(t, { ho64: ho64Props({ "Verified Facts & Sources": rt(facts) }) });
-    const state = await handleProposalHandoffPickup(fakeEnv(), fakeState());
+    const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
     assert.strictEqual(proposals(world).length, 0, facts);
     assert.match(state.blockedReason ?? "", /missing or ambiguous/, facts);
     assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Held", facts);
@@ -755,7 +756,7 @@ test("18b. A missing or ambiguous Finance quote fails closed and holds the Hando
 
 test("18c. Missing token fields fail closed", async (t) => {
   const world = installWorld(t, { ho64: ho64Props({ Matter_Token: rt("") }) });
-  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState());
+  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /Matter_Token/);
 });
@@ -819,14 +820,14 @@ test("18g-2. A Proposal ID without a prefix is still bound by its number", async
 
 test("18h. A non-Finance Handoff is refused (never routed through this path)", async (t) => {
   const world = installWorld(t, { ho64: ho64Props({ "From Unit": { select: { name: "Sales" } }, "From Hat": rt("Sales Executive") }) });
-  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState());
+  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /not a Finance/);
 });
 
 test("19. Missing Telegram Conversation stream configuration fails closed -- nothing is written", async (t) => {
   const world = installWorld(t);
-  const state = await handleProposalHandoffPickup(fakeEnv({ WORKSPACE_TOPIC_ID: undefined }), fakeState());
+  const state = await handleProposalHandoffPickup(fakeEnv({ WORKSPACE_TOPIC_ID: undefined }), fakeState(), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /Telegram Conversation \(Workspace\) stream is not configured/);
   assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Pending", "left Pending so it retries once configured");
@@ -935,7 +936,7 @@ test("S7. An attestation whose proposalContent check did not cover the required 
 
 test("S4. Reprocessing an existing Proposal without verification does not re-hydrate Strategy facts, so no new Version can be built from them", async (t) => {
   const { world, env } = await createV1(t);
-  const fresh = await handleProposalHandoffPickup(env, fakeState({ strategyProposalTokenSafety: undefined }));
+  const fresh = await handleProposalHandoffPickup(env, fakeState({ strategyProposalTokenSafety: undefined }), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 1);
   assert.strictEqual(fresh.salesProposal?.facts, undefined);
   await handleSalesProposalDecision(env, fresh, 7, 1, "revise");
@@ -1039,7 +1040,7 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   };
   assert.strictEqual((freshSales as any).entityToken, undefined, "the fresh Work carries no Finance identity");
 
-  const salesState = await handleProposalHandoffPickup(env, freshSales);
+  const salesState = await handleProposalHandoffPickup(env, freshSales, NO_ACTION_SKILLS);
   assert.ok(!salesState.blockedReason, `pickup must succeed: ${salesState.blockedReason}`);
   assert.strictEqual(salesState.salesProposal?.entityToken, "E-20", "entityToken taken from the Handoff");
   assert.strictEqual(salesState.salesProposal?.matterToken, "MAT-20", "matterToken taken from the Handoff");
@@ -1074,7 +1075,7 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   assert.strictEqual(text(world.pages.get(fsHandoff!.id)!.properties.Status), "Closed");
 
   // Idempotent on reprocessing: still one Proposal, byte-identical content
-  const again = await handleProposalHandoffPickup(env, { ...freshSales });
+  const again = await handleProposalHandoffPickup(env, { ...freshSales }, NO_ACTION_SKILLS);
   assert.ok(!again.blockedReason, `reprocessing must stay clean: ${again.blockedReason}`);
   assert.strictEqual(proposals(world).length, 1, "reprocessing must never create a second Proposal");
   assert.strictEqual(text(proposals(world)[0].properties["Proposal Content"]), content, "content unchanged on reprocess");
@@ -1115,7 +1116,7 @@ test("Ifc. Integration: a marked but malformed Finance block fails closed on its
   for (const { inner, reason } of cases) {
     const facts = `${strategyBlock(approvedStrategyProposal())}\n\n${financeBlock(inner)}`;
     const world = installWorld(t, { ho64: ho64Props({ "Verified Facts & Sources": rt(facts) }) });
-    const state = await handleProposalHandoffPickup(fakeEnv(), fakeState());
+    const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
 
     assert.strictEqual(proposals(world).length, 0, inner);
     assert.match(state.blockedReason ?? "", /missing or ambiguous/, inner);

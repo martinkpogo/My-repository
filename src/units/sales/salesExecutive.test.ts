@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert/strict";
 import {
   handleCallNotesHandoffPickup,
@@ -1173,7 +1174,7 @@ test("Pickup-origin provenance: claiming a real call-notes Handoff records hando
   // Seed a provenance value that would be WRONG for this origin: the recorded
   // value must come from the successful claim itself, never from whatever the
   // caller-supplied state already carried.
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState({ entryType: "inbound_enquiry" }));
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState({ entryType: "inbound_enquiry" }), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.entryType, "handoff_pickup", "the successful claim is the provenance fact and must be recorded");
   assert.ok(patches.some((p) => p.includes("Picked-up")), "the claim must still have happened before provenance was recorded");
@@ -1182,7 +1183,7 @@ test("Pickup-origin provenance: claiming a real call-notes Handoff records hando
 test("Governed Call Notes consumption: the consumed record's registry fields -- not the Handoff's narrative -- become the session business context", async (t) => {
   mockPickupFetch(t);
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(
     result.callNotes,
@@ -1207,7 +1208,7 @@ test("Governed Call Notes consumption: the consumed record's registry fields -- 
 test("Pickup-origin provenance: a refused claim persists no context either -- nothing unsanitized or unproven reaches the session", async (t) => {
   mockPickupFetch(t, { handoffStatus: "Picked-up" });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.callNotes, undefined, "an unclaimed Handoff's context must not be read into the session");
 });
@@ -1215,7 +1216,7 @@ test("Pickup-origin provenance: a refused claim persists no context either -- no
 test("Pickup-origin provenance: a refused claim records no provenance -- an origin that was never proven stays fail-closed", async (t) => {
   mockPickupFetch(t, { handoffStatus: "Picked-up" });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.entryType, undefined, "a Handoff that was never claimed must not confer provenance");
   assert.notStrictEqual(result.stage, "awaiting_qualification_approval", "a non-Pending Handoff must not be processed");
@@ -1267,7 +1268,7 @@ test("Pickup provenance: an empty sanitized context never becomes session contex
   // persisted -- the continuation guard must not launder it either.
   mockPickupFetch(t, { verifiedFacts: "   " });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "an empty sanitized context must still fail closed at the claim");
   assert.strictEqual(result.callNotes, undefined, "an empty sanitized context must not be persisted as the session's value context");
@@ -1289,6 +1290,7 @@ test("Gate 3 continuation end to end: the consumed Call Notes record's fields ar
       matterId: "matter-page-1",
       matterName: "Acme Co — Positioning",
     }),
+    NO_ACTION_SKILLS,
   );
 
   assert.strictEqual(pickedUp.entryType, "handoff_pickup");
@@ -1326,7 +1328,7 @@ test("Governed Call Notes consumption: a Handoff carrying no Call_Notes_ID refer
     handoffReason: "Call notes for commercial qualification. requiredCategory: call_notes",
   });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "a Handoff that names no governed record must be held rather than qualified");
   assert.strictEqual(result.callNotes, undefined, "the Handoff's own narrative must not stand in as Call Notes evidence when no reference is present");
@@ -1341,7 +1343,7 @@ test("Governed Call Notes consumption: a Handoff carrying no Call_Notes_ID refer
 test("Governed Call Notes consumption: an exact-match miss on Call_Notes_ID prevents qualification and leaves the record untouched", async (t) => {
   const { live } = mockPickupFetch(t, { callNotesProperties: null });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "no matching governed record must hold the Handoff");
   assert.strictEqual(result.callNotes, undefined, "nothing may be qualified when the referenced record cannot be read");
@@ -1353,7 +1355,7 @@ test("Governed Call Notes consumption: a record with no approval attestation pre
     callNotesProperties: { "Approval Attestation": { rich_text: [] } },
   });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "an unattested record must never be consumed");
   assert.strictEqual(result.callNotes, undefined, "an unattested record's fields must not reach the qualification path");
@@ -1367,11 +1369,11 @@ test("Governed Call Notes consumption: replaying the pickup does not consume the
   const LIFECYCLE_WRITE = '{"properties":{"Status":{"select":{"name":"Consumed"}}}}';
   const consumeWrites = () => patches.filter((p) => p === LIFECYCLE_WRITE);
 
-  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
   assert.strictEqual(live.callNotesStatus, "Consumed", "the first pickup must advance the record Ready -> Consumed");
   assert.strictEqual(consumeWrites().length, 1, "exactly one lifecycle write for the first pickup");
 
-  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
 
   assert.strictEqual(live.callNotesStatus, "Consumed", "the record stays Consumed -- no second transition to it exists");
   assert.strictEqual(consumeWrites().length, 1, "a replay must not issue a second Ready -> Consumed write");

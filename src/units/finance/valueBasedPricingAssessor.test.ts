@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert/strict";
 import {
   handlePickup,
@@ -206,7 +207,7 @@ test("K. Finance Hold -- AI itself reports insufficient evidence", async (t) => 
   env.AI = fakeAi({ sufficient: false, reason_if_insufficient: "Value exists only as an unsupported assumption." });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held");
   const patch = lastHandoffPatch(log);
@@ -220,7 +221,7 @@ test("Hold reason identifies the specific missing evidence, not a generic messag
   env.AI = fakeAi({ sufficient: false, reason_if_insufficient: "Value-at-stake has no applicable time period." });
   const state = fakeState();
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   const patch = lastHandoffPatch(log);
   assert.match(openQuestionsText(patch), /time period/i);
@@ -246,7 +247,7 @@ test("Telegram hold message states the actual specific reason -- not a hardcoded
   });
   const state = fakeState();
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(
     log.sentTexts.some((t) => /evidence type/i.test(t) && /directly_measured|client_estimated|derived|assumption/i.test(t)),
@@ -272,7 +273,7 @@ test("Required Next Action content is folded into the pricing judgment context, 
   } as any;
   const state = fakeState();
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.match(capturedUserPrompt, /classify evidence_type as client_estimated/, "guidance written into Required Next Action must reach the pricing judgment input");
 });
@@ -283,7 +284,7 @@ test("L. Finance pricing -- sufficient evidence produces a quote and rationale w
   env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_quote_approval");
   assert.ok(result.quote, "a quote must be attached to state");
@@ -301,7 +302,7 @@ test("M. PPP protection -- rationale invoking a PPP multiplier is deterministica
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "a PPP-based rationale must never produce a quote, regardless of sufficient: true");
   const patch = lastHandoffPatch(log);
@@ -318,7 +319,7 @@ test("N. Universal-percentage protection -- a fixed percentage-of-value rational
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held");
   const patch = lastHandoffPatch(log);
@@ -334,7 +335,7 @@ test("O. Currency-conversion protection -- currency conversion presented as pric
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held");
   const patch = lastHandoffPatch(log);
@@ -350,7 +351,7 @@ test("Budget/WTP-as-basis protection -- a rationale that admits using budget as 
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held");
   const patch = lastHandoffPatch(log);
@@ -366,7 +367,7 @@ test("P. Diagnosis-first pricing -- a defined diagnostic can be priced without a
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_quote_approval", "a diagnostic-only engagement must be priceable without a chosen downstream intervention");
   assert.ok(result.quote);
@@ -381,7 +382,7 @@ test("Deterministic validation overrides sufficient: true when value-at-stake is
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "the AI must not be able to force a quote through sufficient: true when its own value-at-stake is assumption-only");
   const patch = lastHandoffPatch(log);
@@ -394,7 +395,7 @@ test("Deterministic validation overrides sufficient: true when no positive price
   env.AI = fakeAi({ ...SUFFICIENT_JUDGEMENT, price: -5 });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held");
 });
@@ -469,7 +470,7 @@ test("Finance pickup refuses a Handoff that is already Picked-up", async (t) => 
   env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.quote, undefined, "must not process a Handoff that isn't genuinely Pending");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
@@ -481,7 +482,7 @@ test("Finance pickup refuses an already-Closed Handoff", async (t) => {
   env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.quote, undefined);
   assert.strictEqual(log.handoffPatchBodies.length, 0);
@@ -493,7 +494,7 @@ test("Finance pickup refuses a Held Handoff (no explicit retry to Pending)", asy
   env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.quote, undefined);
   assert.strictEqual(log.handoffPatchBodies.length, 0);

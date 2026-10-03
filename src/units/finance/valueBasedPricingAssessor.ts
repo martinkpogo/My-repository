@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
@@ -332,7 +333,7 @@ export async function handleDirectRequestContext(env: Env, state: WorkState, tex
   });
 }
 
-export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handlePickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   // Follows wherever this session's home chat/thread already is (Martin's
   // DM by default -- see discoverPendingFinanceHandoffs) rather than
   // forcing Finance's own topic, so every Unit/Hat's work reaches him in
