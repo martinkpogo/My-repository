@@ -22,6 +22,17 @@ export interface Env {
    * Business Object page). Distinct data source from ENTITY_DATA_SOURCE_ID.
    */
   LEADS_DATA_SOURCE_ID: string;
+  /**
+   * The Call Notes database -- the canonical governed object holding the
+   * de-identified record of a completed call. Isolated Sales is its creation
+   * authority and writes it outside this Worker; Runtime Sales only retrieves
+   * and consumes Call Notes and never creates one. Distinct data source from
+   * HANDOFFS_DATA_SOURCE_ID: call evidence is not a Handoff.
+   *
+   * Bound here as a symbolic Env field rather than hardcoded anywhere in
+   * application logic, exactly like every other data source above.
+   */
+  CALL_NOTES_DATA_SOURCE_ID: string;
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;

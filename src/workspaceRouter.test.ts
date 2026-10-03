@@ -110,8 +110,11 @@ function createMockWorkSession() {
     handleFinanceRequest: async (text: string) => {
       calls.handleFinanceRequest.push(text);
     },
-    handleUnitAction: async (actionName: string, text: string) => {
-      calls.handleUnitAction.push([actionName, text]);
+    // Consumes the RESOLVED execution context dispatch hands over (not a
+    // bare action name) -- reading action_id off it is itself an assertion
+    // that the Worker receives the context rather than choosing one.
+    handleUnitAction: async (execution: { action: { action_id: string } }, text: string) => {
+      calls.handleUnitAction.push([execution.action.action_id, text]);
     },
     getState: async () => undefined,
   };
@@ -330,8 +333,8 @@ function toyChatManifest(): UnitManifest {
     responsibility: "Handles toy requests for this test.",
     responsibilityId: "toy_responsibility",
     actions: [
-      { name: "check_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, description: "Read-only status check." },
-      { name: "send_update", responsibility: "toy_responsibility", consequence: "write", requiresApproval: true, description: "Sends a real update -- privileged." },
+      { name: "check_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "check_status" }] }, description: "Read-only status check." },
+      { name: "send_update", responsibility: "toy_responsibility", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "send_update" }] }, description: "Sends a real update -- privileged." },
     ],
     readHandler: async (_env, actionName) => `toy-reply:${actionName}`,
     entryHandler: async (_env, state) => state,
@@ -491,7 +494,12 @@ test("T3. Cowork decision for Strategy routes to its own direct_request entry po
 
   assert.strictEqual(calls.init[0][2], "Strategy");
   assert.strictEqual(calls.init[0][3], "Strategy Analyst");
-  assert.deepStrictEqual(calls.handleStrategyRequest, ["Strategy, diagnose MAT-20: recurring delivery complaints."]);
+  // The former handleStrategyRequest branch is gone: Strategy enters
+  // through the one generic manifest path with its resolved execution
+  // context, and Resolution selects the same entry Action that branch
+  // hardcoded.
+  assert.deepStrictEqual(calls.handleUnitAction, [["diagnose", "Strategy, diagnose MAT-20: recurring delivery complaints."]]);
+  assert.strictEqual(calls.handleStrategyRequest.length, 0);
 });
 
 test("U. Cowork decision for a Unit with no existing chat-triggered governed entry point fails closed (UNSUPPORTED) -- never fabricates ownership, and notifies Operations", async (t) => {
@@ -525,7 +533,11 @@ test("T4. Cowork decision for Finance routes to its own direct_request entry poi
 
   assert.strictEqual(calls.init[0][2], "Finance");
   assert.strictEqual(calls.init[0][3], "Value-Based Pricing Assessor");
-  assert.deepStrictEqual(calls.handleFinanceRequest, ["Finance, price MAT-20: recurring delivery complaints."]);
+  // The former handleFinanceRequest branch is gone: Finance enters through
+  // the one generic manifest path with its resolved execution context, and
+  // Resolution selects the same entry Action that branch hardcoded.
+  assert.deepStrictEqual(calls.handleUnitAction, [["price", "Finance, price MAT-20: recurring delivery complaints."]]);
+  assert.strictEqual(calls.handleFinanceRequest.length, 0);
 });
 
 test("V. Mode selection itself never creates governed work -- switching to cowork alone (no follow-up message) creates nothing", async () => {

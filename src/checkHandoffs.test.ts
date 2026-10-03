@@ -327,6 +327,11 @@ function mockSalesHandoffFetch(t: any, extraProperties: Record<string, any> = {}
     id: "handoff-sales-1",
     url: "https://notion.so/handoff-sales-1",
     properties: {
+      // Destination facts every producer writes (valueBasedPricingAssessor
+      // writes To Unit "Sales" + To Hat "Sales Executive") -- Organization
+      // resolution consumes them rather than a hardcoded Hat.
+      "To Unit": { select: { name: "Sales" } },
+      "To Hat": { rich_text: [{ plain_text: "Sales Executive" }] },
       Matter_Token: { rich_text: [{ plain_text: "MAT-20" }] },
       Entity_Token: { rich_text: [{ plain_text: "E-20" }] },
       ...extraProperties,
@@ -379,6 +384,13 @@ test("11. Externally-created Sales Handoff without handoff_workitem is detected 
   const pickedUp = await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.init.length, 1, "a WorkSession must be registered for the externally-created Sales Handoff");
+  // The Work's identity came from the Handoff's own destination FACTS
+  // ("To Unit"/"To Hat") through Organization + Action Resolution -- not a
+  // hardcoded Hat: Sales owns two Hats and none was supplied by code.
+  const [, , initUnit, initHat, , initExtra] = calls.init[0];
+  assert.strictEqual(initUnit, "Sales");
+  assert.strictEqual(initHat, "Sales Executive", "the destination To Hat fact resolved the Hat");
+  assert.strictEqual(initExtra?.actionName, "proposal_draft", "Action Resolution picked the pickup Action by declared applicability");
   const mapped = await env.STATE_KV.get("handoff_workitem:handoff-sales-1");
   assert.ok(mapped, "handoff_workitem mapping must be recorded so the Handoff is discoverable next time too");
   assert.strictEqual(pickedUp, 0, "detection/registration is not counted as a pickup -- no identity-sensitive execution happened");

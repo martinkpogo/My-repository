@@ -65,9 +65,9 @@ import { findManifestAction } from "./units/unitManifest";
  * comparing anything, so a manifest can never be stale about, or assert,
  * an environment-specific id.
  */
-export type GovernedSource = "entities" | "matters" | "proposals" | "handoffs" | "leads" | "activity_log";
+export type GovernedSource = "entities" | "matters" | "proposals" | "handoffs" | "leads" | "activity_log" | "call_notes";
 
-const allSources: readonly GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log"];
+const allSources: readonly GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log", "call_notes"];
 
 /** The one operation an action can be approval-gated for. `create` and `update` are distinguished deliberately: an approval authorizes creating a governed record or changing an existing one, and these are different commitments. */
 export type GovernedOperation = "create" | "update";
@@ -203,6 +203,8 @@ export function governedSourceDataSourceId(env: Env, source: GovernedSource): st
       return env.LEADS_DATA_SOURCE_ID;
     case "activity_log":
       return env.ACTIVITY_LOG_DATA_SOURCE_ID;
+    case "call_notes":
+      return env.CALL_NOTES_DATA_SOURCE_ID;
   }
 }
 

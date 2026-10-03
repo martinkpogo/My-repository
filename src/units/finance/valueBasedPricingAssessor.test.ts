@@ -47,6 +47,7 @@ function fakeEnv(): Env {
     HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
     ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     LEADS_DATA_SOURCE_ID: "leads-ds",
+    CALL_NOTES_DATA_SOURCE_ID: "call-notes-ds",
     TELEGRAM_BOT_TOKEN: "test-token",
     MARTIN_TELEGRAM_USER_ID: "9999",
     NOTION_TOKEN: "test-notion-token",

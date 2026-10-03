@@ -71,6 +71,17 @@ const researchPackageActions: ActionDefinition<ResearchAction>[] = [
     // field able to silence `requiresApproval` split one authority in two,
     // and failed open whenever an Action declared the flag but omitted the
     // list.)
+    // Structural entry, exactly like Finance's `price`: one Hat, one
+    // Action, so a direct request or a Handoff addressed to this Unit
+    // resolves `research` from context alone (the former dispatchCowork
+    // R&I branch hardcoded the same Action).
+    applicability: {
+      mode: "any",
+      conditions: [
+        { source: "work", field: "origin", operator: "in", value: ["direct_request", "handoff_pickup"] },
+        { source: "work", field: "requested_action", operator: "equals", value: "research" },
+      ],
+    },
     description:
       "Invoke the Research & Intelligence Capability Package to execute the applicable canonical research Procedure(s), synthesize evidence-backed findings, and either present them for Martin's review or route them to the responsible Hat via a governed Handoff -- always gated on Martin's explicit approval before any outbound Handoff is treated as final.",
   },
@@ -121,12 +132,18 @@ export const researchManifest: UnitManifest = {
 };
 
 /**
- * The genuine runtime execution point for the Package's chat-triggered
- * entry point -- session.ts's handleResearchRequest calls this instead of
+ * The Package's manifest-level dispatch helper for its chat-triggered
+ * entry point: routes through the manifest instead of calling
  * research.handleDirectRequest directly, making the manifest the actual
  * dispatch surface rather than a decorative parallel structure. One
- * invocation path, no Stage 1/2 resolution needed here -- mirrors
+ * invocation path, no Hat interpretation needed here -- mirrors
  * dispatchStrategyHat.
+ *
+ * Production entry no longer goes through a per-Unit WorkSession wrapper
+ * (handleResearchRequest is gone): WorkSession.handleUnitAction resolves
+ * the manifest and calls the Hat's entryHandler directly. This export
+ * stays as the manifest's self-contained equivalent, exercised by the
+ * research manifest/capabilityPackage tests.
  */
 export async function dispatchResearchHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = researchManifest.hats[RESEARCH_PACKAGE_HAT_LABEL];

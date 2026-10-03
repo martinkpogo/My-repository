@@ -61,6 +61,7 @@ function fakeEnv(): Env {
     HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
     ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     LEADS_DATA_SOURCE_ID: "leads-ds",
+    CALL_NOTES_DATA_SOURCE_ID: "call-notes-ds",
     TELEGRAM_BOT_TOKEN: "test-token",
     MARTIN_TELEGRAM_USER_ID: "9999",
     NOTION_TOKEN: "test-notion-token",
@@ -115,7 +116,7 @@ function proof(overrides: Partial<{ workId: string; actionName: string; targetDa
   });
 }
 
-const allSources: GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log"];
+const allSources: GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log", "call_notes"];
 
 // ---------------------------------------------------------------------------
 // 1. The registry itself is the authority: every registered Action resolves,
@@ -471,7 +472,7 @@ test("a system context may write the Activity Log it owns and read ENIG's record
   assert.doesNotThrow(() => evaluateAccess(env, request({ operation: "create", dataSourceId: env.ACTIVITY_LOG_DATA_SOURCE_ID }), systemContext("kernel-1")));
   assert.doesNotThrow(() => evaluateAccess(env, request({ dataSourceId: env.ENTITY_DATA_SOURCE_ID }), systemContext()));
 
-  for (const source of ["entities", "matters", "proposals", "handoffs", "leads"] as GovernedSource[]) {
+  for (const source of ["entities", "matters", "proposals", "handoffs", "leads", "call_notes"] as GovernedSource[]) {
     assert.throws(
       () => evaluateAccess(env, request({ operation: "create", dataSourceId: governedSourceDataSourceId(env, source) }), systemContext("kernel-1")),
       /authorizes only the Activity & Decision Log it owns/,
@@ -554,7 +555,7 @@ test("an unrecognized target is refused by name, under every context kind -- a c
       }
     }
   }
-  // And a governed source is recognized, so the check is not vacuous: the six
+  // And a governed source is recognized, so the check is not vacuous: the seven
   // real ids are accepted.
   for (const source of allSources) {
     assert.doesNotThrow(
@@ -671,7 +672,7 @@ test("every governed source maps to this Env's own data source id, and an unknow
   const env = fakeEnv();
   assert.deepStrictEqual(
     allSources.map((s) => governedSourceDataSourceId(env, s)),
-    ["entity-ds", "matters-ds", "proposals-ds", "handoffs-ds", "leads-ds", "activity-log-ds"],
+    ["entity-ds", "matters-ds", "proposals-ds", "handoffs-ds", "leads-ds", "activity-log-ds", "call-notes-ds"],
   );
   assert.strictEqual(governedSourceDataSourceId(env, "handoffs"), env.HANDOFFS_DATA_SOURCE_ID);
 });

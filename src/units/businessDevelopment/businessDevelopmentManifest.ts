@@ -137,21 +137,33 @@ const OPPORTUNITY_DEVELOPMENT_HAT_NAME = "Business Development Manager";
 const OPPORTUNITY_DEVELOPMENT_SPECIALIZATION = "Opportunity Development";
 const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
 
+/**
+ * Every Business Development Action is INTERPRETATION-DRIVEN, unlike the
+ * structural entry rules Finance/R&I/Strategy/Sales/Marketing declare:
+ * this Unit's three Hats each declare several entry Actions with the same
+ * Responsibility, so the Work's origin cannot distinguish them -- only what
+ * the requester actually asked for can. That is expressed declaratively
+ * (an exact `requested_action` condition per Action) rather than by having
+ * the model pick: an intake interpretation may only name an Action id that
+ * matches one of these conditions exactly, and zero or multiple matches
+ * fail closed at the resolution boundary.
+ */
 const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentAction>[] = [
-  { name: "discover_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, description: "Identify a candidate BD opportunity from a signal, market, organisation, or relationship." },
-  { name: "research_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, description: "Gather evidence-backed findings on a named opportunity signal." },
-  { name: "assess_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, description: "Determine whether a researched signal has a substantive reason for ENIG to pursue it." },
+  { name: "discover_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_opportunity" }] }, description: "Identify a candidate BD opportunity from a signal, market, organisation, or relationship." },
+  { name: "research_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_opportunity" }] }, description: "Gather evidence-backed findings on a named opportunity signal." },
+  { name: "assess_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_opportunity" }] }, description: "Determine whether a researched signal has a substantive reason for ENIG to pursue it." },
   {
     name: "qualify_opportunity",
     responsibility: "develop_opportunities",
     consequence: "internal",
     requiresApproval: false,
+    applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_opportunity" }] },
     description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated.",
   },
-  { name: "develop_opportunity", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Take a qualified opportunity forward: stakeholders, value hypothesis, route, dependencies, risks, next step." },
-  { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active opportunity." },
-  { name: "handoff_to_sales", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
-  { name: "handoff_to_strategy", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
+  { name: "develop_opportunity", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_opportunity" }] }, description: "Take a qualified opportunity forward: stakeholders, value hypothesis, route, dependencies, risks, next step." },
+  { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active opportunity." },
+  { name: "handoff_to_sales", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
+  { name: "handoff_to_strategy", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
 ];
 
 /**
@@ -887,14 +899,14 @@ const PARTNERSHIP_DEVELOPMENT_HAT_NAME = "Partnerships Manager";
 const PARTNERSHIP_DEVELOPMENT_SPECIALIZATION = "Partnership Development";
 
 const partnershipDevelopmentActions: ActionDefinition<PartnershipDevelopmentAction>[] = [
-  { name: "discover_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, description: "Identify a potential partner or strategic relationship." },
-  { name: "research_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, description: "Research the organisation, stakeholders, capabilities, and relationship context." },
-  { name: "assess_partnership", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, description: "Assess mutual value, strategic fit, and relationship viability." },
-  { name: "qualify_partnership", responsibility: "develop_partnerships", consequence: "internal", requiresApproval: false, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
-  { name: "develop_partnership", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Develop a qualified partnership: stakeholders, value proposition, relationship model, route, dependencies, risks." },
-  { name: "determine_next_move", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active partnership opportunity." },
-  { name: "handoff_to_sales", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the partnership becomes a genuine client-acquisition opportunity." },
-  { name: "handoff_to_strategy", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the partnership needs strategic diagnosis." },
+  { name: "discover_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_partner" }] }, description: "Identify a potential partner or strategic relationship." },
+  { name: "research_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_partner" }] }, description: "Research the organisation, stakeholders, capabilities, and relationship context." },
+  { name: "assess_partnership", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_partnership" }] }, description: "Assess mutual value, strategic fit, and relationship viability." },
+  { name: "qualify_partnership", responsibility: "develop_partnerships", consequence: "internal", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_partnership" }] }, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
+  { name: "develop_partnership", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_partnership" }] }, description: "Develop a qualified partnership: stakeholders, value proposition, relationship model, route, dependencies, risks." },
+  { name: "determine_next_move", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active partnership opportunity." },
+  { name: "handoff_to_sales", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the partnership becomes a genuine client-acquisition opportunity." },
+  { name: "handoff_to_strategy", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the partnership needs strategic diagnosis." },
 ];
 
 /**
@@ -1192,14 +1204,14 @@ const GROWTH_MARKET_DEVELOPMENT_HAT_NAME = "Growth & Market Development Manager"
 const GROWTH_MARKET_DEVELOPMENT_SPECIALIZATION = "Growth & Market Development";
 
 const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAction>[] = [
-  { name: "discover_growth_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, description: "Identify a potential market, channel, offering, or growth space." },
-  { name: "research_market", responsibility: "develop_growth", consequence: "read", requiresApproval: false, description: "Research market/industry signals, segments, channels, competitors, demand." },
-  { name: "assess_market_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, description: "Assess market attractiveness, strategic/commercial relevance, capability fit." },
-  { name: "qualify_growth_opportunity", responsibility: "develop_growth", consequence: "internal", requiresApproval: false, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
-  { name: "develop_growth_opportunity", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Develop a qualified growth opportunity: value hypothesis, requirements, route, risks." },
-  { name: "determine_next_move", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Commit to the next concrete action for an active growth opportunity." },
-  { name: "handoff_to_sales", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Governed transition to Sales once the growth opportunity becomes a genuine client-acquisition opportunity." },
-  { name: "handoff_to_strategy", responsibility: "develop_growth", consequence: "write", requiresApproval: true, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
+  { name: "discover_growth_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_growth_opportunity" }] }, description: "Identify a potential market, channel, offering, or growth space." },
+  { name: "research_market", responsibility: "develop_growth", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_market" }] }, description: "Research market/industry signals, segments, channels, competitors, demand." },
+  { name: "assess_market_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_market_opportunity" }] }, description: "Assess market attractiveness, strategic/commercial relevance, capability fit." },
+  { name: "qualify_growth_opportunity", responsibility: "develop_growth", consequence: "internal", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_growth_opportunity" }] }, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
+  { name: "develop_growth_opportunity", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_growth_opportunity" }] }, description: "Develop a qualified growth opportunity: value hypothesis, requirements, route, risks." },
+  { name: "determine_next_move", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active growth opportunity." },
+  { name: "handoff_to_sales", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the growth opportunity becomes a genuine client-acquisition opportunity." },
+  { name: "handoff_to_strategy", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
 ];
 
 /**

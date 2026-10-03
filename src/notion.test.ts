@@ -19,6 +19,7 @@ function fakeEnv(): Env {
     HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
     ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     LEADS_DATA_SOURCE_ID: "leads-ds",
+    CALL_NOTES_DATA_SOURCE_ID: "call-notes-ds",
     TELEGRAM_BOT_TOKEN: "test-token",
     MARTIN_TELEGRAM_USER_ID: "9999",
     NOTION_TOKEN: "test-notion-token",
@@ -46,6 +47,21 @@ test("uniqueId returns empty string when number is null or undefined", () => {
 
 test("uniqueId treats 0 as a valid number, not empty", () => {
   assert.equal(uniqueId({ unique_id: { prefix: null, number: 0 } }), "0");
+});
+
+test("Notion requests use the Worker runtime NOTION_TOKEN binding", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let authorization: string | null = null;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get("Authorization");
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await queryDataSource(fakeEnv(), "handoffs-ds", systemContext());
+  assert.equal(authorization, "Bearer test-notion-token");
 });
 
 test("queryDataSource excludes archived/trashed pages from results", async (t) => {
