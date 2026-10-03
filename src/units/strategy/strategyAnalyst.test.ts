@@ -12,14 +12,20 @@ import {
   evaluateCausationDiscipline,
   applyUnprovenCauseDiscipline,
   UNPROVEN_CAUSE_MARKER,
+  deriveStrategyEvidenceStatus,
+  isStrategyEvidenceStatus,
+  formatStrategyEvidenceStatus,
   evaluateProposalCompleteness,
   formatDiagnosisForHandoff,
+  buildStrategyBoundaryRepresentation,
+  serializeStrategyBoundaryRepresentation,
   STRATEGY_BOUNDARY_START,
   STRATEGY_BOUNDARY_END,
   extractLabeledBlock,
   checkStrategyProposalForKnownIdentity,
   type StrategyDiagnosisResult,
   type StrategyProposal,
+  type StrategyEvidenceStatus,
 } from "./strategyAnalyst";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
 import { SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker } from "../../handoffWriter";
@@ -805,6 +811,187 @@ test("Pickup: with no recommendation, the existing no-recommendation path is unc
   const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
   assert.strictEqual(result.stage, "delivered");
   assert.strictEqual(result.strategyProposal, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Structured evidence status on the Strategy Proposal.
+//
+// Three separate questions stay separate all the way downstream: the problem
+// (`sufficient`), the cause (`causationSupported`) and the direction
+// (`directionIndependentOfCause`). The status is derived from the VALIDATED
+// diagnosis by the runtime, never read from proposal-drafting model output,
+// and is never invented when it cannot be established.
+// ---------------------------------------------------------------------------
+
+const EVIDENCE_STATUS_SUPPORTED: StrategyEvidenceStatus = { causationSupported: true, directionIndependentOfCause: true };
+/** Exactly what a drafting/revision model would claim if it were allowed to -- it never is. */
+const MODEL_EVIDENCE_STATUS: StrategyEvidenceStatus = { causationSupported: false, directionIndependentOfCause: false };
+
+test("Evidence status: derived from the validated diagnosis, answering cause and direction as two separate facts", () => {
+  // The normal shipped diagnosis: supported cause, no directionSupport object
+  // at all (permitted once the cause is established).
+  assert.deepStrictEqual(deriveStrategyEvidenceStatus(SUFFICIENT_DIAGNOSIS), EVIDENCE_STATUS_SUPPORTED);
+  // Unproven cause, but the direction stands on its own evidence.
+  assert.deepStrictEqual(
+    deriveStrategyEvidenceStatus({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } }),
+    { causationSupported: false, directionIndependentOfCause: true },
+  );
+  // Supported cause whose direction does lean on it -- both answers differ
+  // from the two cases above, so neither field can be a stand-in for the other.
+  assert.deepStrictEqual(
+    deriveStrategyEvidenceStatus({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: true } }),
+    { causationSupported: true, directionIndependentOfCause: false },
+  );
+});
+
+test("Evidence status: anything it cannot establish returns null -- no default, no inference", () => {
+  assert.strictEqual(deriveStrategyEvidenceStatus(null), null);
+  assert.strictEqual(deriveStrategyEvidenceStatus(undefined), null);
+  // cause support never stated as a boolean
+  assert.strictEqual(deriveStrategyEvidenceStatus({ ...SUFFICIENT_DIAGNOSIS, diagnosis: { ...SUFFICIENT_DIAGNOSIS.diagnosis, causationSupported: undefined } }), null);
+  // directionSupport present but not two booleans
+  assert.strictEqual(deriveStrategyEvidenceStatus({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: true } as never }), null);
+  // no direction to be independent OF
+  assert.strictEqual(deriveStrategyEvidenceStatus({ ...SUFFICIENT_DIAGNOSIS, recommendedDirection: undefined, noRecommendationReason: "not yet" }), null);
+  // an unproven cause with no directionSupport -- the exact case the diagnosis
+  // gate refuses to let through, so reaching here would mean it was bypassed
+  assert.strictEqual(deriveStrategyEvidenceStatus(UNPROVEN_CAUSE_DIAGNOSIS), null);
+});
+
+test("Evidence status: a status absent from a legacy record reads as unknown, never as either answer; a malformed one is rejected", () => {
+  assert.strictEqual(isStrategyEvidenceStatus(undefined), false);
+  assert.strictEqual(isStrategyEvidenceStatus(null), false);
+  assert.strictEqual(isStrategyEvidenceStatus({ causationSupported: "yes", directionIndependentOfCause: true }), false);
+  assert.strictEqual(isStrategyEvidenceStatus({ causationSupported: true }), false);
+  assert.strictEqual(isStrategyEvidenceStatus(MODEL_EVIDENCE_STATUS), true);
+
+  assert.match(formatStrategyEvidenceStatus(undefined), /unknown/);
+  assert.match(formatStrategyEvidenceStatus(undefined), /no evidence status/);
+  const known = formatStrategyEvidenceStatus({ causationSupported: false, directionIndependentOfCause: true });
+  assert.match(known, /diagnosed cause supported by evidence: no/);
+  assert.match(known, /recommended direction independent of an unproven cause: yes/);
+});
+
+test("Evidence status: the approval preview shows it to Martin, with both halves stated", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  const preview = log.sentTexts.find((m) => /Strategy Proposal Ready for Review/i.test(m));
+  assert.ok(preview, "the approval preview must still be sent");
+  assert.match(preview!, /\*Evidence status:\* diagnosed cause supported by evidence: yes/);
+  assert.match(preview!, /recommended direction independent of an unproven cause: yes/);
+});
+
+test("Evidence status: copied from the validated diagnosis -- proposal-drafting model output can neither supply nor change it", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  // The drafting model is handed a proposal JSON that DOES carry an
+  // evidenceStatus field, claiming the opposite of what the diagnosis gate
+  // established. RawStrategyProposal omits the field, so it must be dropped.
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, { ...(RAW_PROPOSAL as any), evidenceStatus: MODEL_EVIDENCE_STATUS });
+
+  const after = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.deepStrictEqual(after.strategyProposal!.evidenceStatus, EVIDENCE_STATUS_SUPPORTED, "the status must come from the validated diagnosis");
+  assert.notDeepStrictEqual(after.strategyProposal!.evidenceStatus, MODEL_EVIDENCE_STATUS, "the drafting output's own evidenceStatus must be discarded");
+
+  // ...and it is what crosses the Strategy -> Finance boundary on approval.
+  await handleInterventionApproval(env, after, after.pendingStrategyApproval!.proposalVersion, "approve");
+  const props = log.handoffCreateBody!.properties;
+  const verifiedFacts = props["Verified Facts & Sources"].rich_text.map((x: any) => x.text.content).join("");
+  const inner = extractLabeledBlock(verifiedFacts, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END);
+  assert.ok(inner, "the approved Strategy proposal must be serialized into the Strategy -> Finance Handoff");
+  assert.deepStrictEqual(JSON.parse(inner!).evidenceStatus, EVIDENCE_STATUS_SUPPORTED, "the Handoff must carry the diagnosis-derived status verbatim");
+});
+
+test("Evidence status: a proposal revision cannot rewrite it -- the incumbent's status is carried over verbatim", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, { ...(RAW_PROPOSAL as any), evidenceStatus: MODEL_EVIDENCE_STATUS }, { ...(RAW_PROPOSAL as any), evidenceStatus: MODEL_EVIDENCE_STATUS });
+  const state = fakeState();
+
+  const after = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const v1Status = { ...after.strategyProposal!.evidenceStatus };
+  assert.deepStrictEqual(v1Status, EVIDENCE_STATUS_SUPPORTED);
+
+  const afterRefine = await handleInterventionApproval(env, after, after.pendingStrategyApproval!.proposalVersion, "refine");
+  const afterRevision = await handleStrategyRefinement(env, afterRefine, "Tighten the timeline.");
+
+  assert.strictEqual(afterRevision.strategyProposal!.proposalVersion, 2, "the revision still produces v2");
+  assert.deepStrictEqual(afterRevision.strategyProposal!.evidenceStatus, v1Status, "the revised proposal carries the status over unchanged");
+  assert.deepStrictEqual(afterRevision.strategyProposal!.evidenceStatus, EVIDENCE_STATUS_SUPPORTED, "the revision model's own evidenceStatus is ignored");
+  assert.ok(log.sentTexts.some((m) => /\*Evidence status:\*/.test(m)), "the revised proposal's preview shows the status too");
+});
+
+test("Evidence status: when it cannot be derived the proposal fails closed -- never presented, never persisted", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  // Passes evaluateCausationDiscipline (direction independently supported,
+  // cause simply never asserted as a boolean), so the refusal has to come from
+  // the proposal layer -- which is exactly where it must live.
+  const diagnosis: StrategyDiagnosisResult = {
+    ...SUFFICIENT_DIAGNOSIS,
+    diagnosis: { ...SUFFICIENT_DIAGNOSIS.diagnosis, causationSupported: undefined },
+    directionSupport: { supported: true, dependsOnUnsupportedCause: false },
+  };
+  assert.strictEqual(evaluateCausationDiscipline(diagnosis).valid, true, "the diagnosis gate lets this through");
+  assert.strictEqual(deriveStrategyEvidenceStatus(diagnosis), null, "so the status genuinely cannot be established");
+
+  env.AI = fakeAi(diagnosis);
+  const after = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(after.strategyProposal, undefined, "no proposal may become current without a status");
+  assert.strictEqual(after.stage, "strategy_blocked");
+  assert.strictEqual(log.handoffCreateBody, null, "nothing is routed downstream");
+  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented to Martin");
+  assert.ok(log.sentTexts.some((m) => /evidence status/i.test(m)), "Martin is told which status is missing");
+});
+
+test("Evidence status: revising a proposal that predates the field fails closed rather than minting a status for it", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const legacy = { ...(RAW_PROPOSAL as any), proposalId: "legacy-proposal", proposalVersion: 1 } as StrategyProposal;
+  assert.strictEqual(legacy.evidenceStatus, undefined, "the fixture must genuinely lack the field");
+  const state = fakeState({
+    stage: "strategy_refining",
+    awaiting: "strategy_refinement_reason",
+    strategyProposal: legacy,
+    pendingStrategyRefinement: { proposalId: "legacy-proposal", proposalVersion: 1 },
+  });
+
+  const after = await handleStrategyRefinement(env, state, "Tighten the timeline.");
+
+  assert.strictEqual(after.strategyProposal!.proposalVersion, 1, "the incumbent proposal must be left untouched");
+  assert.strictEqual(after.strategyProposal!.evidenceStatus, undefined, "a revision must never invent a status");
+  assert.ok(log.sentTexts.some((m) => /carries no evidence status/i.test(m)));
+});
+
+test("Evidence status: serialized into the Strategy boundary block deterministically, and absent from a legacy block", () => {
+  const proposal = {
+    ...(RAW_PROPOSAL as any),
+    proposalId: "p-boundary",
+    proposalVersion: 3,
+    evidenceStatus: { causationSupported: false, directionIndependentOfCause: true },
+  } as StrategyProposal;
+
+  const json = serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal));
+  const inner = extractLabeledBlock(json, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END)!;
+  const parsed = JSON.parse(inner);
+  assert.deepStrictEqual(parsed.evidenceStatus, proposal.evidenceStatus);
+  // fixed key order from the object literal, so the same proposal always
+  // serializes to the same bytes
+  assert.strictEqual(serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal)), json);
+
+  // A block written before the field existed simply has no such key -- that is
+  // what makes it readable as unknown downstream instead of failing closed.
+  const legacy = { ...parsed };
+  delete legacy.evidenceStatus;
+  assert.ok(!JSON.stringify(legacy).includes("evidenceStatus"));
+  assert.strictEqual(isStrategyEvidenceStatus(legacy.evidenceStatus), false);
+  assert.match(formatStrategyEvidenceStatus(legacy.evidenceStatus), /unknown/);
 });
 
 test("7. Held case can explicitly return to Pending", async (t) => {

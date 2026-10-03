@@ -152,6 +152,30 @@ export interface StrategyDiagnosisResult {
 }
 
 /**
+ * The deterministic evidence status of a Strategy Proposal -- the two facts
+ * the diagnosis gate actually established, carried forward verbatim so every
+ * downstream reader sees the same answer Strategy saw.
+ *
+ * - `causationSupported`: whether the diagnosed CAUSE was marked supported by
+ *   the supplied evidence (`StrategyDiagnosisSteps.causationSupported`).
+ * - `directionIndependentOfCause`: whether the recommended DIRECTION stands
+ *   without depending on an UNSUPPORTED cause
+ *   (`StrategyDirectionSupport.dependsOnUnsupportedCause === false`).
+ *
+ * Both are ordinary booleans, never tri-state prose: the runtime derives them
+ * from the validated StrategyDiagnosisResult (see
+ * deriveStrategyEvidenceStatus), never from proposal-drafting model output,
+ * and a proposal that cannot carry them is refused rather than defaulted. On
+ * a cross-Unit boundary block written before this field existed the value is
+ * absent, and readers treat absent as "unknown" rather than inventing either
+ * answer (see isStrategyEvidenceStatus / formatStrategyEvidenceStatus).
+ */
+export interface StrategyEvidenceStatus {
+  causationSupported: boolean;
+  directionIndependentOfCause: boolean;
+}
+
+/**
  * The complete Strategic Intervention Proposal Martin reviews for
  * Approve/Refine/Reject -- a runtime/work-state artifact (see
  * WorkState.strategyProposal), not a Notion database object or a new
@@ -201,6 +225,17 @@ export interface StrategyProposal {
     evidence: string[];
     diagnosticConclusion: string;
   };
+
+  /**
+   * Deterministic evidence status copied from the validated diagnosis that
+   * produced this proposal -- required, so a proposal can never be created,
+   * revised, previewed or routed downstream without it (see
+   * deriveStrategyEvidenceStatus for the derivation and both fail-closed
+   * refusals). Deliberately NOT part of RawStrategyProposal: the drafting
+   * and revision model output cannot carry it, so a revision cannot rewrite
+   * it either.
+   */
+  evidenceStatus: StrategyEvidenceStatus;
 
   strategicOpportunity: {
     opportunity: string;
@@ -319,8 +354,22 @@ export interface StrategyProposal {
   };
 }
 
-/** Everything in StrategyProposal except the two identifiers this module assigns itself (proposalId, proposalVersion). */
-type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersion">;
+/**
+ * The proposal minus `evidenceStatus`: everything a runtime-built proposal
+ * carries once its ids are minted, still missing only the one field the model
+ * may never supply.
+ */
+type StrategyProposalBody = Omit<StrategyProposal, "evidenceStatus">;
+
+/**
+ * Everything the proposal-drafting/revision model output may contain --
+ * StrategyProposalBody minus the two identifiers this module assigns itself
+ * (proposalId, proposalVersion). Omitting `evidenceStatus` is what makes
+ * "never from proposal-drafting model output" and "a revision cannot rewrite
+ * it" structural rather than a convention: neither drafting nor revision has
+ * a field to write it into, so normalizeStrategyProposal cannot pick one up.
+ */
+type RawStrategyProposal = Omit<StrategyProposalBody, "proposalId" | "proposalVersion">;
 
 /**
  * Reconstructs the strategic question and supplied context directly from
@@ -565,6 +614,62 @@ export function applyUnprovenCauseDiscipline(result: StrategyDiagnosisResult): S
     diagnosis: { ...result.diagnosis, cause: `${UNPROVEN_CAUSE_MARKER} ${rawCause}` },
     unresolvedQuestions: result.unresolvedQuestions?.includes(note) ? result.unresolvedQuestions : [result.unresolvedQuestions, note].filter(Boolean).join("\n"),
   };
+}
+
+/**
+ * Derives a Proposal's evidence status from the VALIDATED diagnosis -- the
+ * only source that ever supplies it. Nothing here reads proposal-drafting or
+ * proposal-revision model output: RawStrategyProposal omits `evidenceStatus`
+ * entirely, so the model has no field to write it into even if it tried.
+ *
+ * Returns null (a refusal, never a default) when the status cannot actually
+ * be established:
+ *   - no diagnosis, or the cause's support was never stated as a boolean;
+ *   - a `directionSupport` object that is present but not two booleans;
+ *   - no recommended direction to be independent OF;
+ *   - a direction with no `directionSupport` while the cause is unproven --
+ *     exactly the case evaluateCausationDiscipline refuses to let proceed,
+ *     so reaching here with it would mean the gate was bypassed.
+ *
+ * The cause-supported case with no `directionSupport` (permitted by
+ * evaluateCausationDiscipline, and what every previously-shipped sufficient
+ * diagnosis looks like) derives `directionIndependentOfCause: true`: with the
+ * cause established, nothing makes the direction rest on an *unproven* cause,
+ * which is the only thing this field answers.
+ */
+export function deriveStrategyEvidenceStatus(diagnosis: StrategyDiagnosisResult | null | undefined): StrategyEvidenceStatus | null {
+  if (!diagnosis) return null;
+  const causationSupported = diagnosis.diagnosis?.causationSupported;
+  if (typeof causationSupported !== "boolean") return null;
+
+  const directionSupport = diagnosis.directionSupport;
+  if (directionSupport !== undefined) {
+    if (typeof directionSupport.supported !== "boolean" || typeof directionSupport.dependsOnUnsupportedCause !== "boolean") return null;
+    return { causationSupported, directionIndependentOfCause: directionSupport.dependsOnUnsupportedCause === false };
+  }
+
+  if (!diagnosis.recommendedDirection) return null;
+  if (!causationSupported) return null;
+  return { causationSupported: true, directionIndependentOfCause: true };
+}
+
+/** Type guard for an evidence status read off a serialized boundary block -- absent means legacy/unknown, present-but-wrong is never coerced into a guess. */
+export function isStrategyEvidenceStatus(value: unknown): value is StrategyEvidenceStatus {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Partial<StrategyEvidenceStatus>;
+  return typeof v.causationSupported === "boolean" && typeof v.directionIndependentOfCause === "boolean";
+}
+
+/**
+ * One human-readable rendering of the evidence status, shared by Strategy's
+ * own approval preview and Sales's review notes so the two can never phrase
+ * the same status differently. An absent status reads as "unknown" -- a
+ * boundary block written before this field existed is reported as unknown,
+ * never back-filled with either answer.
+ */
+export function formatStrategyEvidenceStatus(status: StrategyEvidenceStatus | undefined): string {
+  if (!isStrategyEvidenceStatus(status)) return "unknown (no evidence status on this record)";
+  return `diagnosed cause supported by evidence: ${status.causationSupported ? "yes" : "no"}; recommended direction independent of an unproven cause: ${status.directionIndependentOfCause ? "yes" : "no"}`;
 }
 
 /**
@@ -1305,9 +1410,11 @@ function arr(v: unknown): string[] {
  * gave nothing usable) so downstream formatting/preview code never has to
  * guard against undefined. timeline.status is forced to "Indicative" unless
  * the model explicitly and validly returned "Confirmed" -- never manufactures
- * false precision by defaulting the other way.
+ * false precision by defaulting the other way. Returns a StrategyProposalBody
+ * on purpose: `proposalId`/`proposalVersion` are assigned by the caller and
+ * `evidenceStatus` is never read from `raw` (see StrategyProposalBody).
  */
-function normalizeStrategyProposal(raw: Partial<RawStrategyProposal> | null, proposalId: string, proposalVersion: number): StrategyProposal {
+function normalizeStrategyProposal(raw: Partial<RawStrategyProposal> | null, proposalId: string, proposalVersion: number): StrategyProposalBody {
   const r = raw ?? ({} as Partial<RawStrategyProposal>);
   return {
     proposalId,
@@ -1447,6 +1554,7 @@ function formatProposalPreview(state: WorkState, proposal: StrategyProposal): st
     `Entity: ${state.matterToken || state.entityToken || state.workId}`,
     `\n*Strategic problem:* ${proposal.executiveSummary.strategicProblem}`,
     `\n*Recommended direction:* ${proposal.recommendedDirection.direction || proposal.executiveSummary.recommendedDirection}`,
+    `\n*Evidence status:* ${formatStrategyEvidenceStatus(proposal.evidenceStatus)}`,
     `\n*Proposed intervention:* ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
     proposal.commercialScope.included.length ? `\n*Scope (included):* ${proposal.commercialScope.included.join("; ")}` : null,
     proposal.deliverables.length ? `\n*Deliverables:* ${proposal.deliverables.map((d) => d.name).join("; ")}` : null,
@@ -1518,6 +1626,20 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
     return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while developing the proposal. Refusing to proceed without it.");
   }
 
+  // Fail closed BEFORE announcing progress and before the outbound drafting
+  // call: the status is derived from the validated diagnosis already in hand,
+  // so nothing is announced and no provider call is spent on a proposal that
+  // would be refused the moment it came back. It comes from the diagnosis,
+  // never from the drafting output (which has no such field).
+  const evidenceStatus = deriveStrategyEvidenceStatus(diagnosis);
+  if (!evidenceStatus) {
+    return handleBlocked(
+      env,
+      state,
+      "Could not establish the evidence status (causationSupported / directionIndependentOfCause) from the validated diagnosis -- refusing to present a Strategy Proposal that does not carry it.",
+    );
+  }
+
   await advanceStrategyProgress(env, state, "Developing the full Strategic Intervention Proposal...");
 
   const raw = await generate<RawStrategyProposal>(env, {
@@ -1532,7 +1654,8 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
 
   const nextVersion = (state.strategyProposal?.proposalVersion ?? 0) + 1;
   const proposalId = crypto.randomUUID();
-  const proposal = normalizeStrategyProposal(raw, proposalId, nextVersion);
+  const body = normalizeStrategyProposal(raw, proposalId, nextVersion);
+  const proposal: StrategyProposal = { ...body, evidenceStatus };
 
   const completeness = evaluateProposalCompleteness(proposal);
   if (!completeness.valid) {
@@ -1655,6 +1778,19 @@ async function presentStrategyProposalForApproval(
   // "Passed" with checks: [] records honestly that no Sales boundary check
   // exists to run, rather than fabricating a five-check attestation.
   //
+  // Gate 0 -- evidence status: both callers derive it before arriving here
+  // (a fresh draft from the validated diagnosis, a revision by carrying the
+  // incumbent's over). This is the single mutation point for
+  // state.strategyProposal, the approval preview and the Strategy -> Finance
+  // Handoff, so the refusal lives here too: no proposal without a status ever
+  // becomes current, is shown to Martin, or crosses a Unit boundary.
+  if (!isStrategyEvidenceStatus(proposal.evidenceStatus)) {
+    return handleBlocked(
+      env,
+      state,
+      "This Strategy Proposal carries no evidence status (causationSupported / directionIndependentOfCause) -- refusing to present it, since Strategy cannot show or route a proposal whose evidence status is unknown.",
+    );
+  }
   // Gate 1 -- operational references: Entity_ID/Matter_ID are the
   // authoritative identity a Strategy work item operates on (seeded from
   // the Handoff at pickup, or resolved from Martin's explicit token for a
@@ -1802,6 +1938,21 @@ async function reviseStrategyProposal(
     return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while revising the proposal. Refusing to proceed without it.");
   }
 
+  // Fail closed BEFORE the outbound revision call: a revision re-states
+  // content only, so the status is carried over from the proposal being
+  // revised -- the model output has no such field, meaning a Refine can
+  // neither change it nor silently drop it. If the incumbent has no status
+  // to carry (it predates this field), refuse rather than mint one, and do
+  // it before spending a provider call whose result would be thrown away.
+  const evidenceStatus = currentProposal.evidenceStatus;
+  if (!evidenceStatus) {
+    return handleBlocked(
+      env,
+      state,
+      "The existing Strategy Proposal carries no evidence status (causationSupported / directionIndependentOfCause), and a revision cannot supply one -- refusing to revise rather than produce a proposal that does not carry it.",
+    );
+  }
+
   const raw = await generate<RawStrategyProposal>(env, {
     taskId: "strategy.proposal_drafting",
     mode: "json",
@@ -1820,7 +1971,8 @@ async function reviseStrategyProposal(
   // artifact, not a fresh proposal with a new identity.
   const proposalId = currentProposal.proposalId;
   const proposalVersion = currentProposal.proposalVersion + 1;
-  const proposal = normalizeStrategyProposal(raw, proposalId, proposalVersion);
+  const body = normalizeStrategyProposal(raw, proposalId, proposalVersion);
+  const proposal: StrategyProposal = { ...body, evidenceStatus };
 
   const completeness = evaluateProposalCompleteness(proposal);
   if (!completeness.valid) {
@@ -1876,7 +2028,17 @@ export type StrategyBoundaryRepresentation = Pick<
   | "expectedBusinessEffect"
   | "successCriteria"
   | "commercialScope"
->;
+> & {
+  /**
+   * OPTIONAL on the boundary only, and deliberately so: every proposal built
+   * by this runtime carries one (StrategyProposal.evidenceStatus is
+   * required), but a boundary block serialized before this field existed does
+   * not, and Sales must still be able to read that block. Absent therefore
+   * means "unknown" downstream -- see isStrategyEvidenceStatus /
+   * formatStrategyEvidenceStatus -- never a back-filled true or false.
+   */
+  evidenceStatus?: StrategyEvidenceStatus;
+};
 
 /** Selects the boundary fields (see StrategyBoundaryRepresentation) from an approved Strategy Proposal. */
 export function buildStrategyBoundaryRepresentation(proposal: StrategyProposal): StrategyBoundaryRepresentation {
@@ -1887,6 +2049,7 @@ export function buildStrategyBoundaryRepresentation(proposal: StrategyProposal):
     strategicChallenge: proposal.strategicChallenge,
     strategicOpportunity: proposal.strategicOpportunity,
     diagnosis: proposal.diagnosis,
+    evidenceStatus: proposal.evidenceStatus,
     strategicObjective: proposal.strategicObjective,
     recommendedDirection: proposal.recommendedDirection,
     proposedIntervention: proposal.proposedIntervention,

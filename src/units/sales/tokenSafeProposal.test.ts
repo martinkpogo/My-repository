@@ -7,13 +7,23 @@ import {
   handleSalesProposalDecision,
   handleSalesProposalRevisionText,
   parseFinanceQuote,
-  extractInvestmentTolerance,
+  parseStrategyBoundaryRepresentation,
   buildProposalContent,
+  buildReviewNotes,
+  extractInvestmentTolerance,
   PROPOSAL_CALLBACK_ACTION,
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import type { StrategyProposal } from "../strategy/strategyAnalyst";
-import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../strategy/strategyAnalyst";
+import {
+  buildStrategyBoundaryRepresentation,
+  serializeStrategyBoundaryRepresentation,
+  extractLabeledBlock,
+  isStrategyEvidenceStatus,
+  formatStrategyEvidenceStatus,
+  STRATEGY_BOUNDARY_START,
+  STRATEGY_BOUNDARY_END,
+} from "../strategy/strategyAnalyst";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END, handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
 
 // ---------------------------------------------------------------------------
@@ -115,6 +125,7 @@ function approvedStrategyProposal(overrides: Partial<StrategyProposal> = {}): St
     expectedBusinessEffect: { intendedEffects: ["Consistent presentation across teams"], measurableEffects: ["One master profile in use"], effectsRequiringBaseline: [], limitations: ["No attributable lost-revenue figure exists"] },
     successCriteria: [{ criterion: "Single master profile adopted", measurement: "Materials audit", evidenceRequired: "Inventory" }],
     commercialScope: { included: ["Diagnostic audit", "Messaging framework"], excluded: ["Full rebrand"], expectedResources: [], expectedDuration: "12 weeks", clientResponsibilities: ["Provide materials"], downstreamUnitResponsibilities: [] },
+    evidenceStatus: { causationSupported: true, directionIndependentOfCause: true },
     ...overrides,
   } as StrategyProposal;
 }
@@ -1026,6 +1037,16 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   assert.match(writtenFacts, /=== FINANCE COMMERCIAL JUDGMENT ===/, "the real writer must have written the Finance markers");
   assert.ok(writtenFacts.includes(strategyBlock(approvedStrategyProposal())), "the Strategy boundary block must be carried forward verbatim");
 
+  // ...and the Strategy evidence status rides along inside that block,
+  // unchanged by Finance's carry -- Finance neither re-derives nor rewrites it.
+  const carriedStrategyBlock = extractLabeledBlock(writtenFacts, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END);
+  assert.ok(carriedStrategyBlock, "Finance must carry the Strategy boundary block");
+  assert.deepStrictEqual(
+    JSON.parse(carriedStrategyBlock!).evidenceStatus,
+    { causationSupported: true, directionIndependentOfCause: true },
+    "the evidence status must survive the Finance carry verbatim",
+  );
+
   // --- Phase 2: a FRESH Sales Work -- Handoff id only, no Finance state ---
   const freshSales: WorkState = {
     workId: "99999999-8888-7777-6666-55555555bbbb",
@@ -1045,6 +1066,25 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   assert.strictEqual(salesState.salesProposal?.entityToken, "E-20", "entityToken taken from the Handoff");
   assert.strictEqual(salesState.salesProposal?.matterToken, "MAT-20", "matterToken taken from the Handoff");
 
+  // Sales reads the evidence status off the boundary block rather than
+  // re-deriving it, defaulting it, or dropping it.
+  assert.deepStrictEqual(
+    salesState.salesProposal?.facts?.strategy.evidenceStatus,
+    { causationSupported: true, directionIndependentOfCause: true },
+    "the status must reach Sales intact",
+  );
+  const salesFacts = salesState.salesProposal!.facts!;
+  const reviewNotes = buildReviewNotes(salesFacts, {
+    proposalId: salesState.salesProposal!.proposalId,
+    version: salesState.salesProposal!.currentVersion,
+    amendments: salesState.salesProposal!.amendments,
+  });
+  assert.match(
+    reviewNotes,
+    /Strategy evidence status: diagnosed cause supported by evidence: yes; recommended direction independent of an unproven cause: yes/,
+    "Sales must render the status in its review material",
+  );
+
   // Exactly one Proposal, linked to the originating Handoff, token-only identity
   const recs = proposals(world);
   assert.strictEqual(recs.length, 1, "exactly one canonical Proposal");
@@ -1057,6 +1097,7 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
 
   // Quote, rationale and tokens unchanged
   const content = text(rec["Proposal Content"]);
+  assert.ok(!content.includes("Strategy evidence status"), "the evidence status is review material only -- client-facing Proposal Content is unchanged by it");
   assert.strictEqual(rec["Quoted Price"].number, 420000, "currency and amount exactly as Finance quoted");
   assert.match(text(rec["Quote Rationale"]), /^Currency: GHS\./, "currency exactly as Finance quoted");
   assert.match(text(rec["Quote Rationale"]), /value at stake/);
@@ -1124,6 +1165,57 @@ test("Ifc. Integration: a marked but malformed Finance block fails closed on its
     assert.match(state.blockedReason ?? "", reason, inner);
     assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Held", inner);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The Strategy evidence status at the Sales boundary: carried through when
+// present, read as unknown when the block predates the field, refused when
+// malformed. It takes no part in any pricing or proposal decision.
+// ---------------------------------------------------------------------------
+
+test("Ifd. A boundary block carrying an evidence status parses it through unchanged and renders it in review notes", () => {
+  const status = { causationSupported: false, directionIndependentOfCause: true };
+  const combined = `${strategyBlock(approvedStrategyProposal({ evidenceStatus: status }))}\n\n${financeBlock(HO64_FACTS)}`;
+
+  const parsed = parseStrategyBoundaryRepresentation(combined);
+  assert.ok("representation" in parsed, `must parse: ${(parsed as { error: string }).error}`);
+  const rep = (parsed as { representation: any }).representation;
+  assert.deepStrictEqual(rep.evidenceStatus, status, "the status must be preserved exactly as Strategy wrote it");
+  assert.strictEqual(
+    formatStrategyEvidenceStatus(rep.evidenceStatus),
+    "diagnosed cause supported by evidence: no; recommended direction independent of an unproven cause: yes",
+  );
+});
+
+test("Ife. A legacy Strategy boundary block with no evidence status is still readable -- unknown, never assumed either way", async (t) => {
+  const legacy: any = buildStrategyBoundaryRepresentation(approvedStrategyProposal());
+  delete legacy.evidenceStatus;
+  const facts = `${STRATEGY_BOUNDARY_START}\n${JSON.stringify(legacy)}\n${STRATEGY_BOUNDARY_END}\n\n${financeBlock(HO64_FACTS)}`;
+
+  const world = installWorld(t, { ho64: ho64Props({ "Verified Facts & Sources": rt(facts) }) });
+  const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
+
+  assert.ok(!state.blockedReason, `a block written before the field existed must still be readable: ${state.blockedReason}`);
+  assert.strictEqual(proposals(world).length, 1, "and must still produce exactly one Proposal");
+  assert.strictEqual(state.salesProposal?.facts?.strategy.evidenceStatus, undefined, "no status is carried, and none is invented");
+
+  const notes = buildReviewNotes(state.salesProposal!.facts!, {
+    proposalId: state.salesProposal!.proposalId,
+    version: state.salesProposal!.currentVersion,
+    amendments: state.salesProposal!.amendments,
+  });
+  assert.match(notes, /Strategy evidence status: unknown/);
+  assert.ok(!/supported by evidence: (yes|no)/.test(notes), "an unknown status must never be rendered as a definite answer");
+});
+
+test("Iff. A boundary block whose evidence status is malformed fails closed instead of being coerced into a guess", () => {
+  const rep: any = { ...buildStrategyBoundaryRepresentation(approvedStrategyProposal()), evidenceStatus: { causationSupported: "yes", directionIndependentOfCause: true } };
+  const handoffText = `${STRATEGY_BOUNDARY_START}\n${JSON.stringify(rep)}\n${STRATEGY_BOUNDARY_END}\n\n${financeBlock(HO64_FACTS)}`;
+
+  const parsed = parseStrategyBoundaryRepresentation(handoffText);
+  assert.ok("error" in parsed, "a malformed evidence status must fail closed");
+  assert.match((parsed as { error: string }).error, /malformed evidence status/);
+  assert.strictEqual(isStrategyEvidenceStatus(rep.evidenceStatus), false);
 });
 
 

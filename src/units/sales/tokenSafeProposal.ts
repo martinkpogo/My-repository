@@ -1,7 +1,7 @@
 import type { Env, WorkState } from "../../types";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import type { StrategyProposal, StrategyBoundaryRepresentation } from "../strategy/strategyAnalyst";
-import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock, isStrategyEvidenceStatus, formatStrategyEvidenceStatus } from "../strategy/strategyAnalyst";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
 import {
   appendTextBlocks,
@@ -281,10 +281,12 @@ export function findMissingStrategyBoundaryFacts(strategy: StrategyBoundaryRepre
  * Handoff's combined "Verified Facts & Sources" text. This IS the Strategy-
  * facts source for Runtime Sales Proposal production -- fails closed
  * (returns `error`) on any missing markers, invalid JSON, non-object
- * content, missing proposalId/proposalVersion, or an incomplete
- * representation, and never falls back to state.strategyProposal, old
- * conversation state, Telegram history, another Handoff, or an
- * inferred/reconstructed value.
+ * content, missing proposalId/proposalVersion, a malformed evidence status,
+ * or an incomplete representation, and never falls back to
+ * state.strategyProposal, old conversation state, Telegram history, another
+ * Handoff, or an inferred/reconstructed value. `evidenceStatus` is the one
+ * optional field: a block serialized before it existed still parses, and
+ * carries no status, which callers read as unknown rather than as true/false.
  */
 export function parseStrategyBoundaryRepresentation(handoffText: string): { representation: StrategyBoundaryRepresentation } | { error: string } {
   const block = extractLabeledBlock(handoffText, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END);
@@ -304,6 +306,12 @@ export function parseStrategyBoundaryRepresentation(handoffText: string): { repr
   }
   if (typeof rep.proposalVersion !== "number" || !Number.isFinite(rep.proposalVersion)) {
     return { error: "the Strategy boundary representation has no proposalVersion" };
+  }
+  // Absent is legal and means "unknown" downstream (a legacy block); present
+  // but not two booleans is corruption, so it fails closed like the checks
+  // above rather than being coerced into whichever answer is convenient.
+  if (rep.evidenceStatus !== undefined && !isStrategyEvidenceStatus(rep.evidenceStatus)) {
+    return { error: "the Strategy boundary representation carries a malformed evidence status (expected boolean causationSupported and directionIndependentOfCause)" };
   }
   const missing = findMissingStrategyBoundaryFacts(rep as StrategyBoundaryRepresentation);
   if (missing.length) return { error: `the Strategy boundary representation is incomplete: ${missing.join("; ")}` };
@@ -501,6 +509,12 @@ export function buildReviewNotes(
   }
   return joinLines([
     `Source: Handoff ${facts.handoffRef} (Finance → Sales); approved Strategy proposal ${facts.strategyProposalId} v${facts.strategyProposalVersion}.`,
+    // The Strategy evidence status is carried verbatim across the Strategy ->
+    // Finance -> Sales boundary and rendered here, in review material, rather
+    // than in Proposal Content: it is governance/review information, not
+    // client-facing proposal substance, and it takes no part in any pricing or
+    // proposal decision. A block that predates the field renders as unknown.
+    `Strategy evidence status: ${formatStrategyEvidenceStatus(s.evidenceStatus)}.`,
     `Investment is the authoritative Finance quote, unchanged: ${quote}.`,
     tolerance
       ? `Client-disclosed planning range (${tolerance.source}): ${formatMoney(tolerance.currency, tolerance.low)}–${formatMoney(tolerance.currency, tolerance.high).replace(`${tolerance.currency} `, "")}. Commercial context only: both figures are verified facts, and the range does not replace or alter the Finance quote and is not the pricing basis.`
