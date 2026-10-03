@@ -733,6 +733,56 @@ test("Gate: unsupported cause with NO statement about the direction is still blo
   }
 });
 
+test("Gate: ambiguous or malformed direction evidence is held, never coerced -- whether or not the cause is supported", () => {
+  // Ambiguous: the field is simply absent while the cause is unproven, so
+  // there is no direction evidence to weigh.
+  assert.strictEqual(evaluateCausationDiscipline({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: undefined }).valid, false);
+
+  // Malformed: present but not the two booleans the contract declares. It is
+  // refused on its own terms rather than being read as "supported", and the
+  // refusal does not depend on how the cause fared.
+  const malformed: unknown[] = [
+    { supported: true },                                     // incomplete -- no dependsOnUnsupportedCause
+    { dependsOnUnsupportedCause: false },                    // incomplete -- no supported
+    { supported: "yes", dependsOnUnsupportedCause: false },  // wrong type
+    { supported: true, dependsOnUnsupportedCause: "no" },    // wrong type
+    { supported: 1, dependsOnUnsupportedCause: 0 },          // numbers are not booleans
+    { supported: true, dependsOnUnsupportedCause: undefined },
+    "supported",                                             // not an object at all
+    true,
+    null,                                                    // explicit null is present, not absent
+    [],
+  ];
+  for (const base of [SUFFICIENT_DIAGNOSIS, UNPROVEN_CAUSE_DIAGNOSIS]) {
+    for (const directionSupport of malformed) {
+      const result = evaluateCausationDiscipline({ ...base, directionSupport } as any);
+      assert.strictEqual(result.valid, false, `expected hold for ${JSON.stringify(directionSupport)} on ${base === SUFFICIENT_DIAGNOSIS ? "supported" : "unproven"} cause`);
+      if (!result.valid) assert.match(result.reason, /directionSupport evidence is malformed/);
+    }
+  }
+});
+
+test("Gate: an incomplete causal explanation never becomes a generic ask for more market/churn data -- every hold names the specific direction defect", () => {
+  const reasons: string[] = [];
+  const holds = [
+    { directionSupport: { supported: true, dependsOnUnsupportedCause: true } },   // depends on the unproven cause
+    { directionSupport: { supported: false, dependsOnUnsupportedCause: false } }, // direction itself unsupported
+    { directionSupport: { supported: true } },                                    // malformed / partial
+  ];
+  for (const hold of holds) {
+    const result = evaluateCausationDiscipline({ ...UNPROVEN_CAUSE_DIAGNOSIS, ...hold } as any);
+    assert.strictEqual(result.valid, false, `expected a hold for ${JSON.stringify(hold)}`);
+    if (!result.valid) reasons.push(result.reason);
+  }
+  assert.strictEqual(reasons.length, holds.length);
+  for (const reason of reasons) {
+    // The hold must name the direction/dependence defect -- it must never
+    // fall back to a generic request for market, churn or "more data".
+    assert.doesNotMatch(reason, /\bmarket\b|\bchurn\b|more data|additional evidence/i, `hold reason must not demand generic market/churn input: ${reason}`);
+    assert.match(reason, /direction/i);
+  }
+});
+
 test("applyUnprovenCauseDiscipline: an unsupported cause is kept as an explicit, labelled hypothesis -- idempotent, and a supported cause is untouched", () => {
   const proceeding: StrategyDiagnosisResult = { ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } };
   const once = applyUnprovenCauseDiscipline(proceeding);

@@ -485,7 +485,7 @@ function buildDiagnosisPromptParts(hatDefinition: string, universalRoleContract:
   "strategicProblem": {"statement":"...","whyItMatters":"...","keyDrivers":"...","strategicTension":"...","materialUncertainty":"..."},
   "options": [{"name":"...","intendedEffect":"...","rationale":"...","evidenceBasis":"...","assumptions":"...","constraintsRisks":"...","conditionsForSuccess":"..."}],
   "recommendedDirection": "..." (omit entirely if the evidence doesn't support that direction, or it materially depends on an unsupported cause),
-  "directionSupport": {"supported": true|false, "dependsOnUnsupportedCause": true|false} (required whenever recommendedDirection is given),
+  "directionSupport": {"supported": true|false, "dependsOnUnsupportedCause": true|false} (required whenever recommendedDirection is given while causationSupported is not true),
   "recommendationRationale": "...",
   "noRecommendationReason": "..." (required if sufficient=true and recommendedDirection is omitted),
   "evidenceSources": "...",
@@ -498,6 +498,19 @@ Only include situation/diagnosis/strategicProblem/options/recommendation fields 
 }
 
 /**
+ * True only when `directionSupport` is exactly the two booleans the contract
+ * declares. Direction evidence is read fail-closed: a field that is present
+ * but the wrong shape (missing half, wrong type, not an object at all) is
+ * never coerced, never partially read, and never silently ignored -- see
+ * evaluateCausationDiscipline.
+ */
+function isStrategyDirectionSupport(value: unknown): value is StrategyDirectionSupport {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<StrategyDirectionSupport>;
+  return typeof candidate.supported === "boolean" && typeof candidate.dependsOnUnsupportedCause === "boolean";
+}
+
+/**
  * Deterministic post-check on the AI's own structured output -- per the
  * "Do not assert causation without sufficient support," this is never taken
  * on the AI's own say-so. It keeps three questions apart: the problem
@@ -505,9 +518,9 @@ Only include situation/diagnosis/strategicProblem/options/recommendation fields 
  * (`directionSupport`). A recommendation proceeds when its cause is supported,
  * or when the cause is unproven but the direction is itself supported and
  * explicitly does not depend on that cause. It is blocked when the direction
- * is unsupported, or materially depends on an unsupported cause. Mirrors
- * validateFinanceJudgement's role in valueBasedPricingAssessor.ts -- the AI
- * cannot override this.
+ * is unsupported, materially depends on an unsupported cause, or its evidence
+ * is ambiguous or malformed. Mirrors validateFinanceJudgement's role in
+ * valueBasedPricingAssessor.ts -- the AI cannot override this.
  */
 export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | null): { valid: true } | { valid: false; reason: string } {
   if (!result) return { valid: false, reason: "No structured diagnosis was returned." };
@@ -519,6 +532,18 @@ export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | nu
     // Three separate questions: the problem (`sufficient`, above), the cause
     // (causationSupported) and the direction (directionSupport).
     const direction = result.directionSupport;
+    // Fail closed FIRST on malformed direction evidence: if the field was
+    // supplied at all it must be exactly {supported, dependsOnUnsupportedCause}
+    // as booleans. It is checked before the supported===false branch so a
+    // malformed value is reported as malformed rather than misread as an
+    // unsupported (or supported) direction. Omission stays legal where the
+    // contract allows it -- only a present-but-wrong value is refused.
+    if (direction !== undefined && !isStrategyDirectionSupport(direction)) {
+      return {
+        valid: false,
+        reason: "A recommended direction was produced, but its directionSupport evidence is malformed (expected {supported: boolean, dependsOnUnsupportedCause: boolean}) -- ambiguous or malformed evidence must not proceed.",
+      };
+    }
     if (direction?.supported === false) {
       return { valid: false, reason: "A recommended direction was produced, but the direction itself is not sufficiently supported by the evidence -- a direction that is not supported must not proceed." };
     }
