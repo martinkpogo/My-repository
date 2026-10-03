@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import type { NotionProperties, NotionPage } from "./notion";
 import { createPage, richText, updatePage } from "./notion";
 import type { AccessContext } from "./access";
+import { buildMarker, markerFieldEntries, markerPattern, type MarkerEvidence } from "./markerChannel";
 
 /**
  * Single runtime enforcement point for the canonical Handoff identity-write
@@ -254,21 +255,25 @@ export interface HandoffSourceBoundaryAttestation {
 }
 
 /**
- * The sanctioned durable marker channel for a Sales -> Strategy
- * source-boundary attestation: a machine-readable bracket group appended to
- * the Handoff's own `Reason` free text -- the same convention already used
- * for the `requiredCategory: call_notes` marker (see checkHandoffs.ts), so
- * no Notion schema change, no second record, and no new subsystem. The
- * marker is written as part of the Handoff creation payload itself (a
- * single atomic create), which is what binds it to this Handoff: it exists
- * on exactly the record it was computed for, and its operational
- * Entity/Matter references must equal that record's own Entity_Token /
- * Matter_Token when read back. It carries no real-world identity: only the
- * result, the binding references, the five named checks, and which
- * known-identity FIELDS were compared (field names, never values).
+ * The source-boundary attestation marker: one named type within the shared
+ * durable marker channel (`src/markerChannel.ts`), appended to the Handoff's
+ * own `Reason` free text -- the same convention already used for the
+ * `requiredCategory: call_notes` marker (see checkHandoffs.ts), so no Notion
+ * schema change, no second record, and no new subsystem. The marker is
+ * written as part of the Handoff creation payload itself (a single atomic
+ * create), which is what binds it to this Handoff: it exists on exactly the
+ * record it was computed for, and its operational Entity/Matter references
+ * must equal that record's own Entity_Token / Matter_Token when read back.
+ * It carries no real-world identity: only the result, the binding
+ * references, the five named checks, and which known-identity FIELDS were
+ * compared (field names, never values).
+ *
+ * The grammar itself (bracket group, `key=value` pairs) is shared with the
+ * Call Notes `record_approval` marker and lives in `src/markerChannel.ts`;
+ * only this type's field vocabulary and checks are owned here.
  */
-const SOURCE_BOUNDARY_MARKER_PATTERN = /\[source_boundary_check ([^\]]*)\]/;
-const SOURCE_BOUNDARY_MARKER_FIELD_PATTERN = /(\w+)=([^\s\]]*)/g;
+const SOURCE_BOUNDARY_MARKER_NAME = "source_boundary_check";
+const SOURCE_BOUNDARY_MARKER_PATTERN = markerPattern(SOURCE_BOUNDARY_MARKER_NAME);
 
 /** Parse-time whitelist for the marker's `fields=` list -- names only, see KnownIdentityField. */
 const KNOWN_IDENTITY_FIELD_NAMES: readonly KnownIdentityField[] = ["entityName", "matterName", "contactName", "email", "phone"];
@@ -279,17 +284,17 @@ export function buildSourceBoundaryMarker(
   result: SourceBoundaryResult,
   identityFieldsChecked: KnownIdentityField[],
 ): string {
-  return (
-    `[source_boundary_check result=${result}` +
-    ` entity=${identity.entityToken.trim()}` +
-    ` matter=${identity.matterToken.trim()}` +
-    ` checks=${SOURCE_BOUNDARY_CHECKS.join(",")}` +
-    ` fields=${identityFieldsChecked.join(",")}]`
-  );
+  return buildMarker(SOURCE_BOUNDARY_MARKER_NAME, [
+    ["result", result],
+    ["entity", identity.entityToken.trim()],
+    ["matter", identity.matterToken.trim()],
+    ["checks", SOURCE_BOUNDARY_CHECKS.join(",")],
+    ["fields", identityFieldsChecked.join(",")],
+  ]);
 }
 
 /** The outcome of reading a Handoff's recorded source-boundary evidence. */
-export type SourceBoundaryEvidence = { ok: true; attestation: HandoffSourceBoundaryAttestation } | { ok: false; reason: string };
+export type SourceBoundaryEvidence = MarkerEvidence<HandoffSourceBoundaryAttestation>;
 
 /**
  * Reads and validates the durable source-boundary attestation a sender
@@ -310,10 +315,7 @@ export function parseSourceBoundaryMarker(
   if (!match) {
     return { ok: false, reason: "no source_boundary_check attestation marker is recorded on this Handoff" };
   }
-  const fields = new Map<string, string>();
-  for (const [, key, value] of match[1].matchAll(SOURCE_BOUNDARY_MARKER_FIELD_PATTERN)) {
-    fields.set(key, value);
-  }
+  const fields = new Map<string, string>(markerFieldEntries(match[1]));
   const result = fields.get("result");
   if (result !== "Passed" && result !== "Failed") {
     return { ok: false, reason: "the recorded source_boundary_check result is missing or malformed" };

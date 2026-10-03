@@ -466,6 +466,20 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       responsibility: responsibilityId,
       consequence: "write",
       requiresApproval: true,
+      // Every Marketing Hat declares exactly this one Action, so the
+      // structural entry rule resolves it from the Work's origin -- the
+      // same rule Finance/R&I/Strategy use. What Marketing does NOT yet
+      // resolve at this boundary is WHICH Hat owns a direct request (its
+      // own intake classification inside executionEngine still does that,
+      // see Known gaps and drift); the Handoff pickup path, where the
+      // destination names the Hat, resolves fully here.
+      applicability: {
+        mode: "any",
+        conditions: [
+          { source: "work", field: "origin", operator: "in", value: ["direct_request", "handoff_pickup"] },
+          { source: "work", field: "requested_action", operator: "equals", value: "handle_request" },
+        ],
+      },
       description:
         "Decide whether to draft an output within this Hat's ownership, propose a transition to a better-suited Hat, or ask for clarification -- always gated on Martin's explicit approval (or, for Digital Marketer, explicit spend approval) before anything is treated as done.",
     },

@@ -30,16 +30,15 @@ import * as sales from "./salesExecutive";
  * asked for.
  *
  * dispatchSalesExecutiveHat (exported below), mirroring
- * dispatchStrategyHat/dispatchMarketingHat exactly, is the genuine
- * runtime execution point -- session.ts's handleIncomingEnquiry calls
- * this instead of sales.handleIncomingEnquiry directly, making the
- * manifest the actual dispatch surface rather than a decorative parallel
- * structure. router.ts's dispatchCowork keeps its own hardcoded
- * `if (decision.unit === "Sales")` branch unchanged -- it still checks
- * `decision.hat === "Lead Generation Specialist"` first, and Sales
- * Executive's own sub-branch still calls stub.handleIncomingEnquiry(text)
- * exactly as before; only that method's own internal implementation now
- * routes through this manifest.
+ * dispatchStrategyHat/dispatchMarketingHat exactly, is the manifest's own
+ * dispatch surface rather than a decorative parallel structure.
+ * Production entry no longer runs through a per-Unit WorkSession wrapper
+ * (the WorkSession method handleIncomingEnquiry is gone): router.ts's
+ * dispatchCowork keeps only the deliberate SALES_DIRECT_ENTRY_PAUSED
+ * gate, then resolves Sales through the one generic resolveUnitRequest
+ * path like every other manifest Unit, and WorkSession.handleUnitAction
+ * calls this Hat's entryHandler directly. This export stays as the
+ * manifest's self-contained equivalent, exercised by salesManifest.test.
  *
  * Sales Executive's own continuation states (call_notes, intervention,
  * value_context_more, matter_redo_reason, entity_redo_reason,
@@ -146,6 +145,17 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     name: "discover_leads",
     responsibility: "acquire_new_leads",
     consequence: "read",
+    // Structural entry: Lead Discovery is entered only by a direct request
+    // addressed to this Hat (the addressee, not an interpretation, is what
+    // makes this the applicable Action) or by an intake interpretation
+    // naming it exactly. No Handoff pickup resolves into this Hat.
+    applicability: {
+      mode: "any",
+      conditions: [
+        { source: "work", field: "origin", operator: "in", value: ["direct_request"] },
+        { source: "work", field: "requested_action", operator: "equals", value: "discover_leads" },
+      ],
+    },
     // Declared `read` because that is exactly what this Action is: it searches,
     // screens, and reports. A read Action can never authorize a governed write
     // (see consequencePermits in access.ts), which means the three governed
@@ -222,6 +232,17 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // a per-target narrowing of THIS action unnecessary, and it is why
     // `approvalGatedTargets` is gone rather than merely unused.
     requiresApproval: false,
+    // Structural entry: `new_enquiry` is Sales Executive's only dispatched
+    // Action, so a direct request addressed to this Hat resolves it from the
+    // Work's origin alone -- exactly the name the former dispatchCowork
+    // Sales branch hardcoded (before Sales direct entry was paused).
+    applicability: {
+      mode: "any",
+      conditions: [
+        { source: "work", field: "origin", operator: "in", value: ["direct_request"] },
+        { source: "work", field: "requested_action", operator: "equals", value: "new_enquiry" },
+      ],
+    },
     description:
       "Process an incoming business enquiry: match or create the Entity, identify or create the Matter, prepare for the sales call, qualify, and route onward -- with each privileged step inside the flow (entity/matter creation, proposal approval, Finance's quote approval) performed as its own approval-gated Action.",
   },
@@ -230,6 +251,13 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: true,
+    // Performed inside new_enquiry's own flow (recorded on the Work there)
+    // -- never resolved as the Action a Work is entered with, so an entry
+    // context resolves `new_enquiry` only.
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
     description:
       "Commit the Entity record for a staged Entity draft Martin approved. The record exists only because he approved that specific draft, so committing it is his approved governed effect.",
   },
@@ -238,6 +266,11 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: true,
+    // Same as `create_entity`: an in-flow operation, never an entry Action.
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
     description:
       "Commit the Matter record for a staged Matter draft Martin approved. The record exists only because he approved that specific draft, so committing it is his approved governed effect.",
   },
@@ -246,6 +279,16 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: false,
+    // Entered only from a Handoff pickup -- the Finance-quote and other
+    // Sales Handoffs create this Work with `proposal_draft` as their Action
+    // (checkHandoffs' Sales pickup), never from a direct chat request.
+    applicability: {
+      mode: "any",
+      conditions: [
+        { source: "work", field: "origin", operator: "in", value: ["handoff_pickup"] },
+        { source: "work", field: "requested_action", operator: "equals", value: "proposal_draft" },
+      ],
+    },
     description:
       "Create or refresh the canonical token-safe Runtime Proposal record and its first Version. Staging only -- the Proposal is Draft, never presented and never approvable until its content is written, so drafting it requires no approval.",
   },
@@ -254,6 +297,12 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: false,
+    // Performed inside the Proposal lifecycle (recorded on the Work there)
+    // -- never resolved as an entry Action.
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
     description:
       "Transition the Runtime Proposal to Pending Approval and present that exact Version to Martin. Submission requests approval; it is not approval, so it does not itself require an ApprovalProof.",
   },
@@ -262,6 +311,11 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: true,
+    // Same as `proposal_submit`: an in-flow operation, never an entry Action.
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
     description:
       "Apply Martin's approval to the exact Proposal Version he reviewed, recording Approval Status = Approved and the Approved Version. The approval stays bound to that Work, that Proposal, that Version, and that content hash -- an earlier approval never authorizes a later Version.",
   },
@@ -270,6 +324,11 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: false,
+    // Same as `proposal_submit`: an in-flow operation, never an entry Action.
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
     description:
       "Build a new Runtime Proposal Version from Martin's requested change and return it to Pending Approval, leaving the prior Version's content intact. A revised Version requires its own subsequent approval.",
   },
@@ -380,12 +439,17 @@ export const salesManifest: UnitManifest = {
 };
 
 /**
- * The genuine runtime execution point for Sales Executive's chat-triggered
- * entry point -- session.ts's handleIncomingEnquiry calls this instead of
+ * Sales Executive's manifest-level dispatch helper for its chat-triggered
+ * entry point: routes through the manifest instead of calling
  * sales.handleIncomingEnquiry directly, making the manifest the actual
  * dispatch surface rather than a decorative parallel structure. Sales
- * Executive has only one Hat/one action, so no Stage 1/2 resolution is
- * needed here -- mirrors dispatchStrategyHat exactly.
+ * Executive resolves structurally (one addressed Hat, one entry Action)
+ * exactly as the generic Resolution path now does -- mirrors
+ * dispatchStrategyHat exactly.
+ *
+ * Production entry runs WorkSession.handleUnitAction -> the Hat's
+ * entryHandler directly; this export stays as the manifest's
+ * self-contained equivalent, exercised by salesManifest.test.
  */
 export async function dispatchSalesExecutiveHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = salesManifest.hats[SALES_EXECUTIVE_HAT_NAME];

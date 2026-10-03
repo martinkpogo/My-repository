@@ -105,6 +105,17 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     responsibility: "own_strategic_diagnosis",
     consequence: "write",
     requiresApproval: false,
+    // Structural entry, exactly like Finance's `price` and R&I's
+    // `research`: Strategy's entry Action is resolved from the Work's
+    // origin (a direct request or a Handoff addressed to this Unit) --
+    // the former dispatchCowork Strategy branch hardcoded the same name.
+    applicability: {
+      mode: "any",
+      conditions: [
+        { source: "work", field: "origin", operator: "in", value: ["direct_request", "handoff_pickup"] },
+        { source: "work", field: "requested_action", operator: "equals", value: "diagnose" },
+      ],
+    },
     description:
       "Diagnose a Matter/Entity situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and either develop a governed intervention proposal or route the diagnosis to the responsible Unit. Performs the Matter operational-status advance and the inbound Handoff's own lifecycle progression; commits nothing on another Unit's behalf.",
   },
@@ -113,6 +124,14 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     responsibility: "own_strategic_diagnosis",
     consequence: "write",
     requiresApproval: true,
+    // Performed only as this Work's lifecycle advances (after an approval
+    // callback has staged the decision) -- never resolved as the Action a
+    // Work is entered with, so an entry context resolves `diagnose` only
+    // and never the gated one.
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
     description:
       "Commit an approved Strategy decision as an outbound Work Handoff -- to Finance after an approved intervention proposal, or to the responsible Unit after an approved diagnosis routing. Martin's explicit approval is required: an approved diagnosis is not a routed diagnosis until this Action records it.",
   },
@@ -165,11 +184,11 @@ export const strategyManifest: UnitManifest = {
 };
 
 /**
- * The genuine runtime execution point for Strategy's chat-triggered
- * entry point -- session.ts's handleStrategyRequest calls this instead of
+ * Strategy's manifest-level dispatch helper for its chat-triggered entry
+ * point: routes through the manifest instead of calling
  * strategy.handleDirectRequest directly, making the manifest the actual
  * dispatch surface rather than a decorative parallel structure. Strategy
- * has only one Hat, so no Stage 1/2 resolution is needed here; it declares
+ * has only one Hat, so no Hat interpretation is needed here; it declares
  * two Actions, but both resolve to this one entry point, so the dispatch
  * below names the un-gated one.
  */

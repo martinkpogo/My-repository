@@ -109,7 +109,62 @@ export interface ActionDefinition<A extends string> {
    * assigns no Work.
    */
   skill_requirements?: readonly SkillRequirement[];
+  /**
+   * THE declared deterministic applicability of this Action (ENIG
+   * Operating Model, "Action Resolution"): the conditions under which this
+   * Action may be resolved for a Work context. Action Resolution evaluates
+   * these conditions and requires exactly one Action of the resolved
+   * Hat/Responsibility to apply -- zero applicable, or more than one
+   * without an explicit deterministic precedence, fails closed. Nothing
+   * else selects an Action: not model similarity, not a model's
+   * confidence, not "the only one left".
+   *
+   * Required (not optional), for the same reason requiresApproval is:
+   * an Action with no declared applicability is an Action nobody may
+   * resolve, and reading an omission as "always applicable" would make
+   * every unanswered question a silent go-ahead.
+   */
+  applicability: ApplicabilityDeclaration;
   description: string;
+}
+
+/**
+ * One deterministic applicability condition, evaluated against the resolved
+ * Organization context or the current Work execution context -- never
+ * against model output as such.
+ *
+ * `source: "work"` reads a field of the Work's current context
+ * (`WorkContract`); `source: "organization"` reads the resolved
+ * Organization (Unit/Hat/Responsibility). The only interpretation-shaped
+ * field that exists today is `work.requested_action`: an intake
+ * interpretation of the requested outcome (an exact Action id proposed by
+ * an AI intake classification, or an id carried on a Handoff), which
+ * Resolution treats as untrusted input -- it can only match a declared
+ * condition exactly or fail, it is never a selection, and no condition may
+ * be written against a model's similarity score or confidence.
+ */
+export interface ApplicabilityCondition {
+  source: "work" | "organization";
+  field: "origin" | "mode" | "requested_action" | "unit" | "hat" | "responsibility";
+  operator: "equals" | "in";
+  /** Exact value(s) -- never a pattern, never a similarity threshold. */
+  value: string | readonly string[];
+}
+
+/**
+ * The declared applicability of one Action: conditions combined by `mode`
+ * ("all" every condition must hold; "any" at least one must hold).
+ *
+ * `precedence` is an explicit deterministic precedence key (lower number
+ * wins). It is declared, not derived: multiple applicable Actions resolve
+ * only when every applicable Action declares a distinct precedence, in
+ * which case Resolution records `precedence_used` in its evidence.
+ * Otherwise multiple applicable Actions fail closed.
+ */
+export interface ApplicabilityDeclaration {
+  mode: "all" | "any";
+  conditions: readonly ApplicabilityCondition[];
+  precedence?: number;
 }
 
 export interface ReadActionResult {
@@ -224,7 +279,67 @@ export function validateActionDefinition(action: ActionDefinition<string>): stri
       return `${action.name}: declares an unknown Skill id "${String(requirement.skill_id)}" -- Skill requirements resolve by exact id only`;
     }
   }
+  const applicabilityDefect = validateApplicability(action.name, action.applicability);
+  if (applicabilityDefect) return applicabilityDefect;
+  return null;
+}
+
+/**
+ * Shape validation for one declared applicability (deliberately after the
+ * Responsibility/consequence/approval/Skill checks above: an Action that is
+ * wrong about *what it serves* must fail on that first).
+ *
+ * Fail-closed: a missing declaration, an empty condition list, an unknown
+ * source/field/operator, or a non-exact value is a malformed Action -- the
+ * Kernel must not resolve an applicability question it cannot read as
+ * declared.
+ */
+function validateApplicability(actionName: string, declaration: ApplicabilityDeclaration | undefined): string | null {
+  if (!declaration) {
+    return `${actionName}: an Action must declare its deterministic applicability conditions -- omission is never "always applicable"`;
+  }
+  if (declaration.mode !== "all" && declaration.mode !== "any") {
+    return `${actionName}: applicability mode must be "all" or "any", got "${String(declaration.mode)}"`;
+  }
+  if (!Array.isArray(declaration.conditions) || declaration.conditions.length === 0) {
+    return `${actionName}: applicability must declare at least one condition`;
+  }
+  if (declaration.precedence !== undefined && !Number.isFinite(declaration.precedence)) {
+    return `${actionName}: applicability precedence must be a finite number when declared`;
+  }
+  for (const condition of declaration.conditions) {
+    if (!APPLICABILITY_SOURCES.includes(condition.source)) {
+      return `${actionName}: unknown applicability source "${String(condition.source)}"`;
+    }
+    if (!APPLICABILITY_FIELDS.includes(condition.field)) {
+      return `${actionName}: unknown applicability field "${String(condition.field)}"`;
+    }
+    if (condition.operator !== "equals" && condition.operator !== "in") {
+      return `${actionName}: unknown applicability operator "${String(condition.operator)}"`;
+    }
+    const values: readonly unknown[] = Array.isArray(condition.value) ? condition.value : [condition.value];
+    if (values.length === 0 || values.some((value) => typeof value !== "string" || !value.trim())) {
+      return `${actionName}: an applicability condition must carry a non-empty exact value`;
+    }
+    if (condition.operator === "in" && !Array.isArray(condition.value)) {
+      return `${actionName}: operator "in" requires an array of exact values`;
+    }
+    if (condition.operator === "equals" && Array.isArray(condition.value)) {
+      return `${actionName}: operator "equals" requires a single exact value`;
+    }
+  }
   return null;
 }
 
 const CONSEQUENCE_LEVELS: readonly ConsequenceLevel[] = ["read", "internal", "write"];
+
+/** The sources/fields an applicability condition may read -- a closed set, so a typo fails closed instead of never matching. */
+const APPLICABILITY_SOURCES: readonly ApplicabilityCondition["source"][] = ["work", "organization"];
+const APPLICABILITY_FIELDS: readonly ApplicabilityCondition["field"][] = [
+  "origin",
+  "mode",
+  "requested_action",
+  "unit",
+  "hat",
+  "responsibility",
+];

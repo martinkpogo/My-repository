@@ -3,6 +3,10 @@ import { plainText, queryDataSource } from "./notion";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { getSessionStub, newWorkId, resolveUnitForThread, SALES_EXECUTIVE_PAUSED } from "./sessionRouting";
 import { discoveryCronContext } from "./access";
+import { findUnitManifest } from "./units/registry";
+import { resolveOrganization } from "./runtime/organization";
+import { resolveActionExecution } from "./runtime/actionResolution";
+import { workContractForRequest, type WorkRequest } from "./runtime/workContract";
 
 /**
  * Handoff discovery -- the single implementation behind the /checkhandoffs
@@ -35,6 +39,80 @@ async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: 
 }
 
 /**
+ * Resolves the Organization (Unit/Hat/Responsibility) and exactly one
+ * Action for Handoff-originated Work through the SAME resolution
+ * boundaries every direct request uses (ENIG Operating Model: Organization
+ * owns organizational resolution; Action Resolution requires exactly one
+ * declared applicable Action) -- before the Work is created.
+ *
+ * The Handoff's destination is a FACT, consumed as established: `To Unit`
+ * says which Unit owns the Work, `To Hat` which of that Unit's Hats. This
+ * function never re-decides, reclassifies, or defaults it, and no intake
+ * interpretation runs for a pickup -- `origin: "handoff_pickup"` is what
+ * Action Resolution evaluates, so only an Action whose declared
+ * applicability admits a Handoff pickup can resolve (`price`,
+ * `proposal_draft`, `research`, `handle_request`, `diagnose` -- exactly
+ * the Actions the pickup methods these loops call perform).
+ *
+ * Returns null, with Martin notified through the existing discovery
+ * failure channel, when resolution fails closed: a record whose `To Unit`
+ * doesn't match this discovery loop's Unit, a destination naming a Hat the
+ * Unit doesn't declare, a Handoff naming no Hat for a multi-Hat Unit, or
+ * an Action its declarations don't admit at pickup. The Handoff stays
+ * Pending and retries next cycle -- ambiguity stops rather than guessing
+ * the destination, and a hardcoded Hat is never substituted for one the
+ * record does not establish.
+ */
+async function resolveHandoffEntry(
+  env: Env,
+  handoff: { id: string; properties?: Record<string, any> },
+  expectedUnit: Unit,
+): Promise<{ hat: string; actionName: string } | null> {
+  const fail = async (reason: string): Promise<null> => {
+    await notifyMartinOfDiscoveryFailure(env, handoff.id, new Error(`Handoff entry resolution failed: ${reason}`));
+    return null;
+  };
+
+  const toUnit = plainText(handoff.properties?.["To Unit"]) || expectedUnit;
+  if (toUnit !== expectedUnit) {
+    return fail(
+      `destination Unit "${toUnit}" does not match this discovery loop's Unit "${expectedUnit}" -- the destination is a fact and cannot be redirected`,
+    );
+  }
+  const toHat = plainText(handoff.properties?.["To Hat"]) || null;
+  const request: WorkRequest = {
+    // Carried as evidence of what this Work is for; resolution reads the
+    // context below, never parses this text for ownership or Action.
+    requested_outcome: plainText(handoff.properties?.Reason) || `Handoff ${handoff.id}`,
+    current_context: {
+      mode: "cowork",
+      origin: "handoff_pickup",
+      addressed_unit: expectedUnit,
+      handoff: { handoffId: handoff.id, toUnit, toHat },
+    },
+  };
+  const contract = workContractForRequest(request);
+  const manifest = findUnitManifest(expectedUnit);
+  const organization = resolveOrganization(contract, manifest);
+  if (organization.kind === "failed") {
+    return fail(`Organization (${organization.reason}): ${organization.detail}`);
+  }
+  const resolution = await resolveActionExecution(manifest, organization.organization, contract);
+  if (resolution.kind === "need_interpretation") {
+    return fail(
+      "no Action is determined by the Handoff's destination facts, and a pickup is never re-interpreted -- the destination must determine exactly one Action",
+    );
+  }
+  if (resolution.kind === "failed") {
+    return fail(`Action (${resolution.reason}): ${resolution.detail}`);
+  }
+  return {
+    hat: organization.organization.hat,
+    actionName: resolution.execution.action.action_id,
+  };
+}
+
+/**
  * The Finance side of the Sales -> Finance execution boundary. Sales's Hat
  * code only ever creates the Handoff (Status: Pending) and records the
  * handoff_workitem mapping, then returns - it never calls into Finance
@@ -60,6 +138,13 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
       // session instead of skipping it, so Finance can still pick it up.
       // Defaults to Martin's DM, his preferred front door for every
       // Unit/Hat's work, since there's no originating chat to inherit.
+      //
+      // The destination facts resolve the Organization and the Action
+      // BEFORE the Work exists (single-Hat Unit, `price` declared
+      // applicable to a handoff pickup) -- a failure stops here rather
+      // than registering Work under a guessed Hat/Action.
+      const entry = await resolveHandoffEntry(env, handoff, "Finance");
+      if (!entry) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
@@ -68,11 +153,12 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
         // itself (via Matter_Token, the Handoffs schema no longer carries a
         // Matter relation) -- nothing to seed here.
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Finance", "Value-Based Pricing Assessor", threadId, {
+        await stub.init(workId, chatId, "Finance", entry.hat, threadId, {
           handoffId: handoff.id,
-          // This Work exists to run Finance's pickup, and `price` is the
-          // registered operation that pickup performs.
-          actionName: "price",
+          // The RESOLVED pickup Action (`price`) is recorded at creation,
+          // so Work.actionName is the authority Access reads from the
+          // moment this Work exists.
+          actionName: entry.actionName,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
@@ -192,16 +278,25 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
       // it (mirrors every other Unit's own no-mapping branch above) so it
       // is discoverable and its context is ready -- but registering is not
       // executing: nothing here calls into Sales Executive's own AI work.
+      //
+      // Sales owns two Hats, so the destination `To Hat` fact decides
+      // which one this Work belongs to -- "Sales Executive" is no longer
+      // hardcoded here. A Handoff that names no Hat for this multi-Hat
+      // Unit fails closed instead (Registration + Operations notification
+      // never fabricate ownership).
+      const entry = await resolveHandoffEntry(env, handoff, "Sales");
+      if (!entry) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Sales", "Sales Executive", undefined, {
+        await stub.init(workId, chatId, "Sales", entry.hat, undefined, {
           handoffId: handoff.id,
-          // This Work exists to produce the canonical Proposal from a Sales
-          // Handoff; the flow advances the recorded Action to proposal_draft
-          // before its first governed write (see tokenSafeProposal.ts).
-          actionName: "proposal_draft",
+          // The RESOLVED pickup Action (`proposal_draft` -- declared
+          // applicable to a handoff pickup) is recorded at creation; the
+          // flow advances it to later Proposal-lifecycle Actions when its
+          // own governed transitions run (see tokenSafeProposal.ts).
+          actionName: entry.actionName,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Sales Handoff ${handoff.id} (no prior session)`);
@@ -271,15 +366,22 @@ export async function discoverPendingResearchHandoffs(env: Env): Promise<number>
       // No live Telegram session behind this Handoff -- same
       // no-prior-session case discoverPendingFinanceHandoffs handles.
       // Defaults to Martin's DM, his preferred front door.
+      //
+      // Destination facts resolve the Organization (this Unit has a single
+      // Hat, so a Hat-less destination is still unambiguous) and the `research`
+      // Action declared applicable to a handoff pickup -- a failure stops
+      // here rather than registering Work under a guessed identity.
+      const entry = await resolveHandoffEntry(env, handoff, "Research & Intelligence");
+      if (!entry) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Research & Intelligence", "Research & Intelligence Analyst", threadId, {
+        await stub.init(workId, chatId, "Research & Intelligence", entry.hat, threadId, {
           handoffId: handoff.id,
-          // This Work exists to run R&I's pickup, which IS the `research` Action.
-          actionName: "research",
+          // The RESOLVED pickup Action (`research`) is recorded at creation.
+          actionName: entry.actionName,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Research Handoff ${handoff.id} (no prior session)`);
@@ -322,15 +424,21 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
   for (const handoff of pending) {
     let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
+      // Marketing owns several Hats, so the destination `To Hat` fact
+      // decides which one owns this Work ("Marketing Strategist" is no
+      // longer hardcoded here -- capabilityPackage's auto-routing writes
+      // it); a Hat-less destination for this multi-Hat Unit fails closed.
+      const entry = await resolveHandoffEntry(env, handoff, "Marketing");
+      if (!entry) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Marketing", "Marketing Strategist", threadId, {
+        await stub.init(workId, chatId, "Marketing", entry.hat, threadId, {
           handoffId: handoff.id,
-          // This Work exists to run Marketing's pickup, which IS `handle_request`.
-          actionName: "handle_request",
+          // The RESOLVED pickup Action (`handle_request`) is recorded at creation.
+          actionName: entry.actionName,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Marketing Handoff ${handoff.id} (no prior session)`);
@@ -371,15 +479,20 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
   for (const handoff of pending) {
     let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
+      // Destination facts resolve the Organization (single-Hat Unit) and
+      // the `diagnose` Action declared applicable to a handoff pickup --
+      // `commit_diagnosis` is lifecycle-only and cannot resolve here.
+      const entry = await resolveHandoffEntry(env, handoff, "Strategy");
+      if (!entry) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Strategy", "Strategy Analyst", threadId, {
+        await stub.init(workId, chatId, "Strategy", entry.hat, threadId, {
           handoffId: handoff.id,
-          // This Work exists to run Strategy's pickup, which IS the `diagnose` Action.
-          actionName: "diagnose",
+          // The RESOLVED pickup Action (`diagnose`) is recorded at creation.
+          actionName: entry.actionName,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);

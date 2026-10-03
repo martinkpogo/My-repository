@@ -18,10 +18,10 @@ type ToyAction = "lookup_status" | "hold_for_evidence" | "update_record" | "comm
 const TOY_RESPONSIBILITY = "toy_responsibility";
 
 const TOY_REGISTRY: ActionDefinition<ToyAction>[] = [
-  { name: "lookup_status", responsibility: TOY_RESPONSIBILITY, consequence: "read", requiresApproval: false, description: "Read-only status lookup, no side effects." },
-  { name: "hold_for_evidence", responsibility: TOY_RESPONSIBILITY, consequence: "internal", requiresApproval: false, description: "May pause on missing evidence; mutates execution state only, never approval-gated." },
-  { name: "update_record", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, description: "Mutates governed state; not privileged." },
-  { name: "commit_external_change", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: true, description: "Mutates governed state and is privileged -- needs Martin's sign-off." },
+  { name: "lookup_status", responsibility: TOY_RESPONSIBILITY, consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "lookup_status" }] }, description: "Read-only status lookup, no side effects." },
+  { name: "hold_for_evidence", responsibility: TOY_RESPONSIBILITY, consequence: "internal", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "hold_for_evidence" }] }, description: "May pause on missing evidence; mutates execution state only, never approval-gated." },
+  { name: "update_record", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "update_record" }] }, description: "Mutates governed state; not privileged." },
+  { name: "commit_external_change", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "commit_external_change" }] }, description: "Mutates governed state and is privileged -- needs Martin's sign-off." },
 ];
 
 test("dispatchAction: a registered read action runs the read handler immediately and returns its reply", async () => {
@@ -81,7 +81,7 @@ test("dispatchAction: an unregistered action name fails closed with null, never 
 
 test("dispatchAction: an internal action that declares requiresApproval: true fails closed by throwing, never silently downgraded or upgraded", async () => {
   const invalidRegistry: ActionDefinition<"broken">[] = [
-    { name: "broken", responsibility: TOY_RESPONSIBILITY, consequence: "internal", requiresApproval: true, description: "Invalid combination -- internal must never gate on approval." },
+    { name: "broken", responsibility: TOY_RESPONSIBILITY, consequence: "internal", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "broken" }] }, description: "Invalid combination -- internal must never gate on approval." },
   ];
   await assert.rejects(
     () => dispatchAction<"broken">("broken", "irrelevant", invalidRegistry, async () => "unreachable"),
@@ -106,21 +106,51 @@ test("validateActionDefinition: fails closed on a non-boolean requiresApproval r
 });
 
 test("validateActionDefinition: fails closed on a read action that declares requiresApproval: true", () => {
-  const readGate: ActionDefinition<string> = { name: "peek_then_gate", responsibility: TOY_RESPONSIBILITY, consequence: "read", requiresApproval: true, description: "A read has no governed effect to approve." };
+  const readGate: ActionDefinition<string> = { name: "peek_then_gate", responsibility: TOY_RESPONSIBILITY, consequence: "read", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "peek_then_gate" }] }, description: "A read has no governed effect to approve." };
   assert.match(validateActionDefinition(readGate) ?? "", /declared consequence "read" but requiresApproval is true/);
 });
 
 test("validateActionDefinition: fails closed on an unknown consequence, and on an unknown Skill id", () => {
-  const oddConsequence = { name: "sideways", responsibility: TOY_RESPONSIBILITY, consequence: "sideways", requiresApproval: false, description: "Not a level." } as unknown as ActionDefinition<string>;
+  const oddConsequence = { name: "sideways", responsibility: TOY_RESPONSIBILITY, consequence: "sideways", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "sideways" }] }, description: "Not a level." } as unknown as ActionDefinition<string>;
   assert.match(validateActionDefinition(oddConsequence) ?? "", /unknown consequence "sideways"/);
 
-  const unknownSkill = { name: "needs_a_skill", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, description: "Requires a Skill that is not in the registry.", skill_requirements: [{ skill_id: "no_such_skill" }] } as unknown as ActionDefinition<string>;
+  const unknownSkill = { name: "needs_a_skill", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "needs_a_skill" }] }, description: "Requires a Skill that is not in the registry.", skill_requirements: [{ skill_id: "no_such_skill" }] } as unknown as ActionDefinition<string>;
   assert.match(validateActionDefinition(unknownSkill) ?? "", /unknown Skill id "no_such_skill"/);
 });
 
 test("validateActionDefinition: fails closed on a blank name", () => {
-  const blank: ActionDefinition<string> = { name: "   ", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, description: "Nameless." };
+  const blank: ActionDefinition<string> = { name: "   ", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "blank" }] }, description: "Nameless." };
   assert.match(validateActionDefinition(blank) ?? "", /non-empty registered name/);
+});
+
+test("validateActionDefinition: fails closed on an Action that declares no applicability -- omission is never \"always applicable\"", () => {
+  const undeclared = { name: "unscoped", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, description: "Never said when it applies." } as unknown as ActionDefinition<string>;
+  assert.match(validateActionDefinition(undeclared) ?? "", /must declare its deterministic applicability conditions/);
+});
+
+test("validateActionDefinition: fails closed on a malformed applicability declaration rather than resolving a condition it cannot read", () => {
+  const emptyConditions = { name: "no_conditions", responsibility: TOY_RESPONSIBILITY, consequence: "write", requiresApproval: false, applicability: { mode: "all", conditions: [] }, description: "Declares a mode but no conditions." } as unknown as ActionDefinition<string>;
+  assert.match(validateActionDefinition(emptyConditions) ?? "", /at least one condition/);
+
+  const unknownField = {
+    name: "wishful",
+    responsibility: TOY_RESPONSIBILITY,
+    consequence: "write",
+    requiresApproval: false,
+    applicability: { mode: "all", conditions: [{ source: "work", field: "model_vibe", operator: "equals", value: "confident" }] },
+    description: "Conditions on something the resolver cannot read.",
+  } as unknown as ActionDefinition<string>;
+  assert.match(validateActionDefinition(unknownField) ?? "", /unknown applicability field/);
+
+  const arrayOfValues = {
+    name: "single_means_single",
+    responsibility: TOY_RESPONSIBILITY,
+    consequence: "write",
+    requiresApproval: false,
+    applicability: { mode: "all", conditions: [{ source: "work", field: "origin", operator: "equals", value: ["direct_request", "handoff_pickup"] }] },
+    description: "equals must mean one exact value.",
+  } as unknown as ActionDefinition<string>;
+  assert.match(validateActionDefinition(arrayOfValues) ?? "", /operator "equals" requires a single exact value/);
 });
 
 test("findAction: returns the matching definition or undefined for an unregistered name", () => {

@@ -5,10 +5,7 @@ import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as research from "./units/research/capabilityPackage";
 import * as strategy from "./units/strategy/strategyAnalyst";
-import { dispatchStrategyHat } from "./units/strategy/strategyManifest";
-import { dispatchResearchHat } from "./units/research/researchManifest";
-import { dispatchFinanceHat } from "./units/finance/financeManifest";
-import { dispatchSalesExecutiveHat } from "./units/sales/salesManifest";
+import type { ActionExecutionContext } from "./runtime/actionResolution";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
@@ -63,19 +60,15 @@ export class WorkSession extends DurableObject<Env> {
     return this.ctx.storage.get<WorkState>("state");
   }
 
-  // The five per-Unit wrappers below each record their resolved Action on the
-  // Work before entering the Hat's handler, for the same reason
-  // handleUnitAction does (see its doc comment): resolve Hat -> resolve Action
-  // -> persist Action identity on Work -> execute. They remain the live
-  // dispatch path for their Units, so none of them may run without the Work
-  // knowing which Action it is performing.
-  async handleIncomingEnquiry(text: string): Promise<WorkState> {
-    return this.execute((state) => {
-      recordWorkAction(state, "new_enquiry");
-      return dispatchSalesExecutiveHat(this.env, state, text);
-    });
-  }
-
+  // Marketing's own intake resolves WHICH Marketing Hat owns a direct
+  // request (executionEngine.handleMarketingIntake runs Stage 1 itself) and
+  // captures the task text -- so unlike every other manifest Unit, Marketing
+  // still enters through this dedicated wrapper rather than the generic
+  // handleUnitAction below, and records its Action for the same reason it
+  // does (resolve Hat -> resolve Action -> persist Action identity on Work
+  // -> execute). Documented as a known migration gap: moving Marketing onto
+  // the Organization boundary means moving its Hat interpretation ahead of
+  // dispatch, with its relationship-based tie-breaking preserved.
   async handleMarketingRequest(text: string): Promise<WorkState> {
     return this.execute((state) => {
       recordWorkAction(state, "handle_request");
@@ -83,47 +76,34 @@ export class WorkSession extends DurableObject<Env> {
     });
   }
 
-  async handleResearchRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => {
-      recordWorkAction(state, "research");
-      return dispatchResearchHat(this.env, state, text);
-    });
-  }
-
-  async handleStrategyRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => {
-      recordWorkAction(state, "diagnose");
-      return dispatchStrategyHat(this.env, state, text);
-    });
-  }
-
-  async handleFinanceRequest(text: string): Promise<WorkState> {
-    return this.execute((state) => {
-      recordWorkAction(state, "price");
-      return dispatchFinanceHat(this.env, state, text);
-    });
-  }
-
   /**
    * Generic entry point for a Unit built on the Unit Registry manifest
-   * pattern (ENIG Operating Model design doc, "The Unit Registry") --
-   * replaces a per-Unit method like handleFinanceRequest above for any
-   * Unit registered in src/units/registry.ts. dispatchCowork has already
-   * resolved Hat + actionName via resolveUnitRequest before creating this
-   * WorkSession (an "internal"/"write" action only -- "read" never
-   * reaches here at all, per resolveUnitRequest's own contract). Fails
-   * closed if state.unit/state.hat don't resolve to a registered
-   * manifest/Hat rather than silently no-op'ing.
+   * pattern (ENIG Operating Model: "The Unit Registry" / Action Resolution)
+   * -- the entry every manifest-registered Unit uses (Sales, Finance,
+   * Strategy, Research & Intelligence, Business Development). dispatchCowork
+   * has already resolved Organization + Action statelessly via
+   * resolveUnitRequest before creating this WorkSession (an
+   * "internal"/"write" action only -- "read" never reaches here at all, per
+   * resolveUnitRequest's own contract). Fails closed if state.unit/state.hat
+   * don't resolve to a registered manifest/Hat rather than silently
+   * no-op'ing.
+   *
+   * TAKES THE RESOLVED EXECUTION CONTEXT, not an action name. The Worker
+   * consumes what Resolution produced instead of selecting a Unit, Hat,
+   * Responsibility, Action or Skill for its own Work, and refuses to run a
+   * context that doesn't describe this Work (unit/hat/work id/Responsibility
+   * mismatch below) rather than quietly executing someone else's resolution.
    *
    * RECORDS THE RESOLVED ACTION before running the entry handler. The Action
-   * dispatchCowork resolved IS the Work's Action, so it is persisted here --
+   * the resolver produced IS the Work's Action, so it is persisted here --
    * the architecturally required order is resolve Hat -> resolve Action ->
    * persist Action identity on Work -> execute. Recording it here rather than
    * trusting the init call site is what makes Work.actionName the authority
    * Access later reads.
    */
-  async handleUnitAction(actionName: string, text: string): Promise<WorkState> {
+  async handleUnitAction(execution: ActionExecutionContext, text: string): Promise<WorkState> {
     return this.execute((state) => {
+      const actionName = execution.action.action_id;
       const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
       const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
       if (!manifest || !hat) {
@@ -132,6 +112,23 @@ export class WorkSession extends DurableObject<Env> {
           this.env,
           state.chatId,
           `${state.unit ?? "This Unit"} isn't wired for direct dispatch.`,
+          undefined,
+          state.threadId,
+        ).then(() => state);
+      }
+      const contextDescribesThisWork =
+        execution.organization.unit === state.unit &&
+        execution.organization.hat === state.hat &&
+        (execution.work_id === null || execution.work_id === state.workId) &&
+        execution.action.responsibility === hat.responsibilityId;
+      if (!contextDescribesThisWork) {
+        console.error(
+          `handleUnitAction: resolved context (${execution.organization.unit}/${execution.organization.hat}/${actionName}) does not describe Work ${state.workId} (${state.unit}/${state.hat}) -- refusing to run it`,
+        );
+        return sendMessage(
+          this.env,
+          state.chatId,
+          "This Work's resolved execution context doesn't match the Work itself -- nothing was run.",
           undefined,
           state.threadId,
         ).then(() => state);

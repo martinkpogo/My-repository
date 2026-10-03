@@ -59,6 +59,19 @@ const valueBasedPricingAssessorActions: ActionDefinition<FinanceAction>[] = [
     // gate to handoffs/create. It was removed: a second field able to
     // silence `requiresApproval` split one authority in two, and failed
     // open whenever an Action declared the flag but omitted the list.)
+    // Finance's entry is structural, not interpreted: this Hat owns exactly
+    // one Action, so any direct request addressed to it, and any Handoff
+    // addressed to this Unit, resolves `price` from context alone -- the
+    // Action Resolution boundary never needs an intake interpretation here,
+    // which is exactly what dispatchCowork's former Finance branch did by
+    // hardcoding the Action.
+    applicability: {
+      mode: "any",
+      conditions: [
+        { source: "work", field: "origin", operator: "in", value: ["direct_request", "handoff_pickup"] },
+        { source: "work", field: "requested_action", operator: "equals", value: "price" },
+      ],
+    },
     description:
       "Assess value-at-stake and produce a governed price judgment for a Matter, grounded only in verifiable evidence -- always gated on Martin's explicit approval before any quote is treated as final.",
   },
@@ -115,12 +128,18 @@ export const financeManifest: UnitManifest = {
 };
 
 /**
- * The genuine runtime execution point for Finance's chat-triggered entry
- * point -- session.ts's handleFinanceRequest calls this instead of
+ * Finance's manifest-level dispatch helper for its chat-triggered entry
+ * point: routes through the manifest instead of calling
  * finance.handleDirectRequest directly, making the manifest the actual
  * dispatch surface rather than a decorative parallel structure. Finance
- * has only one Hat/one action, so no Stage 1/2 resolution is needed here
- * -- mirrors dispatchStrategyHat/dispatchResearchHat exactly.
+ * has only one Hat/one action, so Resolution resolves it structurally --
+ * mirrors dispatchStrategyHat/dispatchResearchHat exactly.
+ *
+ * Production entry no longer goes through a per-Unit WorkSession wrapper
+ * (handleFinanceRequest is gone): WorkSession.handleUnitAction resolves
+ * the manifest and calls the Hat's entryHandler directly. This export
+ * stays as the manifest's self-contained equivalent, exercised by
+ * financeManifest.test.
  */
 export async function dispatchFinanceHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = financeManifest.hats[VALUE_BASED_PRICING_ASSESSOR_HAT_NAME];

@@ -203,7 +203,10 @@ export async function routeIncomingText(
           const stub = getSessionStub(env, workId);
           await stub.init(workId, chatId, decision.unit, dispatchResult.hat, threadId);
           await setActiveWorkId(env, chatId, threadId, workId);
-          await stub.handleUnitAction(dispatchResult.actionName, text);
+          // The Work exists now -- attribute the resolved execution to it
+          // before the Worker consumes it.
+          dispatchResult.execution.work_id = workId;
+          await stub.handleUnitAction(dispatchResult.execution, text);
           return;
         }
         // "ambiguous" -- fall through to ordinary conversation below.
@@ -223,14 +226,13 @@ export async function routeIncomingText(
 /**
  * Enters the existing governed execution path for a "cowork" routing
  * decision. This function selects WHICH existing entry point to call; it
- * does not reimplement any of them. Every Unit dispatched to here uses the
- * exact same stub.init(...) + handle*Request(...) call, and the exact same
- * approval/Handoff/token-safety/fail-closed gates inside it, as before this
- * router existed. A Unit with no existing chat-triggered governed entry
- * point (Business Development, Finance, Strategy, Creative & Design,
- * Operations -- Finance and Strategy are only ever entered via a Handoff
- * from another Unit today, never directly from chat) fails closed with an
- * explicit message rather than inventing a new execution path.
+ * does not reimplement any of them. Every manifest-registered Unit uses the
+ * exact same stub.init(...) + handleUnitAction(...) call, driven by the
+ * shared Organization/Action Resolution boundaries, and the exact same
+ * approval/Handoff/token-safety/fail-closed gates inside it as before this
+ * router existed. A Unit with no registered manifest (Creative & Design,
+ * Operations) fails closed with an explicit message rather than inventing a
+ * new execution path.
  */
 export async function dispatchCowork(
   env: Env,
@@ -239,67 +241,15 @@ export async function dispatchCowork(
   text: string,
   decision: Extract<WorkspaceDecision, { mode: "cowork" }>,
 ): Promise<void> {
-  if (decision.unit === "Sales") {
-    if (decision.hat === "Lead Generation Specialist") {
-      // Lead Discovery is a separate specialization from Sales Progression
-      // intake -- independent of SALES_DIRECT_ENTRY_PAUSED by design (see
-      // sessionRouting.ts's own doc comment: Lead Discovery runs in this
-      // shared Worker regardless of whether Sales Progression is paused,
-      // the two are independent). Routed through the Unit Registry
-      // manifest (salesManifest.ts) with an explicit priorHat -- Stage 1
-      // Hat resolution is bypassed (this decision already came from
-      // direct-addressing or Unit-level routing, exactly like Business
-      // Development's own manifest branch below), Stage 2 action
-      // classification and the declared discover_leads "read" action both
-      // still run. No WorkSession is created here -- discover_leads is
-      // "read" (confirmed by workspaceRouter.test.ts); it acts directly
-      // and queues its own Handoffs to R&I.
-      const manifest = findUnitManifest("Sales");
-      if (!manifest) {
-        // Unreachable once salesManifest.ts is registered in
-        // units/registry.ts -- fail closed rather than silently
-        // misrouting to Sales Executive if it's ever missing.
-        console.error(`Lead Generation Specialist: Sales manifest not registered (chat ${chatId})`);
-        await sendMessage(env, chatId, "Lead Generation Specialist isn't available right now -- its manifest isn't registered. Nothing was started.", undefined, threadId);
-        return;
-      }
-      const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, "Lead Generation Specialist");
-      if (dispatchResult.kind === "handled" || dispatchResult.kind === "ambiguous") {
-        // "ambiguous" is unreachable from resolveUnitRequest (Cowork's own
-        // ambiguity path always resolves to "handled" -- it replies with a
-        // clarifying question itself, per its own doc comment); handled
-        // alongside "handled" only so this narrows cleanly against
-        // tryResolveUnitAction's shared UnitDispatchResult type.
-        return;
-      }
-      // "continue" would mean an internal/write action resolved -- Lead
-      // Generation Specialist declares none today (discover_leads is its
-      // only, "read" action). Fail closed rather than fabricating a
-      // WorkSession that contradicts that invariant.
-      console.error(
-        `Lead Generation Specialist: unexpected internal/write action "${dispatchResult.actionName}" resolved -- no such action is declared (chat ${chatId})`,
-      );
-      await sendOperationsMessage(
-        env,
-        `⚠️ Lead Generation Specialist resolved an unexpected internal/write action ("${dispatchResult.actionName}") -- no WorkSession created, nothing started. (chat ${chatId})`,
-      ).catch((err) => console.error("Failed to send Lead Generation Specialist unexpected-action Operations notice", err));
-      return;
-    }
-
-    if (SALES_DIRECT_ENTRY_PAUSED) {
-      console.error(`Sales Executive direct entry paused — enquiry not processed (chat ${chatId})`);
-      await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
-      return;
-    }
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Sales", decision.hat ?? "Sales Executive", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleIncomingEnquiry(text);
-    return;
-  }
-
   if (decision.unit === "Marketing") {
+    // COMPATIBILITY PATH -- Marketing is the one manifest Unit that does NOT
+    // dispatch through the generic resolution path below: its own intake
+    // (executionEngine.handleMarketingIntake) still resolves WHICH
+    // Marketing Hat owns the request and captures the task text, and that
+    // has to run before any manifest Action dispatch could. So the branch
+    // stands, recorded as a known migration gap, until that intake moves
+    // ahead of Organization resolution. Which Unit was addressed is already
+    // resolved deterministically by workspaceRouter either way.
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
     await stub.init(workId, chatId, "Marketing", decision.hat ?? "Marketing", threadId);
@@ -308,67 +258,45 @@ export async function dispatchCowork(
     return;
   }
 
-  if (decision.unit === "Research & Intelligence") {
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Research & Intelligence", decision.hat ?? "Research & Intelligence Analyst", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleResearchRequest(text);
+  if (decision.unit === "Sales" && decision.hat !== "Lead Generation Specialist" && SALES_DIRECT_ENTRY_PAUSED) {
+    // Sales Progression direct entry is deliberately paused. Lead Discovery
+    // is a separate specialization and is independent of that pause by
+    // design (see sessionRouting.ts's own doc comment) -- it dispatches
+    // through the generic manifest path below, which is why this gate
+    // exempts it.
+    console.error(`Sales Executive direct entry paused — enquiry not processed (chat ${chatId})`);
+    await sendMessage(env, chatId, SALES_PAUSED_MESSAGE, undefined, threadId);
     return;
   }
 
-  if (decision.unit === "Strategy") {
-    // direct_request origination path (ENIG Operating Model design doc,
-    // Migration path Step 4) -- routes into strategy.handleDirectRequest,
-    // the same governed diagnosis pipeline handlePickup uses, never a
-    // parallel implementation.
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Strategy", decision.hat ?? "Strategy Analyst", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleStrategyRequest(text);
-    return;
-  }
-
-  if (decision.unit === "Finance") {
-    // direct_request origination path, mirroring Strategy's exactly --
-    // routes into finance.handleDirectRequest, the same governed pricing
-    // pipeline handlePickup uses, never a parallel implementation. A
-    // direct-entry quote completes standalone on approval (no Strategy
-    // boundary block, no Finance -> Sales Handoff) -- see
-    // handleQuoteApproval's own handling of !state.handoffId.
-    const workId = newWorkId();
-    const stub = getSessionStub(env, workId);
-    await stub.init(workId, chatId, "Finance", decision.hat ?? "Value-Based Pricing Assessor", threadId);
-    await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleFinanceRequest(text);
-    return;
-  }
-
-  // Unit Registry manifest dispatch (ENIG Operating Model design doc, "The
-  // Unit Registry") -- a generic lookup, not a per-Unit branch: any Unit
-  // registered in src/units/registry.ts routes through here identically.
-  // Only Business Development is registered today; Creative & Design and
+  // Unit Registry manifest dispatch (ENIG Operating Model, "The Unit
+  // Registry") -- the ONE generic path, not a per-Unit branch: Sales
+  // (including Lead Discovery), Finance, Strategy, Research & Intelligence
+  // and Business Development all resolve Organization + Action statelessly
+  // through resolveUnitRequest here, exactly as they did through their
+  // former hardcoded branches/Stage 2 classification, and enter the same
+  // WorkSession entry handlers those branches called. Creative & Design and
   // Operations fall through to the UNSUPPORTED path below exactly as
   // before, since neither has a manifest yet.
   const manifest = findUnitManifest(decision.unit);
   if (manifest) {
     const dispatchResult = await resolveUnitRequest(env, manifest, { chatId, threadId }, text, decision.hat);
     if (dispatchResult.kind === "handled" || dispatchResult.kind === "ambiguous") {
-      // Stage 1/2 already replied directly (a "read" action's answer, or
-      // an ambiguity/clarification message) -- no WorkSession needed, per
-      // the design doc's read/write split ("Read -- no WorkSession
-      // created"). "ambiguous" is unreachable from resolveUnitRequest
-      // itself (see the Lead Generation Specialist branch's own note
-      // above) -- included only to narrow against the shared
-      // UnitDispatchResult type.
+      // "handled" already replied (a read action's answer, or the
+      // clarifying question Resolution sends on ambiguity -- Cowork's
+      // ambiguity path always replies itself). "ambiguous" is unreachable
+      // from resolveUnitRequest (see its own doc) -- included only to
+      // narrow against the shared UnitDispatchResult type.
       return;
     }
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
     await stub.init(workId, chatId, decision.unit, dispatchResult.hat, threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
-    await stub.handleUnitAction(dispatchResult.actionName, text);
+    // The Work exists now -- attribute the resolved execution to it before
+    // the Worker consumes it.
+    dispatchResult.execution.work_id = workId;
+    await stub.handleUnitAction(dispatchResult.execution, text);
     return;
   }
 

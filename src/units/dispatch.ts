@@ -1,11 +1,14 @@
 import type { Env, Unit, WorkState } from "../types";
-import type { UnitManifest } from "./unitManifest";
+import type { HatManifest, UnitManifest } from "./unitManifest";
 import { classifyCandidateHats, classifyAction } from "../hats/intakeClassification";
-import { dispatchAction, findAction } from "../hats/actionRegistry";
+import { dispatchAction } from "../hats/actionRegistry";
 import { sendWorkspaceHatMessage, sendHatMessage } from "../telegram";
 import { logActivity } from "../log";
 import { findUnitManifest } from "./registry";
 import { findManifestAction } from "./unitManifest";
+import { resolveOrganization, type OrganizationFailureReason } from "../runtime/organization";
+import { resolveActionExecution, type ActionExecutionContext, type ActionFailureReason } from "../runtime/actionResolution";
+import { workContractForRequest, type WorkMode, type WorkRequest } from "../runtime/workContract";
 
 /**
  * Records the registered Action a Work item is currently performing.
@@ -64,34 +67,82 @@ export function recordWorkAction(state: WorkState, actionName: string): WorkStat
 export type WorkUnit = Unit;
 
 /**
- * Generic Unit Registry dispatch orchestrator (ENIG Operating Model
- * design doc, "The Unit Registry" / "The Action Registry"). Runs entirely
- * BEFORE any WorkSession exists -- Stage 1 (which Hat) and Stage 2 (which
- * action) both run statelessly, and a "read" action answers directly with
- * no WorkSession ever created, matching the design doc's read/write split
- * exactly ("Read -- runs immediately... no WorkSession created"). Only
- * once an "internal" or "write" action is resolved does the caller
- * (dispatchCowork) init a WorkSession and hand off to the resolved Hat's
- * entryHandler -- this function never creates one itself.
+ * Generic Unit Registry dispatch orchestrator (ENIG Operating Model:
+ * "The Unit Registry" / Action Resolution). Runs entirely BEFORE any
+ * WorkSession exists -- Organization resolution and Action resolution both
+ * run statelessly, and a "read" action answers directly with no WorkSession
+ * ever created ("Read -- runs immediately... no WorkSession created"). Only
+ * once an "internal" or "write" action resolves does the caller
+ * (dispatchCowork) init a WorkSession and hand the resolved execution
+ * context to WorkSession.handleUnitAction -- this function never creates
+ * one itself.
  *
- * Unit-agnostic: works for any UnitManifest, not just Business
- * Development. dispatchCowork resolves `registry[decision.unit]` and
- * calls this once, rather than reimplementing Stage 1/2 per Unit.
+ * The resolution boundaries it drives:
+ *
+ *   1. `resolveOrganization` (runtime/organization.ts) decides Unit/Hat/
+ *      Responsibility from the canonical definitions alone. Stage 1's AI
+ *      classification may PROPOSE Hat candidates when a multi-Hat Unit was
+ *      addressed to none of them; it is validated input, never authority,
+ *      and ambiguity fails closed.
+ *   2. `resolveActionExecution` (runtime/actionResolution.ts) evaluates the
+ *      declared applicability of every manifest-exposed Action against the
+ *      Work contract and requires exactly one to apply. An intake
+ *      interpretation (Stage 2) runs ONLY when the Work context alone
+ *      determines no Action -- its output enters the contract as
+ *      `requested_action` and is validated like any other condition, never
+ *      chosen by similarity or confidence.
+ *
+ * Unit-agnostic: works for any UnitManifest. dispatchCowork resolves
+ * `findUnitManifest(decision.unit)` and calls this once, rather than
+ * reimplementing resolution per Unit.
  */
 export type UnitDispatchResult =
   | { kind: "handled" }
   | { kind: "ambiguous" }
-  | { kind: "continue"; hat: string; actionName: string };
+  | {
+      kind: "continue";
+      hat: string;
+      actionName: string;
+      /** The full resolved Action Execution Context -- consumed by WorkSession.handleUnitAction rather than re-derived there. */
+      execution: ActionExecutionContext;
+    };
 
 interface DispatchTarget {
   chatId: number;
   threadId?: number;
 }
 
-async function resolveHat(env: Env, manifest: UnitManifest, target: DispatchTarget, text: string): Promise<string | null> {
+/**
+ * An intake interpretation of WHICH Hat a request belongs to (Stage 1).
+ * Untrusted input: the Organization boundary validates these candidates
+ * against the Unit's own manifest and can only reject them -- never fall
+ * back to a default, never pick the closest match.
+ */
+interface HatInterpretation {
+  candidates: string[];
+  reason?: string;
+}
+
+/**
+ * Runs Stage 1 (which Hat) ONLY when one can actually matter: the Unit
+ * declares several Hats and the Work was addressed to none of them.
+ * Returns undefined when no interpretation is needed (a single-Hat Unit, or
+ * an explicitly addressed Hat), so resolution is then purely structural.
+ *
+ * Shared by Cowork and Chat: this function neither logs nor replies on
+ * ambiguity. What each mode does with an unresolved Organization differs
+ * (Cowork asks a clarifying question and logs a Blocker; Chat falls open to
+ * conversation silently) and lives in each caller, exactly as before.
+ */
+async function interpretHat(
+  env: Env,
+  manifest: UnitManifest,
+  text: string,
+  priorHat?: string,
+): Promise<HatInterpretation | undefined> {
   const hatNames = Object.keys(manifest.hats);
-  if (hatNames.length === 1) {
-    return hatNames[0];
+  if (priorHat || hatNames.length === 1) {
+    return undefined;
   }
 
   const hatSummaryList = hatNames.map((name) => `- ${name}: ${manifest.hats[name].responsibility}`).join("\n");
@@ -101,67 +152,132 @@ async function resolveHat(env: Env, manifest: UnitManifest, target: DispatchTarg
     text,
   );
 
-  const candidates = (stage1?.candidates ?? []).filter((name) => hatNames.includes(name));
-  if (candidates.length === 1) {
-    return candidates[0];
-  }
-
-  const reasonText = stage1?.reason ?? (candidates.length === 0 ? "none of this Unit's Hats clearly match." : "more than one Hat could plausibly own this.");
-  await logActivity(env, {
-    entry: `${manifest.unit} intake ambiguous -- ${reasonText}`,
-    type: "Blocker",
-    area: manifest.unit,
-    decisionRationale: reasonText,
-    outcome: "Blocked",
-  });
-  await sendWorkspaceHatMessage(env, target, `I'm not sure which ${manifest.unit} Hat this belongs to -- ${reasonText} Can you clarify what's needed?`);
-  return null;
+  return {
+    candidates: (stage1?.candidates ?? []).filter((name) => hatNames.includes(name)),
+    reason: stage1?.reason,
+  };
 }
 
 /**
- * Stage 1 + Stage 2 + read dispatch, entirely stateless. Returns
- * "handled" once it has already replied (read action answered, or
- * Hat/action ambiguity surfaced back to Martin) -- the caller does
- * nothing further. Returns "continue" with the resolved Hat/action name
- * for the caller to init a WorkSession and call entryHandler.
+ * Builds the Work contract (Work.requested_outcome + Work.current_context)
+ * that both resolution boundaries read. The addressed Unit is a fact
+ * workspaceRouter already resolved deterministically; `origin` says how this
+ * Work was entered (a direct request -- Handoff pickups enter through
+ * checkHandoffs instead).
  */
-export async function resolveUnitRequest(env: Env, manifest: UnitManifest, target: DispatchTarget, text: string, priorHat?: string): Promise<UnitDispatchResult> {
-  const hatName = priorHat ?? (await resolveHat(env, manifest, target, text));
-  if (!hatName) {
-    return { kind: "handled" };
-  }
+function contractForRequest(
+  text: string,
+  mode: WorkMode,
+  manifest: UnitManifest,
+  priorHat: string | undefined,
+  interpretation: HatInterpretation | undefined,
+) {
+  const request: WorkRequest = {
+    requested_outcome: text,
+    current_context: {
+      mode,
+      origin: "direct_request",
+      addressed_unit: manifest.unit,
+      addressed_hat: priorHat,
+      interpreted_hats: interpretation?.candidates,
+    },
+  };
+  return workContractForRequest(request);
+}
 
-  const hat = manifest.hats[hatName];
-  if (!hat) {
-    // Fail closed: priorHat named a Hat this manifest doesn't declare.
-    await sendWorkspaceHatMessage(env, target, `"${hatName}" isn't a registered ${manifest.unit} Hat.`);
-    return { kind: "handled" };
-  }
+/** Attaches an intake interpretation's exact Action id to a contract (Resolution reads it as `current_context.requested_action`). */
+function withRequestedAction(
+  contract: ReturnType<typeof contractForRequest>,
+  requestedAction: string | null,
+): ReturnType<typeof contractForRequest> {
+  return { ...contract, current_context: { ...contract.current_context, requested_action: requestedAction } };
+}
 
-  const stage2 = await classifyAction(
-    env,
-    { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${hatName} Hat.` },
-    hat.actions,
-    text,
-  );
-
-  const actionName = stage2?.action ?? undefined;
-  if (!actionName || !findAction(actionName, hat.actions)) {
-    const reasonText = stage2?.reason ?? "none of this Hat's declared actions clearly match.";
+/**
+ * Cowork's discipline when the Organization cannot be resolved: log a
+ * Blocker and ask the one clarifying question (identical text to what
+ * resolveHat sent before Resolution existed), except for an addressee that
+ * names a Hat this Unit doesn't declare -- that detail is already the whole
+ * message.
+ */
+async function organizationFailedCowork(
+  env: Env,
+  manifest: UnitManifest,
+  target: DispatchTarget,
+  failure: { reason: OrganizationFailureReason; detail: string },
+  interpretation: HatInterpretation | undefined,
+): Promise<UnitDispatchResult> {
+  if (failure.reason === "ambiguous_ownership") {
+    const reasonText =
+      interpretation?.reason ??
+      ((interpretation?.candidates.length ?? 0) === 0
+        ? "none of this Unit's Hats clearly match."
+        : "more than one Hat could plausibly own this.");
     await logActivity(env, {
-      entry: `${manifest.unit}.${hatName} action ambiguous -- ${reasonText}`,
+      entry: `${manifest.unit} intake ambiguous -- ${reasonText}`,
       type: "Blocker",
       area: manifest.unit,
       decisionRationale: reasonText,
       outcome: "Blocked",
     });
-    await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, `I'm not sure what to do here -- ${reasonText} Can you clarify?`);
+    await sendWorkspaceHatMessage(env, target, `I'm not sure which ${manifest.unit} Hat this belongs to -- ${reasonText} Can you clarify what's needed?`);
     return { kind: "handled" };
   }
+  await sendWorkspaceHatMessage(env, target, failure.detail);
+  return { kind: "handled" };
+}
 
+/**
+ * Cowork's discipline when no single Action applies: log a Blocker and ask
+ * the one clarifying question (identical text to what the pre-Resolution
+ * Stage 2 failure path sent). When an intake interpretation was consulted,
+ * its reason is the reason; when Resolution failed on its own declarations
+ * (e.g. several applicable without precedence), that detail is.
+ */
+async function actionFailedCowork(
+  env: Env,
+  manifest: UnitManifest,
+  hatName: string,
+  target: DispatchTarget,
+  failure: { reason: ActionFailureReason; detail: string },
+  interpretationReason: string | undefined,
+): Promise<UnitDispatchResult> {
+  const reasonText =
+    interpretationReason ??
+    (failure.reason === "zero_applicable" ? "none of this Hat's declared actions clearly match." : failure.detail);
+  await logActivity(env, {
+    entry: `${manifest.unit}.${hatName} action ambiguous -- ${reasonText}`,
+    type: "Blocker",
+    area: manifest.unit,
+    decisionRationale: reasonText,
+    outcome: "Blocked",
+  });
+  await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, `I'm not sure what to do here -- ${reasonText} Can you clarify?`);
+  return { kind: "handled" };
+}
+
+/**
+ * Runs the resolved Action through the shared Action Registry dispatch:
+ * a "read" answers immediately (its reply targeted per mode -- Cowork's
+ * replies go to the Workspace stream, Chat's go wherever the message came
+ * from); an "internal"/"write" returns the resolved execution context for
+ * the caller to create the WorkSession with.
+ */
+async function dispatchResolvedAction(
+  env: Env,
+  hat: HatManifest,
+  hatName: string,
+  target: DispatchTarget,
+  execution: ActionExecutionContext,
+  text: string,
+  mode: WorkMode,
+): Promise<UnitDispatchResult> {
+  const actionName = execution.action.action_id;
   const dispatchResult = await dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t));
   if (!dispatchResult) {
-    // Unreachable given the findAction check above -- fail closed anyway rather than silently continuing.
+    // Unreachable: Resolution only ever returns manifest-exposed Actions.
+    // Fail closed/silent anyway rather than silently continuing.
+    if (mode === "chat") return { kind: "ambiguous" };
     await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, `"${actionName}" isn't a registered action on this Hat.`);
     return { kind: "handled" };
   }
@@ -174,50 +290,85 @@ export async function resolveUnitRequest(env: Env, manifest: UnitManifest, targe
     // read handler always returns non-empty text, so this is additive,
     // never a behavior change for them.
     if (dispatchResult.reply.trim().length > 0) {
-      await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
+      if (mode === "chat") {
+        await sendHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
+      } else {
+        await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
+      }
     }
     return { kind: "handled" };
   }
 
-  return { kind: "continue", hat: hatName, actionName };
+  return { kind: "continue", hat: hatName, actionName, execution };
 }
 
 /**
- * Chat-mode counterpart to resolveHat above: same Stage 1 candidate
- * resolution, but never sends a clarifying message and never logs a
- * Blocker Activity entry on ambiguity. Ordinary conversation not matching
- * any action is Chat's expected, common case, not a blocker worth an
- * audit trail entry the way an unresolved Cowork request is -- logging
- * every miss here would flood the Activity Log with noise from normal
- * chat. Returns null for anything not confidently resolved.
+ * Cowork-mode Organization + Action Resolution and read dispatch,
+ * entirely stateless. Returns "handled" once it has already replied (read
+ * answer sent, or an Organization/Action ambiguity surfaced back to Martin)
+ * -- the caller does nothing further. Returns "continue" with the resolved
+ * Hat and the full execution context for the caller to init a
+ * WorkSession and call handleUnitAction.
  */
-async function resolveHatSilently(env: Env, manifest: UnitManifest, text: string): Promise<string | null> {
-  const hatNames = Object.keys(manifest.hats);
-  if (hatNames.length === 1) {
-    return hatNames[0];
+export async function resolveUnitRequest(
+  env: Env,
+  manifest: UnitManifest,
+  target: DispatchTarget,
+  text: string,
+  priorHat?: string,
+): Promise<UnitDispatchResult> {
+  // 1. Organization resolution (Unit/Hat/Responsibility). Stage 1's
+  // candidates, when consulted, are validated here -- not authority.
+  const interpretation = await interpretHat(env, manifest, text, priorHat);
+  let contract = contractForRequest(text, "cowork", manifest, priorHat, interpretation);
+  const organization = resolveOrganization(contract, manifest);
+  if (organization.kind === "failed") {
+    return organizationFailedCowork(env, manifest, target, organization, interpretation);
+  }
+  const org = organization.organization;
+  const hat = manifest.hats[org.hat]!; // resolveOrganization only returns a Hat this manifest declares
+
+  // 2. Action resolution. Context first, with no AI involved; an intake
+  // interpretation runs only when the Work context alone determines no
+  // Action (a Unit whose Actions differ only by what was asked for).
+  let resolution = await resolveActionExecution(manifest, org, contract);
+  let interpretationReason: string | undefined;
+  if (resolution.kind === "need_interpretation") {
+    const stage2 = await classifyAction(
+      env,
+      { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${org.hat} Hat.` },
+      hat.actions,
+      text,
+    );
+    interpretationReason = stage2?.reason;
+    contract = withRequestedAction(contract, stage2?.action ?? null);
+    resolution = await resolveActionExecution(manifest, org, contract);
+  }
+  if (resolution.kind === "need_interpretation") {
+    // Unreachable: the re-resolution above always carries an interpretation
+    // state (a string, or null for "attempted, nothing usable") -- never
+    // "not attempted yet". Fail closed rather than looping or guessing.
+    return actionFailedCowork(
+      env,
+      manifest,
+      org.hat,
+      target,
+      { reason: "zero_applicable", detail: "no declared Action of this Hat is applicable, even after an intake interpretation" },
+      interpretationReason,
+    );
+  }
+  if (resolution.kind === "failed") {
+    return actionFailedCowork(env, manifest, org.hat, target, resolution, interpretationReason);
   }
 
-  const hatSummaryList = hatNames.map((name) => `- ${name}: ${manifest.hats[name].responsibility}`).join("\n");
-  const stage1 = await classifyCandidateHats<string>(
-    env,
-    { taskId: manifest.intakeClassificationTaskId, introLine: manifest.intakeIntroLine, hatSummaryList },
-    text,
-  );
-
-  const candidates = (stage1?.candidates ?? []).filter((name) => hatNames.includes(name));
-  return candidates.length === 1 ? candidates[0] : null;
+  return dispatchResolvedAction(env, hat, org.hat, target, resolution.execution, text, "cowork");
 }
 
 /**
- * Chat-mode counterpart to resolveUnitRequest (ENIG Operating Model
- * design doc, "Chat is action-capable, not read-only", 2026-09-28
- * decision). Same Stage 1/Stage 2/dispatch mechanism as Cowork's
- * resolveUnitRequest -- the same Action Registry, the same read/write
- * split, the same approval-gate semantics for write actions (a
- * requiresApproval action is exactly as privileged reached from here as
- * from Cowork; this function makes no approval decision itself, it only
- * resolves and dispatches) -- but opposite ambiguity handling and reply
- * targeting:
+ * Chat-mode counterpart to resolveUnitRequest ("Chat is action-capable,
+ * not read-only", 2026-09-28 decision). Same resolution boundaries, the
+ * same Action Registry, the same read/write split and approval-gate
+ * semantics -- but opposite ambiguity handling and reply targeting:
  *
  *   - Never sends a clarifying question and never creates a Blocker
  *     Activity entry on a miss -- returns { kind: "ambiguous" } instead,
@@ -226,12 +377,18 @@ async function resolveHatSilently(env: Env, manifest: UnitManifest, text: string
  *     correct there); Chat's whole point is low-friction conversation
  *     (blocking it with "I'm not sure what to do" for every message that
  *     isn't an action would defeat that entirely).
+ *   - An intake interpretation is REQUIRED here: Chat only starts
+ *     governed Work when an interpretation names a declared Action, and
+ *     the resolved Action must be the one that was named. That is
+ *     Chat's own mode policy (its fail-open discipline), applied before
+ *     Resolution; the named Action is still only a proposal that
+ *     Resolution validates against its declared applicability -- and a
+ *     proposal that names nothing this Hat can actually be entered with
+ *     falls open to conversation rather than starting the wrong Work.
  *   - A "read" action's reply goes to `target` directly (wherever the
  *     chat message actually came from -- a DM or a Unit's own topic),
  *     never forced to the shared Workspace stream the way
- *     resolveUnitRequest's replies are -- Cowork only ever runs inside
- *     that one stream, so forcing it there is correct for Cowork and
- *     would misroute Chat's reply to the wrong chat entirely.
+ *     resolveUnitRequest's replies are.
  */
 export async function tryResolveUnitAction(
   env: Env,
@@ -240,44 +397,31 @@ export async function tryResolveUnitAction(
   text: string,
   priorHat?: string,
 ): Promise<UnitDispatchResult> {
-  const hatName = priorHat ?? (await resolveHatSilently(env, manifest, text));
-  if (!hatName) {
+  const interpretation = await interpretHat(env, manifest, text, priorHat);
+  const contract = contractForRequest(text, "chat", manifest, priorHat, interpretation);
+  const organization = resolveOrganization(contract, manifest);
+  if (organization.kind === "failed") {
     return { kind: "ambiguous" };
   }
-
-  const hat = manifest.hats[hatName];
-  if (!hat) {
-    // priorHat named a Hat this manifest doesn't declare -- Chat never
-    // had explicit confirmation of this Hat to begin with, so fail
-    // silent (fall through to conversation) rather than closed.
-    return { kind: "ambiguous" };
-  }
+  const org = organization.organization;
+  const hat = manifest.hats[org.hat]!; // resolveOrganization only returns a Hat this manifest declares
 
   const stage2 = await classifyAction(
     env,
-    { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${hatName} Hat.` },
+    { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${org.hat} Hat.` },
     hat.actions,
     text,
   );
-
-  const actionName = stage2?.action ?? undefined;
-  if (!actionName || !findAction(actionName, hat.actions)) {
+  if (!stage2?.action) {
+    // Chat's classification gate: no interpretation, no governed Work --
+    // fall open to conversation (unchanged from before Resolution).
     return { kind: "ambiguous" };
   }
 
-  const dispatchResult = await dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t));
-  if (!dispatchResult) {
-    // Unreachable given the findAction check above -- fail silent (not
-    // closed) anyway, consistent with this function's whole discipline.
+  const resolution = await resolveActionExecution(manifest, org, withRequestedAction(contract, stage2.action));
+  if (resolution.kind !== "resolved" || resolution.execution.action.action_id !== stage2.action) {
     return { kind: "ambiguous" };
   }
 
-  if (dispatchResult.kind === "read") {
-    if (dispatchResult.reply.trim().length > 0) {
-      await sendHatMessage(env, { ...target, hat: hatName }, dispatchResult.reply);
-    }
-    return { kind: "handled" };
-  }
-
-  return { kind: "continue", hat: hatName, actionName };
+  return dispatchResolvedAction(env, hat, org.hat, target, resolution.execution, text, "chat");
 }

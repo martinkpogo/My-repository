@@ -9,6 +9,7 @@ import {
   presentQualifiedCallNotesForApproval,
 } from "./salesExecutive";
 import { SOURCE_BOUNDARY_CHECKS } from "../../handoffWriter";
+import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "./callNotesMarker";
 import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {
@@ -30,6 +31,7 @@ function fakeEnv(): Env {
     HANDOFFS_DATA_SOURCE_ID: "handoffs-ds",
     ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
     LEADS_DATA_SOURCE_ID: "leads-ds",
+    CALL_NOTES_DATA_SOURCE_ID: "call-notes-ds",
     TELEGRAM_BOT_TOKEN: "test-token",
     MARTIN_TELEGRAM_USER_ID: "9999",
     NOTION_TOKEN: "test-notion-token",
@@ -953,13 +955,73 @@ test("Runtime Sales identity boundary: rejecting a drafted Entity still routes t
 // provenance gate, while an origin that was never proven stays fail-closed.
 // ---------------------------------------------------------------------------
 
-function mockPickupFetch(t: any, opts: { handoffStatus?: string; verifiedFacts?: string } = {}) {
+function mockPickupFetch(t: any, opts: {
+  handoffStatus?: string;
+  verifiedFacts?: string;
+  /** The Handoff's `Reason`, where the governed `Call_Notes_ID` reference convention is read. */
+  handoffReason?: string;
+  /** The Handoff's title -- the other free-text field the reference is read from. */
+  handoffTitle?: string;
+  /**
+   * The governed Call Notes record the exact-match lookup should find.
+   * `undefined` = one healthy Ready `CN-007`; `null` = no such record at all;
+   * an object = those properties merged over the healthy record's own.
+   */
+  callNotesProperties?: Record<string, any> | null;
+} = {}) {
   const originalFetch = globalThis.fetch;
   const handoffStatus = opts.handoffStatus ?? "Pending";
   const verifiedFacts = opts.verifiedFacts ?? "De-identified call notes for a positioning engagement.";
+  const handoffReason = opts.handoffReason ?? "Call notes for commercial qualification. requiredCategory: call_notes. Call_Notes_ID: CN-007";
+  const handoffTitle = opts.handoffTitle ?? "Call Notes (Matter: M-12)";
   const patches: string[] = [];
   const sentTexts: string[] = [];
   const created: { handoff: any } = { handoff: null };
+  // The record's live Status, mutated by its own PATCH -- what lets a second
+  // pickup observe `Consumed` exactly as production would.
+  const live = { callNotesStatus: "Ready" };
+  let record: any = null;
+
+  /** The healthy governed record: registry fields plus a valid attestation, built the way Isolated Sales builds one. */
+  async function healthyCallNotesRecord(): Promise<any> {
+    if (record) return record;
+    const registry: CallNotesApprovalRecord = {
+      callNotesId: "CN-007",
+      entity: "E-47",
+      matter: "M-12",
+      callDate: "2026-09-28",
+      callType: "Discovery",
+      sourceId: "SRC-1",
+      sourceType: "Sales Call",
+      version: 1,
+    };
+    const attestation = await buildRecordApprovalMarker(registry, "Approved");
+    record = {
+      id: "call-notes-1",
+      url: "https://notion.so/call-notes-1",
+      parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
+      properties: {
+        "Call Notes ID": { title: [{ plain_text: "CN-007", text: { content: "CN-007" } }] },
+        "Call Date": { date: { start: "2026-09-28" } },
+        "Call Type": { select: { name: "Discovery" } },
+        "Source ID": { rich_text: [{ plain_text: "SRC-1", text: { content: "SRC-1" } }] },
+        "Source Type": { select: { name: "Sales Call" } },
+        "Status": { select: { name: "Ready" } },
+        "Version": { number: 1 },
+        "Entity": { relation: [{ id: "entity-page-1" }] },
+        "Matter": { relation: [{ id: "matter-page-1" }] },
+        "Approval Attestation": { rich_text: [{ plain_text: attestation, text: { content: attestation } }] },
+      },
+    };
+    return record;
+  }
+
+  async function locatedCallNotes(): Promise<any[] | null> {
+    if (opts.callNotesProperties === null) return null;
+    const healthy = await healthyCallNotesRecord();
+    if (!opts.callNotesProperties) return [healthy];
+    return [{ ...healthy, properties: { ...healthy.properties, ...opts.callNotesProperties } }];
+  }
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -983,6 +1045,8 @@ function mockPickupFetch(t: any, opts: { handoffStatus?: string; verifiedFacts?:
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts, text: { content: verifiedFacts } }] },
             Entity_Token: { rich_text: [{ plain_text: "E-47", text: { content: "E-47" } }] },
             Matter_Token: { rich_text: [{ plain_text: "M-12", text: { content: "M-12" } }] },
+            Reason: { rich_text: [{ plain_text: handoffReason, text: { content: handoffReason } }] },
+            Handoff: { title: [{ plain_text: handoffTitle, text: { content: handoffTitle } }] },
           },
         }),
         { status: 200 },
@@ -1015,6 +1079,49 @@ function mockPickupFetch(t: any, opts: { handoffStatus?: string; verifiedFacts?:
         { status: 200 },
       );
     }
+    // The Entity/Matter binding target resolution resolveEntityMatterFromTokens
+    // performs before any Call Notes record may be checked against it.
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              properties: {
+                Matter_ID: { unique_id: { number: 12, prefix: "M" } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    // The exact-match Call Notes lookup (gate 3).
+    if (urlStr.endsWith("/data_sources/call-notes-ds/query") && method === "POST") {
+      return new Response(JSON.stringify({ results: (await locatedCallNotes()) ?? [] }), { status: 200 });
+    }
+    // The lifecycle's compare-current-status read, and its Ready -> Consumed write.
+    if (urlStr.endsWith("/pages/call-notes-1") && method === "GET") {
+      const healthy = await healthyCallNotesRecord();
+      return new Response(
+        JSON.stringify({
+          ...healthy,
+          properties: { ...healthy.properties, Status: { select: { name: live.callNotesStatus } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/call-notes-1") && method === "PATCH") {
+      patches.push(String(init.body));
+      const body = JSON.parse(String(init.body));
+      if (body.properties?.Status?.select?.name) live.callNotesStatus = body.properties.Status.select.name;
+      return new Response(
+        JSON.stringify({ id: "call-notes-1", url: "https://notion.so/call-notes-1", parent: { type: "data_source_id", data_source_id: "call-notes-ds" }, properties: {} }),
+        { status: 200 },
+      );
+    }
     if (urlStr.endsWith("/pages") && method === "POST") {
       const body = JSON.parse(init.body);
       if (body.parent?.data_source_id === "handoffs-ds") {
@@ -1042,7 +1149,7 @@ function mockPickupFetch(t: any, opts: { handoffStatus?: string; verifiedFacts?:
     globalThis.fetch = originalFetch;
   });
 
-  return { patches, sentTexts, created };
+  return { patches, sentTexts, created, live };
 }
 
 function freshPickupState(overrides: Partial<WorkState> = {}): WorkState {
@@ -1072,15 +1179,28 @@ test("Pickup-origin provenance: claiming a real call-notes Handoff records hando
   assert.ok(patches.some((p) => p.includes("Picked-up")), "the claim must still have happened before provenance was recorded");
 });
 
-test("Pickup-origin provenance: a claimed Handoff's sanitized context is persisted into the session business context", async (t) => {
+test("Governed Call Notes consumption: the consumed record's registry fields -- not the Handoff's narrative -- become the session business context", async (t) => {
   mockPickupFetch(t);
 
   const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
 
   assert.strictEqual(
     result.callNotes,
-    "De-identified call notes for a positioning engagement.",
-    "the claimed Handoff's own already-sanitized payload must become the session's value context -- copied from this Handoff and nowhere else",
+    [
+      "Call_Notes_ID: CN-007",
+      "Entity: E-47",
+      "Matter: M-12",
+      "Call Date: 2026-09-28",
+      "Call Type: Discovery",
+      "Source ID: SRC-1",
+      "Source Type: Sales Call",
+      "Version: 1",
+    ].join("\n"),
+    "the consumed Call Notes record's own registry fields must become the session's value context -- read from that record and nowhere else",
+  );
+  assert.ok(
+    !result.callNotes!.includes("De-identified call notes for a positioning engagement."),
+    "the Handoff's own narrative must not reach the session as Call Notes evidence once a governed reference is present",
   );
 });
 
@@ -1153,11 +1273,12 @@ test("Pickup provenance: an empty sanitized context never becomes session contex
   assert.strictEqual(result.callNotes, undefined, "an empty sanitized context must not be persisted as the session's value context");
 });
 
-test("Gate 3 continuation end to end: the claimed Handoff's sanitized context is what carries a pickup session through Gate 3", async (t) => {
+test("Gate 3 continuation end to end: the consumed Call Notes record's fields are what carry a pickup session through Gate 3", async (t) => {
   const { created } = mockPickupFetch(t);
 
-  // Phase 1 -- the claim: the Handoff's own already-sanitized payload becomes
-  // the session's business context, and its origin becomes the provenance.
+  // Phase 1 -- the claim: the governed Call Notes record the Handoff's
+  // reference points at becomes the session's business context, and the
+  // successful claim becomes the provenance.
   const pickedUp = await handleCallNotesHandoffPickup(
     fakeEnv(),
     freshPickupState({
@@ -1172,7 +1293,11 @@ test("Gate 3 continuation end to end: the claimed Handoff's sanitized context is
 
   assert.strictEqual(pickedUp.entryType, "handoff_pickup");
   assert.strictEqual(pickedUp.enquiryText, undefined, "a pickup has no enquiry text, so Gate 3 must rest on the persisted context alone");
-  assert.ok(pickedUp.callNotes?.trim(), "the claimed Handoff's sanitized context must be persisted onto the session");
+  assert.ok(pickedUp.callNotes?.trim(), "the consumed Call Notes record's registry fields must be persisted onto the session");
+  assert.ok(
+    !pickedUp.callNotes!.includes("De-identified call notes for a positioning engagement."),
+    "the Handoff's own narrative must not be the context that carries the continuation",
+  );
 
   // Phase 2 -- the downstream Handoff write: Gate 1 (provenance) and Gate 3
   // (value-relevant context) both pass on facts the pickup itself proved, and
@@ -1188,6 +1313,68 @@ test("Gate 3 continuation end to end: the claimed Handoff's sanitized context is
   assert.match(reason, /Entry type: handoff_pickup/);
   assert.match(reason, /\[source_boundary_check result=Passed\b/, "the LOG-965 attestation remains mandatory for handoff_pickup");
   assert.strictEqual(result.stage, "awaiting_strategy");
+});
+
+// ---------------------------------------------------------------------------
+// Governed Call Notes consumption, end to end through the pickup handler.
+// Each of these proves the REFUSAL half of the chain: the Handoff is held, no
+// qualification runs, and the record is left exactly as it was found.
+// ---------------------------------------------------------------------------
+
+test("Governed Call Notes consumption: a Handoff carrying no Call_Notes_ID reference is held and never reaches qualification", async (t) => {
+  const { patches, live } = mockPickupFetch(t, {
+    handoffReason: "Call notes for commercial qualification. requiredCategory: call_notes",
+  });
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(result.stage, "handoff_held", "a Handoff that names no governed record must be held rather than qualified");
+  assert.strictEqual(result.callNotes, undefined, "the Handoff's own narrative must not stand in as Call Notes evidence when no reference is present");
+  assert.strictEqual(live.callNotesStatus, "Ready", "no record may be consumed when the reference never identified one");
+  assert.ok(patches.some((p) => p.includes("Held")), "the held state must be written back to the Handoff");
+  assert.ok(
+    !patches.some((p) => p === '{"properties":{"Status":{"select":{"name":"Consumed"}}}}'),
+    "the lifecycle write must never happen without a valid reference",
+  );
+});
+
+test("Governed Call Notes consumption: an exact-match miss on Call_Notes_ID prevents qualification and leaves the record untouched", async (t) => {
+  const { live } = mockPickupFetch(t, { callNotesProperties: null });
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(result.stage, "handoff_held", "no matching governed record must hold the Handoff");
+  assert.strictEqual(result.callNotes, undefined, "nothing may be qualified when the referenced record cannot be read");
+  assert.strictEqual(live.callNotesStatus, "Ready", "an unmatched lookup must not transition anything");
+});
+
+test("Governed Call Notes consumption: a record with no approval attestation prevents qualification and is not consumed", async (t) => {
+  const { live } = mockPickupFetch(t, {
+    callNotesProperties: { "Approval Attestation": { rich_text: [] } },
+  });
+
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(result.stage, "handoff_held", "an unattested record must never be consumed");
+  assert.strictEqual(result.callNotes, undefined, "an unattested record's fields must not reach the qualification path");
+  assert.strictEqual(live.callNotesStatus, "Ready", "a record whose attestation fails must be left Ready for its creation authority");
+});
+
+test("Governed Call Notes consumption: replaying the pickup does not consume the Call Notes record twice", async (t) => {
+  const { patches, live } = mockPickupFetch(t);
+  // The lifecycle write exactly: Status is the only property in the payload,
+  // so this is the Ready -> Consumed transition and nothing else.
+  const LIFECYCLE_WRITE = '{"properties":{"Status":{"select":{"name":"Consumed"}}}}';
+  const consumeWrites = () => patches.filter((p) => p === LIFECYCLE_WRITE);
+
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+  assert.strictEqual(live.callNotesStatus, "Consumed", "the first pickup must advance the record Ready -> Consumed");
+  assert.strictEqual(consumeWrites().length, 1, "exactly one lifecycle write for the first pickup");
+
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState());
+
+  assert.strictEqual(live.callNotesStatus, "Consumed", "the record stays Consumed -- no second transition to it exists");
+  assert.strictEqual(consumeWrites().length, 1, "a replay must not issue a second Ready -> Consumed write");
 });
 
 test("Provenance distinction: direct_request remains its own value and does not bypass the Handoff source-boundary attestation", async (t) => {

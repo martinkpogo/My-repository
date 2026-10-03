@@ -33,6 +33,7 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
+import { retrieveAndConsumeCallNotes } from "./callNotesRecord";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -1128,11 +1129,24 @@ export async function presentQualifiedCallNotesForApproval(
 /**
  * Runtime Sales Executive's pickup of a call-notes Handoff created by the
  * isolated Sales Executive Claude project (Section 6A of its Project
- * Instructions). The de-identified narrative it produced is already
- * token-safe, so this runs the same commercial-value-evidence-extraction
- * and qualification reasoning handleCallNotes runs for a live chat, just
- * against contract.sanitizedContext instead of raw enquiry/call-notes
- * text.
+ * Instructions).
+ *
+ * **The Handoff is a routing/reference carrier, not the evidence.** It names
+ * the governed Call Notes record to read via its `Call_Notes_ID` reference;
+ * `retrieveAndConsumeCallNotes` resolves that reference to a single `Ready`
+ * record, proves its Entity/Matter relations and its recorded
+ * `Approval Attestation` against that record, and transitions it
+ * `Ready -> Consumed`. Only the consumed record's own registry fields are then
+ * passed into the same commercial-value-evidence-extraction and qualification
+ * reasoning `handleCallNotes` runs for a live chat.
+ *
+ * The Handoff's de-identified narrative in `Verified Facts & Sources` is still
+ * read and validated through `evaluateHandoffContext` -- it is what proves the
+ * Handoff itself is identity-safe -- but its content is no longer qualified as
+ * evidence. When the governed reference is present there is no fallback to it:
+ * if the record cannot be retrieved and consumed, the Handoff is held and
+ * nothing is qualified. That is the difference between the Handoff describing
+ * which record to read and the Handoff pretending to be the record.
  *
  * On a Qualified result, this now presents the live Telegram Approve/Redo
  * buttons directly (the same handleLeadToProspectApproval flow
@@ -1204,28 +1218,65 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
   const { contract } = evalResult;
   state.entityToken = contract.entityToken;
   state.matterToken = contract.matterToken;
-  // GATE 3 CONTINUATION (Architect decision): the claimed Handoff's own
-  // already-sanitized payload becomes this session's business context, so a
+  const displayToken = contract.matterToken ?? contract.entityToken;
+
+  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
+
+  // GOVERNED CALL NOTES CONSUMPTION (Architect decision): the Handoff now
+  // carries a REFERENCE to the record, not the record's substance.
+  // retrieveAndConsumeCallNotes resolves that reference to exactly one Ready
+  // Call Notes record, proves the record's Entity/Matter relations and its
+  // recorded Approval Attestation against that record, and only then advances
+  // it Ready -> Consumed. Every one of those gates failing closed lands here,
+  // on a held Handoff, with nothing qualified -- there is deliberately no
+  // fallback to the Handoff's own narrative as Call Notes evidence once a
+  // governed reference exists, because silently qualifying the old free-text
+  // payload is the exact behaviour this path replaces.
+  const consumption = await retrieveAndConsumeCallNotes(
+    env,
+    state.handoffId!,
+    { entityToken: contract.entityToken, matterToken: contract.matterToken ?? "" },
+    workSessionContext(state),
+  );
+  if (!consumption.ok) {
+    console.error(`Sales call-notes pickup: ${consumption.reason}`);
+    await logActivity(env, {
+      entry: `Sales call-notes pickup blocked [Call Notes consumption] — ${displayToken}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale: consumption.reason,
+      outcome: "Blocked",
+    });
+    await updateHandoff(env, state.handoffId!, {
+      Status: select("Held"),
+      "Open Questions": richText(consumption.reason.slice(0, 1900)),
+    }, workSessionContext(state)).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
+    await sendOperationsMessage(
+      env,
+      `⚠️ Sales couldn't consume the governed Call Notes record for ${displayToken}: ${consumption.reason}`,
+    ).catch((err) => console.error("Failed to send call-notes consumption-failure Operations notice", err));
+    state.stage = "handoff_held";
+    return state;
+  }
+
+  // GATE 3 CONTINUATION (Architect decision): the consumed Call Notes
+  // record's own registry fields become this session's business context, so a
   // legitimate pickup can satisfy handleInterventionText's Gate 3 (value-
   // relevant context) instead of reaching it with neither enquiry text nor
   // call notes.
   //
-  // Why this is permitted and nothing else is: `contract.sanitizedContext` is
-  // the text evaluateHandoffContext just validated -- already the sanitized
-  // Handoff payload, already trimmed and proven non-empty by the guard in
-  // dataBoundary/policy.ts (an empty or missing sanitizedContext never reaches
-  // here; it fails closed upstream and the Handoff is held). It is copied from
-  // this Handoff and nowhere else: nothing is queried from the Identity
-  // Resolution Registry, and no raw identity-bearing content is read into the
-  // session. The guard below keeps Gate 3 authoritative rather than bypassing
-  // it -- if the context were ever empty, callNotes simply stays unset and
-  // Gate 3 refuses as it always did.
-  if (contract.sanitizedContext && contract.sanitizedContext.trim()) {
-    state.callNotes = contract.sanitizedContext;
-  }
-  const displayToken = contract.matterToken ?? contract.entityToken;
-
-  await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
+  // Why this is permitted and nothing else is: `consumption.evidenceText` is
+  // built from the record this Handoff's Call_Notes_ID reference resolved to
+  // -- the exact record whose Status was just advanced to Consumed, whose
+  // Entity/Matter relations were compared to this Handoff's own tokens, and
+  // whose Approval Attestation was re-hashed against those very fields. It is
+  // never contract.sanitizedContext: the Handoff's narrative still proves the
+  // Handoff is identity-safe upstream, but it is not Call Notes evidence, so
+  // nothing is copied from it into the session. If the governed path had
+  // failed we would already have returned above, so this assignment can never
+  // be reached as a fallback -- and if the text were ever empty, callNotes
+  // simply stays unset and Gate 3 refuses as it always did.
+  state.callNotes = consumption.evidenceText;
 
   const governance = await getSalesExecutiveGovernance(env, { includeEntitySpecification: true });
   if (!governance) {
@@ -1244,7 +1295,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
     return state;
   }
 
-  const result = await runQualificationAssessment(env, state, contract.sanitizedContext, governance, {
+  const result = await runQualificationAssessment(env, state, consumption.evidenceText, governance, {
     evidenceExtraction: "sales.commercial_evidence_extraction_handoff",
     qualification: "sales.call_qualification_handoff",
   });
@@ -1253,12 +1304,12 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState): 
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(
-        "Qualification assessment was inconclusive from the supplied call notes. Send additional de-identified call notes and re-submit.",
+        "Qualification assessment was inconclusive from the consumed Call Notes record's registry fields. Re-open the record (and its Evidence Package) and re-submit.",
       ),
     }, workSessionContext(state)).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
     await sendOperationsMessage(
       env,
-      `Sales qualification inconclusive for ${displayToken} — Handoff held, needs additional call notes.`,
+      `Sales qualification inconclusive for ${displayToken} — Handoff held, needs a richer Call Notes record.`,
     ).catch((err) => console.error("Failed to send inconclusive-qualification Operations notice", err));
     state.stage = "handoff_held";
     return state;

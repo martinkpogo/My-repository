@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { tryResolveUnitAction } from "./dispatch";
+import { tryResolveUnitAction, type UnitDispatchResult } from "./dispatch";
 import type { UnitManifest, HatManifest } from "./unitManifest";
 import type { Env } from "../types";
 
@@ -25,10 +25,10 @@ function toyManifest(overrides: Partial<HatManifest<ToyAction>> = {}): UnitManif
     responsibility: "Handles toy requests for this test.",
     responsibilityId: "toy_responsibility",
     actions: [
-      { name: "check_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, description: "Read-only status check." },
-      { name: "internal_hold", responsibility: "toy_responsibility", consequence: "internal", requiresApproval: false, description: "May pause on missing input." },
-      { name: "update_price", responsibility: "toy_responsibility", consequence: "write", requiresApproval: false, description: "Mutates a price, not privileged." },
-      { name: "send_proposal", responsibility: "toy_responsibility", consequence: "write", requiresApproval: true, description: "Sends a real proposal -- privileged." },
+      { name: "check_status", responsibility: "toy_responsibility", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "check_status" }] }, description: "Read-only status check." },
+      { name: "internal_hold", responsibility: "toy_responsibility", consequence: "internal", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "internal_hold" }] }, description: "May pause on missing input." },
+      { name: "update_price", responsibility: "toy_responsibility", consequence: "write", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "update_price" }] }, description: "Mutates a price, not privileged." },
+      { name: "send_proposal", responsibility: "toy_responsibility", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "send_proposal" }] }, description: "Sends a real proposal -- privileged." },
     ],
     readHandler: async (_env, actionName) => `handled:${actionName}`,
     entryHandler: async (_env, state) => state,
@@ -99,7 +99,17 @@ test("tryResolveUnitAction: an internal/write action resolves to 'continue', wit
 
   const result = await tryResolveUnitAction(env, manifest, { chatId: 1, threadId: 2 }, "set the price to 500");
 
-  assert.deepStrictEqual(result, { kind: "continue", hat: "Toy Hat", actionName: "update_price" });
+  assert.strictEqual(result.kind, "continue");
+  const continuation = result as Extract<UnitDispatchResult, { kind: "continue" }>;
+  assert.strictEqual(continuation.hat, "Toy Hat");
+  assert.strictEqual(continuation.actionName, "update_price");
+  // The Worker receives the whole resolved Action Execution Context --
+  // responsibility, consequence, approval requirement and auditable
+  // evidence -- not just a name to act on.
+  assert.strictEqual(continuation.execution.action.action_id, "update_price");
+  assert.strictEqual(continuation.execution.action.responsibility, "toy_responsibility");
+  assert.strictEqual(continuation.execution.action.requires_approval, false);
+  assert.strictEqual(continuation.execution.evidence.resolved_action, "update_price");
   assert.strictEqual(sent.length, 0, "a write action's own entryHandler decides what to send, not this function");
 });
 
