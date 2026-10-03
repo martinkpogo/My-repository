@@ -42,11 +42,6 @@ export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sa
 // never a qualification, never a proposal/quote. See leadDiscovery.ts.
 export const LEAD_GENERATION_SPECIALIST: HatIdentity = { name: "Lead Generation Specialist", unit: "Sales", specialization: "Lead Discovery" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
-export const RESEARCH_INTELLIGENCE_ANALYST: HatIdentity = {
-  name: "Research & Intelligence Analyst",
-  unit: "Research & Intelligence",
-  specialization: "Research Intelligence",
-};
 // Strategy's composable specialist-diagnosis model (LOG-845, Notion
 // Activity & Decision Log -- "Strategy specialist diagnosis model
 // established"). Strategy Analyst's specialization changed from "Strategy"
@@ -76,7 +71,7 @@ export const COMMUNICATION_STRATEGIST: HatIdentity = { name: "Communication Stra
 // distinct Hat (job position the runtime assumes), not a specialization
 // fragmenting one shared Hat -- same shape as Sales Executive/Lead
 // Generation Specialist above (Hat name, then its one specialization),
-// not R&I's one-Hat/many-specializations pattern. Previously these three
+// not a one-Hat/many-specializations pattern. Previously these three
 // carried the Hat name and specialization concatenated into one `name`
 // string ("X Manager — Y Development"); split out here to match the
 // canonical HatIdentity shape.
@@ -103,7 +98,6 @@ export const ALL_HATS: HatIdentity[] = [
   SALES_EXECUTIVE,
   LEAD_GENERATION_SPECIALIST,
   VALUE_BASED_PRICING_ASSESSOR,
-  RESEARCH_INTELLIGENCE_ANALYST,
   STRATEGY_ANALYST,
   BUSINESS_STRATEGIST,
   BRAND_STRATEGIST,

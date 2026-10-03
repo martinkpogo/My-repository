@@ -3,7 +3,6 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./units/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
-import * as research from "./units/research/capabilityPackage";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
@@ -80,7 +79,7 @@ export class WorkSession extends DurableObject<Env> {
    * Generic entry point for a Unit built on the Unit Registry manifest
    * pattern (ENIG Operating Model: "The Unit Registry" / Action Resolution)
    * -- the entry every manifest-registered Unit uses (Sales, Finance,
-   * Strategy, Research & Intelligence, Business Development). dispatchCowork
+   * Strategy, Business Development). dispatchCowork
    * has already resolved Organization + Action statelessly via
    * resolveUnitRequest before creating this WorkSession (an
    * "internal"/"write" action only -- "read" never reaches here at all, per
@@ -159,10 +158,6 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":
           return marketing.handleMarketingClarification(this.env, state, text);
-        case "research_clarification":
-          return research.handleResearchClarification(this.env, state, text);
-        case "research_feedback":
-          return research.handleResearchFeedback(this.env, state, text);
         case "strategy_clarification":
           return strategy.handleStrategyClarification(this.env, state, text);
         case "strategy_direct_request_matter":
@@ -212,29 +207,19 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
-   * The R&I side of a <Unit> -> Research & Intelligence execution boundary,
-   * invoked independently by index.ts's scheduled Research-Handoff
-   * discovery once a Pending Handoff addressed to Research & Intelligence
-   * is found — mirrors runFinancePickup exactly.
-   */
-  async runResearchPickup(): Promise<WorkState> {
-    return this.execute((state) => research.handlePickup(this.env, state));
-  }
-
-  /**
    * Invoked independently by index.ts's scheduled Strategy-Handoff
    * discovery once a Pending Handoff addressed to Strategy is found --
-   * mirrors runFinancePickup/runResearchPickup exactly.
+   * mirrors runFinancePickup exactly.
    */
   async runStrategyPickup(): Promise<WorkState> {
     return this.execute((state) => strategy.handlePickup(this.env, state));
   }
 
   /**
-   * The Marketing side of the Research & Intelligence -> Marketing
-   * execution boundary, invoked independently by index.ts's scheduled
-   * Marketing-Handoff discovery once a Pending Handoff addressed to
-   * Marketing is found — mirrors runFinancePickup/runResearchPickup.
+   * The Marketing side of a <Unit> -> Marketing execution boundary,
+   * invoked independently by index.ts's scheduled Marketing-Handoff
+   * discovery once a Pending Handoff addressed to Marketing is found —
+   * mirrors runFinancePickup.
    */
   async runMarketingHandoffPickup(): Promise<WorkState> {
     return this.execute((state) => marketing.handleHandoffPickup(this.env, state));
@@ -265,10 +250,10 @@ export class WorkSession extends DurableObject<Env> {
   /**
    * Presents an evidence-backed opportunity finding to Martin for explicit
    * approval before it may become a Lead -- invoked on a freshly created
-   * WorkSession (see processCompletedLGSResearchHandoffs in
-   * leadGenerationDiscovery.ts), the same way discoverPendingFinanceHandoffs
-   * creates a session for an externally-originated Handoff with no live
-   * chat behind it.
+   * WorkSession with no live chat behind it. Currently has no caller:
+   * the only one (the Research & Intelligence Handoff consumer) was
+   * removed with that retired Unit, and the owning Action that will feed
+   * this gate is not yet designed.
    */
   async proposeLeadOpportunity(opportunity: PendingLeadOpportunity): Promise<WorkState> {
     return this.execute((state) => proposeLeadOpportunity(this.env, state, opportunity));

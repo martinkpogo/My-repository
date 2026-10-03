@@ -1,33 +1,24 @@
 /**
- * Runtime representation of the six canonical Research & Intelligence
- * Procedure contracts (Core Structure v2.4).
+ * The six canonical research protocol definitions -- data/method
+ * descriptors consumed by the research runtime executor
+ * (`executor.ts`). A protocol is never an actor, a Hat, a Unit, an Action,
+ * or an execution path of its own: it says what a kind of research is
+ * for and how it is investigated, and the one shared pipeline (protocol
+ * selection -> plan -> evidence gathering -> synthesis -> evidence & source
+ * validation) reads it.
  *
- * Governance source of truth is Notion -- "ENIG HQ > 4. Capability
- * Packages & Skills" -- where the six canonical Procedures are defined.
- * This file is the repository's deterministic runtime copy of those
- * contracts: the Worker never fetches the Notion Procedure pages during a
- * research execution (that would put governance retrieval on the hot
- * path and make execution untestable offline). It is therefore NOT an
- * independent governance system -- where the canonical definition and
- * this file disagree, the canonical definition wins and this file is the
- * bug to fix.
+ * Governance source of truth is Notion -- the research protocol
+ * definitions. This file is the repository's deterministic runtime copy:
+ * the Worker never fetches those pages during a research execution (that
+ * would put governance retrieval on the hot path and make execution
+ * untestable offline). It is therefore NOT an independent governance
+ * system -- where the canonical definition and this file disagree, the
+ * canonical definition wins and this file is the bug to fix.
  *
- * A Procedure is a contract consumed by the shared Capability Package
- * executor (`capabilityPackage.ts`) -- never its own execution path.
- * Procedures are selected per request and executed by one shared
- * pipeline (protocol selection -> plan -> evidence gathering -> synthesis
- * -> Evidence & Source Validation -> delivery); there is no
- * per-Procedure engine, Hat, Unit, or Workspace. The former R&I Unit and
- * R&I Analyst Hat are retired organizational structures (Core Structure
- * v2.4); the `Research & Intelligence` unit/hat strings still present in
- * the codebase are routing/registry labels for the existing manifest and
- * Workspace stream, not capability ownership.
- *
- * Terminology: the runtime identifiers still say "protocol"
- * (`ResearchProtocolId`, `selectedResearchProtocols`,
- * `research.protocol_selection`) so WorkState fields, SemanticTaskIds,
- * and existing records stay stable. Throughout this file and the Package
- * they mean "Procedure".
+ * Reusable research *methodology* (how to read evidence) lives in the
+ * `research_signal` Skill (src/platform/skillRegistry.ts); these protocols
+ * describe *which research dimensions to investigate*, and neither is an
+ * organizational owner of Work.
  */
 
 export type ResearchProtocolId =
@@ -39,47 +30,47 @@ export type ResearchProtocolId =
   | "evidence_validation";
 
 /**
- * One canonical Procedure contract as the Package executor consumes it.
+ * One canonical protocol contract as the research executor executor consumes it.
  *
  * Field ownership follows Core Structure v2.4:
  * - `id`/`name`/`purpose`/`method`/`evidenceRequirements`/
  *   `interpretationConstraints`/`applicabilitySignals`/
- *   `primaryWhenApplicable` are PROCEDURE-OWNED: they say what this
- *   Procedure is for and what it constrains.
+ *   `primaryWhenApplicable` are PROTOCOL-OWNED: they say what this
+ *   protocol is for and what it constrains.
  * - Everything the executor does with them (selection, planning,
  *   searching, synthesising, validating, routing, fail-closed stops) is
- *   CAPABILITY-PACKAGE-OWNED and lives outside this file.
+ *   EXECUTOR-OWNED and lives outside this file.
  *
  * Descriptors are data only -- deliberately no `run`/`execute` member of
- * any kind, so a Procedure can never become a second execution mechanism.
+ * any kind, so a protocol can never become a second execution mechanism.
  */
 export interface ResearchProtocolDefinition {
-  /** Stable canonical id -- preserved across the Unit -> Capability Package migration. */
+  /** Stable canonical id. */
   id: ResearchProtocolId;
-  /** Canonical Procedure name (display/selection identity). */
+  /** Canonical protocol name (display/selection identity). */
   name: string;
-  /** Canonical Procedure purpose -- what this Procedure is for; consumed by the Package's selection stage. */
+  /** Canonical protocol purpose -- what this protocol is for; consumed by the research executor's selection stage. */
   purpose: string;
-  /** Protocol-specific method: how the shared executor investigates once this Procedure is selected. Consumed by plan + synthesis. */
+  /** Protocol-specific method: how the shared executor investigates once this protocol is selected. Consumed by plan + synthesis. */
   method: string;
-  /** Classes of evidence this Procedure's findings must rest on. Consumed by plan + synthesis. */
+  /** Classes of evidence this protocol's findings must rest on. Consumed by plan + synthesis. */
   evidenceRequirements: string;
   /**
    * Protocol-specific interpretation constraints from the canonical
-   * Procedure definition -- injected into the plan and synthesis prompts
-   * for the selected Procedure(s) only, never applied package-wide.
+   * protocol definition -- injected into the plan and synthesis prompts
+   * for the selected protocol(s) only, never applied package-wide.
    */
   interpretationConstraints: string[];
   /**
-   * Applicability signal(s) the Package's deterministic selection
+   * Applicability signal(s) the research executor's deterministic selection
    * guardrail evaluates against the incoming question (procedure-owned
    * criteria, package-owned evaluation -- see protocolGuardrails.ts).
-   * Procedures without a signal are selected by the AI classification
+   * protocols without a signal are selected by the AI classification
    * stage alone, still fail-closed on ambiguity.
    */
   applicabilitySignals?: RegExp[];
   /**
-   * Procedure declares it must be the PRIMARY Procedure whenever its own
+   * protocol declares it must be the PRIMARY protocol whenever its own
    * applicability signal matches (the governance rule that a broad
    * market question has Market / Industry first, not merely alongside).
    */
@@ -169,13 +160,13 @@ export const RESEARCH_PROTOCOL_REGISTRY: Record<ResearchProtocolId, ResearchProt
     id: "evidence_validation",
     name: "Evidence & Source Validation",
     purpose:
-      "Research the provenance, dates, relevance, consistency, source quality, and support for material claims behind the evidence this request relies on. May run alongside another Procedure rather than standing alone.",
+      "Research the provenance, dates, relevance, consistency, source quality, and support for material claims behind the evidence this request relies on. May run alongside another protocol rather than standing alone.",
     method:
       "Validate provenance, dates, relevance, consistency, source quality, and support for material claims across the research process. May run alongside another protocol rather than standing alone.",
     evidenceRequirements:
       "Primary source verification, publication timestamp verification, cross-source consistency checks, and domain authority assessment.",
     interpretationConstraints: [
-      "This Procedure researches source quality; it does not replace the Package's universal Evidence & Source Validation gate, which runs on every execution before any result is delivered.",
+      "This protocol researches source quality; it does not replace the research executor's universal Evidence & Source Validation gate, which runs on every execution before any result is delivered.",
     ],
   },
 };
@@ -186,14 +177,14 @@ export function isResearchProtocolId(id: string): id is ResearchProtocolId {
   return (RESEARCH_PROTOCOL_IDS as string[]).includes(id);
 }
 
-/** Short, flat summary of every Procedure (name + purpose) -- consumed by the Package's selection stage, never full per-protocol detail. */
+/** Short, flat summary of every protocol (name + purpose) -- consumed by the research executor's selection stage, never full per-protocol detail. */
 export function researchProtocolSummaryList(): string {
   return RESEARCH_PROTOCOL_IDS.map((id) => `- ${RESEARCH_PROTOCOL_REGISTRY[id].name}: ${RESEARCH_PROTOCOL_REGISTRY[id].purpose}`).join("\n");
 }
 
 /**
  * Full per-protocol method/evidence/constraint detail for only the
- * selected Procedures -- given to the Package's plan and synthesis
+ * selected protocols -- given to the research executor's plan and synthesis
  * stages, never all six.
  */
 export function researchProtocolDetail(ids: ResearchProtocolId[]): string {
@@ -213,15 +204,15 @@ function normalizeProtocolName(name: string): string {
 }
 
 /**
- * Maps a model-returned Procedure name back to its canonical id,
+ * Maps a model-returned protocol name back to its canonical id,
  * tolerant of minor phrasing variance (case, partial match) since the
- * model is asked to return the Procedure's display name, not its
+ * model is asked to return the protocol's display name, not its
  * internal id. Returns null for anything that doesn't clearly match one
- * of the six registered Procedures -- callers must treat that as "couldn't
+ * of the six registered protocols -- callers must treat that as "couldn't
  * determine," never guess a nearest neighbor. Shared by protocol
- * selection (capabilityPackage.ts) and research-plan generation
+ * selection (executor.ts) and research-plan generation
  * (researchPlan.ts), which both need to resolve a model-returned
- * Procedure name the same way.
+ * protocol name the same way.
  */
 export function nameToProtocolId(name: string): ResearchProtocolId | null {
   const normalized = normalizeProtocolName(name);

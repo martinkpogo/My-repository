@@ -4,7 +4,6 @@ import { businessDevelopmentManifest } from "./businessDevelopment/businessDevel
 import { salesManifest } from "./sales/salesManifest";
 import { marketingManifest } from "./marketing/marketingManifest";
 import { strategyManifest } from "./strategy/strategyManifest";
-import { researchManifest } from "./research/researchManifest";
 import { financeManifest } from "./finance/financeManifest";
 
 /**
@@ -38,14 +37,13 @@ import { financeManifest } from "./finance/financeManifest";
  *   genuine dispatch, not because dispatchCowork's Marketing branch
  *   (still its own hardcoded branch, unchanged) ever calls
  *   findUnitManifest("Marketing") for Hat resolution itself.
- * - Strategy, Research & Intelligence, Finance -- each a single-Hat Unit,
- *   same thin-wrap shape: one declared action wrapping handleDirectRequest
- *   unchanged, plus that one approval-callback prefix
- *   (strategyhandoff/researchhandoff/quote respectively). handlePickup
- *   (Handoff-originated) stays entirely outside each manifest for all
- *   three -- its Handoff-specific context construction has no equivalent
- *   in handleDirectRequest's free-text Matter-token resolution, so
- *   folding it into the same declared action would be semantically
+ * - Strategy, Finance -- each a single-Hat Unit, same thin-wrap shape: one
+ *   declared action wrapping handleDirectRequest unchanged, plus that one
+ *   approval-callback prefix (strategyhandoff/quote respectively).
+ *   handlePickup (Handoff-originated) stays entirely outside each manifest
+ *   for both -- its Handoff-specific context construction has no
+ *   equivalent in handleDirectRequest's free-text Matter-token resolution,
+ *   so folding it into the same declared action would be semantically
  *   wrong, not just inconvenient. See each manifest's own doc comment.
  *
  * A Partial<Record<...>> lookup, not a total one, reflects that Creative
@@ -92,7 +90,6 @@ export function getUnitManifests(): Partial<Record<Unit, UnitManifest>> {
       Sales: salesManifest,
       Marketing: marketingManifest,
       Strategy: strategyManifest,
-      "Research & Intelligence": researchManifest,
       Finance: financeManifest,
     };
   }

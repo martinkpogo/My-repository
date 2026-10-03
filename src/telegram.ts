@@ -259,7 +259,7 @@ export async function editHatMessage(env: Env, target: HatMessageTarget, message
  * using the caller's own. A caller that instead used plain editHatMessage
  * (target.chatId) to edit a message sendWorkspaceHatMessage sent would
  * edit the WRONG chat whenever target.chatId differs from the Workspace
- * stream's chat -- confirmed live: a Strategy/R&I work item picked up via
+ * stream's chat -- confirmed live: a Strategy work item picked up via
  * a Unit's own "no prior session" discovery fallback (checkHandoffs.ts)
  * gets chatId set to Martin's DM, while its progress ack was actually
  * sent to the Workspace group via sendWorkspaceHatMessage -- every

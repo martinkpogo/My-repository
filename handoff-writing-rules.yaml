@@ -8,7 +8,7 @@
 # The runtime now enforces this rule in code, at a single point every
 # production Handoff write goes through: src/handoffWriter.ts's
 # createHandoff/updateHandoff. Every Unit that creates or updates a
-# Handoff (Sales, Strategy, Finance, Research & Intelligence, Marketing)
+# Handoff (Sales, Strategy, Finance, Marketing)
 # calls into that module rather than writing to the Handoffs database
 # directly -- it requires Entity_Token/Matter_Token, and rejects (fails
 # closed, never silently redacts) any protected field that contains a

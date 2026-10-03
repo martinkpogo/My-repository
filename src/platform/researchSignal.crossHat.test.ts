@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { businessDevelopmentManifest } from "../units/businessDevelopment/businessDevelopmentManifest";
 import { evaluateCandidates } from "../units/sales/leadGenerationDiscovery";
 import { getSkillContent } from "./skillRegistry";
-import type { WebSearchResult } from "../units/research/webSearch";
+import type { WebSearchResult } from "../runtime/research/webSearch";
 import type { Env } from "../types";
 
 /**

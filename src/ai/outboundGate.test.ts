@@ -175,7 +175,7 @@ test("Non-exempted TOKEN_SAFE_RUNTIME task still blocks a company-suffix name", 
 
 test("Every registered SemanticTaskId either has a resolved outbound policy or is deliberately absent (blocked)", () => {
   const allTaskIds = Object.keys(SEMANTIC_TASK_REGISTRY) as SemanticTaskId[];
-  assert.strictEqual(allTaskIds.length, 58);
+  assert.strictEqual(allTaskIds.length, 56);
   for (const id of allTaskIds) {
     const policy = PRODUCTION_OUTBOUND_POLICY[id];
     assert.ok(
@@ -250,7 +250,6 @@ test("Raw pre-tokenization Sales tasks and the routing classifiers are deliberat
   for (const id of [
     "routing.enquiry_classification",
     "routing.marketing_specialization_check",
-    "routing.research_specialization_check",
     "sales.matter_summary_drafting",
     "sales.call_prep_briefing",
     "sales.commercial_evidence_extraction",

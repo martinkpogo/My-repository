@@ -30,9 +30,9 @@ test("researchProtocolDetail includes only the requested protocols, not all six"
   assert.ok(!detail.includes("Market / Industry Research"));
 });
 
-// --- Core Structure v2.4: the six canonical Procedure contracts as the Package consumes them ---
+// --- the six canonical protocol definitions as the research executor consumes them ---
 
-test("every Procedure carries the canonical contract fields (id, name, purpose, method, evidenceRequirements, interpretationConstraints)", () => {
+test("every protocol carries the canonical contract fields (id, name, purpose, method, evidenceRequirements, interpretationConstraints)", () => {
   assert.strictEqual(RESEARCH_PROTOCOL_IDS.length, 6);
   for (const id of RESEARCH_PROTOCOL_IDS) {
     const procedure = RESEARCH_PROTOCOL_REGISTRY[id];
@@ -45,15 +45,15 @@ test("every Procedure carries the canonical contract fields (id, name, purpose, 
   }
 });
 
-test("Procedure definitions are declarative data only -- no executable member that could become a second execution mechanism", () => {
+test("protocol definitions are declarative data only -- no executable member that could become a second execution mechanism", () => {
   for (const id of RESEARCH_PROTOCOL_IDS) {
     for (const [field, value] of Object.entries(RESEARCH_PROTOCOL_REGISTRY[id])) {
-      assert.ok(typeof value !== "function", `Procedure ${id}.${field} must be declarative data, never executable`);
+      assert.ok(typeof value !== "function", `protocol ${id}.${field} must be declarative data, never executable`);
     }
   }
 });
 
-test("the canonical per-Procedure distinctions are present in the runtime representation", () => {
+test("the canonical per-protocol distinctions are present in the runtime representation", () => {
   const registry = RESEARCH_PROTOCOL_REGISTRY;
 
   // Business / Company Research: named organisation, material business evidence, authoritative sources.
@@ -80,11 +80,11 @@ test("the canonical per-Procedure distinctions are present in the runtime repres
   assert.ok(registry.environmental_regulatory.interpretationConstraints.some((c) => c.includes("jurisdiction and the time period")));
   assert.ok(registry.environmental_regulatory.interpretationConstraints.some((c) => c.includes("proposed, historical, and current")));
 
-  // Evidence & Source Validation: must not claim the Package's universal gate.
-  assert.ok(registry.evidence_validation.interpretationConstraints.some((c) => c.includes("does not replace the Package's universal Evidence & Source Validation gate")));
+  // Evidence & Source Validation: must not claim the research executor's universal gate.
+  assert.ok(registry.evidence_validation.interpretationConstraints.some((c) => c.includes("does not replace the research executor's universal Evidence & Source Validation gate")));
 });
 
-test("applicability/selection-relevant criteria are Procedure-owned data: only the three signal-bearing Procedures declare a signal, and only Market / Industry declares primary promotion", () => {
+test("applicability/selection-relevant criteria are protocol-owned data: only the three signal-bearing protocols declare a signal, and only Market / Industry declares primary promotion", () => {
   const withSignals = RESEARCH_PROTOCOL_IDS.filter((id) => (RESEARCH_PROTOCOL_REGISTRY[id].applicabilitySignals ?? []).length > 0);
   assert.deepStrictEqual(withSignals, ["market_industry", "competitive", "customer_audience"]);
 
@@ -92,7 +92,7 @@ test("applicability/selection-relevant criteria are Procedure-owned data: only t
   assert.deepStrictEqual(primary, ["market_industry"]);
 });
 
-test("the selection stage consumes Procedure purpose; the plan/synthesis stages consume method + evidence requirements + constraints", () => {
+test("the selection stage consumes protocol purpose; the plan/synthesis stages consume method + evidence requirements + constraints", () => {
   const summary = researchProtocolSummaryList();
   const detail = researchProtocolDetail(RESEARCH_PROTOCOL_IDS);
   for (const id of RESEARCH_PROTOCOL_IDS) {
@@ -106,9 +106,9 @@ test("the selection stage consumes Procedure purpose; the plan/synthesis stages 
   }
 });
 
-// --- Canonical Notion Procedure titles (Core Structure v2.4) ---
+// --- Canonical Notion protocol titles ---
 
-test("all six canonical Notion Procedure titles resolve to their Procedure ids", () => {
+test("all six canonical Notion protocol titles resolve to their protocol ids", () => {
   const canonicalTitles: Array<[string, ResearchProtocolId]> = [
     ["Business / Company Research", "business_company"],
     ["Market / Industry Research", "market_industry"],
@@ -121,8 +121,8 @@ test("all six canonical Notion Procedure titles resolve to their Procedure ids",
 
   for (const [title, id] of canonicalTitles) {
     assert.strictEqual(RESEARCH_PROTOCOL_REGISTRY[id].name, title, `runtime display name for ${id} must equal the canonical Notion title`);
-    assert.strictEqual(nameToProtocolId(title), id, `canonical Procedure title must resolve to its id: ${title}`);
+    assert.strictEqual(nameToProtocolId(title), id, `canonical protocol title must resolve to its id: ${title}`);
     assert.ok(researchProtocolSummaryList().includes(title), `selection summary must list the canonical title: ${title}`);
-    assert.ok(researchProtocolDetail([id]).includes(title), `Procedure detail must carry the canonical title: ${title}`);
+    assert.ok(researchProtocolDetail([id]).includes(title), `protocol detail must carry the canonical title: ${title}`);
   }
 });

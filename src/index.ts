@@ -14,7 +14,6 @@ import {
   checkStaleHandoffs,
   discoverPendingFinanceHandoffs,
   discoverPendingMarketingHandoffs,
-  discoverPendingResearchHandoffs,
   discoverPendingSalesHandoffs,
   discoverPendingStrategyHandoffs,
   maybeAutoContinueCheckHandoffs,
@@ -172,7 +171,6 @@ export default {
       try {
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForResearch = await discoverPendingResearchHandoffs(env);
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
         const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
@@ -181,7 +179,6 @@ export default {
             ok: true,
             handoffs_picked_up: picked,
             sales_handoffs_picked_up: pickedForSales,
-            research_handoffs_picked_up: pickedForResearch,
             marketing_handoffs_picked_up: pickedForMarketing,
             strategy_handoffs_picked_up: pickedForStrategy,
           }),
@@ -393,7 +390,6 @@ export default {
     try {
       await discoverPendingFinanceHandoffs(env);
       await discoverPendingSalesHandoffs(env);
-      await discoverPendingResearchHandoffs(env);
       await discoverPendingMarketingHandoffs(env);
       await discoverPendingStrategyHandoffs(env);
       await checkStaleHandoffs(env);

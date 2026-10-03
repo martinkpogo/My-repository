@@ -85,11 +85,11 @@ export interface Env {
   NOTION_WEBHOOK_SECRET?: string;
 
   /**
-   * Tavily search API key, used only by Research & Intelligence's live
-   * web-search capability (src/units/research/webSearch.ts). Optional --
-   * unset means R&I stays closed-book (reasons only over supplied
-   * context, same as before this capability existed) rather than
-   * failing; never a required secret for the rest of the runtime.
+   * Tavily search API key, used only by the runtime's live web-search
+   * mechanism (src/runtime/research/webSearch.ts). Optional -- unset means
+   * research stays closed-book (reasons only over supplied context)
+   * rather than failing; never a required secret for the rest of the
+   * runtime.
    */
   TAVILY_API_KEY?: string;
 
@@ -119,7 +119,6 @@ export type Unit =
   | "Business Development"
   | "Finance"
   | "Strategy"
-  | "Research & Intelligence"
   | "Creative & Design"
   | "Operations";
 
@@ -332,8 +331,6 @@ export interface WorkState {
     | "entity_redo_reason"
     | "marketing_feedback"
     | "marketing_clarification"
-    | "research_clarification"
-    | "research_feedback"
     | "strategy_clarification"
     | "strategy_feedback"
     | "strategy_refinement_reason"
@@ -411,7 +408,7 @@ export interface WorkState {
   matterName?: string;
   /**
    * The opaque Entity_Token (e.g. "E-20") this work item operates under.
-   * Units that operate on Handoffs only (Strategy, Finance, R&I) never
+   * Units that operate on Handoffs only (Strategy, Finance) never
    * learn a real Entity name at all, per the closed-context contract in
    * dataBoundary/policy.ts -- this is the identity they actually have, and
    * is what must be used in any Handoff field or Telegram message they
@@ -476,37 +473,11 @@ export interface WorkState {
   /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
   pendingPaidMediaAction?: { description: string };
 
-  /** The research question a R&I work item is answering -- carried across clarification/feedback loops. */
-  researchQuestion?: string;
-  /** Sanitized supplied context (from a Handoff's own record, or Martin's direct chat request). */
-  researchContext?: string;
-  /** Preserved per the protocol-selection execution record requirement -- which protocol(s) this work item activated. */
-  selectedResearchProtocols?: import("./units/research/protocols").ResearchProtocolId[];
-  /** The canonical Research-Safe Consultancy Context, cached per work item once retrieved+validated so it isn't re-fetched on every clarification/feedback turn. */
-  researchSafeContext?: string;
-  /** What the current research question means in relation to the authorized safe-context category -- re-derived whenever the question changes. */
-  researchRelevance?: string;
-  /** The Telegram message id of the "researching this now" acknowledgment, edited in place at each pipeline stage rather than sending a new message per stage. */
-  researchProgressMessageId?: number;
-  /**
-   * A proposed R&I -> consuming-Hat handoff, pending Martin's explicit
-   * approval before the Handoff record is created -- per Martin's
-   * request for a preview/approval gate rather than the fully automatic
-   * routing this originally shipped with.
-   */
-  pendingResearchHandoff?: {
-    unit: Unit;
-    hat: string;
-    reason: string;
-    handoffTitle: string;
-    verifiedFactsAndSources: string;
-  };
-
   /** The strategic question/business situation a Strategy work item is diagnosing -- carried across clarification/feedback loops. */
   strategyQuestion?: string;
   /** Sanitized supplied context (from a Handoff's own record) the diagnosis is grounded in. */
   strategyContext?: string;
-  /** The Telegram message id of the "diagnosing this now" acknowledgment, edited in place per stage -- mirrors researchProgressMessageId. */
+  /** The Telegram message id of the "diagnosing this now" acknowledgment, edited in place per stage. */
   strategyProgressMessageId?: number;
   /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
   strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
@@ -530,9 +501,8 @@ export interface WorkState {
   strategySpecialistSelectionUnavailable?: boolean;
   /**
    * A proposed Strategy -> another-Unit handoff, pending Martin's explicit
-   * approval before the Handoff record is created -- mirrors
-   * pendingResearchHandoff's own preview/approval gate exactly. A
-   * recommendation is never treated as authorization to route it onward.
+   * approval before the Handoff record is created (a preview/approval
+   * gate). A recommendation is never treated as authorization to route it onward.
    */
   pendingStrategyHandoff?: {
     unit: Unit;
@@ -563,7 +533,7 @@ export interface WorkState {
   /**
    * A proposed BD -> Sales/Strategy opportunity handoff, pending Martin's
    * explicit approval before the Handoff record is created -- mirrors
-   * pendingResearchHandoff/pendingStrategyHandoff's own preview/approval
+   * pendingStrategyHandoff's own preview/approval
    * gate exactly (see handleBDOpportunityHandoffApproval). A recommendation
    * is never treated as authorization to route it onward.
    */

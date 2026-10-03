@@ -58,12 +58,10 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "chat.data_lookup": "business_sensitive",
   "marketing.intake_classification": "business_sensitive",
   "marketing.hat_action_decision": "business_sensitive",
-  "routing.research_specialization_check": "business_sensitive",
   "research.context_relevance": "business_sensitive",
   "research.protocol_selection": "business_sensitive",
   "research.plan_generation": "business_sensitive",
   "research.synthesis": "business_sensitive",
-  "research.handoff_routing": "business_sensitive",
   "sales.enquiry_extraction": "pii_restricted",
   "sales.matter_summary_drafting": "client_confidential",
   "sales.call_prep_briefing": "client_confidential",
@@ -165,7 +163,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // organizes and interprets evidence Martin actually supplies, never
   // manufactures sources or external findings, and never implies
   // external research was performed. Whether to give BD real research
-  // capability (its own, or a governed transition to R&I) is a separate,
+  // capability (its own, or a governed transition to the research runtime) is a separate,
   // undecided architectural question -- not resolved by this
   // classification.
   "business_development.research_opportunity": "business_sensitive",
@@ -294,11 +292,10 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
  * (see above) and stay unresolved under this rule for exactly that
  * reason, matching the Sales Executive pause itself. Only
  * marketing.intake_classification, marketing.hat_action_decision,
- * finance.quote_judgment, and the routing.research_specialization_check /
- * research.protocol_selection / research.synthesis trio (all
- * business_sensitive -- R&I operates on Entity_Token/Matter_Token and
- * Martin's own direct chat requests, never a real client name) are
- * actually eligible today.
+ * finance.quote_judgment, and the research.protocol_selection /
+ * research.synthesis pair (all business_sensitive -- the research
+ * runtime operates on already-sanitized supplied context, never a real
+ * client name) are actually eligible today.
  */
 /**
  * The free-tier OpenAI-compatible fallback providers (nvidia-nim, groq,
@@ -399,11 +396,11 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * prompt (only state.proposalDraft and Martin's feedback text).
  *
  * research.context_relevance / research.protocol_selection /
- * research.plan_generation / research.synthesis / research.handoff_routing:
- * R&I operates on Entity_Token/Matter_Token, Martin's own direct chat
+ * research.plan_generation / research.synthesis: the research runtime
+ * operates on Entity_Token/Matter_Token, Martin's own direct chat
  * requests, or already-sanitized supplied context -- never a real client
  * identity (no existing governance rule requires otherwise for any of the
- * five).
+ * four).
  *
  * lead.discovery_classification: leadDiscovery.ts's own
  * redactSignalForClassification strips the discovered name/contact before
@@ -496,16 +493,15 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * lifted.
  *
  * -- Deliberately unresolved (no entry below; the gate blocks these) --
- * routing.enquiry_classification / routing.marketing_specialization_check /
- * routing.research_specialization_check: each sends the raw,
- * not-yet-classified incoming Workspace message text -- exactly the text
+ * routing.enquiry_classification / routing.marketing_specialization_check:
+ * each sends the raw, not-yet-classified incoming Workspace message text -- exactly the text
  * that, when it IS a client enquiry (the case these classifiers exist to
  * detect), is expected to describe the prospect's business/situation and
  * may well name it. Workspace Chat/Cowork mode routing and responsibility
  * resolution no longer use an AI classifier at all (see workspaceRouter.ts
  * -- mode is Martin's own explicit choice and responsibility resolution is
  * deterministic structural matching against the finite Unit/Hat registry),
- * so these three classifiers are unreachable in production for the same
+ * so these two classifiers are unreachable in production for the same
  * reason they always were: client_confidential has no eligible provider in
  * PRODUCTION_PROVIDER_ELIGIBILITY above. This is a deliberate, existing
  * governance boundary, not a defect introduced here -- left genuinely
@@ -559,7 +555,6 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "research.protocol_selection": "TOKEN_SAFE_RUNTIME",
   "research.plan_generation": "TOKEN_SAFE_RUNTIME",
   "research.synthesis": "TOKEN_SAFE_RUNTIME",
-  "research.handoff_routing": "TOKEN_SAFE_RUNTIME",
   "sales.proposal_drafting": "TOKEN_SAFE_RUNTIME",
   "sales.proposal_revision": "TOKEN_SAFE_RUNTIME",
   "sales.commercial_evidence_extraction_handoff": "TOKEN_SAFE_RUNTIME",

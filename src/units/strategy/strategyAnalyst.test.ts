@@ -1488,19 +1488,20 @@ test("Strategy -> downstream: a failed Handoff creation must not invoke the /che
   }
 });
 
-test("R&I evidence/research boundary preserved -- Strategy routes missing-evidence work to R&I rather than inventing it", async (t) => {
+test("Missing-evidence work is NOT routed anywhere: a 'research' target resolves to no route, so the diagnosis stays blocked rather than reaching a retired Unit", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
+  // Research & Intelligence is retired and no owning Action/runtime path has
+  // been designed for evidence recovery. Even if a (misbehaving) classifier
+  // returned "research", it is not a key in HANDOFF_ROUTES, so nothing is
+  // proposed and no Handoff is ever created.
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "research", reason: "Regional logistics capacity evidence needed." });
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state);
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Research & Intelligence");
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.hat, "Research & Intelligence Analyst");
 
-  await handleStrategyHandoffApproval(env, afterPickup, true);
-  const props = log.handoffCreateBody.properties;
-  assert.match(props["Required Next Action"].rich_text[0].text.content, /[Gg]ather.*validate/);
+  assert.strictEqual(afterPickup.pendingStrategyHandoff, undefined, "no downstream Handoff may be proposed for a missing-evidence diagnosis");
+  assert.strictEqual(log.handoffCreateBody, null, "and none may be written");
 });
 
 test("39. The generic downstream classifier can never route to Finance -- Finance is reachable only via the Approve gate", async (t) => {

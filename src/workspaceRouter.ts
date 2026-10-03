@@ -47,27 +47,12 @@ const VALID_UNITS: Unit[] = [
   "Business Development",
   "Finance",
   "Strategy",
-  "Research & Intelligence",
   "Creative & Design",
   "Operations",
 ];
 
-/**
- * Small, explicit, finite alias table for well-established abbreviations
- * already used throughout this codebase's own examples and prompts (e.g.
- * "R&I, what does this market look like?"). Deliberately NOT a fuzzy/
- * similarity matcher -- each entry is an exact alternate spelling for one
- * specific, uniquely-identifiable registered Unit, added only where no
- * other registered name could reasonably match it. This is the entire
- * "conservative near-match" surface this module supports; nothing else is
- * treated as a near-match.
- */
-const UNIT_ALIASES: Record<string, Unit> = {
-  "R&I": "Research & Intelligence",
-};
-
 const CLARIFICATION_QUESTION =
-  "Who should own this work? Name the Unit or Hat (e.g. Sales, Strategy, Finance, Marketing, Research & Intelligence).";
+  "Who should own this work? Name the Unit or Hat (e.g. Sales, Strategy, Finance, Marketing).";
 
 interface Addressee {
   name: string;
@@ -79,8 +64,7 @@ interface Addressee {
 function buildAddresseeCandidates(): Addressee[] {
   const hatEntries: Addressee[] = ALL_HATS.map((h) => ({ name: h.name, unit: h.unit as Unit, hat: h.name }));
   const unitEntries: Addressee[] = VALID_UNITS.map((u) => ({ name: u, unit: u }));
-  const aliasEntries: Addressee[] = Object.entries(UNIT_ALIASES).map(([alias, unit]) => ({ name: alias, unit }));
-  return [...hatEntries, ...unitEntries, ...aliasEntries].sort((a, b) => b.name.length - a.name.length);
+  return [...hatEntries, ...unitEntries].sort((a, b) => b.name.length - a.name.length);
 }
 
 /**
@@ -104,8 +88,7 @@ function matchesAddressPrefix(text: string, name: string): boolean {
 
 /**
  * Deterministic structural matching only -- exact registered Hat/Unit
- * names and the small explicit alias table above, matched as a leading
- * vocative address. Returns null on no match (never guesses); the caller
+ * names, matched as a leading vocative address. Returns null on no match (never guesses); the caller
  * treats null as "no explicit addressee," which routes to clarification,
  * never to invented ownership.
  */

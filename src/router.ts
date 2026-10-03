@@ -271,7 +271,7 @@ export async function dispatchCowork(
 
   // Unit Registry manifest dispatch (ENIG Operating Model, "The Unit
   // Registry") -- the ONE generic path, not a per-Unit branch: Sales
-  // (including Lead Discovery), Finance, Strategy, Research & Intelligence
+  // (including Lead Discovery), Finance, Strategy
   // and Business Development all resolve Organization + Action statelessly
   // through resolveUnitRequest here, exactly as they did through their
   // former hardcoded branches/Stage 2 classification, and enter the same

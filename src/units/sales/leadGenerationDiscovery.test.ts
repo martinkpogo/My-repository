@@ -93,10 +93,10 @@ test("DISCOVERY_QUERIES targets observable business situations without presuppos
 
 test("runAutonomousLeadDiscovery does nothing when web search isn't configured -- never fabricates a run", async () => {
   const summary = await runAutonomousLeadDiscovery(fakeEnv());
-  assert.deepStrictEqual(summary, { evaluated: 0, handoffsCreated: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 });
+  assert.deepStrictEqual(summary, { evaluated: 0, heldNoResearchPath: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 });
 });
 
-test("Test A: Candidate signal passes lightweight screening -> no governed write, because no Action authorizes the R&I Handoff create", async (t) => {
+test("Test A: Candidate signal passes lightweight screening -> held; no Handoff and no Lead is created", async (t) => {
   const originalFetch = globalThis.fetch;
   let handoffsCreatedCount = 0;
   let leadsCreatedCount = 0;
@@ -138,17 +138,12 @@ test("Test A: Candidate signal passes lightweight screening -> no governed write
 
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
 
-  // PENDING ARCHITECT DECISION. The R&I Work Handoff is not created, because
-  // creating it is a governed write to Handoffs and `discover_leads` is a
-  // `read` Action that cannot authorize one -- see access.ts's
-  // consequencePermits. Whether a Pending internal research Handoff is a
-  // privileged effect (gated, like Strategy's commit_diagnosis) or ordinary
-  // operational bookkeeping (ungated) is a governance question this change
-  // deliberately does not answer. Until an Action authorizing it is
-  // registered, the write is refused.
+  // The step that used to follow screening (a Handoff to the retired
+  // Research & Intelligence Unit) no longer exists and no replacement has
+  // been designed, so a passing candidate is HELD: counted, never routed.
   assert.strictEqual(leadsCreatedCount, 0, "no Lead may be created immediately upon lightweight screening alone");
-  assert.strictEqual(handoffsCreatedCount, 0, "the R&I Work Handoff create is refused while no Action authorizes it");
-  assert.strictEqual(summary.handoffsCreated, 0);
+  assert.strictEqual(handoffsCreatedCount, 0, "no Handoff is created for a screened candidate");
+  assert.ok(summary.evaluated > 0 && summary.heldNoResearchPath === summary.evaluated, "every candidate that passed screening is held");
 });
 
 const UNSUPPORTED_EVALUATION = JSON.stringify({
@@ -221,49 +216,21 @@ function installDiscoveryRun(t: any, evaluation: string) {
   return { created, createBodies, activityEntries };
 }
 
-test("LGS: a candidate passing lightweight screening creates NO R&I Handoff and NO Lead -- the governed create is refused, and the refusal is recorded rather than swallowed", async (t) => {
+test("LGS: a candidate passing lightweight screening is HELD -- no Handoff, no Lead, and no Blocker (nothing was refused; there is simply no research path to route to)", async (t) => {
   const { created, activityEntries } = installDiscoveryRun(t, PASS_EVALUATION);
 
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
 
-  // PENDING ARCHITECT DECISION (unchanged): the R&I Work Handoff this candidate
-  // is meant to produce is NOT created. `discover_leads` is a `read` Action and
-  // the scheduled loop runs outside any Work item, so no registered Action
-  // authorizes a governed create here -- see access.ts's consequencePermits.
-  // Whether a Pending internal research Handoff is a privileged effect (gated,
-  // like Strategy's commit_diagnosis) or ordinary bookkeeping (ungated) is a
-  // governance question this change does not answer. Until an Action
-  // authorizing it exists, the write is refused.
-  assert.strictEqual(created.handoffs, 0, "no Handoff may be created with no Action of record behind it");
+  assert.strictEqual(created.handoffs, 0, "no Handoff may be created: Research & Intelligence is not a destination and no replacement exists");
   assert.strictEqual(created.leads, 0, "and certainly no Lead -- lightweight screening alone never creates one");
-  assert.strictEqual(summary.handoffsCreated, 0, "the run summary must not claim a Handoff it did not create");
-  assert.ok(summary.evaluated > 0, "the candidate really was evaluated, so the refusal is a decision rather than a no-op");
-
-  // The refusal must be SURFACED, not silently swallowed. A governed write that
-  // fails closed and is then forgotten is indistinguishable, to Martin, from a
-  // run that found nothing -- which is the specific failure mode fail-closed
-  // access is supposed to make impossible to hide. So the run records a Blocker
-  // against the Activity Log, the durable Kernel-owned channel.
-  const blockers = activityEntries.filter((p) => p?.Type?.select?.name === "Blocker" && p?.Outcome?.select?.name === "Blocked");
-  assert.ok(blockers.length > 0, "a refused governed create must record a Blocker, or the refusal is invisible to Martin");
+  assert.ok(summary.evaluated > 0, "the candidate really was evaluated");
+  assert.strictEqual(summary.heldNoResearchPath, summary.evaluated, "every candidate that passed screening is held, and the summary says so");
+  assert.strictEqual(summary.pendingApproval, 0, "nothing is presented to Martin: no evidence-backed validation step exists to produce a finding");
   assert.strictEqual(
-    blockers.length,
-    summary.evaluated,
-    "every candidate whose Handoff create was refused must leave exactly one Blocker behind -- none swallowed, none double-counted",
+    activityEntries.filter((p) => p?.Type?.select?.name === "Blocker").length,
+    0,
+    "holding a candidate is not a refused governed write, so it must not be logged as a Blocker",
   );
-
-  for (const blocker of blockers) {
-    const entry = blocker.Entry.title[0].text.content;
-    const rationale = blocker["Decision Rationale"].rich_text[0].text.content;
-    assert.match(entry, /handoff creation blocked/i, `the Blocker must say what was blocked: ${entry}`);
-    assert.match(rationale, /HANDOFFS_DATA_SOURCE_ID/, "the Blocker must name the governed write that was refused, so the missing authorization is identifiable");
-    // The Access verdict is carried verbatim rather than summarized, so the
-    // reason is diagnosable from the record alone -- without a log tail, and
-    // without re-running anything. It also names the context that lacked the
-    // authority, which is the whole substance of the pending decision.
-    assert.match(rationale, /Access denied/, `the recorded reason must be the Access verdict, not a paraphrase: ${rationale}`);
-    assert.match(rationale, /discovery_cron/, `the Blocker must identify which context was refused: ${rationale}`);
-  }
 });
 
 test("LGS: an unsupported diagnosis is screened out before any governed write -- no Handoff, no Lead, and nothing identity-bearing reaches Notion", async (t) => {
@@ -275,15 +242,13 @@ test("LGS: an unsupported diagnosis is screened out before any governed write --
   assert.strictEqual(summary.screenedOut, summary.evaluated, "an unsupported diagnosis is screened out, not escalated");
   assert.strictEqual(created.handoffs, 0, "no Handoff for a candidate whose diagnosis is only a hypothesis");
   assert.strictEqual(created.leads, 0, "and no Lead");
-  assert.strictEqual(summary.handoffsCreated, 0);
+  assert.strictEqual(summary.heldNoResearchPath, 0);
 
-  // The withheld capability in the original spec note was that the R&I Handoff
-  // "carries only the opaque E-UNBOUND/M-UNBOUND tokens". With no Handoff
-  // created, that property is asserted where it can still be checked
-  // end-to-end: on the wire. Nothing this run wrote anywhere in Notion may
+  // With no Handoff created, the identity boundary is asserted where it can
+  // be checked end-to-end: on the wire. Nothing this run wrote anywhere in Notion may
   // carry a real Entity or Matter identity -- no name, no relation, no contact
   // detail. The only tokens it is even capable of writing are the opaque
-  // placeholders, and a candidate that never becomes a Handoff must not be
+  // placeholders, and a candidate that is never routed must not be
   // smuggled into some other record on the way past.
   const identityKeys = ["entityName", "matterName", "Entity", "Matter", "email", "phone", "contact"];
   for (const body of createBodies) {
@@ -305,142 +270,7 @@ test("LGS: an unsupported diagnosis is screened out before any governed write --
   );
 });
 
-test("Test B: Completed R&I research with insufficient evidence -> no Lead created, no opportunity presented", async (t) => {
-  const originalFetch = globalThis.fetch;
-  let leadsCreatedCount = 0;
-
-  globalThis.fetch = (async (url: string, init: any) => {
-    const method = init?.method ?? "GET";
-    if (url.includes("api.tavily.com")) {
-      return new Response(JSON.stringify({ results: [] }), { status: 200 });
-    }
-    if (url.includes("/blocks/")) {
-      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
-    }
-    if (url.includes("handoffs-ds") && method === "POST" && url.endsWith("/query")) {
-      return new Response(
-        JSON.stringify({
-          results: [
-            {
-              id: "h1",
-              properties: {
-                "From Unit": { select: { name: "Sales" } },
-                "From Hat": { rich_text: [{ plain_text: "Lead Generation Specialist" }] },
-                "To Unit": { select: { name: "Research & Intelligence" } },
-                Status: { select: { name: "Closed" } },
-                Reason: { rich_text: [{ plain_text: "LGS Autonomous Lead Discovery: research request" }] },
-                "Verified Facts & Sources": { rich_text: [{ plain_text: "Candidate Organisation: Beta LLC\nSource URL: https://example.com/beta" }] },
-                "Work Completed": { rich_text: [{ plain_text: JSON.stringify({ findings: [], implications: [], limitations: [{ statement: "Insufficient evidence" }] }) }] },
-              },
-            },
-          ],
-        }),
-        { status: 200 },
-      );
-    }
-    if (url.includes("/pages") && method === "POST") {
-      const body = JSON.parse(init.body ?? "{}");
-      if (body.parent?.data_source_id === "leads-ds") {
-        leadsCreatedCount++;
-      }
-      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
-    }
-    // AI evaluation returns pass: false for insufficient research
-    return new Response(
-      JSON.stringify({ choices: [{ message: { content: JSON.stringify({ pass: false, organisation: "Beta LLC", evidence: "", reason: "Insufficient evidence" }) } }] }),
-      { status: 200 },
-    );
-  }) as typeof fetch;
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
-
-  assert.strictEqual(leadsCreatedCount, 0, "no Lead should be created when research evidence is insufficient");
-  assert.strictEqual(summary.pendingApproval, 0, "no opportunity should be presented when research evidence is insufficient");
-});
-
-test("Test C: Completed R&I research satisfying Acquisition Criteria -> opportunity presented for approval, no Lead created directly", async (t) => {
-  const originalFetch = globalThis.fetch;
-  let leadsCreatedCount = 0;
-
-  globalThis.fetch = (async (url: string, init: any) => {
-    const method = init?.method ?? "GET";
-    if (url.includes("api.tavily.com")) {
-      return new Response(JSON.stringify({ results: [] }), { status: 200 });
-    }
-    if (url.includes("/blocks/")) {
-      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
-    }
-    if (url.includes("handoffs-ds") && method === "POST" && url.endsWith("/query")) {
-      return new Response(
-        JSON.stringify({
-          results: [
-            {
-              id: "h2",
-              properties: {
-                "From Unit": { select: { name: "Sales" } },
-                "From Hat": { rich_text: [{ plain_text: "Lead Generation Specialist" }] },
-                "To Unit": { select: { name: "Research & Intelligence" } },
-                Status: { select: { name: "Closed" } },
-                Reason: { rich_text: [{ plain_text: "LGS Autonomous Lead Discovery: research request" }] },
-                "Verified Facts & Sources": { rich_text: [{ plain_text: "Candidate Organisation: Gamma Inc\nSource URL: https://example.com/gamma\nCategory: positioning" }] },
-                "Work Completed": { rich_text: [{ plain_text: JSON.stringify({ findings: [{ statement: "Gamma Inc expanded into EU market with unaligned messaging" }] }) }] },
-              },
-            },
-          ],
-        }),
-        { status: 200 },
-      );
-    }
-    if (url.includes("leads-ds") && method === "POST" && url.endsWith("/query")) {
-      return new Response(JSON.stringify({ results: [] }), { status: 200 });
-    }
-    if (url.includes("/pages") && method === "POST") {
-      const body = JSON.parse(init.body);
-      if (body.parent?.data_source_id === "leads-ds") {
-        leadsCreatedCount++;
-      }
-      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
-    }
-    return new Response(
-      JSON.stringify({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                pass: true,
-                organisation: "Gamma Inc",
-                evidence: "Attributable market expansion evidence with positioning gap",
-                reason: "Acquisition criteria satisfied by evidence.",
-              }),
-            },
-          },
-        ],
-      }),
-      { status: 200 },
-    );
-  }) as typeof fetch;
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  const { workSession, calls } = createMockWorkSession();
-  const summary = await runAutonomousLeadDiscovery(
-    fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key", WORK_SESSION: workSession as any }),
-  );
-
-  assert.strictEqual(leadsCreatedCount, 0, "scheduled discovery must NEVER create a Lead directly -- only Martin's approval may");
-  assert.strictEqual(summary.pendingApproval, 1, "exactly one opportunity should be presented for approval");
-  assert.strictEqual(calls.init.length, 1, "a fresh WorkSession should be created to hold the pending approval");
-  assert.strictEqual(calls.proposeLeadOpportunity.length, 1, "the opportunity should be presented to Martin");
-  const [opportunity] = calls.proposeLeadOpportunity[0];
-  assert.strictEqual(opportunity.organisation, "Gamma Inc");
-  assert.strictEqual(opportunity.evidence, "Attributable market expansion evidence with positioning gap");
-});
-
-test("Test D & G: Unsupported diagnosis/hypothesis does not become an asserted fact; its Handoff write is refused pending an Architect decision", async (t) => {
+test("Test D & G: A passing candidate is held with no Handoff written -- its unvalidated diagnosis is never asserted as a fact", async (t) => {
   const originalFetch = globalThis.fetch;
   let createdHandoffBody: any;
 
@@ -476,61 +306,9 @@ test("Test D & G: Unsupported diagnosis/hypothesis does not become an asserted f
 
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
 
-  // The screening still happens and still passes -- what is refused is the
-  // governed write, not the analysis. PENDING ARCHITECT DECISION, as in Test A.
-  assert.ok(summary.evaluated >= 1, "the candidate is still evaluated; only the write is refused");
-  assert.strictEqual(createdHandoffBody, undefined, "the R&I Work Handoff create is refused while no Action authorizes it");
-  assert.strictEqual(summary.handoffsCreated, 0);
-});
-
-test("Test E & F: Repeated execution idempotency & unrelated closed R&I Handoff ignored", async (t) => {
-  const originalFetch = globalThis.fetch;
-  let leadsCreatedCount = 0;
-
-  globalThis.fetch = (async (url: string, init: any) => {
-    const method = init?.method ?? "GET";
-    if (url.includes("api.tavily.com")) {
-      return new Response(JSON.stringify({ results: [] }), { status: 200 });
-    }
-    if (url.includes("/blocks/")) {
-      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
-    }
-    if (url.includes("handoffs-ds") && method === "POST" && url.endsWith("/query")) {
-      return new Response(
-        JSON.stringify({
-          results: [
-            // Unrelated closed R&I handoff (From Hat: Marketing Strategist or missing LGS origin marker)
-            {
-              id: "unrelated-1",
-              properties: {
-                "From Unit": { select: { name: "Marketing" } },
-                "From Hat": { rich_text: [{ plain_text: "Marketing Strategist" }] },
-                "To Unit": { select: { name: "Research & Intelligence" } },
-                Status: { select: { name: "Closed" } },
-                Reason: { rich_text: [{ plain_text: "Unrelated marketing request" }] },
-                "Verified Facts & Sources": { rich_text: [{ plain_text: "Candidate Organisation: Epsilon Corp" }] },
-                "Work Completed": { rich_text: [{ plain_text: JSON.stringify({ findings: [{ statement: "Epsilon research" }] }) }] },
-              },
-            },
-          ],
-        }),
-        { status: 200 },
-      );
-    }
-    if (url.includes("/pages") && method === "POST") {
-      leadsCreatedCount++;
-      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ choices: [{ message: { content: PASS_EVALUATION } }] }), { status: 200 });
-  }) as typeof fetch;
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
-
-  assert.strictEqual(summary.pendingApproval, 0);
-  assert.strictEqual(leadsCreatedCount, 0, "unrelated closed R&I handoff must NOT be consumed by LGS");
+  // Screening still runs and still passes; nothing is routed onward.
+  assert.strictEqual(createdHandoffBody, undefined, "no Handoff is written for a held candidate");
+  assert.ok(summary.heldNoResearchPath >= 1, "the candidate is held, not dropped silently");
 });
 
 test("runAutonomousLeadDiscovery never creates a Lead from an inconsistent AI 'pass' with no organisation/evidence -- fails closed on the evidence-threshold gate itself", async (t) => {
@@ -611,7 +389,7 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
   const env = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" });
   const success = await notifyDiscoveryRunSummary(env, 1, undefined, {
     evaluated: 12,
-    handoffsCreated: 1,
+    heldNoResearchPath: 1,
     pendingApproval: 1,
     screenedOut: 9,
     skippedAsDuplicate: 1,
@@ -637,7 +415,7 @@ test("notifyDiscoveryRunSummary catches Telegram errors gracefully without throw
 
   const success = await notifyDiscoveryRunSummary(fakeEnv(), 12345, undefined, {
     evaluated: 5,
-    handoffsCreated: 1,
+    heldNoResearchPath: 1,
     pendingApproval: 0,
     screenedOut: 4,
     skippedAsDuplicate: 0,
@@ -675,7 +453,7 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
 
   const success1 = await notifyDiscoveryRunSummary(fakeEnv(), NaN, undefined, {
     evaluated: 1,
-    handoffsCreated: 0,
+    heldNoResearchPath: 0,
     pendingApproval: 0,
     screenedOut: 1,
     skippedAsDuplicate: 0,
@@ -685,7 +463,7 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
 
   const success2 = await notifyDiscoveryRunSummary(fakeEnv(), 0, undefined, {
     evaluated: 1,
-    handoffsCreated: 0,
+    heldNoResearchPath: 0,
     pendingApproval: 0,
     screenedOut: 1,
     skippedAsDuplicate: 0,
@@ -1116,7 +894,7 @@ test("LeadOpportunityDiscoveryCapability ignores messages that aren't discovery 
   assert.strictEqual(handled, false);
 });
 
-test("LeadOpportunityDiscoveryCapability generates a search strategy and creates R&I Handoffs for promising signals, never a Lead directly", async (t) => {
+test("LeadOpportunityDiscoveryCapability generates a search strategy and holds promising signals -- no Handoff, never a Lead directly", async (t) => {
   const originalFetch = globalThis.fetch;
   let ackText = "";
   let handoffsCreatedCount = 0;
@@ -1188,9 +966,8 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and creates
   assert.strictEqual(handled, true);
   assert.ok(ackText.includes("Searching for organisations"));
   assert.ok(ackText.includes("positioning problem"));
-  // PENDING ARCHITECT DECISION, as in Test A: the R&I Handoff create is refused
-  // under `discover_leads`, so the queries run and no Handoff is produced.
-  assert.strictEqual(handoffsCreatedCount, 0, "the R&I Handoff create is refused while no Action authorizes it");
+  assert.ok(!ackText.includes("Research & Intelligence"), "the acknowledgement must not promise routing to a retired Unit");
+  assert.strictEqual(handoffsCreatedCount, 0, "promising signals are held; no Handoff is produced");
   assert.strictEqual(leadsCreatedCount, 0, "on-demand discovery must never create a Lead directly");
 });
 

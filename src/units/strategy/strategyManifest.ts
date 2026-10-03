@@ -105,8 +105,7 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     responsibility: "own_strategic_diagnosis",
     consequence: "write",
     requiresApproval: false,
-    // Structural entry, exactly like Finance's `price` and R&I's
-    // `research`: Strategy's entry Action is resolved from the Work's
+    // Structural entry, exactly like Finance's `price`: Strategy's entry Action is resolved from the Work's
     // origin (a direct request or a Handoff addressed to this Unit) --
     // the former dispatchCowork Strategy branch hardcoded the same name.
     applicability: {

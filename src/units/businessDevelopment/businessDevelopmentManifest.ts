@@ -139,7 +139,7 @@ const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
 
 /**
  * Every Business Development Action is INTERPRETATION-DRIVEN, unlike the
- * structural entry rules Finance/R&I/Strategy/Sales/Marketing declare:
+ * structural entry rules Finance/Strategy/Sales/Marketing declare:
  * this Unit's three Hats each declare several entry Actions with the same
  * Responsibility, so the Work's origin cannot distinguish them -- only what
  * the requester actually asked for can. That is expressed declaratively
@@ -214,7 +214,7 @@ async function discoverOpportunity(env: Env, text: string): Promise<string> {
  * Real evidence-organization reasoning for research_opportunity, per the
  * Hat Definition's own Output contract (Notion): "evidence-backed
  * findings, implications for ENIG, limitations, and sources." BD has no
- * live web-search/external-research capability wired up (unlike R&I or
+ * live web-search/external-research capability wired up (unlike
  * Lead Discovery) -- this organizes and draws implications only from
  * what Martin has actually supplied in the request, never fabricating
  * facts, statistics, or claims not present in the input. Anything not
@@ -398,7 +398,7 @@ async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string
 
 /**
  * Proposes (never auto-creates) a BD -> Sales/Strategy opportunity
- * handoff -- mirrors Strategy's routeToUnit / R&I's routeToConsumingHat
+ * handoff -- mirrors Strategy's routeToUnit
  * exactly: build a preview into pendingBDHandoff, present Telegram
  * approve/reject buttons, and only create the Handoff in
  * handleBDHandoffApproval once Martin approves. No SemanticTaskId or
@@ -444,7 +444,7 @@ async function proposeBDHandoff(env: Env, state: WorkState, targetUnit: Unit, ta
 
 /**
  * Resolves handoff_to_sales/handoff_to_strategy's approve/reject callback
- * -- mirrors handleStrategyHandoffApproval/handleResearchHandoffApproval
+ * -- mirrors handleStrategyHandoffApproval
  * exactly. Pre-Entity, same as Lead Discovery's own pre-Entity Handoffs
  * (leadGenerationDiscovery.ts): BD never resolves a real Entity/Matter,
  * so this uses the same "E-UNBOUND"/"M-UNBOUND" placeholder tokens

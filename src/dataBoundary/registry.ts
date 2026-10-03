@@ -37,11 +37,6 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Marketing Hat Action Decision",
     description: "Determines whether to draft, route, or clarify within a Marketing Hat.",
   },
-  "routing.research_specialization_check": {
-    id: "routing.research_specialization_check",
-    name: "Routing Research Specialization Check",
-    description: "Checks if a request is a genuine Research & Intelligence research question, as opposed to general chat, when no dedicated topic already signals which.",
-  },
   "research.context_relevance": {
     id: "research.context_relevance",
     name: "Research Context Relevance",
@@ -50,7 +45,7 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
   "research.protocol_selection": {
     id: "research.protocol_selection",
     name: "Research Protocol Selection",
-    description: "Identifies which R&I research protocol(s) a research question requires, or surfaces ambiguity rather than guessing.",
+    description: "Identifies which research protocol(s) a research question requires, or surfaces ambiguity rather than guessing.",
   },
   "research.plan_generation": {
     id: "research.plan_generation",
@@ -61,11 +56,6 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     id: "research.synthesis",
     name: "Research Synthesis",
     description: "Executes the selected research protocol(s) and synthesizes source-linked evidence into Evidence/Finding/Implication/Limitation output.",
-  },
-  "research.handoff_routing": {
-    id: "research.handoff_routing",
-    name: "Research Handoff Routing",
-    description: "Decides whether completed research should be automatically handed off to another Unit's Hat as direct input to its own work.",
   },
   "sales.enquiry_extraction": {
     id: "sales.enquiry_extraction",
@@ -130,7 +120,7 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     id: "strategy.handoff_routing",
     name: "Strategy Handoff Routing",
     description:
-      "Decides whether a completed Strategy diagnosis should be handed off to another Unit (Research & Intelligence, Marketing, Sales, or Finance) as its next responsibility, per the Strategy Analyst Hat Definition's own handoff_rules -- never guesses when the destination is unclear.",
+      "Decides whether a completed Strategy diagnosis should be handed off to another Unit (Marketing, Sales, or Finance) as its next responsibility, per the Strategy Analyst Hat Definition's own handoff_rules -- never guesses when the destination is unclear.",
   },
   "strategy.proposal_drafting": {
     id: "strategy.proposal_drafting",

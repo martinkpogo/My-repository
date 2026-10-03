@@ -89,8 +89,8 @@ test("editHatMessage re-applies the same Hat label an edited bubble started with
   }) as typeof fetch;
 
   try {
-    await editHatMessage(fakeEnv, { chatId: 1, hat: "Research & Intelligence Analyst" }, 4242, "Gathering evidence...");
-    assert.strictEqual(calledBody.text, "Hat: Research & Intelligence Analyst.\n\nGathering evidence...");
+    await editHatMessage(fakeEnv, { chatId: 1, hat: "Strategy Analyst" }, 4242, "Gathering evidence...");
+    assert.strictEqual(calledBody.text, "Hat: Strategy Analyst.\n\nGathering evidence...");
   } finally {
     globalThis.fetch = originalFetch;
   }
