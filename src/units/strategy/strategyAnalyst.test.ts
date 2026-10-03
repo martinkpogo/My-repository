@@ -701,6 +701,28 @@ test("7. Held case can explicitly return to Pending", async (t) => {
   assert.match(patch.properties["Verified Facts & Sources"].rich_text[0].text.content, /delivery, not pricing/);
 });
 
+test("7b. A clarification whose combined context exceeds 1,900 characters is stored completely -- Martin's added evidence is never truncated off the end", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Held" });
+  const env = fakeEnv();
+  const original = `Original context. ${"Established client facts. ".repeat(140)}`; // ~3,700 chars, well past the old 1,900 cut
+  assert.ok(original.length > 3000);
+  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: original });
+  const detail = "ADDED EVIDENCE: the delivery delays began after the warehouse consolidation in Q2, per the operations lead.";
+
+  const result = await handleStrategyClarification(env, state, detail);
+
+  assert.strictEqual(result.stage, "strategy_retry_queued");
+  const patch = lastHandoffPatch(log);
+  assert.strictEqual(patch.properties.Status.select.name, "Pending", "the Handoff is still returned to Pending for re-pickup");
+  const items = patch.properties["Verified Facts & Sources"].rich_text;
+  assert.ok(items.length > 1, "content past one 2,000-char rich-text item is chunked, not cut");
+  for (const item of items) assert.ok(item.text.content.length <= 2000);
+  const stored = items.map((item: any) => item.text.content).join("");
+  assert.strictEqual(stored, `${original}\n\nAdditional detail: ${detail}`, "the complete context, original and added, is persisted verbatim");
+  assert.ok(stored.length > 1900);
+  assert.ok(stored.endsWith(detail), "the clarification text at the end survives in full");
+});
+
 test("8. Pending retry can be picked up again exactly once", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();

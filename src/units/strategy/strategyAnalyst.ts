@@ -2134,7 +2134,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
   }
 
   await updateHandoff(env, state.handoffId, {
-    "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
+    "Verified Facts & Sources": richTextLong(augmentedContext),
     Status: select("Pending"),
   }, strategyAnalystAccess(state));
   await logActivity(env, {
