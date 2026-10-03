@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import { workSessionContext } from "../../access";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
@@ -331,9 +332,9 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     return state;
   }
 
-  // If this work item arrived via a Handoff (currently only from R&I's
-  // auto-routing to Marketing Strategist), close it out as the
-  // completion signal -- same pattern Finance/Sales/R&I already use.
+  // If this work item arrived via a Handoff (e.g. Strategy's approved
+  // routing to Marketing Strategist), close it out as the
+  // completion signal -- same pattern Finance/Sales already use.
   if (state.handoffId) {
     // Authorized as a `write`-consequence Action (handle_request), and
     // ungated because closing the Handoff THIS work item was picked up from is
@@ -468,7 +469,7 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       requiresApproval: true,
       // Every Marketing Hat declares exactly this one Action, so the
       // structural entry rule resolves it from the Work's origin -- the
-      // same rule Finance/R&I/Strategy use. What Marketing does NOT yet
+      // same rule Finance/Strategy use. What Marketing does NOT yet
       // resolve at this boundary is WHICH Hat owns a direct request (its
       // own intake classification inside executionEngine still does that,
       // see Known gaps and drift); the Handoff pickup path, where the
@@ -522,5 +523,5 @@ export async function dispatchMarketingHat(env: Env, state: WorkState): Promise<
     // silently no-opping if that invariant is ever violated.
     throw new Error(`dispatchMarketingHat: "${hatName}" is not a registered Marketing Hat.`);
   }
-  return hat.entryHandler(env, state, "handle_request", state.marketingTaskText ?? "");
+  return hat.entryHandler(env, state, "handle_request", state.marketingTaskText ?? "", await resolveRecordedActionSkills(hat, "handle_request"));
 }

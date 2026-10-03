@@ -314,17 +314,42 @@ export async function resolveActionSkills(requirements: readonly { skill_id: Ski
 }
 
 /**
- * Returns a Skill's methodology content by id -- a plain, synchronous lookup
- * (no network call, no cache, no Env), retained as the narrow content accessor
- * the existing prompt-assembly call sites use. `SkillId` is a closed union and
- * `SKILL_CONTENT` a total map over it, so an unregistered id is a compile-time
- * error rather than a runtime case.
+ * The Skills an Action's execution is permitted to follow: exactly the Skills
+ * its definition declared, already resolved through this Registry and
+ * integrity-verified. This is the ONLY way execution code obtains Skill
+ * methodology.
  *
- * Prefer `resolveSkill`/`resolveActionSkills` where an Action has declared
- * Skill requirements: those validate the full package contract, where this
- * accessor deliberately does none, because it is a raw content read used to
- * embed an already-decided Skill into a prompt.
+ * `get` refuses any id the Action did not declare, so a handler cannot reach
+ * for an undeclared Skill through this path -- a Worker following a Skill the
+ * Action never sanctioned is exactly the substitution the Registry must never
+ * allow. The set is built by `src/runtime/actionSkills.ts` at the execution
+ * boundary; handlers only consume it. An Action declaring no Skills receives
+ * the empty set, and the contract is otherwise unchanged for it.
+ *
+ * A Skill supplies methodology only: nothing here grants access, authorizes a
+ * Tool, assigns Work or satisfies an approval.
  */
-export function getSkillContent(id: SkillId): string {
-  return SKILL_CONTENT[id];
+export interface ResolvedActionSkillSet {
+  /** The exact Skill ids this Action declared, in declaration order. */
+  readonly declared: readonly SkillId[];
+  /** The resolved, integrity-verified Skill for a DECLARED id. Throws SkillResolutionError for any other id. */
+  get(id: SkillId): ResolvedSkill;
 }
+
+/** Builds the set from already-resolved Skills. Callers are `src/runtime/actionSkills.ts`; handlers never construct one. */
+export function createResolvedActionSkillSet(resolved: readonly ResolvedSkill[]): ResolvedActionSkillSet {
+  const byId = new Map<SkillId, ResolvedSkill>(resolved.map((skill) => [skill.id, skill]));
+  return {
+    declared: resolved.map((skill) => skill.id),
+    get(id: SkillId): ResolvedSkill {
+      const skill = byId.get(id);
+      if (!skill) {
+        throw new SkillResolutionError(`Skill "${String(id)}" was not declared by this Action -- execution may only follow the Skills its Action requires`);
+      }
+      return skill;
+    },
+  };
+}
+
+/** The set for an Action that requires no Skills. */
+export const NO_ACTION_SKILLS: ResolvedActionSkillSet = createResolvedActionSkillSet([]);

@@ -9,7 +9,7 @@
  * WHAT ACCESS IS NOT. These are separate capabilities with separate
  * owners, and this module deliberately answers none of them:
  *   - what information may cross an identity boundary
- *       -> src/ai/identityRedaction.ts, src/units/research/safeContext.ts
+ *       -> src/ai/identityRedaction.ts, src/runtime/research/safeContext.ts
  *   - how a Handoff payload/schema is validated
  *       -> src/handoffWriter.ts (validateHandoffProperties,
  *          assertTokensPresent, protected-field/token checks)

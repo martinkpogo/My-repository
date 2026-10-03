@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert/strict";
 import {
   handlePickup,
@@ -492,7 +493,7 @@ test("3. Strategy picks up a Pending Handoff", async (t) => {
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(result.strategyQuestion, "the strategic question/context must be populated from the Handoff");
   assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup must actually progress the work item");
@@ -505,7 +506,7 @@ test("3b. Handoff pickup advances the Matter's operational Status to Commercial 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(
     log.matterPatchBodies.some((p) => p.properties?.Status?.select?.name === "Commercial Development"),
@@ -575,7 +576,7 @@ test("3c. Handoff pickup still completes, and Operations is notified, when the H
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.notStrictEqual(result.stage, "awaiting_pickup", "the diagnosis must still proceed even though the Matter status couldn't be advanced");
   assert.ok(opsMessages.some((m) => /Matter status could not be advanced/.test(m)), "Operations must be notified so the status can be advanced by hand");
@@ -594,7 +595,7 @@ test("Required Next Action content is folded into the diagnosis context, not sil
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.match(result.strategyContext ?? "", /evidence-bounded framing/, "guidance written into Required Next Action must reach the diagnosis input");
 });
@@ -605,7 +606,7 @@ test("4. Strategy refuses a Handoff already Picked-up", async (t) => {
   env.AI = forbiddenAi();
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategyDiagnosis, undefined, "must not process a Handoff that isn't genuinely Pending");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
@@ -617,7 +618,7 @@ test("5. Strategy refuses a Closed Handoff", async (t) => {
   env.AI = forbiddenAi();
   const state = fakeState();
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(log.handoffPatchBodies.length, 0);
 });
@@ -628,7 +629,7 @@ test("6. Strategy can place a blocked case on Held", async (t) => {
   env.AI = fakeAi({ sufficient: false, blockedCategory: "ambiguous_question", blockedReason: "The strategic question could mean either a pricing problem or a delivery problem -- materially different diagnoses follow from each." });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_clarification");
@@ -643,7 +644,7 @@ test("Insufficient evidence blocks rather than inventing a diagnosis", async (t)
   env.AI = fakeAi({ sufficient: false, blockedCategory: "insufficient_evidence", blockedReason: "No evidence is supplied connecting the stated symptom to any business condition -- cannot responsibly diagnose." });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   const heldPatch = lastHandoffPatch(log);
@@ -659,7 +660,7 @@ test("Unsupported causation is rejected -- runtime overrides sufficient: true", 
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked", "a recommendation resting on unsupported causation must never be delivered as-is");
   const heldPatch = lastHandoffPatch(log);
@@ -700,13 +701,35 @@ test("7. Held case can explicitly return to Pending", async (t) => {
   assert.match(patch.properties["Verified Facts & Sources"].rich_text[0].text.content, /delivery, not pricing/);
 });
 
+test("7b. A clarification whose combined context exceeds 1,900 characters is stored completely -- Martin's added evidence is never truncated off the end", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Held" });
+  const env = fakeEnv();
+  const original = `Original context. ${"Established client facts. ".repeat(140)}`; // ~3,700 chars, well past the old 1,900 cut
+  assert.ok(original.length > 3000);
+  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: original });
+  const detail = "ADDED EVIDENCE: the delivery delays began after the warehouse consolidation in Q2, per the operations lead.";
+
+  const result = await handleStrategyClarification(env, state, detail);
+
+  assert.strictEqual(result.stage, "strategy_retry_queued");
+  const patch = lastHandoffPatch(log);
+  assert.strictEqual(patch.properties.Status.select.name, "Pending", "the Handoff is still returned to Pending for re-pickup");
+  const items = patch.properties["Verified Facts & Sources"].rich_text;
+  assert.ok(items.length > 1, "content past one 2,000-char rich-text item is chunked, not cut");
+  for (const item of items) assert.ok(item.text.content.length <= 2000);
+  const stored = items.map((item: any) => item.text.content).join("");
+  assert.strictEqual(stored, `${original}\n\nAdditional detail: ${detail}`, "the complete context, original and added, is persisted verbatim");
+  assert.ok(stored.length > 1900);
+  assert.ok(stored.endsWith(detail), "the clarification text at the end survives in full");
+});
+
 test("8. Pending retry can be picked up again exactly once", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
 
-  const first = await handlePickup(env, state);
+  const first = await handlePickup(env, state, NO_ACTION_SKILLS);
   assert.notStrictEqual(first.stage, "awaiting_pickup");
   const afterFirst = log.handoffPatchBodies.length;
 
@@ -715,7 +738,7 @@ test("8. Pending retry can be picked up again exactly once", async (t) => {
   // record is now Picked-up/Closed (per the mock's static initialStatus,
   // simulating the real post-claim state), so a second call must refuse.
   const secondLog = mockFetch(t, { initialStatus: "Closed" });
-  const second = await handlePickup(env, state);
+  const second = await handlePickup(env, state, NO_ACTION_SKILLS);
   assert.strictEqual(secondLog.handoffPatchBodies.length, 0, "the second pickup must not process anything");
   void afterFirst;
   void second;
@@ -727,7 +750,7 @@ test("9. A recommended diagnosis develops a full Strategic Intervention Proposal
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
   assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
@@ -752,7 +775,7 @@ test("A fresh Strategy Proposal that passes both checks receives a complete stra
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   const attestation = result.strategyProposalTokenSafety;
   assert.strictEqual(attestation?.proposalId, result.strategyProposal!.proposalId);
@@ -777,7 +800,7 @@ test("Missing durable boundary evidence fails closed -- a Passed WorkState sessi
   // stale session copy cannot mask it.
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "no usable durable evidence must leave the attestation unset");
   assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
@@ -795,7 +818,7 @@ test("Failed durable boundary evidence fails closed -- the Proposal is never pre
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "a recorded Failed result must never be accepted as evidence");
   assert.strictEqual(result.strategyProposal, undefined);
@@ -810,7 +833,7 @@ test("Missing operational Entity/Matter reference fails closed -- the Proposal i
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategyProposal, undefined);
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
@@ -828,7 +851,7 @@ test("Fresh Strategy session consumes the durable attestation from the Handoff a
   // operational context comes only from Entity_ID/Matter_ID.
   const state = fakeState({ strategySourceBoundaryAttestation: undefined, entityName: undefined, matterName: undefined });
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(result.pendingStrategyApproval, "a fresh session must reach the proposal-approval stage");
   assert.strictEqual(result.strategyProposal!.proposalVersion, 1);
@@ -857,7 +880,7 @@ test("A drafted Strategy Proposal containing a known identity value fails closed
   // identity value this test needs to prove still leaks-detects correctly.
   const state = fakeState({ entityDraft: { name: "", email: "comfort@meridianfoods.com", phone: "", type: "Organisation" } });
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategyProposal, undefined, "the leaked proposal must never become the current Proposal");
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
@@ -873,7 +896,7 @@ test("Proposal contains every required structural section", async (t) => {
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
   const p = result.strategyProposal as StrategyProposal;
 
   assert.ok(p.strategicObjective.objective, "must contain a strategic objective");
@@ -1002,7 +1025,7 @@ test("An incomplete AI-drafted proposal is held (not presented for approval) -- 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "none" }, incompleteProposal);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked", "an incomplete proposal must be held, not presented for approval");
   assert.strictEqual(result.awaiting, "strategy_clarification");
@@ -1020,7 +1043,7 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
 
   const afterApproval = await handleInterventionApproval(env, afterPickup, proposalVersion, "approve");
@@ -1048,7 +1071,7 @@ test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matte
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   assert.strictEqual(afterPickup.entityToken, "E-47");
   assert.strictEqual(afterPickup.matterToken, "M-12");
 
@@ -1065,7 +1088,7 @@ test("26-29. Strategy -> Finance carries the complete curated Strategy boundary 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
@@ -1103,7 +1126,7 @@ test("The Strategy boundary representation is not truncated at 1900 characters -
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
@@ -1124,7 +1147,7 @@ test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as t
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
@@ -1141,7 +1164,7 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const originalProposalId = afterPickup.strategyProposal!.proposalId;
   const v1Attestation = afterPickup.strategyProposalTokenSafety;
@@ -1194,7 +1217,7 @@ test("SR1. Refinement text is NOT appended to state.strategyContext", async (t) 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const contextBefore = afterPickup.strategyContext;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1211,7 +1234,7 @@ test("SR2. A refinement request containing 'Meridian Foods Ghana Ltd' does not c
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const contextBefore = afterPickup.strategyContext;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1229,7 +1252,7 @@ test("SR3. A refinement request containing 'Ama Mensah' does not contaminate Str
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const contextBefore = afterPickup.strategyContext;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1258,7 +1281,7 @@ test("SR4. The existing Strategy Proposal remains the revision source -- the sys
   } as any;
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const originalProposal = afterPickup.strategyProposal!;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1308,7 +1331,7 @@ test("SR6. The revised proposal still requires Martin's Approve/Refine/Reject --
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
@@ -1325,7 +1348,7 @@ test("SR7. Refinement does not write the raw instruction into Handoff Verified F
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
@@ -1346,7 +1369,7 @@ test("12/25. Reject records the rejection, closes the current attempt, and creat
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
 
   const afterReject = await handleInterventionApproval(env, afterPickup, proposalVersion, "reject");
@@ -1432,7 +1455,7 @@ test("Telegram callback_data byte-limit regression: every strategy-proposal butt
   // reject the entire message (buttons included) with no visible error.
   const state = fakeState({ workId: "a1b2c3d4-e5f6-47a8-89ab-cdef01234567" });
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
   assert.ok(result.pendingStrategyApproval, "a pendingStrategyApproval must be set for this test to be meaningful");
 
   const buttonRows = state.pendingActionSummary!.buttons;
@@ -1450,7 +1473,7 @@ test("Marketing-specific work is routed to Marketing when there is no recommenda
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "marketing", reason: "Positioning decision needed." });
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
   assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Marketing");
   assert.strictEqual(afterPickup.pendingStrategyHandoff!.hat, "Marketing Strategist");
 
@@ -1467,7 +1490,7 @@ test("Strategy -> downstream: a failed Handoff creation must not invoke the /che
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "marketing", reason: "Positioning decision needed." });
   const state = fakeState();
-  const afterPickup = await handlePickup(env, state);
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init?: any) => {
@@ -1488,19 +1511,20 @@ test("Strategy -> downstream: a failed Handoff creation must not invoke the /che
   }
 });
 
-test("R&I evidence/research boundary preserved -- Strategy routes missing-evidence work to R&I rather than inventing it", async (t) => {
+test("Missing-evidence work is NOT routed anywhere: a 'research' target resolves to no route, so the diagnosis stays blocked rather than reaching a retired Unit", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
+  // Research & Intelligence is retired and no owning Action/runtime path has
+  // been designed for evidence recovery. Even if a (misbehaving) classifier
+  // returned "research", it is not a key in HANDOFF_ROUTES, so nothing is
+  // proposed and no Handoff is ever created.
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "research", reason: "Regional logistics capacity evidence needed." });
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state);
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Research & Intelligence");
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.hat, "Research & Intelligence Analyst");
+  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
 
-  await handleStrategyHandoffApproval(env, afterPickup, true);
-  const props = log.handoffCreateBody.properties;
-  assert.match(props["Required Next Action"].rich_text[0].text.content, /[Gg]ather.*validate/);
+  assert.strictEqual(afterPickup.pendingStrategyHandoff, undefined, "no downstream Handoff may be proposed for a missing-evidence diagnosis");
+  assert.strictEqual(log.handoffCreateBody, null, "and none may be written");
 });
 
 test("39. The generic downstream classifier can never route to Finance -- Finance is reachable only via the Approve gate", async (t) => {
@@ -1511,7 +1535,7 @@ test("39. The generic downstream classifier can never route to Finance -- Financ
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "finance", reason: "should be impossible" });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.pendingStrategyHandoff, undefined);
   assert.strictEqual(log.handoffCreateBody, null);
@@ -1534,7 +1558,7 @@ test("36/37/38. Closed-context protections remain intact -- missing Entity_Token
   env.AI = forbiddenAi();
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis should have been attempted");
 });
@@ -1547,7 +1571,7 @@ test("Missing Telegram stream configuration fails closed rather than throwing", 
 
   // Must not throw even though every sendWorkspaceHatMessage call in the
   // pipeline will fail closed (return undefined) for lack of stream config.
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
   assert.strictEqual(result.stage, "delivered");
 });
 
@@ -1637,7 +1661,7 @@ test("Material events use the existing logActivity mechanism", async (t) => {
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(logEntries.length >= 2, "pickup and completion must both be logged");
   for (const entry of logEntries) {
@@ -1895,7 +1919,7 @@ test("composition: no specialist required proceeds directly to the unchanged cor
   env.AI = fakeAiComposition({ selection: { domains: [], reasoning: "Directly resolvable." } });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.deepStrictEqual(result.strategySpecialistFindings, []);
   assert.strictEqual(result.strategySpecialistSelectionUnavailable, false, "a genuine zero-domains determination must be recorded distinctly from selection being unavailable");
@@ -1908,7 +1932,7 @@ test("composition: today's actual default (the shared fakeAi's zero-domains sele
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.deepStrictEqual(result.strategySpecialistFindings, []);
   assert.strictEqual(result.strategySpecialistSelectionUnavailable, false, "the five composition SemanticTaskIds are classified -- selection genuinely ran and determined zero domains, this must never read as 'unavailable'");
@@ -1927,7 +1951,7 @@ test("composition: an actual AI/infrastructure failure on the selection call its
   } as any;
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.deepStrictEqual(result.strategySpecialistFindings, []);
   assert.strictEqual(result.strategySpecialistSelectionUnavailable, true, "a genuine AI/infrastructure failure on the selection call must be recorded as unavailable, never conflated with zero domains genuinely being determined");
@@ -1952,7 +1976,7 @@ test("composition: which domains were selected and run is observable in logs -- 
     console.log = originalLog;
   });
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(logged.some((l) => l.includes("determined 2 domain(s) required: business, brand")), "must log which domains were selected");
   assert.ok(logged.some((l) => l.includes("business:completed") && l.includes("brand:completed")), "must log each domain's completion status");
@@ -1972,7 +1996,7 @@ test("composition: a genuine zero-domains determination is also observable in lo
     console.log = originalLog;
   });
 
-  await handlePickup(env, state);
+  await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.ok(logged.some((l) => l.includes("determined zero specialists are required")), "must log the genuine zero-domains determination distinctly from a selection failure");
 });
@@ -1997,7 +2021,7 @@ test("composition: a single selected specialist is diagnosed and its finding is 
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategySpecialistFindings?.length, 1);
   assert.strictEqual(result.strategySpecialistFindings?.[0].domain, "business");
@@ -2017,7 +2041,7 @@ test("composition: multiple selected specialists run concurrently and are reconc
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.strategySpecialistFindings?.length, 2);
   assert.deepStrictEqual(
@@ -2038,7 +2062,7 @@ test("composition: every selected specialist failing fails closed via the existi
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyDiagnosis, undefined, "core diagnosis must never run when every required specialist finding is unavailable");
@@ -2056,7 +2080,7 @@ test("composition: a partial specialist failure still allows synthesis to procee
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   const byDomain = Object.fromEntries((result.strategySpecialistFindings ?? []).map((f) => [f.domain, f]));
   assert.strictEqual(byDomain.business.status, "completed");
@@ -2075,7 +2099,7 @@ test("composition: synthesis judged insufficient (e.g. an unreconcilable conflic
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyDiagnosis, undefined, "must never proceed to core diagnosis/proposal on an unreconciled conflict");
@@ -2093,7 +2117,7 @@ test("composition never lets a specialist touch the canonical Strategy Proposal 
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state);
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   // NO_RECOMMENDATION_DIAGNOSIS (this file's default composition-test
   // diagnosis) never reaches developStrategyProposal at all -- confirming

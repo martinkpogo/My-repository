@@ -95,7 +95,8 @@ const STRATEGY_DIAGNOSE = work("Strategy", "Strategy Analyst", "diagnose");
 // `diagnose` would assert against an ungated Action and pass for the wrong
 // reason, which is worse than failing.
 const STRATEGY_COMMIT_DIAGNOSIS = work("Strategy", "Strategy Analyst", "commit_diagnosis");
-const R_AND_I_RESEARCH = work("Research & Intelligence", "Research & Intelligence Analyst", "research");
+// A Work whose Action permits reading (`read` consequence) -- the shape any Action using the research runtime's outbound search would have.
+const BD_RESEARCH_READ = work("Business Development", "Business Development Manager", "research_opportunity");
 const FINANCE_PRICE = work("Finance", "Value-Based Pricing Assessor", "price");
 const BD_DEVELOP = work("Business Development", "Business Development Manager", "develop_opportunity");
 
@@ -586,7 +587,7 @@ test("NON_GOVERNED_PAGE_TARGET is read-only: a page outside every governed sourc
 test("an outbound read is permitted for a Kernel-owned read and for a Work whose Action permits reading", () => {
   const env = fakeEnv();
   assert.doesNotThrow(() => evaluateAccess(env, request({ dataSourceId: EXTERNAL_EGRESS_TARGET }), discoveryCronContext()));
-  assert.doesNotThrow(() => evaluateAccess(env, request({ dataSourceId: EXTERNAL_EGRESS_TARGET }), workSessionContext(R_AND_I_RESEARCH)));
+  assert.doesNotThrow(() => evaluateAccess(env, request({ dataSourceId: EXTERNAL_EGRESS_TARGET }), workSessionContext(BD_RESEARCH_READ)));
   assert.doesNotThrow(() => evaluateAccess(env, request({ dataSourceId: EXTERNAL_EGRESS_TARGET }), workSessionContext(SALES_DISCOVER)));
 });
 
@@ -608,7 +609,7 @@ test("a read of ENIG's own records is not authority to disclose one externally",
 
 test("no outbound create or update is authorized under any context, and a caller cannot name its own external target", () => {
   const env = fakeEnv();
-  for (const context of [discoveryCronContext(), workSessionContext(R_AND_I_RESEARCH), systemContext("kernel-1")]) {
+  for (const context of [discoveryCronContext(), workSessionContext(BD_RESEARCH_READ), systemContext("kernel-1")]) {
     for (const operation of ["create", "update"] as const) {
       assert.throws(
         () => evaluateAccess(env, request({ operation, dataSourceId: EXTERNAL_EGRESS_TARGET }), context),
@@ -631,7 +632,7 @@ test("no outbound create or update is authorized under any context, and a caller
     /is not a governed data source in this environment/,
   );
   assert.throws(
-    () => evaluateAccess(env, request({ dataSourceId: "external:https://evil.example.com" }), workSessionContext(R_AND_I_RESEARCH)),
+    () => evaluateAccess(env, request({ dataSourceId: "external:https://evil.example.com" }), workSessionContext(BD_RESEARCH_READ)),
     /is not a governed data source in this environment/,
   );
 });

@@ -3,9 +3,10 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./units/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
-import * as research from "./units/research/capabilityPackage";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
+import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
+import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
@@ -80,7 +81,7 @@ export class WorkSession extends DurableObject<Env> {
    * Generic entry point for a Unit built on the Unit Registry manifest
    * pattern (ENIG Operating Model: "The Unit Registry" / Action Resolution)
    * -- the entry every manifest-registered Unit uses (Sales, Finance,
-   * Strategy, Research & Intelligence, Business Development). dispatchCowork
+   * Strategy, Business Development). dispatchCowork
    * has already resolved Organization + Action statelessly via
    * resolveUnitRequest before creating this WorkSession (an
    * "internal"/"write" action only -- "read" never reaches here at all, per
@@ -133,8 +134,27 @@ export class WorkSession extends DurableObject<Env> {
           state.threadId,
         ).then(() => state);
       }
-      recordWorkAction(state, actionName);
-      return hat.entryHandler(this.env, state, actionName, text);
+      // The Skills this Action declared, resolved by Action Resolution and
+      // carried on the context. Re-verified against the Registry here, before
+      // the handler can run: a declared Skill that is missing, substituted or
+      // integrity-drifted stops the Work rather than letting the handler follow
+      // unverified methodology.
+      const declaredAction = hat.actions.find((a) => a.name === actionName);
+      if (!declaredAction) {
+        console.error(`handleUnitAction: ${state.unit}/${state.hat} declares no action "${actionName}" (work ${state.workId})`);
+        return sendMessage(this.env, state.chatId, `"${actionName}" isn't a registered action on this Hat.`, undefined, state.threadId).then(() => state);
+      }
+      return bindExecutionSkills(execution.skills, declaredAction).then(
+        (skills) => {
+          recordWorkAction(state, actionName);
+          return hat.entryHandler(this.env, state, actionName, text, skills);
+        },
+        (err) => {
+          if (!(err instanceof SkillResolutionError)) throw err;
+          console.error(`handleUnitAction: required Skill resolution failed for ${actionName} (work ${state.workId}): ${err.reason}`);
+          return sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId).then(() => state);
+        },
+      );
     });
   }
 
@@ -159,10 +179,6 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":
           return marketing.handleMarketingClarification(this.env, state, text);
-        case "research_clarification":
-          return research.handleResearchClarification(this.env, state, text);
-        case "research_feedback":
-          return research.handleResearchFeedback(this.env, state, text);
         case "strategy_clarification":
           return strategy.handleStrategyClarification(this.env, state, text);
         case "strategy_direct_request_matter":
@@ -186,8 +202,11 @@ export class WorkSession extends DurableObject<Env> {
           const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
           const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
           const awaitingHandler = hat && state.awaiting ? hat.awaitingHandlers[state.awaiting] : undefined;
-          if (awaitingHandler) {
-            return awaitingHandler(this.env, state, text);
+          if (awaitingHandler && hat) {
+            // The resumed Work runs under the Action it already recorded; that
+            // Action's declared Skills are resolved through the Registry before
+            // the handler runs, exactly as at entry.
+            return this.runUnderRecordedSkills(state, (skills) => awaitingHandler(this.env, state, text, skills));
           }
           return sendMessage(
             this.env,
@@ -208,36 +227,26 @@ export class WorkSession extends DurableObject<Env> {
    * call already returned before this ever runs.
    */
   async runFinancePickup(): Promise<WorkState> {
-    return this.execute((state) => finance.handlePickup(this.env, state));
-  }
-
-  /**
-   * The R&I side of a <Unit> -> Research & Intelligence execution boundary,
-   * invoked independently by index.ts's scheduled Research-Handoff
-   * discovery once a Pending Handoff addressed to Research & Intelligence
-   * is found — mirrors runFinancePickup exactly.
-   */
-  async runResearchPickup(): Promise<WorkState> {
-    return this.execute((state) => research.handlePickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => finance.handlePickup(this.env, state, skills)));
   }
 
   /**
    * Invoked independently by index.ts's scheduled Strategy-Handoff
    * discovery once a Pending Handoff addressed to Strategy is found --
-   * mirrors runFinancePickup/runResearchPickup exactly.
+   * mirrors runFinancePickup exactly.
    */
   async runStrategyPickup(): Promise<WorkState> {
-    return this.execute((state) => strategy.handlePickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => strategy.handlePickup(this.env, state, skills)));
   }
 
   /**
-   * The Marketing side of the Research & Intelligence -> Marketing
-   * execution boundary, invoked independently by index.ts's scheduled
-   * Marketing-Handoff discovery once a Pending Handoff addressed to
-   * Marketing is found — mirrors runFinancePickup/runResearchPickup.
+   * The Marketing side of a <Unit> -> Marketing execution boundary,
+   * invoked independently by index.ts's scheduled Marketing-Handoff
+   * discovery once a Pending Handoff addressed to Marketing is found —
+   * mirrors runFinancePickup.
    */
   async runMarketingHandoffPickup(): Promise<WorkState> {
-    return this.execute((state) => marketing.handleHandoffPickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => marketing.handleHandoffPickup(this.env, state, skills)));
   }
 
   /**
@@ -247,7 +256,7 @@ export class WorkSession extends DurableObject<Env> {
    * checkHandoffs.ts's Sales discovery, never by Finance directly.
    */
   async runTokenSafeProposal(): Promise<WorkState> {
-    return this.execute((state) => salesProposal.handleProposalHandoffPickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => salesProposal.handleProposalHandoffPickup(this.env, state, skills)));
   }
 
   /**
@@ -259,16 +268,16 @@ export class WorkSession extends DurableObject<Env> {
    * directly. Mirrors runFinancePickup/runTokenSafeProposal exactly.
    */
   async runCallNotesPickup(): Promise<WorkState> {
-    return this.execute((state) => sales.handleCallNotesHandoffPickup(this.env, state));
+    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => sales.handleCallNotesHandoffPickup(this.env, state, skills)));
   }
 
   /**
    * Presents an evidence-backed opportunity finding to Martin for explicit
    * approval before it may become a Lead -- invoked on a freshly created
-   * WorkSession (see processCompletedLGSResearchHandoffs in
-   * leadGenerationDiscovery.ts), the same way discoverPendingFinanceHandoffs
-   * creates a session for an externally-originated Handoff with no live
-   * chat behind it.
+   * WorkSession with no live chat behind it. Currently has no caller:
+   * the only one (the Research & Intelligence Handoff consumer) was
+   * removed with that retired Unit, and the owning Action that will feed
+   * this gate is not yet designed.
    */
   async proposeLeadOpportunity(opportunity: PendingLeadOpportunity): Promise<WorkState> {
     return this.execute((state) => proposeLeadOpportunity(this.env, state, opportunity));
@@ -409,6 +418,31 @@ export class WorkSession extends DurableObject<Env> {
    * governance checks already inside each Hat function — those still run
    * first and produce their own explicit, specific messages.
    */
+  /**
+   * Runs a handler for Work whose Action is ALREADY recorded (an awaiting
+   * resume, or a Handoff pickup) under that Action's declared Skills,
+   * resolved through the Skill Registry before the handler runs. If they
+   * cannot be resolved or verified, nothing runs and Martin is told. Access
+   * and approval are not touched here: they remain what the handler's own
+   * governed operations evaluate from the recorded Action.
+   */
+  private async runUnderRecordedSkills(state: WorkState, run: (skills: ResolvedActionSkillSet) => Promise<WorkState>): Promise<WorkState> {
+    const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
+    const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
+    if (!hat) {
+      console.error(`runUnderRecordedSkills: no registered manifest/Hat for ${state.unit}/${state.hat} (work ${state.workId}) -- nothing was run`);
+      await sendMessage(this.env, state.chatId, `${state.unit ?? "This Unit"} isn't wired for this action -- nothing was run.`, undefined, state.threadId);
+      return state;
+    }
+    const outcome = await runWithRecordedActionSkills(hat, state.actionName, run);
+    if (outcome.kind === "refused") {
+      console.error(`required Skill resolution failed for ${state.actionName} (work ${state.workId}): ${outcome.reason}`);
+      await sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId);
+      return state;
+    }
+    return outcome.result;
+  }
+
   private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
     const state = await this.require();
     // Reset every call -- see WorkState.pendingHandoffAutoCheck's doc

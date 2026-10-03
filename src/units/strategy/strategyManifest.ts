@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as strategy from "./strategyAnalyst";
@@ -105,8 +106,7 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     responsibility: "own_strategic_diagnosis",
     consequence: "write",
     requiresApproval: false,
-    // Structural entry, exactly like Finance's `price` and R&I's
-    // `research`: Strategy's entry Action is resolved from the Work's
+    // Structural entry, exactly like Finance's `price`: Strategy's entry Action is resolved from the Work's
     // origin (a direct request or a Handoff addressed to this Unit) --
     // the former dispatchCowork Strategy branch hardcoded the same name.
     applicability: {
@@ -194,5 +194,5 @@ export const strategyManifest: UnitManifest = {
  */
 export async function dispatchStrategyHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = strategyManifest.hats[STRATEGY_ANALYST_HAT_NAME];
-  return hat.entryHandler(env, state, "diagnose", text);
+  return hat.entryHandler(env, state, "diagnose", text, await resolveRecordedActionSkills(hat, "diagnose"));
 }

@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as finance from "./valueBasedPricingAssessor";
@@ -6,7 +7,7 @@ import * as finance from "./valueBasedPricingAssessor";
 /**
  * Finance's Unit Registry manifest (ENIG Operating Model design doc,
  * "The Unit Registry") -- deliberately partial by design, mirroring
- * strategyManifest.ts/researchManifest.ts exactly. Finance has exactly
+ * strategyManifest.ts exactly. Finance has exactly
  * one Hat (Value-Based Pricing Assessor -- see hats/registry.ts's
  * VALUE_BASED_PRICING_ASSESSOR), so there is no Stage 1 Hat-ambiguity to
  * preserve. There is also no "which action" decision Martin's message
@@ -19,7 +20,7 @@ import * as finance from "./valueBasedPricingAssessor";
  *
  * Finance's OTHER entry point, handlePickup (Handoff-originated, called
  * from session.ts's own dedicated method), is deliberately left OUTSIDE
- * this manifest -- same reasoning as Strategy's/R&I's own handlePickup:
+ * this manifest -- same reasoning as Strategy's own handlePickup:
  * it resolves Handoff-specific business context
  * (resolveHandoffBusinessContext) that handleDirectRequest's own
  * free-text Matter-token resolution has no equivalent for, so wrapping
@@ -111,7 +112,7 @@ const valueBasedPricingAssessorHat: HatManifest<FinanceAction> = {
   // Every one of Finance's own continuation states (quote_redo_reason,
   // finance_direct_request_matter, finance_direct_request_context, etc.)
   // remains a hardcoded case in session.ts's handleTextReply switch,
-  // exactly as before this migration -- matching Strategy's/R&I's own
+  // exactly as before this migration -- matching Strategy's own
   // precedent. Only the entry point moves; no multi-turn flow changes.
   awaitingHandlers: {},
   callbackHandlers: valueBasedPricingAssessorCallbackHandlers,
@@ -133,7 +134,7 @@ export const financeManifest: UnitManifest = {
  * finance.handleDirectRequest directly, making the manifest the actual
  * dispatch surface rather than a decorative parallel structure. Finance
  * has only one Hat/one action, so Resolution resolves it structurally --
- * mirrors dispatchStrategyHat/dispatchResearchHat exactly.
+ * mirrors dispatchStrategyHat exactly.
  *
  * Production entry no longer goes through a per-Unit WorkSession wrapper
  * (handleFinanceRequest is gone): WorkSession.handleUnitAction resolves
@@ -143,5 +144,5 @@ export const financeManifest: UnitManifest = {
  */
 export async function dispatchFinanceHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = financeManifest.hats[VALUE_BASED_PRICING_ASSESSOR_HAT_NAME];
-  return hat.entryHandler(env, state, "price", text);
+  return hat.entryHandler(env, state, "price", text, await resolveRecordedActionSkills(hat, "price"));
 }

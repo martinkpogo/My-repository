@@ -48,7 +48,7 @@ export class HandoffWriteViolationError extends Error {
  * matterToken are required on creation (see createHandoff). The display-
  * name/contact fields are supplied only when the calling Unit actually
  * knows them (e.g. Sales, which resolves real identity earlier in its own
- * flow) -- a Unit that operates purely on tokens (Strategy, Finance, R&I)
+ * flow) -- a Unit that operates purely on tokens (Strategy, Finance)
  * has nothing to pass here, and correctly so: it never learned a real name
  * to begin with, per the closed-context contract in dataBoundary/policy.ts.
  */
@@ -462,7 +462,7 @@ export async function createHandoff(
  * one of those fields. `identity` is optional because many lifecycle
  * updates (Status transitions, a system-generated Open Questions reason)
  * carry no client identity at all and the calling Unit may not have one to
- * supply (Strategy/Finance/R&I never learn a real name) -- the generic
+ * supply (Strategy/Finance never learn a real name) -- the generic
  * email/phone patterns still apply even without it. Existing legitimate
  * lifecycle updates (Status -> Closed, Work Completed, etc.) continue to
  * work exactly as before; this only rejects a write that fails validation.

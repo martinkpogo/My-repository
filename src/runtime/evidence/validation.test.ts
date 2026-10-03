@@ -1,11 +1,10 @@
 import test from "node:test";
 import assert from "node:assert";
-import { applyEvidenceSourceValidationGate, findUnverifiableSources, validateSynthesis } from "./evidence";
-import type { ResearchSynthesis } from "./evidence";
+import { applyEvidenceSourceValidationGate, findUnverifiableSources, validateSynthesis } from "./validation";
+import type { EvidenceSynthesis } from "./validation";
 
-function baseSynthesis(overrides: Partial<ResearchSynthesis> = {}): ResearchSynthesis {
+function baseSynthesis(overrides: Partial<EvidenceSynthesis> = {}): EvidenceSynthesis {
   return {
-    protocolsUsed: ["competitive"],
     sources: [{ id: "s1", source: "Company website", sourceType: "primary", passage: "...", claimSupported: "pricing tier", validationStatus: "validated" }],
     evidence: [{ id: "e1", statement: "Competitor X prices at $50/mo", sourceIds: ["s1"] }],
     findings: [{ id: "f1", statement: "Competitor X undercuts our entry tier", evidenceIds: ["e1"] }],
@@ -18,11 +17,6 @@ function baseSynthesis(overrides: Partial<ResearchSynthesis> = {}): ResearchSynt
 test("a well-formed synthesis validates successfully", () => {
   const result = validateSynthesis(baseSynthesis());
   assert.strictEqual(result.valid, true);
-});
-
-test("no protocol recorded fails closed", () => {
-  const result = validateSynthesis(baseSynthesis({ protocolsUsed: [] }));
-  assert.strictEqual(result.valid, false);
 });
 
 test("a Finding with no supporting Evidence is rejected -- never silently turn an inference into a finding", () => {
@@ -127,7 +121,7 @@ test("an empty, honest synthesis (no sources available) validates when findings/
   assert.strictEqual(result.valid, true);
 });
 
-// --- Core Structure v2.4: Evidence & Source Validation as the Package's mandatory cross-cutting gate ---
+// --- Evidence & Source Validation: the mandatory cross-cutting gate ---
 
 test("the gate passes a well-formed, fully grounded synthesis", () => {
   const gate = applyEvidenceSourceValidationGate(

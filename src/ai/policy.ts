@@ -14,7 +14,7 @@ import { sendMessage } from "../telegram";
 // live to reliably eat its full DEFAULT_PROVIDER_TIMEOUT_MS (12s) with
 // zero observed successes on this account's only accessible model
 // (openai/gpt-oss-20b), and with several sequential AI calls per user
-// turn (R&I alone makes up to four), paying that latency tax early in
+// turn (the research runtime alone makes up to four), paying that latency tax early in
 // the chain compounds badly. groq goes first among the fallbacks since
 // it has been the fastest and most often successful. cerebras/sambanova
 // stay last since both currently 402 outright (exhausted quota / no

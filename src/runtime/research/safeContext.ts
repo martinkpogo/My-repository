@@ -1,7 +1,7 @@
 /**
  * Structural validation and minimal-extraction helpers for the canonical
  * "Research-Safe Consultancy Context" Notion governance page. This page
- * is the ONLY description of the consultancy R&I is authorized to reason
+ * is the ONLY description of the consultancy the research runtime is authorized to reason
  * from when interpreting a research question or constructing an external
  * research context -- an abstracted category (e.g. "strategy-led
  * consultancy," "Ghana/Africa"), never the consultancy's real identity,

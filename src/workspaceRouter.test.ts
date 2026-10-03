@@ -146,9 +146,10 @@ test("C. Leading vocative Marketing Hat name resolves that specific Hat", () => 
   assert.strictEqual(result?.hat, "Marketing Strategist");
 });
 
-test("D. Explicit alias table resolves a conservative near-match (R&I -> Research & Intelligence)", () => {
-  const result = resolveAddressee("R&I, what does this market look like?");
-  assert.strictEqual(result?.unit, "Research & Intelligence");
+test("D. Retired Research & Intelligence names are not addressable -- no Unit, Hat, or alias resolves them", () => {
+  assert.strictEqual(resolveAddressee("R&I, what does this market look like?"), null);
+  assert.strictEqual(resolveAddressee("Research & Intelligence, what does this market look like?"), null);
+  assert.strictEqual(resolveAddressee("Research & Intelligence Analyst, research this competitor."), null);
 });
 
 test("E. A Unit name appearing mid-sentence is never treated as addressing (structural, not semantic)", () => {
@@ -200,8 +201,15 @@ test("J. Cowork mode with an explicit Unit addressee -> cowork, resolved determi
 test("K. Cowork mode with an explicit Hat addressee -> cowork with both Unit and Hat resolved", async () => {
   const env = fakeEnv();
   env.STATE_KV.put(`mode:1:604`, "cowork");
+  const decision = await resolveWorkspaceRouting(env, 1, 604, "Marketing Strategist, let's develop the campaign strategy.");
+  assert.deepStrictEqual(decision, { mode: "cowork", unit: "Marketing", hat: "Marketing Strategist" });
+});
+
+test("K2. Cowork mode addressing the retired Research & Intelligence Hat -> clarify, never a guessed Unit", async () => {
+  const env = fakeEnv();
+  env.STATE_KV.put(`mode:1:604`, "cowork");
   const decision = await resolveWorkspaceRouting(env, 1, 604, "Research & Intelligence Analyst, research this competitor.");
-  assert.deepStrictEqual(decision, { mode: "cowork", unit: "Research & Intelligence", hat: "Research & Intelligence Analyst" });
+  assert.strictEqual(decision.mode, "clarify");
 });
 
 test("L. Cowork mode with no addressee -> clarify, never a guess, and marks clarification pending", async () => {
@@ -229,12 +237,13 @@ test("M. Pending clarification answered with a bare Unit name resolves to cowork
   assert.strictEqual(await env.STATE_KV.get(`cowork_pending:1:604`), null);
 });
 
-test("M2. Pending clarification answered via the alias table resolves correctly", async () => {
+test("M2. Pending clarification answered with the retired R&I name stays pending, never resolves to a Unit", async () => {
   const env = fakeEnv();
   env.STATE_KV.put(`mode:1:604`, "cowork");
   env.STATE_KV.put(`cowork_pending:1:604`, "1");
-  const decision = await resolveWorkspaceRouting(env, 1, 604, "That's R&I work.");
-  assert.deepStrictEqual(decision, { mode: "cowork", unit: "Research & Intelligence", hat: undefined });
+  const decision = await resolveWorkspaceRouting(env, 1, 604, "R&I");
+  assert.strictEqual(decision.mode, "clarify");
+  assert.strictEqual(await env.STATE_KV.get(`cowork_pending:1:604`), "1");
 });
 
 test("N. Pending clarification answered with an unrecognized name stays pending, asks again, never guesses", async () => {
@@ -450,17 +459,11 @@ test("T. Cowork decision dispatches to the resolved Unit's existing governed ent
   const { calls, workSession } = createMockWorkSession();
   const env = fakeEnv({ WORK_SESSION: workSession as any });
 
-  await routeIncomingText(env, -1004435157576, "Research this competitor.", 604, {
-    resolveRouting: fixedDecision({ mode: "cowork", unit: "Research & Intelligence", hat: "Research & Intelligence Analyst" }),
-  });
-  assert.strictEqual(calls.init[0][2], "Research & Intelligence");
-  assert.strictEqual(calls.init[0][3], "Research & Intelligence Analyst");
-
   await routeIncomingText(env, -1004435157576, "Let's develop the campaign strategy.", 604, {
     resolveRouting: fixedDecision({ mode: "cowork", unit: "Marketing", hat: "Marketing Strategist" }),
   });
-  assert.strictEqual(calls.init[1][2], "Marketing");
-  assert.strictEqual(calls.init[1][3], "Marketing Strategist");
+  assert.strictEqual(calls.init[0][2], "Marketing");
+  assert.strictEqual(calls.init[0][3], "Marketing Strategist");
 });
 
 test("T2. Cowork decision for Sales/Lead Generation Specialist routes through the Sales Unit Registry manifest (discover_leads, a 'read' action), never Sales Executive's enquiry-extraction -- no WorkSession fabricated by this dispatch", async (t) => {

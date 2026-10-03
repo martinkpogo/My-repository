@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../types";
+import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
 import { workSessionContext } from "../access";
 import { logActivity } from "../log";
 import { sendWorkspaceHatMessage } from "../telegram";
@@ -52,15 +53,15 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
 
 /**
  * Entry point for a Handoff addressed directly to Marketing Strategist --
- * currently only ever created by Research & Intelligence's own
- * auto-routing (see capabilityPackage.ts's routeToConsumingHat). Skips the
+ * created by an upstream Unit's approved Handoff (e.g. Strategy's
+ * strategyhandoff approval). Skips the
  * two-stage intake classification handleMarketingIntake runs for chat-
  * originated work, since the sender already determined which Hat this
  * belongs to; reads the Handoff's own Reason/Verified Facts & Sources as
  * the task text, the same shape dispatchMarketingHat already expects from
  * state.marketingTaskText.
  */
-export async function handleHandoffPickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handleHandoffPickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   const handoff = await getPage(env, state.handoffId!, workSessionContext(state));
   const taskText = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
   if (!taskText.trim()) {

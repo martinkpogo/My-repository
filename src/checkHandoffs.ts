@@ -51,7 +51,7 @@ async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: 
  * interpretation runs for a pickup -- `origin: "handoff_pickup"` is what
  * Action Resolution evaluates, so only an Action whose declared
  * applicability admits a Handoff pickup can resolve (`price`,
- * `proposal_draft`, `research`, `handle_request`, `diagnose` -- exactly
+ * `proposal_draft`, `handle_request`, `diagnose` -- exactly
  * the Actions the pickup methods these loops call perform).
  *
  * Returns null, with Martin notified through the existing discovery
@@ -345,71 +345,10 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
 }
 
 /**
- * The R&I side of a <Unit> -> Research & Intelligence execution boundary,
- * mirroring discoverPendingFinanceHandoffs exactly -- the creating Unit's
- * Hat code only ever creates the Handoff (Status: Pending) and returns;
- * this runs on its own schedule and discovers it independently.
- */
-export async function discoverPendingResearchHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Research & Intelligence" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let pickedUp = 0;
-  for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      // No live Telegram session behind this Handoff -- same
-      // no-prior-session case discoverPendingFinanceHandoffs handles.
-      // Defaults to Martin's DM, his preferred front door.
-      //
-      // Destination facts resolve the Organization (this Unit has a single
-      // Hat, so a Hat-less destination is still unambiguous) and the `research`
-      // Action declared applicable to a handoff pickup -- a failure stops
-      // here rather than registering Work under a guessed identity.
-      const entry = await resolveHandoffEntry(env, handoff, "Research & Intelligence");
-      if (!entry) continue;
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Research & Intelligence", entry.hat, threadId, {
-          handoffId: handoff.id,
-          // The RESOLVED pickup Action (`research`) is recorded at creation.
-          actionName: entry.actionName,
-        });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Research Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Research Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.runResearchPickup();
-      pickedUp++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return pickedUp;
-}
-
-/**
- * The Marketing side of the Research & Intelligence -> Marketing
- * execution boundary, mirroring discoverPendingResearchHandoffs exactly.
- * Currently the only creator of a To-Unit-Marketing Handoff is
- * capabilityPackage.ts's own auto-routing (routeToConsumingHat) once it
- * judges completed research directly relevant to Marketing Strategist's
- * work -- see Martin's "research has to find and feed the strategist hat
- * that needs it" direction.
+ * The Marketing side of a <Unit> -> Marketing execution boundary,
+ * mirroring discoverPendingFinanceHandoffs. Discovers Pending Handoffs
+ * addressed to Marketing (e.g. a Strategy diagnosis Martin approved
+ * routing to Marketing Strategist).
  */
 export async function discoverPendingMarketingHandoffs(env: Env): Promise<number> {
   const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
@@ -426,8 +365,8 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
     if (!workId) {
       // Marketing owns several Hats, so the destination `To Hat` fact
       // decides which one owns this Work ("Marketing Strategist" is no
-      // longer hardcoded here -- capabilityPackage's auto-routing writes
-      // it); a Hat-less destination for this multi-Hat Unit fails closed.
+      // longer hardcoded here -- the creating Unit writes it); a Hat-less
+      // destination for this multi-Hat Unit fails closed.
       const entry = await resolveHandoffEntry(env, handoff, "Marketing");
       if (!entry) continue;
       try {
@@ -461,7 +400,7 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
 
 /**
  * The Strategy side of a <Unit> -> Strategy execution boundary, mirroring
- * discoverPendingResearchHandoffs/discoverPendingMarketingHandoffs exactly
+ * discoverPendingFinanceHandoffs/discoverPendingMarketingHandoffs exactly
  * -- the creating Unit's Hat code only ever creates the Handoff (Status:
  * Pending) and returns; this runs on its own schedule and discovers it
  * independently.
@@ -678,8 +617,8 @@ export async function runCheckHandoffs(
     );
     const unitHere = resolveUnitForThread(env, threadId);
     try {
-      if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Research & Intelligence" || unitHere === "Marketing" || unitHere === "Strategy") {
-        // These five are the only Units with real pickup logic (Marketing's
+      if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Marketing" || unitHere === "Strategy") {
+        // These four are the only Units with real pickup logic (Marketing's
         // is Handoff-only -- see discoverPendingMarketingHandoffs -- chat-
         // originated Marketing work still goes through handleMarketingIntake
         // directly, never this discovery path). Discovery only counts a
@@ -693,7 +632,6 @@ export async function runCheckHandoffs(
         // reporting both as the same "No Handoffs pending" message.
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForResearch = await discoverPendingResearchHandoffs(env);
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
         const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
@@ -708,9 +646,7 @@ export async function runCheckHandoffs(
               ? pickedForSales
               : unitHere === "Marketing"
                 ? pickedForMarketing
-                : unitHere === "Strategy"
-                  ? pickedForStrategy
-                  : pickedForResearch;
+                : pickedForStrategy;
         let reply: string;
         if (pendingCount === 0) {
           reply = `No Handoffs pending for ${unitHere}.`;
@@ -725,7 +661,6 @@ export async function runCheckHandoffs(
         // summary across all real pickup directions.
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForResearch = await discoverPendingResearchHandoffs(env);
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
         const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
@@ -746,7 +681,7 @@ export async function runCheckHandoffs(
         // since that IS about the specific work item(s) in that topic.
         await sendOperationsMessage(
           env,
-          `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForResearch} picked up for Research & Intelligence, ${pickedForMarketing} picked up for Marketing, ${pickedForStrategy} picked up for Strategy.`,
+          `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForMarketing} picked up for Marketing, ${pickedForStrategy} picked up for Strategy.`,
         );
       } else {
         // Business Development, Strategy, Creative & Design, and

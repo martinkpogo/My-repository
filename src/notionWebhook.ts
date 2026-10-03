@@ -90,7 +90,7 @@ function extractPageIdFromEvent(payload: unknown): string | null {
   return id;
 }
 
-const ROUTABLE_UNITS = new Set(["Finance", "Sales", "Research & Intelligence", "Marketing", "Strategy"]);
+const ROUTABLE_UNITS = new Set(["Finance", "Sales", "Marketing", "Strategy"]);
 
 export type HandoffWebhookFilterResult =
   | { relevant: true; toUnit: string; entityToken: string; matterToken: string }
@@ -224,7 +224,7 @@ export async function handleNotionWebhookRequest(request: Request, env: Env, ctx
   // A genuinely relevant Pending Work Handoff, with both opaque tokens
   // present. Wake the existing discovery/pickup engine -- Martin's own DM
   // is the same default front door every other externally-created Handoff
-  // (Finance/Research/Marketing/Strategy, and now Sales) already registers
+  // (Finance/Marketing/Strategy, and now Sales) already registers
   // against when no live Telegram session exists yet (see
   // discoverPendingFinanceHandoffs et al.). The engine re-queries Notion
   // and re-applies its own claim/pickup gates itself -- this handler's own

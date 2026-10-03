@@ -40,7 +40,7 @@ export interface OpenAiCompatibleConfig {
 // Confirmed live: nvidia-nim once took long enough to answer that
 // Cloudflare's own edge gave up with a 524 before our fetch would have.
 // With up to 7 providers in the fallback chain and some call sites
-// (e.g. R&I's protocol selection -> plan generation) making more than
+// (e.g. the research runtime's protocol selection -> plan generation) making more than
 // one AI call per user turn, an unbounded per-provider wait can blow
 // past what Telegram will wait for on its webhook, making the whole
 // reply look like silence rather than a reported failure. Each provider

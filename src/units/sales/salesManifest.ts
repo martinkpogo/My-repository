@@ -1,4 +1,6 @@
 import type { Env, WorkState } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import { discoverLeadsReadHandler, handleLeadOpportunityApproval } from "./leadGenerationDiscovery";
@@ -159,10 +161,11 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     // Declared `read` because that is exactly what this Action is: it searches,
     // screens, and reports. A read Action can never authorize a governed write
     // (see consequencePermits in access.ts), which means the three governed
-    // writes this capability used to perform -- a Lead create on a
-    // Martin-approved opportunity, the scheduled run's R&I research-Handoff
-    // create, and the /lead command's Lead create -- now FAIL CLOSED rather
-    // than proceeding under an Action the caller chose.
+    // writes this capability performed (or was meant to perform) -- a Lead
+    // create on a Martin-approved opportunity, a research-Handoff create
+    // (since removed with the retired Research & Intelligence Unit), and the
+    // /lead command's Lead create -- FAIL CLOSED rather than proceeding under
+    // an Action the caller chose.
     //
     // That is deliberate, and it is a known gap rather than an oversight
     // (see docs/enig-operating-model.md, "Known gaps and drift"). Each of
@@ -173,12 +176,13 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     // reserved to the Architect, and it is not answered here by inventing an
     // Action. The refusal is logged at each site with that reasoning inline.
     requiresApproval: false,
-    description: "Proactively search for organisations showing evidence of a problem worth investigating, and send promising signals to Research & Intelligence.",
+    skill_requirements: [{ skill_id: "research_signal" }],
+    description: "Proactively search for organisations showing evidence of a problem worth investigating, and screen promising signals against the Acquisition Criteria. Candidates that pass are held; no Handoff or Lead is created.",
   },
 ];
 
-async function leadGenerationSpecialistReadHandler(env: Env, _actionName: LeadGenerationSpecialistAction, text: string): Promise<string> {
-  return discoverLeadsReadHandler(env, text);
+async function leadGenerationSpecialistReadHandler(env: Env, _actionName: LeadGenerationSpecialistAction, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  return discoverLeadsReadHandler(env, text, skills);
 }
 
 /** No internal/write actions are declared on this Hat today -- reaching either of these would mean dispatchAction resolved a consequence this manifest never declared. Fails closed rather than silently no-opping. */
@@ -453,5 +457,5 @@ export const salesManifest: UnitManifest = {
  */
 export async function dispatchSalesExecutiveHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = salesManifest.hats[SALES_EXECUTIVE_HAT_NAME];
-  return hat.entryHandler(env, state, "new_enquiry", text);
+  return hat.entryHandler(env, state, "new_enquiry", text, await resolveRecordedActionSkills(hat, "new_enquiry"));
 }

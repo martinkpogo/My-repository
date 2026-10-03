@@ -14,7 +14,6 @@ import {
   checkStaleHandoffs,
   discoverPendingFinanceHandoffs,
   discoverPendingMarketingHandoffs,
-  discoverPendingResearchHandoffs,
   discoverPendingSalesHandoffs,
   discoverPendingStrategyHandoffs,
   maybeAutoContinueCheckHandoffs,
@@ -23,6 +22,8 @@ import {
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
 import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
+import { findUnitManifest } from "./units/registry";
+import { resolveRecordedActionSkills } from "./runtime/actionSkills";
 import type { SessionSummary } from "./types";
 import {
   handleGoogleOAuthStart,
@@ -172,7 +173,6 @@ export default {
       try {
         const picked = await discoverPendingFinanceHandoffs(env);
         const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForResearch = await discoverPendingResearchHandoffs(env);
         const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
         const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
@@ -181,7 +181,6 @@ export default {
             ok: true,
             handoffs_picked_up: picked,
             sales_handoffs_picked_up: pickedForSales,
-            research_handoffs_picked_up: pickedForResearch,
             marketing_handoffs_picked_up: pickedForMarketing,
             strategy_handoffs_picked_up: pickedForStrategy,
           }),
@@ -216,7 +215,13 @@ export default {
         return new Response("forbidden", { status: 403 });
       }
       try {
-        const summary = await runAutonomousLeadDiscovery(env);
+        // The scheduled loop runs outside any Work, so there is no Action
+        // Resolution to carry Skills. The Kernel resolves the Skills the
+        // `discover_leads` Action DECLARES, through the Skill Registry (with
+        // integrity verification), and fails closed if that cannot be done.
+        const leadGenerationHat = findUnitManifest("Sales")?.hats["Lead Generation Specialist"];
+        if (!leadGenerationHat) throw new Error("Sales/Lead Generation Specialist is not registered -- cannot resolve the discovery Action's Skills");
+        const summary = await runAutonomousLeadDiscovery(env, await resolveRecordedActionSkills(leadGenerationHat, "discover_leads"));
         let notificationSent = false;
         let notificationError: string | null = null;
         try {
@@ -393,7 +398,6 @@ export default {
     try {
       await discoverPendingFinanceHandoffs(env);
       await discoverPendingSalesHandoffs(env);
-      await discoverPendingResearchHandoffs(env);
       await discoverPendingMarketingHandoffs(env);
       await discoverPendingStrategyHandoffs(env);
       await checkStaleHandoffs(env);

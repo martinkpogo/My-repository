@@ -1,4 +1,5 @@
 import type { Env, Unit, WorkState } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
@@ -17,8 +18,7 @@ import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesi
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
- * Unit's single active Hat, mirroring capabilityPackage.ts's own structure
- * exactly (governance retrieval -> Handoff context reconstruction ->
+ * Unit's single active Hat (governance retrieval -> Handoff context reconstruction ->
  * structured AI judgment -> deterministic post-check -> delivery ->
  * optional Martin-approved downstream Handoff). No parallel architecture
  * introduced -- this reuses the same WorkSession/Handoff/closed-context/
@@ -305,7 +305,7 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
 /**
  * Reconstructs the strategic question and supplied context directly from
  * the Handoff's own canonical Notion record, evaluated through the same
- * closed-context contract Finance and R&I use. Identity is read as the
+ * closed-context contract Finance uses. Identity is read as the
  * Entity_Token / Matter_Token the sending Unit embedded on the Handoff,
  * never a real Name -- this Hat never resolves those tokens by traversing
  * or discovering unrelated records.
@@ -449,7 +449,7 @@ function buildDiagnosisPromptParts(hatDefinition: string, universalRoleContract:
       "=== TASK (execution mechanics -- not part of the governance above) ===",
       "Work through the canonical operating procedure: (1) establish the strategic question -- stop if materially ambiguous; (2) establish the situation (symptoms, business conditions, constraints, consequences, stakeholders, objectives); (3) diagnose using Symptom -> Problem -> Cause -> Constraint -> Consequence, never asserting causation without sufficient support; (4) frame the strategic problem (what it is, why it matters, key drivers, the strategic tension/decision, material uncertainty); (5) develop strategic options only where genuinely warranted -- if only one direction is strategically reasonable, say so rather than manufacturing alternatives; (6) recommend a direction only when the evidence supports one, otherwise state explicitly what must be resolved first.",
       "Information supplied in the context below is NOT automatically established fact merely because it came from another Hat or Unit -- distinguish evidence from interpretation, inference, implication, and recommendation throughout.",
-      "You do not own research, evidence validation, commercial progression, pricing, or creative production -- those belong to R&I, Sales, Finance, and Creative respectively. If the work genuinely requires one of those first (e.g. missing evidence a Handoff to R&I should gather), say so as the blocked/insufficient reason rather than inventing the missing material yourself.",
+      "You do not own commercial progression, pricing, or creative production -- those belong to Sales, Finance, and Creative respectively. If the work genuinely requires one of those first, or requires evidence that has not been supplied, say so as the blocked/insufficient reason rather than inventing the missing material yourself.",
       "Set causationSupported explicitly and honestly for the diagnosed cause -- true only if the supplied context actually supports that causal claim, never merely because it sounds plausible.",
     ].join("\n\n"),
     context: [
@@ -591,7 +591,7 @@ export async function handleDirectRequestClarification(env: Env, state: WorkStat
   return handleDirectRequest(env, state, text);
 }
 
-export async function handlePickup(env: Env, state: WorkState): Promise<WorkState> {
+export async function handlePickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   // Idempotency guard: re-verifies the Handoff's live Status and claims it
   // (Pending -> Picked-up) at the actual processing boundary, not just
   // trusting the discovery query's Pending filter from moments earlier. A
@@ -919,8 +919,8 @@ export function formatDiagnosisForHandoff(result: StrategyDiagnosisResult): stri
  * until Martin approves and the Strategy -> Finance Handoff is actually
  * created. A diagnosis with NO recommendation (informational, or evidence
  * doesn't yet support one) closes the incoming Handoff immediately and may
- * still propose a non-commercial downstream handoff (research/marketing/
- * sales) via routeToUnit -- mirrors capabilityPackage.ts's deliverSynthesis.
+ * still propose a non-commercial downstream handoff (marketing/sales) via
+ * routeToUnit.
  */
 async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiagnosisResult): Promise<WorkState> {
   if (result.recommendedDirection) {
@@ -963,8 +963,8 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
  * Where a diagnosis's next responsibility belongs to another Unit, per the
  * Hat Definition's own handoff_rules -- proposes (never auto-creates) a
  * downstream Handoff. "none" (no clear destination, or the diagnosis is
- * self-contained/informational) is a valid, expected outcome -- mirrors
- * R&I's routeToConsumingHat: never guesses when unclear. Finance is
+ * self-contained/informational) is a valid, expected outcome -- never guesses
+ * when unclear. Finance is
  * deliberately NOT a routable destination here -- per the canonical
  * commercial flow, Finance is reached exclusively through the
  * Approve/Refine intervention-approval gate (presentInterventionForApproval/
@@ -972,7 +972,6 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
  * there is exactly one path to Finance, not two.
  */
 const HANDOFF_ROUTES: Partial<Record<string, { unit: Unit; hat: string }>> = {
-  research: { unit: "Research & Intelligence", hat: "Research & Intelligence Analyst" },
   marketing: { unit: "Marketing", hat: "Marketing Strategist" },
   sales: { unit: "Sales", hat: "Sales Executive" },
 };
@@ -989,14 +988,13 @@ async function classifyHandoffTarget(env: Env, result: StrategyDiagnosisResult):
     mode: "json",
     parts: {
       persona: `You decide whether a completed Strategy diagnosis's next responsibility belongs to another Unit, per the Strategy Analyst Hat Definition's own handoff_rules:
-- "research": the diagnosis is blocked or weakened by missing evidence/validation that only Research & Intelligence can gather.
 - "marketing": the work is specifically marketing strategy/execution (positioning, campaign, content, channel decisions).
 - "sales": the next step is commercial progression of an opportunity (owned by Sales, not Strategy).
-- "none": the diagnosis is self-contained/informational, or the destination is not clearly one of the above -- never guess.
+- "none": the diagnosis is self-contained/informational, blocked or weakened by missing evidence (no Unit currently owns gathering it -- it stays blocked rather than being routed), or the destination is not clearly one of the above -- never guess.
 
 Never return "finance" -- pricing is reached only through Martin's explicit approval of a recommended intervention, never through this classifier.
 
-Return JSON: {"target": "research" | "marketing" | "sales" | "none", "reason": "..."}`,
+Return JSON: {"target": "marketing" | "sales" | "none", "reason": "..."}`,
       situation: summary,
     },
     light: true,
@@ -1013,11 +1011,9 @@ async function routeToUnit(env: Env, state: WorkState, result: StrategyDiagnosis
   const verifiedFactsAndSources = formatDiagnosisForHandoff(result).slice(0, 1900);
 
   const requiredNextAction =
-    route.unit === "Research & Intelligence"
-      ? "Gather/validate the additional evidence identified as missing above, per the unresolved questions."
-      : route.unit === "Marketing"
-        ? "Take the strategic direction above as input to marketing-specific strategy/execution decisions."
-        : "Take the strategic direction above as input to commercial progression.";
+    route.unit === "Marketing"
+      ? "Take the strategic direction above as input to marketing-specific strategy/execution decisions."
+      : "Take the strategic direction above as input to commercial progression.";
 
   state.pendingStrategyHandoff = {
     unit: route.unit,
@@ -1058,8 +1054,7 @@ async function routeToUnit(env: Env, state: WorkState, result: StrategyDiagnosis
 
 /**
  * Creates the actual Handoff record only once Martin approves the preview
- * sent by routeToUnit -- mirrors handleResearchHandoffApproval exactly.
- * Disclosure of the proposed handoff is not permission to send it; only
+ * sent by routeToUnit -- Disclosure of the proposed handoff is not permission to send it; only
  * this explicit approval is.
  */
 export async function handleStrategyHandoffApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
@@ -1584,7 +1579,7 @@ async function presentStrategyProposalForApproval(
   logVerb: "created" | "revised",
 ): Promise<WorkState> {
   // A direct_request diagnosis (Martin addressing Strategy directly, or
-  // R&I/BD routed in via resolveUnitRequest) has no Sales -> Strategy
+  // BD routed in via resolveUnitRequest) has no Sales -> Strategy
   // Handoff at all -- there is nothing for a source-boundary attestation
   // to attest to, so this check only applies to a Handoff-originated
   // diagnosis, whose durable evidence handlePickup seeds from the Handoff
@@ -2139,7 +2134,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
   }
 
   await updateHandoff(env, state.handoffId, {
-    "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
+    "Verified Facts & Sources": richTextLong(augmentedContext),
     Status: select("Pending"),
   }, strategyAnalystAccess(state));
   await logActivity(env, {
@@ -2155,7 +2150,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
   return state;
 }
 
-/** Free-text follow-up after a delivered diagnosis -- re-runs with the added context, same discipline as R&I's own follow-up loop. */
+/** Free-text follow-up after a delivered diagnosis -- re-runs with the added context. */
 export async function handleStrategyFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
   state.strategyContext = `${state.strategyContext ?? ""}\n\nMartin's follow-up: ${text}`;
   await sendStrategyInProgressAck(env, state);

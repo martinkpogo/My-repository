@@ -1,15 +1,13 @@
 import type { Env, WorkState } from "../../types";
-import { isWebSearchConfigured, searchWeb } from "../research/webSearch";
-import type { WebSearchResult } from "../research/webSearch";
-import { createPage, plainText, queryDataSource, richText, select, title } from "../../notion";
-import { createHandoff } from "../../handoffWriter";
+import { isWebSearchConfigured, searchWeb } from "../../runtime/research/webSearch";
+import type { WebSearchResult } from "../../runtime/research/webSearch";
+import { createPage, richText, select, title } from "../../notion";
 import { generate } from "../../ai";
-import { getSkillContent } from "../../platform/skillRegistry";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
-import { getSessionStub, newWorkId } from "../../sessionRouting";
 import { discoveryCronContext, workSessionContext, type AccessContext } from "../../access";
 
 /**
@@ -108,7 +106,7 @@ interface EvaluationBatchResponse {
  * mechanics and this action's own JSON output shape, neither of which
  * belongs in a Skill meant to stay reusable beyond this one Hat.
  */
-export async function evaluateCandidates(env: Env, results: WebSearchResult[]): Promise<CandidateEvaluation[]> {
+export async function evaluateCandidates(env: Env, results: WebSearchResult[], skills: ResolvedActionSkillSet): Promise<CandidateEvaluation[]> {
   if (results.length === 0) return [];
 
   const governance = await getLeadDiscoveryGovernance(env);
@@ -117,7 +115,7 @@ export async function evaluateCandidates(env: Env, results: WebSearchResult[]): 
     return [];
   }
 
-  const skillContent = getSkillContent("research_signal");
+  const skillContent = skills.get("research_signal").content;
 
   const candidatesText = results
     .map((r, i) => `[${i}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${r.publishedDate ? `\nPublished: ${r.publishedDate}` : ""}`)
@@ -142,12 +140,20 @@ export async function evaluateCandidates(env: Env, results: WebSearchResult[]): 
 
 interface DiscoveryRunSummary {
   evaluated: number;
-  handoffsCreated: number;
+  /**
+   * Candidates that passed screening and are not duplicates, but were
+   * HELD: the evidence-validation step that used to follow screening
+   * (a Handoff to the retired Research & Intelligence Unit) no longer
+   * exists, and no owning Action for it has been designed yet. A held
+   * candidate is neither routed anywhere nor turned into a Lead.
+   */
+  heldNoResearchPath: number;
   /**
    * Evidence-backed opportunity findings presented to Martin for approval
    * this run -- never Leads created. No discovery source (scheduled or
    * on-demand) may create a Lead without Martin's explicit approval; see
-   * proposeLeadOpportunity/handleLeadOpportunityApproval below.
+   * proposeLeadOpportunity/handleLeadOpportunityApproval below. Nothing
+   * currently feeds that gate (see heldNoResearchPath).
    */
   pendingApproval: number;
   screenedOut: number;
@@ -156,213 +162,7 @@ interface DiscoveryRunSummary {
 }
 
 function emptyDiscoveryRunSummary(): DiscoveryRunSummary {
-  return { evaluated: 0, handoffsCreated: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 };
-}
-
-export const LGS_HANDOFF_ORIGIN_MARKER = "LGS Autonomous Lead Discovery";
-
-/**
- * Checks if a pending or completed LGS research request already exists for
- * the candidate organisation or source URL to prevent duplicate handoffs.
- */
-async function findExistingLGSResearchHandoff(env: Env, organisation: string, sourceUrl: string): Promise<boolean> {
-  try {
-    const handoffs = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
-      and: [
-        { property: "From Unit", select: { equals: "Sales" } },
-        { property: "To Unit", select: { equals: "Research & Intelligence" } },
-        { property: "Type", select: { equals: "Work" } },
-      ],
-    });
-
-    for (const h of handoffs) {
-      const reason = plainText(h.properties.Reason);
-      const facts = plainText(h.properties["Verified Facts & Sources"]);
-      if (
-        reason.includes(LGS_HANDOFF_ORIGIN_MARKER) &&
-        (facts.includes(organisation) || (sourceUrl && facts.includes(sourceUrl)))
-      ) {
-        return true;
-      }
-    }
-    return false;
-  } catch (err) {
-    console.error("Failed checking existing LGS research handoffs", err);
-    return false;
-  }
-}
-
-interface AcquisitionCriteriaEvaluationResponse {
-  pass: boolean;
-  organisation: string;
-  evidence: string;
-  reason: string;
-}
-
-/**
- * Evaluates completed R&I research against canonical Acquisition Criteria.
- * Strictly differentiates between observable evidence, findings, preliminary
- * hypothesis, and the acquisition decision -- an unsupported R&I hypothesis
- * is never converted into a fact and does not satisfy criteria on its own.
- */
-async function evaluateResearchAgainstAcquisitionCriteria(
-  env: Env,
-  contextText: string,
-  synthesisText: string,
-): Promise<AcquisitionCriteriaEvaluationResponse | null> {
-  const governance = await getLeadDiscoveryGovernance(env);
-  if (!governance) {
-    console.error("Autonomous Lead Discovery: research evaluation blocked -- governance retrieval failed");
-    return null;
-  }
-
-  return generate<AcquisitionCriteriaEvaluationResponse>(env, {
-    taskId: "lead.discovery_signal_evaluation",
-    mode: "json",
-    parts: {
-      persona:
-        "You are executing the Lead Generation Specialist Hat defined below, retrieved from ENIG's canonical Notion governance. The Universal Role Contract and Hat Definition (including its Acquisition Criteria section) are authoritative for this role -- follow them exactly as written.",
-      behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", governance.universalRoleContract, "=== HAT DEFINITION ===", governance.hatDefinition].join("\n\n"),
-      skillContent: [
-        "=== TASK (execution mechanics -- not part of the governance above) ===",
-        "You are given candidate signal context and completed Research & Intelligence synthesis (findings, implications, limitations, sources). Evaluate whether the canonical Acquisition Criteria section above is genuinely satisfied by attributable evidence.",
-        "CRITICAL RULE ON DISTINCTION: Differentiate strictly between observable evidence, R&I findings, preliminary diagnosis/hypothesis, and the acquisition decision. An unsupported or speculative preliminary diagnosis/hypothesis from R&I is NOT a fact and CANNOT satisfy the Acquisition Criteria by itself. Only evidence-backed findings satisfy the criteria.",
-        'Return JSON: {"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the attributable evidence observation>", "reason": "..."}.',
-      ].join("\n\n"),
-      situation: `Candidate Signal Context:\n${contextText}\n\nCompleted R&I Research Synthesis:\n${synthesisText}`,
-    },
-    light: true,
-    maxTokens: 3000,
-  });
-}
-
-/**
- * Processes completed R&I Research Handoffs originating from LGS autonomous
- * discovery. Only consumes closed R&I handoffs marked with LGS_HANDOFF_ORIGIN_MARKER
- * and From Hat Lead Generation Specialist. Idempotent per KV state.
- */
-export async function processCompletedLGSResearchHandoffs(env: Env, summary: DiscoveryRunSummary): Promise<void> {
-  try {
-    const completedHandoffs = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
-      and: [
-        { property: "From Unit", select: { equals: "Sales" } },
-        { property: "To Unit", select: { equals: "Research & Intelligence" } },
-        { property: "Type", select: { equals: "Work" } },
-        { property: "Status", select: { equals: "Closed" } },
-      ],
-    });
-
-    for (const handoff of completedHandoffs) {
-      const fromHat = plainText(handoff.properties["From Hat"]);
-      const reason = plainText(handoff.properties.Reason);
-
-      // Filter: must strictly originate from LGS autonomous discovery workflow
-      if (fromHat !== "Lead Generation Specialist" || !reason.includes(LGS_HANDOFF_ORIGIN_MARKER)) {
-        continue;
-      }
-
-      // Idempotency check: skip if already processed by LGS
-      const alreadyProcessed = await env.STATE_KV.get(`lgs_processed_handoff:${handoff.id}`);
-      if (alreadyProcessed) continue;
-
-      const facts = plainText(handoff.properties["Verified Facts & Sources"]);
-      const workCompleted = plainText(handoff.properties["Work Completed"]);
-
-      if (!workCompleted) {
-        await env.STATE_KV.put(`lgs_processed_handoff:${handoff.id}`, "insufficient");
-        summary.skippedAsInsufficient++;
-        continue;
-      }
-
-      const evalResult = await evaluateResearchAgainstAcquisitionCriteria(env, facts, workCompleted);
-      await env.STATE_KV.put(`lgs_processed_handoff:${handoff.id}`, "processed");
-
-      if (!evalResult || !evalResult.pass) {
-        summary.screenedOut++;
-        await logActivity(env, {
-          entry: `Autonomous discovery screened out after R&I research: ${evalResult?.organisation || handoff.id}`,
-          type: "Discovery",
-          area: "Sales",
-          decisionRationale: evalResult?.reason || "Research synthesis did not satisfy Acquisition Criteria.",
-          outcome: "Complete",
-        });
-        continue;
-      }
-
-      if (!evalResult.organisation.trim() || !evalResult.evidence.trim()) {
-        summary.skippedAsInsufficient++;
-        continue;
-      }
-
-      let duplicates: Awaited<ReturnType<typeof findDuplicateLeads>>;
-      try {
-        duplicates = await findDuplicateLeads(env, evalResult.organisation, "");
-      } catch (err) {
-        console.error(`Autonomous Lead Discovery: duplicate check failed for ${evalResult.organisation}`, err);
-        await logActivity(env, {
-          entry: `Autonomous discovery blocked -- duplicate check failed: ${evalResult.organisation}`,
-          type: "Blocker",
-          area: "Sales",
-          decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${err instanceof Error ? err.message : String(err)}`,
-          outcome: "Blocked",
-        });
-        continue;
-      }
-      if (duplicates.length > 0) {
-        summary.skippedAsDuplicate++;
-        await logActivity(env, {
-          entry: `Autonomous discovery skipped after research -- possible duplicate: ${evalResult.organisation}`,
-          type: "Discovery",
-          area: "Sales",
-          decisionRationale: `Matches existing Lead(s): ${duplicates.map((d) => d.name).join(", ")}`,
-          outcome: "Complete",
-        });
-        continue;
-      }
-
-      const category = facts.match(/Category:\s*(.+)/i)?.[1]?.trim();
-      const sourceUrl = facts.match(/Source URL:\s*(https?:\/\/\S+)/i)?.[1] || "";
-
-      try {
-        const workId = newWorkId();
-        const stub = getSessionStub(env, workId);
-        // No live chat behind this -- same "no prior session" fallback
-        // discoverPendingFinanceHandoffs uses for an externally-originated
-        // Handoff: default to Martin's DM identity. sendWorkspaceHatMessage
-        // always routes to the shared Workspace topic regardless, so this
-        // is purely the WorkState's own identity, not where the message lands.
-        await stub.init(workId, Number(env.MARTIN_TELEGRAM_USER_ID), "Sales", "Lead Generation Specialist", undefined, {
-          handoffId: handoff.id,
-          // `discover_leads` is Lead Generation Specialist's one registered
-          // Action: finding, screening and presenting candidate opportunities.
-          // The Work records it so Access can resolve it; see the report for
-          // the consequence that committing an approved Lead is a separate
-          // operation with no registered Action behind it.
-          actionName: "discover_leads",
-        });
-        await stub.proposeLeadOpportunity({
-          organisation: evalResult.organisation,
-          evidence: evalResult.evidence,
-          reason: evalResult.reason,
-          category,
-          sourceUrl,
-          handoffId: handoff.id,
-        });
-        summary.pendingApproval++;
-      } catch (err) {
-        console.error(`Autonomous Lead Discovery: failed to present opportunity for approval: ${evalResult.organisation}`, err);
-        await logActivity(env, {
-          entry: `Autonomous discovery blocked -- could not present opportunity for approval: ${evalResult.organisation}`,
-          type: "Blocker",
-          area: "Sales",
-          decisionRationale: err instanceof Error ? err.message : String(err),
-          outcome: "Blocked",
-        });
-      }
-    }
-  } catch (err) {
-    console.error("Error processing completed LGS research handoffs", err);
-  }
+  return { evaluated: 0, heldNoResearchPath: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 };
 }
 
 export interface PendingLeadOpportunity {
@@ -510,7 +310,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
       entry: `Lead recorded (Martin-approved opportunity): ${opportunity.organisation}`,
       type: "Discovery",
       area: "Sales",
-      activity: "Source verified with R&I research evidence. Approved by Martin.",
+      activity: "Source and evidence presented for approval. Approved by Martin.",
       decisionRationale: opportunity.reason,
       nextActions: "Prepared for Sales Executive follow-up.",
       outcome: "Complete",
@@ -541,19 +341,24 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
 }
 
 /**
- * Searches one query, screens its results against the Acquisition
- * Criteria, and creates a Sales -> R&I Work Handoff for each candidate
- * that passes -- the shared Phase 1 body for BOTH the fixed scheduled
- * query list and an on-demand request's AI-generated queries. Identical
- * either way: which query fed it is the only difference, so both paths
- * share the exact same screening discipline and the exact same downstream
- * approval gate (Phase 2 -- see processCompletedLGSResearchHandoffs).
+ * Searches one query and screens its results against the Acquisition
+ * Criteria -- the shared body for BOTH the fixed scheduled query list and
+ * an on-demand request's AI-generated queries.
+ *
+ * A candidate that survives screening and the duplicate-Lead check is
+ * HELD, not routed: the step that used to follow (a Handoff to the retired
+ * research Unit, later consumed to evaluate the Acquisition Criteria)
+ * belonged to a retired organizational structure, and no owning
+ * Action for evidence-backed validation of a discovery candidate has been
+ * designed. This function therefore creates no Handoff and no Lead, and
+ * records nothing about the candidate beyond the run summary -- a later
+ * owning Action will take it from here.
  */
-async function searchAndHandoffForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext): Promise<void> {
+async function searchAndScreenForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext, skills: ResolvedActionSkillSet): Promise<void> {
   const results = (await searchWeb(env, query, access)).slice(0, MAX_RESULTS_PER_QUERY);
   if (results.length === 0) return;
 
-  const evaluations = await evaluateCandidates(env, results);
+  const evaluations = await evaluateCandidates(env, results, skills);
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     const evaluation = evaluations[i];
@@ -588,76 +393,16 @@ async function searchAndHandoffForQuery(env: Env, query: string, summary: Discov
       continue;
     }
 
-    const existingHandoff = await findExistingLGSResearchHandoff(env, evaluation.organisation, result.url);
-    if (existingHandoff) {
-      summary.skippedAsDuplicate++;
-      continue;
-    }
-
-    try {
-      // Pre-Entity discovery: this candidate is a publicly-sourced web
-      // search result, not yet an ENIG Entity/Matter -- there is no real
-      // client identity to protect here (the organisation name IS the
-      // public subject of the research being requested), so the
-      // placeholder "E-UNBOUND"/"M-UNBOUND" tokens are used rather than a
-      // real Entity_Token/Matter_Token, and no entityName/matterName
-      // identity is passed to the validator (none exists yet to check
-      // against). See handoffWriter.ts's HandoffIdentity doc comment.
-      // The scheduled/on-demand discovery run executes outside any Work item,
-      // so there is no recorded Action behind this governed create. Access will
-      // refuse it rather than let a Kernel-run loop write a governed Handoff
-      // with no operation of record -- see the report for the Architect decision
-      // this now requires.
-      await createHandoff(
-        env,
-        {
-          Handoff: title(`LGS Research Request -- ${evaluation.organisation}`),
-          "From Unit": select("Sales"),
-          "From Hat": richText("Lead Generation Specialist"),
-          "To Unit": select("Research & Intelligence"),
-          "To Hat": richText("Research & Intelligence Analyst"),
-          Type: select("Work"),
-          Status: select("Pending"),
-          Reason: richText(`${LGS_HANDOFF_ORIGIN_MARKER}: Research organisation positioning and evidence for Acquisition Criteria evaluation.`),
-          "Expected Output": richText("Evidence-backed research relevant to the Acquisition Criteria, including a preliminary diagnosis/hypothesis where supported by evidence."),
-          Entity_Token: richText("E-UNBOUND"),
-          Matter_Token: richText("M-UNBOUND"),
-          "Verified Facts & Sources": richText(
-            `Candidate Organisation: ${evaluation.organisation}\nSource URL: ${result.url}\nCategory: ${evaluation.category || "unclassified"}\nInitial Signal Evidence: ${evaluation.evidence}\nDecision Maker / Role: ${evaluation.decisionMakerOrRole || "N/A"}\nQuery: "${query}"`,
-          ),
-        },
-        { entityToken: "E-UNBOUND", matterToken: "M-UNBOUND" },
-        discoveryCronContext(),
-      );
-      summary.handoffsCreated++;
-      await logActivity(env, {
-        entry: `R&I research handoff created for discovery candidate: ${evaluation.organisation}`,
-        type: "Discovery",
-        area: "Sales",
-        activity: `Category: ${evaluation.category || "unclassified"}. Source: ${result.url}. Query: "${query}".`,
-        decisionRationale: evaluation.reason,
-        nextActions: "Pending R&I research execution.",
-        outcome: "Active",
-      });
-    } catch (err) {
-      console.error(`Lead Discovery: Handoff creation failed for ${evaluation.organisation}`, err);
-      await logActivity(env, {
-        entry: `Lead discovery handoff creation blocked: ${evaluation.organisation}`,
-        type: "Blocker",
-        area: "Sales",
-        decisionRationale: `Notion call against HANDOFFS_DATA_SOURCE_ID failed: ${err instanceof Error ? err.message : String(err)}`,
-        outcome: "Blocked",
-      });
-    }
+    summary.heldNoResearchPath++;
   }
 }
 
 /**
- * Runs one full autonomous discovery cycle:
- * 1. Search & Lightweight Screening -> create Pending Work Handoff to R&I
- * 2. Process completed R&I research handoffs -> evaluate Acquisition Criteria -> present for approval
+ * Runs one autonomous discovery cycle: search and lightweight screening
+ * against the Acquisition Criteria. Candidates that pass are held (see
+ * searchAndScreenForQuery); no Handoff or Lead is created.
  */
-export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRunSummary> {
+export async function runAutonomousLeadDiscovery(env: Env, skills: ResolvedActionSkillSet): Promise<DiscoveryRunSummary> {
   const summary = emptyDiscoveryRunSummary();
 
   if (!isWebSearchConfigured(env)) {
@@ -665,16 +410,12 @@ export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRun
     return summary;
   }
 
-  // Phase 1: Search & lightweight screening -> create R&I Work Handoffs.
   // This is the Kernel's own scheduled loop, not a Unit's Work item, so the
   // outbound search is authorized as a Kernel-owned read rather than under any
   // registered Action -- see evaluateExternalEgress.
   for (const query of DISCOVERY_QUERIES) {
-    await searchAndHandoffForQuery(env, query, summary, discoveryCronContext());
+    await searchAndScreenForQuery(env, query, summary, discoveryCronContext(), skills);
   }
-
-  // Phase 2: Consume completed R&I research -> evaluate criteria -> present for Martin's approval
-  await processCompletedLGSResearchHandoffs(env, summary);
 
   return summary;
 }
@@ -733,29 +474,27 @@ interface OnDemandIntakeClassification {
  * On-demand counterpart to runAutonomousLeadDiscovery: lets Martin ask,
  * in the Workspace stream, for LGS to proactively find opportunities right
  * now ("find me 3 companies showing a positioning problem") instead of
- * waiting for the next scheduled cycle. Reuses the exact same search,
- * screening, and R&I Handoff creation as scheduled discovery
- * (searchAndHandoffForQuery) -- the only difference is where the query
- * list comes from (AI-generated from Martin's stated focus, instead of
- * the fixed DISCOVERY_QUERIES list) and that it's triggered by a chat
- * message instead of a cron tick. Results still arrive asynchronously,
- * once R&I's own scheduled pickup researches each Handoff and Phase 2
- * evaluates it -- this never bypasses that, and never bypasses the
- * approval gate either, since Phase 2 is shared code.
+ * waiting for the next scheduled cycle. Reuses the exact same search and
+ * screening as scheduled discovery (searchAndScreenForQuery) -- the only
+ * difference is where the query list comes from (AI-generated from
+ * Martin's stated focus, instead of the fixed DISCOVERY_QUERIES list) and
+ * that it's triggered by a chat message instead of a cron tick. Candidates
+ * that pass screening are held, exactly as in the scheduled path, and no
+ * Lead is created without Martin's approval.
  */
 export const LeadOpportunityDiscoveryCapability = {
   id: "sales.lead_opportunity_discovery",
   name: "Lead Generation Specialist On-Demand Discovery Capability",
   description:
     "Runs on-demand opportunity discovery when Martin asks Lead Generation Specialist to proactively find companies showing evidence of a problem worth investigating.",
-  async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
+  async handleIntake(env: Env, chatId: number, text: string, threadId: number | undefined, skills: ResolvedActionSkillSet): Promise<boolean> {
     const classification = await generate<OnDemandIntakeClassification>(env, {
       taskId: "lead.discovery_ondemand_intake",
       mode: "json",
       parts: {
         persona: `You classify incoming messages for ENIG's Lead Generation Specialist on-demand discovery capability.
 Check if Martin is asking ENIG's own team to PROACTIVELY DISCOVER/FIND new potential companies/organisations to investigate as possible clients -- e.g. "find me 3 companies showing a positioning problem", "look for businesses with weak differentiation worth reaching out to", "search for organisations that might need our help".
-This is NOT: a prospective client's own enquiry about their own company (that is a Sales enquiry), a request to research a SPECIFIC NAMED company or market (that is Research & Intelligence), or general chat/small talk.
+This is NOT: a prospective client's own enquiry about their own company (that is a Sales enquiry), a request to research a SPECIFIC NAMED company or market (a separate request, not discovery), or general chat/small talk.
 If yes, set isDiscoveryRequest to true, extract the requested count as an integer if one was stated (otherwise omit the field), and a short restatement of the problem/situation focus requested (e.g. "positioning or communication problem"), or an empty string if no specific focus was given.
 Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not stated>, "focus": "..."}`,
         situation: text,
@@ -804,7 +543,7 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
     await sendWorkspaceHatMessage(
       env,
       target,
-      `🔍 Searching for organisations showing evidence of${focus ? ` ${focus}` : " a positioning, communication, or growth problem worth investigating"} (up to ${requestedCount}). Each promising signal goes to Research & Intelligence for evidence-backed investigation -- I'll bring findings back here for your approval as they're ready. This runs across the next few discovery cycles, not instantly.`,
+      `🔍 Searching for organisations showing evidence of${focus ? ` ${focus}` : " a positioning, communication, or growth problem worth investigating"} (up to ${requestedCount}). Candidates that pass screening are held -- evidence-backed validation of a discovery candidate has no owning step yet, so nothing is routed onward and no Lead is created.`,
     );
 
     const runSummary = emptyDiscoveryRunSummary();
@@ -812,16 +551,16 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
       // Same Kernel-owned read as the scheduled loop above: an on-demand
       // discovery request runs the same discovery capability, so it is
       // authorized the same way.
-      await searchAndHandoffForQuery(env, query, runSummary, discoveryCronContext());
+      await searchAndScreenForQuery(env, query, runSummary, discoveryCronContext(), skills);
     }
 
     await logActivity(env, {
-      entry: `On-demand discovery request processed: ${runSummary.evaluated} candidate(s) evaluated, ${runSummary.handoffsCreated} sent to R&I`,
+      entry: `On-demand discovery request processed: ${runSummary.evaluated} candidate(s) evaluated, ${runSummary.heldNoResearchPath} held (no research path)`,
       type: "Discovery",
       area: "Sales",
       activity: `Requested by Martin${focus ? ` -- focus: "${focus}"` : ""}. Queries: ${queries.map((q) => `"${q}"`).join(", ")}.`,
       decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.`,
-      nextActions: runSummary.handoffsCreated > 0 ? "Awaiting R&I research, then Martin's approval before any Lead is created." : "No promising signal found this run.",
+      nextActions: runSummary.heldNoResearchPath > 0 ? "Candidates held: no owning Action exists yet for evidence-backed validation. No Lead is created without Martin's approval." : "No promising signal found this run.",
       outcome: "Active",
     });
 
@@ -835,8 +574,8 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
  * Model design doc, "The Unit Registry") -- salesManifest.ts's
  * discover_leads action. Deliberately reuses handleIntake unchanged rather
  * than reimplementing it: same governance retrieval, same
- * lead.discovery_ondemand_intake classification, same search/screening/R&I
- * Handoff creation, same fail-closed messages for "no web search
+ * lead.discovery_ondemand_intake classification, same search/screening,
+ * same fail-closed messages for "no web search
  * configured"/"couldn't generate a search strategy" -- this only adapts
  * WHERE the result is delivered.
  *
@@ -856,8 +595,8 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
  * stream target regardless of what's passed in (see telegram.ts). Martin's
  * own DM id is passed only to satisfy handleIntake's signature.
  */
-export async function discoverLeadsReadHandler(env: Env, text: string): Promise<string> {
-  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, Number(env.MARTIN_TELEGRAM_USER_ID), text, undefined);
+export async function discoverLeadsReadHandler(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, Number(env.MARTIN_TELEGRAM_USER_ID), text, undefined, skills);
   return handled
     ? ""
     : `That didn't look like a discovery request to Lead Generation Specialist -- try something like "find me 3 companies showing a positioning problem."`;
@@ -881,7 +620,7 @@ export async function notifyDiscoveryRunSummary(env: Env, chatId: number, thread
     }
 
     const lines = [
-      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.handoffsCreated} R&I research handoff(s) created, ${summary.pendingApproval} opportunity finding(s) sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.`,
+      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.heldNoResearchPath} held with no research path, ${summary.pendingApproval} opportunity finding(s) sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.`,
     ];
     if (summary.pendingApproval > 0) {
       lines.push("", "No Lead is created until you approve each finding in the Workspace topic.");

@@ -2,6 +2,7 @@ import type { Env, Unit, WorkState } from "../types";
 import type { ActionDefinition, ConsequenceLevel } from "../hats/actionRegistry";
 import { validateActionDefinition } from "../hats/actionRegistry";
 import type { SemanticTaskId } from "../dataBoundary/types";
+import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
 
 /**
  * Generic Unit Manifest contract (ENIG Operating Model design doc, "The
@@ -39,10 +40,32 @@ import type { SemanticTaskId } from "../dataBoundary/types";
  * WorkSession creation itself never implies approval. A "read" action
  * never reaches entryHandler at all; it only ever runs readHandler.
  */
-export type EntryHandler<A extends string = string> = (env: Env, state: WorkState, actionName: A, text: string) => Promise<WorkState>;
+export type EntryHandler<A extends string = string> = (
+  env: Env,
+  state: WorkState,
+  actionName: A,
+  text: string,
+  /** The Skills this Action declared, resolved and integrity-verified by the Registry. A handler follows these and never looks Skill content up itself. Empty for an Action that declares none. */
+  skills: ResolvedActionSkillSet,
+) => Promise<WorkState>;
+
+/**
+ * A Handoff-specific pickup executor for Work whose Action was already
+ * resolved and recorded from the Handoff's destination facts. Not an
+ * EntryHandler: it reconstructs Handoff context first. It receives the Skills
+ * its recorded Action declared, resolved and integrity-verified exactly as an
+ * entry would -- empty for an Action that declares none.
+ */
+export type PickupHandler = (env: Env, state: WorkState, skills: ResolvedActionSkillSet) => Promise<WorkState>;
 
 /** Resumes a WorkSession left paused on one of this Hat's own `awaiting` states. */
-export type AwaitingStateHandler = (env: Env, state: WorkState, text: string) => Promise<WorkState>;
+export type AwaitingStateHandler = (
+  env: Env,
+  state: WorkState,
+  text: string,
+  /** The Skills declared by the Action this Work already recorded, resolved through the Registry before the handler runs. */
+  skills: ResolvedActionSkillSet,
+) => Promise<WorkState>;
 
 /**
  * Resolves one of this Hat's own approval-callback prefixes -- the
@@ -100,7 +123,7 @@ export interface HatManifest<A extends string = string> {
   actions: ActionDefinition<A>[];
 
   /** Runs a read action immediately -- no WorkSession, no approval gate. Every action.name with consequence "read" must have a case here; missing one fails closed, never falls through. */
-  readHandler: (env: Env, actionName: A, text: string) => Promise<string>;
+  readHandler: (env: Env, actionName: A, text: string, skills: ResolvedActionSkillSet) => Promise<string>;
 
   /**
    * Starts/continues managed execution for an "internal" or "write"

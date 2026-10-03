@@ -9,7 +9,7 @@ import { title, richText, select } from "../../notion";
 import { sendWorkspaceHatMessage } from "../../telegram";
 import { logActivity } from "../../log";
 import { generate } from "../../ai";
-import { getSkillContent } from "../../platform/skillRegistry";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 
 /**
  * Business Development's Unit Manifest -- the first Unit built entirely
@@ -94,10 +94,13 @@ import { getSkillContent } from "../../platform/skillRegistry";
  * All three Business Development Hats are now fully built.
  *
  * SKILLS (A1): every AI-driven action on all three Hats now resolves its
- * methodology through getSkillContent instead of restating it inline --
- * discover/research/assess actions fetch `research_signal`, qualify_*
- * fetch `opportunity_qualification_gate`, develop_* and
- * determine_next_move fetch `opportunity_forward_planning`. What stays
+ * methodology through its resolved Skill set instead of restating it inline.
+ * Each Action DECLARES its Skill (`skill_requirements`); Action Resolution
+ * resolves it through the Skill Registry and the execution boundary hands the
+ * handler the verified set -- no handler looks Skill content up itself.
+ * discover/research/assess actions declare `research_signal`, qualify_*
+ * declare `opportunity_qualification_gate`, develop_* and
+ * determine_next_move declare `opportunity_forward_planning`. What stays
  * hardcoded in each call is only its own persona framing and output
  * contract (the Skill content itself explicitly leaves the output shape
  * to the invoking action). The three HatManifest.responsibility strings
@@ -139,7 +142,7 @@ const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
 
 /**
  * Every Business Development Action is INTERPRETATION-DRIVEN, unlike the
- * structural entry rules Finance/R&I/Strategy/Sales/Marketing declare:
+ * structural entry rules Finance/Strategy/Sales/Marketing declare:
  * this Unit's three Hats each declare several entry Actions with the same
  * Responsibility, so the Work's origin cannot distinguish them -- only what
  * the requester actually asked for can. That is expressed declaratively
@@ -149,19 +152,20 @@ const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
  * fail closed at the resolution boundary.
  */
 const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentAction>[] = [
-  { name: "discover_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_opportunity" }] }, description: "Identify a candidate BD opportunity from a signal, market, organisation, or relationship." },
-  { name: "research_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_opportunity" }] }, description: "Gather evidence-backed findings on a named opportunity signal." },
-  { name: "assess_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_opportunity" }] }, description: "Determine whether a researched signal has a substantive reason for ENIG to pursue it." },
+  { name: "discover_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_opportunity" }] }, description: "Identify a candidate BD opportunity from a signal, market, organisation, or relationship." },
+  { name: "research_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_opportunity" }] }, description: "Gather evidence-backed findings on a named opportunity signal." },
+  { name: "assess_opportunity", responsibility: "develop_opportunities", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_opportunity" }] }, description: "Determine whether a researched signal has a substantive reason for ENIG to pursue it." },
   {
     name: "qualify_opportunity",
     responsibility: "develop_opportunities",
     consequence: "internal",
     requiresApproval: false,
+    skill_requirements: [{ skill_id: "opportunity_qualification_gate" }],
     applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_opportunity" }] },
     description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated.",
   },
-  { name: "develop_opportunity", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_opportunity" }] }, description: "Take a qualified opportunity forward: stakeholders, value hypothesis, route, dependencies, risks, next step." },
-  { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active opportunity." },
+  { name: "develop_opportunity", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_opportunity" }] }, description: "Take a qualified opportunity forward: stakeholders, value hypothesis, route, dependencies, risks, next step." },
+  { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active opportunity." },
   { name: "handoff_to_sales", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
   { name: "handoff_to_strategy", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
 ];
@@ -188,8 +192,8 @@ const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentActi
  * proving genuine cross-Hat reuse per the OS-analogy review's five-part
  * test, not two copies of the same prompt under one label.
  */
-async function discoverOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function discoverOpportunity(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_opportunity",
     mode: "json",
@@ -214,7 +218,7 @@ async function discoverOpportunity(env: Env, text: string): Promise<string> {
  * Real evidence-organization reasoning for research_opportunity, per the
  * Hat Definition's own Output contract (Notion): "evidence-backed
  * findings, implications for ENIG, limitations, and sources." BD has no
- * live web-search/external-research capability wired up (unlike R&I or
+ * live web-search/external-research capability wired up (unlike
  * Lead Discovery) -- this organizes and draws implications only from
  * what Martin has actually supplied in the request, never fabricating
  * facts, statistics, or claims not present in the input. Anything not
@@ -225,8 +229,8 @@ async function discoverOpportunity(env: Env, text: string): Promise<string> {
  * discoverOpportunity's doc comment for the cross-Hat reuse proof this
  * is part of.
  */
-async function researchOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function researchOpportunity(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_opportunity",
     mode: "json",
@@ -267,8 +271,8 @@ async function researchOpportunity(env: Env, text: string): Promise<string> {
  * without inventing unstated capability claims or market facts is the
  * same evidence discipline, not a distinct methodology.
  */
-async function assessOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function assessOpportunity(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{
     assessment?: string;
     strategicRelevance?: string;
@@ -296,14 +300,14 @@ async function assessOpportunity(env: Env, text: string): Promise<string> {
   return `Assessment: ${result.assessment}\n\nStrategic relevance: ${result.strategicRelevance ?? "(not stated)"}\nCommercial relevance: ${result.commercialRelevance ?? "(not stated)"}\nCapability fit: ${result.capabilityFit ?? "(not stated)"}\nEvidence quality: ${result.evidenceQuality ?? "(not stated)"}\n\nUnresolved questions: ${unresolved}`;
 }
 
-async function opportunityDevelopmentReadHandler(env: Env, actionName: OpportunityDevelopmentAction, text: string): Promise<string> {
+async function opportunityDevelopmentReadHandler(env: Env, actionName: OpportunityDevelopmentAction, text: string, skills: ResolvedActionSkillSet): Promise<string> {
   switch (actionName) {
     case "discover_opportunity":
-      return discoverOpportunity(env, text);
+      return discoverOpportunity(env, text, skills);
     case "research_opportunity":
-      return researchOpportunity(env, text);
+      return researchOpportunity(env, text, skills);
     case "assess_opportunity":
-      return assessOpportunity(env, text);
+      return assessOpportunity(env, text, skills);
     default:
       // qualify_opportunity is "internal" and develop_opportunity/
       // determine_next_move/handoff_to_sales/handoff_to_strategy are
@@ -332,9 +336,9 @@ interface QualificationJudgment {
  * threshold decision with its own consequence-level machinery (it pauses
  * the WorkSession on Held), not an evidence-interpretation step.
  */
-async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
+async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<QualificationJudgment> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
-  const skillContent = getSkillContent("opportunity_qualification_gate");
+  const skillContent = skills.get("opportunity_qualification_gate").content;
 
   const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.opportunity_qualification",
@@ -365,9 +369,9 @@ async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunit
   };
 }
 
-async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string): Promise<WorkState> {
+async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
-  const result = await judgeOpportunityQualification(env, opportunity);
+  const result = await judgeOpportunityQualification(env, opportunity, skills);
 
   state.bdOpportunity = {
     ...opportunity,
@@ -398,7 +402,7 @@ async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string
 
 /**
  * Proposes (never auto-creates) a BD -> Sales/Strategy opportunity
- * handoff -- mirrors Strategy's routeToUnit / R&I's routeToConsumingHat
+ * handoff -- mirrors Strategy's routeToUnit
  * exactly: build a preview into pendingBDHandoff, present Telegram
  * approve/reject buttons, and only create the Handoff in
  * handleBDHandoffApproval once Martin approves. No SemanticTaskId or
@@ -444,7 +448,7 @@ async function proposeBDHandoff(env: Env, state: WorkState, targetUnit: Unit, ta
 
 /**
  * Resolves handoff_to_sales/handoff_to_strategy's approve/reject callback
- * -- mirrors handleStrategyHandoffApproval/handleResearchHandoffApproval
+ * -- mirrors handleStrategyHandoffApproval
  * exactly. Pre-Entity, same as Lead Discovery's own pre-Entity Handoffs
  * (leadGenerationDiscovery.ts): BD never resolves a real Entity/Matter,
  * so this uses the same "E-UNBOUND"/"M-UNBOUND" placeholder tokens
@@ -545,9 +549,9 @@ interface DevelopmentDraft {
   nextStep?: string;
 }
 
-async function draftDevelopOpportunity(env: Env, opportunity: BDOpportunityState): Promise<DevelopmentDraft | null> {
+async function draftDevelopOpportunity(env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<DevelopmentDraft | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
-  const skillContent = getSkillContent("opportunity_forward_planning");
+  const skillContent = skills.get("opportunity_forward_planning").content;
 
   return generate<DevelopmentDraft>(env, {
     taskId: "business_development.develop_opportunity",
@@ -574,11 +578,12 @@ async function proposeBDDevelopment(
   env: Env,
   state: WorkState,
   hatFamily: BDOpportunityState["hatFamily"],
-  draftFn: (env: Env, opportunity: BDOpportunityState) => Promise<DevelopmentDraft | null> = draftDevelopOpportunity,
+  skills: ResolvedActionSkillSet,
+  draftFn: (env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet) => Promise<DevelopmentDraft | null> = draftDevelopOpportunity,
 ): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
   const opportunity = state.bdOpportunity ?? { hatFamily, signal: state.enquiryText ?? "", evidence: [] };
-  const draft = await draftFn(env, opportunity);
+  const draft = await draftFn(env, opportunity, skills);
 
   if (!draft) {
     await sendWorkspaceHatMessage(
@@ -671,7 +676,7 @@ export const BD_DEVELOP_CALLBACK_PREFIX = "bddevelop" as const;
  * matching requiresApproval: true.
  *
  * Migrated (A1) to resolve the shared `opportunity_forward_planning`
- * Skill through getSkillContent -- the second consumer predicted when
+ * Skill through its resolved Skill set -- the second consumer predicted when
  * that Skill was registered (see draftDevelopOpportunity's doc comment).
  * The grounding rule ("build only from established state, never invent
  * a next move") and the "surface any human decision the plan depends on
@@ -681,9 +686,9 @@ export const BD_DEVELOP_CALLBACK_PREFIX = "bddevelop" as const;
  * covers determine_next_move on Opportunity, Partnership, and Growth &
  * Market Development at once.
  */
-async function draftNextMove(env: Env, opportunity: BDOpportunityState): Promise<{ nextMove?: string; rationale?: string; requiresHumanDecision?: string } | null> {
+async function draftNextMove(env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<{ nextMove?: string; rationale?: string; requiresHumanDecision?: string } | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
-  const skillContent = getSkillContent("opportunity_forward_planning");
+  const skillContent = skills.get("opportunity_forward_planning").content;
 
   return generate(env, {
     taskId: "business_development.determine_next_move",
@@ -705,10 +710,10 @@ async function draftNextMove(env: Env, opportunity: BDOpportunityState): Promise
  * handleBDNextMoveApproval once Martin approves. Generic across all
  * three BD Hats.
  */
-async function proposeNextMove(env: Env, state: WorkState, hatFamily: BDOpportunityState["hatFamily"]): Promise<WorkState> {
+async function proposeNextMove(env: Env, state: WorkState, hatFamily: BDOpportunityState["hatFamily"], skills: ResolvedActionSkillSet): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
   const opportunity = state.bdOpportunity ?? { hatFamily, signal: state.enquiryText ?? "", evidence: [] };
-  const draft = await draftNextMove(env, opportunity);
+  const draft = await draftNextMove(env, opportunity, skills);
 
   if (!draft || !draft.nextMove) {
     await sendWorkspaceHatMessage(
@@ -816,9 +821,10 @@ async function opportunityDevelopmentEntryHandler(
   state: WorkState,
   actionName: OpportunityDevelopmentAction,
   text: string,
+  skills: ResolvedActionSkillSet,
 ): Promise<WorkState> {
   if (actionName === "qualify_opportunity") {
-    return runQualifyOpportunity(env, state, OPPORTUNITY_DEVELOPMENT_HAT_NAME);
+    return runQualifyOpportunity(env, state, OPPORTUNITY_DEVELOPMENT_HAT_NAME, skills);
   }
 
   if (actionName === "handoff_to_sales") {
@@ -830,11 +836,11 @@ async function opportunityDevelopmentEntryHandler(
   }
 
   if (actionName === "develop_opportunity") {
-    return proposeBDDevelopment(env, state, "opportunity_development");
+    return proposeBDDevelopment(env, state, "opportunity_development", skills);
   }
 
   if (actionName === "determine_next_move") {
-    return proposeNextMove(env, state, "opportunity_development");
+    return proposeNextMove(env, state, "opportunity_development", skills);
   }
 
   // discover_opportunity/research_opportunity/assess_opportunity are
@@ -849,10 +855,10 @@ async function opportunityDevelopmentEntryHandler(
  * as the initial call does, rather than a separate, drifting
  * implementation of the same rule.
  */
-async function resumeQualifyOpportunity(env: Env, state: WorkState, text: string): Promise<WorkState> {
+async function resumeQualifyOpportunity(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: "", evidence: [] };
   state.bdOpportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
-  return runQualifyOpportunity(env, state, OPPORTUNITY_DEVELOPMENT_HAT_NAME);
+  return runQualifyOpportunity(env, state, OPPORTUNITY_DEVELOPMENT_HAT_NAME, skills);
 }
 
 const opportunityDevelopmentAwaitingHandlers: HatManifest<OpportunityDevelopmentAction>["awaitingHandlers"] = {
@@ -899,12 +905,12 @@ const PARTNERSHIP_DEVELOPMENT_HAT_NAME = "Partnerships Manager";
 const PARTNERSHIP_DEVELOPMENT_SPECIALIZATION = "Partnership Development";
 
 const partnershipDevelopmentActions: ActionDefinition<PartnershipDevelopmentAction>[] = [
-  { name: "discover_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_partner" }] }, description: "Identify a potential partner or strategic relationship." },
-  { name: "research_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_partner" }] }, description: "Research the organisation, stakeholders, capabilities, and relationship context." },
-  { name: "assess_partnership", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_partnership" }] }, description: "Assess mutual value, strategic fit, and relationship viability." },
-  { name: "qualify_partnership", responsibility: "develop_partnerships", consequence: "internal", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_partnership" }] }, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
-  { name: "develop_partnership", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_partnership" }] }, description: "Develop a qualified partnership: stakeholders, value proposition, relationship model, route, dependencies, risks." },
-  { name: "determine_next_move", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active partnership opportunity." },
+  { name: "discover_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_partner" }] }, description: "Identify a potential partner or strategic relationship." },
+  { name: "research_partner", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_partner" }] }, description: "Research the organisation, stakeholders, capabilities, and relationship context." },
+  { name: "assess_partnership", responsibility: "develop_partnerships", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_partnership" }] }, description: "Assess mutual value, strategic fit, and relationship viability." },
+  { name: "qualify_partnership", responsibility: "develop_partnerships", consequence: "internal", requiresApproval: false, skill_requirements: [{ skill_id: "opportunity_qualification_gate" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_partnership" }] }, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
+  { name: "develop_partnership", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_partnership" }] }, description: "Develop a qualified partnership: stakeholders, value proposition, relationship model, route, dependencies, risks." },
+  { name: "determine_next_move", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active partnership opportunity." },
   { name: "handoff_to_sales", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the partnership becomes a genuine client-acquisition opportunity." },
   { name: "handoff_to_strategy", responsibility: "develop_partnerships", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the partnership needs strategic diagnosis." },
 ];
@@ -916,14 +922,14 @@ const partnershipDevelopmentActions: ActionDefinition<PartnershipDevelopmentActi
  * discipline as discoverOpportunity -- never fabricates evidence.
  *
  * Migrated (A1) to resolve the shared `research_signal` Skill through
- * getSkillContent instead of restating its evidence discipline inline --
+ * the resolved Skill set (the Action's declared Skills) instead of restating its evidence discipline inline --
  * the identical Skill discoverOpportunity/researchOpportunity/
  * assessOpportunity already consume, so the partnership flavor lives only
  * in this call's own persona and output contract, never in a second copy
  * of the methodology.
  */
-async function discoverPartner(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function discoverPartner(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_partner",
     mode: "json",
@@ -952,14 +958,14 @@ async function discoverPartner(env: Env, text: string): Promise<string> {
  * capability.
  *
  * Migrated (A1) to resolve the shared `research_signal` Skill through
- * getSkillContent -- the "never fabricate facts/statistics/claims" and
+ * the resolved Skill set (the Action's declared Skills) -- the "never fabricate facts/statistics/claims" and
  * "name what isn't stated as a limitation" prose is the Skill's own
  * methodology, not duplicated here; the no-live-search capability
  * constraint stays in the persona since it is this action's own
  * authority framing, not methodology.
  */
-async function researchPartner(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function researchPartner(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_partner",
     mode: "json",
@@ -990,12 +996,12 @@ async function researchPartner(env: Env, text: string): Promise<string> {
  * viability. Same evidence discipline as assessOpportunity.
  *
  * Migrated (A1) to resolve the shared `research_signal` Skill through
- * getSkillContent -- its fourth research-side consumer, since judging
+ * the resolved Skill set (the Action's declared Skills) -- its fourth research-side consumer, since judging
  * mutual value/fit without inventing unstated capability claims is the
  * same evidence discipline, not a distinct methodology.
  */
-async function assessPartnership(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function assessPartnership(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{
     assessment?: string;
     mutualValue?: string;
@@ -1023,14 +1029,14 @@ async function assessPartnership(env: Env, text: string): Promise<string> {
   return `Assessment: ${result.assessment}\n\nMutual value: ${result.mutualValue ?? "(not stated)"}\nStrategic fit: ${result.strategicFit ?? "(not stated)"}\nComplementary capabilities: ${result.complementaryCapabilities ?? "(not stated)"}\nRisks and dependencies: ${result.risksAndDependencies ?? "(not stated)"}\n\nUnresolved questions: ${unresolved}`;
 }
 
-async function partnershipDevelopmentReadHandler(env: Env, actionName: PartnershipDevelopmentAction, text: string): Promise<string> {
+async function partnershipDevelopmentReadHandler(env: Env, actionName: PartnershipDevelopmentAction, text: string, skills: ResolvedActionSkillSet): Promise<string> {
   switch (actionName) {
     case "discover_partner":
-      return discoverPartner(env, text);
+      return discoverPartner(env, text, skills);
     case "research_partner":
-      return researchPartner(env, text);
+      return researchPartner(env, text, skills);
     case "assess_partnership":
-      return assessPartnership(env, text);
+      return assessPartnership(env, text, skills);
     default:
       throw new Error(`${actionName}: not a read action on Partnership Development.`);
   }
@@ -1042,13 +1048,13 @@ async function partnershipDevelopmentReadHandler(env: Env, actionName: Partnersh
  * partnership-flavored persona/output contract.
  *
  * Migrated (A1) to resolve the shared `opportunity_qualification_gate`
- * Skill through getSkillContent instead of restating the threshold
+ * Skill through its resolved Skill set instead of restating the threshold
  * discipline ("not enthusiasm/confidence/superficial fit; hold rather
  * than infer") inline -- same Skill qualify_opportunity already consumes.
  */
-async function judgePartnershipQualification(env: Env, partnership: BDOpportunityState): Promise<QualificationJudgment> {
+async function judgePartnershipQualification(env: Env, partnership: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<QualificationJudgment> {
   const evidenceText = partnership.evidence.length > 0 ? partnership.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
-  const skillContent = getSkillContent("opportunity_qualification_gate");
+  const skillContent = skills.get("opportunity_qualification_gate").content;
 
   const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.qualify_partnership",
@@ -1076,9 +1082,9 @@ async function judgePartnershipQualification(env: Env, partnership: BDOpportunit
   };
 }
 
-async function runQualifyPartnership(env: Env, state: WorkState): Promise<WorkState> {
+async function runQualifyPartnership(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const partnership = state.bdOpportunity ?? { hatFamily: "partnership_development" as const, signal: state.enquiryText ?? "", evidence: [] };
-  const result = await judgePartnershipQualification(env, partnership);
+  const result = await judgePartnershipQualification(env, partnership, skills);
 
   state.bdOpportunity = {
     ...partnership,
@@ -1107,10 +1113,10 @@ async function runQualifyPartnership(env: Env, state: WorkState): Promise<WorkSt
   return state;
 }
 
-async function resumeQualifyPartnership(env: Env, state: WorkState, text: string): Promise<WorkState> {
+async function resumeQualifyPartnership(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const partnership = state.bdOpportunity ?? { hatFamily: "partnership_development" as const, signal: "", evidence: [] };
   state.bdOpportunity = { ...partnership, evidence: [...partnership.evidence, text] };
-  return runQualifyPartnership(env, state);
+  return runQualifyPartnership(env, state, skills);
 }
 
 /**
@@ -1122,12 +1128,12 @@ async function resumeQualifyPartnership(env: Env, state: WorkState, text: string
  * partnership-flavored persona/output contract.
  *
  * Migrated (A1) to resolve the shared `opportunity_forward_planning`
- * Skill through getSkillContent -- same Skill draftDevelopOpportunity
+ * Skill through its resolved Skill set -- same Skill draftDevelopOpportunity
  * already consumes.
  */
-async function draftDevelopPartnership(env: Env, partnership: BDOpportunityState): Promise<DevelopmentDraft | null> {
+async function draftDevelopPartnership(env: Env, partnership: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<DevelopmentDraft | null> {
   const evidenceText = partnership.evidence.length > 0 ? partnership.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
-  const skillContent = getSkillContent("opportunity_forward_planning");
+  const skillContent = skills.get("opportunity_forward_planning").content;
 
   return generate(env, {
     taskId: "business_development.develop_partnership",
@@ -1146,9 +1152,10 @@ async function partnershipDevelopmentEntryHandler(
   state: WorkState,
   actionName: PartnershipDevelopmentAction,
   text: string,
+  skills: ResolvedActionSkillSet,
 ): Promise<WorkState> {
   if (actionName === "qualify_partnership") {
-    return runQualifyPartnership(env, state);
+    return runQualifyPartnership(env, state, skills);
   }
 
   if (actionName === "handoff_to_sales") {
@@ -1160,11 +1167,11 @@ async function partnershipDevelopmentEntryHandler(
   }
 
   if (actionName === "develop_partnership") {
-    return proposeBDDevelopment(env, state, "partnership_development", draftDevelopPartnership);
+    return proposeBDDevelopment(env, state, "partnership_development", skills, draftDevelopPartnership);
   }
 
   if (actionName === "determine_next_move") {
-    return proposeNextMove(env, state, "partnership_development");
+    return proposeNextMove(env, state, "partnership_development", skills);
   }
 
   throw new Error(`${actionName}: not an internal/write action on Partnership Development.`);
@@ -1204,12 +1211,12 @@ const GROWTH_MARKET_DEVELOPMENT_HAT_NAME = "Growth & Market Development Manager"
 const GROWTH_MARKET_DEVELOPMENT_SPECIALIZATION = "Growth & Market Development";
 
 const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAction>[] = [
-  { name: "discover_growth_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_growth_opportunity" }] }, description: "Identify a potential market, channel, offering, or growth space." },
-  { name: "research_market", responsibility: "develop_growth", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_market" }] }, description: "Research market/industry signals, segments, channels, competitors, demand." },
-  { name: "assess_market_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_market_opportunity" }] }, description: "Assess market attractiveness, strategic/commercial relevance, capability fit." },
-  { name: "qualify_growth_opportunity", responsibility: "develop_growth", consequence: "internal", requiresApproval: false, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_growth_opportunity" }] }, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
-  { name: "develop_growth_opportunity", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_growth_opportunity" }] }, description: "Develop a qualified growth opportunity: value hypothesis, requirements, route, risks." },
-  { name: "determine_next_move", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active growth opportunity." },
+  { name: "discover_growth_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "discover_growth_opportunity" }] }, description: "Identify a potential market, channel, offering, or growth space." },
+  { name: "research_market", responsibility: "develop_growth", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "research_market" }] }, description: "Research market/industry signals, segments, channels, competitors, demand." },
+  { name: "assess_market_opportunity", responsibility: "develop_growth", consequence: "read", requiresApproval: false, skill_requirements: [{ skill_id: "research_signal" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "assess_market_opportunity" }] }, description: "Assess market attractiveness, strategic/commercial relevance, capability fit." },
+  { name: "qualify_growth_opportunity", responsibility: "develop_growth", consequence: "internal", requiresApproval: false, skill_requirements: [{ skill_id: "opportunity_qualification_gate" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "qualify_growth_opportunity" }] }, description: "Apply the evidence threshold for Qualified / Held / Blocked. Held pauses on missing evidence -- execution state, never approval-gated." },
+  { name: "develop_growth_opportunity", responsibility: "develop_growth", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "develop_growth_opportunity" }] }, description: "Develop a qualified growth opportunity: value hypothesis, requirements, route, risks." },
+  { name: "determine_next_move", responsibility: "develop_growth", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active growth opportunity." },
   { name: "handoff_to_sales", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the growth opportunity becomes a genuine client-acquisition opportunity." },
   { name: "handoff_to_strategy", responsibility: "develop_growth", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the growth opportunity needs strategic diagnosis." },
 ];
@@ -1222,11 +1229,11 @@ const growthMarketDevelopmentActions: ActionDefinition<GrowthMarketDevelopmentAc
  * discoverOpportunity/discoverPartner -- never fabricates evidence.
  *
  * Migrated (A1) to resolve the shared `research_signal` Skill through
- * getSkillContent -- the third Hat now consuming the same evidence
+ * the resolved Skill set (the Action's declared Skills) -- the third Hat now consuming the same evidence
  * discipline instead of restating it inline.
  */
-async function discoverGrowthOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function discoverGrowthOpportunity(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{ signal?: string; whyItMayMatter?: string; evidenceNeeded?: string[] }>(env, {
     taskId: "business_development.discover_growth_opportunity",
     mode: "json",
@@ -1255,11 +1262,11 @@ async function discoverGrowthOpportunity(env: Env, text: string): Promise<string
  * web-search/external-research capability.
  *
  * Migrated (A1) to resolve the shared `research_signal` Skill through
- * getSkillContent; the no-live-search capability constraint stays in the
+ * the resolved Skill set (the Action's declared Skills); the no-live-search capability constraint stays in the
  * persona as this action's own authority framing.
  */
-async function researchMarket(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function researchMarket(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{ findings?: string[]; implications?: string; limitations?: string[]; sources?: string[] }>(env, {
     taskId: "business_development.research_market",
     mode: "json",
@@ -1290,10 +1297,10 @@ async function researchMarket(env: Env, text: string): Promise<string> {
  * assessOpportunity/assessPartnership.
  *
  * Migrated (A1) to resolve the shared `research_signal` Skill through
- * getSkillContent -- its research-side consumer on the third BD Hat.
+ * the resolved Skill set (the Action's declared Skills) -- its research-side consumer on the third BD Hat.
  */
-async function assessMarketOpportunity(env: Env, text: string): Promise<string> {
-  const skillContent = getSkillContent("research_signal");
+async function assessMarketOpportunity(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const skillContent = skills.get("research_signal").content;
   const result = await generate<{
     assessment?: string;
     marketAttractiveness?: string;
@@ -1320,14 +1327,14 @@ async function assessMarketOpportunity(env: Env, text: string): Promise<string> 
   return `Assessment: ${result.assessment}\n\nMarket attractiveness: ${result.marketAttractiveness ?? "(not stated)"}\nStrategic/commercial relevance: ${result.strategicCommercialRelevance ?? "(not stated)"}\nCapability fit: ${result.capabilityFit ?? "(not stated)"}\n\nUnresolved questions: ${unresolved}`;
 }
 
-async function growthMarketDevelopmentReadHandler(env: Env, actionName: GrowthMarketDevelopmentAction, text: string): Promise<string> {
+async function growthMarketDevelopmentReadHandler(env: Env, actionName: GrowthMarketDevelopmentAction, text: string, skills: ResolvedActionSkillSet): Promise<string> {
   switch (actionName) {
     case "discover_growth_opportunity":
-      return discoverGrowthOpportunity(env, text);
+      return discoverGrowthOpportunity(env, text, skills);
     case "research_market":
-      return researchMarket(env, text);
+      return researchMarket(env, text, skills);
     case "assess_market_opportunity":
-      return assessMarketOpportunity(env, text);
+      return assessMarketOpportunity(env, text, skills);
     default:
       throw new Error(`${actionName}: not a read action on Growth & Market Development.`);
   }
@@ -1340,12 +1347,12 @@ async function growthMarketDevelopmentReadHandler(env: Env, actionName: GrowthMa
  * growth/market-flavored persona/output contract.
  *
  * Migrated (A1) to resolve the shared `opportunity_qualification_gate`
- * Skill through getSkillContent -- the threshold discipline is the
+ * Skill through its resolved Skill set -- the threshold discipline is the
  * Skill's own methodology, not a third inline copy of it.
  */
-async function judgeGrowthQualification(env: Env, opportunity: BDOpportunityState): Promise<QualificationJudgment> {
+async function judgeGrowthQualification(env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<QualificationJudgment> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered yet)";
-  const skillContent = getSkillContent("opportunity_qualification_gate");
+  const skillContent = skills.get("opportunity_qualification_gate").content;
 
   const result = await generate<{ qualification?: string; rationale?: string; missingEvidence?: string[] }>(env, {
     taskId: "business_development.qualify_growth_opportunity",
@@ -1373,9 +1380,9 @@ async function judgeGrowthQualification(env: Env, opportunity: BDOpportunityStat
   };
 }
 
-async function runQualifyGrowthOpportunity(env: Env, state: WorkState): Promise<WorkState> {
+async function runQualifyGrowthOpportunity(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const opportunity = state.bdOpportunity ?? { hatFamily: "growth_market_development" as const, signal: state.enquiryText ?? "", evidence: [] };
-  const result = await judgeGrowthQualification(env, opportunity);
+  const result = await judgeGrowthQualification(env, opportunity, skills);
 
   state.bdOpportunity = {
     ...opportunity,
@@ -1404,10 +1411,10 @@ async function runQualifyGrowthOpportunity(env: Env, state: WorkState): Promise<
   return state;
 }
 
-async function resumeQualifyGrowthOpportunity(env: Env, state: WorkState, text: string): Promise<WorkState> {
+async function resumeQualifyGrowthOpportunity(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const opportunity = state.bdOpportunity ?? { hatFamily: "growth_market_development" as const, signal: "", evidence: [] };
   state.bdOpportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
-  return runQualifyGrowthOpportunity(env, state);
+  return runQualifyGrowthOpportunity(env, state, skills);
 }
 
 /**
@@ -1419,12 +1426,12 @@ async function resumeQualifyGrowthOpportunity(env: Env, state: WorkState, text: 
  * persona/output contract.
  *
  * Migrated (A1) to resolve the shared `opportunity_forward_planning`
- * Skill through getSkillContent -- the forward-planning discipline is
+ * Skill through its resolved Skill set -- the forward-planning discipline is
  * the Skill's own methodology, not a third inline copy of it.
  */
-async function draftDevelopGrowthOpportunity(env: Env, opportunity: BDOpportunityState): Promise<DevelopmentDraft | null> {
+async function draftDevelopGrowthOpportunity(env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet): Promise<DevelopmentDraft | null> {
   const evidenceText = opportunity.evidence.length > 0 ? opportunity.evidence.map((e, i) => `${i + 1}. ${e}`).join("\n") : "(none gathered)";
-  const skillContent = getSkillContent("opportunity_forward_planning");
+  const skillContent = skills.get("opportunity_forward_planning").content;
 
   return generate(env, {
     taskId: "business_development.develop_growth_opportunity",
@@ -1443,9 +1450,10 @@ async function growthMarketDevelopmentEntryHandler(
   state: WorkState,
   actionName: GrowthMarketDevelopmentAction,
   text: string,
+  skills: ResolvedActionSkillSet,
 ): Promise<WorkState> {
   if (actionName === "qualify_growth_opportunity") {
-    return runQualifyGrowthOpportunity(env, state);
+    return runQualifyGrowthOpportunity(env, state, skills);
   }
 
   if (actionName === "handoff_to_sales") {
@@ -1457,11 +1465,11 @@ async function growthMarketDevelopmentEntryHandler(
   }
 
   if (actionName === "develop_growth_opportunity") {
-    return proposeBDDevelopment(env, state, "growth_market_development", draftDevelopGrowthOpportunity);
+    return proposeBDDevelopment(env, state, "growth_market_development", skills, draftDevelopGrowthOpportunity);
   }
 
   if (actionName === "determine_next_move") {
-    return proposeNextMove(env, state, "growth_market_development");
+    return proposeNextMove(env, state, "growth_market_development", skills);
   }
 
   throw new Error(`${actionName}: not an internal/write action on Growth & Market Development.`);

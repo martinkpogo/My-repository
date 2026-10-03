@@ -67,7 +67,7 @@ export function capResearchPlan(dimensions: ResearchPlanDimension[]): ResearchPl
 export function buildResearchPlanPromptParts(categorySummary: string, relevance: string, protocols: ResearchProtocolId[]): Pick<GeneratePromptParts, "persona" | "skillContent"> {
   return {
     persona:
-      "You generate a bounded research plan for ENIG's Research & Intelligence Unit -- a strategy-led consultancy's own R&I capability. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:",
+      "You generate a bounded research plan for a strategy-led consultancy's own research needs. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:",
     skillContent: [
       categorySummary,
       `This research question has been interpreted, in relation to that authorized category, as:\n"${relevance}"`,

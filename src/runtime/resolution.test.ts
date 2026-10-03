@@ -9,7 +9,7 @@ import type { ActionDefinition } from "../hats/actionRegistry";
 import type { HatManifest, UnitManifest } from "../units/unitManifest";
 import { validateHatManifest } from "../units/unitManifest";
 import { findUnitManifest, getUnitManifests } from "../units/registry";
-import type { SkillId } from "../platform/skillRegistry";
+import { resolveSkill, type SkillId } from "../platform/skillRegistry";
 
 /**
  * Resolution-boundary tests (ENIG Operating Model, §16: Organization
@@ -619,6 +619,7 @@ test("resolveActionExecution: declared Skills resolve by exact id, verified agai
   assert.strictEqual(skill.compatibility_status, "compatible", "resolution throws otherwise");
   assert.strictEqual(skill.integrity_status, "verified", "resolution verifies the digest otherwise");
   assert.strictEqual(skill.package_location, null);
+  assert.strictEqual(skill.content, resolveSkill("research_signal").content, "the carried package is the Registry-validated content");
 });
 
 test("resolveActionExecution: a missing (unregistered) Skill fails closed -- never a partial or substituted set", async (t) => {

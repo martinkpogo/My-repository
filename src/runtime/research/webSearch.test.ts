@@ -23,13 +23,13 @@ function evaluateAccessForTest(env: any, operation: "read" | "create" | "update"
  */
 const KERNEL_SEARCH: AccessContext = discoveryCronContext();
 
-/** An R&I Work item running its own `research` Action, which is how the real research path searches. */
+/** A Work item whose Action permits reading (`research_opportunity` is declared `read`), which is how a Work-owned search is authorized. */
 const WORK_SEARCH: AccessContext = workSessionContext({
   workId: "work-websearch",
   chatId: 9999,
-  unit: "Research & Intelligence",
-  hat: "Research & Intelligence Analyst",
-  actionName: "research",
+  unit: "Business Development",
+  hat: "Business Development Manager",
+  actionName: "research_opportunity",
   stage: "researching",
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
@@ -77,7 +77,7 @@ test("An outbound create is refused outright -- no registered Action authorizes 
   assert.throws(() => evaluateAccessForTest(env, "create", WORK_SEARCH), /outbound create/);
 });
 
-test("A Unit Work whose Action permits reading may search -- the real R&I research path, and the refusal above is specific to contexts that do not", async () => {
+test("A Unit Work whose Action permits reading may search -- a Work-owned search path, and the refusal above is specific to contexts that do not", async () => {
   const originalFetch = globalThis.fetch;
   let called = 0;
   globalThis.fetch = (async () => {
@@ -189,7 +189,7 @@ test("formatUncoveredDimensionsWarning names each uncovered dimension and instru
   assert.ok(warning.toLowerCase().includes("limitation"));
 });
 
-// --- Core Structure v2.4: concurrency + identity boundary stay Package-owned ---
+// --- concurrency + identity boundary stay executor-owned ---
 
 test("gatherDimensionEvidence runs independent dimension searches concurrently -- Promise.all semantics preserved, never serialized", async () => {
   const originalFetch = globalThis.fetch;
@@ -218,7 +218,7 @@ test("gatherDimensionEvidence runs independent dimension searches concurrently -
   }
 });
 
-test("gatherDimensionEvidence redacts identity terms from every outbound query -- token/privacy boundary intact at the Package's search edge", async () => {
+test("gatherDimensionEvidence redacts identity terms from every outbound query -- token/privacy boundary intact at the research runtime's search edge", async () => {
   const originalFetch = globalThis.fetch;
   const queries: string[] = [];
   globalThis.fetch = (async (_url: string, init?: RequestInit) => {

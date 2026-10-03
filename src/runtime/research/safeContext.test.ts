@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
 
-// A faithful shape of the real canonical Notion page (ENIG HQ / 2. Units &
-// Hats / Units / Research & Intelligence / "Research-Safe Consultancy
-// Context"), trimmed to what these helpers actually key off of.
+// A faithful shape of the real canonical Notion page ("Research-Safe
+// Consultancy Context"), trimmed to what these helpers actually key off of.
+// The page's own prose still carries its original R&I wording; it is kept
+// verbatim here as a fixture of the external governance text (Notion is not
+// modified by this repository), not as a description of current structure.
 const REAL_SAFE_CONTEXT = `**Status:** Canonical
 ## Purpose
 A controlled, sanitized description of the consultancy that the Research & Intelligence workspace is authorized to use when interpreting research questions and conducting external research.
