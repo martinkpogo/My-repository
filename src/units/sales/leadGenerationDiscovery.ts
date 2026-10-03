@@ -3,7 +3,7 @@ import { isWebSearchConfigured, searchWeb } from "../../runtime/research/webSear
 import type { WebSearchResult } from "../../runtime/research/webSearch";
 import { createPage, richText, select, title } from "../../notion";
 import { generate } from "../../ai";
-import { getSkillContent } from "../../platform/skillRegistry";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import type { HatMessageTarget } from "../../telegram";
@@ -106,7 +106,7 @@ interface EvaluationBatchResponse {
  * mechanics and this action's own JSON output shape, neither of which
  * belongs in a Skill meant to stay reusable beyond this one Hat.
  */
-export async function evaluateCandidates(env: Env, results: WebSearchResult[]): Promise<CandidateEvaluation[]> {
+export async function evaluateCandidates(env: Env, results: WebSearchResult[], skills: ResolvedActionSkillSet): Promise<CandidateEvaluation[]> {
   if (results.length === 0) return [];
 
   const governance = await getLeadDiscoveryGovernance(env);
@@ -115,7 +115,7 @@ export async function evaluateCandidates(env: Env, results: WebSearchResult[]): 
     return [];
   }
 
-  const skillContent = getSkillContent("research_signal");
+  const skillContent = skills.get("research_signal").content;
 
   const candidatesText = results
     .map((r, i) => `[${i}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${r.publishedDate ? `\nPublished: ${r.publishedDate}` : ""}`)
@@ -354,11 +354,11 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
  * records nothing about the candidate beyond the run summary -- a later
  * owning Action will take it from here.
  */
-async function searchAndScreenForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext): Promise<void> {
+async function searchAndScreenForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext, skills: ResolvedActionSkillSet): Promise<void> {
   const results = (await searchWeb(env, query, access)).slice(0, MAX_RESULTS_PER_QUERY);
   if (results.length === 0) return;
 
-  const evaluations = await evaluateCandidates(env, results);
+  const evaluations = await evaluateCandidates(env, results, skills);
   for (let i = 0; i < results.length; i++) {
     const result = results[i];
     const evaluation = evaluations[i];
@@ -402,7 +402,7 @@ async function searchAndScreenForQuery(env: Env, query: string, summary: Discove
  * against the Acquisition Criteria. Candidates that pass are held (see
  * searchAndScreenForQuery); no Handoff or Lead is created.
  */
-export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRunSummary> {
+export async function runAutonomousLeadDiscovery(env: Env, skills: ResolvedActionSkillSet): Promise<DiscoveryRunSummary> {
   const summary = emptyDiscoveryRunSummary();
 
   if (!isWebSearchConfigured(env)) {
@@ -414,7 +414,7 @@ export async function runAutonomousLeadDiscovery(env: Env): Promise<DiscoveryRun
   // outbound search is authorized as a Kernel-owned read rather than under any
   // registered Action -- see evaluateExternalEgress.
   for (const query of DISCOVERY_QUERIES) {
-    await searchAndScreenForQuery(env, query, summary, discoveryCronContext());
+    await searchAndScreenForQuery(env, query, summary, discoveryCronContext(), skills);
   }
 
   return summary;
@@ -487,7 +487,7 @@ export const LeadOpportunityDiscoveryCapability = {
   name: "Lead Generation Specialist On-Demand Discovery Capability",
   description:
     "Runs on-demand opportunity discovery when Martin asks Lead Generation Specialist to proactively find companies showing evidence of a problem worth investigating.",
-  async handleIntake(env: Env, chatId: number, text: string, threadId?: number): Promise<boolean> {
+  async handleIntake(env: Env, chatId: number, text: string, threadId: number | undefined, skills: ResolvedActionSkillSet): Promise<boolean> {
     const classification = await generate<OnDemandIntakeClassification>(env, {
       taskId: "lead.discovery_ondemand_intake",
       mode: "json",
@@ -551,7 +551,7 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
       // Same Kernel-owned read as the scheduled loop above: an on-demand
       // discovery request runs the same discovery capability, so it is
       // authorized the same way.
-      await searchAndScreenForQuery(env, query, runSummary, discoveryCronContext());
+      await searchAndScreenForQuery(env, query, runSummary, discoveryCronContext(), skills);
     }
 
     await logActivity(env, {
@@ -595,8 +595,8 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
  * stream target regardless of what's passed in (see telegram.ts). Martin's
  * own DM id is passed only to satisfy handleIntake's signature.
  */
-export async function discoverLeadsReadHandler(env: Env, text: string): Promise<string> {
-  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, Number(env.MARTIN_TELEGRAM_USER_ID), text, undefined);
+export async function discoverLeadsReadHandler(env: Env, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(env, Number(env.MARTIN_TELEGRAM_USER_ID), text, undefined, skills);
   return handled
     ? ""
     : `That didn't look like a discovery request to Lead Generation Specialist -- try something like "find me 3 companies showing a positioning problem."`;

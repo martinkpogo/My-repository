@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert";
 import { businessDevelopmentManifest } from "../units/businessDevelopment/businessDevelopmentManifest";
+import { salesManifest } from "../units/sales/salesManifest";
 import { evaluateCandidates } from "../units/sales/leadGenerationDiscovery";
-import { getSkillContent } from "./skillRegistry";
+import { resolveSkill } from "./skillRegistry";
+import { resolveRecordedActionSkills } from "../runtime/actionSkills";
 import type { WebSearchResult } from "../runtime/research/webSearch";
 import type { Env } from "../types";
 
@@ -14,7 +16,7 @@ import type { Env } from "../types";
  * isolation -- it requires both in the same proof, asserting:
  *
  * 1. Both Hats build a prompt containing the identical Skill content
- *    (`getSkillContent("research_signal")`'s own real methodology text) --
+ *    (`resolveSkill("research_signal").content`'s own real methodology text) --
  *    proven by matching a distinctive substring of that content in both
  *    assembled prompts.
  * 2. Each Hat's own Persona/authority framing is distinct and present
@@ -25,9 +27,11 @@ import type { Env } from "../types";
  *    feeds an eventual Lead-creation action gated on Martin's approval.
  *    Neither Hat's invocation carries state from the other.
  *
- * getSkillContent is now a synchronous, repo-native lookup (no Notion
- * round trip) -- migrated 2026-09-28 from the retired fetchSkill/
- * SkillDefinition arrangement (see skillRegistry.ts's own doc comment).
+ * Skills are repo-native (no Notion round trip) -- migrated 2026-09-28 from
+ * the retired fetchSkill/SkillDefinition arrangement (see skillRegistry.ts's
+ * own doc comment). Each Action declares `research_signal` in its
+ * `skill_requirements`; the Registry resolves it and execution is handed the
+ * resolved set, so both Hats below receive the one registered package.
  * Sales's evaluateCandidates still separately fetches its own Hat
  * Definition/Universal Role Contract via getLeadDiscoveryGovernance
  * (a real, live-fetched governance concern, unrelated to Skill content),
@@ -78,9 +82,9 @@ function mockNotionFetch(t: any) {
   });
 }
 
-test("research_signal: getSkillContent returns the same content regardless of caller -- the actual shared-content precondition for cross-Hat reuse", () => {
-  const first = getSkillContent("research_signal");
-  const second = getSkillContent("research_signal");
+test("research_signal: the registry-resolved content is the same regardless of caller -- the actual shared-content precondition for cross-Hat reuse", () => {
+  const first = resolveSkill("research_signal").content;
+  const second = resolveSkill("research_signal").content;
   assert.strictEqual(first, second);
   assert.match(first, new RegExp(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
 });
@@ -98,7 +102,7 @@ test("research_signal: BD's discover_opportunity and Sales's evaluateCandidates 
   } as any;
 
   const opportunityDevelopmentHat = businessDevelopmentManifest.hats["Business Development Manager"];
-  await opportunityDevelopmentHat.readHandler(bdEnv, "discover_opportunity", "There's a signal worth looking at");
+  await opportunityDevelopmentHat.readHandler(bdEnv, "discover_opportunity", "There's a signal worth looking at", await resolveRecordedActionSkills(opportunityDevelopmentHat, "discover_opportunity"));
 
   const salesEnv = fakeEnv();
   const salesCapturedSystems: string[] = [];
@@ -110,7 +114,7 @@ test("research_signal: BD's discover_opportunity and Sales's evaluateCandidates 
   } as any;
 
   const results: WebSearchResult[] = [{ title: "Nova Inc positioning shift", url: "https://example.com/nova", snippet: "Nova expanded into a new market." }];
-  await evaluateCandidates(salesEnv, results);
+  await evaluateCandidates(salesEnv, results, await resolveRecordedActionSkills(salesManifest.hats["Lead Generation Specialist"], "discover_leads"));
 
   // 1. Both prompts contain the identical Skill content.
   assert.strictEqual(bdCapturedSystems.length, 1);

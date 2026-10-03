@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert";
 import {
   salesManifest,
@@ -105,7 +106,7 @@ test("salesManifest: readHandler delegates discover_leads to discoverLeadsReadHa
   });
 
   const hat = salesManifest.hats["Lead Generation Specialist"];
-  const reply = await hat.readHandler(fakeEnv({ GROQ_API_KEY: "key" } as any), "discover_leads", "How's it going?");
+  const reply = await hat.readHandler(fakeEnv({ GROQ_API_KEY: "key" } as any), "discover_leads", "How's it going?", NO_ACTION_SKILLS);
 
   assert.match(reply, /didn't look like a discovery request to Lead Generation Specialist/);
 });
@@ -113,7 +114,7 @@ test("salesManifest: readHandler delegates discover_leads to discoverLeadsReadHa
 test("salesManifest: entryHandler fails closed -- no internal/write action is declared on Lead Generation Specialist", async () => {
   const hat = salesManifest.hats["Lead Generation Specialist"];
   await assert.rejects(
-    () => hat.entryHandler(fakeEnv(), fakeWorkState(), "discover_leads", "text"),
+    () => hat.entryHandler(fakeEnv(), fakeWorkState(), "discover_leads", "text", NO_ACTION_SKILLS),
     /not an internal\/write action on Lead Generation Specialist/,
   );
 });
@@ -225,7 +226,7 @@ test("salesManifest: Sales Executive's readHandler fails closed -- no read actio
   // would need rewriting every time a privileged commit is split out of
   // new_enquiry -- exactly what happened while it read "...only declares
   // \"new_enquiry\"".
-  await assert.rejects(() => hat.readHandler(fakeEnv(), "new_enquiry", "text"), /not a read action/);
+  await assert.rejects(() => hat.readHandler(fakeEnv(), "new_enquiry", "text", NO_ACTION_SKILLS), /not a read action/);
 });
 
 test("salesManifest: Sales Executive's awaitingHandlers is empty -- continuation states stay hardcoded in session.ts", () => {
@@ -274,7 +275,7 @@ test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat ge
   const state = fakeWorkState({ hat: "Sales Executive" });
 
   const hat = salesManifest.hats["Sales Executive"];
-  const result = await hat.entryHandler(env, state, "new_enquiry", "Some inbound enquiry text");
+  const result = await hat.entryHandler(env, state, "new_enquiry", "Some inbound enquiry text", NO_ACTION_SKILLS);
 
   // Provenance of the origin is still recorded -- it is the fact that does
   // not depend on identity -- but Runtime Sales no longer extracts or matches

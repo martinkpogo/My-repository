@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as strategy from "./strategyAnalyst";
@@ -193,5 +194,5 @@ export const strategyManifest: UnitManifest = {
  */
 export async function dispatchStrategyHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = strategyManifest.hats[STRATEGY_ANALYST_HAT_NAME];
-  return hat.entryHandler(env, state, "diagnose", text);
+  return hat.entryHandler(env, state, "diagnose", text, await resolveRecordedActionSkills(hat, "diagnose"));
 }

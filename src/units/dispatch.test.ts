@@ -3,6 +3,8 @@ import assert from "node:assert";
 import { tryResolveUnitAction, type UnitDispatchResult } from "./dispatch";
 import type { UnitManifest, HatManifest } from "./unitManifest";
 import type { Env } from "../types";
+import { resolveSkill } from "../platform/skillRegistry";
+import { bindExecutionSkills } from "../runtime/actionSkills";
 
 /**
  * Covers tryResolveUnitAction -- the Chat-mode counterpart to
@@ -169,4 +171,77 @@ test("tryResolveUnitAction: a single-Hat manifest skips Stage 1 entirely (no AI 
   await tryResolveUnitAction(env, manifest, { chatId: 1, threadId: 2 }, "status?");
 
   assert.strictEqual(aiCalls, 1, "only Stage 2 (action) should call AI -- Stage 1 is skipped for a single-Hat manifest");
+});
+
+// --- Declared Skills reach execution through the resolved Action ----------------
+
+function skilledManifest(skillId: string, received: { skills: any[] }): UnitManifest {
+  const base = toyManifest();
+  const hat = base.hats["Toy Hat"];
+  const skilled = (name: string, consequence: "read" | "write"): any => ({
+    name,
+    responsibility: "toy_responsibility",
+    consequence,
+    requiresApproval: false,
+    skill_requirements: [{ skill_id: skillId }],
+    applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: name }] },
+    description: `Skilled ${consequence} action.`,
+  });
+  return {
+    ...base,
+    hats: {
+      "Toy Hat": {
+        ...hat,
+        actions: [skilled("skilled_read", "read"), skilled("skilled_write", "write")],
+        readHandler: async (_env, _name, _text, skills) => {
+          received.skills.push(skills);
+          return `skills:${skills.declared.join(",")}`;
+        },
+      },
+    },
+  };
+}
+
+test("a read Action's declared Skill is resolved by the Registry and handed to its readHandler -- the content the Registry validated", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const received = { skills: [] as any[] };
+  const env = mockAi({}, [{ action: "skilled_read" }]);
+
+  const result = await tryResolveUnitAction(env, skilledManifest("research_signal", received), { chatId: 1, threadId: 2 }, "read with skill");
+
+  assert.deepStrictEqual(result, { kind: "handled" });
+  assert.strictEqual(received.skills.length, 1);
+  assert.deepStrictEqual(received.skills[0].declared, ["research_signal"]);
+  assert.strictEqual(received.skills[0].get("research_signal").content, resolveSkill("research_signal").content);
+  assert.match(sent[0].text, /skills:research_signal/);
+  assert.throws(() => received.skills[0].get("opportunity_qualification_gate"), /not declared/);
+});
+
+test("a read Action requiring a Skill the Registry cannot resolve never reaches its handler (fail closed before execution)", async (t) => {
+  mockTelegramFetch(t);
+  const received = { skills: [] as any[] };
+  const env = mockAi({}, [{ action: "skilled_read" }]);
+
+  const result = await tryResolveUnitAction(env, skilledManifest("ghost_skill", received), { chatId: 1, threadId: 2 }, "read with a ghost skill");
+
+  assert.strictEqual(received.skills.length, 0, "the handler must not run when a required Skill cannot be resolved");
+  assert.notStrictEqual(result.kind, "continue");
+});
+
+test("a write Action's execution context carries its resolved Skill content to the Worker, which binds it from the same Registry-verified package", async (t) => {
+  mockTelegramFetch(t);
+  const received = { skills: [] as any[] };
+  const manifest = skilledManifest("opportunity_forward_planning", received);
+  const env = mockAi({}, [{ action: "skilled_write" }]);
+
+  const result = await tryResolveUnitAction(env, manifest, { chatId: 1, threadId: 2 }, "write with skill");
+
+  assert.strictEqual(result.kind, "continue");
+  const { execution } = result as Extract<UnitDispatchResult, { kind: "continue" }>;
+  assert.strictEqual(execution.skills[0].skill_id, "opportunity_forward_planning");
+  assert.strictEqual(execution.skills[0].content, resolveSkill("opportunity_forward_planning").content);
+  const action = manifest.hats["Toy Hat"].actions.find((a) => a.name === "skilled_write")!;
+  const bound = await bindExecutionSkills(execution.skills, action);
+  assert.strictEqual(bound.get("opportunity_forward_planning").content, resolveSkill("opportunity_forward_planning").content);
+  assert.strictEqual(received.skills.length, 0, "a write Action never runs a readHandler");
 });

@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as finance from "./valueBasedPricingAssessor";
@@ -143,5 +144,5 @@ export const financeManifest: UnitManifest = {
  */
 export async function dispatchFinanceHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = financeManifest.hats[VALUE_BASED_PRICING_ASSESSOR_HAT_NAME];
-  return hat.entryHandler(env, state, "price", text);
+  return hat.entryHandler(env, state, "price", text, await resolveRecordedActionSkills(hat, "price"));
 }

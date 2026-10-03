@@ -1,4 +1,6 @@
 import type { Env, WorkState } from "../../types";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import { discoverLeadsReadHandler, handleLeadOpportunityApproval } from "./leadGenerationDiscovery";
@@ -174,12 +176,13 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     // reserved to the Architect, and it is not answered here by inventing an
     // Action. The refusal is logged at each site with that reasoning inline.
     requiresApproval: false,
+    skill_requirements: [{ skill_id: "research_signal" }],
     description: "Proactively search for organisations showing evidence of a problem worth investigating, and screen promising signals against the Acquisition Criteria. Candidates that pass are held; no Handoff or Lead is created.",
   },
 ];
 
-async function leadGenerationSpecialistReadHandler(env: Env, _actionName: LeadGenerationSpecialistAction, text: string): Promise<string> {
-  return discoverLeadsReadHandler(env, text);
+async function leadGenerationSpecialistReadHandler(env: Env, _actionName: LeadGenerationSpecialistAction, text: string, skills: ResolvedActionSkillSet): Promise<string> {
+  return discoverLeadsReadHandler(env, text, skills);
 }
 
 /** No internal/write actions are declared on this Hat today -- reaching either of these would mean dispatchAction resolved a consequence this manifest never declared. Fails closed rather than silently no-opping. */
@@ -454,5 +457,5 @@ export const salesManifest: UnitManifest = {
  */
 export async function dispatchSalesExecutiveHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const hat = salesManifest.hats[SALES_EXECUTIVE_HAT_NAME];
-  return hat.entryHandler(env, state, "new_enquiry", text);
+  return hat.entryHandler(env, state, "new_enquiry", text, await resolveRecordedActionSkills(hat, "new_enquiry"));
 }

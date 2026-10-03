@@ -7,6 +7,8 @@ import { logActivity } from "../log";
 import { findUnitManifest } from "./registry";
 import { findManifestAction } from "./unitManifest";
 import { resolveOrganization, type OrganizationFailureReason } from "../runtime/organization";
+import { bindExecutionSkills } from "../runtime/actionSkills";
+import { NO_ACTION_SKILLS, SkillResolutionError, type ResolvedActionSkillSet } from "../platform/skillRegistry";
 import { resolveActionExecution, type ActionExecutionContext, type ActionFailureReason } from "../runtime/actionResolution";
 import { workContractForRequest, type WorkMode, type WorkRequest } from "../runtime/workContract";
 
@@ -273,7 +275,23 @@ async function dispatchResolvedAction(
   mode: WorkMode,
 ): Promise<UnitDispatchResult> {
   const actionName = execution.action.action_id;
-  const dispatchResult = await dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t));
+  // A read Action runs here, so its declared Skills are bound here: the same
+  // check handleUnitAction applies to write/internal Actions, before any
+  // handler can run. An Action declaring none binds the empty set.
+  const declaredAction = hat.actions.find((a) => a.name === actionName);
+  let skills: ResolvedActionSkillSet = NO_ACTION_SKILLS;
+  if (declaredAction) {
+    try {
+      skills = await bindExecutionSkills(execution.skills, declaredAction);
+    } catch (err) {
+      if (!(err instanceof SkillResolutionError)) throw err;
+      console.error(`dispatchResolvedAction: required Skill resolution failed for ${actionName}: ${err.reason}`);
+      if (mode === "chat") return { kind: "ambiguous" };
+      await sendWorkspaceHatMessage(env, { ...target, hat: hatName }, "A Skill this action requires could not be verified -- nothing was run.");
+      return { kind: "handled" };
+    }
+  }
+  const dispatchResult = await dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t, skills));
   if (!dispatchResult) {
     // Unreachable: Resolution only ever returns manifest-exposed Actions.
     // Fail closed/silent anyway rather than silently continuing.

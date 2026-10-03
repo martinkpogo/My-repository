@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "../../types";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import { workSessionContext } from "../../access";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
@@ -522,5 +523,5 @@ export async function dispatchMarketingHat(env: Env, state: WorkState): Promise<
     // silently no-opping if that invariant is ever violated.
     throw new Error(`dispatchMarketingHat: "${hatName}" is not a registered Marketing Hat.`);
   }
-  return hat.entryHandler(env, state, "handle_request", state.marketingTaskText ?? "");
+  return hat.entryHandler(env, state, "handle_request", state.marketingTaskText ?? "", await resolveRecordedActionSkills(hat, "handle_request"));
 }

@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert";
 import { strategyManifest, STRATEGY_HANDOFF_CALLBACK_PREFIX } from "./strategyManifest";
 import { findCallbackHandler } from "../unitManifest";
@@ -125,7 +126,7 @@ test("strategyManifest: Strategy Analyst declares two actions -- ungated diagnos
 test("strategyManifest: readHandler fails closed -- no read action is declared", async () => {
   const hat = strategyManifest.hats["Strategy Analyst"];
   await assert.rejects(
-    () => hat.readHandler(fakeEnv(), "diagnose", "text"),
+    () => hat.readHandler(fakeEnv(), "diagnose", "text", NO_ACTION_SKILLS),
     // Matched loosely on purpose: the historical string enumerated the Hat's
     // actions ("only declares \"diagnose\"") and so broke every time the Action
     // set changed. What is under test is that an ungated read is refused --

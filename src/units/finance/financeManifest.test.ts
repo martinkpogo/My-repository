@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert";
 import { financeManifest, dispatchFinanceHat, QUOTE_CALLBACK_PREFIX } from "./financeManifest";
 import { findCallbackHandler } from "../unitManifest";
@@ -88,7 +89,7 @@ test("financeManifest: Value-Based Pricing Assessor declares exactly one action,
 test("financeManifest: readHandler fails closed -- no read action is declared", async () => {
   const hat = financeManifest.hats["Value-Based Pricing Assessor"];
   await assert.rejects(
-    () => hat.readHandler(fakeEnv(), "price", "text"),
+    () => hat.readHandler(fakeEnv(), "price", "text", NO_ACTION_SKILLS),
     /not a read action -- Value-Based Pricing Assessor only declares "price"/,
   );
 });
@@ -123,7 +124,7 @@ test("financeManifest: entryHandler/dispatchFinanceHat genuinely delegates to va
   const state = fakeWorkState();
 
   const hat = financeManifest.hats["Value-Based Pricing Assessor"];
-  const result = await hat.entryHandler(env, state, "price", "no Matter token anywhere in this message");
+  const result = await hat.entryHandler(env, state, "price", "no Matter token anywhere in this message", NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "finance_blocked");
   assert.strictEqual(result.awaiting, "finance_direct_request_matter");

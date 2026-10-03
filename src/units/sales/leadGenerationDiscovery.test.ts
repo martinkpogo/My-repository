@@ -9,6 +9,11 @@ import {
   runAutonomousLeadDiscovery,
 } from "./leadGenerationDiscovery";
 import type { Env, WorkState } from "../../types";
+import { salesManifest } from "./salesManifest";
+import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
+
+/** The Skills `discover_leads` declares, resolved through the Skill Registry -- the same path execution uses. */
+const lgsSkills = () => resolveRecordedActionSkills(salesManifest.hats["Lead Generation Specialist"], "discover_leads");
 
 function createMockWorkSession() {
   const calls: { init: any[][]; proposeLeadOpportunity: any[][] } = { init: [], proposeLeadOpportunity: [] };
@@ -92,7 +97,7 @@ test("DISCOVERY_QUERIES targets observable business situations without presuppos
 });
 
 test("runAutonomousLeadDiscovery does nothing when web search isn't configured -- never fabricates a run", async () => {
-  const summary = await runAutonomousLeadDiscovery(fakeEnv());
+  const summary = await runAutonomousLeadDiscovery(fakeEnv(), await lgsSkills());
   assert.deepStrictEqual(summary, { evaluated: 0, heldNoResearchPath: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 });
 });
 
@@ -136,7 +141,7 @@ test("Test A: Candidate signal passes lightweight screening -> held; no Handoff 
     globalThis.fetch = originalFetch;
   });
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   // The step that used to follow screening (a Handoff to the retired
   // Research & Intelligence Unit) no longer exists and no replacement has
@@ -219,7 +224,7 @@ function installDiscoveryRun(t: any, evaluation: string) {
 test("LGS: a candidate passing lightweight screening is HELD -- no Handoff, no Lead, and no Blocker (nothing was refused; there is simply no research path to route to)", async (t) => {
   const { created, activityEntries } = installDiscoveryRun(t, PASS_EVALUATION);
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   assert.strictEqual(created.handoffs, 0, "no Handoff may be created: Research & Intelligence is not a destination and no replacement exists");
   assert.strictEqual(created.leads, 0, "and certainly no Lead -- lightweight screening alone never creates one");
@@ -236,7 +241,7 @@ test("LGS: a candidate passing lightweight screening is HELD -- no Handoff, no L
 test("LGS: an unsupported diagnosis is screened out before any governed write -- no Handoff, no Lead, and nothing identity-bearing reaches Notion", async (t) => {
   const { created, createBodies, activityEntries } = installDiscoveryRun(t, UNSUPPORTED_EVALUATION);
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   assert.ok(summary.evaluated > 0, "the candidate was evaluated");
   assert.strictEqual(summary.screenedOut, summary.evaluated, "an unsupported diagnosis is screened out, not escalated");
@@ -304,7 +309,7 @@ test("Test D & G: A passing candidate is held with no Handoff written -- its unv
     globalThis.fetch = originalFetch;
   });
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   // Screening still runs and still passes; nothing is routed onward.
   assert.strictEqual(createdHandoffBody, undefined, "no Handoff is written for a held candidate");
@@ -342,7 +347,7 @@ test("runAutonomousLeadDiscovery never creates a Lead from an inconsistent AI 'p
     globalThis.fetch = originalFetch;
   });
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   assert.strictEqual(leadsCreatedCount, 0);
   assert.strictEqual(summary.skippedAsInsufficient, DISCOVERY_QUERIES.length);
@@ -369,7 +374,7 @@ test("runAutonomousLeadDiscovery records nothing when governance retrieval fails
     globalThis.fetch = originalFetch;
   });
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }));
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   assert.strictEqual(leadsCreatedCount, 0);
   assert.strictEqual(summary.pendingApproval, 0);
@@ -491,7 +496,7 @@ test("Requirement 1 & 2: Successful discovery with failed notification still ret
   });
 
   const env = fakeEnv({ MARTIN_TELEGRAM_USER_ID: "9999" });
-  const summary = await runAutonomousLeadDiscovery(env); // returns summary with 0 evaluated when unconfigured
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills()); // returns summary with 0 evaluated when unconfigured
 
   let notificationSent = false;
   let notificationError: string | null = null;
@@ -524,7 +529,7 @@ test("Requirement 1: Successful discovery with successful notification records n
   });
 
   const env = fakeEnv({ MARTIN_TELEGRAM_USER_ID: "9999" });
-  const summary = await runAutonomousLeadDiscovery(env);
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
 
   let notificationSent = false;
   let notificationError: string | null = null;
@@ -890,7 +895,7 @@ test("LeadOpportunityDiscoveryCapability ignores messages that aren't discovery 
     globalThis.fetch = originalFetch;
   });
 
-  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(fakeEnv({ GROQ_API_KEY: "key" }), 12345, "How's it going?");
+  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(fakeEnv({ GROQ_API_KEY: "key" }), 12345, "How's it going?", undefined, await lgsSkills());
   assert.strictEqual(handled, false);
 });
 
@@ -961,6 +966,8 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
     fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }),
     12345,
     "Find me 2 companies showing a positioning problem",
+    undefined,
+    await lgsSkills(),
   );
 
   assert.strictEqual(handled, true);
@@ -1014,6 +1021,8 @@ test("LeadOpportunityDiscoveryCapability fails closed when search strategy gener
     fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }),
     12345,
     "Find me 3 companies with a positioning problem",
+    undefined,
+    await lgsSkills(),
   );
 
   assert.strictEqual(handled, true, "must not silently fall through once intent is recognized -- an explicit failure message is required");
@@ -1052,7 +1061,7 @@ test("LeadOpportunityDiscoveryCapability fails closed when web search isn't conf
     globalThis.fetch = originalFetch;
   });
 
-  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(fakeEnv({ GROQ_API_KEY: "key" }), 12345, "Find me some companies");
+  const handled = await LeadOpportunityDiscoveryCapability.handleIntake(fakeEnv({ GROQ_API_KEY: "key" }), 12345, "Find me some companies", undefined, await lgsSkills());
 
   assert.strictEqual(handled, true);
   assert.ok(sentText.includes("no web search provider is configured"));

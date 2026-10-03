@@ -70,6 +70,13 @@ export interface ResolvedActionSkill {
   compatibility_status: "compatible";
   /** "verified" only because resolution threw otherwise (SHA-256 against the registered digest). */
   integrity_status: "verified";
+  /**
+   * The methodology body the Registry resolved and integrity-verified. This is
+   * what execution follows: it travels to the handler through
+   * `bindExecutionSkills` (actionSkills.ts), which re-checks it against the
+   * Registry at the point of use. Execution never looks a Skill up itself.
+   */
+  content: string;
 }
 
 /**
@@ -296,6 +303,7 @@ async function finalize(
       package_location: null,
       compatibility_status: "compatible" as const,
       integrity_status: "verified" as const,
+      content: skill.content,
     }));
   } catch (err) {
     if (err instanceof SkillResolutionError) {

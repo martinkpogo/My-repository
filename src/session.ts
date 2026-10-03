@@ -5,6 +5,8 @@ import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
+import { bindExecutionSkills, resolveRecordedActionSkills } from "./runtime/actionSkills";
+import { SkillResolutionError } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { logActivity } from "./log";
@@ -132,8 +134,27 @@ export class WorkSession extends DurableObject<Env> {
           state.threadId,
         ).then(() => state);
       }
-      recordWorkAction(state, actionName);
-      return hat.entryHandler(this.env, state, actionName, text);
+      // The Skills this Action declared, resolved by Action Resolution and
+      // carried on the context. Re-verified against the Registry here, before
+      // the handler can run: a declared Skill that is missing, substituted or
+      // integrity-drifted stops the Work rather than letting the handler follow
+      // unverified methodology.
+      const declaredAction = hat.actions.find((a) => a.name === actionName);
+      if (!declaredAction) {
+        console.error(`handleUnitAction: ${state.unit}/${state.hat} declares no action "${actionName}" (work ${state.workId})`);
+        return sendMessage(this.env, state.chatId, `"${actionName}" isn't a registered action on this Hat.`, undefined, state.threadId).then(() => state);
+      }
+      return bindExecutionSkills(execution.skills, declaredAction).then(
+        (skills) => {
+          recordWorkAction(state, actionName);
+          return hat.entryHandler(this.env, state, actionName, text, skills);
+        },
+        (err) => {
+          if (!(err instanceof SkillResolutionError)) throw err;
+          console.error(`handleUnitAction: required Skill resolution failed for ${actionName} (work ${state.workId}): ${err.reason}`);
+          return sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId).then(() => state);
+        },
+      );
     });
   }
 
@@ -181,8 +202,18 @@ export class WorkSession extends DurableObject<Env> {
           const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
           const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
           const awaitingHandler = hat && state.awaiting ? hat.awaitingHandlers[state.awaiting] : undefined;
-          if (awaitingHandler) {
-            return awaitingHandler(this.env, state, text);
+          if (awaitingHandler && hat) {
+            // The resumed Work runs under the Action it already recorded; that
+            // Action's declared Skills are resolved through the Registry before
+            // the handler runs, exactly as at entry.
+            return resolveRecordedActionSkills(hat, state.actionName).then(
+              (skills) => awaitingHandler(this.env, state, text, skills),
+              (err) => {
+                if (!(err instanceof SkillResolutionError)) throw err;
+                console.error(`handleTextReply: required Skill resolution failed for ${state.actionName} (work ${state.workId}): ${err.reason}`);
+                return sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId).then(() => state);
+              },
+            );
           }
           return sendMessage(
             this.env,
