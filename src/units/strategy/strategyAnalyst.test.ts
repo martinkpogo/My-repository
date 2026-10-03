@@ -10,6 +10,8 @@ import {
   handleStrategyClarification,
   handleStrategyRefinement,
   evaluateCausationDiscipline,
+  applyUnprovenCauseDiscipline,
+  UNPROVEN_CAUSE_MARKER,
   evaluateProposalCompleteness,
   formatDiagnosisForHandoff,
   STRATEGY_BOUNDARY_START,
@@ -686,6 +688,123 @@ test("evaluateCausationDiscipline: requires a stated reason when no recommendati
     diagnosis: { problem: "Problem.", cause: "Cause.", causationSupported: true },
   });
   assert.strictEqual(result.valid, false);
+});
+
+// --- Three separate questions: problem, cause, direction ---------------------------
+// `sufficient` = the problem is supported; `diagnosis.causationSupported` = the cause is
+// supported; `directionSupport` = the recommended direction is itself supported.
+
+const UNPROVEN_CAUSE_DIAGNOSIS: StrategyDiagnosisResult = {
+  ...SUFFICIENT_DIAGNOSIS,
+  diagnosis: { ...SUFFICIENT_DIAGNOSIS.diagnosis, causationSupported: false },
+  recommendedDirection: "Run a focused diagnostic of delivery operations to establish the cause of the late deliveries.",
+};
+
+test("Gate: supported cause + supported direction proceeds", () => {
+  const result = evaluateCausationDiscipline({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } });
+  assert.strictEqual(result.valid, true);
+  // A supported cause with a direction that does depend on it is exactly the normal case.
+  assert.strictEqual(evaluateCausationDiscipline({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: true } }).valid, true);
+});
+
+test("Gate: unsupported cause + independently supported direction proceeds", () => {
+  const result = evaluateCausationDiscipline({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } });
+  assert.strictEqual(result.valid, true);
+});
+
+test("Gate: unsupported cause + direction that materially depends on it is blocked", () => {
+  const result = evaluateCausationDiscipline({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: true } });
+  assert.strictEqual(result.valid, false);
+  if (!result.valid) assert.match(result.reason, /materially depends on a diagnosed cause/);
+});
+
+test("Gate: a direction that is itself insufficiently supported is blocked, whether or not the cause is supported", () => {
+  for (const base of [SUFFICIENT_DIAGNOSIS, UNPROVEN_CAUSE_DIAGNOSIS]) {
+    const result = evaluateCausationDiscipline({ ...base, directionSupport: { supported: false, dependsOnUnsupportedCause: false } });
+    assert.strictEqual(result.valid, false);
+    if (!result.valid) assert.match(result.reason, /direction itself is not sufficiently supported/);
+  }
+});
+
+test("Gate: unsupported cause with NO statement about the direction is still blocked -- the existing causation gate is not weakened", () => {
+  for (const directionSupport of [undefined, { supported: true } as any]) {
+    const result = evaluateCausationDiscipline({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport });
+    assert.strictEqual(result.valid, false);
+  }
+});
+
+test("applyUnprovenCauseDiscipline: an unsupported cause is kept as an explicit, labelled hypothesis -- idempotent, and a supported cause is untouched", () => {
+  const proceeding: StrategyDiagnosisResult = { ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } };
+  const once = applyUnprovenCauseDiscipline(proceeding);
+  assert.ok(once.diagnosis!.cause!.startsWith(UNPROVEN_CAUSE_MARKER));
+  assert.match(once.unresolvedQuestions!, /is unproven; the recommended direction does not depend on it/);
+  assert.deepStrictEqual(applyUnprovenCauseDiscipline(once), once, "applying it twice changes nothing");
+  assert.strictEqual(proceeding.diagnosis!.cause, SUFFICIENT_DIAGNOSIS.diagnosis!.cause, "the input is not mutated");
+
+  assert.strictEqual(applyUnprovenCauseDiscipline(SUFFICIENT_DIAGNOSIS), SUFFICIENT_DIAGNOSIS, "supported cause: unchanged");
+  assert.strictEqual(applyUnprovenCauseDiscipline(NO_RECOMMENDATION_DIAGNOSIS), NO_RECOMMENDATION_DIAGNOSIS, "no recommendation: unchanged");
+});
+
+test("Pickup: supported cause + supported direction proceeds to a proposal for Martin's approval", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } });
+
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "awaiting_intervention_approval");
+  assert.strictEqual(result.strategyDiagnosis!.diagnosis!.cause, SUFFICIENT_DIAGNOSIS.diagnosis!.cause, "a supported cause is not relabelled");
+});
+
+test("Pickup: unsupported cause + independently supported direction proceeds, and the cause stays explicitly unproven", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } });
+
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "awaiting_intervention_approval", "an independently supported direction proceeds although the cause is unresolved");
+  const diagnosis = result.strategyDiagnosis!;
+  assert.strictEqual(diagnosis.diagnosis!.causationSupported, false, "causationSupported keeps its meaning");
+  assert.ok(diagnosis.diagnosis!.cause!.startsWith(UNPROVEN_CAUSE_MARKER), "the unsupported cause is never presented as established fact");
+  assert.match(diagnosis.unresolvedQuestions!, /is unproven/);
+  assert.ok(log.sentTexts.some((text) => text.includes("UNPROVEN HYPOTHESIS")), "the uncertainty is visible to Martin, not only in state");
+  assert.strictEqual(log.handoffCreateBody, null, "no Handoff is created before Martin approves");
+});
+
+test("Pickup: unsupported cause + direction that materially depends on it is blocked and the Handoff is Held", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: true } });
+
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyProposal, undefined);
+  const held = lastHandoffPatch(log);
+  assert.strictEqual(held.properties.Status.select.name, "Held");
+  assert.match(held.properties["Open Questions"].rich_text[0].text.content, /materially depends on a diagnosed cause/);
+});
+
+test("Pickup: a direction with insufficient support is blocked -- it does not proceed to a proposal", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: false, dependsOnUnsupportedCause: false } });
+
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyProposal, undefined);
+  assert.match(lastHandoffPatch(log).properties["Open Questions"].rich_text[0].text.content, /direction itself is not sufficiently supported/);
+});
+
+test("Pickup: with no recommendation, the existing no-recommendation path is unchanged", async (t) => {
+  mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(result.strategyProposal, undefined);
 });
 
 test("7. Held case can explicitly return to Pending", async (t) => {

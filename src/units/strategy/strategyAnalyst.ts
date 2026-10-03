@@ -79,15 +79,33 @@ export interface StrategyDiagnosisSteps {
   cause?: string;
   /**
    * Whether the stated cause is actually supported by the supplied
-   * evidence, per the Hat Definition's "Do not assert causation without
-   * sufficient support." This is never taken on trust -- see
-   * evaluateCausationDiscipline, which forces the whole result to a
-   * blocked/insufficient state if a recommendation rests on causation the
-   * model itself did not mark as supported.
+   * evidence ("do not assert causation without sufficient support"). This
+   * answers ONE of three separate questions a diagnosis must keep apart:
+   * (1) is the problem supported by evidence -- `StrategyDiagnosisResult.sufficient`;
+   * (2) is the causal explanation supported -- this field;
+   * (3) is the recommended direction supported -- `directionSupport`.
+   * Never taken on trust -- see evaluateCausationDiscipline. An unsupported
+   * cause is never presented as established: it is kept as an explicit,
+   * labelled hypothesis (see applyUnprovenCauseDiscipline).
    */
   causationSupported?: boolean;
   constraint?: string;
   consequence?: string;
+}
+
+/**
+ * Whether the RECOMMENDED DIRECTION is itself supported by the evidence,
+ * independently of whether the diagnosed cause is. `supported`: the
+ * evidence actually backs this direction (not merely that it sounds
+ * sensible). `dependsOnUnsupportedCause`: the direction only makes sense if
+ * the diagnosed cause is true. A direction that does not rest on the cause
+ * (for example, one that investigates or resolves the unproven cause
+ * itself) may proceed while the cause stays unproven; one that materially
+ * depends on an unsupported cause may not.
+ */
+export interface StrategyDirectionSupport {
+  supported: boolean;
+  dependsOnUnsupportedCause: boolean;
 }
 
 export interface StrategicProblemFraming {
@@ -123,6 +141,8 @@ export interface StrategyDiagnosisResult {
   strategicProblem?: StrategicProblemFraming;
   options?: StrategicOption[];
   recommendedDirection?: string;
+  /** Required whenever a recommendedDirection is given and the cause is not marked supported -- see evaluateCausationDiscipline. */
+  directionSupport?: StrategyDirectionSupport;
   recommendationRationale?: string;
   /** Required whenever sufficient=true but no recommendedDirection is given -- states what must be resolved first, per step 6 of the operating procedure. */
   noRecommendationReason?: string;
@@ -447,10 +467,11 @@ function buildDiagnosisPromptParts(hatDefinition: string, universalRoleContract:
     ...strategyGovernancePersonaBehavior(hatDefinition, universalRoleContract),
     skillContent: [
       "=== TASK (execution mechanics -- not part of the governance above) ===",
-      "Work through the canonical operating procedure: (1) establish the strategic question -- stop if materially ambiguous; (2) establish the situation (symptoms, business conditions, constraints, consequences, stakeholders, objectives); (3) diagnose using Symptom -> Problem -> Cause -> Constraint -> Consequence, never asserting causation without sufficient support; (4) frame the strategic problem (what it is, why it matters, key drivers, the strategic tension/decision, material uncertainty); (5) develop strategic options only where genuinely warranted -- if only one direction is strategically reasonable, say so rather than manufacturing alternatives; (6) recommend a direction only when the evidence supports one, otherwise state explicitly what must be resolved first.",
+      "Work through the canonical operating procedure: (1) establish the strategic question -- stop if materially ambiguous; (2) establish the situation (symptoms, business conditions, constraints, consequences, stakeholders, objectives); (3) diagnose using Symptom -> Problem -> Cause -> Constraint -> Consequence, never asserting causation without sufficient support; (4) frame the strategic problem (what it is, why it matters, key drivers, the strategic tension/decision, material uncertainty); (5) develop strategic options only where genuinely warranted -- if only one direction is strategically reasonable, say so rather than manufacturing alternatives; (6) recommend a direction only when the evidence supports that direction, otherwise state explicitly what must be resolved first.",
       "Information supplied in the context below is NOT automatically established fact merely because it came from another Hat or Unit -- distinguish evidence from interpretation, inference, implication, and recommendation throughout.",
       "You do not own commercial progression, pricing, or creative production -- those belong to Sales, Finance, and Creative respectively. If the work genuinely requires one of those first, or requires evidence that has not been supplied, say so as the blocked/insufficient reason rather than inventing the missing material yourself.",
-      "Set causationSupported explicitly and honestly for the diagnosed cause -- true only if the supplied context actually supports that causal claim, never merely because it sounds plausible.",
+      "Keep three questions separate and answer each honestly: (a) is the problem itself supported by the supplied evidence (sufficient); (b) is the diagnosed CAUSE supported -- set causationSupported true only if the supplied context actually supports that causal claim, never merely because it sounds plausible; (c) is the recommended DIRECTION supported by the evidence -- set directionSupport.supported true only if the evidence itself backs that direction. Evidence that a problem exists is not evidence of its cause, and evidence of a cause is not by itself evidence for a direction.",
+      "If the cause is NOT supported, state it as an unproven hypothesis, never as established fact. You may still recommend a direction when that direction is itself supported by the evidence and does not rest on the unproven cause (set directionSupport.supported true and dependsOnUnsupportedCause false) -- for example a direction that investigates or resolves the unproven cause. If the direction materially depends on the unproven cause being true, or is itself not supported, do not recommend it: omit recommendedDirection and state in noRecommendationReason what must be established first.",
     ].join("\n\n"),
     context: [
       "=== RESPONSE FORMAT (execution mechanics -- not part of the governance above) ===",
@@ -463,7 +484,8 @@ function buildDiagnosisPromptParts(hatDefinition: string, universalRoleContract:
   "diagnosis": {"symptom":"...","problem":"...","cause":"...","causationSupported": true|false,"constraint":"...","consequence":"..."},
   "strategicProblem": {"statement":"...","whyItMatters":"...","keyDrivers":"...","strategicTension":"...","materialUncertainty":"..."},
   "options": [{"name":"...","intendedEffect":"...","rationale":"...","evidenceBasis":"...","assumptions":"...","constraintsRisks":"...","conditionsForSuccess":"..."}],
-  "recommendedDirection": "..." (omit entirely if evidence doesn't support a recommendation),
+  "recommendedDirection": "..." (omit entirely if the evidence doesn't support that direction, or it materially depends on an unsupported cause),
+  "directionSupport": {"supported": true|false, "dependsOnUnsupportedCause": true|false} (required whenever recommendedDirection is given),
   "recommendationRationale": "...",
   "noRecommendationReason": "..." (required if sufficient=true and recommendedDirection is omitted),
   "evidenceSources": "...",
@@ -477,12 +499,15 @@ Only include situation/diagnosis/strategicProblem/options/recommendation fields 
 
 /**
  * Deterministic post-check on the AI's own structured output -- per the
- * Hat Definition's "Do not assert causation without sufficient support,"
- * this is never taken on the AI's own say-so. A result claiming a
- * recommended direction while its own diagnosis marks causation as
- * unsupported is downgraded to blocked here, regardless of what
- * "sufficient" the model itself reported. Mirrors validateFinanceJudgement's
- * role in valueBasedPricingAssessor.ts -- the AI cannot override this.
+ * "Do not assert causation without sufficient support," this is never taken
+ * on the AI's own say-so. It keeps three questions apart: the problem
+ * (`sufficient`), the cause (`causationSupported`) and the direction
+ * (`directionSupport`). A recommendation proceeds when its cause is supported,
+ * or when the cause is unproven but the direction is itself supported and
+ * explicitly does not depend on that cause. It is blocked when the direction
+ * is unsupported, or materially depends on an unsupported cause. Mirrors
+ * validateFinanceJudgement's role in valueBasedPricingAssessor.ts -- the AI
+ * cannot override this.
  */
 export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | null): { valid: true } | { valid: false; reason: string } {
   if (!result) return { valid: false, reason: "No structured diagnosis was returned." };
@@ -490,16 +515,56 @@ export function evaluateCausationDiscipline(result: StrategyDiagnosisResult | nu
   if (!result.diagnosis?.problem || !result.diagnosis?.cause) {
     return { valid: false, reason: "Diagnosis is incomplete -- problem and cause must both be established before a strategic problem can be framed." };
   }
-  if (result.recommendedDirection && result.diagnosis.causationSupported !== true) {
-    return {
-      valid: false,
-      reason: "A recommended direction was produced, but the diagnosed cause is not marked as sufficiently supported by evidence -- a recommendation must not rest on unsupported causation.",
-    };
+  if (result.recommendedDirection) {
+    // Three separate questions: the problem (`sufficient`, above), the cause
+    // (causationSupported) and the direction (directionSupport).
+    const direction = result.directionSupport;
+    if (direction?.supported === false) {
+      return { valid: false, reason: "A recommended direction was produced, but the direction itself is not sufficiently supported by the evidence -- a direction that is not supported must not proceed." };
+    }
+    if (result.diagnosis.causationSupported !== true) {
+      // The cause is unproven. The direction may proceed ONLY if it is
+      // independently supported and explicitly does not rest on that cause.
+      if (direction?.supported !== true) {
+        return {
+          valid: false,
+          reason: "A recommended direction was produced, but the diagnosed cause is not marked as sufficiently supported by evidence and the direction is not shown to be independently supported -- a recommendation must not rest on unsupported causation.",
+        };
+      }
+      if (direction.dependsOnUnsupportedCause !== false) {
+        return {
+          valid: false,
+          reason: "A recommended direction was produced, but it materially depends on a diagnosed cause that is not sufficiently supported by evidence -- a recommendation must not rest on unsupported causation.",
+        };
+      }
+    }
   }
   if (!result.recommendedDirection && !result.noRecommendationReason) {
     return { valid: false, reason: "No recommended direction was given, and no reason was stated for why one isn't yet supported." };
   }
   return { valid: true };
+}
+
+/** Marker that keeps an unsupported cause visibly an unproven hypothesis wherever the diagnosis is later read. */
+export const UNPROVEN_CAUSE_MARKER = "[UNPROVEN HYPOTHESIS -- not established by the supplied evidence]";
+
+/**
+ * Applied to a diagnosis that has PASSED evaluateCausationDiscipline. When the
+ * cause is not supported but an independently supported direction proceeds,
+ * the cause is never allowed to read as established fact: it is labelled as an
+ * unproven hypothesis in the diagnosis itself, and recorded as an unresolved
+ * question. Deterministic -- not left to the model's wording. A supported
+ * cause, or a result with no recommendation, is returned unchanged.
+ */
+export function applyUnprovenCauseDiscipline(result: StrategyDiagnosisResult): StrategyDiagnosisResult {
+  if (!result.recommendedDirection || result.diagnosis?.causationSupported === true || !result.diagnosis?.cause) return result;
+  const rawCause = result.diagnosis.cause.startsWith(UNPROVEN_CAUSE_MARKER) ? result.diagnosis.cause.slice(UNPROVEN_CAUSE_MARKER.length).trim() : result.diagnosis.cause;
+  const note = `The diagnosed cause ("${rawCause}") is unproven; the recommended direction does not depend on it.`;
+  return {
+    ...result,
+    diagnosis: { ...result.diagnosis, cause: `${UNPROVEN_CAUSE_MARKER} ${rawCause}` },
+    unresolvedQuestions: result.unresolvedQuestions?.includes(note) ? result.unresolvedQuestions : [result.unresolvedQuestions, note].filter(Boolean).join("\n"),
+  };
 }
 
 /**
@@ -847,8 +912,11 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
     return handleBlocked(env, state, reason);
   }
 
-  state.strategyDiagnosis = result;
-  return deliverDiagnosis(env, state, result);
+  // The gate passed. An unproven cause stays an explicitly labelled hypothesis
+  // in everything downstream; a supported cause or no-recommendation result is unchanged.
+  const disciplined = applyUnprovenCauseDiscipline(result);
+  state.strategyDiagnosis = disciplined;
+  return deliverDiagnosis(env, state, disciplined);
 }
 
 async function handleBlocked(env: Env, state: WorkState, reason: string): Promise<WorkState> {
