@@ -25,12 +25,37 @@
  * (task-methodology, "how should this be performed") -- it's Kernel-
  * adjacent cross-cutting behavior, injected as `generate()`'s `behavior`
  * part, not `skillContent`. Nothing about it changes here.
+ *
+ * The four Strategy Skills (`strategy_analysis`, `brand_strategy`,
+ * `business_strategy`, `communication_strategy`) are the later addition to
+ * this Registry: the Strategy Analyst's composable-Skills architecture,
+ * under which Strategy remains ONE organizational Hat and its specialist
+ * domains become bounded methodology instead of specialist Hats. They were
+ * authored here rather than migrated from a Notion page, and they follow
+ * this file's own Skill contract -- methodology only. They name no actor,
+ * grant no access, own no Responsibility, and decide no gate; the Strategy
+ * Analyst performs the cycle and stays accountable for it.
  */
 
-export type SkillId = "research_signal" | "opportunity_qualification_gate" | "opportunity_forward_planning";
+export type SkillId =
+  | "research_signal"
+  | "opportunity_qualification_gate"
+  | "opportunity_forward_planning"
+  | "strategy_analysis"
+  | "brand_strategy"
+  | "business_strategy"
+  | "communication_strategy";
 
 /** Every registrable Skill id, for exact validation. Closed: a Skill outside this list cannot be declared or resolved. */
-export const SKILL_IDS: readonly SkillId[] = ["research_signal", "opportunity_qualification_gate", "opportunity_forward_planning"];
+export const SKILL_IDS: readonly SkillId[] = [
+  "research_signal",
+  "opportunity_qualification_gate",
+  "opportunity_forward_planning",
+  "strategy_analysis",
+  "brand_strategy",
+  "business_strategy",
+  "communication_strategy",
+];
 
 /** The one runtime Worker ABI a Skill package may declare compatibility with. */
 export type WorkerRuntime = "enig-worker-v1";
@@ -142,10 +167,119 @@ This methodology governs how a forward plan or next-action recommendation is der
 - the specific fields a particular plan must contain (stakeholders/value hypothesis/route vs. a single next action + rationale) -- that shape is the invoking action's own output contract, supplied as that call's own instruction;
 - whether the resulting plan may be acted on without Martin's sign-off, or what gets committed if it's approved -- those are the invoking action's own declared consequence/approval and the Kernel's own execution machinery, never this Skill's concern.`;
 
+const STRATEGY_ANALYSIS = `\`\`\`yaml
+skill_id: strategy-analysis
+status: canonical
+purpose: >
+  Drive one strategic diagnostic question through a sequence of bounded
+  methodological moves -- interpret the evidence at hand, decide the next
+  useful method, read what that method returned, and stop when the question
+  is answerable rather than when the available methods are exhausted.
+\`\`\`
+
+## The diagnostic-cycle discipline (the methodology itself)
+
+1. **Start from the evidence actually given.** Interpret only what the supplied situation and findings contain. Never import outside knowledge about the subject, and never treat a supplied claim as established fact merely because it was supplied.
+2. **Name the one question the current evidence leaves open.** A diagnosis advances by answering a specific question ("is the commercial model or the brand the binding constraint?"), not by accumulating material. If no question is genuinely open, stop.
+3. **Choose one next move, don't run a list.** After interpreting, pick exactly one of: invoke one bounded domain method, or stop. Never invoke every available method merely because it is available, and never pre-commit to a sequence before the evidence has been read.
+4. **Choose a method because the question needs that domain of judgment, not because the situation merely touches it.** A brand symptom with a commercial cause calls for the commercial method, not the brand method. Domain relevance alone is never sufficient reason.
+5. **Skipping is a decision, not a gap.** Resolving the question after zero or one domain method is a complete, correct outcome -- never a degraded one. A method not needed must not be run "for completeness".
+6. **Let a later move depend on an earlier finding.** Each returning finding changes what the next question is. Read the accumulated findings before choosing again; a fixed plan executed regardless of what came back is not this methodology.
+7. **A returning finding is evidence, not a verdict.** It reports what its domain supports, including where it does not support anything. Weigh it against the question; never adopt it as the diagnosis because it was produced.
+8. **Stop when the question is answerable.** The stopping test is the evidence, not the number of methods run and not whether every method has had a turn.
+9. **Synthesis separates what was established from what is inferred.** Reconcile agreement, disagreement, and cross-domain relationships in plain prose for the diagnosis step. State material uncertainty rather than smoothing it over, and never substitute one finding's assumptions for an unavailable one's absence.
+10. **Never soften an evidence gap into a request for generic background.** Where evidence is incomplete, name the specific fact that is missing and why it changes this decision -- "we lack the market data" is not a usable gap, because it invites a fill rather than a resolution.
+11. **You do not own the gates.** Whether the resulting diagnosis may proceed to a proposal, must be held, or needs a decision from Martin is evaluated by the invoking Action's own governance, never by this methodology.
+
+## What this Skill does not decide
+
+This methodology governs *how the diagnostic cycle itself is run* -- it does not decide:
+- which bounded domain methods exist, or which are permitted for this work -- that is the invoking Action's own declared Skill set, resolved exactly by the Skill Registry;
+- whether a domain method's output may be acted on (an approval requirement is the invoking Action's declared property, never this Skill's);
+- which evidence sources may be read in the first place (Data Boundary is resolved by the Kernel per invoking Hat, before this methodology is ever applied to it);
+- who is performing the work (Organization owns that; a Skill is never an actor).
+
+The Hat performing this work stays the single accountable actor throughout the cycle; the methodology names no other actor.`;
+
+const BRAND_STRATEGY = `\`\`\`yaml
+skill_id: brand-strategy
+status: canonical
+purpose: >
+  Examine the brand dimension of a strategic situation -- positioning,
+  differentiation, perception, identity, relevance, and brand architecture
+  -- and return what that dimension supports, what it does not, and what it
+  implies for the diagnosis being built elsewhere.
+\`\`\`
+
+## The bounded-domain discipline (the methodology itself)
+
+1. **Answer the question you were asked, in your own domain.** Work the open diagnostic question through brand judgment only: positioning, differentiation, perception, identity, relevance, brand architecture. Leave commercial modelling, growth, and messaging architecture to the methods that own them, and say so when the question runs past your boundary.
+2. **Work only from the supplied evidence.** Never invent a perception study, a competitor's position, a market signal, or a customer sentiment that the evidence does not contain. If the evidence says nothing about how the brand is perceived, that is a finding, not a licence to infer one.
+3. **Distinguish observation from interpretation.** "Public messaging still describes the previous offer" is an observation; "the brand has lost relevance" is an interpretation the evidence may not carry. Label which you are giving.
+4. **A domain finding is not a recommendation.** Report what the brand dimension supports. Whether it becomes the direction is decided after reconciliation, by the diagnosis step.
+5. **Say plainly when the domain does not justify an intervention.** A brand dimension that is a downstream symptom of a commercial constraint must be reported as exactly that -- never upgraded into a reason to act on the brand because the field was available to fill.
+6. **Name the evidence limitation with the finding.** Every finding carries what it could not establish and which question remains open. An unqualified finding reads as stronger than the evidence and is therefore wrong.
+
+## Return to the analysis step
+
+Return three things -- the finding, its evidence limitation, and its implication for the question under diagnosis. Do not decide whether the overall Work is blocked, do not draft or modify the canonical Proposal, and do not route anything: those remain with the Hat performing this work.`;
+
+const BUSINESS_STRATEGY = `\`\`\`yaml
+skill_id: business-strategy
+status: canonical
+purpose: >
+  Examine the business dimension of a strategic situation -- business
+  model, growth model, commercial opportunity, competitive position,
+  business objectives, and material commercial constraints -- and return
+  what that dimension supports, what it does not, and what it implies for
+  the diagnosis being built elsewhere.
+\`\`\`
+
+## The bounded-domain discipline (the methodology itself)
+
+1. **Answer the question you were asked, in your own domain.** Work the open diagnostic question through commercial judgment only: the business and growth model, the commercial opportunity, competitive position, objectives, and the material commercial constraints binding them. Leave positioning, perception, and messaging architecture to the methods that own them, and say so when the question runs past your boundary.
+2. **Work only from the supplied evidence.** Never invent a revenue figure, a cost, a competitor, a market size, or an objective that the evidence does not contain. If the evidence says nothing about unit economics, that is a finding, not a licence to assume a plausible one.
+3. **Distinguish observation from interpretation.** "Fulfilment capacity has not scaled with demand for two quarters" is an observation; "the business model is wrong" is an interpretation the evidence may not carry. Label which you are giving.
+4. **A domain finding is not a recommendation.** Report what the commercial dimension supports. Whether it becomes the direction is decided after reconciliation, by the diagnosis step.
+5. **Say plainly when the domain does not justify an intervention.** A commercial dimension that is merely adjacent to the real constraint must be reported as exactly that -- never upgraded into a reason to act commercially because the field was available to fill.
+6. **Name the evidence limitation with the finding.** Every finding carries what it could not establish and which question remains open. An unqualified finding reads as stronger than the evidence and is therefore wrong.
+
+## Return to the analysis step
+
+Return three things -- the finding, its evidence limitation, and its implication for the question under diagnosis. Do not decide whether the overall Work is blocked, do not draft or modify the canonical Proposal, and do not route anything: those remain with the Hat performing this work.`;
+
+const COMMUNICATION_STRATEGY = `\`\`\`yaml
+skill_id: communication-strategy
+status: canonical
+purpose: >
+  Examine the communication dimension of a strategic situation -- messaging,
+  narrative, audience communication, and the implications a change has for
+  the communication system as a whole -- and return what that dimension
+  supports, what it does not, and what it implies for the diagnosis being
+  built elsewhere.
+\`\`\`
+
+## The bounded-domain discipline (the methodology itself)
+
+1. **Answer the question you were asked, in your own domain.** Work the open diagnostic question through communication judgment only: what is said, to whom, in what narrative, and what a change would imply for the wider communication system. Leave positioning, perception, and commercial modelling to the methods that own them, and say so when the question runs past your boundary.
+2. **Work only from the supplied evidence.** Never invent an audience segment, a channel, a message test result, or a campaign performance figure that the evidence does not contain. If the evidence says nothing about how the message lands, that is a finding, not a licence to assume one.
+3. **Distinguish observation from interpretation.** "Two audiences are being given contradictory descriptions of the offer" is an observation; "the company cannot communicate its value" is an interpretation the evidence may not carry. Label which you are giving.
+4. **A domain finding is not a recommendation.** Report what the communication dimension supports. Whether it becomes the direction is decided after reconciliation, by the diagnosis step.
+5. **Say plainly when the domain does not justify an intervention.** A communication dimension that is a downstream symptom of a positioning or commercial constraint must be reported as exactly that -- never upgraded into a reason to act on messaging because the field was available to fill.
+6. **Name the evidence limitation with the finding.** Every finding carries what it could not establish and which question remains open. An unqualified finding reads as stronger than the evidence and is therefore wrong.
+
+## Return to the analysis step
+
+Return three things -- the finding, its evidence limitation, and its implication for the question under diagnosis. Do not decide whether the overall Work is blocked, do not draft or modify the canonical Proposal, and do not route anything: those remain with the Hat performing this work.`;
+
 const SKILL_CONTENT: Readonly<Record<SkillId, string>> = {
   research_signal: RESEARCH_SIGNAL,
   opportunity_qualification_gate: OPPORTUNITY_QUALIFICATION_GATE,
   opportunity_forward_planning: OPPORTUNITY_FORWARD_PLANNING,
+  strategy_analysis: STRATEGY_ANALYSIS,
+  brand_strategy: BRAND_STRATEGY,
+  business_strategy: BUSINESS_STRATEGY,
+  communication_strategy: COMMUNICATION_STRATEGY,
 };
 
 /**
@@ -218,6 +352,38 @@ const SKILL_PACKAGES: Readonly<Record<SkillId, SkillPackage>> = {
     workerRuntime: CURRENT_WORKER_RUNTIME,
     format: SUPPORTED_SKILL_PACKAGE_FORMAT,
     integritySha256: "aa68e53f68b373191141e4b08756655003f1561beee8d0410af111636ac6dbc8",
+  },
+  strategy_analysis: {
+    id: "strategy_analysis",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "aad1311be1fbeecf4a2ddc3d4d5aff1e75318347358eadeaf9def35f8d8b5ae6",
+  },
+  brand_strategy: {
+    id: "brand_strategy",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "9c566d7949e9a688c2571511a877b6bf1c7e22a078e432d017c78d362514a849",
+  },
+  business_strategy: {
+    id: "business_strategy",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "e8d49eb3766f152d6e95f3d45b8e00ce605878a504fb0a395c6360b0d3f31522",
+  },
+  communication_strategy: {
+    id: "communication_strategy",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "bd6134cca6b858714421dcd609460b68a5d9c888ae03fd384f42fc3fc597d6b7",
   },
 };
 

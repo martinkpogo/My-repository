@@ -277,28 +277,28 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
   },
   "strategy.specialist_selection": {
     id: "strategy.specialist_selection",
-    name: "Strategy Specialist Selection",
-    description: "Determines which strategic domains (business, brand, communication) require specialist diagnosis for a given situation -- one, multiple, or none.",
+    name: "Strategy Analysis Step",
+    description: "One move in the Strategy Analyst's diagnostic cycle: interprets the evidence accumulated so far, names the question it leaves open, and chooses exactly one next move -- invoke one declared Strategy Skill, or stop and synthesize.",
   },
   "strategy.business_diagnosis": {
     id: "strategy.business_diagnosis",
-    name: "Strategy Business Strategist Diagnosis",
-    description: "Bounded diagnosis of business model, growth model, market opportunity, competitive position, commercial direction, and material commercial constraints.",
+    name: "Strategy Business Skill",
+    description: "Applies the business_strategy Skill: bounded examination of business model, growth model, market opportunity, competitive position, commercial direction, and material commercial constraints, returned to Strategy Analysis as a finding.",
   },
   "strategy.brand_diagnosis": {
     id: "strategy.brand_diagnosis",
-    name: "Strategy Brand Strategist Diagnosis",
-    description: "Bounded diagnosis of positioning, differentiation, perception, brand architecture, and brand relevance.",
+    name: "Strategy Brand Skill",
+    description: "Applies the brand_strategy Skill: bounded examination of positioning, differentiation, perception, brand architecture, and brand relevance, returned to Strategy Analysis as a finding.",
   },
   "strategy.communication_diagnosis": {
     id: "strategy.communication_diagnosis",
-    name: "Strategy Communication Strategist Diagnosis",
-    description: "Bounded diagnosis of messaging, narrative, audience communication, and communication architecture.",
+    name: "Strategy Communication Skill",
+    description: "Applies the communication_strategy Skill: bounded examination of messaging, narrative, audience communication, and communication architecture, returned to Strategy Analysis as a finding.",
   },
   "strategy.specialist_synthesis": {
     id: "strategy.specialist_synthesis",
-    name: "Strategy Specialist Synthesis",
-    description: "Reconciles bounded specialist findings into a single synthesized context for the Strategy Analyst's diagnosis -- distinguishes evidence from inference, identifies agreement/disagreement and cross-domain relationships, and determines whether the findings are sufficient to proceed.",
+    name: "Strategy Analysis Synthesis",
+    description: "Reconciles the bounded Strategy Skill findings into a single synthesized context for the Strategy Analyst's diagnosis -- distinguishes evidence from inference, identifies agreement/disagreement and cross-domain relationships, and determines whether the findings are sufficient to proceed.",
   },
 };
 

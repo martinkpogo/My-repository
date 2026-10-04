@@ -1,5 +1,7 @@
 import test from "node:test";
-import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
+import { strategyManifest } from "./strategyManifest";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
+import { createResolvedActionSkillSet, resolveSkill } from "../../platform/skillRegistry";
 import assert from "node:assert/strict";
 import {
   handlePickup,
@@ -22,9 +24,28 @@ import {
   type StrategyProposal,
 } from "./strategyAnalyst";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
+import { buildRecordApprovalMarker } from "../sales/callNotesMarker";
+import { hasSubstantiveEvidence } from "./strategyEvidence";
 import { SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker } from "../../handoffWriter";
 import type { WorkState, Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
+
+/**
+ * The Skill set Strategy's own `diagnose` Action declares, resolved from the
+ * manifest's OWN `skill_requirements` -- so a change to that declaration is
+ * visible here immediately, and every test in this file exercises the real
+ * declared Skill set rather than a hand-built stand-in.
+ *
+ * Resolution is synchronous (the Registry's own `resolveSkill`, which
+ * validates id/format/status/runtime); the integrity-digest verification that
+ * production runs at the execution boundary is covered by skillRegistry.test.ts
+ * and actionSkills.test.ts respectively, not re-asserted on every call here.
+ */
+const STRATEGY_SKILLS: ResolvedActionSkillSet = createResolvedActionSkillSet(
+  (strategyManifest.hats["Strategy Analyst"].actions.find((action) => action.name === "diagnose")?.skill_requirements ?? []).map((requirement) =>
+    resolveSkill(requirement.skill_id),
+  ),
+);
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -217,8 +238,15 @@ function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" 
   return {
     run: async (_model: any, opts: any) => {
       const system = String(opts?.messages?.[0]?.content ?? "");
-      if (system.includes("specialist-selection responsibility")) {
-        return { response: JSON.stringify({ domains: [], reasoning: "Directly resolvable from the available evidence -- no specialist required." }) };
+      // The composable-Skills cycle's Strategy Analysis move. "synthesize"
+      // with no findings yet is the everyday case: Strategy Analysis judged
+      // the supplied evidence sufficient on its own, so no bounded domain
+      // Skill is invoked at all.
+      if (system.includes("one move in a diagnostic cycle")) {
+        return { response: JSON.stringify({ next: "synthesize", interpretation: "Directly resolvable from the available evidence.", diagnosticQuestion: "", rationale: "No domain method is required." }) };
+      }
+      if (system.includes("reconciling the bounded Strategy Skill findings")) {
+        return { response: JSON.stringify({ sufficient: true, synthesizedContext: "test synthesis" }) };
       }
       if (system.includes("canonical operating procedure")) {
         return { response: JSON.stringify(diagnosisJson) };
@@ -252,6 +280,8 @@ interface FetchLog {
   sentTexts: string[];
   sentButtons: any[];
   matterPatchBodies: any[];
+  /** Every query issued against the Call Notes store -- the only way the evidence order can reach a Call Notes record. */
+  callNotesQueryBodies: any[];
 }
 
 function mockFetch(
@@ -262,6 +292,20 @@ function mockFetch(
     matterToken?: string;
     initialStatus?: string;
     requiredNextAction?: string;
+    /**
+     * When set, the Handoff carries a `Call_Notes_ID` reference and -- unless
+     * `verifiedFacts` is given explicitly -- holds NO substantive evidence of
+     * its own (evidence order 2 becomes the only route to a situation). The
+     * referenced Call Notes record is then served by this mock's query
+     * handler.
+     */
+    callNotesId?: string;
+    /** The record's Status; defaults to `Ready`. */
+    callNotesStatus?: string;
+    /** The record's own `Approval Attestation`, built by the test. */
+    callNotesAttestation?: string;
+    /** The record's registry Version; defaults to 1. */
+    callNotesVersion?: number;
     /**
      * The durable source-boundary marker recorded in the Handoff's Reason.
      * Defaults to a valid Passed marker built by the same builder the
@@ -274,8 +318,9 @@ function mockFetch(
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [] };
-  const verifiedFacts = opts.verifiedFacts ?? "Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.";
+  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [], callNotesQueryBodies: [] };
+  const verifiedFacts =
+    opts.verifiedFacts ?? (opts.callNotesId ? `Call_Notes_ID: ${opts.callNotesId}` : "Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.");
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
   const initialStatus = opts.initialStatus ?? "Pending";
@@ -286,8 +331,8 @@ function mockFetch(
       : (opts.sourceBoundaryMarker ??
         buildSourceBoundaryMarker({ entityToken, matterToken }, "Passed", ["entityName", "matterName"]));
   const reason = `Commercial fit/progression approved for ${matterToken}. Entry type: inbound_enquiry.${
-    sourceBoundaryMarker ? ` ${sourceBoundaryMarker}` : ""
-  }`;
+    opts.callNotesId ? `\nCall_Notes_ID: ${opts.callNotesId}` : ""
+  }${sourceBoundaryMarker ? `\n${sourceBoundaryMarker}` : ""}`;
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -320,6 +365,42 @@ function mockFetch(
     if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") {
       log.handoffPatchBodies.push(JSON.parse(init.body));
       return new Response(JSON.stringify({ id: "handoff-1", url: "https://notion.so/handoff-1", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
+    }
+    if (urlStr.endsWith("/data_sources/call-notes-ds/query") && method === "POST") {
+      // The only route the evidence order has to a Call Notes record. Reads
+      // alone: any PATCH/PUT against this store falls through to the throw at
+      // the bottom of this mock, which is itself the proof that no write
+      // happens on this path.
+      const body = JSON.parse(init.body);
+      log.callNotesQueryBodies.push(body);
+      const requested = body?.filter?.title?.equals;
+      if (!opts.callNotesId || requested !== opts.callNotesId) {
+        return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "cn-page-1",
+              url: "https://notion.so/cn-page-1",
+              parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
+              properties: {
+                "Call Notes ID": { title: [{ plain_text: opts.callNotesId }] },
+                Status: { select: { name: opts.callNotesStatus ?? "Ready" } },
+                Version: { number: opts.callNotesVersion ?? 1 },
+                "Call Date": { date: { start: "2026-09-01" } },
+                "Call Type": { select: { name: "Discovery" } },
+                "Source ID": { rich_text: [{ plain_text: "SRC-1" }] },
+                "Source Type": { rich_text: [{ plain_text: "transcript" }] },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+                Matter: { relation: [{ id: "matter-page-1" }] },
+                "Approval Attestation": { rich_text: [{ plain_text: opts.callNotesAttestation ?? "" }] },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
     }
     if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
       return new Response(
@@ -495,7 +576,7 @@ test("3. Strategy picks up a Pending Handoff", async (t) => {
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.ok(result.strategyQuestion, "the strategic question/context must be populated from the Handoff");
   assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup must actually progress the work item");
@@ -508,7 +589,7 @@ test("3b. Handoff pickup advances the Matter's operational Status to Commercial 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  await handlePickup(env, state, NO_ACTION_SKILLS);
+  await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.ok(
     log.matterPatchBodies.some((p) => p.properties?.Status?.select?.name === "Commercial Development"),
@@ -578,7 +659,7 @@ test("3c. Handoff pickup still completes, and Operations is notified, when the H
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.notStrictEqual(result.stage, "awaiting_pickup", "the diagnosis must still proceed even though the Matter status couldn't be advanced");
   assert.ok(opsMessages.some((m) => /Matter status could not be advanced/.test(m)), "Operations must be notified so the status can be advanced by hand");
@@ -597,7 +678,7 @@ test("Required Next Action content is folded into the diagnosis context, not sil
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.match(result.strategyContext ?? "", /evidence-bounded framing/, "guidance written into Required Next Action must reach the diagnosis input");
 });
@@ -608,7 +689,7 @@ test("4. Strategy refuses a Handoff already Picked-up", async (t) => {
   env.AI = forbiddenAi();
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategyDiagnosis, undefined, "must not process a Handoff that isn't genuinely Pending");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
@@ -620,7 +701,7 @@ test("5. Strategy refuses a Closed Handoff", async (t) => {
   env.AI = forbiddenAi();
   const state = fakeState();
 
-  await handlePickup(env, state, NO_ACTION_SKILLS);
+  await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(log.handoffPatchBodies.length, 0);
 });
@@ -631,7 +712,7 @@ test("6. Strategy can place a blocked case on Held", async (t) => {
   env.AI = fakeAi({ sufficient: false, blockedCategory: "ambiguous_question", blockedReason: "The strategic question could mean either a pricing problem or a delivery problem -- materially different diagnoses follow from each." });
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_clarification");
@@ -646,7 +727,7 @@ test("Insufficient evidence blocks rather than inventing a diagnosis", async (t)
   env.AI = fakeAi({ sufficient: false, blockedCategory: "insufficient_evidence", blockedReason: "No evidence is supplied connecting the stated symptom to any business condition -- cannot responsibly diagnose." });
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   const heldPatch = lastHandoffPatch(log);
@@ -662,7 +743,7 @@ test("Unsupported causation is rejected -- runtime overrides sufficient: true", 
   });
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked", "a recommendation resting on unsupported causation must never be delivered as-is");
   const heldPatch = lastHandoffPatch(log);
@@ -800,7 +881,7 @@ test("Pickup: supported cause + supported direction proceeds to a proposal for M
   const env = fakeEnv();
   env.AI = fakeAi({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } });
 
-  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
   assert.strictEqual(result.strategyDiagnosis!.diagnosis!.cause, SUFFICIENT_DIAGNOSIS.diagnosis!.cause, "a supported cause is not relabelled");
@@ -811,7 +892,7 @@ test("Pickup: unsupported cause + independently supported direction proceeds, an
   const env = fakeEnv();
   env.AI = fakeAi({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: false } });
 
-  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval", "an independently supported direction proceeds although the cause is unresolved");
   const diagnosis = result.strategyDiagnosis!;
@@ -827,7 +908,7 @@ test("Pickup: unsupported cause + direction that materially depends on it is blo
   const env = fakeEnv();
   env.AI = fakeAi({ ...UNPROVEN_CAUSE_DIAGNOSIS, directionSupport: { supported: true, dependsOnUnsupportedCause: true } });
 
-  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyProposal, undefined);
@@ -841,7 +922,7 @@ test("Pickup: a direction with insufficient support is blocked -- it does not pr
   const env = fakeEnv();
   env.AI = fakeAi({ ...SUFFICIENT_DIAGNOSIS, directionSupport: { supported: false, dependsOnUnsupportedCause: false } });
 
-  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyProposal, undefined);
@@ -852,7 +933,7 @@ test("Pickup: with no recommendation, the existing no-recommendation path is unc
   mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
-  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
   assert.strictEqual(result.stage, "delivered");
   assert.strictEqual(result.strategyProposal, undefined);
 });
@@ -862,7 +943,7 @@ test("7. Held case can explicitly return to Pending", async (t) => {
   const env = fakeEnv();
   const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: "Original context." });
 
-  const result = await handleStrategyClarification(env, state, "The problem is specifically about delivery, not pricing.");
+  const result = await handleStrategyClarification(env, state, "The problem is specifically about delivery, not pricing.", STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_retry_queued");
   const patch = lastHandoffPatch(log);
@@ -878,7 +959,7 @@ test("7b. A clarification whose combined context exceeds 1,900 characters is sto
   const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: original });
   const detail = "ADDED EVIDENCE: the delivery delays began after the warehouse consolidation in Q2, per the operations lead.";
 
-  const result = await handleStrategyClarification(env, state, detail);
+  const result = await handleStrategyClarification(env, state, detail, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_retry_queued");
   const patch = lastHandoffPatch(log);
@@ -898,7 +979,7 @@ test("8. Pending retry can be picked up again exactly once", async (t) => {
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
 
-  const first = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const first = await handlePickup(env, state, STRATEGY_SKILLS);
   assert.notStrictEqual(first.stage, "awaiting_pickup");
   const afterFirst = log.handoffPatchBodies.length;
 
@@ -907,7 +988,7 @@ test("8. Pending retry can be picked up again exactly once", async (t) => {
   // record is now Picked-up/Closed (per the mock's static initialStatus,
   // simulating the real post-claim state), so a second call must refuse.
   const secondLog = mockFetch(t, { initialStatus: "Closed" });
-  const second = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const second = await handlePickup(env, state, STRATEGY_SKILLS);
   assert.strictEqual(secondLog.handoffPatchBodies.length, 0, "the second pickup must not process anything");
   void afterFirst;
   void second;
@@ -919,7 +1000,7 @@ test("9. A recommended diagnosis develops a full Strategic Intervention Proposal
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
   assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
@@ -944,7 +1025,7 @@ test("A fresh Strategy Proposal that passes both checks receives a complete stra
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   const attestation = result.strategyProposalTokenSafety;
   assert.strictEqual(attestation?.proposalId, result.strategyProposal!.proposalId);
@@ -969,7 +1050,7 @@ test("Missing durable boundary evidence fails closed -- a Passed WorkState sessi
   // stale session copy cannot mask it.
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "no usable durable evidence must leave the attestation unset");
   assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
@@ -987,7 +1068,7 @@ test("Failed durable boundary evidence fails closed -- the Proposal is never pre
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "a recorded Failed result must never be accepted as evidence");
   assert.strictEqual(result.strategyProposal, undefined);
@@ -1002,7 +1083,7 @@ test("Missing operational Entity/Matter reference fails closed -- the Proposal i
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategyProposal, undefined);
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
@@ -1020,7 +1101,7 @@ test("Fresh Strategy session consumes the durable attestation from the Handoff a
   // operational context comes only from Entity_ID/Matter_ID.
   const state = fakeState({ strategySourceBoundaryAttestation: undefined, entityName: undefined, matterName: undefined });
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.ok(result.pendingStrategyApproval, "a fresh session must reach the proposal-approval stage");
   assert.strictEqual(result.strategyProposal!.proposalVersion, 1);
@@ -1049,7 +1130,7 @@ test("A drafted Strategy Proposal containing a known identity value fails closed
   // identity value this test needs to prove still leaks-detects correctly.
   const state = fakeState({ entityDraft: { name: "", email: "comfort@meridianfoods.com", phone: "", type: "Organisation" } });
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategyProposal, undefined, "the leaked proposal must never become the current Proposal");
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
@@ -1065,7 +1146,7 @@ test("Proposal contains every required structural section", async (t) => {
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
   const p = result.strategyProposal as StrategyProposal;
 
   assert.ok(p.strategicObjective.objective, "must contain a strategic objective");
@@ -1194,7 +1275,7 @@ test("An incomplete AI-drafted proposal is held (not presented for approval) -- 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, { target: "none" }, incompleteProposal);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked", "an incomplete proposal must be held, not presented for approval");
   assert.strictEqual(result.awaiting, "strategy_clarification");
@@ -1212,7 +1293,7 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
 
   const afterApproval = await handleInterventionApproval(env, afterPickup, proposalVersion, "approve");
@@ -1240,7 +1321,7 @@ test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matte
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   assert.strictEqual(afterPickup.entityToken, "E-47");
   assert.strictEqual(afterPickup.matterToken, "M-12");
 
@@ -1257,7 +1338,7 @@ test("26-29. Strategy -> Finance carries the complete curated Strategy boundary 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
@@ -1295,7 +1376,7 @@ test("The Strategy boundary representation is not truncated at 1900 characters -
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
@@ -1316,7 +1397,7 @@ test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as t
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
@@ -1333,7 +1414,7 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const originalProposalId = afterPickup.strategyProposal!.proposalId;
   const v1Attestation = afterPickup.strategyProposalTokenSafety;
@@ -1386,7 +1467,7 @@ test("SR1. Refinement text is NOT appended to state.strategyContext", async (t) 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const contextBefore = afterPickup.strategyContext;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1403,7 +1484,7 @@ test("SR2. A refinement request containing 'Meridian Foods Ghana Ltd' does not c
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const contextBefore = afterPickup.strategyContext;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1421,7 +1502,7 @@ test("SR3. A refinement request containing 'Ama Mensah' does not contaminate Str
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const contextBefore = afterPickup.strategyContext;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1450,7 +1531,7 @@ test("SR4. The existing Strategy Proposal remains the revision source -- the sys
   } as any;
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const originalProposal = afterPickup.strategyProposal!;
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
@@ -1500,7 +1581,7 @@ test("SR6. The revised proposal still requires Martin's Approve/Refine/Reject --
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
@@ -1517,7 +1598,7 @@ test("SR7. Refinement does not write the raw instruction into Handoff Verified F
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
@@ -1538,7 +1619,7 @@ test("12/25. Reject records the rejection, closes the current attempt, and creat
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.pendingStrategyApproval!;
 
   const afterReject = await handleInterventionApproval(env, afterPickup, proposalVersion, "reject");
@@ -1624,7 +1705,7 @@ test("Telegram callback_data byte-limit regression: every strategy-proposal butt
   // reject the entire message (buttons included) with no visible error.
   const state = fakeState({ workId: "a1b2c3d4-e5f6-47a8-89ab-cdef01234567" });
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
   assert.ok(result.pendingStrategyApproval, "a pendingStrategyApproval must be set for this test to be meaningful");
 
   const buttonRows = state.pendingActionSummary!.buttons;
@@ -1642,7 +1723,7 @@ test("Marketing-specific work is routed to Marketing when there is no recommenda
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "marketing", reason: "Positioning decision needed." });
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Marketing");
   assert.strictEqual(afterPickup.pendingStrategyHandoff!.hat, "Marketing Strategist");
 
@@ -1659,7 +1740,7 @@ test("Strategy -> downstream: a failed Handoff creation must not invoke the /che
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "marketing", reason: "Positioning decision needed." });
   const state = fakeState();
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init?: any) => {
@@ -1690,7 +1771,7 @@ test("Missing-evidence work is NOT routed anywhere: a 'research' target resolves
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "research", reason: "Regional logistics capacity evidence needed." });
   const state = fakeState();
 
-  const afterPickup = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(afterPickup.pendingStrategyHandoff, undefined, "no downstream Handoff may be proposed for a missing-evidence diagnosis");
   assert.strictEqual(log.handoffCreateBody, null, "and none may be written");
@@ -1704,7 +1785,7 @@ test("39. The generic downstream classifier can never route to Finance -- Financ
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS, { target: "finance", reason: "should be impossible" });
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.pendingStrategyHandoff, undefined);
   assert.strictEqual(log.handoffCreateBody, null);
@@ -1727,7 +1808,7 @@ test("36/37/38. Closed-context protections remain intact -- missing Entity_Token
   env.AI = forbiddenAi();
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis should have been attempted");
 });
@@ -1740,7 +1821,7 @@ test("Missing Telegram stream configuration fails closed rather than throwing", 
 
   // Must not throw even though every sendWorkspaceHatMessage call in the
   // pipeline will fail closed (return undefined) for lack of stream config.
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
   assert.strictEqual(result.stage, "delivered");
 });
 
@@ -1830,7 +1911,7 @@ test("Material events use the existing logActivity mechanism", async (t) => {
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeState();
-  await handlePickup(env, state, NO_ACTION_SKILLS);
+  await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.ok(logEntries.length >= 2, "pickup and completion must both be logged");
   for (const entry of logEntries) {
@@ -1959,7 +2040,7 @@ test("handleDirectRequest resolves an explicit Matter token, runs the shared dia
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeDirectRequestState();
 
-  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.", STRATEGY_SKILLS);
 
   assert.strictEqual(result.entryType, "direct_request");
   assert.strictEqual(result.matterToken, "MAT-20");
@@ -1974,7 +2055,7 @@ test("handleDirectRequest: a diagnosis WITH a recommended direction reaches an a
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeDirectRequestState();
 
-  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.", STRATEGY_SKILLS);
 
   assert.strictEqual(result.entryType, "direct_request");
   assert.strictEqual(result.matterToken, "MAT-20");
@@ -1994,7 +2075,7 @@ test("handleDirectRequest: a Proposal that genuinely mentions its own Matter tok
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS, undefined, proposalMentioningOwnToken);
   const state = fakeDirectRequestState();
 
-  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.");
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.", STRATEGY_SKILLS);
 
   assert.ok(result.pendingStrategyApproval, "a Proposal mentioning its own token must still be presented, not blocked as a false identity leak");
 });
@@ -2005,7 +2086,7 @@ test("handleDirectRequest fails closed with a clarifying message when no Matter 
   env.AI = forbiddenAi();
   const state = fakeDirectRequestState();
 
-  const result = await handleDirectRequest(env, state, "Strategy, we have recurring delivery complaints for this account.");
+  const result = await handleDirectRequest(env, state, "Strategy, we have recurring delivery complaints for this account.", STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_direct_request_matter");
@@ -2019,7 +2100,7 @@ test("handleDirectRequest fails closed when the token in the text doesn't resolv
   env.AI = forbiddenAi();
   const state = fakeDirectRequestState();
 
-  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-999: this Matter doesn't exist.");
+  const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-999: this Matter doesn't exist.", STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_direct_request_matter");
@@ -2032,243 +2113,359 @@ test("handleDirectRequestClarification re-attempts resolution against Martin's f
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const state = fakeDirectRequestState({ stage: "strategy_blocked", awaiting: "strategy_direct_request_matter" });
 
-  const result = await handleDirectRequestClarification(env, state, "It's MAT-20, sorry -- recurring delivery complaints.");
+  const result = await handleDirectRequestClarification(env, state, "It's MAT-20, sorry -- recurring delivery complaints.", STRATEGY_SKILLS);
 
   assert.strictEqual(result.matterToken, "MAT-20");
   assert.strictEqual(result.entityToken, "E-7");
   assert.strictEqual(result.stage, "delivered", "supplying the token on follow-up must unblock and complete the request");
 });
 
+
 /**
- * Composition-path integration tests (LOG-845 specialist-diagnosis model).
+ * Composable-Skills composition tests (ENIG Core Structure v3.0).
  *
- * strategy.specialist_selection/business_diagnosis/brand_diagnosis/
- * communication_diagnosis/specialist_synthesis are now classified
+ * These replace LOG-845's specialist-Hat composition tests. Strategy is ONE
+ * organizational Hat; the specialist domains are Skills it follows one move
+ * at a time; every Skill reaches execution only through the generic Registry
+ * (the set is resolved from the manifest's own `skill_requirements`, exactly
+ * as production resolves it).
+ *
+ * `strategy.specialist_selection` / `business_diagnosis` / `brand_diagnosis` /
+ * `communication_diagnosis` / `specialist_synthesis` are classified
  * business_sensitive/TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
- * PRODUCTION_OUTBOUND_POLICY (see policy.ts), so composition genuinely runs
+ * PRODUCTION_OUTBOUND_POLICY (see policy.ts), so the cycle genuinely runs
  * against the real production policy tables here -- no test-time policy
  * override is needed or used.
  */
-type CompositionScript = {
-  selection?: unknown;
-  business?: unknown | "throw";
-  brand?: unknown | "throw";
-  communication?: unknown | "throw";
+type Move = { next: "invoke"; skillId: string; focus?: string } | { next: "synthesize" } | "throw";
+
+type CycleScript = {
+  /** Strategy Analysis moves, consumed in order; the last entry repeats once exhausted. Defaults to a single "synthesize" (no Skill needed). */
+  moves?: Move[];
+  /** Per-Skill responses, keyed by Skill id. Defaults to a completed finding. */
+  skills?: Record<string, unknown | "throw">;
   synthesis?: unknown;
   diagnosis?: unknown;
   routing?: unknown;
   proposal?: unknown;
 };
 
-/** Same dispatch as fakeAi, plus the three new composition steps (selection/specialist/synthesis). */
-function fakeAiComposition(script: CompositionScript): Ai {
-  return {
-    run: async (_model: any, opts: any) => {
-      const system = String(opts?.messages?.[0]?.content ?? "");
-      const respond = (val: unknown) => {
-        if (val === "throw") throw new Error("simulated specialist infrastructure failure");
-        return { response: JSON.stringify(val) };
-      };
-      if (system.includes("specialist-selection responsibility")) return respond(script.selection ?? { domains: [], reasoning: "test" });
-      if (system.includes("Business Strategist Hat")) return respond(script.business ?? { sufficient: false, blockedReason: "not configured for this test" });
-      if (system.includes("Brand Strategist Hat")) return respond(script.brand ?? { sufficient: false, blockedReason: "not configured for this test" });
-      if (system.includes("Communication Strategist Hat")) return respond(script.communication ?? { sufficient: false, blockedReason: "not configured for this test" });
-      if (system.includes("synthesis responsibility")) return respond(script.synthesis ?? { sufficient: true, synthesizedContext: "test synthesis" });
-      if (system.includes("canonical operating procedure")) return respond(script.diagnosis ?? NO_RECOMMENDATION_DIAGNOSIS);
-      if (system.includes("Expand it into the COMPLETE Strategic Intervention Proposal")) return respond(script.proposal ?? RAW_PROPOSAL);
-      if (system.includes("next responsibility belongs to another Unit")) return respond(script.routing ?? { target: "none" });
-      throw new Error(`Unexpected AI call in composition test -- system prompt: ${system.slice(0, 80)}`);
-    },
-  } as any;
+interface RecordedCall {
+  kind: "analysis" | "skill" | "synthesis" | "diagnosis" | "routing" | "proposal";
+  skillId?: string;
+  prompt: string;
 }
 
-test("composition: no specialist required proceeds directly to the unchanged core diagnosis (explicit, though every prior test already relies on this default)", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = fakeAiComposition({ selection: { domains: [], reasoning: "Directly resolvable." } });
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
-
-  assert.deepStrictEqual(result.strategySpecialistFindings, []);
-  assert.strictEqual(result.strategySpecialistSelectionUnavailable, false, "a genuine zero-domains determination must be recorded distinctly from selection being unavailable");
-  assert.strictEqual(result.stage, "delivered");
-});
-
-test("composition: today's actual default (the shared fakeAi's zero-domains selection response) is a genuine no-specialist-required determination, not a degraded fallback -- exercised via the SAME fakeAi every pre-existing Strategy test already uses", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
-
-  assert.deepStrictEqual(result.strategySpecialistFindings, []);
-  assert.strictEqual(result.strategySpecialistSelectionUnavailable, false, "the five composition SemanticTaskIds are classified -- selection genuinely ran and determined zero domains, this must never read as 'unavailable'");
-  assert.strictEqual(result.stage, "delivered");
-});
-
-test("composition: an actual AI/infrastructure failure on the selection call itself still degrades gracefully to the no-specialist path, recorded as unavailable (not a genuine zero-domains determination)", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = {
+/** Same dispatch as fakeAi, plus the cycle's own steps -- and a record of every call, so prompts are assertable. */
+function fakeAiCycle(script: CycleScript): { ai: Ai; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = [];
+  const defaultSkillFinding = (skillId: string) => ({
+    sufficient: true,
+    finding: `${skillId} established a bounded domain finding.`,
+    evidenceLimitation: `${skillId} could not establish cost or market size from the evidence given.`,
+    implication: `${skillId} implies the open question is the binding constraint.`,
+    unresolvedQuestion: `What does ${skillId} still need to know?`,
+  });
+  const ai = {
     run: async (_model: any, opts: any) => {
       const system = String(opts?.messages?.[0]?.content ?? "");
-      if (system.includes("specialist-selection responsibility")) throw new Error("simulated provider outage on the selection call");
-      return { response: JSON.stringify(NO_RECOMMENDATION_DIAGNOSIS) };
+      const all = JSON.stringify(opts?.messages ?? []);
+      const respond = (val: unknown) => {
+        if (val === "throw") throw new Error("simulated provider failure");
+        return { response: JSON.stringify(val) };
+      };
+
+      if (system.includes("one move in a diagnostic cycle")) {
+        const moves = script.moves && script.moves.length > 0 ? script.moves : [{ next: "synthesize" as const }];
+        const move = moves[Math.min(calls.filter((c) => c.kind === "analysis").length, moves.length - 1)];
+        calls.push({ kind: "analysis", prompt: all });
+        if (move === "throw") throw new Error("simulated Strategy Analysis provider failure");
+        if (move.next === "synthesize") return respond({ next: "synthesize", interpretation: "the evidence answers the question", diagnosticQuestion: "", rationale: "no further method needed" });
+        return respond({ next: "invoke", skillId: move.skillId, focus: move.focus ?? "the open diagnostic question", interpretation: "", diagnosticQuestion: "", rationale: "this domain of judgment is required" });
+      }
+
+      const skillMatch = system.match(/applying one bounded Strategy Skill: `([^`]+)`/);
+      if (skillMatch) {
+        const skillId = skillMatch[1];
+        calls.push({ kind: "skill", skillId, prompt: all });
+        return respond(script.skills?.[skillId] ?? defaultSkillFinding(skillId));
+      }
+
+      if (system.includes("reconciling the bounded Strategy Skill findings")) {
+        calls.push({ kind: "synthesis", prompt: all });
+        return respond(script.synthesis ?? { sufficient: true, synthesizedContext: "reconciled findings" });
+      }
+      if (system.includes("canonical operating procedure")) {
+        calls.push({ kind: "diagnosis", prompt: all });
+        return respond(script.diagnosis ?? NO_RECOMMENDATION_DIAGNOSIS);
+      }
+      if (system.includes("Expand it into the COMPLETE Strategic Intervention Proposal")) {
+        calls.push({ kind: "proposal", prompt: all });
+        return respond(script.proposal ?? RAW_PROPOSAL);
+      }
+      if (system.includes("next responsibility belongs to another Unit")) {
+        calls.push({ kind: "routing", prompt: all });
+        return respond(script.routing ?? { target: "none" });
+      }
+      throw new Error(`Unexpected AI call in cycle test -- system prompt: ${system.slice(0, 120)}`);
     },
   } as any;
-  const state = fakeState();
+  return { ai, calls };
+}
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+const COMPLETED_SKILL_FINDING = {
+  sufficient: true,
+  finding: "Fulfilment capacity has not scaled with demand for two quarters.",
+  evidenceLimitation: "No cost or vendor-capacity figures were supplied.",
+  implication: "The binding constraint appears commercial rather than brand.",
+  unresolvedQuestion: "What is the cost of adding capacity?",
+};
 
-  assert.deepStrictEqual(result.strategySpecialistFindings, []);
-  assert.strictEqual(result.strategySpecialistSelectionUnavailable, true, "a genuine AI/infrastructure failure on the selection call must be recorded as unavailable, never conflated with zero domains genuinely being determined");
-  assert.strictEqual(result.stage, "delivered", "an unrelated selection-call failure must never block an otherwise-resolvable core diagnosis");
-});
-
-test("composition: which domains were selected and run is observable in logs -- otherwise execution is unreconstructable after the fact (nothing else persists it)", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business", "brand"], reasoning: "test" },
-    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
-    brand: { sufficient: true, domainExamined: "d2", problemOrIssue: "p2", supportingEvidence: "e2", diagnosis: "diag2", strategicImplication: "s2", uncertaintyAndLimitations: "u2", unresolvedQuestions: "q2" },
-    synthesis: { sufficient: true, synthesizedContext: "synthesis" },
-  });
-  const state = fakeState();
-
-  const originalLog = console.log;
-  const logged: string[] = [];
-  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
-  t.after(() => {
-    console.log = originalLog;
-  });
-
-  await handlePickup(env, state, NO_ACTION_SKILLS);
-
-  assert.ok(logged.some((l) => l.includes("determined 2 domain(s) required: business, brand")), "must log which domains were selected");
-  assert.ok(logged.some((l) => l.includes("business:completed") && l.includes("brand:completed")), "must log each domain's completion status");
-  assert.ok(logged.some((l) => l.includes("synthesis") && l.includes("sufficient")), "must log that synthesis was folded into the diagnosis");
-});
-
-test("composition: a genuine zero-domains determination is also observable in logs, distinct from the domains-selected case above", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
-  const state = fakeState();
-
-  const originalLog = console.log;
-  const logged: string[] = [];
-  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
-  t.after(() => {
-    console.log = originalLog;
-  });
-
-  await handlePickup(env, state, NO_ACTION_SKILLS);
-
-  assert.ok(logged.some((l) => l.includes("determined zero specialists are required")), "must log the genuine zero-domains determination distinctly from a selection failure");
-});
-
-test("composition: a single selected specialist is diagnosed and its finding is folded into context before core diagnosis runs", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business"], reasoning: "Situation requires commercial judgment." },
-    business: {
-      sufficient: true,
-      domainExamined: "Business model.",
-      problemOrIssue: "Capacity-constrained growth.",
-      supportingEvidence: "Two quarters of documented shortfall.",
-      diagnosis: "Fulfilment capacity has not scaled with demand.",
-      strategicImplication: "Root cause is commercial, not brand or communication.",
-      interventionImplication: "Expand capacity.",
-      uncertaintyAndLimitations: "Exact cost unknown.",
-      unresolvedQuestions: "Vendor capacity.",
-    },
-    synthesis: { sufficient: true, synthesizedContext: "Business Strategist established the root cause is a capacity constraint." },
-  });
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
-
-  assert.strictEqual(result.strategySpecialistFindings?.length, 1);
-  assert.strictEqual(result.strategySpecialistFindings?.[0].domain, "business");
-  assert.strictEqual(result.strategySpecialistFindings?.[0].status, "completed");
-  assert.strictEqual(result.strategySpecialistSelectionUnavailable, undefined, "specialists genuinely ran -- this must never read as a no-specialist/unavailable state");
-  assert.strictEqual(result.stage, "delivered", "synthesis folded into context, core diagnosis still completes normally");
-});
-
-test("composition: multiple selected specialists run concurrently and are reconciled by one synthesis before core diagnosis", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business", "brand"], reasoning: "Situation has independent commercial and brand dimensions." },
-    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "Capacity-driven.", strategicImplication: "s", interventionImplication: "Expand capacity.", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
-    brand: { sufficient: true, domainExamined: "d2", problemOrIssue: "p2", supportingEvidence: "e2", diagnosis: "Perception is a downstream effect, not a separate cause.", strategicImplication: "s2", uncertaintyAndLimitations: "u2", unresolvedQuestions: "q2" },
-    synthesis: { sufficient: true, synthesizedContext: "Both specialists agree the brand-perception symptom is downstream of the capacity constraint.", crossDomainRelationships: "Brand perception <- business capacity." },
-  });
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
-
-  assert.strictEqual(result.strategySpecialistFindings?.length, 2);
+test("Skills: Strategy's diagnose Action resolves exactly its declared Strategy Skill set through the generic Registry", async () => {
   assert.deepStrictEqual(
-    result.strategySpecialistFindings?.map((f) => f.domain).sort(),
-    ["brand", "business"],
+    STRATEGY_SKILLS.declared,
+    ["strategy_analysis", "brand_strategy", "business_strategy", "communication_strategy", "research_signal"],
+    "the multi-Skill Responsibility declares the orchestration Skill, the three bounded domain Skills, and the reused research_signal -- no Skill is duplicated and none is mandatory",
   );
-  assert.ok(result.strategySpecialistFindings?.every((f) => f.status === "completed"));
+  // Resolved content is the Registry's own verified package, not something
+  // the handler built -- the same call production makes at the execution
+  // boundary.
+  assert.match(STRATEGY_SKILLS.get("strategy_analysis").content, /diagnostic-cycle discipline/);
+  assert.strictEqual(STRATEGY_SKILLS.get("research_signal").content, resolveSkill("research_signal").content);
+  assert.strictEqual(STRATEGY_SKILLS.get("research_signal").version, resolveSkill("research_signal").version);
+  // There is no mandatory primary Skill: every one of them is optional
+  // methodology, and the cycle may follow none at all (asserted below).
+  assert.strictEqual(strategyManifest.hats["Strategy Analyst"].actions.filter((a) => a.skill_requirements?.length).length, 1);
+});
+
+test("Skills: Strategy remains ONE organizational Hat -- the specialist Hats are not registered and can never be addressed or switched to", () => {
+  assert.deepStrictEqual(Object.keys(strategyManifest.hats), ["Strategy Analyst"]);
+  const strategyHats = ALL_HATS.filter((h) => h.unit === "Strategy");
+  assert.deepStrictEqual(strategyHats.map((h) => h.name), ["Strategy Analyst"], "Strategy owns exactly one Hat");
+  for (const retired of ["Business Strategist", "Brand Strategist", "Communication Strategist"]) {
+    assert.ok(!ALL_HATS.some((h) => h.name === retired), `${retired} must no longer exist as a Hat`);
+  }
+  // Marketing Strategist stays exclusively Marketing's, as before.
+  assert.ok(!ALL_HATS.some((h) => h.name === "Marketing Strategist" && h.unit === "Strategy"));
+});
+
+test("Skills: no call in the cycle is ever addressed as a specialist Hat -- the Strategy Analyst stays the single accountable actor", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(result.hat, "Strategy Analyst", "Hat switching must never happen -- the accountable Hat is unchanged");
+  assert.ok(calls.some((c) => c.kind === "skill"), "the Skills genuinely ran");
+  for (const call of calls) {
+    for (const retired of ["Business Strategist Hat", "Brand Strategist Hat", "Communication Strategist Hat"]) {
+      assert.ok(!call.prompt.includes(retired), `no cycle call may be addressed as the retired ${retired}`);
+    }
+  }
+  // The three cycle steps are Skill methodology only -- none of them fetches
+  // or follows a Hat Definition. (The unchanged core-diagnosis step still
+  // does, and still should: it is the Strategy Analyst's own governance.)
+  for (const call of calls.filter((c) => c.kind === "analysis" || c.kind === "skill" || c.kind === "synthesis")) {
+    assert.ok(!call.prompt.includes("Hat Definition"), "a Strategy Skill is methodology, not a fetched Hat Definition");
+  }
+});
+
+test("composition: Strategy Analysis can invoke ONE Strategy Skill and finish", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "brand_strategy", focus: "is positioning the real constraint?" }, { next: "synthesize" }],
+    skills: { brand_strategy: COMPLETED_SKILL_FINDING },
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.strategySkillFindings?.length, 1);
+  assert.strictEqual(result.strategySkillFindings?.[0].skillId, "brand_strategy");
+  assert.strictEqual(result.strategySkillFindings?.[0].status, "completed");
+  assert.strictEqual(result.strategySkillCycleUnavailable, undefined, "a Skill genuinely ran -- this must never read as a no-Skill/unavailable state");
+  assert.strictEqual(result.stage, "delivered", "synthesis folded into context, core diagnosis still completes normally");
+  assert.deepStrictEqual(calls.filter((c) => c.kind === "skill").map((c) => c.skillId), ["brand_strategy"], "exactly one Skill was invoked");
+});
+
+test("composition: Strategy Analysis can invoke multiple Strategy Skills sequentially, each after the previous one returned", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "business_strategy" },
+      { next: "invoke", skillId: "brand_strategy" },
+      { next: "invoke", skillId: "communication_strategy" },
+      { next: "synthesize" },
+    ],
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.deepStrictEqual(
+    result.strategySkillFindings?.map((f) => f.skillId),
+    ["business_strategy", "brand_strategy", "communication_strategy"],
+    "Skills run one at a time, in the order Strategy Analysis chose them -- never concurrently",
+  );
+  assert.ok(result.strategySkillFindings?.every((f) => f.status === "completed"));
+  // Strict ordering: skill 2 is only requested after skill 1 has returned.
+  const kinds = calls.map((c) => c.kind);
+  assert.deepStrictEqual(kinds.filter((k) => k === "analysis" || k === "skill"), [
+    "analysis", "skill", "analysis", "skill", "analysis", "skill", "analysis",
+  ]);
   assert.strictEqual(result.stage, "delivered");
 });
 
-test("composition: every selected specialist failing fails closed via the existing handleBlocked -- never proceeds as if synthesis were complete", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
+test("composition: a later Strategy Skill's move is chosen from an earlier Skill's finding -- Strategy Analysis reads what came back before deciding again", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business", "brand"], reasoning: "test" },
-    business: "throw",
-    brand: { sufficient: false, blockedReason: "insufficient evidence" },
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "business_strategy" },
+      { next: "invoke", skillId: "brand_strategy", focus: "is the brand-perception symptom downstream of the capacity constraint?" },
+      { next: "synthesize" },
+    ],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING },
   });
+  env.AI = ai;
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  const skillCalls = calls.filter((c) => c.kind === "skill");
+  const brandCall = skillCalls.find((c) => c.skillId === "brand_strategy");
+  assert.ok(brandCall, "the second Skill must have run");
+  assert.ok(
+    brandCall!.prompt.includes("Fulfilment capacity has not scaled with demand for two quarters."),
+    "the later Skill must be handed the earlier Skill's finding -- the cycle accumulates, it does not start over",
+  );
+  assert.ok(
+    brandCall!.prompt.includes("downstream of the capacity constraint"),
+    "the move's own `focus` names the dependency the Strategy Analysis move chose",
+  );
+  const analysisAfterFirstSkill = calls.filter((c) => c.kind === "analysis")[1];
+  assert.ok(
+    analysisAfterFirstSkill.prompt.includes("Fulfilment capacity has not scaled with demand for two quarters."),
+    "Strategy Analysis itself resumes with the accumulated finding in front of it",
+  );
+});
+
+test("composition: unnecessary Strategy Skills are skipped -- a genuine no-Skill determination is distinct from the cycle being unavailable", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({ moves: [{ next: "synthesize" }] });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.deepStrictEqual(result.strategySkillFindings, [], "no Skill was invoked");
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, "a skipped Skill is never invoked 'for completeness'");
+  assert.strictEqual(result.strategySkillCycleUnavailable, false, "Strategy Analysis genuinely ran and determined no Skill was needed -- never conflated with the cycle not being able to run");
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: Strategy Analysis resumes after every Strategy Skill -- one analysis move before each Skill, and one final move that stops", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(calls.filter((c) => c.kind === "analysis").length, 3, "two Skills invoked, so Strategy Analysis runs three times (twice to choose, once to stop)");
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition: an unusable Strategy Analysis move degrades to the unchanged core diagnosis, recorded as unavailable", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({ moves: ["throw"] });
+  env.AI = ai;
+  const state = fakeState();
+
+  const originalWarn = console.warn;
+  const warned: string[] = [];
+  console.warn = (...args: unknown[]) => warned.push(args.map(String).join(" "));
+  t.after(() => {
+    console.warn = originalWarn;
+  });
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.deepStrictEqual(result.strategySkillFindings, []);
+  assert.strictEqual(result.strategySkillCycleUnavailable, true, "a genuine provider failure on the analysis move must be recorded as unavailable, never conflated with no Skill being needed");
+  assert.strictEqual(result.stage, "delivered", "an unrelated cycle failure must never block an otherwise-resolvable core diagnosis");
+  assert.ok(warned.some((w) => w.includes("Skill cycle unavailable")), "the degradation is logged, never silently swallowed");
+});
+
+test("composition: every invoked Strategy Skill failing fails closed via the existing handleBlocked -- never proceeds as if the findings were complete", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible business finding" } },
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "core diagnosis must never run when every required specialist finding is unavailable");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "core diagnosis must never run when the only requested finding is unavailable");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Held"));
 });
 
-test("composition: a partial specialist failure still allows synthesis to proceed, with the unavailable specialist explicit rather than backfilled", async (t) => {
+test("composition: a partial Skill failure still allows synthesis to proceed, with the unavailable Skill explicit rather than backfilled", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business", "brand"], reasoning: "test" },
-    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
-    brand: "throw",
-    synthesis: { sufficient: true, synthesizedContext: "Business finding is sufficient on its own; Brand Strategist's finding is unavailable but not material here." },
+  const { ai, calls } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
+    skills: {
+      business_strategy: COMPLETED_SKILL_FINDING,
+      brand_strategy: { sufficient: false, blockedReason: "no perception evidence was supplied" },
+    },
   });
+  env.AI = ai;
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  const byDomain = Object.fromEntries((result.strategySpecialistFindings ?? []).map((f) => [f.domain, f]));
-  assert.strictEqual(byDomain.business.status, "completed");
-  assert.strictEqual(byDomain.brand.status, "failed");
+  const bySkill = Object.fromEntries((result.strategySkillFindings ?? []).map((f) => [f.skillId, f]));
+  assert.strictEqual(bySkill.business_strategy.status, "completed");
+  assert.strictEqual(bySkill.brand_strategy.status, "failed");
+  assert.ok(bySkill.brand_strategy.failureReason?.includes("no perception evidence"), "the failure reason travels with the finding");
+  const synthesisCall = calls.find((c) => c.kind === "synthesis");
+  assert.ok(synthesisCall?.prompt.includes("UNAVAILABLE"), "synthesis is told the finding is missing -- never given it as if it were neutral");
   assert.strictEqual(result.stage, "delivered");
 });
 
-test("composition: synthesis judged insufficient (e.g. an unreconcilable conflict) fails closed and never produces a proposal", async (t) => {
+test("composition: synthesis judged insufficient fails closed and never produces a proposal", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business", "brand"], reasoning: "test" },
-    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "Capacity-driven.", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
-    brand: { sufficient: true, domainExamined: "d2", problemOrIssue: "p2", supportingEvidence: "e2", diagnosis: "Positioning-driven.", strategicImplication: "s2", uncertaintyAndLimitations: "u2", unresolvedQuestions: "q2" },
-    synthesis: { sufficient: false, insufficiencyReason: "Business and Brand findings materially conflict on root cause and cannot be reconciled from the supplied evidence." },
+  const { ai } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING },
+    synthesis: { sufficient: false, insufficiencyReason: "The business and brand findings materially conflict on root cause and cannot be reconciled from the supplied evidence." },
   });
+  env.AI = ai;
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyDiagnosis, undefined, "must never proceed to core diagnosis/proposal on an unreconciled conflict");
@@ -2276,17 +2473,89 @@ test("composition: synthesis judged insufficient (e.g. an unreconcilable conflic
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("conflict")));
 });
 
-test("composition never lets a specialist touch the canonical Strategy Proposal -- state.strategyProposal is untouched immediately after composition/diagnosis, set only later by the existing approval-gated developStrategyProposal step", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
+test("composition: a move naming a Skill this Action did not declare is refused at the point of use", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  env.AI = fakeAiComposition({
-    selection: { domains: ["business"], reasoning: "test" },
-    business: { sufficient: true, domainExamined: "d", problemOrIssue: "p", supportingEvidence: "e", diagnosis: "diag", strategicImplication: "s", uncertaintyAndLimitations: "u", unresolvedQuestions: "q" },
-    synthesis: { sufficient: true, synthesizedContext: "synthesis" },
-  });
+  // Only two Skills declared -- `communication_strategy` is a real Strategy
+  // domain Skill, but not one THIS Action requires.
+  const twoSkills = createResolvedActionSkillSet([resolveSkill("strategy_analysis"), resolveSkill("brand_strategy")]);
+  const { ai } = fakeAiCycle({ moves: [{ next: "invoke", skillId: "communication_strategy" }] });
+  env.AI = ai;
   const state = fakeState();
 
-  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+  const result = await handlePickup(env, state, twoSkills);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined);
+  assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("did not declare")));
+});
+
+test("composition: a move naming something that is not a Strategy domain Skill is refused -- no improvisation substitutes for a declared Skill", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({ moves: [{ next: "invoke", skillId: "opportunity_qualification_gate" }] });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined);
+  assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("not a Strategy domain Skill")));
+});
+
+test("composition: which Strategy Skills ran is observable in logs -- otherwise execution is unreconstructable after the fact (nothing else persists it)", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const originalLog = console.log;
+  const logged: string[] = [];
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  t.after(() => {
+    console.log = originalLog;
+  });
+
+  await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.ok(logged.some((l) => l.includes("invoked 2 Strategy Skill(s): business_strategy:completed, brand_strategy:completed")), "must log which Skills ran and their outcome");
+  assert.ok(logged.some((l) => l.includes("synthesis") && l.includes("sufficient")), "must log that synthesis was folded into the diagnosis");
+});
+
+test("composition: a genuine no-Skill determination is also observable in logs, distinct from the Skills-invoked case", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({ moves: [{ next: "synthesize" }] });
+  env.AI = ai;
+  const state = fakeState();
+
+  const originalLog = console.log;
+  const logged: string[] = [];
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  t.after(() => {
+    console.log = originalLog;
+  });
+
+  await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.ok(logged.some((l) => l.includes("no Strategy Skill was required")), "must log the genuine no-Skill determination distinctly from a cycle failure");
+});
+
+test("composition never lets a Strategy Skill touch the canonical Strategy Proposal -- state.strategyProposal is untouched immediately after composition/diagnosis, set only later by the existing approval-gated developStrategyProposal step", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING },
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   // NO_RECOMMENDATION_DIAGNOSIS (this file's default composition-test
   // diagnosis) never reaches developStrategyProposal at all -- confirming
@@ -2294,4 +2563,196 @@ test("composition never lets a specialist touch the canonical Strategy Proposal 
   // routing, exactly like every existing no-recommendation test above.
   assert.strictEqual(result.strategyProposal, undefined);
   assert.strictEqual(result.stage, "delivered");
+});
+
+test("composition reaches the existing Strategy Approval Needed gate -- a recommended direction still stops for Martin's decision, never auto-approves", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING },
+    diagnosis: SUFFICIENT_DIAGNOSIS,
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "awaiting_intervention_approval");
+  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(result.strategyProposal, "the approval-gated proposal is built by the unchanged step, after the cycle");
+  assert.ok(result.pendingStrategyApproval, "Approval Needed is reached: Martin's explicit Approve/Refine/Reject is still required");
+  assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
+});
+
+/**
+ * Governed evidence-retrieval order tests (ENIG Core Structure v3.0) --
+ * orders 1, 2 and 4 of strategyEvidence.ts, plus the KoraGrid-shaped case
+ * they exist for.
+ *
+ * Order 3 (any other explicitly governed approved source) has no
+ * implementation because none exists; it is documented as a deliberate
+ * no-op rather than a speculative lookup, so there is deliberately nothing
+ * here to assert for it beyond that.
+ */
+function recordAi(inner: Ai, prompts: string[]): Ai {
+  return {
+    run: async (model: any, opts: any) => {
+      prompts.push(JSON.stringify(opts?.messages ?? []));
+      return inner.run(model, opts);
+    },
+  } as any;
+}
+
+const CALL_NOTES_APPROVAL_RECORD = {
+  callNotesId: "CN-007",
+  entity: "E-47",
+  matter: "M-12",
+  callDate: "2026-09-01",
+  callType: "Discovery",
+  sourceId: "SRC-1",
+  sourceType: "transcript",
+  version: 1,
+};
+
+test("Evidence order: when the Handoff holds substantive approved evidence of its own, that is order 1 and the Call Notes store is never queried", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    verifiedFacts: "Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.",
+  });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "order 1 must short-circuit -- no governed secondary source is consulted while the Handoff's own evidence is usable");
+});
+
+test("Evidence order: a reference-only Handoff falls through to the approved Call Notes record, read-only, and the diagnosis is grounded in it", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(NO_RECOMMENDATION_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(log.callNotesQueryBodies.length, 1, "exactly one exact-match lookup -- no nearest-record pass, and never inferred from Entity/Matter");
+  assert.strictEqual(log.callNotesQueryBodies[0].filter?.title?.equals, "CN-007", "the lookup is the Handoff's own reference, matched exactly");
+  assert.ok(
+    prompts.some((p) => p.includes("Call_Notes_ID: CN-007") && p.includes("Call Date: 2026-09-01")),
+    "the diagnosis is actually grounded in the governed record's registry fields, not in a bare reference",
+  );
+  assert.ok(
+    prompts.some((p) => p.includes("order 2 -- the Handoff held no substantive evidence of its own")),
+    "the provenance of the evidence is stated to the diagnosis rather than passed off as the Handoff's own narrative",
+  );
+  assert.strictEqual(result.stage, "delivered", "the existing core-diagnosis gate still decides sufficiency on top of the retrieved evidence");
+});
+
+test("Evidence order: an already-Consumed Call Notes record is still readable -- Strategy's read is idempotent and consumes nothing", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesStatus: "Consumed" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered", "a Consumed record still carries approved evidence; Strategy's Held -> Pending -> re-pickup loop must be able to re-read it every attempt");
+  assert.strictEqual(log.callNotesQueryBodies.length, 1);
+});
+
+test("Evidence order: a Superseded Call Notes record is refused -- there is no approved current evidence to diagnose from", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesStatus: "Superseded" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "must never diagnose from a superseded record");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Clarification needed/);
+  assert.match(message, /Status "Superseded"/, "the reason names the exact unresolved fact");
+  assert.match(message, /materially affects the decision/);
+  assert.strictEqual(result.strategyApprovalState, undefined, "Clarification Needed is kept separate from Approval Needed");
+});
+
+test("Evidence order: a record whose Approval Attestation does not match its own registry fields is refused, and the refusal names the mismatch", async (t) => {
+  // A syntactically valid attestation whose fields_hash no longer matches
+  // what the record actually holds -- the record was altered after approval.
+  const valid = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const tampered = valid.replace(/fields_hash=[0-9a-f]+/, `fields_hash=${"0".repeat(64)}`);
+  assert.notStrictEqual(tampered, valid, "the fixture must actually differ from a valid attestation");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: tampered });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "an unverifiable attestation is never treated as approved evidence");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Clarification needed/);
+  assert.match(message, /fields_hash does not match/, "the reason names the exact unresolved fact rather than a generic 'not enough context'");
+  assert.match(message, /materially affects the decision/, "order 4 must explain why the unresolved fact changes the decision");
+});
+
+test("Evidence order: with no governed reference anywhere on the Handoff, Clarification Needed names the exact fact and the Call Notes store is never queried", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: "Call_Notes_ID: CN-007" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "a reference is never inferred from Entity/Matter -- nothing is looked up without one");
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_clarification", "Clarification Needed, kept separate from Approval Needed");
+  assert.strictEqual(result.strategyApprovalState, undefined, "clarification must never read as an approval request");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /the business situation this diagnosis is about has not been established/);
+  assert.match(message, /materially affects the decision/);
+  assert.match(message, /points at evidence rather than being evidence/);
+});
+
+test("Evidence order: hasSubstantiveEvidence treats a Call_Notes_ID reference as pointing at evidence, never being it", () => {
+  assert.strictEqual(hasSubstantiveEvidence(""), false);
+  assert.strictEqual(hasSubstantiveEvidence("   \n  "), false);
+  assert.strictEqual(hasSubstantiveEvidence("Call_Notes_ID: CN-007"), false);
+  assert.strictEqual(hasSubstantiveEvidence("Call_Notes_ID: CN-007\nCall_Notes_ID: CN-007"), false);
+  assert.strictEqual(hasSubstantiveEvidence("Recurring delivery complaints over two quarters, tied to warehouse capacity."), true, "narrative is substantive even though it carries no structured reference");
+  assert.strictEqual(
+    hasSubstantiveEvidence("Call_Notes_ID: CN-007\nRecurring delivery complaints over two quarters."),
+    true,
+    "a reference alongside a real account is retained, not discarded",
+  );
+});
+
+test("KoraGrid: the case progresses from an approved Call Notes Handoff all the way to Strategy Approval Needed, without Martin doing the diagnosis", async (t) => {
+  // KoraGrid-shaped fixture: the Handoff carries no narrative of its own --
+  // only the governed Call_Notes_ID reference -- so the entire situation
+  // reaches the diagnosis through evidence order 2. Nothing in production
+  // knows the name; this is a fixture, not a special case.
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, initialStatus: "Pending" });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(SUFFICIENT_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(log.callNotesQueryBodies.length, 1, "the approved Call Notes record is read once, read-only");
+  assert.ok(
+    prompts.some((p) => p.includes("Call_Notes_ID: CN-007")),
+    "the diagnosis ran on the retrieved evidence rather than on a bare reference",
+  );
+  assert.strictEqual(result.stage, "awaiting_intervention_approval");
+  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(result.strategyProposal, "the unchanged approval-gated proposal step ran on top of the retrieved evidence");
+  assert.ok(result.pendingStrategyApproval, "Approval Needed is reached -- Martin still decides; nothing auto-approves");
+  assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
 });

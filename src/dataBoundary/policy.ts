@@ -91,17 +91,20 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // strategy.diagnosis (Entity_Token/Matter_Token + sanitized text), never
   // a real client identity.
   "strategy.proposal_drafting": "business_sensitive",
-  // Strategy's composable specialist-diagnosis model (LOG-845). Martin's
-  // explicit direction: classify these five so composition can actually
-  // run, applying the exact same rationale as strategy.diagnosis/
-  // handoff_routing/proposal_drafting above to a structurally identical
-  // payload -- every one of the five receives only the same already-
-  // sanitized state.strategyContext (Entity_Token/Matter_Token-bound,
-  // already governed by evaluateHandoffContext/resolveStrategyHandoffContext)
-  // or a specialist's own already-produced bounded finding derived from it
+  // Strategy's composable-Skills diagnostic cycle (ENIG Core Structure
+  // v3.0; successor to LOG-845's specialist-Hat composition, whose Hats
+  // are retired). Martin's explicit direction stands unchanged: classify
+  // these five so the cycle can actually run, applying the exact same
+  // rationale as strategy.diagnosis/handoff_routing/proposal_drafting above
+  // to a structurally identical payload -- every one of the five receives
+  // only the same already-sanitized state.strategyContext
+  // (Entity_Token/Matter_Token-bound, already governed by
+  // evaluateHandoffContext/resolveStrategyHandoffContext) or a Strategy
+  // Skill's own already-produced bounded finding derived from it
   // (strategy.specialist_synthesis) -- never a real client identity. No new
   // payload category is introduced by any of the five relative to
-  // strategy.diagnosis itself.
+  // strategy.diagnosis itself, and the Skills architecture registers no new
+  // SemanticTaskId -- each cycle step reuses one of these five.
   "strategy.specialist_selection": "business_sensitive",
   "strategy.business_diagnosis": "business_sensitive",
   "strategy.brand_diagnosis": "business_sensitive",
@@ -379,10 +382,11 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * identity -- the current expected posture for this Outbound Data Gate
  * task. strategy.specialist_selection / strategy.business_diagnosis /
  * strategy.brand_diagnosis / strategy.communication_diagnosis /
- * strategy.specialist_synthesis (LOG-845's specialist-diagnosis composition
- * model) carry the identical rationale -- every one of the five operates on
+ * strategy.specialist_synthesis (Strategy's composable-Skills diagnostic
+ * cycle) carry the identical rationale -- every one of the five operates on
  * the same already-sanitized state.strategyContext strategy.diagnosis
- * itself consumes, or a specialist's own bounded finding derived from it.
+ * itself consumes, or a Strategy Skill's own bounded finding derived from
+ * it.
  * sales.proposal_drafting now runs exclusively through
  * tokenSafeProposal.ts's handleProposalHandoffPickup (see
  * checkHandoffs.ts's discoverPendingSalesHandoffs -> runTokenSafeProposal),
@@ -563,13 +567,13 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "strategy.diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.handoff_routing": "TOKEN_SAFE_RUNTIME",
   "strategy.proposal_drafting": "TOKEN_SAFE_RUNTIME",
-  // Strategy's composable specialist-diagnosis model (LOG-845) -- same
-  // rationale as strategy.diagnosis/handoff_routing/proposal_drafting
-  // directly above: every one of these five operates on the same already-
-  // sanitized Entity_Token/Matter_Token-bound state.strategyContext or a
-  // specialist's own bounded finding derived from it, never a real client
-  // identity. Classified per Martin's explicit direction so specialist
-  // composition can actually run in production.
+  // Strategy's composable-Skills diagnostic cycle (ENIG Core Structure
+  // v3.0) -- same rationale as strategy.diagnosis/handoff_routing/
+  // proposal_drafting directly above: every one of these five operates on
+  // the same already-sanitized Entity_Token/Matter_Token-bound
+  // state.strategyContext or a Strategy Skill's own bounded finding derived
+  // from it, never a real client identity. Classified per Martin's explicit
+  // direction so the Skills cycle can actually run in production.
   "strategy.specialist_selection": "TOKEN_SAFE_RUNTIME",
   "strategy.business_diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.brand_diagnosis": "TOKEN_SAFE_RUNTIME",

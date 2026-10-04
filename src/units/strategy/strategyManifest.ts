@@ -1,6 +1,7 @@
 import type { Env, WorkState } from "../../types";
 import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
+import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as strategy from "./strategyAnalyst";
 
@@ -118,6 +119,22 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     },
     description:
       "Diagnose a Matter/Entity situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and either develop a governed intervention proposal or route the diagnosis to the responsible Unit. Performs the Matter operational-status advance and the inbound Handoff's own lifecycle progression; commits nothing on another Unit's behalf.",
+    // Multi-Skill Responsibility (the model established for Responsibilities
+    // that may be performed with zero, one or multiple Skills -- there is no
+    // mandatory primary Skill). `strategy_analysis` is the overarching
+    // diagnostic/orchestration methodology; the three domain Skills are
+    // bounded methods it may invoke one at a time, and `research_signal` is
+    // the existing, reused evidence-discipline Skill. Declaring a Skill here
+    // only makes it AVAILABLE to this Action -- the cycle chooses which (if
+    // any) to actually follow, from the evidence. It never invokes all of
+    // them by default, and it may not invoke one this Action did not declare.
+    skill_requirements: [
+      { skill_id: "strategy_analysis" },
+      { skill_id: "brand_strategy" },
+      { skill_id: "business_strategy" },
+      { skill_id: "communication_strategy" },
+      { skill_id: "research_signal" },
+    ],
   },
   {
     name: "commit_diagnosis",
@@ -137,8 +154,8 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
   },
 ];
 
-async function strategyEntryHandler(env: Env, state: WorkState, _actionName: StrategyAction, text: string): Promise<WorkState> {
-  return strategy.handleDirectRequest(env, state, text);
+async function strategyEntryHandler(env: Env, state: WorkState, _actionName: StrategyAction, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
+  return strategy.handleDirectRequest(env, state, text, skills);
 }
 
 /** Strategy declares no "read" action -- both its Actions are "write" (a WorkSession always exists by the time this manifest is consulted). Fails closed rather than silently no-opping. */
