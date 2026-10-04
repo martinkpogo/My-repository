@@ -16,6 +16,7 @@ import { recordWorkAction } from "../dispatch";
 import type { ApprovalProof } from "../../types";
 import { runStrategySkillCycle } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
+import { parseCommercialValueEvidenceBlock } from "../sales/commercialValueEvidence";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -461,6 +462,36 @@ async function readSourceBoundaryEvidence(
   }
 }
 
+/**
+ * Reads the upstream Commercial Value Evidence block the sending Sales
+ * execution wrote into this Handoff's "Verified Facts & Sources" at creation,
+ * and structurally parses it (units/sales/commercialValueEvidence.ts).
+ *
+ * This is consumption of recorded provenance, never a re-performance of the
+ * commercial-value evaluation: Strategy does not run the evaluator, does not
+ * recompute a determination, and does not repair a malformed block -- an
+ * absent or unparseable one returns { ok: false, reason } so the proposal
+ * approval gate can fail closed and name the exact provenance gap. The
+ * determination INSIDE a present block is deliberately not inspected here:
+ * `Insufficient Evidence` is a valid, provenance-complete result to carry
+ * forward, and Strategy's gate checks provenance rather than sufficiency.
+ */
+async function readCommercialValueEvidence(
+  env: Env,
+  handoffId: string,
+  access: AccessContext,
+): Promise<{ ok: true; block: string } | { ok: false; reason: string }> {
+  try {
+    const handoff = await getPage(env, handoffId, access);
+    const parsed = parseCommercialValueEvidenceBlock(plainText(handoff.properties["Verified Facts & Sources"]));
+    if (!parsed.ok) return { ok: false, reason: parsed.reason };
+    return { ok: true, block: parsed.block };
+  } catch (err) {
+    console.error(`Strategy: Commercial Value Evidence read failed for handoff ${handoffId}`, err);
+    return { ok: false, reason: "the Handoff record could not be read to retrieve the Commercial Value Evidence block" };
+  }
+}
+
 async function sendStrategyInProgressAck(env: Env, state: WorkState): Promise<void> {
   state.strategyProgressMessageId = await sendWorkspaceHatMessage(
     env,
@@ -802,6 +833,28 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   if (!sourceBoundaryEvidence.ok) {
     console.error(
       `Strategy handlePickup: no usable source-boundary attestation for handoff ${state.handoffId} (${sourceBoundaryEvidence.reason}) -- the proposal gate will fail closed.`,
+    );
+  }
+
+  // Upstream Commercial Value Evidence provenance, seeded FROM THE HANDOFF
+  // RECORD the same way the source-boundary attestation above is: the block
+  // Sales wrote at creation is re-read (and structurally re-parsed) on every
+  // pickup, so a fresh session holds the same bytes a same-session flow
+  // would, and a stale copy can never mask a malformed/missing block. An
+  // absent or unparseable block leaves this field unset, with the exact
+  // reason in commercialValueEvidenceError, so
+  // presentStrategyProposalForApproval fails closed below the line. Nothing
+  // here judges the determination itself -- see readCommercialValueEvidence.
+  const commercialValueEvidence = await readCommercialValueEvidence(
+    env,
+    state.handoffId!,
+    strategyAnalystAccess(state),
+  );
+  state.commercialValueEvidenceBlock = commercialValueEvidence.ok ? commercialValueEvidence.block : undefined;
+  state.commercialValueEvidenceError = commercialValueEvidence.ok ? undefined : commercialValueEvidence.reason;
+  if (!commercialValueEvidence.ok) {
+    console.error(
+      `Strategy handlePickup: no usable Commercial Value Evidence block for handoff ${state.handoffId} (${commercialValueEvidence.reason}) -- the proposal gate will fail closed.`,
     );
   }
 
@@ -1762,6 +1815,31 @@ async function presentStrategyProposalForApproval(
       "no Sales source-boundary identity check is on record for this work item's Sales -> Strategy Handoff -- refusing to treat this Strategy Proposal as safe to present or route downstream.",
     );
   }
+  // Gate 3 -- upstream Commercial Value Evidence provenance. Finance is the
+  // sole authority for whether commercial value evidence is sufficient to
+  // price, so this gate proves exactly one thing: that the determination
+  // Strategy would carry downstream EXISTS in the sending Handoff and parses
+  // deterministically. It deliberately never inspects what the determination
+  // says -- a block reading `Insufficient Evidence` is complete, valid
+  // provenance and this gate passes it, because Strategy may be approved
+  // either way and pricing sufficiency belongs to Finance
+  // (validateFinanceJudgement, unchanged). What is refused is a proposal
+  // routed downstream with no attributable determination at all, or one whose
+  // block could only be read by interpreting it. Strategy never authorises,
+  // estimates, or infers a number here; it only checks that the sender's
+  // determination is on record.
+  //
+  // direct_request has no Sales -> Strategy Handoff to carry a block from,
+  // handled the same honest way Gate 2 handles it: recorded as having no
+  // upstream determination, never fabricated. Only a Handoff-originated work
+  // item requires the block.
+  if (state.entryType !== "direct_request" && !state.commercialValueEvidenceBlock) {
+    return handleBlocked(
+      env,
+      state,
+      `no upstream Commercial Value Evidence block could be read from this work item's Sales -> Strategy Handoff (${state.commercialValueEvidenceError ?? "the block is absent"}), so the proposal would be routed downstream with no attributable commercial-value determination -- refusing to present it for approval. Strategy never authors, estimates, or infers that determination itself.`,
+    );
+  }
   const identityCheck = checkStrategyProposalForKnownIdentity(proposal, {
     contactName: state.entityDraft?.name,
     email: state.entityDraft?.email,
@@ -1990,20 +2068,16 @@ export function serializeStrategyBoundaryRepresentation(rep: StrategyBoundaryRep
 /**
  * Locates a `${startMarker} ... ${endMarker}` block within `text` and
  * returns its inner content (trimmed), or null if the markers aren't both
- * present in order. The shared extraction primitive every downstream
- * consumer of a labeled boundary block uses (Finance, to carry the Strategy
- * block forward verbatim without re-authoring it; Sales, to parse both the
- * Strategy and Finance blocks out of the combined Finance -> Sales
- * Handoff) -- one matching implementation, not one per caller.
+ * present in order.
+ *
+ * The implementation itself now lives in src/labeledBlock.ts (a Unit-neutral
+ * pure string primitive, so Sales's Commercial Value Evidence block and
+ * Strategy's boundary block can share it without an import cycle). This
+ * re-export keeps the established import path -- every existing consumer
+ * (`../strategy/strategyAnalyst`) still resolves to the SAME single
+ * implementation; there is still exactly one, not one per caller.
  */
-export function extractLabeledBlock(text: string, startMarker: string, endMarker: string): string | null {
-  const startIdx = text.indexOf(startMarker);
-  if (startIdx === -1) return null;
-  const contentStart = startIdx + startMarker.length;
-  const endIdx = text.indexOf(endMarker, contentStart);
-  if (endIdx === -1) return null;
-  return text.slice(contentStart, endIdx).trim();
-}
+export { extractLabeledBlock } from "../../labeledBlock";
 
 /**
  * Martin's Approve/Refine/Reject decision on the current Strategy Proposal.
@@ -2104,10 +2178,35 @@ export async function handleInterventionApproval(
   }
 
   // decision === "approve"
+  //
+  // Provenance re-check BEFORE the gated Action is recorded: Gate 3 proved
+  // the upstream Commercial Value Evidence block present and parseable when
+  // this proposal was presented, and the same proof is required again here,
+  // so a commit can never produce a Finance Handoff missing the upstream
+  // determination. It still says nothing about what the determination IS --
+  // `Insufficient Evidence` rides through untouched (see Gate 3 above).
+  const upstreamCommercialValueEvidence = state.entryType === "direct_request" ? null : state.commercialValueEvidenceBlock;
+  if (state.entryType !== "direct_request" && !upstreamCommercialValueEvidence) {
+    return handleBlocked(
+      env,
+      state,
+      `the Commercial Value Evidence block this proposal was approved with is no longer on record (${state.commercialValueEvidenceError ?? "the block is absent"}) -- refusing to commit a Handoff to Finance that carries no attributable commercial-value determination. Strategy never authors that determination itself.`,
+    );
+  }
   try {
     // Same reason as handleStrategyHandoffApproval: the gated Action is the
     // privileged effect, and the proof has to be bound to it.
     recordWorkAction(state, COMMIT_DIAGNOSIS_ACTION);
+    // Finance must receive BOTH blocks, side by side: the approved Strategy
+    // Boundary Representation (unchanged, above) and the upstream Commercial
+    // Value Evidence determination (verbatim, below). The latter is copied
+    // byte-for-byte from the Sales -> Strategy Handoff -- never paraphrased,
+    // summarised, re-parsed into prose, or regenerated -- so Finance judges
+    // against exactly the determination Strategy was handed.
+    const strategyBoundaryBlock = serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal!));
+    const verifiedFactsForFinance = upstreamCommercialValueEvidence
+      ? `${strategyBoundaryBlock}\n\n${upstreamCommercialValueEvidence}`
+      : strategyBoundaryBlock;
     const { page: handoff } = await createHandoff(
       env,
       {
@@ -2132,7 +2231,7 @@ export async function handleInterventionApproval(
         Matter_Token: richText(state.matterToken ?? ""),
         Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
         "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
-        "Verified Facts & Sources": richTextLong(serializeStrategyBoundaryRepresentation(buildStrategyBoundaryRepresentation(proposal!))),
+        "Verified Facts & Sources": richTextLong(verifiedFactsForFinance),
       },
       { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },
       // Same shape as handleStrategyHandoffApproval: consuming the staged
@@ -2255,15 +2354,29 @@ export async function handleStrategyRefinement(env: Env, state: WorkState, text:
 }
 
 /**
- * Ambiguity/Held retry loop. Rather than continuing in-session (which would
- * bypass the pickup-idempotency boundary), this requeues the Handoff:
+ * Clarification/Held retry loop. Rather than continuing in-session (which
+ * would bypass the pickup-idempotency boundary), this requeues the Handoff:
  * appends the added detail to Verified Facts & Sources and returns Status
- * to Pending, mirroring salesExecutive.ts's handleMoreValueContext exactly.
- * Discovery re-finds it and hands it back through handlePickup's own
- * claim-then-process guard, so it is picked up again exactly once.
+ * to Pending, so discovery re-finds it and hands it back through
+ * handlePickup's own claim-then-process guard, so it is picked up again
+ * exactly once. (Contrast Finance's own evidence-clarification loop, which
+ * re-runs in-session and never rewrites the record -- see
+ * valueBasedPricingAssessor.ts's handleValueContextClarification.)
  */
 export async function handleStrategyClarification(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const augmentedContext = `${state.strategyContext ?? ""}\n\nAdditional detail: ${text}`;
+  // The upstream Commercial Value Evidence block must survive this rewrite:
+  // the proposal approval gate re-reads it from this very field on the next
+  // pickup, and when the evidence base came from approved Call Notes (order
+  // 2) it does NOT contain the block. Writing `strategyContext` back over
+  // the record unchanged would delete the block and turn a recoverable
+  // clarification into a permanent provenance failure. So the block is
+  // re-appended verbatim when it is not already in the base being written.
+  const baseContext = state.strategyContext ?? "";
+  const preservedValueEvidenceBlock =
+    state.commercialValueEvidenceBlock && !baseContext.includes(state.commercialValueEvidenceBlock)
+      ? `\n\n${state.commercialValueEvidenceBlock}`
+      : "";
+  const augmentedContext = `${baseContext}${preservedValueEvidenceBlock}\n\nAdditional detail: ${text}`;
   state.strategyContext = augmentedContext;
 
   if (!state.handoffId) {

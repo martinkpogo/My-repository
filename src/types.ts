@@ -639,6 +639,38 @@ export interface WorkState {
    */
   strategySourceBoundaryAttestation?: HandoffSourceBoundaryAttestation;
   /**
+   * The upstream Commercial Value Evidence block exactly as it is written in
+   * the Sales -> Strategy Handoff's "Verified Facts & Sources" (markers
+   * included), read and structurally parsed at pickup -- see
+   * units/sales/commercialValueEvidence.ts. This is PROVENANCE, not a new
+   * evidence model: the determination inside it was produced upstream by
+   * Sales's deterministic `evaluateCommercialValueEvidence`, and Strategy
+   * copies this block byte-for-byte into the Strategy -> Finance Handoff so
+   * Finance judges against the same determination it was handed.
+   *
+   * Absent (with `commercialValueEvidenceError` saying why) whenever the
+   * block could not be read or could not be parsed deterministically --
+   * presentStrategyProposalForApproval treats that as a fail-closed provenance
+   * failure and never as a reason to doubt the determination itself: an
+   * `Insufficient Evidence` determination still sits here fully valid.
+   */
+  commercialValueEvidenceBlock?: string;
+  /** Why `commercialValueEvidenceBlock` is absent (markers absent, not JSON, malformed field...). Carried only so a fail-closed gate can name the exact provenance gap. */
+  commercialValueEvidenceError?: string;
+  /**
+   * Set when Martin has supplied the specific commercial fact Finance named
+   * in its value-evidence hold (see valueBasedPricingAssessor.ts's
+   * handleValueContextClarification). While the block's upstream
+   * `Insufficient Evidence` determination is the whole picture, Finance
+   * holds deterministically and asks; once a fact has actually been
+   * supplied, that fact must be re-evaluated through Finance's EXISTING
+   * judgment + validateFinanceJudgement path, because the block's own
+   * bytes are upstream-authored and cannot be edited from here. The flag
+   * only ever selects which of those two governed paths runs -- it is never
+   * a pricing authority, and never overrides validateFinanceJudgement.
+   */
+  valueEvidenceFactSupplied?: boolean;
+  /**
    * The bounded, deterministic known-identity safety attestation for the
    * EXACT Strategy Proposal (proposalId, proposalVersion) currently
    * approved/in-flight -- see verifyStrategyProposalTokenSafety and

@@ -20,6 +20,7 @@ import {
   queryDataSource,
   relation,
   richText,
+  richTextLong,
   select,
   title,
   uniqueId,
@@ -35,6 +36,7 @@ import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataB
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { retrieveAndConsumeCallNotes } from "./callNotesRecord";
+import { serializeCommercialValueEvidenceBlock } from "./commercialValueEvidence";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -1418,6 +1420,31 @@ const VALID_ENTRY_TYPES: ReadonlyArray<NonNullable<WorkState["entryType"]>> = [
 ];
 
 /**
+ * Upper bound for the HUMAN-READABLE narrative that rides ahead of the
+ * structured Commercial Value Evidence block in the Sales -> Strategy
+ * Handoff's "Verified Facts & Sources".
+ *
+ * The narrative is a convenience for anyone reading the Handoff in Notion;
+ * the structured block below it is provenance Strategy's approval gate and
+ * Finance's pricing judgment both depend on. So the narrative is bounded and
+ * the block is written AFTER it: an unbounded commercial situation or
+ * call-notes dump can no longer push the value-evidence block off the end of
+ * the field (the previous `.slice(0, 1900)` path truncated whatever came
+ * last, which was the evidence). The field itself is written with
+ * richTextLong, whose own hard cap (RICH_TEXT_LONG_MAX_CHARS) still fails
+ * closed on anything beyond it rather than persisting a partial record.
+ */
+const HUMAN_READABLE_EVIDENCE_MAX_CHARS = 6000;
+
+function boundHumanReadableEvidence(text: string): string {
+  if (text.length <= HUMAN_READABLE_EVIDENCE_MAX_CHARS) return text;
+  return (
+    `${text.slice(0, HUMAN_READABLE_EVIDENCE_MAX_CHARS)}\n` +
+    `[... human-readable commercial evidence truncated at ${HUMAN_READABLE_EVIDENCE_MAX_CHARS} characters; the structured Commercial Value Evidence block below is always written in full ...]`
+  );
+}
+
+/**
  * Creates the Sales -> Strategy Handoff after Martin approves Entity/
  * Prospect progression -- per the canonical commercial flow (Inbound ->
  * Sales -> Strategy -> Finance -> Sales), this REPLACES the obsolete
@@ -1513,6 +1540,20 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
     contactName: state.entityDraft?.type === "Individual" ? state.entityDraft?.name : undefined,
   };
 
+  // The structured Commercial Value Evidence provenance block Strategy's
+  // approval gate validates and Finance's pricing judgment consumes. The
+  // determination is produced by the SAME existing deterministic evaluator
+  // over the SAME evidence serialized beside it -- evaluateCommercialValueEvidence
+  // stays the sole authority for this condition; nothing here estimates,
+  // rewords, or second-guesses it, and the whole block is written verbatim
+  // by every Unit that carries it forward.
+  const commercialValueEvaluation = evaluateCommercialValueEvidence(state.commercialEvidence);
+  const commercialValueEvidenceBlock = serializeCommercialValueEvidenceBlock({
+    determination: commercialValueEvaluation.assessment,
+    evidenceText: commercialValueEvaluation.evidenceText,
+    evidence: state.commercialEvidence ?? null,
+  });
+
   const { page: handoff, sourceBoundaryAttestation } = await createHandoff(
     env,
     {
@@ -1536,11 +1577,22 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
       Assumptions: richText(
         "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a pricing input downstream.",
       ),
-      "Verified Facts & Sources": richText(
-        `Commercial situation: ${trimmedSituation}\n\n${formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext)}\n\nRaw value context (enquiry + call notes):\n${valueContext}`.slice(
-          0,
-          1900,
-        ),
+      "Verified Facts & Sources": richTextLong(
+        // Human-readable narrative first (bounded -- see
+        // HUMAN_READABLE_EVIDENCE_MAX_CHARS), the structured Commercial
+        // Value Evidence block LAST, so no length of commercial situation or
+        // call notes can truncate it. richTextLong stores the whole thing
+        // instead of the old .slice(0, 1900) truncation.
+        [
+          boundHumanReadableEvidence(
+            [
+              `Commercial situation: ${trimmedSituation}`,
+              formatCommercialEvidenceForHandoff(state.commercialEvidence, state.investmentToleranceContext),
+              `Raw value context (enquiry + call notes):\n${valueContext}`,
+            ].join("\n\n"),
+          ),
+          commercialValueEvidenceBlock,
+        ].join("\n\n"),
       ),
     },
     strategyHandoffIdentity,
@@ -1604,38 +1656,26 @@ async function resolveIdentityTokens(env: Env, entityId: string, matterId: strin
   };
 }
 
-export async function handleMoreValueContext(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.proposedIntervention = `${state.proposedIntervention}\n\nAdditional value context: ${text}`;
-  // Sales's authority here is mechanical only: record the new content and
-  // make the Handoff queue-eligible again. This is not a determination that
-  // Finance's Hold gate is resolved -- Finance's own judgment in
-  // handlePickup (invoked only via independent discovery, never from here)
-  // remains the sole authority over sufficiency and the resulting
-  // Held/Closed outcome. Sales's execution ends here.
-  await updateHandoff(
-    env,
-    state.handoffId!,
-    {
-      "Verified Facts & Sources": richText(
-        `Proposed intervention + value context:\n${state.proposedIntervention}`.slice(0, 1900),
-      ),
-      Status: select("Pending"),
-    },
-    salesExecutiveAccess(state),
-    {
-      entityToken: state.entityToken ?? "",
-      matterToken: state.matterToken ?? "",
-      entityName: state.entityName,
-      matterName: state.matterName,
-    },
-  );
-  await sendWorkspaceHatMessage(
-    env,
-    { ...state, hat: "Sales Executive" },
-    `Got it — added to the Handoff for *${state.entityName}* and queued for Finance to reassess. I'll let you know here once Finance responds.`,
-  );
-  return state;
-}
+// REMOVED (2026-10-04, Strategy -> Finance value-evidence contract): the
+// Sales-side value-context clarification handler
+//
+//   handleMoreValueContext
+//
+// It was the handler session.ts's `value_context_more` awaiting state
+// dispatched to, and it was wrong in both halves of that arrangement: (a) it
+// wrote `Proposed intervention + value context: ...` over the Handoff's
+// "Verified Facts & Sources", destroying whatever blocks were already there
+// (the Strategy Boundary Representation and the Commercial Value Evidence
+// block Finance's pricing judgment depends on), and (b) `state.proposedIntervention`
+// is not populated for the Finance-owned Work item that actually enters this
+// path, so the value it rewrote the record with could be "undefined".
+//
+// A Finance-owned evidence gate now has a Finance-owned clarification loop:
+// valueBasedPricingAssessor.ts's handleValueContextClarification re-reads the
+// Handoff, appends Martin's reply IN MEMORY only (the record's blocks are
+// never overwritten), and re-runs the existing judgeQuote. Sales has no
+// remaining reason to accept value-context replies -- nothing in Sales sets
+// awaiting "value_context_more" any more.
 
 // REMOVED (2026-09-30, ENIG Operating Model implementation): the legacy
 // identity-bearing Proposal path.

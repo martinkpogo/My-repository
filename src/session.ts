@@ -166,7 +166,7 @@ export class WorkSession extends DurableObject<Env> {
         case "intervention":
           return sales.handleInterventionText(this.env, state, text);
         case "value_context_more":
-          return sales.handleMoreValueContext(this.env, state, text);
+          return finance.handleValueContextClarification(this.env, state, text);
         case "quote_redo_reason":
           return finance.handleQuoteRedoReason(this.env, state, text);
         case "matter_redo_reason":

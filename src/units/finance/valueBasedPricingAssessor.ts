@@ -1,4 +1,4 @@
-import type { Env, WorkState } from "../../types";
+import type { Env, WorkState, ValueAtStake } from "../../types";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { generate, type GeneratePromptParts } from "../../ai";
@@ -11,6 +11,7 @@ import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+import { parseCommercialValueEvidenceBlock, type CommercialValueEvidenceRecord } from "../sales/commercialValueEvidence";
 import { resolveMatterFromText } from "../../identityResolution";
 import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
@@ -120,6 +121,66 @@ function validateFinanceJudgement(judgement: PriceJudgement | null): { valid: tr
     return { valid: false, reason: `Pricing rationale appears to rely on ${forbidden.reason}, which is not canonical ENIG pricing policy.` };
   }
   return { valid: true };
+}
+
+/**
+ * Names the SPECIFIC commercial fact the upstream determination found
+ * missing, while keeping the two different gaps apart:
+ *
+ *   - genuinely MISSING value evidence (no quantified figure exists at all);
+ *   - an UNSUPPORTED ASSUMPTION (a figure exists but carries no attribution)
+ *     -- a different fact to supply, and never the same request as "no number".
+ *
+ * Purely a reading of the structured block: no figure is computed, derived,
+ * or repaired here, and a budget/willingness-to-pay/investment-tolerance
+ * figure is never offered as a substitute (it is context, not evidence).
+ */
+function describeCommercialValueGap(record: CommercialValueEvidenceRecord): string {
+  const figures: ValueAtStake[] = [record.evidence?.valueAtStake, record.evidence?.costOfInaction].filter(
+    (f): f is ValueAtStake => f !== undefined,
+  );
+  const withNumber = figures.filter(
+    (f) => typeof f.value === "number" || typeof f.low === "number" || typeof f.high === "number",
+  );
+  if (withNumber.length === 0) {
+    return "a quantified value-at-stake or cost-of-inaction figure is genuinely MISSING from the record (missing evidence, not an unsupported estimate)";
+  }
+  const attributed = withNumber.find((f) => f.evidenceType && f.evidenceType !== "assumption");
+  if (!attributed) {
+    return "the only figure on record is an UNSUPPORTED ASSUMPTION -- a number exists but carries no attribution, which is a different gap from having no number at all";
+  }
+  if (!attributed.source) return "the figure on record has no attributable source";
+  if (!attributed.period) return "the figure on record has no applicable time period";
+  return "the figure on record does not satisfy the governed value-evidence rules";
+}
+
+/**
+ * Finance's deterministic hold over the structured upstream Commercial Value
+ * Evidence block, applied BEFORE Finance's own AI judgment is even requested.
+ *
+ * Finance is the sole authority on whether commercial value evidence is
+ * sufficient to price, and this is that authority being exercised against
+ * the governed upstream determination rather than against the free-text
+ * prescription narrative: when the block says the evidence does not satisfy
+ * the rule, no amount of narrative wording around it changes that, and a
+ * figure cannot be reconstructed from anywhere else. Returns null when the
+ * upstream determination IS satisfied (or when there is no structured block
+ * to read, e.g. a direct request with no Handoff), in which case the normal
+ * judgment + validateFinanceJudgement path decides as before.
+ *
+ * validateFinanceJudgement itself is unchanged -- this gate does not
+ * replace it; a Satisfied determination still has to pass it before any
+ * quote exists.
+ */
+function commercialValueEvidenceHoldReason(record: CommercialValueEvidenceRecord): string | null {
+  if (record.determination === "Satisfied") return null;
+  const gap = describeCommercialValueGap(record);
+  return (
+    `The upstream commercial-value determination carried with this request is "${record.determination}": ${record.evidenceText} ` +
+    `Specific missing commercial fact: ${gap}. ` +
+    `Finance is holding for that specific fact as attributable evidence (source and period stated), not for a budget or willingness-to-pay figure -- those are never the pricing basis. ` +
+    `Supply it and the governed evidence will be re-evaluated; the determination will be re-read, never re-derived.`
+  );
 }
 
 // Canonical Notion governance source for this Hat, verified live in the
@@ -374,9 +435,10 @@ export async function handlePickup(env: Env, state: WorkState, _skills: Resolved
       outcome: "Blocked",
     });
     // Already claimed (Picked-up) above -- move to Held rather than leaving
-    // it stuck at Picked-up, so the existing Held->Pending retry path
-    // (handleMoreValueContext) can bring it back for exactly one more
-    // pickup once the missing context is supplied.
+    // it stuck at Picked-up, so Finance's own clarification loop
+    // (handleValueContextClarification, the awaiting "value_context_more"
+    // continuation) can re-evaluate it exactly once the missing context is
+    // supplied.
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(evalResult.insufficientContext.reason.slice(0, 1900)),
@@ -451,8 +513,10 @@ async function judgeQuote(
     });
     // On the fresh-pickup path the Handoff was already claimed (Picked-up)
     // by handlePickup's idempotency guard before this ever ran -- move it
-    // to Held rather than leaving it stuck, so the existing Held->Pending
-    // retry path can bring it back. The redo path (awaitingOnInsufficient
+    // to Held rather than leaving it stuck at Picked-up, so Finance's own
+    // clarification loop (handleValueContextClarification, the awaiting
+    // "value_context_more" continuation) can re-evaluate it once the missing
+    // detail is supplied. The redo path (awaitingOnInsufficient
     // "quote_redo_reason") started at Held and never left it, so it's
     // already in a recoverable state and needs no extra transition here.
     if (awaitingOnInsufficient === "value_context_more") {
@@ -482,24 +546,76 @@ async function judgeQuote(
     outcome: "Active",
   });
 
-  const judgement = await generate<PriceJudgement>(env, {
-    taskId: "finance.quote_judgment",
-    mode: "json",
-    parts: { ...buildFinancePromptParts(hatDefinition, universalRoleContract), situation: `Entity: ${entityToken}\nProposed intervention and value context:\n${judgmentContext}` },
-  });
+  // Structured upstream Commercial Value Evidence, parsed BEFORE any
+  // reliance on the free-text prescription content: Finance must not have to
+  // hunt for value evidence in narrative prose. When the block is present
+  // it is presented to the judgment ONCE, as a labelled structured fact, and
+  // removed from the narrative below so the same bytes are not also floating
+  // around as prose. When it is absent (a direct request with no Handoff, or
+  // a legacy Handoff created before this contract) nothing changes: the
+  // existing free-text judgment path decides exactly as it did before.
+  const valueEvidence = parseCommercialValueEvidenceBlock(judgmentContext);
+  const structuredValueSection = valueEvidence.ok
+    ? [
+        "=== UPSTREAM COMMERCIAL VALUE EVIDENCE (structured -- carried verbatim Sales -> Strategy -> Finance) ===",
+        valueEvidence.block,
+        `Determination: ${valueEvidence.record.determination} -- ${valueEvidence.record.evidenceText}`,
+        "This block is the governed upstream determination of the commercial value evidence. Treat it as the structured fact for value: never re-derive, re-estimate, paraphrase, or replace it, and never lift a value figure out of the narrative below when it names what is missing. A disclosed budget or willingness-to-pay figure, investment tolerance, a geographic adjustment, or a currency conversion is never the pricing basis, and no figure is reconstructed from the Measurement Baseline.",
+        "=== END UPSTREAM COMMERCIAL VALUE EVIDENCE ===",
+      ].join("\n")
+    : "";
+  const narrativeContext = valueEvidence.ok ? judgmentContext.split(valueEvidence.block).join("") : judgmentContext;
+  const situation = [
+    `Entity: ${entityToken}`,
+    structuredValueSection,
+    `Proposed intervention and value context:\n${narrativeContext.trim()}`,
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
 
-  // The AI's own "sufficient: true" is never taken as final authority --
-  // per the Commercial Value & Pricing Operating Model, a structured
-  // judgment must also pass deterministic validation before it's allowed
-  // to become a quote. A judgment the AI marked insufficient is held on
-  // its own stated reason; one it marked sufficient is held anyway, on the
-  // deterministic reason, if validation fails. The AI cannot override this.
-  let holdReason: string | null = null;
-  if (!judgement || judgement.sufficient !== true) {
-    holdReason = judgement?.reason_if_insufficient ?? "Value context insufficient to price responsibly.";
-  } else {
-    const validation = validateFinanceJudgement(judgement);
-    if (!validation.valid) holdReason = validation.reason;
+  // Deterministic pre-check against the structured block (see
+  // commercialValueEvidenceHoldReason): an upstream "Insufficient Evidence"
+  // holds here, naming the specific missing commercial fact, WITHOUT the AI
+  // being asked to price something the governed evidence says is not
+  // established. No structured block (direct request / legacy Handoff) ->
+  // null -> the judgment and validateFinanceJudgement below decide as always.
+  //
+  // Once Martin has actually supplied the fact that was asked for
+  // (state.valueEvidenceFactSupplied), the block is no longer the whole
+  // picture -- its bytes are upstream-authored and cannot be edited here --
+  // so the hold steps aside and the EXISTING path re-evaluates the combined
+  // evidence: the structured block (still naming what was missing) plus the
+  // supplied fact, gated by the unchanged validateFinanceJudgement. That is
+  // how a hold closes without any new pricing authority being created.
+  const structuredHoldReason =
+    valueEvidence.ok && !state.valueEvidenceFactSupplied ? commercialValueEvidenceHoldReason(valueEvidence.record) : null;
+  if (valueEvidence.ok) {
+    console.log(
+      `Finance judgeQuote: structured Commercial Value Evidence parsed for work ${state.workId} (determination: ${valueEvidence.record.determination})`,
+    );
+  }
+
+  let judgement: PriceJudgement | null = null;
+  let holdReason: string | null = structuredHoldReason;
+  if (holdReason === null) {
+    judgement = await generate<PriceJudgement>(env, {
+      taskId: "finance.quote_judgment",
+      mode: "json",
+      parts: { ...buildFinancePromptParts(hatDefinition, universalRoleContract), situation },
+    });
+
+    // The AI's own "sufficient: true" is never taken as final authority --
+    // per the Commercial Value & Pricing Operating Model, a structured
+    // judgment must also pass deterministic validation before it's allowed
+    // to become a quote. A judgment the AI marked insufficient is held on
+    // its own stated reason; one it marked sufficient is held anyway, on the
+    // deterministic reason, if validation fails. The AI cannot override this.
+    if (!judgement || judgement.sufficient !== true) {
+      holdReason = judgement?.reason_if_insufficient ?? "Value context insufficient to price responsibly.";
+    } else {
+      const validation = validateFinanceJudgement(judgement);
+      if (!validation.valid) holdReason = validation.reason;
+    }
   }
 
   if (holdReason !== null) {
@@ -596,10 +712,13 @@ async function judgeQuote(
 /**
  * Handles Martin's reasoning after he clicks Redo on a computed quote.
  * This stays entirely within Finance — Martin is critiquing Finance's own
- * judgment, not supplying business facts Sales owns (contrast
- * sales.handleMoreValueContext, used for the latter) — so it acts
+ * judgment, not supplying business facts another Unit owns — so it acts
  * immediately rather than requeuing the Handoff Pending for cron discovery
- * to re-pick-up asynchronously; no Unit boundary is being crossed.
+ * to re-pick-up asynchronously; no Unit boundary is being crossed. The
+ * Handoff's own "Verified Facts & Sources" is rewritten with the augmented
+ * context via richTextLong (never a 1,900-char truncation), so the Strategy
+ * Boundary Representation and Commercial Value Evidence blocks inside it
+ * survive a redo intact.
  */
 export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
   const financeThreadId = state.financeThreadId ?? state.threadId;
@@ -624,7 +743,7 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
 
   const augmentedContext = `${evalResult.contract.sanitizedContext}\n\nMartin's redo reasoning: ${reasonText}`;
   await updateHandoff(env, state.handoffId!, {
-    "Verified Facts & Sources": richText(augmentedContext.slice(0, 1900)),
+    "Verified Facts & Sources": richTextLong(augmentedContext),
   }, financeAccess(state));
 
   return judgeQuote(env, state, {
@@ -634,6 +753,81 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
     financeThreadId,
     awaitingOnInsufficient: "quote_redo_reason",
     activityLabel: "resumed reassessment following Martin's redo reasoning",
+  });
+}
+
+/**
+ * Finance's own clarification loop for Finance's own governed evidence gate
+ * (`awaiting: "value_context_more"`), replacing the Sales-side handler this
+ * state used to dispatch to (which overwrote the Handoff's
+ * "Verified Facts & Sources" -- destroying the Strategy Boundary
+ * Representation and Commercial Value Evidence blocks -- from a Work item
+ * that never had `state.proposedIntervention` populated).
+ *
+ * Finance owns the hold, so Finance owns the request: Martin replies with
+ * the exact commercial fact the hold named, and this handler
+ *
+ *   1. re-reads the Handoff (never a Sales-side reconstruction),
+ *   2. appends Martin's fact to the IN-MEMORY judgment context ONLY -- the
+ *      record's blocks are never rewritten, so both survive untouched,
+ *   3. re-runs the SAME judgeQuote, whose structured-block parsing re-reads
+ *      the upstream determination and whose validateFinanceJudgement is
+ *      unchanged. No new pricing authority is created by a clarification:
+ *      the supplied fact still has to satisfy the existing gate.
+ *
+ * The same cross-Unit discipline as handleQuoteRedoReason: acts
+ * in-session, no new workflow mechanism, no requeue.
+ */
+export async function handleValueContextClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const financeThreadId = state.financeThreadId ?? state.threadId;
+  const suppliedFact = text.trim();
+
+  if (!suppliedFact) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      "What specific commercial fact should I re-evaluate? Name the value, what it attaches to, where it came from, and the period it covers -- I won't price on a budget or willingness-to-pay figure.",
+    );
+    state.stage = "handoff_held";
+    state.awaiting = "value_context_more";
+    return state;
+  }
+
+  const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!, financeAccess(state));
+  if (!evalResult.success) {
+    console.error(`Finance value-context clarification blocked — context evaluation failed for handoff ${state.handoffId}`);
+    await logActivity(env, {
+      entry: `Finance value-context clarification blocked — insufficient business context: ${state.entityToken}`,
+      type: "Blocker",
+      area: "Finance",
+      decisionRationale: evalResult.insufficientContext.reason,
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: "Value-Based Pricing Assessor" },
+      `Couldn't re-read the Handoff record for *${state.entityToken}* to apply the fact you supplied: ${evalResult.insufficientContext.reason}\n\nThe request stays held and nothing on the record was changed.`,
+    );
+    state.stage = "handoff_held";
+    state.awaiting = "value_context_more";
+    return state;
+  }
+
+  // The supplied fact joins the IN-MEMORY context only. The Handoff's
+  // "Verified Facts & Sources" -- carrying the approved Strategy Boundary
+  // Representation and the upstream Commercial Value Evidence block -- is
+  // deliberately NOT written here, so no clarification can destroy the
+  // blocks Finance's judgment is grounded in.
+  const augmentedContext = `${evalResult.contract.sanitizedContext}\n\nCommercial fact supplied by Martin in clarification: ${suppliedFact}`;
+  state.valueEvidenceFactSupplied = true;
+
+  return judgeQuote(env, state, {
+    entityToken: evalResult.contract.entityToken,
+    matterToken: evalResult.contract.matterToken ?? "",
+    judgmentContext: augmentedContext,
+    financeThreadId,
+    awaitingOnInsufficient: "value_context_more",
+    activityLabel: "re-evaluated the governed value evidence after Martin supplied the missing commercial fact",
   });
 }
 
