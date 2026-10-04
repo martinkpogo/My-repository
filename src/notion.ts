@@ -292,13 +292,25 @@ export function uniqueId(prop: any): string {
 
 /**
  * Retrieves a Notion page's block-children content as plain text, paginating
- * as needed. Governance pages (Hat Definitions, Universal Role Contract,
- * etc.) are a flat sequence of a `code` block (the machine-readable yaml
- * definition) followed by prose blocks (the human-readable explanation) —
- * code blocks are tagged so the two stay distinguishable. Only top-level
- * blocks are read; nested children are not recursed into. Not a general
- * Notion renderer — just enough to make a governance page's own text usable
- * as authoritative context.
+ * as needed.
+ *
+ * Two callers, one reader. **Governance pages** (Hat Definitions, Universal
+ * Role Contract, etc.) are a flat sequence of a `code` block (the
+ * machine-readable yaml definition) followed by prose blocks (the
+ * human-readable explanation) — code blocks are tagged so the two stay
+ * distinguishable. **An approved Call Notes record's page body** is the other:
+ * Strategy reads it as the substantive evidence behind an attested record
+ * (see `src/units/strategy/strategyEvidence.ts`), and that live record was
+ * verified to hold its evidence as top-level heading / paragraph / list /
+ * divider blocks, which is exactly what this function returns.
+ *
+ * Only top-level blocks are read; nested children are deliberately NOT
+ * recursed into — that is the boundary of this helper, not an oversight. If a
+ * governed record ever kept its evidence inside toggles, synced blocks,
+ * columns, or similar containers, that would be a scope change to approve,
+ * never a reason to add a second, recursive retrieval path beside this one.
+ * Not a general Notion renderer — just enough to make a page's own text usable
+ * as context.
  */
 export async function getPageContent(env: Env, pageId: string, access: AccessContext): Promise<string> {
   // Same rule as getPage: the read is authorized against the page's real

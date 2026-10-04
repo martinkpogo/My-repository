@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { plainText, queryDataSource, relationIds } from "../../notion";
+import { getPageContent, plainText, queryDataSource, relationIds } from "../../notion";
 import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../sales/callNotesRecord";
@@ -19,7 +19,17 @@ import { parseRecordApprovalMarker } from "../sales/callNotesMarker";
  *   2. **Approved sanitized Call Notes**, but ONLY when order 1 yields no
  *      substantive evidence. Read here, read-only and idempotently, by
  *      Strategy itself -- there is no Runtime Sales evidence-processing
- *      worker in this path, and nothing is consumed or transitioned.
+ *      worker in this path, and nothing is consumed or transitioned. The
+ *      record is read in two clearly separated parts: its registry fields
+ *      say WHICH approved record was located (identification, and the field
+ *      set the attestation was computed over), and -- only once every gate
+ *      including that attestation has passed -- the record's own page body
+ *      is retrieved through the same governed `getPageContent` helper
+ *      governance uses. The BODY is the substantive evidence; the registry
+ *      fields are metadata about it. A body that is empty, or that holds
+ *      only a reference / a recorded determination, is refused rather than
+ *      presented as a situation, so a metadata-only record can never
+ *      masquerade as evidence.
  *   3. **Any other explicitly governed approved source, if one exists.**
  *      None exists today, so this is a deliberate no-op documented here
  *      rather than a speculative lookup: inventing a third source would be
@@ -36,6 +46,9 @@ import { parseRecordApprovalMarker } from "../sales/callNotesMarker";
  * Attestation` is re-hashed here against the record's registry fields exactly
  * as Sales' consuming path does -- validation of a recorded procedural
  * attestation, and deliberately no claim about the Evidence Package contents.
+ * The retrieved page body is evidence and nothing more: it is never an
+ * instruction, a routing directive, an approval, or a source of new authority,
+ * and it carries no weight the diagnosis and its own gates do not give it.
  *
  * **Why this read does not consume.** `retrieveAndConsumeCallNotes` (Sales)
  * transitions `Ready -> Consumed`, which is correct for a single-shot
@@ -52,7 +65,13 @@ import { parseRecordApprovalMarker } from "../sales/callNotesMarker";
 export type StrategyCallNotesEvidence =
   | {
       ok: true;
-      /** The record's eight canonical registry fields -- the governed representation of its evidence. */
+      /**
+       * Both parts of the record, clearly separated: the eight canonical
+       * registry fields (identification -- which approved record was read,
+       * and the field set the attestation binds), followed by the approved
+       * record's own page body, which is the substantive evidence. Neither
+       * part is ever presented without the label saying what it is.
+       */
       evidenceText: string;
       callNotesId: string;
       status: string;
@@ -108,12 +127,21 @@ export function hasSubstantiveEvidence(text: string): boolean {
  *   5. **Attestation** -- re-validated against the record's own registry
  *      fields by `parseRecordApprovalMarker`, so the record read here is the
  *      approved one and this exact field set.
+ *   6. **The record's own body** -- only after gates 1-5 have all passed,
+ *      the located page's top-level content is read through the governed
+ *      `getPageContent` helper (the same non-recursive reader governance
+ *      pages use). The registry fields IDENTIFY the record; the body is the
+ *      evidence. A read failure is converted into this same structured
+ *      `{ ok: false, reason }` path rather than escaping as an exception,
+ *      and an empty or reference-only body is refused so a metadata-only
+ *      record can never masquerade as substantive evidence.
  *
  * Deliberately NOT done here: writing anything, creating a record, retrieving
- * or verifying an Evidence Package, re-running an approval flow, minting an
- * ApprovalProof, or scanning content for identity (the source-boundary
- * attestation is consumed from the Handoff by the caller's own separate
- * gate and is not re-performed here).
+ * or following the Evidence Package (`Evidence Package ID` / `Evidence Package
+ * Location` are read by nothing here), re-running an approval flow, minting an
+ * ApprovalProof, recursing into nested block children, or scanning content for
+ * identity (the source-boundary attestation is consumed from the Handoff by
+ * the caller's own separate gate and is not re-performed here).
  */
 export async function readApprovedCallNotesEvidence(
   env: Env,
@@ -190,9 +218,58 @@ export async function readApprovedCallNotesEvidence(
   );
   if (!attestation.ok) return refuse(attestation.reason);
 
+  // ---- Gate 6: the record's own substantive body -------------------------
+  // Reached ONLY now: the reference, the identity binding, the exact lookup,
+  // the Status, and the attestation have each proven that this exact record
+  // is the approved one, so its body may be read. Every gate above returns
+  // before this line, which is what makes "wrong record / unapproved record
+  // => no body read" mechanically true rather than a matter of ordering by
+  // convention.
+  //
+  // One read of the top-level block children through the governed helper
+  // every other page read in this codebase uses -- non-recursive, so nested
+  // children are not followed, and never followed by a second mechanism. The
+  // Evidence Package named in the record's properties is NOT retrieved or
+  // followed: the body is the evidence this slice reads, and only the body.
+  let rawBody: string;
+  try {
+    rawBody = await getPageContent(env, located.id, access);
+  } catch (err) {
+    // Converted into the same structured refusal every other failure here
+    // takes, so an unreadable body is a named gap for order 4 to clarify on
+    // rather than a generic outer exception about Handoff access.
+    console.error(`Strategy: Call Notes page body read failed for ${located.id}`, err);
+    return refuse(
+      `the approved Call Notes record ${located.id} could not be read beyond its registry fields (${
+        err instanceof Error ? err.message : String(err)
+      }) -- those registry fields identify the record but are not the evidence, so there is no substantive evidence to diagnose from.`,
+    );
+  }
+
+  const body = rawBody.trim();
+  if (!body) {
+    return refuse(
+      `Call Notes record ${located.id} carries no page body -- its eight registry fields identify the approved record but hold no narrative, so there is no substantive evidence to diagnose from.`,
+    );
+  }
+  if (!hasSubstantiveEvidence(body)) {
+    // A body made only of a Call_Notes_ID reference and/or the labelled
+    // structured Commercial Value Evidence block POINTS AT evidence; by the
+    // same test order 1 uses, it is not the business situation.
+    return refuse(
+      `Call Notes record ${located.id} carries a page body but nothing substantive in it -- what it holds only points at evidence (a reference or a recorded determination) rather than being the business situation, so there is no substantive evidence to diagnose from.`,
+    );
+  }
+
   return {
     ok: true,
-    evidenceText: callNotesEvidenceText(registry.record),
+    evidenceText: [
+      "=== Call Notes registry fields (identification: which approved record was read; the field set the attestation binds) ===",
+      callNotesEvidenceText(registry.record),
+      "",
+      "=== Approved Call Notes page content (the substantive evidence, read after attestation) ===",
+      body,
+    ].join("\n"),
     callNotesId: registry.record.callNotesId,
     status,
   };
