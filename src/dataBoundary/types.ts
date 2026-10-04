@@ -124,24 +124,26 @@ export type SemanticTaskId =
   // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
   | "sales.intake_classification"
   | "sales.hat_action_decision"
-  // Strategy's specialist-diagnosis composition model (LOG-845, approved
-  // Notion architecture: Strategy Unit page + Strategy Analyst/Business
-  // Strategist/Brand Strategist/Communication Strategist Hat
-  // Definitions). Payload for all five is the same category as the
-  // already-classified strategy.diagnosis/handoff_routing/
-  // proposal_drafting: Entity_Token/Matter_Token-bound sanitized
-  // situation text (strategy.specialist_selection,
+  // Strategy's composable-Skills diagnostic cycle (ENIG Core Structure
+  // v3.0; successor to LOG-845's specialist-Hat composition, whose Hats are
+  // retired). The Strategy Analyst remains the single actor; the specialist
+  // domains are now Skills it follows one move at a time. Payload for all
+  // five is the same category as the already-classified
+  // strategy.diagnosis/handoff_routing/proposal_drafting: Entity_Token/
+  // Matter_Token-bound sanitized situation text (strategy.specialist_selection,
   // strategy.business_diagnosis, strategy.brand_diagnosis,
   // strategy.communication_diagnosis all receive the same sanitized
   // state.strategyContext already governed by evaluateHandoffContext/
   // resolveStrategyHandoffContext -- no new raw/identity-bearing input
-  // introduced) or the specialists' own already-produced bounded
-  // findings (strategy.specialist_synthesis). Classified business_sensitive/
+  // introduced) or the cycle's own already-produced bounded findings
+  // (strategy.specialist_synthesis). Classified business_sensitive/
   // TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
   // PRODUCTION_OUTBOUND_POLICY per Martin's explicit direction, applying the
   // exact same already-approved rationale as strategy.diagnosis/
   // handoff_routing/proposal_drafting to this structurally identical
-  // payload category -- see those tables' own doc comments.
+  // payload category -- see those tables' own doc comments. No new
+  // SemanticTaskId was registered for the Skills architecture: each step
+  // reuses one of these already-classified ids.
   | "strategy.specialist_selection"
   | "strategy.business_diagnosis"
   | "strategy.brand_diagnosis"

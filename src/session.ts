@@ -180,15 +180,15 @@ export class WorkSession extends DurableObject<Env> {
         case "marketing_clarification":
           return marketing.handleMarketingClarification(this.env, state, text);
         case "strategy_clarification":
-          return strategy.handleStrategyClarification(this.env, state, text);
+          return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyClarification(this.env, state, text, skills));
         case "strategy_direct_request_matter":
-          return strategy.handleDirectRequestClarification(this.env, state, text);
+          return this.runUnderRecordedSkills(state, (skills) => strategy.handleDirectRequestClarification(this.env, state, text, skills));
         case "finance_direct_request_matter":
           return finance.handleDirectRequestClarification(this.env, state, text);
         case "finance_direct_request_context":
           return finance.handleDirectRequestContext(this.env, state, text);
         case "strategy_feedback":
-          return strategy.handleStrategyFeedback(this.env, state, text);
+          return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyFeedback(this.env, state, text, skills));
         case "strategy_refinement_reason":
           return strategy.handleStrategyRefinement(this.env, state, text);
         default: {

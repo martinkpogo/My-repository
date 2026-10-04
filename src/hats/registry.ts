@@ -42,24 +42,19 @@ export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sa
 // never a qualification, never a proposal/quote. See leadDiscovery.ts.
 export const LEAD_GENERATION_SPECIALIST: HatIdentity = { name: "Lead Generation Specialist", unit: "Sales", specialization: "Lead Discovery" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
-// Strategy's composable specialist-diagnosis model (LOG-845, Notion
-// Activity & Decision Log -- "Strategy specialist diagnosis model
-// established"). Strategy Analyst's specialization changed from "Strategy"
-// to "Strategic Assessment & Synthesis" as part of this same approved
-// architecture update, reflecting its narrowed role: assessment,
-// specialist selection, coordination, synthesis, and the canonical
-// Strategy Proposal -- not standalone diagnosis of every strategic domain
-// itself. Business/Brand/Communication Strategist are new specialist Hats
-// that return bounded diagnostic findings to Strategy Analyst; they never
-// produce or modify the canonical Strategy Proposal (see
-// strategySpecialists.ts). Marketing Strategist is deliberately NOT
-// duplicated here -- it remains exclusively Marketing's own Hat (see
-// marketingStrategist.ts); Strategy's own Notion Unit page explicitly
-// says Strategy "may invoke" it rather than own a copy.
+// Strategy's composable-Skills model (ENIG Core Structure v3.0). Strategy
+// Analyst's specialization is "Strategic Assessment & Synthesis" and it is
+// the Unit's ONE organizational Hat: assessment, methodological selection,
+// coordination, synthesis, and the canonical Strategy Proposal. The
+// specialist domains it used to run as concurrent specialist Hats (LOG-845's
+// Business/Brand/Communication Strategist) are now Skills -- bounded
+// methodology Strategy Analyst itself follows, one move at a time (see
+// strategySkillCycle.ts) -- so they are deliberately NOT registered here and
+// can never be resolved as, addressed as, or switched to as a Hat. Marketing
+// Strategist is deliberately NOT duplicated here -- it remains exclusively
+// Marketing's own Hat (see marketingStrategist.ts); Strategy's own Notion
+// Unit page explicitly says Strategy "may invoke" it rather than own a copy.
 export const STRATEGY_ANALYST: HatIdentity = { name: "Strategy Analyst", unit: "Strategy", specialization: "Strategic Assessment & Synthesis" };
-export const BUSINESS_STRATEGIST: HatIdentity = { name: "Business Strategist", unit: "Strategy", specialization: "Business & Commercial Strategy" };
-export const BRAND_STRATEGIST: HatIdentity = { name: "Brand Strategist", unit: "Strategy", specialization: "Brand & Positioning Strategy" };
-export const COMMUNICATION_STRATEGIST: HatIdentity = { name: "Communication Strategist", unit: "Strategy", specialization: "Communication & Messaging Strategy" };
 // Business Development's three parallel specialist Hats -- selected only
 // when their specialization is relevant, never mandatory workflow stages
 // (see businessDevelopmentManifest.ts). Registered here purely for
@@ -99,9 +94,6 @@ export const ALL_HATS: HatIdentity[] = [
   LEAD_GENERATION_SPECIALIST,
   VALUE_BASED_PRICING_ASSESSOR,
   STRATEGY_ANALYST,
-  BUSINESS_STRATEGIST,
-  BRAND_STRATEGIST,
-  COMMUNICATION_STRATEGIST,
   BD_OPPORTUNITY_DEVELOPMENT,
   BD_PARTNERSHIP_DEVELOPMENT,
   BD_GROWTH_MARKET_DEVELOPMENT,

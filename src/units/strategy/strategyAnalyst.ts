@@ -14,7 +14,8 @@ import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import type { ApprovalProof } from "../../types";
-import { selectRequiredSpecialists, runSpecialistDiagnosesConcurrently, synthesizeSpecialistFindings } from "./strategySpecialists";
+import { runStrategySkillCycle } from "./strategySkillCycle";
+import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -325,10 +326,13 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
 /**
  * Reconstructs the strategic question and supplied context directly from
  * the Handoff's own canonical Notion record, evaluated through the same
- * closed-context contract Finance uses. Identity is read as the
- * Entity_Token / Matter_Token the sending Unit embedded on the Handoff,
- * never a real Name -- this Hat never resolves those tokens by traversing
- * or discovering unrelated records.
+ * closed-context contract Finance uses -- following the governed evidence
+ * order (Handoff evidence, then approved Call Notes read-only, then
+ * Clarification Needed for a fact still unresolved; see
+ * strategyEvidence.ts). Identity is read as the Entity_Token / Matter_Token
+ * the sending Unit embedded on the Handoff, never a real Name -- this Hat
+ * never resolves those tokens by traversing or discovering unrelated
+ * records.
  */
 /**
  * Reads the Handoff this Work item was picked up from, and evaluates whether
@@ -341,7 +345,7 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
 export async function resolveStrategyHandoffContext(env: Env, handoffId: string, access: AccessContext): Promise<HandoffContextEvaluationResult> {
   try {
     const handoff = await getPage(env, handoffId, access);
-    const verifiedFacts = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
+    const handoffEvidence = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
     // Required Next Action is where a human naturally writes refinement
     // guidance when returning a Held Handoff to Pending directly in Notion
     // (rather than through the bot's own Telegram reply flow, which
@@ -352,9 +356,54 @@ export async function resolveStrategyHandoffContext(env: Env, handoffId: string,
     // reproduced the identical Held outcome. Always folded in here so
     // guidance reaches the diagnosis regardless of which path supplied it.
     const requiredNextAction = plainText(handoff.properties["Required Next Action"]);
-    const sanitizedContext = requiredNextAction ? `${verifiedFacts}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : verifiedFacts;
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
+
+    // ---- Evidence order 1 -> 2 -> 3 -> 4 ----------------------------------
+    // 1. The Handoff's own approved evidence, whenever it is substantive.
+    // 2. Otherwise the approved Call Notes record, read read-only and
+    //    idempotently by Strategy itself -- strategyEvidence.ts owns the
+    //    order, the five gates, and why this path never consumes.
+    // 3. There is no other explicitly governed approved source today, so
+    //    nothing else is looked up here BY DESIGN -- see strategyEvidence.ts.
+    // 4. Still unresolved -> Clarification Needed naming the exact fact and
+    //    why it materially affects the decision. Never a generic request.
+    let evidenceBase: string;
+    if (hasSubstantiveEvidence(handoffEvidence)) {
+      evidenceBase = handoffEvidence;
+    } else if (!entityToken) {
+      // Nothing of the Handoff's own, and no token to bind a governed record
+      // to: fall through so the closed-context contract reports its own
+      // reason for the missing Entity rather than a Call Notes reason for a
+      // check that could not even have been attempted.
+      evidenceBase = handoffEvidence;
+    } else {
+      const callNotes = await readApprovedCallNotesEvidence(
+        env,
+        handoff.properties,
+        { entityToken, matterToken },
+        access,
+      );
+      if (!callNotes.ok) {
+        return {
+          success: false,
+          insufficientContext: {
+            isInsufficient: true,
+            category: "unresolved material fact",
+            reason: strategyClarificationReason(handoffEvidence, callNotes.reason),
+          },
+        };
+      }
+      console.log(
+        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, read-only, attestation re-verified) as the evidence base.`,
+      );
+      evidenceBase = [
+        `=== Evidence source: approved Call Notes record ${callNotes.callNotesId} (order 2 -- the Handoff held no substantive evidence of its own; read-only, attestation re-verified against this record's registry fields) ===`,
+        callNotes.evidenceText,
+      ].join("\n");
+    }
+
+    const sanitizedContext = requiredNextAction ? `${evidenceBase}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : evidenceBase;
 
     return evaluateHandoffContext(
       {
@@ -609,7 +658,7 @@ export function applyUnprovenCauseDiscipline(result: StrategyDiagnosisResult): S
  * ambiguous Matter. Fails closed with a clarifying chat message if no
  * token is present or it doesn't resolve to a real Matter.
  */
-export async function handleDirectRequest(env: Env, state: WorkState, text: string): Promise<WorkState> {
+export async function handleDirectRequest(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const resolved = await resolveMatterFromText(env, text);
   if (!resolved) {
     await sendWorkspaceHatMessage(
@@ -668,7 +717,7 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
   });
 
   await sendStrategyInProgressAck(env, state);
-  return runDiagnosis(env, state);
+  return runDiagnosis(env, state, skills);
 }
 
 /**
@@ -677,11 +726,11 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
  * exactly as handleDirectRequest does on first entry, rather than a
  * separate, drifting implementation.
  */
-export async function handleDirectRequestClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  return handleDirectRequest(env, state, text);
+export async function handleDirectRequestClarification(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
+  return handleDirectRequest(env, state, text, skills);
 }
 
-export async function handlePickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
+export async function handlePickup(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
   // Idempotency guard: re-verifies the Handoff's live Status and claims it
   // (Pending -> Picked-up) at the actual processing boundary, not just
   // trusting the discovery query's Pending filter from moments earlier. A
@@ -790,112 +839,110 @@ export async function handlePickup(env: Env, state: WorkState, _skills: Resolved
   });
 
   await sendStrategyInProgressAck(env, state);
-  return runDiagnosis(env, state);
+  return runDiagnosis(env, state, skills);
 }
 
 /**
- * Strategy's composable specialist-diagnosis orchestration (LOG-845 --
- * canonical operating_procedure steps 3-5: determine required strategic
- * domains, coordinate specialist diagnosis (concurrently where
- * independent), synthesize findings). Runs BEFORE the unchanged
- * runCoreDiagnosis (steps 6-7, the existing Symptom -> Problem -> Cause ->
- * Constraint -> Consequence diagnosis) and never replaces it -- this
- * function's only effect on success is to enrich state.strategyContext in
- * place with the reconciled specialist synthesis, exactly matching the
- * existing accumulating-context pattern already used by
+ * Strategy's composable-Skills diagnostic cycle (ENIG Core Structure v3.0),
+ * which runs BEFORE the unchanged runCoreDiagnosis (the existing Symptom
+ * -> Problem -> Cause -> Constraint -> Consequence diagnosis) and never
+ * replaces it -- this function's only effect on success is to enrich
+ * state.strategyContext in place with the reconciled Skill findings, exactly
+ * matching the existing accumulating-context pattern already used by
  * handleStrategyClarification/handleStrategyFeedback, before delegating to
  * runCoreDiagnosis unchanged.
  *
- * Failure handling is NOT uniform across the three new steps, and this is
- * deliberate:
+ * Strategy remains ONE organizational Hat. The cycle is Strategy Analyst
+ * interpreting evidence, choosing the next useful method, invoking exactly one
+ * declared Strategy Skill, reading what came back, and returning to Strategy
+ * Analysis -- see strategySkillCycle.ts for the model itself and for why no
+ * specialist Hat exists in it any more. Skills are resolved by the Registry
+ * from this Work's recorded Action and handed in; this file never looks one
+ * up.
  *
- * - Specialist SELECTION returning null (the classifier itself could not
- *   be run -- a genuine AI/infrastructure failure, or a transient provider
- *   exhaustion; the five new SemanticTaskIds are now classified business_
- *   sensitive/TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
- *   PRODUCTION_OUTBOUND_POLICY -- see policy.ts's own doc comment -- so this
- *   is no longer the standing, permanent case it was before that
- *   classification) degrades to the SAME continuation as a genuine
- *   zero-domains determination -- proceed directly to the unchanged
- *   runCoreDiagnosis -- but NOT to the same recorded state:
- *   state.strategySpecialistSelectionUnavailable is set to `true`
- *   specifically for this case (selection itself could not run) and to
- *   `false` for a genuine zero-domains determination, so the two are never
- *   conflated in persisted WorkState, only in their downstream
+ * Failure handling is NOT uniform across the outcomes, and this is deliberate:
+ *
+ * - The cycle returning `unavailable` (an analysis move could not be
+ *   obtained at all -- a genuine AI/infrastructure failure or unparseable
+ *   output) degrades to the SAME continuation as a genuine "no Skill needed"
+ *   determination -- proceed directly to the unchanged runCoreDiagnosis --
+ *   but NOT to the same recorded state:
+ *   state.strategySkillCycleUnavailable is set to `true` specifically for this
+ *   case and to `false` for a genuine no-Skill-needed determination, so the
+ *   two are never conflated in persisted WorkState, only in their downstream
  *   continuation. This is a deliberate exception to this Unit's usual
- *   fail-closed discipline: composition is a NEW layer sitting in front of
- *   Strategy's existing, already-approved, already-working diagnosis
- *   pipeline, and an inability to run the new selection step must never
+ *   fail-closed discipline: the composition layer is NEW work sitting in
+ *   front of Strategy's existing, already-approved, already-working
+ *   diagnosis pipeline, and an inability to run the new layer must never
  *   silently disable that pre-existing capability -- even a transient
- *   provider failure on the selection call must not block an otherwise-
- *   resolvable diagnosis. It is both logged (console.warn) and persisted
- *   on WorkState (never silently swallowed).
- * - Once selection DOES return one or more required domains, every
- *   subsequent failure mode (all selected specialists failed, synthesis
- *   judged insufficient) fails closed via the existing handleBlocked,
- *   exactly like every other Strategy stop condition -- no new
- *   failure-handling mechanism is introduced for those.
+ *   provider failure must not block an otherwise-resolvable diagnosis. It is
+ *   both logged (console.warn) and persisted on WorkState (never silently
+ *   swallowed).
+ * - Once the cycle DOES run, every subsequent stop condition it reports
+ *   (every invoked Skill failed, synthesis judged insufficient, a move naming
+ *   an undeclared or unknown Skill, a cycle that did not converge) fails
+ *   closed via the existing handleBlocked, exactly like every other Strategy
+ *   stop condition -- no new failure-handling mechanism is introduced for
+ *   those.
+ * - `skills.get("strategy_analysis")` failing closed (SkillResolutionError)
+ *   is NOT caught here: an Action that requires Skills and cannot be handed
+ *   them must not run.
  */
-async function runDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
+async function runDiagnosis(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const strategyQuestion = state.strategyQuestion ?? "";
   const strategyContext = state.strategyContext ?? "";
 
-  const selection = await selectRequiredSpecialists(env, strategyQuestion, strategyContext);
-  if (!selection) {
+  const cycle = await runStrategySkillCycle({
+    env,
+    strategyQuestion,
+    strategyContext,
+    skills,
+    onProgress: (message) => advanceStrategyProgress(env, state, message),
+  });
+
+  if (cycle.status === "unavailable") {
     console.warn(
-      `Strategy runDiagnosis: specialist selection unavailable for work ${state.workId} (AI/infrastructure failure on strategy.specialist_selection) -- proceeding directly to core diagnosis without specialist composition.`,
+      `Strategy runDiagnosis: Skill cycle unavailable for work ${state.workId} (${cycle.reason}) -- proceeding directly to core diagnosis without Skill composition.`,
     );
-    state.strategySpecialistSelectionUnavailable = true;
-    state.strategySpecialistFindings = [];
+    state.strategySkillCycleUnavailable = true;
+    state.strategySkillFindings = cycle.findings;
     return runCoreDiagnosis(env, state);
   }
 
-  if (selection.domains.length === 0) {
-    console.log(`Strategy runDiagnosis: specialist selection ran for work ${state.workId} and determined zero specialists are required -- proceeding directly to core diagnosis.`);
-    state.strategySpecialistSelectionUnavailable = false;
-    state.strategySpecialistFindings = [];
+  // One or more moves are actually recorded (or the cycle genuinely
+  // determined none was needed) -- explicitly clear any stale value a prior
+  // attempt on this same WorkState may have left (e.g.
+  // handleStrategyFeedback's direct-continuation retry path reuses the same
+  // state object), so this attempt's real outcome is never shadowed by a
+  // leftover true/false from an earlier, differently-resolved attempt.
+  state.strategySkillCycleUnavailable = undefined;
+  state.strategySkillFindings = cycle.findings;
+
+  if (cycle.status === "hold") {
+    console.error(`Strategy runDiagnosis: Skill cycle held for work ${state.workId} -- ${cycle.reason}`);
+    return handleBlocked(env, state, cycle.reason);
+  }
+
+  if (cycle.findings.length === 0) {
+    console.log(
+      `Strategy runDiagnosis: Strategy Analysis ran for work ${state.workId} and determined no Strategy Skill was required -- proceeding directly to core diagnosis.`,
+    );
+    state.strategySkillCycleUnavailable = false;
     return runCoreDiagnosis(env, state);
   }
 
-  // One or more specialists are actually required and about to run --
-  // explicitly clear any stale value a prior attempt on this same
-  // WorkState may have left (e.g. handleStrategyFeedback's direct-
-  // continuation retry path reuses the same state object), so this
-  // attempt's real per-domain findings are never shadowed by a leftover
-  // true/false from an earlier, differently-resolved attempt.
-  state.strategySpecialistSelectionUnavailable = undefined;
-
-  // Metadata-only observability (domain names/counts/status labels, never
-  // situation content) -- without this, whether composition actually ran
-  // for a given work item is unreconstructable after the fact from
-  // anything persisted (Notion never receives specialist findings/
-  // synthesis; only the ephemeral in-progress Telegram message, which can
-  // be overwritten before anyone reads it, ever named the domains).
-  console.log(`Strategy runDiagnosis: specialist selection for work ${state.workId} determined ${selection.domains.length} domain(s) required: ${selection.domains.join(", ")}.`);
-  await advanceStrategyProgress(env, state, `Running specialist diagnosis (${selection.domains.join(", ")})...`);
-
-  const findings = await runSpecialistDiagnosesConcurrently(env, selection.domains, strategyContext);
-  state.strategySpecialistFindings = findings;
+  // Metadata-only observability (Skill ids/counts/status labels, never
+  // situation content) -- without this, whether the cycle actually ran for a
+  // given work item is unreconstructable after the fact from anything
+  // persisted (Notion never receives Skill findings or synthesis; only the
+  // ephemeral in-progress Telegram message, which can be overwritten before
+  // anyone reads it, ever named the Skills).
   console.log(
-    `Strategy runDiagnosis: specialist diagnosis for work ${state.workId} completed -- ${findings.map((f) => `${f.domain}:${f.status}`).join(", ")}.`,
+    `Strategy runDiagnosis: Skill cycle for work ${state.workId} invoked ${cycle.findings.length} Strategy Skill(s): ${cycle.findings.map((f) => `${f.skillId}:${f.status}`).join(", ")}.`,
   );
 
-  const allFailed = findings.every((f) => f.status === "failed");
-  if (allFailed) {
-    const reasons = findings.map((f) => `${f.domain}: ${f.failureReason ?? "unavailable"}`).join("; ");
-    return handleBlocked(env, state, `Specialist diagnosis could not be completed for any required domain (${reasons}).`);
-  }
-
-  const synthesis = await synthesizeSpecialistFindings(env, strategyQuestion, findings);
-  if (!synthesis) {
-    return handleBlocked(env, state, "Could not synthesize specialist findings into the strategic diagnosis.");
-  }
-  if (!synthesis.sufficient) {
-    return handleBlocked(env, state, synthesis.insufficiencyReason ?? "Specialist findings are not sufficient to responsibly proceed with the diagnosis.");
-  }
-
-  console.log(`Strategy runDiagnosis: specialist synthesis for work ${state.workId} sufficient -- folding into strategyContext before core diagnosis.`);
-  state.strategyContext = `${strategyContext}\n\nSpecialist synthesis:\n${synthesis.synthesizedContext ?? ""}`;
+  state.strategyContext = `${strategyContext}\n\nStrategy Analysis synthesis:\n${cycle.synthesizedContext ?? ""}`;
+  console.log(`Strategy runDiagnosis: Skill cycle synthesis for work ${state.workId} sufficient -- folding into strategyContext before core diagnosis.`);
   return runCoreDiagnosis(env, state);
 }
 
@@ -2215,7 +2262,7 @@ export async function handleStrategyRefinement(env: Env, state: WorkState, text:
  * Discovery re-finds it and hands it back through handlePickup's own
  * claim-then-process guard, so it is picked up again exactly once.
  */
-export async function handleStrategyClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+export async function handleStrategyClarification(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const augmentedContext = `${state.strategyContext ?? ""}\n\nAdditional detail: ${text}`;
   state.strategyContext = augmentedContext;
 
@@ -2223,7 +2270,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
     // No Handoff context to requeue against (shouldn't normally occur) --
     // fall back to direct continuation rather than losing the message.
     await sendStrategyInProgressAck(env, state);
-    return runDiagnosis(env, state);
+    return runDiagnosis(env, state, skills);
   }
 
   await updateHandoff(env, state.handoffId, {
@@ -2244,8 +2291,8 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
 }
 
 /** Free-text follow-up after a delivered diagnosis -- re-runs with the added context. */
-export async function handleStrategyFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
+export async function handleStrategyFeedback(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
   state.strategyContext = `${state.strategyContext ?? ""}\n\nMartin's follow-up: ${text}`;
   await sendStrategyInProgressAck(env, state);
-  return runDiagnosis(env, state);
+  return runDiagnosis(env, state, skills);
 }

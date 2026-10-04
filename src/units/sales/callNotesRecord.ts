@@ -151,7 +151,15 @@ export function extractCallNotesReference(
  * authority ever hashes a different representation, `fields_hash` disagrees and
  * this fails closed rather than guessing.
  */
-function readApprovalRecord(
+/**
+ * Reads the record's own registry fields for validation -- exported so a
+ * caller that must NOT consume the record (a read-only, idempotent consumer
+ * that cannot transition Status without breaking its own retry loop) can
+ * still re-verify the same attestation against exactly the same fields.
+ * Exporting it changes no Sales behavior: `retrieveAndConsumeCallNotes`
+ * calls it identically.
+ */
+export function readApprovalRecord(
   page: NotionPage,
   entityToken: string,
   matterToken: string,
