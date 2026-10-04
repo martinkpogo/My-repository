@@ -160,6 +160,11 @@ function richTextValue(prop: any): string {
   return prop?.rich_text?.[0]?.text?.content ?? "";
 }
 
+/** Joins every rich-text item -- richTextLong stores long content chunked across items, so item[0] alone is only the first 2,000 chars. */
+function richTextJoined(prop: any): string {
+  return (prop?.rich_text ?? []).map((item: any) => item?.text?.content ?? "").join("");
+}
+
 test("1. Inbound enquiry -> valid Sales -> Strategy Handoff via the existing queue", async (t) => {
   const log = mockFetch(t);
   const state = fakeState({ entryType: "inbound_enquiry" });
@@ -454,6 +459,7 @@ import {
   buildMeasurementBaseline,
   formatCommercialEvidenceForHandoff,
 } from "./salesExecutive";
+import { COMMERCIAL_VALUE_EVIDENCE_START, COMMERCIAL_VALUE_EVIDENCE_END, parseCommercialValueEvidenceBlock } from "./commercialValueEvidence";
 
 test("A. Sufficient commercial evidence (numerical affected opportunity/value, source, period, desired outcome) -> commercial_value_evidence can be Satisfied", () => {
   const evidence = normalizeCommercialEvidence({
@@ -748,6 +754,80 @@ test("S. Opaque-token boundary holds even with commercial evidence attached -- H
   assert.match(factsText, /Commercial-value evidence/);
   assert.match(factsText, /Investment tolerance/);
   assert.ok(!factsText.includes("Acme"), "structured evidence carry-forward must not reintroduce the real Entity name");
+});
+
+test("The Sales -> Strategy Handoff carries the labelled Commercial Value Evidence block: the existing evidence plus the existing deterministic determination, written after the human-readable narrative", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    commercialEvidence: {
+      financialConsequence: "Late deliveries erode the wholesale channel.",
+      valueAtStake: {
+        low: 8000000,
+        high: 12000000,
+        currency: "GHS",
+        period: "annual",
+        evidenceType: "client_estimated",
+        source: "Client-stated on call",
+      },
+    },
+    investmentToleranceContext: { low: 30000, high: 60000, currency: "GHS" },
+  });
+
+  await handleInterventionText(fakeEnv(), state, "Diagnostic engagement to identify positioning gaps.");
+
+  const facts = richTextJoined(handoffProps(log)["Verified Facts & Sources"]);
+  const parsed = parseCommercialValueEvidenceBlock(facts);
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.reason);
+
+  // The determination written into the Handoff IS the existing deterministic
+  // evaluator's own output over the existing state.commercialEvidence --
+  // not re-derived, reworded, re-estimated, or second-guessed anywhere.
+  const evaluation = evaluateCommercialValueEvidence(state.commercialEvidence);
+  assert.strictEqual(parsed.record.determination, evaluation.assessment);
+  assert.strictEqual(parsed.record.evidenceText, evaluation.evidenceText);
+  assert.deepStrictEqual(parsed.record.evidence?.valueAtStake, state.commercialEvidence?.valueAtStake, "value-at-stake evidence is carried verbatim");
+  assert.strictEqual(parsed.record.evidence?.financialConsequence, state.commercialEvidence?.financialConsequence);
+
+  // Human-readable commercial situation, evidence narrative and the
+  // context-only investment-tolerance block all still present, and the
+  // structured block follows them.
+  assert.match(facts, /Commercial situation: Diagnostic engagement to identify positioning gaps\./);
+  assert.match(facts, /Commercial-value evidence/);
+  assert.match(facts, /Investment tolerance \(CONTEXT ONLY/);
+  assert.ok(facts.indexOf("Commercial situation:") < facts.indexOf(COMMERCIAL_VALUE_EVIDENCE_START), "the structured block comes after the narrative");
+  assert.ok(facts.endsWith(COMMERCIAL_VALUE_EVIDENCE_END), "the value-evidence block is the last thing in the field, so nothing can follow it into truncation");
+});
+
+test("An unbounded commercial-situation prefix cannot truncate the structured value-evidence block -- the field uses richTextLong and the human-readable prefix is bounded", async (t) => {
+  const log = mockFetch(t);
+  const state = fakeState({
+    commercialEvidence: {
+      valueAtStake: {
+        low: 8000000,
+        high: 12000000,
+        currency: "GHS",
+        period: "annual",
+        evidenceType: "client_estimated",
+        source: "Client-stated on call",
+      },
+    },
+  });
+  // Far beyond the old 1,900-character .slice() budget for this field.
+  const hugeSituation = `Rebrand the storefront. ${"Delivery delays and stockouts across the region. ".repeat(400)}`;
+  assert.ok(hugeSituation.length > 18000);
+
+  await handleInterventionText(fakeEnv(), state, hugeSituation);
+
+  const prop = handoffProps(log)["Verified Facts & Sources"];
+  assert.ok((prop.rich_text?.length ?? 0) > 1, "long content must be stored chunked (richTextLong), never silently truncated to one item");
+  const facts = richTextJoined(prop);
+
+  const parsed = parseCommercialValueEvidenceBlock(facts);
+  assert.ok(parsed.ok, `the value-evidence block must survive a huge prefix intact: ${parsed.ok ? "" : parsed.reason}`);
+  assert.strictEqual(parsed.record.determination, evaluateCommercialValueEvidence(state.commercialEvidence).assessment);
+  assert.match(facts, /\[\.\.\. human-readable commercial evidence truncated at \d+ characters/);
+  assert.ok(facts.indexOf("Commercial situation:") < facts.indexOf(COMMERCIAL_VALUE_EVIDENCE_START));
+  assert.ok(facts.endsWith(COMMERCIAL_VALUE_EVIDENCE_END));
 });
 
 // ---------------------------------------------------------------------------

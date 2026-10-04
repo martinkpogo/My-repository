@@ -43,7 +43,7 @@ import * as sales from "./salesExecutive";
  * manifest's self-contained equivalent, exercised by salesManifest.test.
  *
  * Sales Executive's own continuation states (call_notes, intervention,
- * value_context_more, matter_redo_reason, entity_redo_reason,
+ * matter_redo_reason, entity_redo_reason,
  * proposal_feedback, sales_proposal_revision, etc.) all remain hardcoded
  * cases in session.ts's handleTextReply switch, exactly as they were --
  * matching Strategy's own precedent (strategyAnalystHat's
@@ -406,7 +406,7 @@ const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
   readHandler: salesExecutiveReadHandler,
   entryHandler: salesExecutiveEntryHandler,
   // Every one of Sales Executive's own continuation states (call_notes,
-  // intervention, value_context_more, matter_redo_reason,
+  // intervention, matter_redo_reason,
   // entity_redo_reason, proposal_feedback, sales_proposal_revision, etc.)
   // remains a hardcoded case in session.ts's handleTextReply switch,
   // exactly as before this migration -- matching Strategy's own

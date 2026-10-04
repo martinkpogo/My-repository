@@ -7,11 +7,17 @@ import {
   handleDirectRequest,
   handleDirectRequestClarification,
   handleDirectRequestContext,
+  handleValueContextClarification,
   validateFinanceJudgement,
   FINANCE_JUDGMENT_START,
   FINANCE_JUDGMENT_END,
 } from "./valueBasedPricingAssessor";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+import {
+  serializeCommercialValueEvidenceBlock,
+  COMMERCIAL_VALUE_EVIDENCE_START,
+  COMMERCIAL_VALUE_EVIDENCE_END,
+} from "../sales/commercialValueEvidence";
 // The Finance -> Sales quote contract is only meaningful END TO END: Finance
 // writes the labeled block, Sales parses it. Importing Sales's real parser here
 // is what stops the two halves drifting apart -- see the "writer-to-parser
@@ -986,4 +992,183 @@ test("writer-to-parser contract: absent, malformed, ambiguous and incomplete Fin
     assert.ok("error" in parsed, `${name}: must fail closed, but the parser accepted it as ${JSON.stringify((parsed as { quote: unknown }).quote)}`);
     assert.match((parsed as { error: string }).error, expected, `${name}: must be refused on its own branch, not an incidental one`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Strategy -> Finance commercial-value contract: Finance picks the structured
+// Commercial Value Evidence block up structurally, owns its own clarification
+// loop, and never gains a second pricing authority from either.
+// ---------------------------------------------------------------------------
+
+/** The two blocks a Strategy -> Finance Handoff always carries. */
+const SATISFIED_VALUE_EVIDENCE_BLOCK = serializeCommercialValueEvidenceBlock({
+  determination: "Satisfied",
+  evidenceText: "GHS 8000000-12000000 over annual, evidence type: client_estimated, source: Client-stated on call.",
+  evidence: {
+    valueAtStake: {
+      low: 8000000,
+      high: 12000000,
+      currency: "GHS",
+      period: "annual",
+      evidenceType: "client_estimated",
+      source: "Client-stated on call",
+    },
+  },
+});
+const MISSING_VALUE_EVIDENCE_BLOCK = serializeCommercialValueEvidenceBlock({
+  determination: "Insufficient Evidence",
+  evidenceText: "No numerical value connected to the business problem or opportunity has been established.",
+  evidence: null,
+});
+const ASSUMPTION_VALUE_EVIDENCE_BLOCK = serializeCommercialValueEvidenceBlock({
+  determination: "Insufficient Evidence",
+  evidenceText: "The only numerical value available is an unsupported assumption -- assumption-only evidence cannot satisfy this condition on its own.",
+  evidence: {
+    financialConsequence: "Delays compound across the season.",
+    valueAtStake: { value: 5000000, currency: "GHS", period: "annual", evidenceType: "assumption", assumptions: "Guessed from similar engagements." },
+  },
+});
+
+function verifiedFactsWith(valueEvidenceBlock: string): string {
+  return `${FAKE_STRATEGY_BOUNDARY_BLOCK}\n\nProposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.\n\n${valueEvidenceBlock}`;
+}
+
+test("Finance parses the structured Commercial Value Evidence block and feeds it to the judgment as a structured fact, ahead of -- and outside -- the free-text narrative", async (t) => {
+  mockFetch(t, { verifiedFacts: verifiedFactsWith(SATISFIED_VALUE_EVIDENCE_BLOCK) });
+  const env = fakeEnv();
+  let prompt = "";
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      prompt = String(opts?.messages?.[1]?.content ?? "");
+      return { response: JSON.stringify(SUFFICIENT_JUDGEMENT) };
+    },
+  } as any;
+
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "awaiting_quote_approval");
+  const structuredIdx = prompt.indexOf("=== UPSTREAM COMMERCIAL VALUE EVIDENCE");
+  const narrativeIdx = prompt.indexOf("Proposed intervention and value context:");
+  assert.ok(structuredIdx >= 0, "the structured value-evidence section is present in the judgment input");
+  assert.ok(narrativeIdx > structuredIdx, "structured facts are presented BEFORE the free text, so Finance never has to hunt for them in prose");
+  assert.ok(prompt.includes(`Determination: Satisfied -- ${"GHS 8000000-12000000 over annual, evidence type: client_estimated, source: Client-stated on call."}`));
+  assert.strictEqual(
+    prompt.split(COMMERCIAL_VALUE_EVIDENCE_START).length - 1,
+    1,
+    "the block appears exactly once: parsed structurally, not duplicated as narrative",
+  );
+});
+
+test("Valid non-assumption evidence stays priceable under the existing validator when the upstream determination is Satisfied", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: verifiedFactsWith(SATISFIED_VALUE_EVIDENCE_BLOCK) });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "awaiting_quote_approval", "a Satisfied determination is not held by the structured pre-check");
+  assert.strictEqual(result.quote!.price, 15000);
+  assert.strictEqual(lastHandoffPatch(log).properties.Status.select.name, "Closed");
+});
+
+test("Missing quantified value reaches Finance as a Finance-owned clarification hold -- never a governance block, and the AI is never asked to price it", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: verifiedFactsWith(MISSING_VALUE_EVIDENCE_BLOCK) });
+  const env = fakeEnv();
+  env.AI = {
+    run: async () => {
+      throw new Error("the AI must not be asked to price a determination that says nothing has been established");
+    },
+  } as any;
+
+  const result = await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "handoff_held", "the Work item itself is held -- nothing is escalated as a governance block");
+  assert.strictEqual(result.awaiting, "value_context_more", "Finance's own clarification continuation owns the loop");
+  assert.strictEqual(lastHandoffPatch(log).properties.Status.select.name, "Held");
+  const holdText = openQuestionsText(lastHandoffPatch(log));
+  assert.match(holdText, /Insufficient Evidence/);
+  assert.match(holdText, /MISSING/);
+  assert.match(holdText, /No numerical value connected to the business problem or opportunity has been established\./, "the exact upstream reason is preserved, not reworded");
+  assert.ok(log.sentTexts.some((m) => /Finance has held the quote request/.test(m)));
+  assert.ok(!log.sentTexts.some((m) => /Strategy diagnosis blocked/.test(m)), "the hold is never presented as another Unit's governance block");
+  assert.strictEqual(log.handoffCreateBody, null, "no downstream Handoff of any kind is created from a hold");
+});
+
+test("Unsupported-assumption evidence stays distinguishable from genuinely missing evidence in Finance's hold", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: verifiedFactsWith(ASSUMPTION_VALUE_EVIDENCE_BLOCK) });
+  const env = fakeEnv();
+  env.AI = { run: async () => { throw new Error("a hold on an assumption-only figure must not reach the AI either"); } } as any;
+
+  await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  const holdText = openQuestionsText(lastHandoffPatch(log));
+  assert.match(holdText, /UNSUPPORTED ASSUMPTION/, "an assumption-only figure is reported as an assumption problem");
+  assert.ok(!/genuinely MISSING/.test(holdText), "it is never reported as if no number existed at all");
+  assert.match(holdText, /different gap from having no number at all/);
+  assert.match(holdText, /The only numerical value available is an unsupported assumption/, "the upstream wording is preserved verbatim");
+});
+
+test("Finance clarification re-evaluates the governed evidence without creating a pricing authority, and never rewrites the Handoff's blocks", async (t) => {
+  const verifiedFacts = verifiedFactsWith(MISSING_VALUE_EVIDENCE_BLOCK);
+  const log = mockFetch(t, { verifiedFacts });
+  const env = fakeEnv();
+  let prompt = "";
+  env.AI = {
+    run: async (_model: any, opts: any) => {
+      prompt = String(opts?.messages?.[1]?.content ?? "");
+      return { response: JSON.stringify(SUFFICIENT_JUDGEMENT) };
+    },
+  } as any;
+  const state = fakeState({ stage: "handoff_held", awaiting: "value_context_more" });
+
+  const result = await handleValueContextClarification(
+    env,
+    state,
+    "GHS 9,000,000 annual cost of inaction, stated by the CFO on the 2026-09-20 call and derived from recorded churn cost.",
+  );
+
+  assert.strictEqual(state.valueEvidenceFactSupplied, true, "the supplied fact is what lets the governed re-evaluation run at all");
+  assert.ok(log.getCallCount >= 1, "the Handoff is re-read, not reconstructed from memory");
+  const rewrites = log.handoffPatchBodies.filter((patch) => patch.properties?.["Verified Facts & Sources"] !== undefined);
+  assert.strictEqual(rewrites.length, 0, "a clarification never overwrites Verified Facts & Sources -- the blocks survive untouched");
+  assert.ok(verifiedFacts.includes(STRATEGY_BOUNDARY_START) && verifiedFacts.includes(STRATEGY_BOUNDARY_END), "fixture still carries the approved Strategy boundary representation");
+  assert.ok(verifiedFacts.includes(COMMERCIAL_VALUE_EVIDENCE_START) && verifiedFacts.includes(COMMERCIAL_VALUE_EVIDENCE_END), "fixture still carries the upstream Commercial Value Evidence block");
+  assert.ok(prompt.includes(STRATEGY_BOUNDARY_START), "both blocks still reach the re-evaluation");
+  assert.ok(prompt.includes("=== UPSTREAM COMMERCIAL VALUE EVIDENCE"), "the structured block still reaches the re-evaluation, parsed structurally");
+  assert.ok(
+    prompt.includes("Commercial fact supplied by"),
+    "the supplied fact joins the judgment context (identity terms are redacted by ai/identityRedaction.ts, so match the stable part)",
+  );
+  assert.strictEqual(result.stage, "awaiting_quote_approval", "a supplied fact goes through the EXISTING judgment + validateFinanceJudgement path, not a new authority");
+});
+
+test("Finance clarification routing: `value_context_more` dispatches to Finance's own handler and the Sales-side reconstruction handler no longer exists", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const session = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "session.ts"), "utf8");
+  const caseBlock = /case "value_context_more":([\s\S]*?)(?:case "|default)/.exec(session)?.[1] ?? "";
+  assert.ok(caseBlock.length > 0, "the awaiting state must still be dispatched somewhere");
+  assert.ok(caseBlock.includes("finance.handleValueContextClarification"), "Finance owns its own evidence-gate clarification loop");
+  assert.ok(!caseBlock.includes("sales.handleMoreValueContext"), "it must never enter Sales's handler, which overwrote the Handoff's blocks");
+  assert.ok(!caseBlock.includes("sales.handle"), "no Sales handler at all receives Finance's evidence clarifications");
+
+  const sales = fs.readFileSync(path.join(import.meta.dirname, "..", "sales", "salesExecutive.ts"), "utf8");
+  assert.ok(
+    !sales.includes("export async function handleMoreValueContext"),
+    "the Sales-side handler is removed rather than merely left unrouted, so the block-overwriting path cannot come back",
+  );
+});
+
+test("No forbidden pricing basis can enter through the structured value-evidence path -- validateFinanceJudgement still runs afterwards", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: verifiedFactsWith(SATISFIED_VALUE_EVIDENCE_BLOCK) });
+  const env = fakeEnv();
+  env.AI = fakeAi({ ...SUFFICIENT_JUDGEMENT, rationale: "Priced by taking the client's disclosed budget as the pricing basis." });
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, NO_ACTION_SKILLS);
+
+  assert.strictEqual(result.stage, "handoff_held", "a Satisfied upstream determination never bypasses the existing pricing validation");
+  assert.strictEqual(result.quote, undefined);
+  assert.match(openQuestionsText(lastHandoffPatch(log)), /budget or willingness-to-pay used as the pricing basis/);
 });

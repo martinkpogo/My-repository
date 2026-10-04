@@ -3,6 +3,7 @@ import { plainText, queryDataSource, relationIds } from "../../notion";
 import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../sales/callNotesRecord";
+import { stripCommercialValueEvidenceBlock } from "../sales/commercialValueEvidence";
 import { parseRecordApprovalMarker } from "../sales/callNotesMarker";
 
 /**
@@ -68,13 +69,18 @@ export type StrategyCallNotesEvidence =
  * A reference *points at* evidence; it is not evidence.
  *
  * Everything else counts as substantive here -- this test removes only
- * `Call_Notes_ID` reference lines and nothing else, because deciding that
- * some other *narrative* is "too thin" would be a judgment about evidence
- * quality that belongs to the diagnosis and its gates, not to retrieval.
+ * `Call_Notes_ID` reference lines and the labelled structured Commercial
+ * Value Evidence block, and nothing else, because deciding that some other
+ * *narrative* is "too thin" would be a judgment about evidence quality that
+ * belongs to the diagnosis and its gates, not to retrieval. The structured
+ * block is removed for the same structural reason a reference line is: it
+ * POINTS AT / RECORDS a determination, it is not the business situation the
+ * diagnosis is about, and a Handoff whose only content is one would
+ * otherwise reach the diagnosis as if the JSON were the situation.
  */
 export function hasSubstantiveEvidence(text: string): boolean {
   if (!text.trim()) return false;
-  const withoutReference = text
+  const withoutReference = stripCommercialValueEvidenceBlock(text)
     .split(/\r?\n/)
     .filter((line) => !/^\s*Call_Notes_ID[ \t]*[:=]/.test(line))
     .join("\n");
