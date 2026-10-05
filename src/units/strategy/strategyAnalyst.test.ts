@@ -306,9 +306,13 @@ function forbiddenAi(): Ai {
 interface FetchLog {
   handoffPatchBodies: any[];
   handoffCreateBody: any;
+  /** Every Activity Log page created by `logActivity` -- the only durable record of a Blocker's own rationale. */
+  activityLogBodies: any[];
   sentTexts: string[];
   sentButtons: any[];
   matterPatchBodies: any[];
+  /** Every request this harness received, as `METHOD url` -- the evidence for "no additional model/source access". */
+  requests: string[];
   /** Every query issued against the Call Notes store -- the only way the evidence order can reach a Call Notes record. */
   callNotesQueryBodies: any[];
   /** Every page id whose block children were read, in order. The proof of WHICH page a body came from. */
@@ -378,7 +382,7 @@ function mockFetch(
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [], callNotesQueryBodies: [], blockReads: [], callNotesRequests: [], nonNotionHosts: [] };
+  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, activityLogBodies: [], sentTexts: [], sentButtons: [], matterPatchBodies: [], requests: [], callNotesQueryBodies: [], blockReads: [], callNotesRequests: [], nonNotionHosts: [] };
   const verifiedFacts =
     opts.verifiedFacts ??
     (opts.callNotesId
@@ -400,6 +404,9 @@ function mockFetch(
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
     const method = init?.method ?? "GET";
+    // Every request this mock saw, so a test can prove a path performed no
+    // read beyond the ones it already performs -- and reached no other host.
+    log.requests.push(`${method} ${urlStr}`);
     // A read-only evidence retrieval must touch Notion (and, in this harness,
     // Telegram for the operator message) and nothing else. Anything else is
     // recorded so a test can assert no external retrieval ever happened.
@@ -524,6 +531,11 @@ function mockFetch(
         log.handoffCreateBody = body;
         return new Response(JSON.stringify({ id: "handoff-new", url: "https://notion.so/handoff-new", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
       }
+      // Everything else from this mock's `/pages` POST is an Activity Log
+      // append (`logActivity` swallows its own failures, so a test that wants
+      // to assert what a Blocker entry actually recorded has to capture the
+      // body here rather than infer it from the user-facing message).
+      log.activityLogBodies.push(body);
       return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/log-page", parent: { type: "data_source_id", data_source_id: "activity-log-ds" }, properties: {} }), { status: 200 });
     }
     // Handoff pickup now resolves the Handoff's own tokens to their real
@@ -3229,5 +3241,202 @@ test("Evidence order: a body read that fails is a named gap on the structured re
   assert.ok(
     !message.includes("handoff record access"),
     "the failure is NOT reported as the generic outer Handoff-access exception",
+  );
+});
+
+/** The Activity Log Blocker entry's own rationale, exactly as `logActivity` wrote it. */
+function activityLogBlocker(log: FetchLog): string {
+  const entry = log.activityLogBodies.find((body) => body.properties?.Type?.select?.name === "Blocker");
+  return String(entry?.properties?.["Decision Rationale"]?.rich_text?.[0]?.text?.content ?? "");
+}
+
+/** The six moves the cap test needs: the seventh analysis decision is the one MAX_STRATEGY_SKILL_INVOCATIONS refuses. */
+const SIX_INVOKE_MOVES: Move[] = [
+  { next: "invoke", skillId: "business_strategy" },
+  { next: "invoke", skillId: "brand_strategy" },
+  { next: "invoke", skillId: "communication_strategy" },
+  { next: "invoke", skillId: "research_signal" },
+  { next: "invoke", skillId: "business_strategy" },
+  { next: "invoke", skillId: "brand_strategy" },
+];
+
+test("failure observability: a cap hold records which Skills ran -- six skillId:status entries in invocation order, original termination reason preserved, no finding prose", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai } = fakeAiCycle({ moves: SIX_INVOKE_MOVES });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "the cap hold fails closed -- core diagnosis never runs on it");
+  assert.strictEqual(result.strategySkillFindings?.length, 6, "six findings were recorded before the seventh invoke move was refused");
+
+  const blocker = activityLogBlocker(log);
+  assert.ok(blocker, "the Activity Log Blocker entry is written");
+  const termination = "The diagnostic cycle did not converge within 6 Strategy Skill invocations";
+  assert.ok(blocker.includes(termination), "the original termination reason is preserved verbatim");
+  const expected = [
+    "1. business_strategy:completed",
+    "2. brand_strategy:completed",
+    "3. communication_strategy:completed",
+    "4. research_signal:completed",
+    "5. business_strategy:completed",
+    "6. brand_strategy:completed",
+  ];
+  let cursor = -1;
+  for (const entry of expected) {
+    const at = blocker.indexOf(entry);
+    assert.ok(at > cursor, `blocker must carry ${entry} in original invocation order -- got: ${blocker}`);
+    cursor = at;
+  }
+  assert.ok(
+    blocker.indexOf(termination) < blocker.indexOf(expected[0]),
+    "the termination reason comes first and the metadata summary is appended after it",
+  );
+  for (const prose of [
+    "established a bounded domain finding",
+    "could not establish cost or market size",
+    "implies the open question",
+    "still need to know",
+    "failureReason",
+    "evidenceLimitation",
+    "implication:",
+  ]) {
+    assert.ok(!blocker.includes(prose), `no finding prose may appear in the blocker summary (found: ${prose})`);
+  }
+  const handoffReason = log.handoffPatchBodies
+    .map((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content)
+    .find((c) => typeof c === "string" && c.includes(termination));
+  assert.ok(handoffReason?.includes("6. brand_strategy:completed"), "the Handoff's Open Questions carry the same metadata summary");
+  assert.ok(
+    log.sentTexts.some((s) => s.includes(termination) && s.includes("1. business_strategy:completed") && s.includes("6. brand_strategy:completed")),
+    "the operator message carries the same metadata summary",
+  );
+});
+
+test("failure observability: failed Skill invocations keep their status metadata on the cap path -- blockedReason/failure prose never reaches the blocker", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const failingProse = [
+    "FAILING PROSE business: no cost or vendor-capacity figures were supplied",
+    "FAILING PROSE brand: no perception evidence was supplied",
+    "FAILING PROSE communication: no messaging evidence was supplied",
+    "FAILING PROSE research: the single supplied source is not corroborated",
+  ];
+  const { ai } = fakeAiCycle({
+    moves: SIX_INVOKE_MOVES,
+    skills: {
+      business_strategy: { sufficient: false, blockedReason: failingProse[0] },
+      brand_strategy: { sufficient: false, blockedReason: failingProse[1] },
+      communication_strategy: { sufficient: false, blockedReason: failingProse[2] },
+      research_signal: { sufficient: false, blockedReason: failingProse[3] },
+    },
+  });
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategySkillFindings?.length, 6);
+  assert.ok(
+    result.strategySkillFindings?.every((f) => f.status === "failed"),
+    "every recorded finding is failed -- the statuses are what the blocker may show",
+  );
+
+  const blocker = activityLogBlocker(log);
+  assert.ok(blocker, "the Activity Log Blocker entry is written");
+  const termination = "The diagnostic cycle did not converge within 6 Strategy Skill invocations";
+  assert.ok(blocker.includes(termination), "the cap termination reason is what stopped this cycle");
+  assert.ok(
+    !blocker.includes("Every Strategy Skill invoked"),
+    "the separate 'every Skill failed' diagnosis was NOT taken: Strategy Analysis kept choosing invoke, so the cap is what refused it",
+  );
+  const expected = [
+    "1. business_strategy:failed",
+    "2. brand_strategy:failed",
+    "3. communication_strategy:failed",
+    "4. research_signal:failed",
+    "5. business_strategy:failed",
+    "6. brand_strategy:failed",
+  ];
+  let cursor = -1;
+  for (const entry of expected) {
+    const at = blocker.indexOf(entry);
+    assert.ok(at > cursor, `blocker must carry ${entry} in original invocation order -- got: ${blocker}`);
+    cursor = at;
+  }
+  for (const prose of failingProse) {
+    assert.ok(!blocker.includes(prose), `failed finding prose must never appear in the blocker (found: ${prose})`);
+  }
+  assert.ok(!blocker.includes("UNAVAILABLE"), "a failed finding is reported by status only, never by its narrative");
+  assert.ok(!log.sentTexts.join("\n").includes(failingProse[0]), "the operator message carries no failed-finding prose either");
+});
+
+test("failure observability: a converging cycle still synthesizes and raises no blocker, so no invocation metadata is appended anywhere", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.ok(calls.some((c) => c.kind === "synthesis"), "synthesis still runs -- the metadata summary exists only on the hold path");
+  assert.ok(calls.some((c) => c.kind === "diagnosis"), "the unchanged core diagnosis still follows synthesis");
+  const blockers = log.activityLogBodies.filter((b) => b.properties?.Type?.select?.name === "Blocker");
+  assert.strictEqual(blockers.length, 0, "no blocker is raised when the cycle converges");
+  assert.ok(
+    log.sentTexts.every((s) => !s.includes("Strategy Skill invocations (number. skillId:status)")),
+    "no invocation metadata is appended to a non-blocked run's messages",
+  );
+  assert.ok(
+    log.handoffPatchBodies.every((p) => !(p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content ?? "").includes("Strategy Skill invocations (number.")),
+    "no invocation metadata is appended to a non-blocked run's Handoff writes",
+  );
+});
+
+test("failure observability: the invocation metadata costs no additional AI call, no Notion read and no external source access", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({ moves: SIX_INVOKE_MOVES });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  // Exactly the cycle's own work: six Skill executions and seven Strategy
+  // Analysis decisions (the seventh being the move the cap refuses).
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 6, "six Skill executions, unchanged");
+  assert.strictEqual(calls.filter((c) => c.kind === "analysis").length, 7, "seven analysis decisions, unchanged");
+  assert.strictEqual(
+    calls.filter((c) => c.kind === "synthesis" || c.kind === "diagnosis" || c.kind === "routing" || c.kind === "proposal").length,
+    0,
+    "the summary is assembled from the persisted findings alone -- no further model step of any kind runs to produce it",
+  );
+  assert.deepStrictEqual(
+    log.requests.filter((r) => r.includes("/blocks/")),
+    [],
+    "no Notion page-content (block-children) read is performed to build or write the summary",
+  );
+  const notionReads = log.requests.filter((r) => r.startsWith("GET ") && r.includes("api.notion.com"));
+  assert.ok(
+    notionReads.every((r) => /\/pages\/(handoff-1|entity-page-1|matter-page-1)$/.test(r)),
+    `the only Notion reads are the pre-existing pickup lookups -- no governance page, no Call Notes record and no page body is read to build the summary (got: ${notionReads.join(" | ")})`,
+  );
+  assert.deepStrictEqual(
+    log.requests.filter((r) => !r.includes("api.notion.com") && !r.includes("api.telegram.org")),
+    [],
+    "no external source is touched",
+  );
+  assert.strictEqual(
+    log.requests.filter((r) => r === "POST https://api.notion.com/v1/pages").length,
+    2,
+    "the only Activity Log writes are the pre-existing pickup entry and this blocker -- the summary creates nothing new",
   );
 });
