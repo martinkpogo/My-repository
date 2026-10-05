@@ -364,7 +364,9 @@ export async function resolveStrategyHandoffContext(env: Env, handoffId: string,
     // 1. The Handoff's own approved evidence, whenever it is substantive.
     // 2. Otherwise the approved Call Notes record, read read-only and
     //    idempotently by Strategy itself -- strategyEvidence.ts owns the
-    //    order, the five gates, and why this path never consumes.
+    //    order, the six gates (the last of which retrieves the record's own
+    //    page body as the substantive evidence), and why this path never
+    //    consumes.
     // 3. There is no other explicitly governed approved source today, so
     //    nothing else is looked up here BY DESIGN -- see strategyEvidence.ts.
     // 4. Still unresolved -> Clarification Needed naming the exact fact and
@@ -396,7 +398,7 @@ export async function resolveStrategyHandoffContext(env: Env, handoffId: string,
         };
       }
       console.log(
-        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, read-only, attestation re-verified) as the evidence base.`,
+        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, read-only, attestation re-verified) and its page body as the evidence base.`,
       );
       evidenceBase = [
         `=== Evidence source: approved Call Notes record ${callNotes.callNotesId} (order 2 -- the Handoff held no substantive evidence of its own; read-only, attestation re-verified against this record's registry fields) ===`,

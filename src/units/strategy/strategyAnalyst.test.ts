@@ -311,7 +311,24 @@ interface FetchLog {
   matterPatchBodies: any[];
   /** Every query issued against the Call Notes store -- the only way the evidence order can reach a Call Notes record. */
   callNotesQueryBodies: any[];
+  /** Every page id whose block children were read, in order. The proof of WHICH page a body came from. */
+  blockReads: string[];
+  /** Every request whose target is the Call Notes store or a Call Notes page -- reads only; a write here is the bug these tests exist to catch. */
+  callNotesRequests: string[];
+  /** Every request to a host that is neither Notion nor Telegram -- evidence-only readers must never produce one. */
+  nonNotionHosts: string[];
 }
+
+/**
+ * The narrative a Call Notes record's page body carries by default.
+ *
+ * Deliberately distinct from every other fixture text so a test can tell
+ * "the record's page body reached the prompt" apart from "governance page
+ * content reached the prompt" (the mock serves those from DIFFERENT page
+ * ids -- see the blocks handler below) and from the Handoff's own evidence.
+ */
+const DEFAULT_CALL_NOTES_BODY =
+  "Direct client statement: proposals take roughly 20 staff hours to clean up because there is no single system for colours, fonts and layouts, and three logo versions are in circulation.";
 
 function mockFetch(
   t: any,
@@ -336,6 +353,20 @@ function mockFetch(
     /** The record's registry Version; defaults to 1. */
     callNotesVersion?: number;
     /**
+     * The record's PAGE BODY -- what `/blocks/{id}/children` returns for the
+     * Call Notes page. Defaults to a substantive narrative; pass `""` for a
+     * metadata-only record (no body at all).
+     */
+    callNotesBody?: string;
+    /** Serve the record's block children as a 500, exercising the structured body-read-failure path. */
+    callNotesBodyReadFails?: boolean;
+    /** The record's `Entity` relation; defaults to the page the fixture's Entity token resolves to. */
+    callNotesEntityRelation?: string;
+    /** The record's `Matter` relation; defaults to the page the fixture's Matter token resolves to. */
+    callNotesMatterRelation?: string;
+    /** How many exact-title matches the store returns; defaults to 1. `2` exercises the multiple-match refusal. */
+    callNotesMatches?: number;
+    /**
      * The durable source-boundary marker recorded in the Handoff's Reason.
      * Defaults to a valid Passed marker built by the same builder the
      * runtime uses, bound to this fixture's own tokens (production shape).
@@ -347,7 +378,7 @@ function mockFetch(
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
-  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [], callNotesQueryBodies: [] };
+  const log: FetchLog = { handoffPatchBodies: [], handoffCreateBody: null, sentTexts: [], sentButtons: [], matterPatchBodies: [], callNotesQueryBodies: [], blockReads: [], callNotesRequests: [], nonNotionHosts: [] };
   const verifiedFacts =
     opts.verifiedFacts ??
     (opts.callNotesId
@@ -369,6 +400,15 @@ function mockFetch(
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
     const method = init?.method ?? "GET";
+    // A read-only evidence retrieval must touch Notion (and, in this harness,
+    // Telegram for the operator message) and nothing else. Anything else is
+    // recorded so a test can assert no external retrieval ever happened.
+    if (!urlStr.includes("api.notion.com") && !urlStr.includes("api.telegram.org")) {
+      log.nonNotionHosts.push(`${method} ${urlStr}`);
+    }
+    if (urlStr.includes("call-notes-ds") || urlStr.includes("/cn-page-1")) {
+      log.callNotesRequests.push(`${method} ${urlStr}`);
+    }
 
     if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(init.body);
@@ -406,35 +446,73 @@ function mockFetch(
       const body = JSON.parse(init.body);
       log.callNotesQueryBodies.push(body);
       const requested = body?.filter?.title?.equals;
-      if (!opts.callNotesId || requested !== opts.callNotesId) {
+      const matchCount = opts.callNotesMatches ?? 1;
+      if (!opts.callNotesId || requested !== opts.callNotesId || matchCount === 0) {
         return new Response(JSON.stringify({ results: [] }), { status: 200 });
       }
+      const record = (index: number) => ({
+        id: `cn-page-1${index > 0 ? `-${index + 1}` : ""}`,
+        url: `https://notion.so/cn-page-1${index > 0 ? `-${index + 1}` : ""}`,
+        parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
+        properties: {
+          "Call Notes ID": { title: [{ plain_text: opts.callNotesId }] },
+          Status: { select: { name: opts.callNotesStatus ?? "Ready" } },
+          Version: { number: opts.callNotesVersion ?? 1 },
+          "Call Date": { date: { start: "2026-09-01" } },
+          "Call Type": { select: { name: "Discovery" } },
+          "Source ID": { rich_text: [{ plain_text: "SRC-1" }] },
+          "Source Type": { rich_text: [{ plain_text: "transcript" }] },
+          Entity: { relation: [{ id: opts.callNotesEntityRelation ?? "entity-page-1" }] },
+          Matter: { relation: [{ id: opts.callNotesMatterRelation ?? "matter-page-1" }] },
+          "Approval Attestation": { rich_text: [{ plain_text: opts.callNotesAttestation ?? "" }] },
+        },
+      });
       return new Response(
         JSON.stringify({
-          results: [
-            {
-              id: "cn-page-1",
-              url: "https://notion.so/cn-page-1",
-              parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
-              properties: {
-                "Call Notes ID": { title: [{ plain_text: opts.callNotesId }] },
-                Status: { select: { name: opts.callNotesStatus ?? "Ready" } },
-                Version: { number: opts.callNotesVersion ?? 1 },
-                "Call Date": { date: { start: "2026-09-01" } },
-                "Call Type": { select: { name: "Discovery" } },
-                "Source ID": { rich_text: [{ plain_text: "SRC-1" }] },
-                "Source Type": { rich_text: [{ plain_text: "transcript" }] },
-                Entity: { relation: [{ id: "entity-page-1" }] },
-                Matter: { relation: [{ id: "matter-page-1" }] },
-                "Approval Attestation": { rich_text: [{ plain_text: opts.callNotesAttestation ?? "" }] },
-              },
-            },
-          ],
+          results: Array.from({ length: matchCount }, (_, index) => record(index)),
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("/pages/cn-page-1") && method === "GET") {
+      // getPageContent resolves the page's REAL parent before it reads a
+      // single block, exactly like every other page read -- so the Call Notes
+      // page must be resolvable as living in the Call Notes data source.
+      const pageId = urlStr.split("/").pop();
+      return new Response(
+        JSON.stringify({
+          id: pageId,
+          url: `https://notion.so/${pageId}`,
+          parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
+          properties: {},
         }),
         { status: 200 },
       );
     }
     if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
+      // PAGE-ID AWARE: which page was read decides what it returns, so
+      // governance-page content can never be served as Call Notes content
+      // (or the reverse) and a test asserting on a prompt can tell them
+      // apart. Recorded in log.blockReads as the evidence of which page a
+      // body actually came from.
+      const pageId = urlStr.split("/blocks/")[1]?.split("/")[0] ?? "(unknown)";
+      log.blockReads.push(pageId);
+      if (pageId === "cn-page-1") {
+        // Serves EXACTLY what the fixture declared as the record's body --
+        // no extra blocks -- so a test asserting "this body is (not)
+        // substantive" is asserting on what the reader actually saw.
+        if (opts.callNotesBodyReadFails) {
+          return new Response(JSON.stringify({ object: "error", status: 500, message: "could not read block children" }), { status: 500 });
+        }
+        const bodyText = opts.callNotesBody ?? DEFAULT_CALL_NOTES_BODY;
+        if (!bodyText.trim()) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: bodyText }] } }],
+          }),
+          { status: 200 },
+        );
+      }
       return new Response(
         JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }),
         { status: 200 },
@@ -2933,4 +3011,223 @@ test("KoraGrid: the case progresses from an approved Call Notes Handoff all the 
   assert.ok(result.strategyProposal, "the unchanged approval-gated proposal step ran on top of the retrieved evidence");
   assert.ok(result.pendingStrategyApproval, "Approval Needed is reached -- Martin still decides; nothing auto-approves");
   assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
+});
+
+/**
+ * The substantive-body retrieval (strategyEvidence.ts's gate 6): after every
+ * existing gate has proven WHICH approved record this is, the record's own
+ * page body is read and is what the diagnosis is actually grounded in.
+ *
+ * The registry fields remain, but as identification -- and a record with no
+ * body of its own is refused rather than promoted into evidence.
+ */
+test("Evidence order: the approved Call Notes record's own page body reaches the Strategy diagnosis prompt, clearly separated from its registry metadata", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(NO_RECOMMENDATION_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.ok(log.blockReads.includes("cn-page-1"), "the record's page body was actually read -- after attestation, not assumed");
+  const prompt = prompts.find((p) => p.includes("Call_Notes_ID: CN-007"));
+  assert.ok(prompt, "the diagnosis prompt carries the governed Call Notes record");
+  assert.ok(prompt!.includes(DEFAULT_CALL_NOTES_BODY), "the substantive narrative itself reaches the prompt -- not only the eight registry fields");
+  assert.ok(prompt!.includes("=== Call Notes registry fields (identification"), "registry metadata is presented as identification, labelled as such");
+  assert.ok(prompt!.includes("=== Approved Call Notes page content (the substantive evidence"), "the body is presented as the substantive evidence, labelled as such");
+  const callNotesSection = prompt!.slice(prompt!.indexOf("=== Approved Call Notes page content"));
+  assert.ok(!callNotesSection.includes("Governance content."), "page-ID-aware: governance-page content is never served as the Call Notes body");
+  assert.deepStrictEqual(log.nonNotionHosts, [], "reading the body reaches nothing outside Notion");
+});
+
+test("Evidence order: an approved Call Notes record with no page body never masquerades as substantive evidence -- metadata is not a situation", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesBody: "" });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(SUFFICIENT_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.ok(log.blockReads.includes("cn-page-1"), "the body was read -- the refusal comes from what it held, not from an earlier gate");
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "a metadata-only record is never the situation a diagnosis runs on");
+  assert.strictEqual(result.strategyApprovalState, undefined, "Clarification Needed stays separate from Approval Needed");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Clarification needed/);
+  assert.match(message, /carries no page body/);
+  assert.match(message, /registry fields identify the approved record but hold no narrative/);
+  assert.match(message, /materially affects the decision/);
+  assert.ok(
+    !prompts.some((p) => p.includes("Call_Notes_ID: CN-007")),
+    "the eight registry fields are never handed to a diagnosis as if they were the evidence",
+  );
+});
+
+test("Evidence order: a Call Notes body that only points at evidence is refused as non-substantive -- the same test order 1 applies", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    callNotesBody: `Call_Notes_ID: CN-007\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`,
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined);
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /carries a page body but nothing substantive in it/);
+  assert.match(message, /only points at evidence/);
+});
+
+test("Evidence order: every gate ahead of the body read fails closed WITHOUT reading the record's page body", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const tampered = attestation.replace(/fields_hash=[0-9a-f]+/, `fields_hash=${"0".repeat(64)}`);
+  assert.notStrictEqual(tampered, attestation, "the tampered fixture must actually differ from a valid attestation");
+
+  const cases: Array<{ name: string; opts: Parameters<typeof mockFetch>[1]; match: RegExp }> = [
+    {
+      name: "wrong Entity relation",
+      opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesEntityRelation: "some-other-entity-page" },
+      match: /not bound to this Work's Entity/,
+    },
+    {
+      name: "wrong Matter relation",
+      opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesMatterRelation: "some-other-matter-page" },
+      match: /not bound to this Work's Matter/,
+    },
+    {
+      name: "invalid Status",
+      opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesStatus: "Superseded" },
+      match: /Status "Superseded"/,
+    },
+    {
+      name: "tampered Approval Attestation",
+      opts: { callNotesId: "CN-007", callNotesAttestation: tampered },
+      match: /fields_hash does not match/,
+    },
+    {
+      name: "zero exact matches",
+      opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesMatches: 0 },
+      match: /no Call Notes record has Call_Notes_ID "CN-007"/,
+    },
+    {
+      name: "multiple exact matches",
+      opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesMatches: 2 },
+      match: /2 Call Notes records carry Call_Notes_ID "CN-007"/,
+    },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async (st) => {
+      const log = mockFetch(st, entry.opts);
+      const env = fakeEnv();
+      env.AI = forbiddenAi();
+
+      const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+      assert.strictEqual(result.stage, "strategy_blocked", "the gate refuses rather than proceeding");
+      assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis runs on an unproven record");
+      assert.ok(!log.blockReads.includes("cn-page-1"), "the page body was never read -- the refusal came first, and nothing was fetched for it");
+      assert.strictEqual(log.callNotesQueryBodies.length, 1, "exactly one exact lookup, as before");
+      const message = log.sentTexts.join("\n");
+      assert.match(message, /Clarification needed/);
+      assert.match(message, entry.match, "the refusal names the exact unresolved fact");
+      assert.match(message, /materially affects the decision/);
+    });
+  }
+});
+
+test("Evidence order: an Evidence Package URL inside the Call Notes body is text the diagnosis reads, never a retrieval to follow", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const body =
+    "Evidence Package Location: https://files.example.com/packages/koragrid-call-note-update.pdf -- Evidence Package ID: /projects/01a101bb/areas/koragrid-call-note-update.md";
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesBody: body });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(NO_RECOMMENDATION_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  const prompt = prompts.find((p) => p.includes("Call_Notes_ID: CN-007"));
+  assert.ok(prompt, "the diagnosis prompt carries the record");
+  assert.ok(prompt!.includes("https://files.example.com/packages/koragrid-call-note-update.pdf"), "the URL reaches the model as TEXT");
+  assert.deepStrictEqual(log.nonNotionHosts, [], "the URL is never followed -- no request to any external host");
+  assert.deepStrictEqual(
+    log.blockReads.filter((id) => id === "cn-page-1"),
+    ["cn-page-1"],
+    "exactly one body read: the body is the evidence, and nothing in it is retrieved",
+  );
+});
+
+test("Evidence order: order 1 still wins outright -- a substantive Handoff never reaches the Call Notes record OR its body", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    verifiedFacts: "Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.",
+  });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "order 1 short-circuits -- the store is never queried");
+  assert.ok(!log.blockReads.includes("cn-page-1"), "and the record's page body is never read either");
+});
+
+test("Evidence order: repeated Strategy pickup re-reads the same body read-only -- no Status write, no consumption, on either attempt", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesStatus: "Ready" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const first = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  const second = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(first.stage, "delivered");
+  assert.strictEqual(second.stage, "delivered", "the Held -> Pending -> re-pickup loop re-reads the same approved evidence every attempt");
+  assert.strictEqual(log.callNotesQueryBodies.length, 2, "one exact lookup per pickup");
+  assert.deepStrictEqual(
+    log.blockReads.filter((id) => id === "cn-page-1"),
+    ["cn-page-1", "cn-page-1"],
+    "the body is read again on the second attempt rather than consumed away",
+  );
+  assert.ok(
+    log.callNotesRequests.every((request) => /^(GET|POST) /.test(request)),
+    `the Call Notes record is only ever read (requests made: ${log.callNotesRequests.join(" | ")}) -- a Status transition would be a PATCH, and the mock has no write route for this store`,
+  );
+  assert.ok(
+    log.callNotesRequests.some((request) => request.startsWith("POST ") && request.includes("/data_sources/call-notes-ds/query")),
+    "the exact-title lookup is the only query issued against the store",
+  );
+});
+
+test("Evidence order: a body read that fails is a named gap on the structured refusal path, not a generic exception about Handoff access", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesBodyReadFails: true });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked", "the failure is converted into the existing structured refusal, so the flow stays fail-closed");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis runs on a record whose evidence could not be read");
+  assert.ok(log.blockReads.includes("cn-page-1"), "the read was attempted -- after attestation -- and it is that read which failed");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Clarification needed/);
+  assert.match(message, /could not be read beyond its registry fields/);
+  assert.match(message, /registry fields identify the record but are not the evidence/);
+  assert.match(message, /materially affects the decision/);
+  assert.ok(
+    !message.includes("handoff record access"),
+    "the failure is NOT reported as the generic outer Handoff-access exception",
+  );
 });

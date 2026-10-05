@@ -51,6 +51,13 @@ import {
  * it validates is the procedural one the creation authority recorded on the
  * record -- it is not proof that any Runtime-side approval happened, and
  * nothing here should be described as having verified evidence contents.
+ *
+ * Reading the record's PAGE BODY is deliberately absent from this path too:
+ * Sales's consumption qualifies the record's registry fields, and the body is
+ * read only by Strategy's separate, read-only evidence retrieval through the
+ * same five gates plus a sixth (see `src/units/strategy/strategyEvidence.ts`).
+ * Nothing here assumes the registry fields are the whole of a record's
+ * evidence, and nothing there changes what Sales receives here.
  */
 
 /** The free-text fields a call-notes Handoff's own `Call_Notes_ID` reference is read from. */
@@ -197,15 +204,22 @@ export function readApprovalRecord(
 }
 
 /**
- * The governed record's fields as passed into the existing commercial-value
- * extraction and qualification path.
+ * The governed record's eight registry fields, rendered for a model to read.
  *
- * Exactly the eight canonical registry fields -- `CALL_NOTES_APPROVAL_FIELDS`'
- * own names -- so that what reaches the model is what the governed record says
- * and nothing else. Presentation only: this text is never hashed, never written
- * back anywhere, and carries no claim about the Evidence Package (which Runtime
- * does not retrieve in this slice) and no narrative the record does not itself
- * hold.
+ * Exactly `CALL_NOTES_APPROVAL_FIELDS`' own names -- so that what is presented
+ * is what the governed record says and nothing else. Presentation only: this
+ * text is never hashed, never written back anywhere, and carries no claim
+ * about the Evidence Package (which no path in this repository retrieves) and
+ * no narrative the record does not itself hold.
+ *
+ * What it IS, by caller: Sales's own `retrieveAndConsumeCallNotes` hands these
+ * fields, unchanged, to the existing commercial-value extraction and
+ * qualification path -- that contract is untouched by Strategy's evidence
+ * retrieval. Strategy's read-only path (`src/units/strategy/strategyEvidence.ts`)
+ * uses this same rendering as the IDENTIFICATION section of its evidence base
+ * and appends the record's separately-read page body, labelled, as the
+ * substantive evidence: the registry fields say which approved record was
+ * read, they are never the situation a diagnosis is about.
  */
 export function callNotesEvidenceText(record: CallNotesApprovalRecord): string {
   return [
