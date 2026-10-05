@@ -34,6 +34,7 @@ import {
 import { pollGoogleDocComments } from "./googleDocComments";
 import { pollGoogleSheetComments } from "./googleSheetComments";
 import { handleNotionWebhookRequest } from "./notionWebhook";
+import { handleWorkSessionState } from "./workSessionInspect";
 
 export { WorkSession } from "./session";
 
@@ -350,6 +351,19 @@ export default {
       return new Response(JSON.stringify({ last_google_sheet_comment_poll_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
         headers: { "content-type": "application/json" },
       });
+    }
+
+    // READ-ONLY WorkSession inspection: returns a fixed projection of one
+    // WorkSession's persisted state (no identity fields -- just the work and
+    // handoff pointers, stage, timestamps, and the Skill invocation sequence)
+    // so an operator can recover what a blocked Strategy run actually did
+    // without re-running it -- a re-run would overwrite that evidence and
+    // write to the Handoff/Activity Log. Header-gated (X-Worker-Admin-Key)
+    // instead of ?key= so the admin secret never appears in the URL or in
+    // observability logs (wrangler.toml sets redact_query_string = false).
+    // The handler makes exactly one Durable Object call: getState().
+    if (url.pathname === "/admin/work-session-state" && request.method === "GET") {
+      return handleWorkSessionState(request, env);
     }
 
     // Independent watchdog: meant to be pinged by a SECOND, separate external
