@@ -14,7 +14,7 @@ import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import type { ApprovalProof } from "../../types";
-import { runStrategySkillCycle } from "./strategySkillCycle";
+import { runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
 import { parseCommercialValueEvidenceBlock } from "../sales/commercialValueEvidence";
 
@@ -1046,21 +1046,53 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
   return deliverDiagnosis(env, state, disciplined);
 }
 
+/**
+ * Metadata-only summary of the Strategy Skill invocations this cycle recorded
+ * (`state.strategySkillFindings`), appended to a blocker's existing reason.
+ *
+ * **Data boundary: three closed fields, selected explicitly.** Each entry is
+ * the invocation number, the `skillId`, and the `status` -- the whole of what
+ * `StrategySkillFinding` already carries as closed metadata. `finding`,
+ * `evidenceLimitation`, `implication`, `failureReason`, and
+ * `unresolvedQuestion` are never read here, and there is no generic
+ * serializer over finding objects that could pick them up later: the three
+ * fields are named one by one. Focus, rationale, accumulated context and raw
+ * `strategyContext` are not reachable from this function at all -- it takes
+ * the findings array and nothing else, so it needs no AI call, no Notion
+ * read, and no external source access.
+ *
+ * Returns "" when there is nothing to report, which is what keeps every
+ * blocker raised without findings byte-identical to what it was before this
+ * observability existed. Six entries at the current cap stay in the low
+ * hundreds of characters, comfortably inside the Activity Log's and the
+ * Handoff `Open Questions` field's own limits.
+ */
+function skillInvocationSummary(findings: readonly StrategySkillFinding[] | undefined): string {
+  if (!findings || findings.length === 0) return "";
+  const entries = findings.map((finding, index) => `${index + 1}. ${finding.skillId}:${finding.status}`);
+  return `\n\nStrategy Skill invocations (number. skillId:status): ${entries.join(", ")}.`;
+}
+
 async function handleBlocked(env: Env, state: WorkState, reason: string): Promise<WorkState> {
+  // The original termination reason stays first and untouched -- the
+  // invocation metadata is appended, never mixed in front of or in place of
+  // it. When the cycle recorded no findings this is byte-for-byte the same
+  // `reason` as before, so non-cycle blockers are unchanged.
+  const blockerReason = reason + skillInvocationSummary(state.strategySkillFindings);
   await logActivity(env, {
     entry: `Strategy diagnosis blocked`,
     type: "Blocker",
     area: "Strategy",
-    decisionRationale: reason,
+    decisionRationale: blockerReason,
     outcome: "Blocked",
   });
   if (state.handoffId) {
     await updateHandoff(env, state.handoffId, {
       Status: select("Held"),
-      "Open Questions": richText(reason.slice(0, 1900)),
+      "Open Questions": richText(blockerReason.slice(0, 1900)),
     }, strategyAnalystAccess(state)).catch((err) => console.error(`Strategy: failed to mark Handoff ${state.handoffId} Held`, err));
   }
-  await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `*Strategy diagnosis held.*\n\n${reason}\n\nSend the missing information/clarification and I'll re-run the diagnosis.`);
+  await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `*Strategy diagnosis held.*\n\n${blockerReason}\n\nSend the missing information/clarification and I'll re-run the diagnosis.`);
   state.stage = "strategy_blocked";
   state.awaiting = "strategy_clarification";
   return state;
