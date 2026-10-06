@@ -3576,23 +3576,62 @@ const SIX_INVOKE_MOVES: Move[] = [
   { next: "invoke", skillId: "brand_strategy", focus: "is positioning implicated by the constraint the other methods named?", retryRationale: "Retry after brand_strategy returned UNAVAILABLE: the later findings changed what the brand method has to test." },
 ];
 
-test("failure observability: a cap hold records which Skills ran -- six skillId:status entries in invocation order, original termination reason preserved, no finding prose", async (t) => {
+test("cap: six completed findings at the cap go to synthesis and the core diagnosis instead of being discarded", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai } = fakeAiCycle({ moves: SIX_INVOKE_MOVES });
+  const { ai, calls } = fakeAiCycle({ moves: SIX_INVOKE_MOVES });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "the cap hold fails closed -- core diagnosis never runs on it");
-  assert.strictEqual(result.strategySkillFindings?.length, 6, "six findings were recorded before the seventh invoke move was refused");
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 6, "the cap still binds -- never a seventh invocation");
+  assert.strictEqual(result.strategySkillFindings?.length, 6);
+  assert.ok(calls.some((c) => c.kind === "synthesis"), "the completed findings are reconciled");
+  assert.ok(calls.some((c) => c.kind === "diagnosis"), "the unchanged core diagnosis gate judges the result");
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(activityLogBlocker(log), "", "no cap blocker is raised");
+});
 
+test("cap: HO-86 (2026-10-06 19:52) -- five completed and the sixth failed reaches synthesis, which is told the failed method is missing", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "business_strategy" },
+      { next: "invoke", skillId: "research_signal" },
+      { next: "invoke", skillId: "brand_strategy" },
+      { next: "invoke", skillId: "business_strategy", focus: "which commercial constraint binds?" },
+      { next: "invoke", skillId: "research_signal", focus: "what does the freelance spend figure support?" },
+      { next: "invoke", skillId: "communication_strategy" },
+    ],
+    skills: { communication_strategy: { sufficient: false, blockedReason: "no messaging evidence was supplied" } },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.deepStrictEqual(
+    result.strategySkillFindings?.map((f) => f.status),
+    ["completed", "completed", "completed", "completed", "completed", "failed"],
+  );
+  assert.ok(calls.find((c) => c.kind === "synthesis")?.prompt.includes("UNAVAILABLE"), "synthesis is told communication_strategy is missing, not given it as neutral");
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("cap: synthesis after the cap still judges sufficiency -- an insufficient synthesis holds and records which Skills ran, with no finding prose", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const insufficiency = "Win/loss attribution to the brand is unestablished and material to scope.";
+  const { ai, calls } = fakeAiCycle({ moves: SIX_INVOKE_MOVES, synthesis: { sufficient: false, insufficiencyReason: insufficiency } });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked", "synthesis is not a bypass");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "the core diagnosis never runs on an insufficient synthesis");
+  assert.ok(!calls.some((c) => c.kind === "diagnosis"));
   const blocker = activityLogBlocker(log);
-  assert.ok(blocker, "the Activity Log Blocker entry is written");
-  const termination = "The diagnostic cycle did not converge within 6 Strategy Skill invocations";
-  assert.ok(blocker.includes(termination), "the original termination reason is preserved verbatim");
+  assert.ok(blocker.includes(insufficiency), `the hold names the synthesis's own reason: ${blocker}`);
   const expected = [
     "1. business_strategy:completed",
     "2. brand_strategy:completed",
@@ -3607,27 +3646,11 @@ test("failure observability: a cap hold records which Skills ran -- six skillId:
     assert.ok(at > cursor, `blocker must carry ${entry} in original invocation order -- got: ${blocker}`);
     cursor = at;
   }
-  assert.ok(
-    blocker.indexOf(termination) < blocker.indexOf(expected[0]),
-    "the termination reason comes first and the metadata summary is appended after it",
-  );
-  for (const prose of [
-    "established a bounded domain finding",
-    "could not establish cost or market size",
-    "implies the open question",
-    "still need to know",
-    "failureReason",
-    "evidenceLimitation",
-    "implication:",
-  ]) {
+  for (const prose of ["established a bounded domain finding", "could not establish cost or market size", "implies the open question", "still need to know"]) {
     assert.ok(!blocker.includes(prose), `no finding prose may appear in the blocker summary (found: ${prose})`);
   }
-  const handoffReason = log.handoffPatchBodies
-    .map((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content)
-    .find((c) => typeof c === "string" && c.includes(termination));
-  assert.ok(handoffReason?.includes("6. brand_strategy:completed"), "the Handoff's Open Questions carry the same metadata summary");
   assert.ok(
-    log.sentTexts.some((s) => s.includes(termination) && s.includes("1. business_strategy:completed") && s.includes("6. brand_strategy:completed")),
+    log.sentTexts.some((s) => s.includes(insufficiency) && s.includes("6. brand_strategy:completed")),
     "the operator message carries the same metadata summary",
   );
 });
@@ -3720,7 +3743,13 @@ test("failure observability: a converging cycle still synthesizes and raises no 
 test("failure observability: the invocation metadata costs no additional AI call, no Notion read and no external source access", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({ moves: SIX_INVOKE_MOVES });
+  // Every Skill fails, so reaching the cap holds (with a completed finding it
+  // would go to synthesis instead) -- this measures the cost of the hold path.
+  const failed = { sufficient: false, blockedReason: "no defensible finding from the supplied evidence" };
+  const { ai, calls } = fakeAiCycle({
+    moves: SIX_INVOKE_MOVES,
+    skills: { business_strategy: failed, brand_strategy: failed, communication_strategy: failed, research_signal: failed },
+  });
   env.AI = ai;
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
