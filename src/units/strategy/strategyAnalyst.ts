@@ -898,7 +898,7 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
 }
 
 /**
- * Strategy's composable-Skills diagnostic cycle (ENIG Core Structure v3.0),
+ * Strategy's composable-Skills diagnosis (ENIG Core Structure v3.0),
  * which runs BEFORE the unchanged runCoreDiagnosis (the existing Symptom
  * -> Problem -> Cause -> Constraint -> Consequence diagnosis) and never
  * replaces it -- this function's only effect on success is to enrich
@@ -907,19 +907,19 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
  * handleStrategyClarification/handleStrategyFeedback, before delegating to
  * runCoreDiagnosis unchanged.
  *
- * Strategy remains ONE organizational Hat. The cycle is Strategy Analyst
- * interpreting evidence, choosing the next useful method, invoking exactly one
- * declared Strategy Skill, reading what came back, and returning to Strategy
- * Analysis -- see strategySkillCycle.ts for the model itself and for why no
+ * Strategy remains ONE organizational Hat. The composition is Strategy
+ * Analyst planning once which declared Strategy Skills (if any) the open
+ * questions need, running them in parallel, and synthesizing their findings
+ * once -- see strategySkillCycle.ts for the model itself and for why no
  * specialist Hat exists in it any more. Skills are resolved by the Registry
  * from this Work's recorded Action and handed in; this file never looks one
  * up.
  *
  * Failure handling is NOT uniform across the outcomes, and this is deliberate:
  *
- * - The cycle returning `unavailable` (an analysis move could not be
- *   obtained at all -- a genuine AI/infrastructure failure or unparseable
- *   output) degrades to the SAME continuation as a genuine "no Skill needed"
+ * - The composition returning `unavailable` (no usable plan could be
+ *   obtained -- a genuine AI/infrastructure failure or malformed output)
+ *   degrades to the SAME continuation as a genuine "no Skill needed"
  *   determination -- proceed directly to the unchanged runCoreDiagnosis --
  *   but NOT to the same recorded state:
  *   state.strategySkillCycleUnavailable is set to `true` specifically for this
@@ -933,11 +933,9 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
  *   provider failure must not block an otherwise-resolvable diagnosis. It is
  *   both logged (console.warn) and persisted on WorkState (never silently
  *   swallowed).
- * - Once the cycle DOES run, every subsequent stop condition it reports
- *   (every invoked Skill failed, synthesis judged insufficient, a move naming
- *   an undeclared or unknown Skill, a repeat of an already-failed Skill
- *   without the retry justification it requires, a cycle that did not
- *   converge) fails closed via the existing handleBlocked, exactly like every
+ * - Once a plan exists, every stop condition the composition reports
+ *   (a plan naming an undeclared or unknown Skill, every planned Skill
+ *   failed, synthesis judged insufficient) fails closed via the existing handleBlocked, exactly like every
  *   other Strategy stop condition -- no new failure-handling mechanism is
  *   introduced for those.
  * - `skills.get("strategy_analysis")` failing closed (SkillResolutionError)
@@ -965,8 +963,8 @@ async function runDiagnosis(env: Env, state: WorkState, skills: ResolvedActionSk
     return runCoreDiagnosis(env, state);
   }
 
-  // One or more moves are actually recorded (or the cycle genuinely
-  // determined none was needed) -- explicitly clear any stale value a prior
+  // A plan ran (or Strategy Analysis genuinely determined no Skill was
+  // needed) -- explicitly clear any stale value a prior
   // attempt on this same WorkState may have left (e.g.
   // handleStrategyFeedback's direct-continuation retry path reuses the same
   // state object), so this attempt's real outcome is never shadowed by a
@@ -1064,8 +1062,8 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
  *
  * Returns "" when there is nothing to report, which is what keeps every
  * blocker raised without findings byte-identical to what it was before this
- * observability existed. Six entries at the current cap stay in the low
- * hundreds of characters, comfortably inside the Activity Log's and the
+ * observability existed. A plan's at most three entries stay well under a
+ * few hundred characters, comfortably inside the Activity Log's and the
  * Handoff `Open Questions` field's own limits.
  */
 function skillInvocationSummary(findings: readonly StrategySkillFinding[] | undefined): string {

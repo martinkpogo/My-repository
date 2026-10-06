@@ -34,7 +34,7 @@
  * authored here rather than migrated from a Notion page, and they follow
  * this file's own Skill contract -- methodology only. They name no actor,
  * grant no access, own no Responsibility, and decide no gate; the Strategy
- * Analyst performs the cycle and stays accountable for it.
+ * Analyst performs the diagnosis and stays accountable for it.
  */
 
 export type SkillId =
@@ -171,35 +171,33 @@ const STRATEGY_ANALYSIS = `\`\`\`yaml
 skill_id: strategy-analysis
 status: canonical
 purpose: >
-  Drive one strategic diagnostic question through a sequence of bounded
-  methodological moves -- interpret the evidence at hand, decide the next
-  useful method, read what that method returned, and stop when the question
-  is answerable rather than when the available methods are exhausted.
+  Plan which bounded methods one strategic diagnostic question needs, from
+  the evidence at hand, then reconcile what they return and judge whether the
+  evidence supports a diagnosis -- not whether everything is known.
 \`\`\`
 
-## The diagnostic-cycle discipline (the methodology itself)
+## The planning and synthesis discipline (the methodology itself)
 
-1. **Start from the evidence actually given.** Interpret only what the supplied situation and findings contain. Never import outside knowledge about the subject, and never treat a supplied claim as established fact merely because it was supplied.
-2. **Name the one question the current evidence leaves open.** A diagnosis advances by answering a specific question ("is the commercial model or the brand the binding constraint?"), not by accumulating material. If no question is genuinely open, stop.
-3. **Choose one next move, don't run a list.** After interpreting, pick exactly one of: invoke one bounded domain method, or stop. Never invoke every available method merely because it is available, and never pre-commit to a sequence before the evidence has been read.
+1. **Start from the evidence actually given.** Interpret only what the supplied situation contains. Never import outside knowledge about the subject, and never treat a supplied claim as established fact merely because it was supplied.
+2. **Name the specific questions the evidence leaves open.** A diagnosis advances by answering specific questions ("is the commercial model or the brand the binding constraint?"), not by accumulating material. If no question is genuinely open, plan no method.
+3. **Plan once, before any method runs.** Choose only the methods the open questions need, each with its own specific question. The planned methods run independently against the same evidence, so no question may depend on another method's answer. Never plan every available method merely because it is available.
 4. **Choose a method because the question needs that domain of judgment, not because the situation merely touches it.** A brand symptom with a commercial cause calls for the commercial method, not the brand method. Domain relevance alone is never sufficient reason.
-5. **Skipping is a decision, not a gap.** Resolving the question after zero or one domain method is a complete, correct outcome -- never a degraded one. A method not needed must not be run "for completeness".
-6. **Let a later move depend on an earlier finding.** Each returning finding changes what the next question is. Read the accumulated findings before choosing again; a fixed plan executed regardless of what came back is not this methodology.
-7. **A returning finding is evidence, not a verdict.** It reports what its domain supports, including where it does not support anything. Weigh it against the question; never adopt it as the diagnosis because it was produced.
-8. **Stop when the question is answerable.** The stopping test is the evidence, not the number of methods run and not whether every method has had a turn.
-9. **Synthesis separates what was established from what is inferred.** Reconcile agreement, disagreement, and cross-domain relationships in plain prose for the diagnosis step. State material uncertainty rather than smoothing it over, and never substitute one finding's assumptions for an unavailable one's absence.
-10. **Never soften an evidence gap into a request for generic background.** Where evidence is incomplete, name the specific fact that is missing and why it changes this decision -- "we lack the market data" is not a usable gap, because it invites a fill rather than a resolution.
-11. **You do not own the gates.** Whether the resulting diagnosis may proceed to a proposal, must be held, or needs a decision from Martin is evaluated by the invoking Action's own governance, never by this methodology.
+5. **Planning no method is a decision, not a gap.** Resolving the question with zero or one domain method is a complete, correct outcome -- never a degraded one. A method not needed must not be run "for completeness".
+6. **A returning finding is evidence, not a verdict.** It reports what its domain supports, including where it does not support anything. Weigh it against the question; never adopt it as the diagnosis because it was produced.
+7. **Synthesis separates what was established from what is inferred.** Reconcile agreement, disagreement, and cross-domain relationships in plain prose for the diagnosis step. State material uncertainty rather than smoothing it over, and never substitute one finding's assumptions for an unavailable one's absence.
+8. **Judge sufficiency for the diagnosis, not for completeness.** The evidence is sufficient when it supports a defensible problem definition, a cause stated either as supported or as explicitly unproven, and a direction that does not depend on an unproven cause. Facts that cannot be known at this stage -- unknowns the situation already records as unknown, and figures the diagnosis or its proposal is meant to produce (intervention scope, budget, price) -- are carried forward as stated uncertainty, never treated as insufficiency.
+9. **Hold only for a specific, obtainable fact that would change the decision.** Name the missing fact and why it changes the problem definition or the direction -- "we lack the market data" is not a usable gap, because it invites a fill rather than a resolution. Never soften an evidence gap into a request for generic background.
+10. **You do not own the gates.** Whether the resulting diagnosis may proceed to a proposal, must be held, or needs a decision from Martin is evaluated by the invoking Action's own governance, never by this methodology.
 
 ## What this Skill does not decide
 
-This methodology governs *how the diagnostic cycle itself is run* -- it does not decide:
+This methodology governs *how a diagnosis is planned and its findings reconciled* -- it does not decide:
 - which bounded domain methods exist, or which are permitted for this work -- that is the invoking Action's own declared Skill set, resolved exactly by the Skill Registry;
 - whether a domain method's output may be acted on (an approval requirement is the invoking Action's declared property, never this Skill's);
 - which evidence sources may be read in the first place (Data Boundary is resolved by the Kernel per invoking Hat, before this methodology is ever applied to it);
 - who is performing the work (Organization owns that; a Skill is never an actor).
 
-The Hat performing this work stays the single accountable actor throughout the cycle; the methodology names no other actor.`;
+The Hat performing this work stays the single accountable actor throughout; the methodology names no other actor.`;
 
 const BRAND_STRATEGY = `\`\`\`yaml
 skill_id: brand-strategy
@@ -355,11 +353,11 @@ const SKILL_PACKAGES: Readonly<Record<SkillId, SkillPackage>> = {
   },
   strategy_analysis: {
     id: "strategy_analysis",
-    version: "1.0.0",
+    version: "2.0.0",
     status: "active",
     workerRuntime: CURRENT_WORKER_RUNTIME,
     format: SUPPORTED_SKILL_PACKAGE_FORMAT,
-    integritySha256: "aad1311be1fbeecf4a2ddc3d4d5aff1e75318347358eadeaf9def35f8d8b5ae6",
+    integritySha256: "e93e8d736f66d618058cbb987abe190399a49dfee83c15339fd6c18a8900a44a",
   },
   brand_strategy: {
     id: "brand_strategy",

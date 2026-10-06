@@ -124,10 +124,10 @@ export type SemanticTaskId =
   // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
   | "sales.intake_classification"
   | "sales.hat_action_decision"
-  // Strategy's composable-Skills diagnostic cycle (ENIG Core Structure
+  // Strategy's composable-Skills diagnosis (ENIG Core Structure
   // v3.0; successor to LOG-845's specialist-Hat composition, whose Hats are
   // retired). The Strategy Analyst remains the single actor; the specialist
-  // domains are now Skills it follows one move at a time. Payload for all
+  // domains are now Skills a single plan may name. Payload for all
   // five is the same category as the already-classified
   // strategy.diagnosis/handoff_routing/proposal_drafting: Entity_Token/
   // Matter_Token-bound sanitized situation text (strategy.specialist_selection,
@@ -135,7 +135,7 @@ export type SemanticTaskId =
   // strategy.communication_diagnosis all receive the same sanitized
   // state.strategyContext already governed by evaluateHandoffContext/
   // resolveStrategyHandoffContext -- no new raw/identity-bearing input
-  // introduced) or the cycle's own already-produced bounded findings
+  // introduced) or the composition's own already-produced bounded findings
   // (strategy.specialist_synthesis). Classified business_sensitive/
   // TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
   // PRODUCTION_OUTBOUND_POLICY per Martin's explicit direction, applying the

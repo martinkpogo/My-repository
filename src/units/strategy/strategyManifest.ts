@@ -121,19 +121,20 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
       "Diagnose a Matter/Entity situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and either develop a governed intervention proposal or route the diagnosis to the responsible Unit. Performs the Matter operational-status advance and the inbound Handoff's own lifecycle progression; commits nothing on another Unit's behalf.",
     // Multi-Skill Responsibility (the model established for Responsibilities
     // that may be performed with zero, one or multiple Skills -- there is no
-    // mandatory primary Skill). `strategy_analysis` is the overarching
-    // diagnostic/orchestration methodology; the three domain Skills are
-    // bounded methods it may invoke one at a time, and `research_signal` is
-    // the existing, reused evidence-discipline Skill. Declaring a Skill here
-    // only makes it AVAILABLE to this Action -- the cycle chooses which (if
-    // any) to actually follow, from the evidence. It never invokes all of
-    // them by default, and it may not invoke one this Action did not declare.
+    // mandatory primary Skill). `strategy_analysis` is the planning and
+    // synthesis methodology; the three domain Skills are bounded methods a
+    // single plan may name. Declaring a Skill here only makes it AVAILABLE to
+    // this Action -- the plan chooses which (if any) to follow, from the
+    // evidence. It never names all of them by default, and it may not name one
+    // this Action did not declare. `research_signal` is deliberately not
+    // declared: it can only re-judge the evidence already supplied, and in
+    // live use the planner kept choosing it as if it could fetch new evidence.
+    // Research needs an owning Action first (LOG-975).
     skill_requirements: [
       { skill_id: "strategy_analysis" },
       { skill_id: "brand_strategy" },
       { skill_id: "business_strategy" },
       { skill_id: "communication_strategy" },
-      { skill_id: "research_signal" },
     ],
   },
   {
