@@ -63,6 +63,35 @@ test("editMessageText fails silently (logged, not thrown) when Telegram rejects 
   }
 });
 
+test("editMessageText retries as plain text when Telegram rejects the Markdown -- an identifier with an underscore still reaches the chat", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_url: string, init: any) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    // Telegram's real reply to an unpaired `_` under parse_mode Markdown.
+    if (body.parse_mode === "Markdown") {
+      return new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 102" }), { status: 400 });
+    }
+    return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    await editMessageText(fakeEnv, 1, 4242, "🧭 Running Strategy Skills (business_strategy, communication_strategy)...");
+    assert.strictEqual(bodies.length, 2, "one Markdown attempt, then one plain-text retry");
+    assert.strictEqual(bodies[1].parse_mode, undefined, "the retry carries no parse_mode");
+    assert.strictEqual(bodies[1].text, bodies[0].text, "the same text is sent unchanged");
+    assert.strictEqual(bodies[1].message_id, 4242);
+    assert.deepStrictEqual(errors, [], "a successful plain-text retry logs no failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+});
+
 test("sendHatMessage labels the message with the Hat name before the content", async () => {
   const originalFetch = globalThis.fetch;
   let calledBody: any;

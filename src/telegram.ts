@@ -204,16 +204,20 @@ export async function sendMessage(
  * per stage. Best-effort: fails silently (logged, not thrown) since a
  * failed edit (e.g. the message is too old, or was deleted) should never
  * block the pipeline it's reporting progress on.
+ *
+ * Falls back to plain text when the Markdown edit is rejected, exactly as
+ * sendMessage does: text carrying an identifier such as `business_strategy`
+ * has an unpaired `_`, which Telegram refuses as Markdown ("can't parse
+ * entities") -- confirmed live on Strategy's Skill progress line.
  */
 export async function editMessageText(env: Env, chatId: number, messageId: number, text: string): Promise<void> {
-  const res = await call(env, "editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    parse_mode: "Markdown",
-  });
+  const payload = { chat_id: chatId, message_id: messageId, text, parse_mode: "Markdown" };
+  let res = await call(env, "editMessageText", payload);
   if (!res.ok) {
-    console.error("telegram editMessageText failed", await res.text());
+    res = await call(env, "editMessageText", { ...payload, parse_mode: undefined });
+    if (!res.ok) {
+      console.error("telegram editMessageText failed", await res.text());
+    }
   }
 }
 
