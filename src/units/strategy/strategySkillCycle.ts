@@ -35,6 +35,13 @@ import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegist
  * to be chosen because the open diagnostic question needs that domain of
  * judgment, never because the method exists.
  *
+ * A Skill that already returned UNAVAILABLE in this cycle is not an ordinary
+ * still-untried option either. Selection stays Strategy Analysis's own
+ * responsibility -- the runtime never picks a different specialist -- but a
+ * repeat of a failed Skill must carry a concrete retry justification and ask
+ * a question that differs from the failed attempt. Without both, the move is
+ * refused rather than spent (see the failure modes below).
+ *
  * **What this module never decides.** A domain Skill returns findings,
  * evidence limitations and implications -- never whether the Strategy Work is
  * blocked, never a proposal, never a routing. Insufficiency, hold, proposal
@@ -65,6 +72,12 @@ import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegist
  * - A move naming a Skill this Action did not declare is refused at the point
  *   of use, mirroring `ResolvedActionSkillSet.get`'s own rule: execution may
  *   only follow the Skills its Action requires.
+ * - A move asking to re-run a Skill that already returned UNAVAILABLE in this
+ *   cycle, without the retry justification that repeat requires -- a concrete
+ *   `retryRationale`, plus a focus or diagnostic question that differs from
+ *   the failed attempt -- is refused the same way and holds. The runtime
+ *   never substitutes a different specialist for the refused repeat, and
+ *   never spends another invocation on an unqualified one.
  *
  * **Data boundary.** Every call receives only the already-sanitized
  * `state.strategyContext` (and, between moves, this module's own bounded
@@ -99,6 +112,17 @@ export const STRATEGY_DOMAIN_SKILL_IDS: readonly StrategyDomainSkillId[] = [
  * hold, never a silent truncation.
  */
 export const MAX_STRATEGY_SKILL_INVOCATIONS = 6;
+
+/**
+ * Minimum substance of the `retryRationale` a move must carry to re-run a
+ * Skill that already returned UNAVAILABLE in this cycle. A structural,
+ * deterministic floor (not a judgement of the wording): it stops the retry
+ * gate from being satisfied by a token such as "retry", while leaving what
+ * counts as a good justification to Strategy Analysis -- the runtime never
+ * evaluates the merits of a specialist choice, it only requires that the
+ * choice be made for a stated, changed reason rather than re-issued.
+ */
+export const MIN_RETRY_RATIONALE_LENGTH = 20;
 
 interface DomainProfile {
   /**
@@ -166,6 +190,17 @@ export interface StrategyAnalysisDecision {
   /** The specific question this method should answer -- how a later move depends on earlier findings. */
   focus?: string;
   rationale?: string;
+  /**
+   * Required by the runtime ONLY when `skillId` names a Skill that already
+   * returned a failed finding in this cycle: the concrete reason this retry is
+   * worth an invocation now -- the new evidence or the changed question it
+   * depends on. Smallest schema addition the repeat rule needs: `rationale`
+   * already exists but is the general "why this move", is optional, and
+   * carries no signal that a failed Skill is being re-run, while `focus` and
+   * `diagnosticQuestion` are the existing fields that must show the question
+   * actually changed.
+   */
+  retryRationale?: string;
 }
 
 /** The reconciled context folded in front of the unchanged core diagnosis. */
@@ -241,6 +276,7 @@ async function runStrategyAnalysisStep(
       skillId?: string;
       focus?: string;
       rationale?: string;
+      retryRationale?: string;
     }>(env, {
       taskId: "strategy.specialist_selection",
       mode: "json",
@@ -262,7 +298,8 @@ async function runStrategyAnalysisStep(
           '  "next": "invoke" | "synthesize",',
           '  "skillId": "brand_strategy" | "business_strategy" | "communication_strategy" | "research_signal"  (REQUIRED when next=\\"invoke\\", and MUST be one of the ids listed as available below; OMIT it entirely when next=\\"synthesize\\") ,',
           '  "focus": "... the specific question this method should answer (required when next=\\"invoke\\")",',
-          '  "rationale": "... why this is the one useful next move"',
+          '  "rationale": "... why this is the one useful next move",',
+          '  "retryRationale": "... (REQUIRED ONLY when `skillId` re-invokes a method already marked UNAVAILABLE below: name the specific new evidence or changed question that justifies another invocation -- at least 20 characters. OMIT it for any other move.)"',
           "}",
           "",
           "Rules:",
@@ -270,6 +307,7 @@ async function runStrategyAnalysisStep(
           '- "synthesize" means no further method is needed and the accumulated findings should be reconciled. With no findings yet, it means the supplied evidence answers the question directly.',
           "- Choose a method because the open question needs that domain of judgment, never because the situation merely touches it.",
           "- A move may depend on any earlier finding -- name that in `focus`.",
+          '- A method already marked UNAVAILABLE below is not an ordinary still-untried option: re-invoking it requires BOTH a `retryRationale` naming the new evidence or changed question AND a `focus` (or `diagnosticQuestion`) that differs from the failed attempt. Without both, the runtime refuses the move instead of spending another invocation -- and it never picks a different method for you.',
           '- Anything other than a single well-formed decision is unusable: respond with the exact shape above or not at all.',
         ].join("\n\n"),
         situation: [
@@ -285,6 +323,13 @@ async function runStrategyAnalysisStep(
           input.availableSkills.length > 0
             ? input.availableSkills.map((id) => `- ${id}: ${DOMAIN_PROFILES[id].scope}`).join("\n")
             : "(none declared by this Action -- only \"synthesize\" is available)",
+          "",
+          "=== METHODS ALREADY UNAVAILABLE IN THIS CYCLE (re-invoking one needs a retryRationale AND a changed focus/diagnosticQuestion) ===",
+          input.findings.some((f) => f.status === "failed")
+            ? [...new Set(input.findings.filter((f) => f.status === "failed").map((f) => f.skillId))]
+                .map((id) => `- ${id}`)
+                .join("\n")
+            : "(none)",
         ].join("\n"),
       },
       light: true,
@@ -303,6 +348,9 @@ async function runStrategyAnalysisStep(
       interpretation: result.interpretation,
       diagnosticQuestion: result.diagnosticQuestion,
       rationale: result.rationale,
+      // Carried only to make it assertable by the retry gate below; the gate
+      // -- never this parsing step -- decides whether a repeat is qualified.
+      retryRationale: typeof result.retryRationale === "string" ? result.retryRationale : undefined,
     };
   } catch (err) {
     console.error(`Strategy Skill cycle: analysis step ${input.round} threw unexpectedly`, err);
@@ -450,6 +498,13 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   const availableSkills = STRATEGY_DOMAIN_SKILL_IDS.filter((id): id is StrategyDomainSkillId => skills.declared.includes(id));
 
   const findings: StrategySkillFinding[] = [];
+  // Per-cycle memory of what a failed attempt actually asked, so a later
+  // re-selection of the same Skill can be compared against it deterministically
+  // (string equality on the decision's own fields) instead of being judged by
+  // the runtime. Entries exist only within this cycle run: each finding's
+  // failure is recorded when it is pushed and refreshed on a later failure of
+  // the same Skill, so a retry is always measured against the most recent one.
+  const priorFailures = new Map<StrategyDomainSkillId, { focus: string; diagnosticQuestion: string }>();
   let accumulated = strategyContext;
   let round = 0;
 
@@ -524,6 +579,37 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
       };
     }
 
+    // A Skill that already returned UNAVAILABLE in this cycle is not an
+    // ordinary still-untried option: a repeat has to earn its invocation.
+    // Both checks are deterministic over the decision's own fields -- a
+    // minimum-substance retryRationale, and a focus/diagnostic question that
+    // differs from what the failed attempt asked -- so the runtime never
+    // evaluates the merits of a specialist choice, never picks a different
+    // specialist, and never accepts the same retry merely because the id was
+    // selected again. Unqualified repeats fail closed WITHOUT spending the
+    // invocation. Checked after the cap so a justified retry can never extend
+    // a cycle that has already reached the safety limit.
+    const priorFailure = priorFailures.get(skillId as StrategyDomainSkillId);
+    if (priorFailure) {
+      const retryRationale = (decision.retryRationale ?? "").trim();
+      if (retryRationale.length < MIN_RETRY_RATIONALE_LENGTH) {
+        return {
+          status: "hold",
+          reason: `Strategy Analysis asked to invoke "${skillId}" again after that method already failed to return a defensible finding, without the retry justification a repeat requires (a retryRationale of at least ${MIN_RETRY_RATIONALE_LENGTH} characters). Refusing to spend another invocation on an unqualified repeat.`,
+          findings,
+        };
+      }
+      const focus = (decision.focus ?? "").trim();
+      const question = (decision.diagnosticQuestion ?? "").trim();
+      if (focus === priorFailure.focus && question === priorFailure.diagnosticQuestion) {
+        return {
+          status: "hold",
+          reason: `Strategy Analysis asked to invoke "${skillId}" again with a retry justification, but the question this repeat would answer is unchanged from the failed attempt. Refusing to spend another invocation on the same retry.`,
+          findings,
+        };
+      }
+    }
+
     await onProgress?.(`Running Strategy Skill (${skillId})...`);
     const finding = await runDomainSkill(env, skillId as StrategyDomainSkillId, decision.focus ?? "", {
       strategyQuestion,
@@ -532,6 +618,14 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
       skillContent: skills.get(skillId as SkillId).content,
     });
     findings.push(finding);
+    if (finding.status === "failed") {
+      // Remember exactly what this attempt asked, so the next re-selection of
+      // this Skill can be measured against it rather than accepted on sight.
+      priorFailures.set(skillId as StrategyDomainSkillId, {
+        focus: (decision.focus ?? "").trim(),
+        diagnosticQuestion: (decision.diagnosticQuestion ?? "").trim(),
+      });
+    }
     // The accumulated situation gains the bounded contribution this Skill
     // returned, so a later move can be chosen from an earlier finding.
     accumulated = `${accumulated}\n\n=== ${skillId} finding ===\n${finding.status === "failed" ? `UNAVAILABLE -- ${finding.failureReason}` : `${finding.finding}\nEvidence limitation: ${finding.evidenceLimitation}\nImplication: ${finding.implication}`}`;

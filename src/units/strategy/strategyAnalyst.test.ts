@@ -2397,7 +2397,7 @@ test("handleDirectRequestClarification re-attempts resolution against Martin's f
  * against the real production policy tables here -- no test-time policy
  * override is needed or used.
  */
-type Move = { next: "invoke"; skillId: string; focus?: string } | { next: "synthesize" } | "throw";
+type Move = { next: "invoke"; skillId: string; focus?: string; retryRationale?: string; diagnosticQuestion?: string } | { next: "synthesize" } | "throw";
 
 type CycleScript = {
   /** Strategy Analysis moves, consumed in order; the last entry repeats once exhausted. Defaults to a single "synthesize" (no Skill needed). */
@@ -2441,7 +2441,15 @@ function fakeAiCycle(script: CycleScript): { ai: Ai; calls: RecordedCall[] } {
         calls.push({ kind: "analysis", prompt: all });
         if (move === "throw") throw new Error("simulated Strategy Analysis provider failure");
         if (move.next === "synthesize") return respond({ next: "synthesize", interpretation: "the evidence answers the question", diagnosticQuestion: "", rationale: "no further method needed" });
-        return respond({ next: "invoke", skillId: move.skillId, focus: move.focus ?? "the open diagnostic question", interpretation: "", diagnosticQuestion: "", rationale: "this domain of judgment is required" });
+        return respond({
+          next: "invoke",
+          skillId: move.skillId,
+          focus: move.focus ?? "the open diagnostic question",
+          interpretation: "",
+          diagnosticQuestion: move.diagnosticQuestion ?? "",
+          rationale: "this domain of judgment is required",
+          ...(move.retryRationale ? { retryRationale: move.retryRationale } : {}),
+        });
       }
 
       const skillMatch = system.match(/applying one bounded Strategy Skill: `([^`]+)`/);
@@ -2843,6 +2851,208 @@ test("composition reaches the existing Strategy Approval Needed gate -- a recomm
   assert.ok(result.strategyProposal, "the approval-gated proposal is built by the unchanged step, after the cycle");
   assert.ok(result.pendingStrategyApproval, "Approval Needed is reached: Martin's explicit Approve/Refine/Reject is still required");
   assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
+});
+
+/**
+ * Repeat-of-a-failed-Skill contract tests. HO-86 in production spent all six
+ * of its invocations on two Skills that failed every time and was stopped only
+ * by the cap; these pin the runtime rule that prevents that being the model's
+ * default while leaving specialist selection -- and every other move shape --
+ * exactly where it was.
+ */
+const FAILED_BUSINESS_FINDING = { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible business finding" };
+
+test("retry contract: a failed Skill is never blindly invoked again -- the unqualified repeat is refused before execution and the model is told the rule", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    // Exactly HO-86's shape: the id is simply selected again -- no rationale,
+    // no changed question.
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: FAILED_BUSINESS_FINDING },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked", "the refusal fails closed through the existing blocked path");
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 1, "the repeat never reaches execution -- the invocation is not spent");
+  assert.deepStrictEqual(
+    result.strategySkillFindings?.map((f) => f.skillId),
+    ["business_strategy"],
+    "exactly one invocation is recorded, so the blocker's metadata stays truthful",
+  );
+  const blocker = activityLogBlocker(log);
+  assert.ok(blocker.includes("already failed"), `the refusal states why: ${blocker}`);
+  assert.ok(blocker.includes("retryRationale"), "and names the field whose justification was missing");
+  assert.ok(!blocker.includes("cannot support a defensible"), "failed finding prose still never reaches the blocker");
+
+  const analysisPrompts = calls.filter((c) => c.kind === "analysis").map((c) => c.prompt);
+  assert.ok(analysisPrompts[0].includes("retryRationale"), "the very first move is told what a repeat of a failed method requires");
+  assert.ok(
+    analysisPrompts[1].includes("METHODS ALREADY UNAVAILABLE IN THIS CYCLE") && analysisPrompts[1].includes("business_strategy"),
+    "the second move is told which methods are already unavailable rather than seeing them as ordinary options",
+  );
+});
+
+test("retry contract: a repeat carrying a concrete retryRationale and a materially changed question IS spent -- the gate is not a ban on retrying", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "business_strategy", focus: "is the commercial model the binding constraint?" },
+      {
+        next: "invoke",
+        skillId: "business_strategy",
+        focus: "does the capacity evidence from the later findings change which constraint binds?",
+        retryRationale: "business_strategy returned UNAVAILABLE on the growth model alone; the accumulated findings now isolate a capacity constraint, so the same method has a different question to answer.",
+      },
+      { next: "synthesize" },
+    ],
+    skills: { business_strategy: FAILED_BUSINESS_FINDING },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 2, "the justified, materially changed retry is allowed and is spent");
+  assert.strictEqual(result.stage, "strategy_blocked");
+  const blocker = activityLogBlocker(log);
+  assert.ok(blocker.includes("Every Strategy Skill invoked"), "the hold is the pre-existing all-failed one, not a retry refusal");
+  assert.ok(!blocker.includes("retryRationale"), "no retry refusal is raised for a qualified retry");
+  assert.ok(!blocker.includes("unchanged from the failed attempt"), "nor an unchanged-question refusal");
+});
+
+test("retry contract: both halves are required -- a justification without a changed question, and a changed question without a justification, each fail closed", async (t) => {
+  const attempts = [
+    {
+      name: "retryRationale present but the question is unchanged",
+      move: {
+        next: "invoke" as const,
+        skillId: "business_strategy",
+        focus: "the open diagnostic question",
+        retryRationale: "The earlier attempt was unavailable, and the accumulated evidence since then still leaves this same question open.",
+      },
+      expected: "unchanged from the failed attempt",
+      unexpected: "without the retry justification",
+    },
+    {
+      name: "question changed but the retryRationale is not a real justification",
+      move: { next: "invoke" as const, skillId: "business_strategy", focus: "a freshly worded question", retryRationale: "retry" },
+      expected: "without the retry justification",
+      unexpected: "unchanged from the failed attempt",
+    },
+    {
+      name: "question changed but no retryRationale at all",
+      move: { next: "invoke" as const, skillId: "business_strategy", focus: "a freshly worded question" },
+      expected: "without the retry justification",
+      unexpected: "unchanged from the failed attempt",
+    },
+  ];
+
+  for (const attempt of attempts) {
+    const log = mockFetch(t, { initialStatus: "Pending" });
+    const env = fakeEnv();
+    const { ai, calls } = fakeAiCycle({
+      moves: [{ next: "invoke", skillId: "business_strategy", focus: "the open diagnostic question" }, attempt.move, { next: "synthesize" }],
+      skills: { business_strategy: FAILED_BUSINESS_FINDING },
+    });
+    env.AI = ai;
+
+    const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+    assert.strictEqual(result.stage, "strategy_blocked", `${attempt.name}: fails closed`);
+    assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 1, `${attempt.name}: the invocation is not spent`);
+    // This test re-invokes mockFetch inside one `test` context, so each
+    // attempt's fetch log also sees the earlier attempts' writes -- take the
+    // LAST Blocker, which is this attempt's own.
+    const blockers = log.activityLogBodies.filter((b) => b.properties?.Type?.select?.name === "Blocker");
+    const blocker = String(blockers[blockers.length - 1]?.properties?.["Decision Rationale"]?.rich_text?.[0]?.text?.content ?? "");
+    assert.ok(blocker.includes(attempt.expected), `${attempt.name}: blocker says "${attempt.expected}" -- got: ${blocker}`);
+    assert.ok(!blocker.includes(attempt.unexpected), `${attempt.name}: must not claim the other defect`);
+  }
+});
+
+test("retry contract: an untried declared Skill stays freely selectable after another Skill failed -- the rule gates repeats, not selection", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "business_strategy" },
+      { next: "invoke", skillId: "brand_strategy", focus: "is positioning implicated?" },
+      { next: "synthesize" },
+    ],
+    skills: { business_strategy: FAILED_BUSINESS_FINDING, brand_strategy: COMPLETED_SKILL_FINDING },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered", "the cycle still reaches synthesis and the unchanged core diagnosis");
+  assert.deepStrictEqual(
+    calls.filter((c) => c.kind === "skill").map((c) => c.skillId),
+    ["business_strategy", "brand_strategy"],
+    "the untried Skill needs no retryRationale of any kind",
+  );
+  const bySkill = Object.fromEntries((result.strategySkillFindings ?? []).map((f) => [f.skillId, f]));
+  assert.strictEqual(bySkill.brand_strategy.status, "completed");
+  assert.strictEqual(bySkill.business_strategy.status, "failed");
+});
+
+test("retry contract: the synthesize path is untouched -- zero findings still finish quietly, all-failed still fails closed", async (t) => {
+  // (a) No Skill needed: synthesize with no findings.
+  mockFetch(t, { initialStatus: "Pending" });
+  const envA = fakeEnv();
+  const { ai: aiA, calls: callsA } = fakeAiCycle({ moves: [{ next: "synthesize" }] });
+  envA.AI = aiA;
+  const noSkill = await handlePickup(envA, fakeState(), STRATEGY_SKILLS);
+  assert.strictEqual(noSkill.stage, "delivered");
+  assert.strictEqual(callsA.filter((c) => c.kind === "skill").length, 0, "no invocation happens on a genuine no-Skill determination");
+  assert.strictEqual(noSkill.strategySkillCycleUnavailable, false, "a genuine no-Skill determination stays distinct from an unavailable cycle");
+
+  // (b) Every invoked Skill failed: the pre-existing all-failed hold, reached
+  // through the unchanged synthesize branch.
+  const logB = mockFetch(t, { initialStatus: "Pending" });
+  const envB = fakeEnv();
+  const { ai: aiB } = fakeAiCycle({
+    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    skills: { business_strategy: FAILED_BUSINESS_FINDING },
+  });
+  envB.AI = aiB;
+  const allFailed = await handlePickup(envB, fakeState(), STRATEGY_SKILLS);
+  assert.strictEqual(allFailed.stage, "strategy_blocked");
+  assert.ok(activityLogBlocker(logB).includes("Every Strategy Skill invoked"));
+});
+
+test("retry contract: the six-invocation cap still binds when every single retry is justified", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  // One failed Skill re-selected five more times, each repeat qualified: a
+  // distinct focus plus a real retryRationale. Nothing here may exceed the
+  // cap, and the cap reason -- not the retry gate -- must be what stops it.
+  const moves: Move[] = [
+    { next: "invoke", skillId: "business_strategy", focus: "which constraint is binding?" },
+    ...Array.from({ length: 5 }, (_, i) => ({
+      next: "invoke" as const,
+      skillId: "business_strategy",
+      focus: `re-opened question after attempt ${i + 1} returned UNAVAILABLE`,
+      retryRationale: `Retry ${i + 2}: attempt ${i + 1} was unavailable, and the findings recorded since then change what this method must answer.`,
+    })),
+  ];
+  const { ai, calls } = fakeAiCycle({ moves, skills: { business_strategy: FAILED_BUSINESS_FINDING } });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 6, "exactly MAX_STRATEGY_SKILL_INVOCATIONS invocations -- never a seventh");
+  assert.strictEqual(result.strategySkillFindings?.length, 6);
+  const blocker = activityLogBlocker(log);
+  assert.ok(blocker.includes("did not converge within 6 Strategy Skill invocations"), "the cap is the termination reason");
+  assert.ok(
+    !blocker.includes("unchanged from the failed attempt") && !blocker.includes("without the retry justification"),
+    "the retry gate never fires first: the cap check runs before it",
+  );
 });
 
 /**
@@ -3256,8 +3466,13 @@ const SIX_INVOKE_MOVES: Move[] = [
   { next: "invoke", skillId: "brand_strategy" },
   { next: "invoke", skillId: "communication_strategy" },
   { next: "invoke", skillId: "research_signal" },
-  { next: "invoke", skillId: "business_strategy" },
-  { next: "invoke", skillId: "brand_strategy" },
+  // The last two repeat Skills invoked earlier in the same cycle. They carry
+  // what the retry contract demands (a concrete retryRationale and a focus
+  // that differs from the failed attempt), so when every Skill fails these
+  // moves are let through by the retry gate and it is the invocation cap --
+  // not the retry gate -- that is proven to stop the cycle.
+  { next: "invoke", skillId: "business_strategy", focus: "does the accumulated evidence change which constraint is binding?", retryRationale: "Retry after business_strategy returned UNAVAILABLE: the findings so far now isolate a capacity constraint instead of the growth model." },
+  { next: "invoke", skillId: "brand_strategy", focus: "is positioning implicated by the constraint the other methods named?", retryRationale: "Retry after brand_strategy returned UNAVAILABLE: the later findings changed what the brand method has to test." },
 ];
 
 test("failure observability: a cap hold records which Skills ran -- six skillId:status entries in invocation order, original termination reason preserved, no finding prose", async (t) => {

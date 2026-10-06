@@ -935,10 +935,11 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
  *   swallowed).
  * - Once the cycle DOES run, every subsequent stop condition it reports
  *   (every invoked Skill failed, synthesis judged insufficient, a move naming
- *   an undeclared or unknown Skill, a cycle that did not converge) fails
- *   closed via the existing handleBlocked, exactly like every other Strategy
- *   stop condition -- no new failure-handling mechanism is introduced for
- *   those.
+ *   an undeclared or unknown Skill, a repeat of an already-failed Skill
+ *   without the retry justification it requires, a cycle that did not
+ *   converge) fails closed via the existing handleBlocked, exactly like every
+ *   other Strategy stop condition -- no new failure-handling mechanism is
+ *   introduced for those.
  * - `skills.get("strategy_analysis")` failing closed (SkillResolutionError)
  *   is NOT caught here: an Action that requires Skills and cannot be handed
  *   them must not run.
