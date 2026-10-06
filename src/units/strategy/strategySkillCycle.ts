@@ -67,9 +67,12 @@ import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegist
  *   degrades to the unchanged core diagnosis, is logged, and is persisted on
  *   WorkState.
  * - The cycle ran and its own methodology says stop (every invoked Skill
- *   failed; the diagnosis did not converge within the invocation cap; a
- *   synthesized judgment is insufficient). This is a hold and fails closed
- *   through the existing `handleBlocked`.
+ *   failed; a synthesized judgment is insufficient). This is a hold and fails
+ *   closed through the existing `handleBlocked`.
+ * - The cycle reached the invocation cap. Nothing further is invoked. If at
+ *   least one Skill has completed, the cycle goes to synthesis with the
+ *   findings recorded so far (synthesis and the core diagnosis gate still
+ *   judge sufficiency); with no completed finding it holds.
  * - A move naming a Skill this Action did not declare is refused at the point
  *   of use, mirroring `ResolvedActionSkillSet.get`'s own rule: execution may
  *   only follow the Skills its Action requires.
@@ -532,12 +535,12 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
     return { status: "ok", findings, synthesizedContext: synthesis.synthesizedContext ?? "" };
   };
 
-  // A refused repeat of a failed Skill stops the cycle from invoking anything
-  // further. When at least one Skill already completed, those findings are
-  // reconciled rather than discarded -- synthesis and the core diagnosis gate
-  // still judge whether they suffice. With no completed finding there is
-  // nothing to reconcile, so the refusal holds.
-  const refuseRepeat = async (reason: string): Promise<StrategySkillCycleOutcome> => {
+  // A refused repeat of a failed Skill, or reaching the invocation cap, stops
+  // the cycle from invoking anything further. When at least one Skill already
+  // completed, those findings are reconciled rather than discarded --
+  // synthesis and the core diagnosis gate still judge whether they suffice.
+  // With no completed finding there is nothing to reconcile, so it holds.
+  const stopInvoking = async (reason: string): Promise<StrategySkillCycleOutcome> => {
     if (!findings.some((f) => f.status === "completed")) {
       return { status: "hold", reason, findings };
     }
@@ -597,11 +600,9 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
       };
     }
     if (findings.length >= MAX_STRATEGY_SKILL_INVOCATIONS) {
-      return {
-        status: "hold",
-        reason: `The diagnostic cycle did not converge within ${MAX_STRATEGY_SKILL_INVOCATIONS} Strategy Skill invocations -- refusing to keep invoking methods indefinitely.`,
-        findings,
-      };
+      return stopInvoking(
+        `The diagnostic cycle did not converge within ${MAX_STRATEGY_SKILL_INVOCATIONS} Strategy Skill invocations -- refusing to keep invoking methods indefinitely.`,
+      );
     }
 
     // A Skill that already returned UNAVAILABLE in this cycle is not an
@@ -618,14 +619,14 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
     if (priorFailure) {
       const retryRationale = (decision.retryRationale ?? "").trim();
       if (retryRationale.length < MIN_RETRY_RATIONALE_LENGTH) {
-        return refuseRepeat(
+        return stopInvoking(
           `Strategy Analysis asked to invoke "${skillId}" again after that method already failed to return a defensible finding, without the retry justification a repeat requires (a retryRationale of at least ${MIN_RETRY_RATIONALE_LENGTH} characters). Refusing to spend another invocation on an unqualified repeat.`,
         );
       }
       const focus = (decision.focus ?? "").trim();
       const question = (decision.diagnosticQuestion ?? "").trim();
       if (focus === priorFailure.focus && question === priorFailure.diagnosticQuestion) {
-        return refuseRepeat(
+        return stopInvoking(
           `Strategy Analysis asked to invoke "${skillId}" again with a retry justification, but the question this repeat would answer is unchanged from the failed attempt. Refusing to spend another invocation on the same retry.`,
         );
       }
