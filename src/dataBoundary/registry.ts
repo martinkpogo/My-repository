@@ -278,7 +278,7 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
   "strategy.specialist_selection": {
     id: "strategy.specialist_selection",
     name: "Strategy Analysis Step",
-    description: "One move in the Strategy Analyst's diagnostic cycle: interprets the evidence accumulated so far, names the question it leaves open, and chooses exactly one next move -- invoke one declared Strategy Skill, or stop and synthesize.",
+    description: "The Strategy Analyst's one planning call: interprets the evidence, names the questions it leaves open, and plans which declared Strategy Skills (at most three, possibly none) to run once each, in parallel.",
   },
   "strategy.business_diagnosis": {
     id: "strategy.business_diagnosis",

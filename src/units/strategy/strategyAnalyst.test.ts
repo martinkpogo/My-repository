@@ -267,12 +267,11 @@ function fakeAi(diagnosisJson: unknown, routingJson: unknown = { target: "none" 
   return {
     run: async (_model: any, opts: any) => {
       const system = String(opts?.messages?.[0]?.content ?? "");
-      // The composable-Skills cycle's Strategy Analysis move. "synthesize"
-      // with no findings yet is the everyday case: Strategy Analysis judged
-      // the supplied evidence sufficient on its own, so no bounded domain
-      // Skill is invoked at all.
-      if (system.includes("one move in a diagnostic cycle")) {
-        return { response: JSON.stringify({ next: "synthesize", interpretation: "Directly resolvable from the available evidence.", diagnosticQuestion: "", rationale: "No domain method is required." }) };
+      // Strategy Analysis's one planning call. An empty plan is the everyday
+      // case: Strategy Analysis judged the supplied evidence sufficient on its
+      // own, so no bounded domain Skill is invoked at all.
+      if (system.includes("This call plans the diagnosis once")) {
+        return { response: JSON.stringify({ interpretation: "Directly resolvable from the available evidence.", plan: [], rationale: "No domain method is required." }) };
       }
       if (system.includes("reconciling the bounded Strategy Skill findings")) {
         return { response: JSON.stringify({ sufficient: true, synthesizedContext: "test synthesis" }) };
@@ -2382,26 +2381,30 @@ test("handleDirectRequestClarification re-attempts resolution against Martin's f
 
 
 /**
- * Composable-Skills composition tests (ENIG Core Structure v3.0).
+ * Composable-Skills composition tests (ENIG Core Structure v3.0): plan once,
+ * run in parallel, synthesize once.
  *
- * These replace LOG-845's specialist-Hat composition tests. Strategy is ONE
- * organizational Hat; the specialist domains are Skills it follows one move
- * at a time; every Skill reaches execution only through the generic Registry
- * (the set is resolved from the manifest's own `skill_requirements`, exactly
- * as production resolves it).
+ * Strategy is ONE organizational Hat; the specialist domains are Skills that
+ * a single plan may name; every Skill reaches execution only through the
+ * generic Registry (the set is resolved from the manifest's own
+ * `skill_requirements`, exactly as production resolves it). These replace the
+ * sequential-cycle tests (one move per Skill, invocation cap, retry rule):
+ * there is no loop left for those rules to bound.
  *
  * `strategy.specialist_selection` / `business_diagnosis` / `brand_diagnosis` /
  * `communication_diagnosis` / `specialist_synthesis` are classified
  * business_sensitive/TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
- * PRODUCTION_OUTBOUND_POLICY (see policy.ts), so the cycle genuinely runs
- * against the real production policy tables here -- no test-time policy
+ * PRODUCTION_OUTBOUND_POLICY (see policy.ts), so the composition genuinely
+ * runs against the real production policy tables here -- no test-time policy
  * override is needed or used.
  */
-type Move = { next: "invoke"; skillId: string; focus?: string; retryRationale?: string; diagnosticQuestion?: string } | { next: "synthesize" } | "throw";
+type PlanEntry = { skillId: string; question?: string };
 
 type CycleScript = {
-  /** Strategy Analysis moves, consumed in order; the last entry repeats once exhausted. Defaults to a single "synthesize" (no Skill needed). */
-  moves?: Move[];
+  /** The planning call's `plan`. Defaults to an empty plan (no Skill needed). "throw" simulates a provider failure. */
+  plan?: PlanEntry[] | "throw";
+  /** Overrides the whole planning response, for malformed-plan cases. */
+  planResponse?: unknown;
   /** Per-Skill responses, keyed by Skill id. Defaults to a completed finding. */
   skills?: Record<string, unknown | "throw">;
   synthesis?: unknown;
@@ -2411,12 +2414,12 @@ type CycleScript = {
 };
 
 interface RecordedCall {
-  kind: "analysis" | "skill" | "synthesis" | "diagnosis" | "routing" | "proposal";
+  kind: "plan" | "skill" | "synthesis" | "diagnosis" | "routing" | "proposal";
   skillId?: string;
   prompt: string;
 }
 
-/** Same dispatch as fakeAi, plus the cycle's own steps -- and a record of every call, so prompts are assertable. */
+/** Same dispatch as fakeAi, plus the composition's own steps -- and a record of every call, so prompts are assertable. */
 function fakeAiCycle(script: CycleScript): { ai: Ai; calls: RecordedCall[] } {
   const calls: RecordedCall[] = [];
   const defaultSkillFinding = (skillId: string) => ({
@@ -2435,21 +2438,12 @@ function fakeAiCycle(script: CycleScript): { ai: Ai; calls: RecordedCall[] } {
         return { response: JSON.stringify(val) };
       };
 
-      if (system.includes("one move in a diagnostic cycle")) {
-        const moves = script.moves && script.moves.length > 0 ? script.moves : [{ next: "synthesize" as const }];
-        const move = moves[Math.min(calls.filter((c) => c.kind === "analysis").length, moves.length - 1)];
-        calls.push({ kind: "analysis", prompt: all });
-        if (move === "throw") throw new Error("simulated Strategy Analysis provider failure");
-        if (move.next === "synthesize") return respond({ next: "synthesize", interpretation: "the evidence answers the question", diagnosticQuestion: "", rationale: "no further method needed" });
-        return respond({
-          next: "invoke",
-          skillId: move.skillId,
-          focus: move.focus ?? "the open diagnostic question",
-          interpretation: "",
-          diagnosticQuestion: move.diagnosticQuestion ?? "",
-          rationale: "this domain of judgment is required",
-          ...(move.retryRationale ? { retryRationale: move.retryRationale } : {}),
-        });
+      if (system.includes("This call plans the diagnosis once")) {
+        calls.push({ kind: "plan", prompt: all });
+        if (script.planResponse !== undefined) return respond(script.planResponse);
+        if (script.plan === "throw") throw new Error("simulated Strategy Analysis provider failure");
+        const plan = (script.plan ?? []).map((p) => ({ skillId: p.skillId, question: p.question ?? `what does ${p.skillId} establish about the open question?` }));
+        return respond({ interpretation: "the evidence leaves the binding constraint open", plan, rationale: "these domains of judgment are required" });
       }
 
       const skillMatch = system.match(/applying one bounded Strategy Skill: `([^`]+)`/);
@@ -2475,7 +2469,7 @@ function fakeAiCycle(script: CycleScript): { ai: Ai; calls: RecordedCall[] } {
         calls.push({ kind: "routing", prompt: all });
         return respond(script.routing ?? { target: "none" });
       }
-      throw new Error(`Unexpected AI call in cycle test -- system prompt: ${system.slice(0, 120)}`);
+      throw new Error(`Unexpected AI call in composition test -- system prompt: ${system.slice(0, 120)}`);
     },
   } as any;
   return { ai, calls };
@@ -2489,20 +2483,28 @@ const COMPLETED_SKILL_FINDING = {
   unresolvedQuestion: "What is the cost of adding capacity?",
 };
 
-test("Skills: Strategy's diagnose Action resolves exactly its declared Strategy Skill set through the generic Registry", async () => {
+const FAILED_BUSINESS_FINDING = { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible business finding" };
+
+const BUSINESS_AND_BRAND: PlanEntry[] = [
+  { skillId: "business_strategy", question: "is the commercial model the binding constraint?" },
+  { skillId: "brand_strategy", question: "is positioning implicated in the perception symptom?" },
+];
+
+test("Skills: Strategy's diagnose Action resolves exactly its declared Strategy Skill set through the generic Registry -- research_signal is not declared", async () => {
   assert.deepStrictEqual(
     STRATEGY_SKILLS.declared,
-    ["strategy_analysis", "brand_strategy", "business_strategy", "communication_strategy", "research_signal"],
-    "the multi-Skill Responsibility declares the orchestration Skill, the three bounded domain Skills, and the reused research_signal -- no Skill is duplicated and none is mandatory",
+    ["strategy_analysis", "brand_strategy", "business_strategy", "communication_strategy"],
+    "the multi-Skill Responsibility declares the planning/synthesis Skill and the three bounded domain Skills -- no Skill is duplicated and none is mandatory",
   );
+  assert.ok(!STRATEGY_SKILLS.declared.includes("research_signal"), "research_signal can only re-judge supplied evidence; it is not offered to diagnose until research has an owning Action");
   // Resolved content is the Registry's own verified package, not something
   // the handler built -- the same call production makes at the execution
   // boundary.
-  assert.match(STRATEGY_SKILLS.get("strategy_analysis").content, /diagnostic-cycle discipline/);
-  assert.strictEqual(STRATEGY_SKILLS.get("research_signal").content, resolveSkill("research_signal").content);
-  assert.strictEqual(STRATEGY_SKILLS.get("research_signal").version, resolveSkill("research_signal").version);
+  assert.match(STRATEGY_SKILLS.get("strategy_analysis").content, /planning and synthesis discipline/);
+  assert.strictEqual(STRATEGY_SKILLS.get("strategy_analysis").version, "2.0.0");
+  assert.match(STRATEGY_SKILLS.get("strategy_analysis").content, /Judge sufficiency for the diagnosis, not for completeness/);
   // There is no mandatory primary Skill: every one of them is optional
-  // methodology, and the cycle may follow none at all (asserted below).
+  // methodology, and a plan may follow none at all (asserted below).
   assert.strictEqual(strategyManifest.hats["Strategy Analyst"].actions.filter((a) => a.skill_requirements?.length).length, 1);
 });
 
@@ -2517,44 +2519,40 @@ test("Skills: Strategy remains ONE organizational Hat -- the specialist Hats are
   assert.ok(!ALL_HATS.some((h) => h.name === "Marketing Strategist" && h.unit === "Strategy"));
 });
 
-test("Skills: no call in the cycle is ever addressed as a specialist Hat -- the Strategy Analyst stays the single accountable actor", async (t) => {
+test("Skills: no composition call is ever addressed as a specialist Hat -- the Strategy Analyst stays the single accountable actor", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
-  });
+  const { ai, calls } = fakeAiCycle({ plan: BUSINESS_AND_BRAND });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "delivered");
   assert.strictEqual(result.hat, "Strategy Analyst", "Hat switching must never happen -- the accountable Hat is unchanged");
   assert.ok(calls.some((c) => c.kind === "skill"), "the Skills genuinely ran");
   for (const call of calls) {
     for (const retired of ["Business Strategist Hat", "Brand Strategist Hat", "Communication Strategist Hat"]) {
-      assert.ok(!call.prompt.includes(retired), `no cycle call may be addressed as the retired ${retired}`);
+      assert.ok(!call.prompt.includes(retired), `no composition call may be addressed as the retired ${retired}`);
     }
   }
-  // The three cycle steps are Skill methodology only -- none of them fetches
+  // The composition steps are Skill methodology only -- none of them fetches
   // or follows a Hat Definition. (The unchanged core-diagnosis step still
   // does, and still should: it is the Strategy Analyst's own governance.)
-  for (const call of calls.filter((c) => c.kind === "analysis" || c.kind === "skill" || c.kind === "synthesis")) {
+  for (const call of calls.filter((c) => c.kind === "plan" || c.kind === "skill" || c.kind === "synthesis")) {
     assert.ok(!call.prompt.includes("Hat Definition"), "a Strategy Skill is methodology, not a fetched Hat Definition");
   }
 });
 
-test("composition: Strategy Analysis can invoke ONE Strategy Skill and finish", async (t) => {
+test("plan: one planned Strategy Skill runs and the diagnosis finishes", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   const { ai, calls } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "brand_strategy", focus: "is positioning the real constraint?" }, { next: "synthesize" }],
+    plan: [{ skillId: "brand_strategy", question: "is positioning the real constraint?" }],
     skills: { brand_strategy: COMPLETED_SKILL_FINDING },
   });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.strategySkillFindings?.length, 1);
   assert.strictEqual(result.strategySkillFindings?.[0].skillId, "brand_strategy");
@@ -2564,107 +2562,79 @@ test("composition: Strategy Analysis can invoke ONE Strategy Skill and finish", 
   assert.deepStrictEqual(calls.filter((c) => c.kind === "skill").map((c) => c.skillId), ["brand_strategy"], "exactly one Skill was invoked");
 });
 
-test("composition: Strategy Analysis can invoke multiple Strategy Skills sequentially, each after the previous one returned", async (t) => {
+test("plan: Strategy Analysis plans exactly once; the planned Skills each run once, independently, and their findings keep the plan's order", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "business_strategy" },
-      { next: "invoke", skillId: "brand_strategy" },
-      { next: "invoke", skillId: "communication_strategy" },
-      { next: "synthesize" },
-    ],
-  });
-  env.AI = ai;
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
-
-  assert.deepStrictEqual(
-    result.strategySkillFindings?.map((f) => f.skillId),
-    ["business_strategy", "brand_strategy", "communication_strategy"],
-    "Skills run one at a time, in the order Strategy Analysis chose them -- never concurrently",
-  );
-  assert.ok(result.strategySkillFindings?.every((f) => f.status === "completed"));
-  // Strict ordering: skill 2 is only requested after skill 1 has returned.
-  const kinds = calls.map((c) => c.kind);
-  assert.deepStrictEqual(kinds.filter((k) => k === "analysis" || k === "skill"), [
-    "analysis", "skill", "analysis", "skill", "analysis", "skill", "analysis",
-  ]);
-  assert.strictEqual(result.stage, "delivered");
-});
-
-test("composition: a later Strategy Skill's move is chosen from an earlier Skill's finding -- Strategy Analysis reads what came back before deciding again", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "business_strategy" },
-      { next: "invoke", skillId: "brand_strategy", focus: "is the brand-perception symptom downstream of the capacity constraint?" },
-      { next: "synthesize" },
+    plan: [
+      { skillId: "business_strategy", question: "is the commercial model the binding constraint?" },
+      { skillId: "brand_strategy", question: "is the perception symptom a positioning problem?" },
+      { skillId: "communication_strategy", question: "does the proposal material communicate capability?" },
     ],
     skills: { business_strategy: COMPLETED_SKILL_FINDING },
   });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
+  assert.strictEqual(calls.filter((c) => c.kind === "plan").length, 1, "one planning decision -- no move-by-move loop");
+  assert.deepStrictEqual(
+    result.strategySkillFindings?.map((f) => f.skillId),
+    ["business_strategy", "brand_strategy", "communication_strategy"],
+    "recorded in the plan's order",
+  );
+  assert.deepStrictEqual(
+    calls.filter((c) => c.kind === "skill").map((c) => c.skillId).sort(),
+    ["brand_strategy", "business_strategy", "communication_strategy"],
+    "each planned Skill runs exactly once",
+  );
+  const brandCall = calls.find((c) => c.kind === "skill" && c.skillId === "brand_strategy")!;
+  assert.ok(brandCall.prompt.includes("is the perception symptom a positioning problem?"), "each Skill is handed its own planned question");
+  assert.ok(
+    !brandCall.prompt.includes("Fulfilment capacity has not scaled with demand for two quarters."),
+    "a Skill never sees another Skill's finding -- they run independently against the same evidence",
+  );
+  const kinds = calls.map((c) => c.kind);
+  assert.strictEqual(kinds.indexOf("synthesis"), kinds.lastIndexOf("synthesis"), "synthesis runs once");
+  assert.ok(kinds.indexOf("synthesis") > kinds.lastIndexOf("skill"), "synthesis runs after every planned Skill returned");
   assert.strictEqual(result.stage, "delivered");
-  const skillCalls = calls.filter((c) => c.kind === "skill");
-  const brandCall = skillCalls.find((c) => c.skillId === "brand_strategy");
-  assert.ok(brandCall, "the second Skill must have run");
-  assert.ok(
-    brandCall!.prompt.includes("Fulfilment capacity has not scaled with demand for two quarters."),
-    "the later Skill must be handed the earlier Skill's finding -- the cycle accumulates, it does not start over",
-  );
-  assert.ok(
-    brandCall!.prompt.includes("downstream of the capacity constraint"),
-    "the move's own `focus` names the dependency the Strategy Analysis move chose",
-  );
-  const analysisAfterFirstSkill = calls.filter((c) => c.kind === "analysis")[1];
-  assert.ok(
-    analysisAfterFirstSkill.prompt.includes("Fulfilment capacity has not scaled with demand for two quarters."),
-    "Strategy Analysis itself resumes with the accumulated finding in front of it",
-  );
 });
 
-test("composition: unnecessary Strategy Skills are skipped -- a genuine no-Skill determination is distinct from the cycle being unavailable", async (t) => {
+test("plan: a failed Skill is never re-run and Strategy Analysis is never asked again -- there is no loop to repeat it", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({ moves: [{ next: "synthesize" }] });
+  const { ai, calls } = fakeAiCycle({ plan: BUSINESS_AND_BRAND, skills: { business_strategy: FAILED_BUSINESS_FINDING } });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(calls.filter((c) => c.kind === "plan").length, 1);
+  assert.strictEqual(calls.filter((c) => c.kind === "skill" && c.skillId === "business_strategy").length, 1, "the failed Skill ran once");
+  assert.deepStrictEqual(result.strategySkillFindings?.map((f) => f.status), ["failed", "completed"]);
+  assert.ok(calls.find((c) => c.kind === "synthesis")?.prompt.includes("UNAVAILABLE"), "synthesis is told the finding is missing -- never given it as if it were neutral");
+  assert.strictEqual(result.stage, "delivered");
+});
+
+test("plan: an empty plan skips every Skill -- a genuine no-Skill determination is distinct from the plan being unavailable", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({ plan: [] });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.deepStrictEqual(result.strategySkillFindings, [], "no Skill was invoked");
   assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, "a skipped Skill is never invoked 'for completeness'");
-  assert.strictEqual(result.strategySkillCycleUnavailable, false, "Strategy Analysis genuinely ran and determined no Skill was needed -- never conflated with the cycle not being able to run");
+  assert.strictEqual(calls.filter((c) => c.kind === "synthesis").length, 0, "nothing to reconcile");
+  assert.strictEqual(result.strategySkillCycleUnavailable, false, "Strategy Analysis genuinely ran and determined no Skill was needed -- never conflated with the plan not being obtainable");
   assert.strictEqual(result.stage, "delivered");
 });
 
-test("composition: Strategy Analysis resumes after every Strategy Skill -- one analysis move before each Skill, and one final move that stops", async (t) => {
+test("plan: a planning call that fails degrades to the unchanged core diagnosis, recorded as unavailable", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
-  });
+  const { ai } = fakeAiCycle({ plan: "throw" });
   env.AI = ai;
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
-
-  assert.strictEqual(calls.filter((c) => c.kind === "analysis").length, 3, "two Skills invoked, so Strategy Analysis runs three times (twice to choose, once to stop)");
-  assert.strictEqual(result.stage, "delivered");
-});
-
-test("composition: an unusable Strategy Analysis move degrades to the unchanged core diagnosis, recorded as unavailable", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai } = fakeAiCycle({ moves: ["throw"] });
-  env.AI = ai;
-  const state = fakeState();
 
   const originalWarn = console.warn;
   const warned: string[] = [];
@@ -2673,67 +2643,70 @@ test("composition: an unusable Strategy Analysis move degrades to the unchanged 
     console.warn = originalWarn;
   });
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.deepStrictEqual(result.strategySkillFindings, []);
-  assert.strictEqual(result.strategySkillCycleUnavailable, true, "a genuine provider failure on the analysis move must be recorded as unavailable, never conflated with no Skill being needed");
-  assert.strictEqual(result.stage, "delivered", "an unrelated cycle failure must never block an otherwise-resolvable core diagnosis");
+  assert.strictEqual(result.strategySkillCycleUnavailable, true, "a genuine provider failure on the plan must be recorded as unavailable, never conflated with no Skill being needed");
+  assert.strictEqual(result.stage, "delivered", "a composition failure must never block an otherwise-resolvable core diagnosis");
   assert.ok(warned.some((w) => w.includes("Skill cycle unavailable")), "the degradation is logged, never silently swallowed");
 });
 
-test("composition: every invoked Strategy Skill failing fails closed via the existing handleBlocked -- never proceeds as if the findings were complete", async (t) => {
+test("plan: a malformed plan is unusable and degrades the same way -- nothing it names is run", async (t) => {
+  const malformed: Array<{ name: string; response: unknown }> = [
+    { name: "plan is not a list", response: { plan: "business_strategy" } },
+    {
+      name: "more than MAX_PLANNED_STRATEGY_SKILLS entries",
+      response: {
+        plan: [
+          { skillId: "business_strategy", question: "a" },
+          { skillId: "brand_strategy", question: "b" },
+          { skillId: "communication_strategy", question: "c" },
+          { skillId: "business_strategy", question: "d" },
+        ],
+      },
+    },
+    { name: "a Skill named twice", response: { plan: [{ skillId: "business_strategy", question: "a" }, { skillId: "business_strategy", question: "b" }] } },
+    { name: "an entry with no question of its own", response: { plan: [{ skillId: "business_strategy", question: "  " }] } },
+  ];
+  for (const { name, response } of malformed) {
+    mockFetch(t, { initialStatus: "Pending" });
+    const env = fakeEnv();
+    const { ai, calls } = fakeAiCycle({ planResponse: response });
+    env.AI = ai;
+
+    const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+    assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, `${name}: nothing runs`);
+    assert.strictEqual(result.strategySkillCycleUnavailable, true, `${name}: recorded as unavailable`);
+    assert.strictEqual(result.stage, "delivered", `${name}: the core diagnosis still runs`);
+  }
+});
+
+test("plan: every planned Strategy Skill failing fails closed via the existing handleBlocked -- never proceeds as if the findings were complete", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
-    skills: { business_strategy: { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible business finding" } },
-  });
+  const { ai, calls } = fakeAiCycle({ plan: [{ skillId: "business_strategy" }], skills: { business_strategy: FAILED_BUSINESS_FINDING } });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyDiagnosis, undefined, "core diagnosis must never run when the only requested finding is unavailable");
+  assert.strictEqual(calls.filter((c) => c.kind === "synthesis").length, 0, "nothing to reconcile");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Held"));
+  assert.ok(activityLogBlocker(log).includes("Every Strategy Skill invoked"));
 });
 
-test("composition: a partial Skill failure still allows synthesis to proceed, with the unavailable Skill explicit rather than backfilled", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
-    skills: {
-      business_strategy: COMPLETED_SKILL_FINDING,
-      brand_strategy: { sufficient: false, blockedReason: "no perception evidence was supplied" },
-    },
-  });
-  env.AI = ai;
-  const state = fakeState();
-
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
-
-  const bySkill = Object.fromEntries((result.strategySkillFindings ?? []).map((f) => [f.skillId, f]));
-  assert.strictEqual(bySkill.business_strategy.status, "completed");
-  assert.strictEqual(bySkill.brand_strategy.status, "failed");
-  assert.ok(bySkill.brand_strategy.failureReason?.includes("no perception evidence"), "the failure reason travels with the finding");
-  const synthesisCall = calls.find((c) => c.kind === "synthesis");
-  assert.ok(synthesisCall?.prompt.includes("UNAVAILABLE"), "synthesis is told the finding is missing -- never given it as if it were neutral");
-  assert.strictEqual(result.stage, "delivered");
-});
-
-test("composition: synthesis judged insufficient fails closed and never produces a proposal", async (t) => {
+test("plan: synthesis judged insufficient fails closed and never produces a proposal", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   const { ai } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
-    skills: { business_strategy: COMPLETED_SKILL_FINDING },
+    plan: BUSINESS_AND_BRAND,
     synthesis: { sufficient: false, insufficiencyReason: "The business and brand findings materially conflict on root cause and cannot be reconciled from the supplied evidence." },
   });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyDiagnosis, undefined, "must never proceed to core diagnosis/proposal on an unreconciled conflict");
@@ -2741,45 +2714,78 @@ test("composition: synthesis judged insufficient fails closed and never produces
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("conflict")));
 });
 
-test("composition: a move naming a Skill this Action did not declare is refused at the point of use", async (t) => {
+test("plan: synthesis judges sufficiency for the diagnosis -- it sees the situation, and known unknowns and to-be-produced figures are uncertainty, not insufficiency", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({ plan: BUSINESS_AND_BRAND });
+  env.AI = ai;
+  const state = fakeState();
+
+  await handlePickup(env, state, STRATEGY_SKILLS);
+
+  const synthesis = calls.find((c) => c.kind === "synthesis")!.prompt;
+  assert.match(synthesis, /Judge sufficiency for the DIAGNOSIS, not for completeness/);
+  assert.match(synthesis, /intervention scope, budget, price/, "figures the diagnosis is meant to produce are named as uncertainty, never a precondition");
+  assert.match(synthesis, /specific fact that could be obtained is missing and would change the problem definition or the direction/);
+  assert.ok(synthesis.includes("=== SITUATION (already sanitized) ==="), "synthesis reads the situation, so it can see which unknowns are already recorded as unknown");
+});
+
+test("plan: the planning prompt offers exactly the declared domain methods, once, with no retry or move-by-move machinery", async (t) => {
+  mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({ plan: [] });
+  env.AI = ai;
+
+  await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  const plan = calls.find((c) => c.kind === "plan")!.prompt;
+  for (const id of ["business_strategy", "brand_strategy", "communication_strategy"]) {
+    assert.ok(plan.includes(`- ${id}:`), `${id} is offered`);
+  }
+  assert.ok(!plan.includes("- research_signal:"), "research_signal is not offered");
+  assert.ok(!plan.includes("retryRationale"), "no retry rule exists to describe");
+  assert.match(plan, /At most 3 entries/);
+  assert.match(plan, /runs once, independently and at the same time/);
+});
+
+test("plan: a plan naming a Skill this Action did not declare is refused at the point of use -- nothing runs", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   // Only two Skills declared -- `communication_strategy` is a real Strategy
   // domain Skill, but not one THIS Action requires.
   const twoSkills = createResolvedActionSkillSet([resolveSkill("strategy_analysis"), resolveSkill("brand_strategy")]);
-  const { ai } = fakeAiCycle({ moves: [{ next: "invoke", skillId: "communication_strategy" }] });
+  const { ai, calls } = fakeAiCycle({ plan: [{ skillId: "brand_strategy" }, { skillId: "communication_strategy" }] });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, twoSkills);
+  const result = await handlePickup(env, fakeState(), twoSkills);
 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.strategyDiagnosis, undefined);
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, "the plan is checked whole before any Skill runs");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("did not declare")));
 });
 
-test("composition: a move naming something that is not a Strategy domain Skill is refused -- no improvisation substitutes for a declared Skill", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai } = fakeAiCycle({ moves: [{ next: "invoke", skillId: "opportunity_qualification_gate" }] });
-  env.AI = ai;
-  const state = fakeState();
+test("plan: a plan naming something that is not a Strategy domain Skill (including research_signal) is refused -- no improvisation substitutes for a declared Skill", async (t) => {
+  for (const id of ["opportunity_qualification_gate", "research_signal"]) {
+    const log = mockFetch(t, { initialStatus: "Pending" });
+    const env = fakeEnv();
+    const { ai, calls } = fakeAiCycle({ plan: [{ skillId: id }] });
+    env.AI = ai;
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+    const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined);
-  assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("not a Strategy domain Skill")));
+    assert.strictEqual(result.stage, "strategy_blocked", `${id}: refused`);
+    assert.strictEqual(result.strategyDiagnosis, undefined);
+    assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0);
+    assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("not a Strategy domain Skill")));
+  }
 });
 
-test("composition: which Strategy Skills ran is observable in logs -- otherwise execution is unreconstructable after the fact (nothing else persists it)", async (t) => {
+test("plan: which Strategy Skills ran is observable in logs -- otherwise execution is unreconstructable after the fact (nothing else persists it)", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "brand_strategy" }, { next: "synthesize" }],
-  });
+  const { ai } = fakeAiCycle({ plan: BUSINESS_AND_BRAND });
   env.AI = ai;
-  const state = fakeState();
 
   const originalLog = console.log;
   const logged: string[] = [];
@@ -2788,18 +2794,17 @@ test("composition: which Strategy Skills ran is observable in logs -- otherwise 
     console.log = originalLog;
   });
 
-  await handlePickup(env, state, STRATEGY_SKILLS);
+  await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.ok(logged.some((l) => l.includes("invoked 2 Strategy Skill(s): business_strategy:completed, brand_strategy:completed")), "must log which Skills ran and their outcome");
   assert.ok(logged.some((l) => l.includes("synthesis") && l.includes("sufficient")), "must log that synthesis was folded into the diagnosis");
 });
 
-test("composition: a genuine no-Skill determination is also observable in logs, distinct from the Skills-invoked case", async (t) => {
+test("plan: a genuine no-Skill determination is also observable in logs, distinct from the Skills-invoked case", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai } = fakeAiCycle({ moves: [{ next: "synthesize" }] });
+  const { ai } = fakeAiCycle({ plan: [] });
   env.AI = ai;
-  const state = fakeState();
 
   const originalLog = console.log;
   const logged: string[] = [];
@@ -2808,22 +2813,18 @@ test("composition: a genuine no-Skill determination is also observable in logs, 
     console.log = originalLog;
   });
 
-  await handlePickup(env, state, STRATEGY_SKILLS);
+  await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.ok(logged.some((l) => l.includes("no Strategy Skill was required")), "must log the genuine no-Skill determination distinctly from a cycle failure");
+  assert.ok(logged.some((l) => l.includes("no Strategy Skill was required")), "must log the genuine no-Skill determination distinctly from a planning failure");
 });
 
 test("composition never lets a Strategy Skill touch the canonical Strategy Proposal -- state.strategyProposal is untouched immediately after composition/diagnosis, set only later by the existing approval-gated developStrategyProposal step", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
-    skills: { business_strategy: COMPLETED_SKILL_FINDING },
-  });
+  const { ai } = fakeAiCycle({ plan: [{ skillId: "business_strategy" }], skills: { business_strategy: COMPLETED_SKILL_FINDING } });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   // NO_RECOMMENDATION_DIAGNOSIS (this file's default composition-test
   // diagnosis) never reaches developStrategyProposal at all -- confirming
@@ -2837,302 +2838,19 @@ test("composition reaches the existing Strategy Approval Needed gate -- a recomm
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   const { ai } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
+    plan: [{ skillId: "business_strategy" }],
     skills: { business_strategy: COMPLETED_SKILL_FINDING },
     diagnosis: SUFFICIENT_DIAGNOSIS,
   });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
   assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
-  assert.ok(result.strategyProposal, "the approval-gated proposal is built by the unchanged step, after the cycle");
+  assert.ok(result.strategyProposal, "the approval-gated proposal is built by the unchanged step, after the composition");
   assert.ok(result.pendingStrategyApproval, "Approval Needed is reached: Martin's explicit Approve/Refine/Reject is still required");
   assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
-});
-
-/**
- * Repeat-of-a-failed-Skill contract tests. HO-86 in production spent all six
- * of its invocations on two Skills that failed every time and was stopped only
- * by the cap; these pin the runtime rule that prevents that being the model's
- * default while leaving specialist selection -- and every other move shape --
- * exactly where it was.
- */
-const FAILED_BUSINESS_FINDING = { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible business finding" };
-
-test("retry contract: a failed Skill is never blindly invoked again -- the unqualified repeat is refused before execution and the model is told the rule", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    // Exactly HO-86's shape: the id is simply selected again -- no rationale,
-    // no changed question.
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
-    skills: { business_strategy: FAILED_BUSINESS_FINDING },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(result.stage, "strategy_blocked", "the refusal fails closed through the existing blocked path");
-  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 1, "the repeat never reaches execution -- the invocation is not spent");
-  assert.deepStrictEqual(
-    result.strategySkillFindings?.map((f) => f.skillId),
-    ["business_strategy"],
-    "exactly one invocation is recorded, so the blocker's metadata stays truthful",
-  );
-  const blocker = activityLogBlocker(log);
-  assert.ok(blocker.includes("already failed"), `the refusal states why: ${blocker}`);
-  assert.ok(blocker.includes("retryRationale"), "and names the field whose justification was missing");
-  assert.ok(!blocker.includes("cannot support a defensible"), "failed finding prose still never reaches the blocker");
-
-  const analysisPrompts = calls.filter((c) => c.kind === "analysis").map((c) => c.prompt);
-  assert.ok(analysisPrompts[0].includes("retryRationale"), "the very first move is told what a repeat of a failed method requires");
-  assert.ok(
-    analysisPrompts[1].includes("METHODS ALREADY UNAVAILABLE IN THIS CYCLE") && analysisPrompts[1].includes("business_strategy"),
-    "the second move is told which methods are already unavailable rather than seeing them as ordinary options",
-  );
-});
-
-test("retry contract: a repeat carrying a concrete retryRationale and a materially changed question IS spent -- the gate is not a ban on retrying", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "business_strategy", focus: "is the commercial model the binding constraint?" },
-      {
-        next: "invoke",
-        skillId: "business_strategy",
-        focus: "does the capacity evidence from the later findings change which constraint binds?",
-        retryRationale: "business_strategy returned UNAVAILABLE on the growth model alone; the accumulated findings now isolate a capacity constraint, so the same method has a different question to answer.",
-      },
-      { next: "synthesize" },
-    ],
-    skills: { business_strategy: FAILED_BUSINESS_FINDING },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 2, "the justified, materially changed retry is allowed and is spent");
-  assert.strictEqual(result.stage, "strategy_blocked");
-  const blocker = activityLogBlocker(log);
-  assert.ok(blocker.includes("Every Strategy Skill invoked"), "the hold is the pre-existing all-failed one, not a retry refusal");
-  assert.ok(!blocker.includes("retryRationale"), "no retry refusal is raised for a qualified retry");
-  assert.ok(!blocker.includes("unchanged from the failed attempt"), "nor an unchanged-question refusal");
-});
-
-test("retry contract: both halves are required -- a justification without a changed question, and a changed question without a justification, each fail closed", async (t) => {
-  const attempts = [
-    {
-      name: "retryRationale present but the question is unchanged",
-      move: {
-        next: "invoke" as const,
-        skillId: "business_strategy",
-        focus: "the open diagnostic question",
-        retryRationale: "The earlier attempt was unavailable, and the accumulated evidence since then still leaves this same question open.",
-      },
-      expected: "unchanged from the failed attempt",
-      unexpected: "without the retry justification",
-    },
-    {
-      name: "question changed but the retryRationale is not a real justification",
-      move: { next: "invoke" as const, skillId: "business_strategy", focus: "a freshly worded question", retryRationale: "retry" },
-      expected: "without the retry justification",
-      unexpected: "unchanged from the failed attempt",
-    },
-    {
-      name: "question changed but no retryRationale at all",
-      move: { next: "invoke" as const, skillId: "business_strategy", focus: "a freshly worded question" },
-      expected: "without the retry justification",
-      unexpected: "unchanged from the failed attempt",
-    },
-  ];
-
-  for (const attempt of attempts) {
-    const log = mockFetch(t, { initialStatus: "Pending" });
-    const env = fakeEnv();
-    const { ai, calls } = fakeAiCycle({
-      moves: [{ next: "invoke", skillId: "business_strategy", focus: "the open diagnostic question" }, attempt.move, { next: "synthesize" }],
-      skills: { business_strategy: FAILED_BUSINESS_FINDING },
-    });
-    env.AI = ai;
-
-    const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-    assert.strictEqual(result.stage, "strategy_blocked", `${attempt.name}: fails closed`);
-    assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 1, `${attempt.name}: the invocation is not spent`);
-    // This test re-invokes mockFetch inside one `test` context, so each
-    // attempt's fetch log also sees the earlier attempts' writes -- take the
-    // LAST Blocker, which is this attempt's own.
-    const blockers = log.activityLogBodies.filter((b) => b.properties?.Type?.select?.name === "Blocker");
-    const blocker = String(blockers[blockers.length - 1]?.properties?.["Decision Rationale"]?.rich_text?.[0]?.text?.content ?? "");
-    assert.ok(blocker.includes(attempt.expected), `${attempt.name}: blocker says "${attempt.expected}" -- got: ${blocker}`);
-    assert.ok(!blocker.includes(attempt.unexpected), `${attempt.name}: must not claim the other defect`);
-  }
-});
-
-const FAILED_RESEARCH_FINDING = { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible research finding" };
-
-test("retry contract: a refused repeat with a completed finding goes to synthesis instead of discarding it (HO-86, 2026-10-06 19:39)", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    // Exactly the live run: business_strategy completed, research_signal
-    // failed, then research_signal selected again with no justification.
-    moves: [
-      { next: "invoke", skillId: "business_strategy" },
-      { next: "invoke", skillId: "research_signal", focus: "does the evidence show the brand affects win/loss?" },
-      { next: "invoke", skillId: "research_signal", focus: "does the evidence show the brand affects win/loss?" },
-    ],
-    skills: { business_strategy: COMPLETED_SKILL_FINDING, research_signal: FAILED_RESEARCH_FINDING },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.deepStrictEqual(
-    calls.filter((c) => c.kind === "skill").map((c) => c.skillId),
-    ["business_strategy", "research_signal"],
-    "the refused repeat is still never spent",
-  );
-  assert.ok(calls.some((c) => c.kind === "synthesis"), "the completed finding is reconciled");
-  assert.ok(calls.some((c) => c.kind === "diagnosis"), "the unchanged core diagnosis gate still judges the result");
-  assert.ok(calls.find((c) => c.kind === "synthesis")?.prompt.includes("UNAVAILABLE"), "synthesis is told research_signal is missing, not given it as neutral");
-  assert.strictEqual(result.stage, "delivered");
-  assert.strictEqual(activityLogBlocker(log), "", "no retry-refusal blocker is raised");
-});
-
-test("retry contract: an unchanged-question repeat with a completed finding also goes to synthesis", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "brand_strategy" },
-      { next: "invoke", skillId: "business_strategy", focus: "the open diagnostic question" },
-      {
-        next: "invoke",
-        skillId: "business_strategy",
-        focus: "the open diagnostic question",
-        retryRationale: "The earlier attempt was unavailable, and the accumulated evidence since then still leaves this same question open.",
-      },
-    ],
-    skills: { brand_strategy: COMPLETED_SKILL_FINDING, business_strategy: FAILED_BUSINESS_FINDING },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 2, "the unchanged repeat is not spent");
-  assert.ok(calls.some((c) => c.kind === "synthesis"));
-  assert.strictEqual(result.stage, "delivered");
-  assert.strictEqual(activityLogBlocker(log), "");
-});
-
-test("retry contract: synthesis after a refused repeat still judges sufficiency -- an insufficient synthesis holds", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "business_strategy" },
-      { next: "invoke", skillId: "research_signal" },
-      { next: "invoke", skillId: "research_signal" },
-    ],
-    skills: { business_strategy: COMPLETED_SKILL_FINDING, research_signal: FAILED_RESEARCH_FINDING },
-    synthesis: { sufficient: false, insufficiencyReason: "Win/loss attribution to the brand is unestablished and material to scope." },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(result.stage, "strategy_blocked", "synthesis is not a bypass: an insufficient judgment still fails closed");
-  assert.ok(!calls.some((c) => c.kind === "diagnosis"), "the core diagnosis does not run on an insufficient synthesis");
-  const blocker = activityLogBlocker(log);
-  assert.ok(blocker.includes("Win/loss attribution"), `the hold names the synthesis's own reason: ${blocker}`);
-  assert.ok(!blocker.includes("retryRationale"), "not the retry refusal");
-});
-
-test("retry contract: an untried declared Skill stays freely selectable after another Skill failed -- the rule gates repeats, not selection", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "business_strategy" },
-      { next: "invoke", skillId: "brand_strategy", focus: "is positioning implicated?" },
-      { next: "synthesize" },
-    ],
-    skills: { business_strategy: FAILED_BUSINESS_FINDING, brand_strategy: COMPLETED_SKILL_FINDING },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(result.stage, "delivered", "the cycle still reaches synthesis and the unchanged core diagnosis");
-  assert.deepStrictEqual(
-    calls.filter((c) => c.kind === "skill").map((c) => c.skillId),
-    ["business_strategy", "brand_strategy"],
-    "the untried Skill needs no retryRationale of any kind",
-  );
-  const bySkill = Object.fromEntries((result.strategySkillFindings ?? []).map((f) => [f.skillId, f]));
-  assert.strictEqual(bySkill.brand_strategy.status, "completed");
-  assert.strictEqual(bySkill.business_strategy.status, "failed");
-});
-
-test("retry contract: the synthesize path is untouched -- zero findings still finish quietly, all-failed still fails closed", async (t) => {
-  // (a) No Skill needed: synthesize with no findings.
-  mockFetch(t, { initialStatus: "Pending" });
-  const envA = fakeEnv();
-  const { ai: aiA, calls: callsA } = fakeAiCycle({ moves: [{ next: "synthesize" }] });
-  envA.AI = aiA;
-  const noSkill = await handlePickup(envA, fakeState(), STRATEGY_SKILLS);
-  assert.strictEqual(noSkill.stage, "delivered");
-  assert.strictEqual(callsA.filter((c) => c.kind === "skill").length, 0, "no invocation happens on a genuine no-Skill determination");
-  assert.strictEqual(noSkill.strategySkillCycleUnavailable, false, "a genuine no-Skill determination stays distinct from an unavailable cycle");
-
-  // (b) Every invoked Skill failed: the pre-existing all-failed hold, reached
-  // through the unchanged synthesize branch.
-  const logB = mockFetch(t, { initialStatus: "Pending" });
-  const envB = fakeEnv();
-  const { ai: aiB } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
-    skills: { business_strategy: FAILED_BUSINESS_FINDING },
-  });
-  envB.AI = aiB;
-  const allFailed = await handlePickup(envB, fakeState(), STRATEGY_SKILLS);
-  assert.strictEqual(allFailed.stage, "strategy_blocked");
-  assert.ok(activityLogBlocker(logB).includes("Every Strategy Skill invoked"));
-});
-
-test("retry contract: the six-invocation cap still binds when every single retry is justified", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  // One failed Skill re-selected five more times, each repeat qualified: a
-  // distinct focus plus a real retryRationale. Nothing here may exceed the
-  // cap, and the cap reason -- not the retry gate -- must be what stops it.
-  const moves: Move[] = [
-    { next: "invoke", skillId: "business_strategy", focus: "which constraint is binding?" },
-    ...Array.from({ length: 5 }, (_, i) => ({
-      next: "invoke" as const,
-      skillId: "business_strategy",
-      focus: `re-opened question after attempt ${i + 1} returned UNAVAILABLE`,
-      retryRationale: `Retry ${i + 2}: attempt ${i + 1} was unavailable, and the findings recorded since then change what this method must answer.`,
-    })),
-  ];
-  const { ai, calls } = fakeAiCycle({ moves, skills: { business_strategy: FAILED_BUSINESS_FINDING } });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 6, "exactly MAX_STRATEGY_SKILL_INVOCATIONS invocations -- never a seventh");
-  assert.strictEqual(result.strategySkillFindings?.length, 6);
-  const blocker = activityLogBlocker(log);
-  assert.ok(blocker.includes("did not converge within 6 Strategy Skill invocations"), "the cap is the termination reason");
-  assert.ok(
-    !blocker.includes("unchanged from the failed attempt") && !blocker.includes("without the retry justification"),
-    "the retry gate never fires first: the cap check runs before it",
-  );
 });
 
 /**
@@ -3561,204 +3279,112 @@ function activityLogBlocker(log: FetchLog): string {
   return String(entry?.properties?.["Decision Rationale"]?.rich_text?.[0]?.text?.content ?? "");
 }
 
-/** The six moves the cap test needs: the seventh analysis decision is the one MAX_STRATEGY_SKILL_INVOCATIONS refuses. */
-const SIX_INVOKE_MOVES: Move[] = [
-  { next: "invoke", skillId: "business_strategy" },
-  { next: "invoke", skillId: "brand_strategy" },
-  { next: "invoke", skillId: "communication_strategy" },
-  { next: "invoke", skillId: "research_signal" },
-  // The last two repeat Skills invoked earlier in the same cycle. They carry
-  // what the retry contract demands (a concrete retryRationale and a focus
-  // that differs from the failed attempt), so when every Skill fails these
-  // moves are let through by the retry gate and it is the invocation cap --
-  // not the retry gate -- that is proven to stop the cycle.
-  { next: "invoke", skillId: "business_strategy", focus: "does the accumulated evidence change which constraint is binding?", retryRationale: "Retry after business_strategy returned UNAVAILABLE: the findings so far now isolate a capacity constraint instead of the growth model." },
-  { next: "invoke", skillId: "brand_strategy", focus: "is positioning implicated by the constraint the other methods named?", retryRationale: "Retry after brand_strategy returned UNAVAILABLE: the later findings changed what the brand method has to test." },
+const THREE_SKILL_PLAN: PlanEntry[] = [
+  { skillId: "business_strategy", question: "is the commercial model the binding constraint?" },
+  { skillId: "brand_strategy", question: "is the perception symptom a positioning problem?" },
+  { skillId: "communication_strategy", question: "does the material communicate capability?" },
 ];
 
-test("cap: six completed findings at the cap go to synthesis and the core diagnosis instead of being discarded", async (t) => {
+test("failure observability: a held diagnosis records which Skills ran -- plan order, skillId:status, original reason preserved, no finding prose", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({ moves: SIX_INVOKE_MOVES });
+  const insufficiency = "Whether the capacity constraint predates the positioning change is unestablished and decides the direction.";
+  const { ai } = fakeAiCycle({ plan: THREE_SKILL_PLAN, synthesis: { sufficient: false, insufficiencyReason: insufficiency } });
   env.AI = ai;
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 6, "the cap still binds -- never a seventh invocation");
-  assert.strictEqual(result.strategySkillFindings?.length, 6);
-  assert.ok(calls.some((c) => c.kind === "synthesis"), "the completed findings are reconciled");
-  assert.ok(calls.some((c) => c.kind === "diagnosis"), "the unchanged core diagnosis gate judges the result");
-  assert.strictEqual(result.stage, "delivered");
-  assert.strictEqual(activityLogBlocker(log), "", "no cap blocker is raised");
-});
-
-test("cap: HO-86 (2026-10-06 19:52) -- five completed and the sixth failed reaches synthesis, which is told the failed method is missing", async (t) => {
-  mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [
-      { next: "invoke", skillId: "business_strategy" },
-      { next: "invoke", skillId: "research_signal" },
-      { next: "invoke", skillId: "brand_strategy" },
-      { next: "invoke", skillId: "business_strategy", focus: "which commercial constraint binds?" },
-      { next: "invoke", skillId: "research_signal", focus: "what does the freelance spend figure support?" },
-      { next: "invoke", skillId: "communication_strategy" },
-    ],
-    skills: { communication_strategy: { sufficient: false, blockedReason: "no messaging evidence was supplied" } },
-  });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.deepStrictEqual(
-    result.strategySkillFindings?.map((f) => f.status),
-    ["completed", "completed", "completed", "completed", "completed", "failed"],
-  );
-  assert.ok(calls.find((c) => c.kind === "synthesis")?.prompt.includes("UNAVAILABLE"), "synthesis is told communication_strategy is missing, not given it as neutral");
-  assert.strictEqual(result.stage, "delivered");
-});
-
-test("cap: synthesis after the cap still judges sufficiency -- an insufficient synthesis holds and records which Skills ran, with no finding prose", async (t) => {
-  const log = mockFetch(t, { initialStatus: "Pending" });
-  const env = fakeEnv();
-  const insufficiency = "Win/loss attribution to the brand is unestablished and material to scope.";
-  const { ai, calls } = fakeAiCycle({ moves: SIX_INVOKE_MOVES, synthesis: { sufficient: false, insufficiencyReason: insufficiency } });
-  env.AI = ai;
-
-  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-
-  assert.strictEqual(result.stage, "strategy_blocked", "synthesis is not a bypass");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "the core diagnosis never runs on an insufficient synthesis");
-  assert.ok(!calls.some((c) => c.kind === "diagnosis"));
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "the hold fails closed -- core diagnosis never runs on it");
   const blocker = activityLogBlocker(log);
-  assert.ok(blocker.includes(insufficiency), `the hold names the synthesis's own reason: ${blocker}`);
-  const expected = [
-    "1. business_strategy:completed",
-    "2. brand_strategy:completed",
-    "3. communication_strategy:completed",
-    "4. research_signal:completed",
-    "5. business_strategy:completed",
-    "6. brand_strategy:completed",
-  ];
+  assert.ok(blocker.includes(insufficiency), "the original hold reason is preserved verbatim");
+  const expected = ["1. business_strategy:completed", "2. brand_strategy:completed", "3. communication_strategy:completed"];
   let cursor = -1;
   for (const entry of expected) {
     const at = blocker.indexOf(entry);
-    assert.ok(at > cursor, `blocker must carry ${entry} in original invocation order -- got: ${blocker}`);
+    assert.ok(at > cursor, `blocker must carry ${entry} in plan order -- got: ${blocker}`);
     cursor = at;
   }
-  for (const prose of ["established a bounded domain finding", "could not establish cost or market size", "implies the open question", "still need to know"]) {
+  assert.ok(blocker.indexOf(insufficiency) < blocker.indexOf(expected[0]), "the reason comes first and the metadata summary is appended after it");
+  for (const prose of ["established a bounded domain finding", "could not establish cost or market size", "implies the open question", "still need to know", "failureReason", "evidenceLimitation", "implication:"]) {
     assert.ok(!blocker.includes(prose), `no finding prose may appear in the blocker summary (found: ${prose})`);
   }
+  const handoffReason = log.handoffPatchBodies
+    .map((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content)
+    .find((c) => typeof c === "string" && c.includes(insufficiency));
+  assert.ok(handoffReason?.includes("3. communication_strategy:completed"), "the Handoff's Open Questions carry the same metadata summary");
   assert.ok(
-    log.sentTexts.some((s) => s.includes(insufficiency) && s.includes("6. brand_strategy:completed")),
+    log.sentTexts.some((s) => s.includes(insufficiency) && s.includes("1. business_strategy:completed")),
     "the operator message carries the same metadata summary",
   );
 });
 
-test("failure observability: failed Skill invocations keep their status metadata on the cap path -- blockedReason/failure prose never reaches the blocker", async (t) => {
+test("failure observability: failed Skills keep their status metadata on the all-failed hold -- blockedReason/failure prose never reaches the blocker", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
   const failingProse = [
     "FAILING PROSE business: no cost or vendor-capacity figures were supplied",
     "FAILING PROSE brand: no perception evidence was supplied",
     "FAILING PROSE communication: no messaging evidence was supplied",
-    "FAILING PROSE research: the single supplied source is not corroborated",
   ];
   const { ai } = fakeAiCycle({
-    moves: SIX_INVOKE_MOVES,
+    plan: THREE_SKILL_PLAN,
     skills: {
       business_strategy: { sufficient: false, blockedReason: failingProse[0] },
       brand_strategy: { sufficient: false, blockedReason: failingProse[1] },
       communication_strategy: { sufficient: false, blockedReason: failingProse[2] },
-      research_signal: { sufficient: false, blockedReason: failingProse[3] },
     },
   });
   env.AI = ai;
-  const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategySkillFindings?.length, 6);
-  assert.ok(
-    result.strategySkillFindings?.every((f) => f.status === "failed"),
-    "every recorded finding is failed -- the statuses are what the blocker may show",
-  );
-
+  assert.ok(result.strategySkillFindings?.every((f) => f.status === "failed"));
   const blocker = activityLogBlocker(log);
-  assert.ok(blocker, "the Activity Log Blocker entry is written");
-  const termination = "The diagnostic cycle did not converge within 6 Strategy Skill invocations";
-  assert.ok(blocker.includes(termination), "the cap termination reason is what stopped this cycle");
-  assert.ok(
-    !blocker.includes("Every Strategy Skill invoked"),
-    "the separate 'every Skill failed' diagnosis was NOT taken: Strategy Analysis kept choosing invoke, so the cap is what refused it",
-  );
-  const expected = [
-    "1. business_strategy:failed",
-    "2. brand_strategy:failed",
-    "3. communication_strategy:failed",
-    "4. research_signal:failed",
-    "5. business_strategy:failed",
-    "6. brand_strategy:failed",
-  ];
+  assert.ok(blocker.includes("Every Strategy Skill invoked"));
   let cursor = -1;
-  for (const entry of expected) {
+  for (const entry of ["1. business_strategy:failed", "2. brand_strategy:failed", "3. communication_strategy:failed"]) {
     const at = blocker.indexOf(entry);
-    assert.ok(at > cursor, `blocker must carry ${entry} in original invocation order -- got: ${blocker}`);
+    assert.ok(at > cursor, `blocker must carry ${entry} in plan order -- got: ${blocker}`);
     cursor = at;
   }
-  for (const prose of failingProse) {
-    assert.ok(!blocker.includes(prose), `failed finding prose must never appear in the blocker (found: ${prose})`);
-  }
-  assert.ok(!blocker.includes("UNAVAILABLE"), "a failed finding is reported by status only, never by its narrative");
-  assert.ok(!log.sentTexts.join("\n").includes(failingProse[0]), "the operator message carries no failed-finding prose either");
+  assert.ok(!log.sentTexts.join("\n").includes("UNAVAILABLE"), "a failed finding is reported by status only, never by its narrative");
 });
 
-test("failure observability: a converging cycle still synthesizes and raises no blocker, so no invocation metadata is appended anywhere", async (t) => {
+test("failure observability: a sufficient synthesis raises no blocker, so no invocation metadata is appended anywhere", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  const { ai, calls } = fakeAiCycle({
-    moves: [{ next: "invoke", skillId: "business_strategy" }, { next: "synthesize" }],
-    skills: { business_strategy: COMPLETED_SKILL_FINDING },
-  });
+  const { ai, calls } = fakeAiCycle({ plan: [{ skillId: "business_strategy" }] });
   env.AI = ai;
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "delivered");
-  assert.ok(calls.some((c) => c.kind === "synthesis"), "synthesis still runs -- the metadata summary exists only on the hold path");
-  assert.ok(calls.some((c) => c.kind === "diagnosis"), "the unchanged core diagnosis still follows synthesis");
+  assert.ok(calls.some((c) => c.kind === "synthesis"));
+  assert.ok(calls.some((c) => c.kind === "diagnosis"));
   const blockers = log.activityLogBodies.filter((b) => b.properties?.Type?.select?.name === "Blocker");
-  assert.strictEqual(blockers.length, 0, "no blocker is raised when the cycle converges");
-  assert.ok(
-    log.sentTexts.every((s) => !s.includes("Strategy Skill invocations (number. skillId:status)")),
-    "no invocation metadata is appended to a non-blocked run's messages",
-  );
-  assert.ok(
-    log.handoffPatchBodies.every((p) => !(p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content ?? "").includes("Strategy Skill invocations (number.")),
-    "no invocation metadata is appended to a non-blocked run's Handoff writes",
-  );
+  assert.strictEqual(blockers.length, 0, "no blocker is raised when synthesis is sufficient");
+  assert.ok(!log.sentTexts.join("\n").includes("Strategy Skill invocations"), "no metadata summary is sent on success");
 });
 
-test("failure observability: the invocation metadata costs no additional AI call, no Notion read and no external source access", async (t) => {
+test("failure observability: a hold costs exactly one plan call and one call per planned Skill -- no Notion read or external source access to build the summary", async (t) => {
   const log = mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
-  // Every Skill fails, so reaching the cap holds (with a completed finding it
-  // would go to synthesis instead) -- this measures the cost of the hold path.
+  // Every Skill fails, so the composition holds before synthesis -- this
+  // measures the cost of the hold path itself.
   const failed = { sufficient: false, blockedReason: "no defensible finding from the supplied evidence" };
   const { ai, calls } = fakeAiCycle({
-    moves: SIX_INVOKE_MOVES,
-    skills: { business_strategy: failed, brand_strategy: failed, communication_strategy: failed, research_signal: failed },
+    plan: THREE_SKILL_PLAN,
+    skills: { business_strategy: failed, brand_strategy: failed, communication_strategy: failed },
   });
   env.AI = ai;
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  // Exactly the cycle's own work: six Skill executions and seven Strategy
-  // Analysis decisions (the seventh being the move the cap refuses).
-  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 6, "six Skill executions, unchanged");
-  assert.strictEqual(calls.filter((c) => c.kind === "analysis").length, 7, "seven analysis decisions, unchanged");
+  assert.strictEqual(calls.filter((c) => c.kind === "plan").length, 1, "one planning call");
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 3, "one call per planned Skill");
   assert.strictEqual(
     calls.filter((c) => c.kind === "synthesis" || c.kind === "diagnosis" || c.kind === "routing" || c.kind === "proposal").length,
     0,

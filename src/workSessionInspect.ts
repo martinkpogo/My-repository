@@ -5,8 +5,8 @@ import { getSessionStub } from "./sessionRouting";
  * GET /admin/work-session-state -- READ-ONLY operator inspection of one
  * WorkSession Durable Object's persisted state.
  *
- * Why this exists: a Strategy Skill cycle that stops at the invocation cap
- * records its per-Skill sequence only in WorkState.strategySkillFindings.
+ * Why this exists: a held Strategy diagnosis records which Skills its plan
+ * ran only in WorkState.strategySkillFindings.
  * Before PR #232 that sequence reached no durable operator surface, so
  * recovering it for a blocked WorkSession requires reading this state rather
  * than re-running (re-running would overwrite the very evidence being read,
@@ -56,9 +56,10 @@ export async function handleWorkSessionState(request: Request, env: Env): Promis
     return jsonError(404, "work session state not found");
   }
 
-  // Array order IS the invocation order: runStrategySkillCycle pushes each
-  // finding inside its sequential await loop, so index + 1 is the invocation
-  // number. Nothing here reorders or renumbers.
+  // Array order IS the plan's order: runStrategySkillCycle returns the
+  // findings in the order the plan named the Skills (they run concurrently,
+  // but Promise.all preserves order), so index + 1 is the invocation number.
+  // Nothing here reorders or renumbers.
   const strategySkillFindings = (state.strategySkillFindings ?? []).map((finding, index) => ({
     invocation: index + 1,
     skillId: finding.skillId ?? null,
