@@ -40,7 +40,8 @@ import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegist
  * responsibility -- the runtime never picks a different specialist -- but a
  * repeat of a failed Skill must carry a concrete retry justification and ask
  * a question that differs from the failed attempt. Without both, the move is
- * refused rather than spent (see the failure modes below).
+ * refused rather than spent, and the cycle reconciles any completed findings
+ * instead of discarding them (see the failure modes below).
  *
  * **What this module never decides.** A domain Skill returns findings,
  * evidence limitations and implications -- never whether the Strategy Work is
@@ -75,9 +76,13 @@ import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegist
  * - A move asking to re-run a Skill that already returned UNAVAILABLE in this
  *   cycle, without the retry justification that repeat requires -- a concrete
  *   `retryRationale`, plus a focus or diagnostic question that differs from
- *   the failed attempt -- is refused the same way and holds. The runtime
- *   never substitutes a different specialist for the refused repeat, and
- *   never spends another invocation on an unqualified one.
+ *   the failed attempt -- is refused, and the cycle invokes nothing further.
+ *   If at least one Skill has already completed, the refusal goes to
+ *   synthesis with the findings recorded so far (synthesis and the core
+ *   diagnosis gate still judge sufficiency); with no completed finding it
+ *   holds. The runtime never substitutes a different specialist for the
+ *   refused repeat, and never spends another invocation on an unqualified
+ *   one.
  *
  * **Data boundary.** Every call receives only the already-sanitized
  * `state.strategyContext` (and, between moves, this module's own bounded
@@ -508,6 +513,38 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   let accumulated = strategyContext;
   let round = 0;
 
+  // Reconciles the findings recorded so far and judges their sufficiency.
+  // Shared by an explicit `synthesize` move and by a refused repeat that
+  // already has a completed finding to stand on.
+  const synthesize = async (): Promise<StrategySkillCycleOutcome> => {
+    await onProgress?.("Reconciling Strategy Skill findings...");
+    const synthesis = await synthesizeStrategyFindings(env, { strategyQuestion, findings, strategyAnalysisContent: strategyAnalysis.content });
+    if (!synthesis) {
+      return { status: "hold", reason: "Could not reconcile the Strategy Skill findings into the strategic diagnosis.", findings };
+    }
+    if (!synthesis.sufficient) {
+      return {
+        status: "hold",
+        reason: synthesis.insufficiencyReason ?? "The Strategy Skill findings are not sufficient to responsibly proceed with the diagnosis.",
+        findings,
+      };
+    }
+    return { status: "ok", findings, synthesizedContext: synthesis.synthesizedContext ?? "" };
+  };
+
+  // A refused repeat of a failed Skill stops the cycle from invoking anything
+  // further. When at least one Skill already completed, those findings are
+  // reconciled rather than discarded -- synthesis and the core diagnosis gate
+  // still judge whether they suffice. With no completed finding there is
+  // nothing to reconcile, so the refusal holds.
+  const refuseRepeat = async (reason: string): Promise<StrategySkillCycleOutcome> => {
+    if (!findings.some((f) => f.status === "completed")) {
+      return { status: "hold", reason, findings };
+    }
+    console.warn(`Strategy Skill cycle: ${reason} Proceeding to synthesis with the ${findings.filter((f) => f.status === "completed").length} completed finding(s).`);
+    return synthesize();
+  };
+
   for (;;) {
     round += 1;
     const decision = await runStrategyAnalysisStep(env, {
@@ -542,19 +579,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
         return { status: "ok", findings };
       }
 
-      await onProgress?.("Reconciling Strategy Skill findings...");
-      const synthesis = await synthesizeStrategyFindings(env, { strategyQuestion, findings, strategyAnalysisContent: strategyAnalysis.content });
-      if (!synthesis) {
-        return { status: "hold", reason: "Could not reconcile the Strategy Skill findings into the strategic diagnosis.", findings };
-      }
-      if (!synthesis.sufficient) {
-        return {
-          status: "hold",
-          reason: synthesis.insufficiencyReason ?? "The Strategy Skill findings are not sufficient to responsibly proceed with the diagnosis.",
-          findings,
-        };
-      }
-      return { status: "ok", findings, synthesizedContext: synthesis.synthesizedContext ?? "" };
+      return synthesize();
     }
 
     // next === "invoke"
@@ -593,20 +618,16 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
     if (priorFailure) {
       const retryRationale = (decision.retryRationale ?? "").trim();
       if (retryRationale.length < MIN_RETRY_RATIONALE_LENGTH) {
-        return {
-          status: "hold",
-          reason: `Strategy Analysis asked to invoke "${skillId}" again after that method already failed to return a defensible finding, without the retry justification a repeat requires (a retryRationale of at least ${MIN_RETRY_RATIONALE_LENGTH} characters). Refusing to spend another invocation on an unqualified repeat.`,
-          findings,
-        };
+        return refuseRepeat(
+          `Strategy Analysis asked to invoke "${skillId}" again after that method already failed to return a defensible finding, without the retry justification a repeat requires (a retryRationale of at least ${MIN_RETRY_RATIONALE_LENGTH} characters). Refusing to spend another invocation on an unqualified repeat.`,
+        );
       }
       const focus = (decision.focus ?? "").trim();
       const question = (decision.diagnosticQuestion ?? "").trim();
       if (focus === priorFailure.focus && question === priorFailure.diagnosticQuestion) {
-        return {
-          status: "hold",
-          reason: `Strategy Analysis asked to invoke "${skillId}" again with a retry justification, but the question this repeat would answer is unchanged from the failed attempt. Refusing to spend another invocation on the same retry.`,
-          findings,
-        };
+        return refuseRepeat(
+          `Strategy Analysis asked to invoke "${skillId}" again with a retry justification, but the question this repeat would answer is unchanged from the failed attempt. Refusing to spend another invocation on the same retry.`,
+        );
       }
     }
 

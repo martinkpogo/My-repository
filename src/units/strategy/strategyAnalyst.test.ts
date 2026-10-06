@@ -2973,6 +2973,86 @@ test("retry contract: both halves are required -- a justification without a chan
   }
 });
 
+const FAILED_RESEARCH_FINDING = { sufficient: false, blockedReason: "the supplied evidence cannot support a defensible research finding" };
+
+test("retry contract: a refused repeat with a completed finding goes to synthesis instead of discarding it (HO-86, 2026-10-06 19:39)", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    // Exactly the live run: business_strategy completed, research_signal
+    // failed, then research_signal selected again with no justification.
+    moves: [
+      { next: "invoke", skillId: "business_strategy" },
+      { next: "invoke", skillId: "research_signal", focus: "does the evidence show the brand affects win/loss?" },
+      { next: "invoke", skillId: "research_signal", focus: "does the evidence show the brand affects win/loss?" },
+    ],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING, research_signal: FAILED_RESEARCH_FINDING },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.deepStrictEqual(
+    calls.filter((c) => c.kind === "skill").map((c) => c.skillId),
+    ["business_strategy", "research_signal"],
+    "the refused repeat is still never spent",
+  );
+  assert.ok(calls.some((c) => c.kind === "synthesis"), "the completed finding is reconciled");
+  assert.ok(calls.some((c) => c.kind === "diagnosis"), "the unchanged core diagnosis gate still judges the result");
+  assert.ok(calls.find((c) => c.kind === "synthesis")?.prompt.includes("UNAVAILABLE"), "synthesis is told research_signal is missing, not given it as neutral");
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(activityLogBlocker(log), "", "no retry-refusal blocker is raised");
+});
+
+test("retry contract: an unchanged-question repeat with a completed finding also goes to synthesis", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "brand_strategy" },
+      { next: "invoke", skillId: "business_strategy", focus: "the open diagnostic question" },
+      {
+        next: "invoke",
+        skillId: "business_strategy",
+        focus: "the open diagnostic question",
+        retryRationale: "The earlier attempt was unavailable, and the accumulated evidence since then still leaves this same question open.",
+      },
+    ],
+    skills: { brand_strategy: COMPLETED_SKILL_FINDING, business_strategy: FAILED_BUSINESS_FINDING },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 2, "the unchanged repeat is not spent");
+  assert.ok(calls.some((c) => c.kind === "synthesis"));
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(activityLogBlocker(log), "");
+});
+
+test("retry contract: synthesis after a refused repeat still judges sufficiency -- an insufficient synthesis holds", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  const { ai, calls } = fakeAiCycle({
+    moves: [
+      { next: "invoke", skillId: "business_strategy" },
+      { next: "invoke", skillId: "research_signal" },
+      { next: "invoke", skillId: "research_signal" },
+    ],
+    skills: { business_strategy: COMPLETED_SKILL_FINDING, research_signal: FAILED_RESEARCH_FINDING },
+    synthesis: { sufficient: false, insufficiencyReason: "Win/loss attribution to the brand is unestablished and material to scope." },
+  });
+  env.AI = ai;
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked", "synthesis is not a bypass: an insufficient judgment still fails closed");
+  assert.ok(!calls.some((c) => c.kind === "diagnosis"), "the core diagnosis does not run on an insufficient synthesis");
+  const blocker = activityLogBlocker(log);
+  assert.ok(blocker.includes("Win/loss attribution"), `the hold names the synthesis's own reason: ${blocker}`);
+  assert.ok(!blocker.includes("retryRationale"), "not the retry refusal");
+});
+
 test("retry contract: an untried declared Skill stays freely selectable after another Skill failed -- the rule gates repeats, not selection", async (t) => {
   mockFetch(t, { initialStatus: "Pending" });
   const env = fakeEnv();
