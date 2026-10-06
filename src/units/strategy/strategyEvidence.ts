@@ -87,9 +87,14 @@ export type StrategyCallNotesEvidence =
  * diagnosis ran on a database reference as if it were a business situation.
  * A reference *points at* evidence; it is not evidence.
  *
+ * The same failure arrives in a second shape: the field holds the bare
+ * Call Notes id itself (`CN-...` alone on a line, with no `Call_Notes_ID:`
+ * label) -- live on HO-86, where it was diagnosed as the situation six
+ * times. A bare id is a reference too, so it is removed the same way.
+ *
  * Everything else counts as substantive here -- this test removes only
- * `Call_Notes_ID` reference lines and the labelled structured Commercial
- * Value Evidence block, and nothing else, because deciding that some other
+ * `Call_Notes_ID` reference lines, bare Call Notes id lines, and the
+ * labelled structured Commercial Value Evidence block, and nothing else, because deciding that some other
  * *narrative* is "too thin" would be a judgment about evidence quality that
  * belongs to the diagnosis and its gates, not to retrieval. The structured
  * block is removed for the same structural reason a reference line is: it
@@ -97,11 +102,14 @@ export type StrategyCallNotesEvidence =
  * diagnosis is about, and a Handoff whose only content is one would
  * otherwise reach the diagnosis as if the JSON were the situation.
  */
+/** A line that is nothing but one Call Notes id token, e.g. `CN-a7f2d9c1-...`. */
+const BARE_CALL_NOTES_ID_LINE = /^\s*CN-\S+\s*$/;
+
 export function hasSubstantiveEvidence(text: string): boolean {
   if (!text.trim()) return false;
   const withoutReference = stripCommercialValueEvidenceBlock(text)
     .split(/\r?\n/)
-    .filter((line) => !/^\s*Call_Notes_ID[ \t]*[:=]/.test(line))
+    .filter((line) => !/^\s*Call_Notes_ID[ \t]*[:=]/.test(line) && !BARE_CALL_NOTES_ID_LINE.test(line))
     .join("\n");
   return withoutReference.trim().length > 0;
 }

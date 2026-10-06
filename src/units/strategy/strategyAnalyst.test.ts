@@ -3269,11 +3269,32 @@ test("Evidence order: with no governed reference anywhere on the Handoff, Clarif
   assert.match(message, /points at evidence rather than being evidence/);
 });
 
+test("Evidence order: a bare Call Notes id as the whole Verified Facts (HO-86's original shape) is a reference, never the situation", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: "CN-a7f2d9c1-4e15-42b8-9d8f-3c6b1a2f5e8d" });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked", "the diagnosis never runs on an id as if it were a business situation");
+  assert.strictEqual(result.awaiting, "strategy_clarification", "Clarification Needed names the gap instead");
+  assert.strictEqual(result.strategyApprovalState, undefined);
+  assert.match(log.sentTexts.join("\n"), /the business situation this diagnosis is about has not been established/);
+});
+
 test("Evidence order: hasSubstantiveEvidence treats a Call_Notes_ID reference as pointing at evidence, never being it", () => {
   assert.strictEqual(hasSubstantiveEvidence(""), false);
   assert.strictEqual(hasSubstantiveEvidence("   \n  "), false);
   assert.strictEqual(hasSubstantiveEvidence("Call_Notes_ID: CN-007"), false);
   assert.strictEqual(hasSubstantiveEvidence("Call_Notes_ID: CN-007\nCall_Notes_ID: CN-007"), false);
+  assert.strictEqual(hasSubstantiveEvidence("CN-a7f2d9c1-4e15-42b8-9d8f-3c6b1a2f5e8d"), false, "a bare Call Notes id is a reference too");
+  assert.strictEqual(hasSubstantiveEvidence("  CN-007  \n\nCall_Notes_ID: CN-007"), false);
+  assert.strictEqual(
+    hasSubstantiveEvidence("CN-007\nRecurring delivery complaints over two quarters."),
+    true,
+    "a bare id alongside a real account is retained, not discarded",
+  );
+  assert.strictEqual(hasSubstantiveEvidence("CN-007 confirmed recurring delivery complaints."), true, "only a line that is nothing but the id is removed");
   assert.strictEqual(hasSubstantiveEvidence("Recurring delivery complaints over two quarters, tied to warehouse capacity."), true, "narrative is substantive even though it carries no structured reference");
   assert.strictEqual(
     hasSubstantiveEvidence("Call_Notes_ID: CN-007\nRecurring delivery complaints over two quarters."),
