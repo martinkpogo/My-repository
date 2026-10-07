@@ -109,12 +109,17 @@ const valueBasedPricingAssessorHat: HatManifest<FinanceAction> = {
   responsibilityId: "value_based_pricing",
   readHandler: financeReadHandler,
   entryHandler: financeEntryHandler,
-  // Every one of Finance's own continuation states (quote_redo_reason,
-  // finance_direct_request_matter, finance_direct_request_context, etc.)
-  // remains a hardcoded case in session.ts's handleTextReply switch,
-  // exactly as before this migration -- matching Strategy's own
-  // precedent. Only the entry point moves; no multi-turn flow changes.
-  awaitingHandlers: {},
+  // Finance's own continuation states, registered on the manifest so
+  // handleTextReply dispatches them through the ONE generic awaiting path
+  // (manifest lookup + runUnderRecordedSkills) instead of hardcoded switch
+  // cases. Each entry is the exact same handler function the old case
+  // called, with the same arguments -- only the lookup moved.
+  awaitingHandlers: {
+    value_context_more: finance.handleValueContextClarification,
+    quote_redo_reason: finance.handleQuoteRedoReason,
+    finance_direct_request_matter: finance.handleDirectRequestClarification,
+    finance_direct_request_context: finance.handleDirectRequestContext,
+  },
   callbackHandlers: valueBasedPricingAssessorCallbackHandlers,
 };
 

@@ -3,6 +3,7 @@ import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert";
 import { strategyManifest, STRATEGY_HANDOFF_CALLBACK_PREFIX } from "./strategyManifest";
 import { findCallbackHandler } from "../unitManifest";
+import * as strategy from "./strategyAnalyst";
 import type { Env, WorkState } from "../../types";
 
 /**
@@ -135,9 +136,23 @@ test("strategyManifest: readHandler fails closed -- no read action is declared",
   );
 });
 
-test("strategyManifest: awaitingHandlers is empty -- Strategy's own continuation states stay hardcoded in session.ts", () => {
+test("strategyManifest: awaitingHandlers resumes Strategy's four continuation states through the manifest", () => {
   const hat = strategyManifest.hats["Strategy Analyst"];
-  assert.deepStrictEqual(hat.awaitingHandlers, {});
+  assert.deepStrictEqual(
+    Object.keys(hat.awaitingHandlers).sort(),
+    ["strategy_clarification", "strategy_direct_request_matter", "strategy_feedback", "strategy_refinement_reason"],
+    "exactly Strategy's four awaiting states must be registered",
+  );
+  // Identity assertions: each entry IS the same function the old
+  // handleTextReply switch case called -- same body, same arguments,
+  // same Skill-set passing (the three Skill-aware handlers keep their
+  // 4th skills parameter; strategy_refinement_reason never took one).
+  assert.strictEqual(hat.awaitingHandlers.strategy_clarification, strategy.handleStrategyClarification);
+  assert.strictEqual(hat.awaitingHandlers.strategy_direct_request_matter, strategy.handleDirectRequestClarification);
+  assert.strictEqual(hat.awaitingHandlers.strategy_feedback, strategy.handleStrategyFeedback);
+  assert.strictEqual(hat.awaitingHandlers.strategy_refinement_reason, strategy.handleStrategyRefinement);
+  assert.strictEqual(strategy.handleStrategyClarification.length, 4, "Skill-aware handlers declare the skills parameter");
+  assert.strictEqual(strategy.handleStrategyRefinement.length, 3, "handlers that never took skills keep their exact signature");
 });
 
 test("strategyManifest: declares exactly strategyhandoff in callbackHandlers", () => {

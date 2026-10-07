@@ -5,6 +5,7 @@ import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import { discoverLeadsReadHandler, handleLeadOpportunityApproval } from "./leadGenerationDiscovery";
 import * as sales from "./salesExecutive";
+import * as salesProposal from "./tokenSafeProposal";
 
 /**
  * Sales's Unit Registry manifest (ENIG Operating Model design doc, "The
@@ -43,13 +44,13 @@ import * as sales from "./salesExecutive";
  * manifest's self-contained equivalent, exercised by salesManifest.test.
  *
  * Sales Executive's own continuation states (call_notes, intervention,
- * matter_redo_reason, entity_redo_reason,
- * proposal_feedback, sales_proposal_revision, etc.) all remain hardcoded
- * cases in session.ts's handleTextReply switch, exactly as they were --
- * matching Strategy's own precedent (strategyAnalystHat's
- * awaitingHandlers is likewise empty despite Strategy having its own
- * awaiting states already hardcoded there). Only the entry point moves;
- * every existing multi-turn flow is untouched.
+ * matter_redo_reason, entity_redo_reason, sales_proposal_revision) are
+ * declared on this Hat's awaitingHandlers below, resolved by
+ * session.ts's handleTextReply through the one generic manifest lookup
+ * (WP6) -- each entry the exact handler the former hardcoded switch case
+ * called. proposal_feedback, like matter_pick/entity_pick, has never had
+ * a handler and still falls through to the unchanged "not awaiting"
+ * fallback. Every existing multi-turn flow is untouched.
  *
  * salesExecutiveHat.callbackHandlers declares four of Sales Executive's
  * own nested approval-gate prefixes -- entitynew, matternew, qualify,
@@ -405,15 +406,20 @@ const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
   actions: salesExecutiveActions,
   readHandler: salesExecutiveReadHandler,
   entryHandler: salesExecutiveEntryHandler,
-  // Every one of Sales Executive's own continuation states (call_notes,
-  // intervention, matter_redo_reason,
-  // entity_redo_reason, proposal_feedback, sales_proposal_revision, etc.)
-  // remains a hardcoded case in session.ts's handleTextReply switch,
-  // exactly as before this migration -- matching Strategy's own
-  // precedent (strategyAnalystHat's awaitingHandlers is likewise empty
-  // despite Strategy having its own awaiting states already hardcoded
-  // there). Only the entry point moves; no multi-turn flow changes.
-  awaitingHandlers: {},
+  // Sales Executive's own continuation states, registered on the manifest
+  // so handleTextReply dispatches them through the ONE generic awaiting
+  // path (manifest lookup + runUnderRecordedSkills) instead of a hardcoded
+  // switch case. Each entry is the exact same handler function the old
+  // case called, with the same arguments -- only the lookup moved.
+  // Lead Generation Specialist keeps an empty set: it has no multi-turn
+  // hold/resume flow.
+  awaitingHandlers: {
+    call_notes: sales.handleCallNotes,
+    intervention: sales.handleInterventionText,
+    matter_redo_reason: sales.handleMatterRedoReason,
+    entity_redo_reason: sales.handleEntityRedoReason,
+    sales_proposal_revision: salesProposal.handleSalesProposalRevisionText,
+  },
   callbackHandlers: salesExecutiveCallbackHandlers,
 };
 

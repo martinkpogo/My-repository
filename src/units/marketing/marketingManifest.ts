@@ -4,7 +4,9 @@ import type { ActionDefinition } from "../../hats/actionRegistry";
 import { workSessionContext } from "../../access";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import type { MarketingHatDefinition, MarketingHatName } from "../../hats/types";
-import { MARKETING_HAT_REGISTRY, isMarketingHat } from "../../hats/registry";
+import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from "../../hats/registry";
+import { classifyCandidateHats } from "../../hats/intakeClassification";
+import { resolveMarketingCandidateRelationships, selectMarketingAmbiguityReasonCode } from "../../hats/relationships";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage } from "../../telegram";
@@ -18,7 +20,8 @@ import { updateHandoff } from "../../handoffWriter";
  * oversight. Unlike Business Development (built from scratch on this
  * pattern) or Sales's Lead Generation Specialist (a single existing
  * action wrapped as-is), Marketing already has real, live, actively-used
- * Stage 1/2 routing logic in src/hats/executionEngine.ts:
+ * Stage 1/2 routing logic in handleMarketingIntake (below -- relocated
+ * from src/hats/executionEngine.ts):
  * classifyCandidateHats (Stage 1: which Hat) + resolveMarketingCandidateRelationships
  * (Stage 2: deterministic relationship-based tie-breaking across multiple
  * valid candidates, backed by 5 registered relationship IDs -- see
@@ -37,15 +40,15 @@ import { updateHandoff } from "../../handoffWriter";
  * identical routing semantics."
  *
  * So this manifest covers ONLY what happens once Marketing's own Stage
- * 1/2 (executionEngine.ts's handleMarketingIntake) has already resolved
- * which Hat owns the work -- the per-Hat execution step (decide to draft/
- * route/clarify), not Hat resolution itself. executionEngine.ts calls
- * dispatchMarketingHat (exported below) wherever it used to call the
- * internal runMarketingHat function directly -- every call site
- * (handleHandoffPickup, handleMarketingIntake's success path,
- * handleMarketingFeedback, handleMarketingClarification) is now routed
- * through this manifest's entryHandler, making it the genuine runtime
- * execution point rather than
+ * 1/2 (handleMarketingIntake below, relocated from executionEngine.ts)
+ * has already resolved which Hat owns the work -- the per-Hat execution
+ * step (decide to draft/route/clarify), not Hat resolution itself.
+ * Every call site (executionEngine.ts's handleHandoffPickup, and this
+ * file's handleMarketingIntake success path, handleMarketingFeedback,
+ * handleMarketingClarification) is now routed through this manifest's
+ * entryHandler -- dispatchMarketingHat (exported below) where those call
+ * sites used to call the internal runMarketingHat function directly --
+ * making it the genuine runtime execution point rather than
  * a decorative parallel structure. The actual decision logic below is
  * relocated from executionEngine.ts UNCHANGED, byte-for-byte -- this
  * migration makes zero behavioral changes to draft/route/clarify
@@ -66,7 +69,7 @@ import { updateHandoff } from "../../handoffWriter";
  * already-classified marketing.intake_classification/hat_action_decision
  * SemanticTaskIds (business_sensitive, TOKEN_SAFE_RUNTIME) -- required by
  * UnitManifest's shape, but never actually invoked through this manifest;
- * Marketing's own Stage 1/2 in executionEngine.ts already calls
+ * Marketing's own Stage 1/2 (handleMarketingIntake above) already calls
  * classifyCandidateHats with these same taskIds directly.
  */
 type MarketingAction = "handle_request";
@@ -248,6 +251,90 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   state.stage = "awaiting_marketing_draft_approval";
   state.awaiting = undefined;
   return state;
+}
+
+/**
+ * Entry point for a new Marketing work item, analogous to
+ * sales.handleIncomingEnquiry. Uses a two-stage deterministic routing model:
+ * - Stage 1 identifies genuinely plausible candidate Hats and whether establishing is needed.
+ * - Stage 2 evaluates specific registered sequential relationships between candidates deterministically.
+ */
+export async function handleMarketingIntake(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  state.marketingTaskText = text;
+
+  // Stage 1: LLM identifies candidate Hats and establishing context
+  const stage1 = await classifyCandidateHats<MarketingHatName>(
+    env,
+    {
+      taskId: "marketing.intake_classification",
+      introLine: "You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit.",
+      hatSummaryList: marketingHatSummaryList(),
+      light: true,
+    },
+    text,
+  );
+
+  if (!stage1 || !stage1.candidates) {
+    const reasonCode = selectMarketingAmbiguityReasonCode(null);
+    console.error(`Marketing Stage 1 classification failed for work ${state.workId}`);
+    await logActivity(env, {
+      entry: `Marketing intake blocked [${reasonCode}] — classification failed`,
+      type: "Blocker",
+      area: "Marketing",
+      decisionRationale: `Could not classify Marketing candidates for this request. Refusing to guess. Reason code: ${reasonCode}`,
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(env, state, "Couldn't determine which Marketing Hat this belongs to — classification failed. Please resend or rephrase.");
+    return state;
+  }
+
+  const validCandidates = stage1.candidates.filter(isMarketingHat);
+
+  // Stage 2: Deterministic, request-text-free evaluation of registered sequential relationships
+  const stage2 = resolveMarketingCandidateRelationships(validCandidates, stage1.establishing);
+
+  if (!stage2.resolved || !stage2.hat) {
+    const reasonCode = selectMarketingAmbiguityReasonCode(stage2);
+    const reasonText = stage2.reason ?? stage1.reason ?? "Request could plausibly belong to more than one Marketing Hat.";
+    await logActivity(env, {
+      entry: `Marketing intake ambiguous [${reasonCode}]`,
+      type: "Blocker",
+      area: "Marketing",
+      decisionRationale: `${reasonText} (Reason code: ${reasonCode})`,
+      outcome: "Blocked",
+    });
+    await sendWorkspaceHatMessage(env, state, `I'm not sure which Marketing Hat this belongs to — ${reasonText}. Can you clarify what's needed?`);
+    state.stage = "marketing_ambiguous";
+    state.awaiting = "marketing_clarification";
+    return state;
+  }
+
+  state.hat = stage2.hat;
+  await logActivity(env, {
+    entry: `Marketing task routed to ${stage2.hat}${stage2.relationshipId ? ` via relationship ${stage2.relationshipId}` : ""}`,
+    type: "Activity",
+    area: "Marketing",
+    activity: text,
+    outcome: "Active",
+  });
+
+  return dispatchMarketingHat(env, state);
+}
+
+/** Redo loop: append Martin's reasoning to the task text and re-run the current Hat's decision from scratch. */
+export async function handleMarketingFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  state.marketingTaskText = `${state.marketingTaskText ?? ""}\n\nMartin's feedback: ${text}`;
+  return dispatchMarketingHat(env, state);
+}
+
+/** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
+export async function handleMarketingClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const augmented = `${state.marketingTaskText ?? ""}\n\nAdditional detail: ${text}`;
+  if (isMarketingHat(state.hat)) {
+    state.marketingTaskText = augmented;
+    return dispatchMarketingHat(env, state);
+  }
+  return handleMarketingIntake(env, state, augmented);
 }
 
 // The callback_data prefix runMarketingHat's own "route" branch buttons
@@ -494,7 +581,17 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
     actions,
     readHandler: marketingReadHandler,
     entryHandler: marketingEntryHandler,
-    awaitingHandlers: {},
+    // Marketing's two continuation states, registered on EVERY Hat: the
+    // old handleTextReply switch cases never consulted state.hat, so both
+    // entries are uniform (state.hat is one of these five Hats whenever
+    // either state is set -- the placeholder "Marketing" init path fails
+    // closed at recordWorkAction before any awaiting state is reached).
+    // Each entry is the exact same handler function the old case called,
+    // with the same arguments -- only the lookup moved.
+    awaitingHandlers: {
+      marketing_feedback: handleMarketingFeedback,
+      marketing_clarification: handleMarketingClarification,
+    },
     callbackHandlers: marketingCallbackHandlers,
   };
 }
@@ -509,9 +606,9 @@ export const marketingManifest: UnitManifest = {
 
 /**
  * The genuine runtime execution point for a Marketing Hat, once
- * executionEngine.ts's own Stage 1/2 (or a Handoff pickup, or an approval/
- * feedback/clarification loop) has already determined state.hat. Replaces
- * every former direct call to executionEngine.ts's internal
+ * handleMarketingIntake's own Stage 1/2 (or a Handoff pickup, or an
+ * approval/feedback/clarification loop) has already determined state.hat.
+ * Replaces every former direct call to executionEngine.ts's internal
  * runMarketingHat -- this manifest's entryHandler now runs it.
  */
 export async function dispatchMarketingHat(env: Env, state: WorkState): Promise<WorkState> {

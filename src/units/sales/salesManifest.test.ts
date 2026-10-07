@@ -10,6 +10,8 @@ import {
   QUALIFY_CALLBACK_PREFIX,
 } from "./salesManifest";
 import { findCallbackHandler } from "../unitManifest";
+import * as sales from "./salesExecutive";
+import * as salesProposal from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 
 /**
@@ -229,9 +231,20 @@ test("salesManifest: Sales Executive's readHandler fails closed -- no read actio
   await assert.rejects(() => hat.readHandler(fakeEnv(), "new_enquiry", "text", NO_ACTION_SKILLS), /not a read action/);
 });
 
-test("salesManifest: Sales Executive's awaitingHandlers is empty -- continuation states stay hardcoded in session.ts", () => {
+test("salesManifest: Sales Executive's awaitingHandlers resumes the same five continuation states through the manifest", () => {
   const hat = salesManifest.hats["Sales Executive"];
-  assert.deepStrictEqual(hat.awaitingHandlers, {});
+  assert.deepStrictEqual(
+    Object.keys(hat.awaitingHandlers).sort(),
+    ["call_notes", "entity_redo_reason", "intervention", "matter_redo_reason", "sales_proposal_revision"],
+    "exactly Sales Executive's five awaiting states must be registered",
+  );
+  // Identity assertions: the manifest entry IS the same function the old
+  // handleTextReply switch case called -- same body, same arguments.
+  assert.strictEqual(hat.awaitingHandlers.call_notes, sales.handleCallNotes);
+  assert.strictEqual(hat.awaitingHandlers.intervention, sales.handleInterventionText);
+  assert.strictEqual(hat.awaitingHandlers.matter_redo_reason, sales.handleMatterRedoReason);
+  assert.strictEqual(hat.awaitingHandlers.entity_redo_reason, sales.handleEntityRedoReason);
+  assert.strictEqual(hat.awaitingHandlers.sales_proposal_revision, salesProposal.handleSalesProposalRevisionText);
 });
 
 test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat genuinely delegates to salesExecutive.ts's handleIncomingEnquiry, which holds the enquiry at the Runtime identity boundary instead of extracting or matching identity", async (t) => {

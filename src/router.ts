@@ -244,7 +244,7 @@ export async function dispatchCowork(
   if (decision.unit === "Marketing") {
     // COMPATIBILITY PATH -- Marketing is the one manifest Unit that does NOT
     // dispatch through the generic resolution path below: its own intake
-    // (executionEngine.handleMarketingIntake) still resolves WHICH
+    // (marketingManifest.handleMarketingIntake) still resolves WHICH
     // Marketing Hat owns the request and captures the task text, and that
     // has to run before any manifest Action dispatch could. So the branch
     // stands, recorded as a known migration gap, until that intake moves

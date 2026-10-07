@@ -3,6 +3,7 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import * as sales from "./units/sales/salesExecutive";
 import * as finance from "./units/finance/valueBasedPricingAssessor";
 import * as marketing from "./hats/executionEngine";
+import { handleMarketingIntake } from "./units/marketing/marketingManifest";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
@@ -11,6 +12,7 @@ import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { notifyMartinOfDiscoveryFailure } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
+import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
 import {
   handleGoogleAccountSelection,
@@ -64,18 +66,19 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   // Marketing's own intake resolves WHICH Marketing Hat owns a direct
-  // request (executionEngine.handleMarketingIntake runs Stage 1 itself) and
-  // captures the task text -- so unlike every other manifest Unit, Marketing
-  // still enters through this dedicated wrapper rather than the generic
-  // handleUnitAction below, and records its Action for the same reason it
-  // does (resolve Hat -> resolve Action -> persist Action identity on Work
-  // -> execute). Documented as a known migration gap: moving Marketing onto
-  // the Organization boundary means moving its Hat interpretation ahead of
-  // dispatch, with its relationship-based tie-breaking preserved.
+  // request (marketingManifest.handleMarketingIntake runs Stage 1 itself)
+  // and captures the task text -- so unlike every other manifest Unit,
+  // Marketing still enters through this dedicated wrapper rather than the
+  // generic handleUnitAction below, and records its Action for the same
+  // reason it does (resolve Hat -> resolve Action -> persist Action
+  // identity on Work -> execute). Documented as a known migration gap:
+  // moving Marketing onto the Organization boundary means moving its Hat
+  // interpretation ahead of dispatch, with its relationship-based
+  // tie-breaking preserved.
   async handleMarketingRequest(text: string): Promise<WorkState> {
     return this.execute((state) => {
       recordWorkAction(state, "handle_request");
-      return marketing.handleMarketingIntake(this.env, state, text);
+      return handleMarketingIntake(this.env, state, text);
     });
   }
 
@@ -162,63 +165,27 @@ export class WorkSession extends DurableObject<Env> {
 
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
-      switch (state.awaiting) {
-        case "call_notes":
-          return sales.handleCallNotes(this.env, state, text);
-        case "intervention":
-          return sales.handleInterventionText(this.env, state, text);
-        case "value_context_more":
-          return finance.handleValueContextClarification(this.env, state, text);
-        case "quote_redo_reason":
-          return finance.handleQuoteRedoReason(this.env, state, text);
-        case "matter_redo_reason":
-          return sales.handleMatterRedoReason(this.env, state, text);
-        case "entity_redo_reason":
-          return sales.handleEntityRedoReason(this.env, state, text);
-        case "sales_proposal_revision":
-          return salesProposal.handleSalesProposalRevisionText(this.env, state, text);
-        case "marketing_feedback":
-          return marketing.handleMarketingFeedback(this.env, state, text);
-        case "marketing_clarification":
-          return marketing.handleMarketingClarification(this.env, state, text);
-        case "strategy_clarification":
-          return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyClarification(this.env, state, text, skills));
-        case "strategy_direct_request_matter":
-          return this.runUnderRecordedSkills(state, (skills) => strategy.handleDirectRequestClarification(this.env, state, text, skills));
-        case "finance_direct_request_matter":
-          return finance.handleDirectRequestClarification(this.env, state, text);
-        case "finance_direct_request_context":
-          return finance.handleDirectRequestContext(this.env, state, text);
-        case "strategy_feedback":
-          return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyFeedback(this.env, state, text, skills));
-        case "strategy_refinement_reason":
-          return strategy.handleStrategyRefinement(this.env, state, text);
-        default: {
-          // Generic manifest lookup for a Unit built on the Unit Registry
-          // pattern -- checked only as a fallback, after every existing
-          // hand-written case above, so no legacy Unit's behavior changes.
-          // Per the design doc's fail-closed manifest completeness: a
-          // state.awaiting value the resolved Hat doesn't declare in its
-          // own awaitingHandlers still falls through to the same "not
-          // awaiting" message below, never a silent no-op.
-          const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
-          const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
-          const awaitingHandler = hat && state.awaiting ? hat.awaitingHandlers[state.awaiting] : undefined;
-          if (awaitingHandler && hat) {
-            // The resumed Work runs under the Action it already recorded; that
-            // Action's declared Skills are resolved through the Registry before
-            // the handler runs, exactly as at entry.
-            return this.runUnderRecordedSkills(state, (skills) => awaitingHandler(this.env, state, text, skills));
-          }
-          return sendMessage(
-            this.env,
-            state.chatId,
-            "This work item isn't awaiting a reply right now. Use /sessions to switch context.",
-            undefined,
-            state.threadId,
-          ).then(() => state);
-        }
+      // Every awaiting state resolves through the owning Hat's own
+      // awaitingHandlers in its Unit's manifest (the hardcoded switch is
+      // gone -- each case was moved to its Unit's manifest entry first,
+      // then deleted). Per the design doc's fail-closed manifest
+      // completeness: a state.awaiting value the resolved Hat doesn't
+      // declare in its own awaitingHandlers still falls through to the
+      // same "not awaiting" message below, never a silent no-op.
+      const awaitingHandler = resolveAwaitingHandler(state);
+      if (awaitingHandler) {
+        // The resumed Work runs under the Action it already recorded; that
+        // Action's declared Skills are resolved through the Registry before
+        // the handler runs, exactly as at entry.
+        return this.runUnderRecordedSkills(state, (skills) => awaitingHandler(this.env, state, text, skills));
       }
+      return sendMessage(
+        this.env,
+        state.chatId,
+        "This work item isn't awaiting a reply right now. Use /sessions to switch context.",
+        undefined,
+        state.threadId,
+      ).then(() => state);
     });
   }
 
