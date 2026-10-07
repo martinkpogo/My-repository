@@ -29,7 +29,7 @@ import { workContractForRequest, type WorkRequest } from "./runtime/workContract
  * retried next cycle rather than silently dropped. Logs and notifies Martin
  * directly rather than aborting the rest of the batch.
  */
-async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: unknown): Promise<void> {
+export async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string, err: unknown): Promise<void> {
   console.error(`Automated pickup failed for Handoff ${handoffId}`, err);
   await sendMessage(
     env,
@@ -128,7 +128,7 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
     ],
   });
 
-  let pickedUp = 0;
+  let scheduled = 0;
   for (const handoff of pending) {
     let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
@@ -170,13 +170,13 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
     }
     const stub = getSessionStub(env, workId);
     try {
-      await stub.runFinancePickup();
-      pickedUp++;
+      await stub.schedulePickup("finance");
+      scheduled++;
     } catch (err) {
       await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
     }
   }
-  return pickedUp;
+  return scheduled;
 }
 
 /**
@@ -269,7 +269,7 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
     ],
   });
 
-  let pickedUp = 0;
+  let scheduled = 0;
   for (const handoff of pending) {
     let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
@@ -325,8 +325,8 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
     if (isCallNotesHandoff(handoff)) {
       const stub = getSessionStub(env, workId);
       try {
-        await stub.runCallNotesPickup();
-        pickedUp++;
+        await stub.schedulePickup("sales_call_notes");
+        scheduled++;
       } catch (err) {
         await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
       }
@@ -335,13 +335,13 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
 
     const stub = getSessionStub(env, workId);
     try {
-      await stub.runTokenSafeProposal();
-      pickedUp++;
+      await stub.schedulePickup("sales_proposal");
+      scheduled++;
     } catch (err) {
       await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
     }
   }
-  return pickedUp;
+  return scheduled;
 }
 
 /**
@@ -359,7 +359,7 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
     ],
   });
 
-  let pickedUp = 0;
+  let scheduled = 0;
   for (const handoff of pending) {
     let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
@@ -389,13 +389,13 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
     }
     const stub = getSessionStub(env, workId);
     try {
-      await stub.runMarketingHandoffPickup();
-      pickedUp++;
+      await stub.schedulePickup("marketing");
+      scheduled++;
     } catch (err) {
       await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
     }
   }
-  return pickedUp;
+  return scheduled;
 }
 
 /**
@@ -414,7 +414,7 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
     ],
   });
 
-  let pickedUp = 0;
+  let scheduled = 0;
   for (const handoff of pending) {
     let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
     if (!workId) {
@@ -443,13 +443,13 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
     }
     const stub = getSessionStub(env, workId);
     try {
-      await stub.runStrategyPickup();
-      pickedUp++;
+      await stub.schedulePickup("strategy");
+      scheduled++;
     } catch (err) {
       await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
     }
   }
-  return pickedUp;
+  return scheduled;
 }
 
 /**
@@ -622,47 +622,48 @@ export async function runCheckHandoffs(
         // is Handoff-only -- see discoverPendingMarketingHandoffs -- chat-
         // originated Marketing work still goes through handleMarketingIntake
         // directly, never this discovery path). Discovery only counts a
-        // Handoff as "picked up" if it has a handoff_workitem KV mapping
-        // (tied to a live Telegram session); a Handoff created directly in
-        // Notion -- e.g. by the isolated Sales Executive project -- has no
-        // such mapping, so discovery finds it but silently skips it, and
-        // picked stays 0 even though it's genuinely Pending. Query Notion
-        // directly too, so the reply can tell "nothing pending" apart from
-        // "pending but stuck for lack of a work-item mapping" instead of
-        // reporting both as the same "No Handoffs pending" message.
-        const picked = await discoverPendingFinanceHandoffs(env);
-        const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
-        const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
+        // Handoff as scheduled for pickup if it has a handoff_workitem KV
+        // mapping (tied to a live Telegram session); a Handoff created
+        // directly in Notion -- e.g. by the isolated Sales Executive
+        // project -- has no such mapping, so discovery finds it but
+        // silently skips it, and financeScheduled stays 0 even though it's
+        // genuinely Pending. Query Notion directly too, so the reply can
+        // tell "nothing pending" apart from "pending but stuck for lack of
+        // a work-item mapping" instead of reporting both as the same
+        // "No Handoffs pending" message.
+        const financeScheduled = await discoverPendingFinanceHandoffs(env);
+        const salesScheduled = await discoverPendingSalesHandoffs(env);
+        const marketingScheduled = await discoverPendingMarketingHandoffs(env);
+        const strategyScheduled = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
         // notion_webhook always passes threadId undefined (Martin's DM),
         // so resolveUnitForThread never resolves to a specific Unit here --
         // this branch only ever runs for "manual"/"runtime_auto".
         const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
-        const pickedForThisUnit =
+        const scheduledForThisUnit =
           unitHere === "Finance"
-            ? picked
+            ? financeScheduled
             : unitHere === "Sales"
-              ? pickedForSales
+              ? salesScheduled
               : unitHere === "Marketing"
-                ? pickedForMarketing
-                : pickedForStrategy;
+                ? marketingScheduled
+                : strategyScheduled;
         let reply: string;
         if (pendingCount === 0) {
           reply = `No Handoffs pending for ${unitHere}.`;
-        } else if (pickedForThisUnit >= pendingCount) {
-          reply = `Picked up ${pickedForThisUnit} Handoff(s) for ${unitHere}.`;
+        } else if (scheduledForThisUnit >= pendingCount) {
+          reply = `Scheduled pickup for ${scheduledForThisUnit} Handoff(s) for ${unitHere}.`;
         } else {
-          reply = `${pendingCount} Handoff(s) pending for ${unitHere}, but automated pickup couldn't process ${pendingCount - pickedForThisUnit} of them (no handoff_workitem mapping -- likely created outside a live Telegram session, e.g. directly in Notion or by the isolated Sales Executive project). Needs manual follow-up.`;
+          reply = `${pendingCount} Handoff(s) pending for ${unitHere}, but pickup could not be scheduled for ${pendingCount - scheduledForThisUnit} of them (no handoff_workitem mapping -- likely created outside a live Telegram session, e.g. directly in Notion or by the isolated Sales Executive project). Needs manual follow-up.`;
         }
         await sendMessage(env, chatId, reply, undefined, threadId);
       } else if (unitHere === "dm" || unitHere === "unmapped") {
         // No specific Unit to scope to -- fall back to the combined
         // summary across all real pickup directions.
-        const picked = await discoverPendingFinanceHandoffs(env);
-        const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
-        const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
+        const financeScheduled = await discoverPendingFinanceHandoffs(env);
+        const salesScheduled = await discoverPendingSalesHandoffs(env);
+        const marketingScheduled = await discoverPendingMarketingHandoffs(env);
+        const strategyScheduled = await discoverPendingStrategyHandoffs(env);
         await checkStaleHandoffs(env);
         if (source === "notion_webhook") {
           // Background/event-driven: no Telegram user is waiting on a
@@ -681,7 +682,7 @@ export async function runCheckHandoffs(
         // since that IS about the specific work item(s) in that topic.
         await sendOperationsMessage(
           env,
-          `Checked Handoffs: ${picked} picked up for Finance, ${pickedForSales} picked up for Sales, ${pickedForMarketing} picked up for Marketing, ${pickedForStrategy} picked up for Strategy.`,
+          `Checked Handoffs: pickup scheduled for ${financeScheduled} Finance Handoff(s), ${salesScheduled} Sales Handoff(s), ${marketingScheduled} Marketing Handoff(s), ${strategyScheduled} Strategy Handoff(s).`,
         );
       } else {
         // Business Development, Strategy, Creative & Design, and

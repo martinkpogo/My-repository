@@ -146,7 +146,7 @@ Recording an Action transition is **legitimate lifecycle advancement**, not an a
 
 A **Handoff** is a Business Object representing controlled transfer of Work between organizational capabilities. It carries a contract (opaque tokens, sanitized context, required next action, expected output, acceptance criteria -- and, for a call-notes Handoff, the `Call_Notes_ID` reference naming the governed Call Notes record to read) and it is governed by the Kernel's identity/token boundary.
 
-It is *not* a separate routing subsystem. It does not decide who does what, resolve Responsibilities, or grant authority. The receiving capability picks it up through the same ordinary Work mechanism any other Work uses.
+It is *not* a separate routing subsystem. It does not decide who does what, resolve Responsibilities, or grant authority. The receiving capability picks it up through the same ordinary Work mechanism any other Work uses -- discovery schedules that pickup onto the receiving `WorkSession`'s Durable Object alarm; the pickup never runs inside the webhook request that discovered it (see Infrastructure).
 
 ### The Handoff carries its own source-boundary attestation
 
@@ -623,6 +623,8 @@ Infrastructure is the **implementation layer underneath the operating model**. E
 * external integrations
 
 Infrastructure must not be presented as business or organizational concepts. A Durable Object is not a Unit, a stream is not a Responsibility, a deployment is not a stage of Work, and a provider is not a Tool's authority.
+
+**Handoff pickup runs from a Durable Object alarm, not inside the webhook request.** Handoff discovery -- the Notion webhook wake-up, the cron trigger, `/checkhandoffs`, and the automatic post-confirmation continuation -- only *schedules* a pickup: it records which pickup kind the Handoff's `WorkSession` should run (`schedulePickup`) and arms that Durable Object's alarm; the pickup itself runs from `WorkSession.alarm()`, reusing the ordinary pickup runners unchanged. A webhook's `ctx.waitUntil` work is cancelled by Cloudflare shortly after the response, so discovery must never await an AI pickup inline. Duplicate protection stays where it was -- the Handoff claim, not a second scheduling dedupe -- and a failed alarm reports through the same discovery failure-notification path the loops use, leaving the Handoff Pending for the next discovery cycle.
 
 ---
 

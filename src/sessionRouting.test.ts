@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert";
 import { getReplyMessageWorkId, routeIncomingText, setReplyMessageWorkId } from "./router";
+import {
+  PENDING_PICKUP_KIND_KEY,
+  dispatchScheduledPickup,
+  schedulePickupAlarm,
+  type PickupAlarmStorage,
+  type PickupKind,
+} from "./sessionRouting";
 import { getWorkspaceTarget, getOperationsTarget, sendHatMessage, sendOperationsMessage } from "./telegram";
 import type { Env } from "./types";
 
@@ -239,4 +246,142 @@ test("8. sendHatMessage automatically registers reply_msg mapping in KV when tar
   assert.strictEqual(msgId, 777);
   const registeredWorkId = await getReplyMessageWorkId(env, 777);
   assert.strictEqual(registeredWorkId, "work-uuid-777", "sendHatMessage must automatically register reply_msg:777 in KV");
+});
+
+// --- Alarm-scheduled Handoff pickup (WorkSession storage side) ---------------
+//
+// These cover the storage/dispatch half of the pickup alarm. The alarm()
+// method itself lives on WorkSession (src/session.ts), which tests cannot
+// import (`cloudflare:workers` fails to resolve under the node test runner),
+// so alarm() is a thin shell: it catches a dispatch failure and reports it
+// through notifyMartinOfDiscoveryFailure (covered at the discovery layer),
+// while everything decision-shaped lives here.
+
+function fakePickupStorage(initialKind?: string): PickupAlarmStorage & {
+  store: Map<string, string>;
+  alarms: Array<number | Date>;
+} {
+  const store = new Map<string, string>();
+  if (initialKind !== undefined) store.set(PENDING_PICKUP_KIND_KEY, initialKind);
+  const alarms: Array<number | Date> = [];
+  return {
+    store,
+    alarms,
+    get: async <T = unknown>(key: string): Promise<T | undefined> => (store.has(key) ? (store.get(key) as unknown as T) : undefined),
+    put: async (key: string, value: unknown) => {
+      store.set(key, String(value));
+    },
+    delete: async (key: string) => {
+      store.delete(key);
+    },
+    setAlarm: async (timestamp: number | Date) => {
+      alarms.push(timestamp);
+    },
+  };
+}
+
+function allRunners(runs: string[]): Record<PickupKind, () => Promise<unknown>> {
+  return {
+    strategy: async () => {
+      runs.push("strategy");
+    },
+    finance: async () => {
+      runs.push("finance");
+    },
+    sales_call_notes: async () => {
+      runs.push("sales_call_notes");
+    },
+    sales_proposal: async () => {
+      runs.push("sales_proposal");
+    },
+    marketing: async () => {
+      runs.push("marketing");
+    },
+  };
+}
+
+test("WP1. schedulePickupAlarm stores the pickup kind and arms exactly one immediate DO alarm", async () => {
+  const storage = fakePickupStorage();
+  const before = Date.now();
+
+  await schedulePickupAlarm(storage, "strategy");
+
+  assert.strictEqual(storage.store.get(PENDING_PICKUP_KIND_KEY), "strategy", "the pending kind is recorded on the WorkSession's own storage");
+  assert.strictEqual(storage.alarms.length, 1, "exactly one alarm per scheduled pickup");
+  assert.ok(typeof storage.alarms[0] === "number" && (storage.alarms[0] as number) >= before, "the alarm is armed to fire immediately");
+});
+
+test("WP1. dispatchScheduledPickup runs exactly one runStrategyPickup for a scheduled 'strategy' kind and clears the pending kind", async () => {
+  const storage = fakePickupStorage("strategy");
+  const runs: string[] = [];
+
+  const ran = await dispatchScheduledPickup(storage, allRunners(runs));
+
+  assert.strictEqual(ran, "strategy");
+  assert.deepStrictEqual(runs, ["strategy"], "exactly the one scheduled runner, exactly once");
+  assert.strictEqual(storage.store.has(PENDING_PICKUP_KIND_KEY), false, "the pending kind is cleared before the pickup counts as consumed");
+
+  const again = await dispatchScheduledPickup(storage, allRunners(runs));
+  assert.strictEqual(again, undefined, "nothing pending");
+  assert.deepStrictEqual(runs, ["strategy"], "a re-fired or duplicate alarm cannot run the same pickup twice");
+});
+
+test("WP1. duplicate scheduling does not double-run a pickup -- the second schedule overwrites the same pending key", async () => {
+  const storage = fakePickupStorage();
+  const runs: string[] = [];
+
+  await schedulePickupAlarm(storage, "finance");
+  await schedulePickupAlarm(storage, "finance");
+  assert.strictEqual(storage.alarms.length, 2, "each schedule arms the (single, overwritten) alarm slot");
+
+  const ran = await dispatchScheduledPickup(storage, allRunners(runs));
+  assert.strictEqual(ran, "finance");
+  assert.deepStrictEqual(runs, ["finance"], "one key, one dispatch -- scheduling twice still runs the pickup once");
+});
+
+test("WP1. every discovery-scheduled kind dispatches to its own runner -- all five run exactly once", async () => {
+  const kinds: PickupKind[] = ["strategy", "finance", "sales_call_notes", "sales_proposal", "marketing"];
+  for (const kind of kinds) {
+    const storage = fakePickupStorage(kind);
+    const runs: string[] = [];
+    const ran = await dispatchScheduledPickup(storage, allRunners(runs));
+    assert.strictEqual(ran, kind, `${kind}: the stored kind survives take-and-clear`);
+    assert.deepStrictEqual(runs, [kind], `${kind}: only its own runner runs, exactly once`);
+  }
+});
+
+test("WP1. an unrecognized pending value is discarded fail-closed -- no runner is ever dispatched for it", async () => {
+  const storage = fakePickupStorage("not-a-real-kind");
+  const runs: string[] = [];
+
+  const ran = await dispatchScheduledPickup(storage, allRunners(runs));
+
+  assert.strictEqual(ran, undefined, "garbage is not a schedulable kind");
+  assert.deepStrictEqual(runs, [], "fail-closed: nothing runs");
+  assert.strictEqual(storage.store.has(PENDING_PICKUP_KIND_KEY), false, "the garbage value is still consumed, not left to linger");
+});
+
+test("WP1. a runner failure propagates out of dispatchScheduledPickup so alarm() can report it, and the pending kind is not re-armed by the alarm itself", async () => {
+  const storage = fakePickupStorage("strategy");
+  const boom = new Error("pickup runner failed");
+  const runners: Record<PickupKind, () => Promise<unknown>> = {
+    strategy: async () => {
+      throw boom;
+    },
+    finance: async () => {
+      throw new Error("must not run");
+    },
+    sales_call_notes: async () => {
+      throw new Error("must not run");
+    },
+    sales_proposal: async () => {
+      throw new Error("must not run");
+    },
+    marketing: async () => {
+      throw new Error("must not run");
+    },
+  };
+
+  await assert.rejects(() => dispatchScheduledPickup(storage, runners), boom, "the failure reaches alarm()'s catch, which reports it through notifyMartinOfDiscoveryFailure");
+  assert.strictEqual(storage.store.has(PENDING_PICKUP_KIND_KEY), false, "the failed kind was already consumed -- the Handoff stays Pending and the next discovery cycle retries, it is not retried by a loop here");
 });
