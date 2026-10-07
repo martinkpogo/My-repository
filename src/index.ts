@@ -22,7 +22,7 @@ import {
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
 import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
-import { findUnitManifest } from "./units/registry";
+import { findUnitManifest, getUnitManifests } from "./units/registry";
 import { resolveRecordedActionSkills } from "./runtime/actionSkills";
 import type { SessionSummary } from "./types";
 import {
@@ -37,6 +37,17 @@ import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
 
 export { WorkSession } from "./session";
+
+// WP8: assemble (and thereby validate) the Unit Registry at module load,
+// before any request is ever served: every Hat of every Unit manifest is
+// checked once here at isolate boot, so a malformed manifest fails the
+// test/deploy gate and then boot itself -- never a live request mid-run.
+// registry.ts's own module body cannot do this: the documented access.ts
+// cycle makes reading manifest bindings at that top level a TDZ crash for
+// manifest-first entry points, so the registry validates where it is
+// assembled, and this Worker-entry call forces that assembly to happen at
+// the production module load.
+getUnitManifests();
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
