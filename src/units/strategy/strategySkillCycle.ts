@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { generate } from "../../ai";
+import { generate, generateWithOutcome, type AiFailureCause } from "../../ai";
 import type { SemanticTaskId } from "../../dataBoundary/types";
 import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegistry";
 
@@ -162,7 +162,7 @@ export interface StrategySynthesisResult {
 
 export type StrategySkillCycleOutcome =
   /** No usable plan -- degrade to the unchanged core diagnosis (the pre-existing exception). */
-  | { status: "unavailable"; reason: string; findings: StrategySkillFinding[] }
+  | { status: "unavailable"; reason: string; findings: StrategySkillFinding[]; cause?: AiFailureCause }
   /** The composition's own methodology says stop -- fail closed through handleBlocked. */
   | { status: "hold"; reason: string; findings: StrategySkillFinding[] }
   /** Finished. `synthesizedContext` is present only when at least one Skill ran. */
@@ -198,11 +198,29 @@ function findingsText(findings: StrategySkillFinding[]): string {
 }
 
 /**
- * Strategy Analysis's one planning decision. Returns null only when no usable
- * plan could be obtained -- provider failure, null output, or a plan that is
- * not a list of at most MAX_PLANNED_STRATEGY_SKILLS distinct entries each
- * carrying its own question. Whether a named id is a declared Strategy Skill
- * is checked by the caller, at the point of use.
+ * Maps a failed AI call's cause to the caller-facing hold reason -- the
+ * one place Strategy phrases an AI failure for a human. Two distinct
+ * messages, deliberately: an Outbound Data Gate refusal is a POLICY
+ * judgement about the outgoing payload that a human can act on (reword and
+ * re-run), while providers_exhausted/unparseable are infrastructure
+ * failures no rewording will fix. Codes only, never payload content.
+ */
+export function describeAiFailure(cause: AiFailureCause, gateReasons: readonly string[]): string {
+  if (cause === "outbound_gate_blocked") {
+    const codes = gateReasons.length > 0 ? gateReasons.join(", ") : "reason code not recorded";
+    return `The AI call was refused by the Outbound Data Gate (${codes}). The Handoff text probably contains a phrase the gate treats as identity, e.g. a capitalised phrase ending in Group/Ltd/Partners/Holdings. Reword it and re-run.`;
+  }
+  return `No AI provider returned a usable result (${cause}). This is an infrastructure failure, not an evidence judgement.`;
+}
+
+/**
+ * Strategy Analysis's one planning decision. Returns `{ plan: null, cause }`
+ * only when no usable plan could be obtained -- a failed AI call (its
+ * `AiFailureCause` recorded for the caller's log/WorkState), null output,
+ * or a plan that is not a list of at most MAX_PLANNED_STRATEGY_SKILLS
+ * distinct entries each carrying its own question (recorded as
+ * "unparseable"). Whether a named id is a declared Strategy Skill is
+ * checked by the caller, at the point of use.
  */
 async function planStrategySkills(
   env: Env,
@@ -212,11 +230,10 @@ async function planStrategySkills(
     availableSkills: readonly StrategyDomainSkillId[];
     strategyAnalysisContent: string;
   },
-): Promise<StrategySkillPlanEntry[] | null> {
+): Promise<{ plan: StrategySkillPlanEntry[] | null; cause?: AiFailureCause }> {
   try {
-    const result = await generate<{ interpretation?: string; plan?: unknown; rationale?: string }>(env, {
+    const outcome = await generateWithOutcome<{ interpretation?: string; plan?: unknown; rationale?: string }>(env, {
       taskId: "strategy.specialist_selection",
-      mode: "json",
       parts: {
         persona: [
           "You are the Strategy Analyst performing its own Strategic Diagnosis & Prescription responsibility. You are the single accountable actor: no one else performs a step, and no other Hat is ever assumed.",
@@ -253,20 +270,28 @@ async function planStrategySkills(
       light: true,
     });
 
-    if (!result || typeof result !== "object" || !Array.isArray(result.plan)) return null;
-    if (result.plan.length > MAX_PLANNED_STRATEGY_SKILLS) return null;
+    if (!outcome.ok) {
+      // The documented degradation is unchanged (the caller proceeds to
+      // core diagnosis with strategySkillCycleUnavailable = true); only
+      // the CAUSE is additionally recorded for the log and WorkState.
+      console.error(`Strategy Skill plan: planning call failed (${outcome.cause}${outcome.gateReasons.length ? ` [${outcome.gateReasons.join(", ")}]` : ""}) -- the cycle degrades to core diagnosis as documented.`);
+      return { plan: null, cause: outcome.cause };
+    }
+    const result = outcome.json;
+    if (!result || typeof result !== "object" || !Array.isArray(result.plan)) return { plan: null, cause: "unparseable" };
+    if (result.plan.length > MAX_PLANNED_STRATEGY_SKILLS) return { plan: null, cause: "unparseable" };
     const plan: StrategySkillPlanEntry[] = [];
     for (const raw of result.plan) {
-      if (!raw || typeof raw !== "object") return null;
+      if (!raw || typeof raw !== "object") return { plan: null, cause: "unparseable" };
       const { skillId, question } = raw as { skillId?: unknown; question?: unknown };
-      if (typeof skillId !== "string" || !skillId || typeof question !== "string" || !question.trim()) return null;
-      if (plan.some((p) => p.skillId === skillId)) return null;
+      if (typeof skillId !== "string" || !skillId || typeof question !== "string" || !question.trim()) return { plan: null, cause: "unparseable" };
+      if (plan.some((p) => p.skillId === skillId)) return { plan: null, cause: "unparseable" };
       plan.push({ skillId, question: question.trim() });
     }
-    return plan;
+    return { plan };
   } catch (err) {
     console.error("Strategy Skill plan: planning call threw unexpectedly", err);
-    return null;
+    return { plan: null, cause: "providers_exhausted" };
   }
 }
 
@@ -362,11 +387,13 @@ async function runDomainSkill(
 async function synthesizeStrategyFindings(
   env: Env,
   input: { strategyQuestion: string; strategyContext: string; findings: StrategySkillFinding[]; strategyAnalysisContent: string },
-): Promise<StrategySynthesisResult | null> {
+): Promise<{
+  synthesis: StrategySynthesisResult | null;
+  aiFailure?: { cause: AiFailureCause; gateReasons: string[] };
+}> {
   try {
-    const result = await generate<StrategySynthesisResult>(env, {
+    const outcome = await generateWithOutcome<StrategySynthesisResult>(env, {
       taskId: "strategy.specialist_synthesis",
-      mode: "json",
       parts: {
         persona: [
           "You are the Strategy Analyst reconciling the bounded Strategy Skill findings below, before the unchanged Symptom -> Problem -> Cause -> Constraint -> Consequence diagnosis proceeds. You remain the single accountable actor; a Skill never decides anything.",
@@ -396,10 +423,13 @@ async function synthesizeStrategyFindings(
       light: true,
       maxTokens: 2000,
     });
-    return result ?? null;
+    if (!outcome.ok) {
+      return { synthesis: null, aiFailure: { cause: outcome.cause, gateReasons: outcome.gateReasons } };
+    }
+    return { synthesis: outcome.json };
   } catch (err) {
     console.error("Strategy Skill plan: synthesis threw unexpectedly", err);
-    return null;
+    return { synthesis: null };
   }
 }
 
@@ -418,10 +448,13 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   const strategyAnalysis = skills.get("strategy_analysis");
   const availableSkills = STRATEGY_DOMAIN_SKILL_IDS.filter((id) => skills.declared.includes(id));
 
-  const plan = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content });
-  if (!plan) {
-    return { status: "unavailable", reason: "Strategy Analysis could not produce a usable Skill plan -- the planning call returned no usable plan.", findings: [] };
+  const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content });
+  if (planOutcome.plan === null) {
+    // Unchanged degradation: proceed to core diagnosis, only the CAUSE is
+    // additionally carried for the caller's log and WorkState.
+    return { status: "unavailable", reason: "Strategy Analysis could not produce a usable Skill plan -- the planning call returned no usable plan.", findings: [], cause: planOutcome.cause };
   }
+  const plan = planOutcome.plan;
 
   for (const { skillId } of plan) {
     if (!STRATEGY_DOMAIN_SKILL_IDS.includes(skillId as StrategyDomainSkillId)) {
@@ -464,10 +497,16 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   }
 
   await onProgress?.("Reconciling Strategy Skill findings...");
-  const synthesis = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content });
-  if (!synthesis) {
+  const synthesisOutcome = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content });
+  if (synthesisOutcome.synthesis === null) {
+    if (synthesisOutcome.aiFailure) {
+      // A failed synthesis call is phrased by cause (gate refusal vs
+      // infrastructure), not the generic reconciliation text.
+      return { status: "hold", reason: describeAiFailure(synthesisOutcome.aiFailure.cause, synthesisOutcome.aiFailure.gateReasons), findings };
+    }
     return { status: "hold", reason: "Could not reconcile the Strategy Skill findings into the strategic diagnosis.", findings };
   }
+  const synthesis = synthesisOutcome.synthesis;
   if (!synthesis.sufficient) {
     return {
       status: "hold",

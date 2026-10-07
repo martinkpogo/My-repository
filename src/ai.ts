@@ -1,7 +1,9 @@
 import type { Env } from "./types";
-import { defaultPolicyExecutor, AiPolicyExecutor } from "./ai/policy";
+import { defaultPolicyExecutor, AiPolicyExecutor, type AiFailureCause } from "./ai/policy";
 import type { AiTask } from "./ai/types";
 import type { SemanticTaskId, ContextSegment, SensitivityLevel } from "./dataBoundary/types";
+
+export type { AiFailureCause };
 
 export interface AiJsonOptions {
   taskId: SemanticTaskId;
@@ -29,11 +31,12 @@ export interface ChatTurn {
  * to the next eligible provider rather than failing the whole call.
  * Mandates explicit SemanticTaskId and constructs structured BoundaryContext.
  */
-export async function aiJson<T = Record<string, unknown>>(
-  env: Env,
-  opts: AiJsonOptions,
-  executor: AiPolicyExecutor = defaultPolicyExecutor,
-): Promise<T | null> {
+/**
+ * Builds the exact JSON-mode AiTask both `aiJson` and `generateWithOutcome`
+ * send -- one definition so the two can never drift apart in prompt suffix,
+ * boundary segments, temperature, token budget or validation seam.
+ */
+function buildJsonTask(opts: AiJsonOptions): AiTask {
   const systemContent = `${opts.system}\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.`;
   const segments: ContextSegment[] = [
     { type: "system", content: systemContent, provenance: `${opts.taskId}:system` },
@@ -64,7 +67,15 @@ export async function aiJson<T = Record<string, unknown>>(
     validateResponse: isParsableJson,
   };
 
-  const response = await executor.executeTask(env, task);
+  return task;
+}
+
+export async function aiJson<T = Record<string, unknown>>(
+  env: Env,
+  opts: AiJsonOptions,
+  executor: AiPolicyExecutor = defaultPolicyExecutor,
+): Promise<T | null> {
+  const response = await executor.executeTask(env, buildJsonTask(opts));
   if (!response) {
     return null;
   }
@@ -222,6 +233,57 @@ export async function generate(env: Env, options: BaseGenerateOptions & { mode: 
     return aiChat(env, options.taskId, system, options.history, situation, options.maxTokens ?? 800, options.sensitivity);
   }
   return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens });
+}
+
+/**
+ * The outcome of a json-mode `generateWithOutcome` call: either the parsed
+ * JSON, or WHY nothing usable came back (`AiFailureCause` codes only --
+ * gateReasons carries the Outbound Data Gate's distinct reasonCategory
+ * CODES, never payload content).
+ */
+export type AiJsonOutcome<T> =
+  | { ok: true; json: T }
+  | { ok: false; cause: AiFailureCause; gateReasons: string[] };
+
+/**
+ * generateWithOutcome -- json mode only: byte-identical to
+ * `generate(env, { ..., mode: "json" })` in prompt, boundary treatment,
+ * gate, validation and provider fallback, but instead of collapsing every
+ * failure into `null` it reports the CAUSE (via the executor's
+ * executeTaskWithOutcome) so a caller can tell an Outbound Data Gate
+ * refusal -- a policy judgement about the payload, rewordable by a human
+ * -- apart from an infrastructure failure or unparseable output, which no
+ * rewording will fix. A provider whose response doesn't parse still falls
+ * through to the next eligible provider exactly as before; `unparseable`
+ * is only ever returned once every eligible provider is done. Callers that
+ * only need "did it work" keep using generate/aiJson unchanged.
+ */
+export async function generateWithOutcome<T = Record<string, unknown>>(
+  env: Env,
+  options: BaseGenerateOptions,
+  executor: AiPolicyExecutor = defaultPolicyExecutor,
+): Promise<AiJsonOutcome<T>> {
+  const system = assembleSystemPrompt(options.parts);
+  const outcome = await executor.executeTaskWithOutcome(env, buildJsonTask({
+    taskId: options.taskId,
+    system,
+    user: options.parts.situation,
+    light: options.light,
+    maxTokens: options.maxTokens,
+  }));
+  if (!outcome.ok) {
+    return { ok: false, cause: outcome.cause, gateReasons: outcome.gateReasons };
+  }
+
+  const jsonText = extractJson(outcome.response.rawText);
+  if (!jsonText) {
+    return { ok: false, cause: "unparseable", gateReasons: [] };
+  }
+  try {
+    return { ok: true, json: JSON.parse(jsonText) as T };
+  } catch {
+    return { ok: false, cause: "unparseable", gateReasons: [] };
+  }
 }
 
 function isParsableJson(rawText: string): boolean {

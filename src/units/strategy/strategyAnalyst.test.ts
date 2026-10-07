@@ -915,6 +915,46 @@ test("WP2d. A direct_request with no Commercial Value Evidence block is NOT bloc
   assert.ok(!log.sentTexts.some((m) => /Strategy diagnosis held/i.test(m)), "no fail-fast hold message on the exempt path");
 });
 
+// --- WP3: a failed AI call is told by its cause, never as an evidence gap ---
+
+test("WP3. A gate-blocked diagnosis tells the caller the Outbound Data Gate refused the call, with its reason codes -- never 'Insufficient evidence'", async (t) => {
+  const log = mockFetch(t, {
+    initialStatus: "Pending",
+    // The situation text itself is what the gate refuses: "Hotel Group"
+    // survives identity redaction and trips COMPANY_SUFFIX_DETECTED on
+    // every provider attempt of both the planning call and the diagnosis.
+    verifiedFacts: `Hotel Group pricing strategy situation: recurring client complaints about late delivery over two quarters.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`,
+  });
+  const env = fakeEnv();
+  let aiCalls = 0;
+  env.AI = {
+    run: async () => {
+      aiCalls++;
+      throw new Error("AI must not execute -- the Outbound Data Gate must block the call first");
+    },
+  } as any;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_clarification");
+  assert.strictEqual(aiCalls, 0, "the gate blocks before any provider executes -- ZERO AI calls");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.strategySkillCycleUnavailable, true, "the planning call degraded to core diagnosis, exactly as documented");
+  assert.strictEqual(result.strategySkillCycleUnavailableCause, "outbound_gate_blocked", "the CAUSE is recorded in WorkState");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /The AI call was refused by the Outbound Data Gate \(COMPANY_SUFFIX_DETECTED\)/, "the hold reason states the gate refusal with its reason CODE");
+  assert.ok(!message.includes("Insufficient evidence to complete a defensible diagnosis"), "a policy refusal is never phrased as an evidence judgement");
+  const heldPatch = lastHandoffPatch(log);
+  assert.strictEqual(heldPatch.properties.Status.select.name, "Held");
+  assert.match(
+    heldPatch.properties["Open Questions"].rich_text[0].text.content,
+    /refused by the Outbound Data Gate/,
+    "the Handoff's Open Questions carry the true cause too",
+  );
+});
+
 test("Required Next Action content is folded into the diagnosis context, not silently ignored", async (t) => {
   // Regression test for a live incident: a human returned a Held Handoff
   // to Pending directly in Notion, writing detailed refinement guidance
