@@ -8,6 +8,9 @@ import {
   ENTITY_NEW_CALLBACK_PREFIX,
   MATTER_NEW_CALLBACK_PREFIX,
   QUALIFY_CALLBACK_PREFIX,
+  ENTITY_CHOICE_CALLBACK_PREFIX,
+  MATTER_CHOICE_CALLBACK_PREFIX,
+  salesProposalDecisionCallback,
 } from "./salesManifest";
 import { findCallbackHandler } from "../unitManifest";
 import * as sales from "./salesExecutive";
@@ -306,21 +309,30 @@ test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat ge
   assert.strictEqual(viaDispatch.stage, "identity_boundary_hold");
 });
 
-test("salesManifest: Sales Executive declares exactly entitynew, matternew, and qualify in callbackHandlers -- the Proposal decision is a Token-Safe Action callback, not a manifest one", () => {
+test("salesManifest: Sales Executive declares exactly entitynew, matternew, qualify, entity, matter and salesprop in callbackHandlers", () => {
   const hat = salesManifest.hats["Sales Executive"];
   assert.deepStrictEqual(
     new Set(Object.keys(hat.callbackHandlers ?? {})),
-    new Set([ENTITY_NEW_CALLBACK_PREFIX, MATTER_NEW_CALLBACK_PREFIX, QUALIFY_CALLBACK_PREFIX]),
+    new Set([
+      ENTITY_NEW_CALLBACK_PREFIX,
+      MATTER_NEW_CALLBACK_PREFIX,
+      QUALIFY_CALLBACK_PREFIX,
+      ENTITY_CHOICE_CALLBACK_PREFIX,
+      MATTER_CHOICE_CALLBACK_PREFIX,
+      salesProposal.PROPOSAL_CALLBACK_ACTION,
+    ]),
   );
-  // The Proposal Approve/Refine/Reject decision is a compound-encoded
-  // ("<number>.<version>.<a|r>" value) callback handled by the canonical
-  // token-safe Proposal module under the proposal_approve / proposal_revision
-  // Actions. It has no manifest callback route, so no second Proposal
-  // lifecycle exists beside it.
+  // The "salesprop" key the manifest spells as a literal (to avoid a
+  // circular-import TDZ at module init) must stay equal to
+  // tokenSafeProposal's exported constant -- drift fails here. The
+  // manifest entry is now the Proposal decision's ONLY route: its former
+  // handleCallback switch case is deleted (asserted source-level in
+  // callbackHandlersDispatch.test.ts), so no second Proposal lifecycle
+  // exists beside it.
   assert.strictEqual(
-    (hat.callbackHandlers ?? {})["proposal"],
-    undefined,
-    "the Proposal decision must not have a second, manifest-declared route",
+    (hat.callbackHandlers ?? {})[salesProposal.PROPOSAL_CALLBACK_ACTION],
+    salesProposalDecisionCallback,
+    "salesprop routes to the relocated decision callback",
   );
 });
 

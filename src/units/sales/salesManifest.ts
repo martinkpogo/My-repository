@@ -52,15 +52,15 @@ import * as salesProposal from "./tokenSafeProposal";
  * a handler and still falls through to the unchanged "not awaiting"
  * fallback. Every existing multi-turn flow is untouched.
  *
- * salesExecutiveHat.callbackHandlers declares four of Sales Executive's
- * own nested approval-gate prefixes -- entitynew, matternew, qualify,
- * proposal -- migrated off session.ts's hardcoded switch cases onto the
- * generic manifest lookup (approval-callback dispatch mechanism, PRs
- * #203-210). entity/matter (N-way choice pickers, not approve/reject)
- * and the sales-proposal decision callback (compound-encoded
- * "<number>.<version>.<a|r>" value) are deliberately NOT migrated --
- * they don't fit ApprovalCallbackHandler's plain boolean shape. All four
- * migrated handlers are unchanged, byte-for-byte.
+ * salesExecutiveHat.callbackHandlers declares six of Sales Executive's
+ * own nested approval-gate prefixes -- entitynew, matternew, qualify
+ * (plain approve/reject) plus entity, matter and salesprop (richer
+ * payloads, each a thin adapter over the exact handler and exact parsing
+ * its former handleCallback switch case used, reached through
+ * ApprovalCallbackHandler's forwarded raw `value`) -- all migrated off
+ * session.ts's hardcoded switch onto the generic manifest lookup
+ * (approval-callback dispatch mechanism, PRs #203-210 and WP7). The
+ * original approve/reject handlers are unchanged, byte-for-byte.
  *
  * Lead Generation Specialist declares one action -- discover_leads, the
  * on-demand discovery request ("find me 3 companies showing a
@@ -385,16 +385,52 @@ async function salesExecutiveReadHandler(_env: Env, actionName: SalesExecutiveAc
 //
 // The entity/matter pickers (N-way choice, not approve/reject) and the
 // sales-proposal decision callback (compound-encoded
-// "<number>.<version>.<a|r>" value) remain outside
-// ApprovalCallbackHandler's plain boolean shape, as before.
+// "<number>.<version>.<a|r>" value) carry richer payloads than a single
+// approve/reject flag, so each is a thin adapter over the exact handler
+// and exact parsing its former handleCallback switch case used -- the raw
+// callback_data value reaches them through ApprovalCallbackHandler's
+// forwarded `value` argument (WP7). Handlers and parsing are unchanged;
+// only the dispatch lookup moved.
 export const ENTITY_NEW_CALLBACK_PREFIX = "entitynew" as const;
 export const MATTER_NEW_CALLBACK_PREFIX = "matternew" as const;
 export const QUALIFY_CALLBACK_PREFIX = "qualify" as const;
+export const ENTITY_CHOICE_CALLBACK_PREFIX = "entity" as const;
+export const MATTER_CHOICE_CALLBACK_PREFIX = "matter" as const;
+
+export const entityChoiceCallback: ApprovalCallbackHandler = (env, state, _approved, value) =>
+  sales.handleEntityChoice(env, state, value ?? "");
+
+export const matterChoiceCallback: ApprovalCallbackHandler = (env, state, _approved, value) =>
+  sales.handleMatterChoice(env, state, value ?? "");
+
+export const salesProposalDecisionCallback: ApprovalCallbackHandler = (env, state, _approved, value) => {
+  // value is "<proposalNumber>.<version>.<a|r>" -- binds the decision
+  // to the exact Proposal ID + Version; "." keeps it intact through
+  // index.ts's split(":") and well under Telegram's 64-byte limit.
+  const m = (value ?? "").match(/^(\d+)\.(\d+)\.([ar])$/);
+  if (!m) return Promise.resolve(state);
+  return salesProposal.handleSalesProposalDecision(
+    env,
+    state,
+    Number(m[1]),
+    Number(m[2]),
+    m[3] === "a" ? "approve" : "revise",
+  );
+};
 
 const salesExecutiveCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [ENTITY_NEW_CALLBACK_PREFIX]: sales.handleEntityCreationApproval,
   [MATTER_NEW_CALLBACK_PREFIX]: sales.handleMatterCreationApproval,
   [QUALIFY_CALLBACK_PREFIX]: sales.handleLeadToProspectApproval,
+  [ENTITY_CHOICE_CALLBACK_PREFIX]: entityChoiceCallback,
+  [MATTER_CHOICE_CALLBACK_PREFIX]: matterChoiceCallback,
+  // salesProposal.PROPOSAL_CALLBACK_ACTION ("salesprop"), spelled as the
+  // literal rather than the exported const on purpose: tokenSafeProposal
+  // transitively imports the Unit registry (recordWorkAction -> dispatch ->
+  // registry -> this file), so evaluating its const during this module's
+  // init would be a TDZ crash. CallbackHandlersDispatch.test asserts the
+  // literal and that constant stay equal, so drift fails the suite.
+  "salesprop": salesProposalDecisionCallback,
 };
 
 const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {

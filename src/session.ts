@@ -345,43 +345,13 @@ export class WorkSession extends DurableObject<Env> {
   async handleCallback(action: string, value: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (action) {
-        case "entity":
-          return sales.handleEntityChoice(this.env, state, value);
-        case "matter":
-          return sales.handleMatterChoice(this.env, state, value);
-        case "sprop": {
-          // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
-          // ":") specifically so it survives index.ts's plain
-          // data.split(":") destructure into [action, workId, value]
-          // unchanged. Deliberately compact: Telegram's callback_data has a
-          // hard 64-byte limit, and workId alone (a 36-char UUID, required
-          // for index.ts to resolve the right WorkSession) already leaves
-          // no room for a second UUID -- see developStrategyProposal's
-          // button construction for the full rationale.
-          const dot = value.lastIndexOf(".");
-          const versionStr = dot === -1 ? "" : value.slice(0, dot);
-          const decisionChar = dot === -1 ? "" : value.slice(dot + 1);
-          const proposalVersion = Number(versionStr);
-          const decision = decisionChar === "a" ? "approve" : decisionChar === "r" ? "refine" : decisionChar === "j" ? "reject" : "";
-          if ((decision !== "approve" && decision !== "refine" && decision !== "reject") || !Number.isFinite(proposalVersion)) {
-            return Promise.resolve(state);
-          }
-          return strategy.handleInterventionApproval(this.env, state, proposalVersion, decision);
-        }
-        case salesProposal.PROPOSAL_CALLBACK_ACTION: {
-          // value is "<proposalNumber>.<version>.<a|r>" -- binds the decision
-          // to the exact Proposal ID + Version; "." keeps it intact through
-          // index.ts's split(":") and well under Telegram's 64-byte limit.
-          const m = value.match(/^(\d+)\.(\d+)\.([ar])$/);
-          if (!m) return Promise.resolve(state);
-          return salesProposal.handleSalesProposalDecision(
-            this.env,
-            state,
-            Number(m[1]),
-            Number(m[2]),
-            m[3] === "a" ? "approve" : "revise",
-          );
-        }
+        // The four business prefixes that used to live here -- entity,
+        // matter, sprop and salesprop -- are now declared on their owning
+        // Hat's HatManifest.callbackHandlers (salesManifest.ts and
+        // strategyManifest.ts) and reach their exact handlers through the
+        // generic manifest lookup below (WP7). Only the infrastructure
+        // callbacks remain hardcoded: they authorize cross-system OAuth
+        // flows and belong to no Unit's business decisions.
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);
         case "googlefolder":
@@ -391,14 +361,19 @@ export class WorkSession extends DurableObject<Env> {
         default: {
           // Generic manifest lookup for an approval-callback prefix a Hat
           // has migrated onto HatManifest.callbackHandlers -- checked only
-          // as a fallback, after every existing hand-written case above, so
-          // no legacy prefix's behavior changes. Mirrors handleTextReply's
-          // own default-case manifest fallback for awaitingHandlers.
+          // as a fallback, after every remaining hand-written case above,
+          // so no legacy prefix's behavior changes. The raw value is
+          // forwarded alongside the derived `approved` flag so entries
+          // whose buttons carry richer payloads (entity/matter pickers,
+          // sprop, salesprop) parse them exactly as their former switch
+          // case did. Mirrors handleTextReply's own default-case manifest
+          // fallback for awaitingHandlers; an unknown prefix still resolves
+          // the state unchanged, as before.
           const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
           const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
           const callbackHandler = hat ? findCallbackHandler(action, hat) : undefined;
           if (callbackHandler) {
-            return callbackHandler(this.env, state, value === "approve");
+            return callbackHandler(this.env, state, value === "approve", value);
           }
           return Promise.resolve(state);
         }

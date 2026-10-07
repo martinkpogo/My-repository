@@ -75,7 +75,23 @@ export type AwaitingStateHandler = (
  * that resumes on a typed text reply, this resolves a callback_data button
  * press, a mechanism the manifest had no field for at all until this one.
  */
-export type ApprovalCallbackHandler = (env: Env, state: WorkState, approved: boolean) => Promise<WorkState>;
+export type ApprovalCallbackHandler = (
+  env: Env,
+  state: WorkState,
+  approved: boolean,
+  /**
+   * The raw `callback_data` value (everything after `<prefix>:<workId>:`,
+   * as index.ts's `split(":")` destructure produced it), forwarded so an
+   * entry whose buttons carry a richer payload than one approve/reject
+   * flag -- the entity/matter pickers' chosen page id or "new", the
+   * intervention's "<version>.<a|r|j>", the sales proposal's
+   * "<number>.<version>.<a|r>" -- can parse it exactly as its former
+   * `handleCallback` switch case did. `approved` is still derived from
+   * the button value exactly as before; approve/reject entries ignore
+   * this argument and are unchanged.
+   */
+  value?: string,
+) => Promise<WorkState>;
 
 export interface HatManifest<A extends string = string> {
   /** Matches this Hat's HatIdentity.name in src/hats/registry.ts -- not duplicated, only referenced. */
@@ -147,13 +163,16 @@ export interface HatManifest<A extends string = string> {
    * callback_data prefix a propose function or entryHandler sets when it
    * sends its Telegram approve/reject buttons (e.g. "bdopportunityhandoff" for
    * "bdopportunityhandoff:<workId>:approve"). Optional and defaults to
-   * none -- most Hats' approval callbacks are still hardcoded cases in
-   * session.ts's handleCallback switch; this migrates incrementally,
-   * same rollout discipline as entryHandler's own migration (one Hat/one
-   * prefix proves the shape before others follow). A prefix declared
-   * here is dispatched generically instead of needing its own switch
-   * case; a prefix NOT declared here simply isn't reachable through this
-   * mechanism yet, and stays exactly as it was.
+   * none. A prefix declared here is dispatched generically through
+   * session.ts's handleCallback's default case instead of needing its own
+   * switch case -- since WP7 that switch holds only the Google OAuth
+   * infrastructure prefixes; every business prefix lives here. A prefix
+   * NOT declared here simply isn't reachable through this mechanism yet,
+   * and stays exactly as it was. Entries whose buttons carry richer
+   * payloads than a single approve/reject flag (the entity/matter
+   * pickers, salesprop, sprop) receive the raw callback_data value
+   * through ApprovalCallbackHandler's optional `value` argument and parse
+   * it exactly as their former switch case did.
    */
   callbackHandlers?: Record<string, ApprovalCallbackHandler>;
 }
