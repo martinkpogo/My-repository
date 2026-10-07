@@ -167,14 +167,6 @@ export class WorkSession extends DurableObject<Env> {
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":
           return marketing.handleMarketingClarification(this.env, state, text);
-        case "strategy_clarification":
-          return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyClarification(this.env, state, text, skills));
-        case "strategy_direct_request_matter":
-          return this.runUnderRecordedSkills(state, (skills) => strategy.handleDirectRequestClarification(this.env, state, text, skills));
-        case "strategy_feedback":
-          return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyFeedback(this.env, state, text, skills));
-        case "strategy_refinement_reason":
-          return strategy.handleStrategyRefinement(this.env, state, text);
         default: {
           // Generic manifest lookup for a Unit built on the Unit Registry
           // pattern -- checked only as a fallback, after every existing

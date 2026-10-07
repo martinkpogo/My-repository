@@ -187,7 +187,17 @@ const strategyAnalystHat: HatManifest<StrategyAction> = {
   responsibilityId: "own_strategic_diagnosis",
   readHandler: strategyReadHandler,
   entryHandler: strategyEntryHandler,
-  awaitingHandlers: {},
+  // Strategy's own continuation states, registered on the manifest so
+  // handleTextReply dispatches them through the ONE generic awaiting path
+  // (manifest lookup + runUnderRecordedSkills) instead of hardcoded switch
+  // cases. Each entry is the exact same handler function the old case
+  // called, with the same arguments -- only the lookup moved.
+  awaitingHandlers: {
+    strategy_clarification: strategy.handleStrategyClarification,
+    strategy_direct_request_matter: strategy.handleDirectRequestClarification,
+    strategy_feedback: strategy.handleStrategyFeedback,
+    strategy_refinement_reason: strategy.handleStrategyRefinement,
+  },
   callbackHandlers: strategyAnalystCallbackHandlers,
 };
 
