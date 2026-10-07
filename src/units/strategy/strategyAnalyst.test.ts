@@ -340,6 +340,14 @@ function mockFetch(
     verifiedFacts?: string;
     entityToken?: string;
     matterToken?: string;
+    /**
+     * The Matter record's own operational `Status` as the matters-ds query
+     * serves it; defaults to `Qualified` (the canonical precondition state
+     * the pickup's advance expects). Other values exercise the guarded
+     * advance: at/ beyond the transition makes no write, anything else
+     * makes no write and is reported to Operations.
+     */
+    matterStatus?: string;
     initialStatus?: string;
     requiredNextAction?: string;
     /**
@@ -395,6 +403,7 @@ function mockFetch(
       : `Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`);
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
+  const matterStatus = opts.matterStatus ?? "Qualified";
   const initialStatus = opts.initialStatus ?? "Pending";
   const requiredNextAction = opts.requiredNextAction ?? "";
   const sourceBoundaryMarker =
@@ -561,6 +570,10 @@ function mockFetch(
               properties: {
                 Matter_ID: { unique_id: { prefix: matterShape[1], number: Number(matterShape[2]) } },
                 Entity: { relation: [{ id: "entity-page-1" }] },
+                // The Matter's own operational Status -- production shape:
+                // resolveEntityMatterFromTokens reads it in this same query
+                // so the pickup can gate its Status advance on it.
+                Status: { select: { name: matterStatus } },
               },
             },
           ],
@@ -721,6 +734,51 @@ test("3b. Handoff pickup advances the Matter's operational Status to Commercial 
   assert.ok(
     log.matterPatchBodies.some((p) => p.properties?.Status?.select?.name === "Commercial Development"),
     "the Matter's own operational Status must advance at Handoff pickup, not just the Handoff's",
+  );
+});
+
+// --- WP4: the Matter Status advance is guarded by its precondition ----------
+
+test("WP4a. A Matter already at or beyond the transition makes NO Status write -- re-pickup stays idempotent", async (t) => {
+  for (const status of ["Commercial Development", "Proposal", "Converted"]) {
+    const log = mockFetch(t, { initialStatus: "Pending", matterStatus: status });
+    const env = fakeEnv();
+    env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+    const state = fakeState();
+
+    const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+    assert.strictEqual(log.matterPatchBodies.length, 0, `a Matter already at '${status}' must not be written at pickup`);
+    assert.ok(
+      !log.sentTexts.some((m) => m.includes("expected 'Qualified' -- not advanced.")),
+      `the idempotent '${status}' case sends no not-advanced Operations notice`,
+    );
+    assert.ok(result.strategyQuestion, `the diagnosis still runs after the no-op '${status}' pickup`);
+  }
+});
+
+test("WP4b. A Matter at 'Open' makes NO write, reports the exact Operations notice, and the diagnosis still runs", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending", matterStatus: "Open" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(log.matterPatchBodies.length, 0, "only Qualified may advance -- an 'Open' Matter must not be written");
+  const notice = log.sentTexts.find((m) => m.includes("expected 'Qualified' -- not advanced."));
+  assert.ok(notice, "the not-advanced Operations notice was sent");
+  assert.ok(
+    notice!.includes(`Matter ${result.matterToken} is 'Open', expected 'Qualified' -- not advanced.`),
+    `the notice must carry the exact required text; got: ${notice}`,
+  );
+  // Diagnosis is NOT blocked by a non-Qualified Matter (governance
+  // question of refusing such Handoffs deliberately not implemented).
+  assert.ok(result.strategyQuestion, "the diagnosis still runs in the Open case");
+  assert.notStrictEqual(result.stage, "strategy_blocked", "the notice must not block the diagnosis");
+  assert.ok(
+    !log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Held"),
+    "the Handoff is not Held for a non-Qualified Matter",
   );
 });
 

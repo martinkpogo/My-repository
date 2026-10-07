@@ -3,7 +3,7 @@ import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
+import { editWorkspaceHatMessage, sendOperationsMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
@@ -885,13 +885,15 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   if (!commercialValueEvidence.ok && state.entryType !== "direct_request") {
     pickupDefects.push(`Commercial Value Evidence is not usable: ${commercialValueEvidence.reason}`);
   }
-  // Resolved ONCE here so the fail-fast check and the authorized Matter
-  // status advance below see the same result.
+  // Resolved ONCE here so the fail-fast check and the guarded Matter
+  // status advance below see the same result (and the same Status read).
   let resolvedMatterId: string | null = null;
+  let matterStatus: string | null = null;
   if (state.entityToken && state.matterToken) {
     const resolved = await resolveEntityMatterFromTokens(env, state.entityToken, state.matterToken);
     if (resolved) {
       resolvedMatterId = resolved.matterId;
+      matterStatus = resolved.matterStatus;
     } else {
       pickupDefects.push(`Matter_Token '${state.matterToken}' does not resolve to a related Matter`);
     }
@@ -903,18 +905,29 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   // Now authorized (identity architecture decision recorded in Notion,
   // Sept 2026): advance the Matter's own operational Status to Commercial
   // Development at Handoff pickup, the point substantive commercial
-  // development actually begins (see the Matter Business Object's
-  // Qualified_to_Commercial_Development transition). Previously this only
-  // ever happened inside Sales's own (now-paused) direct-entry flow before
-  // creating the Handoff; with the isolated project creating Sales ->
-  // Strategy Handoffs directly, nothing else advances it. Resolution
-  // already succeeded above (an unresolvable token is one of the pickup
-  // defects that stop before this point), so only a write failure is
-  // tolerated here -- best-effort, logged.
+  // development actually begins -- but only along the canonical
+  // Qualified -> Commercial_Development transition (LOG-987: Isolated
+  // Sales performs Open -> Qualified). "Qualified" advances, as always; a
+  // Matter already at or beyond the transition (Commercial Development,
+  // Proposal, Converted) writes nothing, so a re-pickup stays idempotent;
+  // any OTHER status writes nothing and is reported to Operations. The
+  // notice deliberately does not block the diagnosis -- whether to refuse
+  // Handoffs whose Matter is not Qualified is an open governance
+  // question, recorded rather than decided here. Resolution already
+  // succeeded above (an unresolvable token is one of the pickup defects
+  // that stop before this point), so only a write failure is tolerated
+  // here -- best-effort, logged.
   if (resolvedMatterId) {
-    await updatePage(env, resolvedMatterId, { Status: select("Commercial Development") }, workSessionContext(state)).catch((err) =>
-      console.error(`Strategy handlePickup: failed to advance Matter ${state.matterToken} to Commercial Development`, err),
-    );
+    if (matterStatus === "Qualified") {
+      await updatePage(env, resolvedMatterId, { Status: select("Commercial Development") }, workSessionContext(state)).catch((err) =>
+        console.error(`Strategy handlePickup: failed to advance Matter ${state.matterToken} to Commercial Development`, err),
+      );
+    } else if (matterStatus !== "Commercial Development" && matterStatus !== "Proposal" && matterStatus !== "Converted") {
+      await sendOperationsMessage(
+        env,
+        `Matter ${state.matterToken} is '${matterStatus ?? "(unset)"}', expected 'Qualified' -- not advanced.`,
+      ).catch((err) => console.error("Failed to send Matter-status-not-advanced Operations notice", err));
+    }
   }
 
   await logActivity(env, {
