@@ -1,7 +1,7 @@
 import test from "node:test";
 import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert";
-import { strategyManifest, STRATEGY_HANDOFF_CALLBACK_PREFIX } from "./strategyManifest";
+import { strategyManifest, STRATEGY_HANDOFF_CALLBACK_PREFIX, INTERVENTION_APPROVAL_CALLBACK_PREFIX, interventionApprovalCallback } from "./strategyManifest";
 import { findCallbackHandler } from "../unitManifest";
 import * as strategy from "./strategyAnalyst";
 import type { Env, WorkState } from "../../types";
@@ -155,9 +155,14 @@ test("strategyManifest: awaitingHandlers resumes Strategy's four continuation st
   assert.strictEqual(strategy.handleStrategyRefinement.length, 3, "handlers that never took skills keep their exact signature");
 });
 
-test("strategyManifest: declares exactly strategyhandoff in callbackHandlers", () => {
+test("strategyManifest: declares exactly strategyhandoff and sprop in callbackHandlers", () => {
   const hat = strategyManifest.hats["Strategy Analyst"];
-  assert.deepStrictEqual(Object.keys(hat.callbackHandlers ?? {}), [STRATEGY_HANDOFF_CALLBACK_PREFIX]);
+  assert.deepStrictEqual(Object.keys(hat.callbackHandlers ?? {}), [STRATEGY_HANDOFF_CALLBACK_PREFIX, INTERVENTION_APPROVAL_CALLBACK_PREFIX]);
+  assert.strictEqual(
+    (hat.callbackHandlers ?? {})[INTERVENTION_APPROVAL_CALLBACK_PREFIX],
+    interventionApprovalCallback,
+    "sprop routes to the relocated intervention-approval callback",
+  );
 });
 
 test("findCallbackHandler resolves strategyhandoff on Strategy Analyst and genuinely delegates to handleStrategyHandoffApproval -- rejecting a pending handoff clears it and replies, proving real delegation", async (t) => {

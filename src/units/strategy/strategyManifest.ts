@@ -174,8 +174,41 @@ async function strategyReadHandler(_env: Env, actionName: StrategyAction, _text:
 // file, so there's no circular-import risk to design around.
 export const STRATEGY_HANDOFF_CALLBACK_PREFIX = "strategyhandoff" as const;
 
+/**
+ * The intervention-proposal approval prefix (WP7), relocated from
+ * session.ts's handleCallback switch -- its value carries
+ * "<proposalVersion>.<a|r|j>" rather than a single approve/reject flag,
+ * so the former case's parsing moves here verbatim and the raw value
+ * reaches it through ApprovalCallbackHandler's forwarded `value`
+ * argument. Delegates to the exact same handler with the exact same
+ * arguments the switch case passed.
+ */
+export const INTERVENTION_APPROVAL_CALLBACK_PREFIX = "sprop" as const;
+
+export const interventionApprovalCallback: ApprovalCallbackHandler = (env, state, _approved, value) => {
+  // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
+  // ":") specifically so it survives index.ts's plain
+  // data.split(":") destructure into [action, workId, value]
+  // unchanged. Deliberately compact: Telegram's callback_data has a
+  // hard 64-byte limit, and workId alone (a 36-char UUID, required
+  // for index.ts to resolve the right WorkSession) already leaves
+  // no room for a second UUID -- see developStrategyProposal's
+  // button construction for the full rationale.
+  const raw = value ?? "";
+  const dot = raw.lastIndexOf(".");
+  const versionStr = dot === -1 ? "" : raw.slice(0, dot);
+  const decisionChar = dot === -1 ? "" : raw.slice(dot + 1);
+  const proposalVersion = Number(versionStr);
+  const decision = decisionChar === "a" ? "approve" : decisionChar === "r" ? "refine" : decisionChar === "j" ? "reject" : "";
+  if ((decision !== "approve" && decision !== "refine" && decision !== "reject") || !Number.isFinite(proposalVersion)) {
+    return Promise.resolve(state);
+  }
+  return strategy.handleInterventionApproval(env, state, proposalVersion, decision);
+};
+
 const strategyAnalystCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [STRATEGY_HANDOFF_CALLBACK_PREFIX]: strategy.handleStrategyHandoffApproval,
+  [INTERVENTION_APPROVAL_CALLBACK_PREFIX]: interventionApprovalCallback,
 };
 
 const strategyAnalystHat: HatManifest<StrategyAction> = {

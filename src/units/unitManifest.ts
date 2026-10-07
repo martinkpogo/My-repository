@@ -75,7 +75,23 @@ export type AwaitingStateHandler = (
  * that resumes on a typed text reply, this resolves a callback_data button
  * press, a mechanism the manifest had no field for at all until this one.
  */
-export type ApprovalCallbackHandler = (env: Env, state: WorkState, approved: boolean) => Promise<WorkState>;
+export type ApprovalCallbackHandler = (
+  env: Env,
+  state: WorkState,
+  approved: boolean,
+  /**
+   * The raw `callback_data` value (everything after `<prefix>:<workId>:`,
+   * as index.ts's `split(":")` destructure produced it), forwarded so an
+   * entry whose buttons carry a richer payload than one approve/reject
+   * flag -- the entity/matter pickers' chosen page id or "new", the
+   * intervention's "<version>.<a|r|j>", the sales proposal's
+   * "<number>.<version>.<a|r>" -- can parse it exactly as its former
+   * `handleCallback` switch case did. `approved` is still derived from
+   * the button value exactly as before; approve/reject entries ignore
+   * this argument and are unchanged.
+   */
+  value?: string,
+) => Promise<WorkState>;
 
 export interface HatManifest<A extends string = string> {
   /** Matches this Hat's HatIdentity.name in src/hats/registry.ts -- not duplicated, only referenced. */
