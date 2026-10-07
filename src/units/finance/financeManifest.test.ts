@@ -3,6 +3,7 @@ import { NO_ACTION_SKILLS } from "../../platform/skillRegistry";
 import assert from "node:assert";
 import { financeManifest, dispatchFinanceHat, QUOTE_CALLBACK_PREFIX } from "./financeManifest";
 import { findCallbackHandler } from "../unitManifest";
+import * as finance from "./valueBasedPricingAssessor";
 import type { Env, WorkState } from "../../types";
 
 /**
@@ -94,9 +95,19 @@ test("financeManifest: readHandler fails closed -- no read action is declared", 
   );
 });
 
-test("financeManifest: awaitingHandlers is empty -- Finance's own continuation states stay hardcoded in session.ts", () => {
+test("financeManifest: awaitingHandlers resumes Finance's four continuation states through the manifest", () => {
   const hat = financeManifest.hats["Value-Based Pricing Assessor"];
-  assert.deepStrictEqual(hat.awaitingHandlers, {});
+  assert.deepStrictEqual(
+    Object.keys(hat.awaitingHandlers).sort(),
+    ["finance_direct_request_context", "finance_direct_request_matter", "quote_redo_reason", "value_context_more"],
+    "exactly Finance's four awaiting states must be registered",
+  );
+  // Identity assertions: each entry IS the same function the old
+  // handleTextReply switch case called -- same body, same arguments.
+  assert.strictEqual(hat.awaitingHandlers.value_context_more, finance.handleValueContextClarification);
+  assert.strictEqual(hat.awaitingHandlers.quote_redo_reason, finance.handleQuoteRedoReason);
+  assert.strictEqual(hat.awaitingHandlers.finance_direct_request_matter, finance.handleDirectRequestClarification);
+  assert.strictEqual(hat.awaitingHandlers.finance_direct_request_context, finance.handleDirectRequestContext);
 });
 
 test("financeManifest: declares exactly quote in callbackHandlers", () => {

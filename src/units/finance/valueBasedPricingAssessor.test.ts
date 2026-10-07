@@ -1144,14 +1144,21 @@ test("Finance clarification re-evaluates the governed evidence without creating 
 });
 
 test("Finance clarification routing: `value_context_more` dispatches to Finance's own handler and the Sales-side reconstruction handler no longer exists", async () => {
+  // Post-WP6 the awaiting dispatch resolves through the Unit Registry
+  // manifest (HatManifest.awaitingHandlers), not a hardcoded switch case
+  // in session.ts -- assert the routing by handler identity.
+  const { financeManifest } = await import("./financeManifest");
+  const hat = financeManifest.hats["Value-Based Pricing Assessor"];
+  assert.strictEqual(
+    hat.awaitingHandlers.value_context_more,
+    handleValueContextClarification,
+    "Finance owns its own evidence-gate clarification loop",
+  );
+
   const fs = await import("node:fs");
   const path = await import("node:path");
   const session = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "session.ts"), "utf8");
-  const caseBlock = /case "value_context_more":([\s\S]*?)(?:case "|default)/.exec(session)?.[1] ?? "";
-  assert.ok(caseBlock.length > 0, "the awaiting state must still be dispatched somewhere");
-  assert.ok(caseBlock.includes("finance.handleValueContextClarification"), "Finance owns its own evidence-gate clarification loop");
-  assert.ok(!caseBlock.includes("sales.handleMoreValueContext"), "it must never enter Sales's handler, which overwrote the Handoff's blocks");
-  assert.ok(!caseBlock.includes("sales.handle"), "no Sales handler at all receives Finance's evidence clarifications");
+  assert.ok(!session.includes('case "value_context_more"'), "the awaiting state must no longer be a hardcoded switch case");
 
   const sales = fs.readFileSync(path.join(import.meta.dirname, "..", "sales", "salesExecutive.ts"), "utf8");
   assert.ok(

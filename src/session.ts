@@ -163,10 +163,6 @@ export class WorkSession extends DurableObject<Env> {
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (state.awaiting) {
-        case "value_context_more":
-          return finance.handleValueContextClarification(this.env, state, text);
-        case "quote_redo_reason":
-          return finance.handleQuoteRedoReason(this.env, state, text);
         case "marketing_feedback":
           return marketing.handleMarketingFeedback(this.env, state, text);
         case "marketing_clarification":
@@ -175,10 +171,6 @@ export class WorkSession extends DurableObject<Env> {
           return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyClarification(this.env, state, text, skills));
         case "strategy_direct_request_matter":
           return this.runUnderRecordedSkills(state, (skills) => strategy.handleDirectRequestClarification(this.env, state, text, skills));
-        case "finance_direct_request_matter":
-          return finance.handleDirectRequestClarification(this.env, state, text);
-        case "finance_direct_request_context":
-          return finance.handleDirectRequestContext(this.env, state, text);
         case "strategy_feedback":
           return this.runUnderRecordedSkills(state, (skills) => strategy.handleStrategyFeedback(this.env, state, text, skills));
         case "strategy_refinement_reason":
