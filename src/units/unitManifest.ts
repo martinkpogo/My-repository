@@ -163,13 +163,16 @@ export interface HatManifest<A extends string = string> {
    * callback_data prefix a propose function or entryHandler sets when it
    * sends its Telegram approve/reject buttons (e.g. "bdopportunityhandoff" for
    * "bdopportunityhandoff:<workId>:approve"). Optional and defaults to
-   * none -- most Hats' approval callbacks are still hardcoded cases in
-   * session.ts's handleCallback switch; this migrates incrementally,
-   * same rollout discipline as entryHandler's own migration (one Hat/one
-   * prefix proves the shape before others follow). A prefix declared
-   * here is dispatched generically instead of needing its own switch
-   * case; a prefix NOT declared here simply isn't reachable through this
-   * mechanism yet, and stays exactly as it was.
+   * none. A prefix declared here is dispatched generically through
+   * session.ts's handleCallback's default case instead of needing its own
+   * switch case -- since WP7 that switch holds only the Google OAuth
+   * infrastructure prefixes; every business prefix lives here. A prefix
+   * NOT declared here simply isn't reachable through this mechanism yet,
+   * and stays exactly as it was. Entries whose buttons carry richer
+   * payloads than a single approve/reject flag (the entity/matter
+   * pickers, salesprop, sprop) receive the raw callback_data value
+   * through ApprovalCallbackHandler's optional `value` argument and parse
+   * it exactly as their former switch case did.
    */
   callbackHandlers?: Record<string, ApprovalCallbackHandler>;
 }
