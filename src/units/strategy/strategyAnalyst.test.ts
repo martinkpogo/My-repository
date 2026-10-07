@@ -2215,6 +2215,96 @@ test("23. Old approval callback (superseded proposal version) cannot approve a r
   assert.strictEqual(result.pendingStrategyApproval?.proposalVersion, 2, "the current pending approval must remain untouched");
 });
 
+/** Titles of every Activity Log entry written so far. */
+function activityLogTitles(log: FetchLog): string[] {
+  return log.activityLogBodies.map((b) => String(b.properties?.Entry?.title?.[0]?.text?.content ?? ""));
+}
+
+test("Lifecycle guard: a WorkSession awaiting intervention approval is never picked up again, even when its Handoff is back at Pending (HO-86)", async (t) => {
+  // The mock serves the Handoff as Pending -- exactly HO-86's state after a
+  // manual Notion edit returned it to Pending while Proposal v1 was waiting.
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+  const proposalV1: StrategyProposal = { ...(RAW_PROPOSAL as any), proposalId: "proposal-v1", proposalVersion: 1 };
+  const pendingV1 = {
+    kind: "strategy_intervention" as const,
+    strategyWorkSessionId: "work_strat_1",
+    proposalId: "proposal-v1",
+    proposalVersion: 1,
+    decisionOptions: ["approve", "refine", "reject"] as Array<"approve" | "refine" | "reject">,
+  };
+  const state = fakeState({
+    stage: "awaiting_intervention_approval",
+    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
+    strategyProposal: proposalV1,
+    pendingStrategyApproval: pendingV1,
+  });
+  const proposalBefore = structuredClone(state.strategyProposal);
+  const pendingBefore = structuredClone(state.pendingStrategyApproval);
+  const historyBefore = structuredClone(state.strategyProposalHistory);
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  // forbiddenAi() throws on any AI call, so reaching here means none happened.
+  assert.deepStrictEqual(result.strategyProposal, proposalBefore, "Proposal v1 is untouched");
+  assert.strictEqual(result.strategyProposal?.proposalVersion, 1, "no version increment");
+  assert.deepStrictEqual(result.pendingStrategyApproval, pendingBefore, "the pending v1 approval is untouched");
+  assert.deepStrictEqual(result.strategyProposalHistory, historyBefore, "proposal history is untouched");
+  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "approval state unchanged");
+  assert.strictEqual(result.stage, "awaiting_intervention_approval", "stage unchanged");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis ran");
+  assert.deepStrictEqual(log.handoffPatchBodies, [], "no claim (Pending -> Picked-up) and no other Handoff write -- the Status is left exactly as found");
+  assert.strictEqual(log.sentButtons.length, 0, "no new approval request is sent");
+
+  const titles = activityLogTitles(log);
+  assert.ok(!titles.some((tt) => tt.startsWith("Strategy Proposal")), "no Strategy Proposal is created or revised");
+  assert.ok(!titles.some((tt) => tt.startsWith("Strategy picked up request")), "the normal pickup entry is never written");
+  const refusal = log.activityLogBodies.find((b) => String(b.properties?.Entry?.title?.[0]?.text?.content ?? "").startsWith("Strategy pickup refused — proposal already awaiting"));
+  assert.ok(refusal, `the refusal is logged (got: ${titles.join(" | ")})`);
+  assert.strictEqual(refusal.properties?.Type?.select?.name, "Blocker");
+  const rationale = String(refusal.properties?.["Decision Rationale"]?.rich_text?.[0]?.text?.content ?? "");
+  assert.match(rationale, /AWAITING_INTERVENTION_APPROVAL/);
+  assert.match(rationale, /governed Refine path/);
+});
+
+test("Lifecycle guard: REFINEMENT_REQUESTED also refuses re-pickup, and explicit Refine still produces v2 and returns to AWAITING_INTERVENTION_APPROVAL", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Pending" });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+
+  // A real first pickup produces v1 and enters the approval gate.
+  const afterPickup = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  assert.strictEqual(afterPickup.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  const v1Id = afterPickup.strategyProposal!.proposalId;
+
+  // Martin taps Refine on v1.
+  const afterRefine = await handleInterventionApproval(env, afterPickup, 1, "refine");
+  assert.strictEqual(afterRefine.strategyApprovalState, "REFINEMENT_REQUESTED");
+  const refinementBefore = structuredClone(afterRefine.pendingStrategyRefinement);
+
+  // The Handoff is (still) served as Pending -- a re-pickup in this state is refused.
+  env.AI = forbiddenAi();
+  const patchesBefore = log.handoffPatchBodies.length;
+  const afterRepickup = await handlePickup(env, afterRefine, STRATEGY_SKILLS);
+  assert.strictEqual(afterRepickup.strategyApprovalState, "REFINEMENT_REQUESTED", "refinement state unchanged");
+  assert.strictEqual(afterRepickup.strategyProposal?.proposalVersion, 1, "no version increment from a pickup");
+  assert.deepStrictEqual(afterRepickup.pendingStrategyRefinement, refinementBefore, "the Refine binding is untouched");
+  assert.strictEqual(afterRepickup.awaiting, "strategy_refinement_reason", "still waiting for Martin's refinement text");
+  assert.strictEqual(log.handoffPatchBodies.length, patchesBefore, "no claim and no Handoff write");
+  assert.ok(activityLogTitles(log).some((tt) => tt.startsWith("Strategy pickup refused — proposal already awaiting")), "the refusal is logged");
+
+  // The governed Refine path still produces v2 and returns to the approval gate.
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const afterRevision = await handleStrategyRefinement(env, afterRepickup, "Consider a phased rollout instead.");
+  assert.strictEqual(afterRevision.strategyProposal!.proposalVersion, 2, "Refine increments the version");
+  assert.strictEqual(afterRevision.strategyProposal!.proposalId, v1Id, "same proposal lineage");
+  assert.strictEqual(afterRevision.strategyProposalHistory?.[0]?.proposalVersion, 1, "v1 preserved as history");
+  assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "v2 re-enters the approval gate");
+  assert.strictEqual(afterRevision.pendingStrategyApproval?.proposalVersion, 2);
+  assert.ok(activityLogTitles(log).some((tt) => tt.startsWith("Strategy Proposal revised (v2)")), "v2 is logged as a revision, not a fresh proposal");
+});
+
 test("24. Stale approval callback (wrong stage) does not mutate current work", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
