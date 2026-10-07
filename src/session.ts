@@ -9,6 +9,8 @@ import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/acti
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
+import { notifyMartinOfDiscoveryFailure } from "./checkHandoffs";
+import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { logActivity } from "./log";
 import {
   handleGoogleAccountSelection,
@@ -218,6 +220,45 @@ export class WorkSession extends DurableObject<Env> {
         }
       }
     });
+  }
+
+  /**
+   * Invoked by Handoff discovery (checkHandoffs.ts's discovery loops) INSTEAD
+   * of awaiting the pickup inline: this only records the pending pickup kind
+   * on the WorkSession's own storage and arms this Durable Object's alarm.
+   * The pickup itself runs later from alarm() below, so a webhook's
+   * ctx.waitUntil window (cancelled by Cloudflare ~30 s after the response)
+   * never has to hold an entire AI diagnosis. See
+   * docs/enig-operating-model.md, "Infrastructure".
+   */
+  async schedulePickup(kind: PickupKind): Promise<void> {
+    await schedulePickupAlarm(this.ctx.storage, kind);
+  }
+
+  /**
+   * Cloudflare invokes this when the alarm armed by schedulePickup fires. It
+   * runs EXACTLY the one pickup discovery scheduled (the pending kind is
+   * cleared before the runner starts, so a duplicate or re-fired alarm can
+   * never run the same pickup twice; duplicate Handoff claims remain guarded
+   * by claimPendingHandoff exactly as before -- no second dedupe mechanism).
+   * Failures report through the same notifyMartinOfDiscoveryFailure path the
+   * discovery loops use and are deliberately not rethrown: the Handoff stays
+   * Pending and the next discovery cycle retries, matching the loops' own
+   * catch-and-notify behaviour.
+   */
+  async alarm(): Promise<void> {
+    try {
+      await dispatchScheduledPickup(this.ctx.storage, {
+        strategy: () => this.runStrategyPickup(),
+        finance: () => this.runFinancePickup(),
+        sales_call_notes: () => this.runCallNotesPickup(),
+        sales_proposal: () => this.runTokenSafeProposal(),
+        marketing: () => this.runMarketingHandoffPickup(),
+      });
+    } catch (err) {
+      const state = await this.getState().catch(() => undefined);
+      await notifyMartinOfDiscoveryFailure(this.env, state?.handoffId ?? "(unknown)", err);
+    }
   }
 
   /**

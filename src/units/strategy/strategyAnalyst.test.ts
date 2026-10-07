@@ -35,6 +35,7 @@ import { hasSubstantiveEvidence } from "./strategyEvidence";
 import { SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker } from "../../handoffWriter";
 import type { WorkState, Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
+import { dispatchScheduledPickup, PENDING_PICKUP_KIND_KEY, type PickupAlarmStorage } from "../../sessionRouting";
 
 /**
  * The Skill set Strategy's own `diagnose` Action declares, resolved from the
@@ -825,6 +826,64 @@ test("5. Strategy refuses a Closed Handoff", async (t) => {
   await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(log.handoffPatchBodies.length, 0);
+});
+
+// WP1 -- the same refusal in the scheduled (alarm) shape. WorkSession.alarm()
+// consumes the pending kind and calls EXACTLY the one runner discovery
+// scheduled (wired in src/session.ts; the storage/dispatch side is covered in
+// sessionRouting.test.ts). Here the chain is completed against an already
+// claimed Handoff: the scheduled runner reaches handlePickup, which refuses
+// before any pickup work or AI call.
+test("4b. An alarm-scheduled pickup for an already-claimed Handoff does no pickup work and makes no AI call", async (t) => {
+  const log = mockFetch(t, { initialStatus: "Picked-up" });
+  const env = fakeEnv();
+  let aiCalls = 0;
+  env.AI = {
+    run: async () => {
+      aiCalls++;
+      throw new Error("AI must not be called for an already-claimed Handoff");
+    },
+  } as any;
+  const state = fakeState();
+
+  // The WorkSession's own storage, pre-loaded with the pending kind exactly
+  // as schedulePickupAlarm would leave it.
+  const store = new Map<string, string>();
+  store.set(PENDING_PICKUP_KIND_KEY, "strategy");
+  const storage: PickupAlarmStorage = {
+    get: async <T = unknown>(key: string): Promise<T | undefined> => (store.has(key) ? (store.get(key) as unknown as T) : undefined),
+    put: async (key: string, value: unknown) => {
+      store.set(key, String(value));
+    },
+    delete: async (key: string) => {
+      store.delete(key);
+    },
+    setAlarm: async () => {},
+  };
+
+  const ran = await dispatchScheduledPickup(storage, {
+    strategy: async () => {
+      await handlePickup(env, state, STRATEGY_SKILLS);
+    },
+    finance: async () => {
+      throw new Error("only the scheduled runner may run");
+    },
+    sales_call_notes: async () => {
+      throw new Error("only the scheduled runner may run");
+    },
+    sales_proposal: async () => {
+      throw new Error("only the scheduled runner may run");
+    },
+    marketing: async () => {
+      throw new Error("only the scheduled runner may run");
+    },
+  });
+
+  assert.strictEqual(ran, "strategy", "the alarm consumed the scheduled kind");
+  assert.strictEqual(store.has(PENDING_PICKUP_KIND_KEY), false, "the pending kind is cleared");
+  assert.strictEqual(aiCalls, 0, "zero AI calls -- refused before any diagnosis");
+  assert.strictEqual(log.handoffPatchBodies.length, 0, "no pickup work happened (no Notion write at all)");
+  assert.strictEqual(state.strategyDiagnosis, undefined, "no diagnosis was produced");
 });
 
 test("6. Strategy can place a blocked case on Held", async (t) => {

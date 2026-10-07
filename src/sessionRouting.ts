@@ -124,6 +124,90 @@ export function getSessionStub(env: Env, workId: string) {
   return env.WORK_SESSION.get(id) as any;
 }
 
+// ---------------------------------------------------------------------------
+// Alarm-scheduled Handoff pickup (checkHandoffs.ts's discovery loops).
+//
+// Discovery (Notion webhook wake-up, cron, /checkhandoffs) must never AWAIT
+// a Unit's pickup: a webhook's ctx.waitUntil window is cancelled by
+// Cloudflare ~30 s after the response, which cut short exactly the long AI
+// pickups (Strategy's diagnosis) and could leave the AUTO_CHECKHANDOFFS
+// guard set on a cancelled run. Discovery therefore only RECORDS which
+// pickup kind this WorkSession should run and arms a Durable Object alarm;
+// the pickup itself runs later from WorkSession.alarm() (src/session.ts),
+// reusing the existing run*Pickup methods unchanged. Duplicate protection
+// stays where it was (claimPendingHandoff): scheduling twice is harmless
+// because the claim makes a second pickup a no-op -- deliberately no second
+// dedupe mechanism here.
+//
+// This logic lives in this dependency-free module rather than on
+// WorkSession itself only so it is testable: tests cannot import
+// src/session.ts, because its `cloudflare:workers` Durable Object import is
+// not resolvable under the node test runner.
+// ---------------------------------------------------------------------------
+
+/** Which existing WorkSession pickup runner a discovery loop scheduled. */
+export type PickupKind = "strategy" | "finance" | "sales_call_notes" | "sales_proposal" | "marketing";
+
+const PICKUP_KINDS: readonly string[] = ["strategy", "finance", "sales_call_notes", "sales_proposal", "marketing"];
+
+/** Storage key on the WorkSession DO's own storage -- never the "state" key. */
+export const PENDING_PICKUP_KIND_KEY = "pending_pickup_kind";
+
+/**
+ * The minimal storage surface these helpers need. DurableObjectStorage
+ * satisfies it structurally; test fakes implement it directly.
+ */
+export interface PickupAlarmStorage {
+  get<T = unknown>(key: string): Promise<T | undefined | null>;
+  put(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<boolean | void>;
+  setAlarm(timestamp: number | Date): Promise<void>;
+}
+
+/**
+ * Records the pending pickup kind on the WorkSession's own storage and arms
+ * its alarm to fire immediately. Discovery calls this INSTEAD of awaiting
+ * the pickup itself.
+ */
+export async function schedulePickupAlarm(storage: PickupAlarmStorage, kind: PickupKind): Promise<void> {
+  await storage.put(PENDING_PICKUP_KIND_KEY, kind);
+  await storage.setAlarm(Date.now());
+}
+
+/**
+ * Reads and CLEARS the pending pickup kind. Clearing before the pickup runs
+ * is what makes an alarm single-shot: a duplicate or re-fired alarm can
+ * never run the same scheduled pickup twice (a genuinely new schedule
+ * writes the key again). Returns undefined when nothing is pending; an
+ * unrecognized stored value is discarded fail-closed rather than dispatched.
+ */
+export async function takePendingPickupKind(storage: PickupAlarmStorage): Promise<PickupKind | undefined> {
+  const raw = await storage.get<string>(PENDING_PICKUP_KIND_KEY);
+  if (raw === undefined || raw === null) return undefined;
+  await storage.delete(PENDING_PICKUP_KIND_KEY);
+  return PICKUP_KINDS.includes(raw) ? (raw as PickupKind) : undefined;
+}
+
+/**
+ * The alarm-side dispatch: consume the pending kind, then run EXACTLY the
+ * one runner discovery scheduled for it. The runners are the WorkSession's
+ * existing pickup methods, passed in bound by alarm() -- no pickup logic
+ * lives here. Re-throws a runner failure; WorkSession.alarm() catches it
+ * and reports through notifyMartinOfDiscoveryFailure, matching each
+ * discovery loop's own catch-and-notify behaviour (the Handoff stays
+ * Pending and the next cycle retries). Returns the kind that ran, or
+ * undefined when nothing was pending.
+ */
+export async function dispatchScheduledPickup(
+  storage: PickupAlarmStorage,
+  runners: Record<PickupKind, () => Promise<unknown>>,
+): Promise<PickupKind | undefined> {
+  const kind = await takePendingPickupKind(storage);
+  if (!kind) return undefined;
+  await runners[kind]();
+  return kind;
+}
+
 export type StreamType = "workspace" | "operations" | "dm" | "unmapped";
 
 /**

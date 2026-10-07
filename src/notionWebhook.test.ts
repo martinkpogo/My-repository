@@ -401,6 +401,104 @@ test("18. No synthetic Telegram /checkhandoffs message is emitted by the webhook
   assert.strictEqual(counts.telegramCalls, 0, "the webhook path must never send a synthetic /checkhandoffs summary or fake conversation reply");
 });
 
+// --- pickup is never awaited inside the webhook request ---------------------
+
+test("Webhook handler returns without awaiting any Unit pickup -- the background discovery only schedules the pickup onto the WorkSession alarm", async (t) => {
+  const scheduled: string[] = [];
+  const runnerCalls: string[] = [];
+  const stub = {
+    init: async () => {},
+    // The one thing discovery is allowed to do to the session: record the kind.
+    schedulePickup: async (kind: string) => {
+      scheduled.push(kind);
+    },
+    // Tripwires: if the webhook path ever awaited a pickup runner directly
+    // again (the pre-alarm inline shape), these record it and the last
+    // assertion fails.
+    runStrategyPickup: async () => {
+      runnerCalls.push("strategy");
+    },
+    runFinancePickup: async () => {
+      runnerCalls.push("finance");
+    },
+    runCallNotesPickup: async () => {
+      runnerCalls.push("sales_call_notes");
+    },
+    runTokenSafeProposal: async () => {
+      runnerCalls.push("sales_proposal");
+    },
+    runMarketingHandoffPickup: async () => {
+      runnerCalls.push("marketing");
+    },
+  };
+  const env = fakeEnv({
+    WORK_SESSION: { idFromName: (n: string) => n, get: () => stub } as any,
+  });
+
+  const originalFetch = globalThis.fetch;
+  const strategyHandoff = {
+    id: "handoff-strategy-1",
+    url: "https://notion.so/handoff-strategy-1",
+    properties: {
+      "To Unit": { select: { name: "Strategy" } },
+      "To Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] },
+      Matter_Token: { rich_text: [{ plain_text: "MAT-30" }] },
+      Entity_Token: { rich_text: [{ plain_text: "E-30" }] },
+    },
+    archived: false,
+  };
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.includes("/data_sources/") && urlStr.includes("/query")) {
+      const body = JSON.parse(init.body);
+      const toUnit = body.filter?.and?.find((f: any) => f.property === "To Unit")?.select?.equals;
+      if (toUnit === "Strategy") {
+        return new Response(JSON.stringify({ results: [strategyHandoff] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.match(/\/pages\/[^/]+$/)) {
+      // The handler's own awaited page retrieval (evaluation only).
+      return new Response(JSON.stringify({ id: "page-1", url: "https://notion.so/page-1", ...pendingWorkHandoffPage() }), { status: 200 });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (init?.method === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch in test: ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const { ctx, flush } = fakeCtx();
+  const body = eventBody();
+  const req = new Request("https://worker.example/notion/webhook", {
+    method: "POST",
+    body,
+    headers: { "X-Notion-Signature": sign(body) },
+  });
+
+  const res = await handleNotionWebhookRequest(req, env, ctx);
+  assert.strictEqual(res.status, 200);
+  assert.deepStrictEqual(scheduled, [], "the handler returns without awaiting discovery, so no pickup kind is scheduled yet at response time");
+
+  await flush();
+
+  assert.deepStrictEqual(scheduled, ["strategy"], "the background discovery schedules exactly the pending Strategy pickup afterwards");
+  assert.deepStrictEqual(runnerCalls, [], "no Unit pickup runner is ever awaited on the webhook path -- only the WorkSession alarm runs those");
+});
+
 // --- 20. no real identity in the detection response/telemetry --------------
 
 test("20. Webhook detection response carries only opaque identifiers, never full page properties", async (t) => {

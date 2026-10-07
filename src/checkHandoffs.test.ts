@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingSalesHandoffs } from "./checkHandoffs";
+import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingSalesHandoffs, discoverPendingStrategyHandoffs } from "./checkHandoffs";
 import type { Env, WorkState } from "./types";
 
 function fakeKv() {
@@ -295,14 +295,21 @@ test("17. Manual /checkhandoffs behavior remains unchanged (default source)", as
 // --- Sales external-Handoff detection (items 11-13) -----------------------
 
 function createMockWorkSession() {
-  const calls: { init: any[][]; runTokenSafeProposal: number; runCallNotesPickup: number } = {
+  const calls: { init: any[][]; schedulePickup: string[]; runTokenSafeProposal: number; runCallNotesPickup: number } = {
     init: [],
+    schedulePickup: [],
     runTokenSafeProposal: 0,
     runCallNotesPickup: 0,
   };
   const stub = {
     init: async (...args: any[]) => {
       calls.init.push(args);
+    },
+    // Discovery must only ever RECORD the pickup kind here -- the actual
+    // runner methods below stay as tripwires: any call to them directly
+    // (the pre-alarm inline shape) fails the test.
+    schedulePickup: async (kind: string) => {
+      calls.schedulePickup.push(kind);
     },
     runTokenSafeProposal: async () => {
       calls.runTokenSafeProposal++;
@@ -375,13 +382,58 @@ function mockSalesHandoffFetch(t: any, extraProperties: Record<string, any> = {}
   return { operationsMessages };
 }
 
+/** Modelled on mockSalesHandoffFetch, keyed to the Strategy discovery query. */
+function mockStrategyHandoffFetch(t: any) {
+  const originalFetch = globalThis.fetch;
+  const strategyHandoff = {
+    id: "handoff-strategy-1",
+    url: "https://notion.so/handoff-strategy-1",
+    properties: {
+      "To Unit": { select: { name: "Strategy" } },
+      "To Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] },
+      Matter_Token: { rich_text: [{ plain_text: "MAT-30" }] },
+      Entity_Token: { rich_text: [{ plain_text: "E-30" }] },
+    },
+    archived: false,
+  };
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.includes("/data_sources/handoffs-ds/query")) {
+      const body = JSON.parse(init.body);
+      const toUnit = body.filter?.and?.find((f: any) => f.property === "To Unit")?.select?.equals;
+      if (toUnit === "Strategy") {
+        return new Response(JSON.stringify({ results: [strategyHandoff] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (init?.method === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      return new Response(
+        JSON.stringify({
+          id: url.split("/v1/pages/").pop()!.split("?")[0],
+          url: url,
+          parent: { type: "page", page_id: "governance-root" },
+          properties: {},
+        }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch in test: ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+}
+
 test("11. Externally-created Sales Handoff without handoff_workitem is detected instead of skipped", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
   mockSalesHandoffFetch(t);
 
-  const pickedUp = await discoverPendingSalesHandoffs(env, true);
+  const scheduled = await discoverPendingSalesHandoffs(env, true);
 
   assert.strictEqual(calls.init.length, 1, "a WorkSession must be registered for the externally-created Sales Handoff");
   // The Work's identity came from the Handoff's own destination FACTS
@@ -393,7 +445,7 @@ test("11. Externally-created Sales Handoff without handoff_workitem is detected 
   assert.strictEqual(initExtra?.actionName, "proposal_draft", "Action Resolution picked the pickup Action by declared applicability");
   const mapped = await env.STATE_KV.get("handoff_workitem:handoff-sales-1");
   assert.ok(mapped, "handoff_workitem mapping must be recorded so the Handoff is discoverable next time too");
-  assert.strictEqual(pickedUp, 0, "detection/registration is not counted as a pickup -- no identity-sensitive execution happened");
+  assert.strictEqual(scheduled, 0, "detection/registration is not counted as a scheduled pickup -- no pickup was scheduled and no identity-sensitive execution happened");
 });
 
 test("12. External Sales detection does not execute identity-sensitive Sales work automatically", async (t) => {
@@ -460,10 +512,11 @@ test("Paused: a Finance -> Sales Handoff follows the existing paused behaviour -
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t, FINANCE_ORIGIN);
 
-  const pickedUp = await discoverPendingSalesHandoffs(env, true);
+  const scheduled = await discoverPendingSalesHandoffs(env, true);
 
-  assert.strictEqual(calls.runTokenSafeProposal, 0, "the token-safe Proposal flow must not run while Sales is paused");
-  assert.strictEqual(pickedUp, 0);
+  assert.deepStrictEqual(calls.schedulePickup, [], "no pickup kind may be scheduled while Sales is paused");
+  assert.strictEqual(calls.runTokenSafeProposal, 0, "the token-safe Proposal flow must not run inline while Sales is paused");
+  assert.strictEqual(scheduled, 0);
   assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "the existing paused notification is sent");
   // The mocked fetch throws on anything but the discovery query and Telegram,
   // so reaching here also proves no Handoff status write (it stays Pending).
@@ -475,10 +528,11 @@ test("Not paused: a Finance -> Sales Handoff runs the token-safe Proposal flow i
   (env as any).WORK_SESSION = workSession;
   const { operationsMessages } = mockSalesHandoffFetch(t, FINANCE_ORIGIN);
 
-  const pickedUp = await discoverPendingSalesHandoffs(env, false);
+  const scheduled = await discoverPendingSalesHandoffs(env, false);
 
-  assert.strictEqual(calls.runTokenSafeProposal, 1);
-  assert.strictEqual(pickedUp, 1);
+  assert.deepStrictEqual(calls.schedulePickup, ["sales_proposal"], "discovery must schedule the Proposal pickup, not run it inline");
+  assert.strictEqual(calls.runTokenSafeProposal, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
+  assert.strictEqual(scheduled, 1);
   assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });
 
@@ -490,7 +544,8 @@ test("Not paused: a non-Finance Sales Handoff routes to the token-safe Proposal 
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.strictEqual(calls.runTokenSafeProposal, 1);
+  assert.deepStrictEqual(calls.schedulePickup, ["sales_proposal"]);
+  assert.strictEqual(calls.runTokenSafeProposal, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
 });
 
 test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + notify only)", async (t) => {
@@ -501,6 +556,7 @@ test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + 
 
   await discoverPendingSalesHandoffs(env, true);
 
+  assert.deepStrictEqual(calls.schedulePickup, [], "nothing may be scheduled while Sales is paused");
   assert.strictEqual(calls.runTokenSafeProposal, 0);
   assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
 });
@@ -525,11 +581,12 @@ test("Not paused: a call-notes Handoff (requiredCategory: call_notes) runs the c
     },
   });
 
-  const pickedUp = await discoverPendingSalesHandoffs(env, false);
+  const scheduled = await discoverPendingSalesHandoffs(env, false);
 
-  assert.strictEqual(calls.runCallNotesPickup, 1);
+  assert.deepStrictEqual(calls.schedulePickup, ["sales_call_notes"], "discovery must schedule the call-notes pickup, not run it inline");
+  assert.strictEqual(calls.runCallNotesPickup, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
   assert.strictEqual(calls.runTokenSafeProposal, 0);
-  assert.strictEqual(pickedUp, 1);
+  assert.strictEqual(scheduled, 1);
 });
 
 test("Detection matches on free-text Reason wording, not just the literal opening phrase -- regression test for HO-69's actual wording", async (t) => {
@@ -549,7 +606,8 @@ test("Detection matches on free-text Reason wording, not just the literal openin
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.strictEqual(calls.runCallNotesPickup, 1, "must still route to call-notes pickup even without the literal 'Call Notes (Matter:' opening phrase");
+  assert.deepStrictEqual(calls.schedulePickup, ["sales_call_notes"], "must still schedule call-notes pickup even without the literal 'Call Notes (Matter:' opening phrase");
+  assert.strictEqual(calls.runCallNotesPickup, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
 });
 
 test("Detection matches the marker in the Handoff title when Reason doesn't carry it -- regression test for HO-73's actual shape (marker only in the title, Reason free of it entirely)", async (t) => {
@@ -567,7 +625,8 @@ test("Detection matches the marker in the Handoff title when Reason doesn't carr
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.strictEqual(calls.runCallNotesPickup, 1, "must route to call-notes pickup when the marker is only in the title, not Reason");
+  assert.deepStrictEqual(calls.schedulePickup, ["sales_call_notes"], "must schedule call-notes pickup when the marker is only in the title, not Reason");
+  assert.strictEqual(calls.runCallNotesPickup, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
 });
 
 test("Paused: a call-notes Handoff follows the existing paused behaviour (detect + notify only, no pickup)", async (t) => {
@@ -578,9 +637,36 @@ test("Paused: a call-notes Handoff follows the existing paused behaviour (detect
     Reason: { rich_text: [{ plain_text: "Call Notes (Matter: MAT-20). requiredCategory: call_notes." }] },
   });
 
-  const pickedUp = await discoverPendingSalesHandoffs(env, true);
+  const scheduled = await discoverPendingSalesHandoffs(env, true);
 
+  assert.deepStrictEqual(calls.schedulePickup, [], "no call-notes pickup may be scheduled automatically while Sales is paused");
   assert.strictEqual(calls.runCallNotesPickup, 0, "call-notes pickup must not run automatically while Sales is paused");
-  assert.strictEqual(pickedUp, 0);
+  assert.strictEqual(scheduled, 0);
   assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
+});
+
+// --- Alarm-scheduled pickup -------------------------------------------------
+//
+// Discovery never awaits a Unit's pickup inline anymore: it RECORDS the
+// pickup kind on the WorkSession and arms its Durable Object alarm (the
+// webhook's ctx.waitUntil window is cancelled ~30 s after the response and
+// used to cut short exactly the long AI pickups). The runner methods live
+// on WorkSession, which tests cannot import (`cloudflare:workers` is not
+// resolvable under the node test runner), so the mock stub below simply
+// provides NO runner methods at all: any regression back to an inline call
+// would throw a TypeError inside discovery and these assertions would fail.
+
+test("discoverPendingStrategyHandoffs schedules pickup on the WorkSession alarm instead of running runStrategyPickup inline", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockStrategyHandoffFetch(t);
+
+  const scheduled = await discoverPendingStrategyHandoffs(env);
+
+  assert.strictEqual(calls.init.length, 1, "a WorkSession must be created for the externally-created Strategy Handoff");
+  assert.deepStrictEqual(calls.schedulePickup, ["strategy"], "discovery must record exactly one scheduled strategy pickup kind");
+  assert.strictEqual(scheduled, 1, "a successfully scheduled pickup counts exactly as before -- once per Handoff");
+  const mapped = await env.STATE_KV.get("handoff_workitem:handoff-strategy-1");
+  assert.ok(mapped, "handoff_workitem mapping must be recorded before scheduling, exactly as before");
 });
