@@ -3,7 +3,7 @@ import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { editWorkspaceHatMessage, sendOperationsMessage, sendWorkspaceHatMessage } from "../../telegram";
+import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
@@ -821,8 +821,9 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   // with Sales) has the same evidence a same-session pickup has. The
   // attestation recorded on any prior session copy is replaced by what the
   // record actually says -- missing/malformed/Failed/unbound evidence
-  // leaves this undefined so presentStrategyProposalForApproval fails
-  // closed below the line. Strategy consumes this evidence; it never
+  // leaves this undefined so the fail-fast check right below stops the
+  // pickup before any AI call; the proposal gate keeps failing closed on
+  // the same evidence as defence in depth. Strategy consumes this evidence; it never
   // re-runs Sales's boundary check and never queries the Identity
   // Resolution Registry.
   const sourceBoundaryEvidence = await readSourceBoundaryEvidence(
@@ -844,8 +845,12 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   // pickup, so a fresh session holds the same bytes a same-session flow
   // would, and a stale copy can never mask a malformed/missing block. An
   // absent or unparseable block leaves this field unset, with the exact
-  // reason in commercialValueEvidenceError, so
-  // presentStrategyProposalForApproval fails closed below the line. Nothing
+  // reason in commercialValueEvidenceError, so the fail-fast check right
+  // below stops the pickup before any AI call (direct_request exempt,
+  // exactly like both proposal-gate checks -- a direct request carries no
+  // Sales -> Strategy Handoff to read a block from), while
+  // presentStrategyProposalForApproval keeps failing closed on the same
+  // evidence as defence in depth. Nothing
   // here judges the determination itself -- see readCommercialValueEvidence.
   const commercialValueEvidence = await readCommercialValueEvidence(
     env,
@@ -860,6 +865,41 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
     );
   }
 
+  // Fail fast on KNOWN Handoff defects before spending any AI work: the
+  // proposal gate (presentStrategyProposalForApproval) refuses these same
+  // defects today, but only after up to five AI calls plus the core
+  // diagnosis, and the caller was told nothing about what the Handoff
+  // actually lacks. Every defect is collected first -- all of them, each
+  // on its own line, in plain words -- and nothing on this path makes an
+  // AI call. handleBlocked is the EXISTING stop (Handoff -> Held with the
+  // reason in Open Questions, stage strategy_blocked); no new hold
+  // mechanism. The claim and the context evaluation above stay in front of
+  // these reads, and both proposal-gate checks stay unchanged as defence
+  // in depth. Commercial Value Evidence is exempt for direct_request,
+  // mirroring the gate checks exactly (a direct request carries no Sales
+  // -> Strategy Handoff to read a block from).
+  const pickupDefects: string[] = [];
+  if (!sourceBoundaryEvidence.ok) {
+    pickupDefects.push(`source-boundary attestation is not usable: ${sourceBoundaryEvidence.reason}`);
+  }
+  if (!commercialValueEvidence.ok && state.entryType !== "direct_request") {
+    pickupDefects.push(`Commercial Value Evidence is not usable: ${commercialValueEvidence.reason}`);
+  }
+  // Resolved ONCE here so the fail-fast check and the authorized Matter
+  // status advance below see the same result.
+  let resolvedMatterId: string | null = null;
+  if (state.entityToken && state.matterToken) {
+    const resolved = await resolveEntityMatterFromTokens(env, state.entityToken, state.matterToken);
+    if (resolved) {
+      resolvedMatterId = resolved.matterId;
+    } else {
+      pickupDefects.push(`Matter_Token '${state.matterToken}' does not resolve to a related Matter`);
+    }
+  }
+  if (pickupDefects.length > 0) {
+    return handleBlocked(env, state, pickupDefects.join("\n"));
+  }
+
   // Now authorized (identity architecture decision recorded in Notion,
   // Sept 2026): advance the Matter's own operational Status to Commercial
   // Development at Handoff pickup, the point substantive commercial
@@ -867,22 +907,14 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   // Qualified_to_Commercial_Development transition). Previously this only
   // ever happened inside Sales's own (now-paused) direct-entry flow before
   // creating the Handoff; with the isolated project creating Sales ->
-  // Strategy Handoffs directly, nothing else advances it. Best-effort --
-  // a token that doesn't resolve does not block the diagnosis Martin is
-  // waiting on; it's logged and Operations is notified so the Matter
-  // status can be advanced by hand.
-  if (state.entityToken && state.matterToken) {
-    const resolved = await resolveEntityMatterFromTokens(env, state.entityToken, state.matterToken);
-    if (resolved) {
-      await updatePage(env, resolved.matterId, { Status: select("Commercial Development") }, workSessionContext(state)).catch((err) =>
-        console.error(`Strategy handlePickup: failed to advance Matter ${state.matterToken} to Commercial Development`, err),
-      );
-    } else {
-      await sendOperationsMessage(
-        env,
-        `⚠️ Strategy picked up Handoff ${state.handoffId} for ${state.matterToken || state.entityToken}, but Matter status could not be advanced to Commercial Development -- tokens did not resolve to a real, related Entity/Matter record.`,
-      ).catch((err) => console.error("Failed to send Matter-status-not-advanced Operations notice", err));
-    }
+  // Strategy Handoffs directly, nothing else advances it. Resolution
+  // already succeeded above (an unresolvable token is one of the pickup
+  // defects that stop before this point), so only a write failure is
+  // tolerated here -- best-effort, logged.
+  if (resolvedMatterId) {
+    await updatePage(env, resolvedMatterId, { Status: select("Commercial Development") }, workSessionContext(state)).catch((err) =>
+      console.error(`Strategy handlePickup: failed to advance Matter ${state.matterToken} to Commercial Development`, err),
+    );
   }
 
   await logActivity(env, {
