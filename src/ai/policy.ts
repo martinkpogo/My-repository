@@ -5,8 +5,32 @@ import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
 import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
-import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator } from "./outboundGate";
+import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator, type OutboundGateReasonCategory } from "./outboundGate";
 import { sendMessage } from "../telegram";
+
+/**
+ * WHY an AI call produced no usable response -- the distinction a plain
+ * `null` erases. Codes only, never payload content.
+ *
+ * - `outbound_gate_blocked`: the Outbound Data Gate refused the payload
+ *   (a policy judgement about the outgoing text, e.g. COMPANY_SUFFIX_DETECTED)
+ * - `providers_exhausted`: no AI provider returned a usable result --
+ *   infrastructure failures, boundary denials, no eligible provider, or
+ *   the identity-redaction hard stop before any provider was reached
+ * - `unparseable`: providers answered, but their output never passed shape
+ *   validation for this call
+ */
+export type AiFailureCause = "outbound_gate_blocked" | "providers_exhausted" | "unparseable";
+
+/**
+ * The outcome-carrying twin of `executeTask`'s `CommonAiResponse | null`.
+ * On failure, `gateReasons` carries the distinct Outbound Data Gate
+ * `reasonCategory` CODES observed during the call (empty when the gate
+ * never blocked anything) -- metadata only, never the detected text.
+ */
+export type AiCallOutcome =
+  | { ok: true; response: CommonAiResponse }
+  | { ok: false; cause: AiFailureCause; gateReasons: string[] };
 
 // Fallback order: Workers AI first (it's the free baseline until its
 // daily quota is hit), then the free-tier OpenAI-compatible providers.
@@ -67,29 +91,73 @@ export class AiPolicyExecutor {
    * Evaluates every provider candidate independently against data boundary policy.
    * Falls back to eligible secondary providers ONLY upon InfrastructureError AND data boundary approval.
    * Fails closed if no eligible provider remains, data boundary policy denies execution, or all fail.
+   *
+   * Behaviour is unchanged for every existing caller: this is now a thin
+   * delegate over executeTaskWithOutcome, returning the response exactly
+   * when that outcome is ok and `null` for exactly the failure cases that
+   * outcome classifies. Callers that need to know WHY nothing usable came
+   * back call executeTaskWithOutcome directly.
    */
   public async executeTask(
     env: Env,
     task: AiTask,
   ): Promise<CommonAiResponse | null> {
+    const outcome = await this.executeTaskWithOutcome(env, task);
+    return outcome.ok ? outcome.response : null;
+  }
+
+  /**
+   * The same provider loop as executeTask (which delegates here -- every
+   * eligibility check, boundary evaluation, redaction verification, gate
+   * evaluation, validation and log line is shared, never duplicated), but
+   * reports the CAUSE of a failed call instead of collapsing it to `null`.
+   *
+   * Per-call classification over all provider attempts:
+   * - `outbound_gate_blocked` -- every provider the call actually processed
+   *   was refused by the Outbound Data Gate (no provider executed, none
+   *   returned malformed output, none failed infrastructurally);
+   * - `unparseable` -- at least one provider returned output that failed
+   *   shape validation, and nothing in the call failed infrastructurally;
+   * - `providers_exhausted` -- everything else (infrastructure failures,
+   *   data-boundary denials, no eligible provider, an invalid task, or the
+   *   identity-redaction hard stop that never reaches a provider at all).
+   *
+   * `gateReasons` holds the distinct `reasonCategory` CODES the gate
+   * reported during the call, whichever cause is returned -- metadata
+   * only, never the detected payload text.
+   */
+  public async executeTaskWithOutcome(
+    env: Env,
+    task: AiTask,
+  ): Promise<AiCallOutcome> {
     if (!task || !task.taskId || !isSemanticTaskId(task.taskId) || !task.boundaryContext) {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
-      return null;
+      return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
 
     const eligible = this.providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
       console.error("AiPolicyExecutor: No eligible AI provider available");
-      return null;
+      return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
 
     const attempted = new Set<string>();
+    // Per-call failure accounting for the outcome classification: providers
+    // actually processed (after the duplicate-id skip), how each failed, and
+    // the distinct gate reason CODES seen -- never payload content.
+    let processed = 0;
+    let gateBlocked = 0;
+    let malformed = 0;
+    let infraFailures = 0;
+    let redactionAborted = false;
+    const gateReasons = new Set<OutboundGateReasonCategory>();
 
     for (const provider of eligible) {
       if (attempted.has(provider.id)) {
         continue;
       }
       attempted.add(provider.id);
+      processed++;
 
       // Data Boundary Seam: Evaluates provider independently against data boundary policy
       const boundaryEval = this.dataBoundaryEvaluator.evaluate(
@@ -149,7 +217,13 @@ export class AiPolicyExecutor {
           Number(env.MARTIN_TELEGRAM_USER_ID),
           `⚠️ AI call blocked: identity redaction missed ${uniqueTerms.join(", ")} for task "${task.taskId}" (provider ${provider.id}). The prompt was NOT sent. This is a redaction-pattern gap in code, not a one-off -- it will keep blocking this task until fixed.`,
         ).catch((notifyErr) => console.error("Failed to notify Martin of identity redaction failure", notifyErr));
-        return null;
+        // Hard stop, exactly as executeTask always behaved: no further
+        // provider is tried. The precise notification above already
+        // explains why; for the outcome this is "no provider returned a
+        // usable result" (an infrastructure/pattern failure, never an
+        // evidence judgement).
+        redactionAborted = true;
+        break;
       }
       effectiveTask = { ...effectiveTask, messages: redactedMessages };
 
@@ -164,6 +238,8 @@ export class AiPolicyExecutor {
       // attempt.
       const gateResult = this.outboundDataGate.evaluate(task.taskId, provider.id, effectiveTask.messages);
       if (!gateResult.allowed) {
+        gateBlocked++;
+        gateReasons.add(gateResult.reasonCategory);
         console.warn(
           `AiPolicyExecutor: Outbound Data Gate blocked provider ${provider.id} for task ${task.taskId} [${gateResult.reasonCategory}] (policy: ${gateResult.policy}, detector: ${gateResult.detectorClassification}). Call not sent to this provider.`,
         );
@@ -182,9 +258,10 @@ export class AiPolicyExecutor {
           );
           // Fallback loop continues to next eligible provider -- a
           // malformed response is no more useful than no response.
+          malformed++;
           continue;
         }
-        return result.response;
+        return { ok: true, response: result.response };
       }
 
       // Material provider failure logging (metadata only)
@@ -202,10 +279,20 @@ export class AiPolicyExecutor {
         `AiPolicyExecutor: Provider ${provider.id} failed with infrastructure error [${failureAudit.reasonCode}]: ${result.error.message}`,
       );
       // Fallback loop continues to next eligible provider
+      infraFailures++;
     }
 
-    console.error("AiPolicyExecutor: All eligible AI providers exhausted without success");
-    return null;
+    if (!redactionAborted) {
+      console.error("AiPolicyExecutor: All eligible AI providers exhausted without success");
+    }
+    const reasons = [...gateReasons];
+    if (gateBlocked > 0 && gateBlocked === processed) {
+      return { ok: false, cause: "outbound_gate_blocked", gateReasons: reasons };
+    }
+    if (malformed > 0 && infraFailures === 0) {
+      return { ok: false, cause: "unparseable", gateReasons: reasons };
+    }
+    return { ok: false, cause: "providers_exhausted", gateReasons: reasons };
   }
 }
 

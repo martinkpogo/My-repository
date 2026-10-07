@@ -1,7 +1,7 @@
 import type { Env, Unit, WorkState } from "../../types";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
-import { generate, type GeneratePromptParts } from "../../ai";
+import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -14,7 +14,7 @@ import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import type { ApprovalProof } from "../../types";
-import { runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
+import { describeAiFailure, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
 import { parseCommercialValueEvidenceBlock } from "../sales/commercialValueEvidence";
 
@@ -988,9 +988,10 @@ async function runDiagnosis(env: Env, state: WorkState, skills: ResolvedActionSk
 
   if (cycle.status === "unavailable") {
     console.warn(
-      `Strategy runDiagnosis: Skill cycle unavailable for work ${state.workId} (${cycle.reason}) -- proceeding directly to core diagnosis without Skill composition.`,
+      `Strategy runDiagnosis: Skill cycle unavailable for work ${state.workId} (${cycle.reason}${cycle.cause ? `; cause: ${cycle.cause}` : ""}) -- proceeding directly to core diagnosis without Skill composition.`,
     );
     state.strategySkillCycleUnavailable = true;
+    state.strategySkillCycleUnavailableCause = cycle.cause;
     state.strategySkillFindings = cycle.findings;
     return runCoreDiagnosis(env, state);
   }
@@ -1002,6 +1003,7 @@ async function runDiagnosis(env: Env, state: WorkState, skills: ResolvedActionSk
   // state object), so this attempt's real outcome is never shadowed by a
   // leftover true/false from an earlier, differently-resolved attempt.
   state.strategySkillCycleUnavailable = undefined;
+  state.strategySkillCycleUnavailableCause = undefined;
   state.strategySkillFindings = cycle.findings;
 
   if (cycle.status === "hold") {
@@ -1057,16 +1059,23 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
 
   await advanceStrategyProgress(env, state, "Establishing the situation and running the diagnosis...");
 
-  const result = await generate<StrategyDiagnosisResult>(env, {
+  const outcome = await generateWithOutcome<StrategyDiagnosisResult>(env, {
     taskId: "strategy.diagnosis",
-    mode: "json",
     parts: { ...buildDiagnosisPromptParts(governance.hatDefinition, governance.universalRoleContract), situation: state.strategyContext ?? "" },
     maxTokens: 3000,
   });
+  if (!outcome.ok) {
+    // A failed AI call is never reported as an evidence judgement: the
+    // hold reason states the actual cause (gate refusal with its codes,
+    // or infrastructure/unparseable output) via describeAiFailure. A real
+    // sufficient=false result below keeps its own blockedReason path.
+    return handleBlocked(env, state, describeAiFailure(outcome.cause, outcome.gateReasons));
+  }
+  const result = outcome.json;
 
   const causationCheck = evaluateCausationDiscipline(result);
-  if (!result || result.sufficient !== true || !causationCheck.valid) {
-    const reason = result?.sufficient !== true ? (result?.blockedReason ?? "Insufficient evidence to complete a defensible diagnosis.") : (causationCheck as { valid: false; reason: string }).reason;
+  if (result.sufficient !== true || !causationCheck.valid) {
+    const reason = result.sufficient !== true ? (result.blockedReason ?? "Insufficient evidence to complete a defensible diagnosis.") : (causationCheck as { valid: false; reason: string }).reason;
     return handleBlocked(env, state, reason);
   }
 

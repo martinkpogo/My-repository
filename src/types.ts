@@ -506,6 +506,16 @@ export interface WorkState {
    */
   strategySkillCycleUnavailable?: boolean;
   /**
+   * WHY strategySkillCycleUnavailable is `true` -- the AI-call cause code
+   * only (`outbound_gate_blocked` | `providers_exhausted` | `unparseable`,
+   * never payload content or a human-readable reason string). Set together
+   * with `strategySkillCycleUnavailable = true` and cleared together with
+   * its other transitions, so the persisted state records not just that the
+   * composable-Skills cycle could not run but which class of failure kept
+   * it from running. Undefined when the cycle was not unavailable.
+   */
+  strategySkillCycleUnavailableCause?: import("./ai/policy").AiFailureCause;
+  /**
    * A proposed Strategy -> another-Unit handoff, pending Martin's explicit
    * approval before the Handoff record is created (a preview/approval
    * gate). A recommendation is never treated as authorization to route it onward.

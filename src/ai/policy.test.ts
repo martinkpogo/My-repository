@@ -224,3 +224,113 @@ test("Additional: Empty text result caused by provider infrastructure failure fa
 
   assert.equal(resText, "");
 });
+
+// --- WP3: executeTaskWithOutcome reports WHY a call produced nothing --------
+
+/** A json-mode chat.general_reply task, built exactly like aiJson builds one. */
+function wp3JsonTask(user: string): AiTask {
+  const systemContent = "s\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.";
+  return {
+    taskId: "chat.general_reply",
+    boundaryContext: {
+      segments: [
+        { type: "system", content: systemContent, provenance: "chat.general_reply:system" },
+        { type: "user", content: user, provenance: "chat.general_reply:user" },
+      ],
+    },
+    type: "json",
+    messages: [
+      { role: "system", content: systemContent },
+      { role: "user", content: user },
+    ],
+    temperature: 0.2,
+    maxTokens: 2048,
+    validateResponse: (raw: string) => {
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start === -1 || end < start) return false;
+      try {
+        JSON.parse(raw.slice(start, end + 1));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+test("WP3. Every eligible provider gate-blocked -> outbound_gate_blocked carrying the gate's distinct reason CODES only; legacy executeTask still returns null", async () => {
+  const primary = new MockProvider("p1", () => ({
+    success: true,
+    response: { rawText: '{"result": "ok"}' },
+  }));
+  const executor = new AiPolicyExecutor([primary], testBoundaryEvaluator);
+  const gateTask = () => wp3JsonTask("The situation concerns Hotel Group pricing strategy for a subscription business.");
+
+  const outcome = await executor.executeTaskWithOutcome(fakeEnv, gateTask());
+
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) {
+    assert.equal(outcome.cause, "outbound_gate_blocked", "every provider the call processed was refused by the Outbound Data Gate");
+    assert.deepEqual(outcome.gateReasons, ["COMPANY_SUFFIX_DETECTED"], "codes only -- the distinct reasonCategory, never payload content");
+  }
+  assert.equal(primary.attempts, 0, "the gate blocks before any provider executes");
+
+  // The existing null-returning method is unchanged for every other caller.
+  const legacy = await executor.executeTask(fakeEnv, gateTask());
+  assert.equal(legacy, null);
+  assert.equal(primary.attempts, 0, "executeTask behaves identically on the same gate refusal");
+});
+
+test("WP3. Mixed infra + malformed failures -> providers_exhausted; all-malformed -> unparseable", async () => {
+  const infra = new MockProvider("p1", () => ({
+    success: false,
+    error: new InfrastructureError("p1", "Quota exhausted", { statusCode: 429 }),
+  }));
+  const malformed = new MockProvider("p2", () => ({
+    success: true,
+    response: { rawText: "INVALID_NOT_JSON" },
+  }));
+  const mixedExecutor = new AiPolicyExecutor([infra, malformed], testBoundaryEvaluator);
+
+  const mixed = await mixedExecutor.executeTaskWithOutcome(fakeEnv, wp3JsonTask("plain situation text"));
+  assert.equal(mixed.ok, false);
+  if (!mixed.ok) {
+    assert.equal(mixed.cause, "providers_exhausted", "an infrastructure failure anywhere in the call dominates: nothing points a human at rewording");
+    assert.deepEqual(mixed.gateReasons, [], "the gate never blocked anything");
+  }
+
+  const q1 = new MockProvider("p1", () => ({
+    success: true,
+    response: { rawText: "INVALID_NOT_JSON" },
+  }));
+  const q2 = new MockProvider("p2", () => ({
+    success: true,
+    response: { rawText: "also not json" },
+  }));
+  const allMalformedExecutor = new AiPolicyExecutor([q1, q2], testBoundaryEvaluator);
+
+  const allMalformed = await allMalformedExecutor.executeTaskWithOutcome(fakeEnv, wp3JsonTask("plain situation text"));
+  assert.equal(allMalformed.ok, false);
+  if (!allMalformed.ok) {
+    assert.equal(allMalformed.cause, "unparseable", "every provider answered but none produced parseable output");
+  }
+});
+
+test("WP3. Success outcome is unchanged -- ok plus the very response executeTask returns", async () => {
+  const p1 = new MockProvider("p1", () => ({
+    success: true,
+    response: { rawText: '{"result": "ok"}' },
+  }));
+  const executor = new AiPolicyExecutor([p1], testBoundaryEvaluator);
+
+  const outcome = await executor.executeTaskWithOutcome(fakeEnv, wp3JsonTask("plain situation text"));
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) {
+    assert.equal(outcome.response.rawText, '{"result": "ok"}');
+  }
+
+  const legacy = await executor.executeTask(fakeEnv, wp3JsonTask("plain situation text"));
+  assert.equal(legacy?.rawText, '{"result": "ok"}', "executeTask returns the identical response on success");
+  assert.equal(p1.attempts, 2, "both methods ran the same provider loop");
+});
