@@ -386,7 +386,12 @@ function mockFetch(
   const verifiedFacts =
     opts.verifiedFacts ??
     (opts.callNotesId
-      ? `Call_Notes_ID: ${opts.callNotesId}`
+      // Production shape: a Runtime-created Handoff carries BOTH the
+      // Call_Notes_ID reference and the Commercial Value Evidence block
+      // Sales writes at creation -- the block is present by default so
+      // pickup's fail-fast provenance check passes and a test opts in to
+      // its absence deliberately.
+      ? `Call_Notes_ID: ${opts.callNotesId}\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`
       : `Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`);
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
@@ -719,15 +724,15 @@ test("3b. Handoff pickup advances the Matter's operational Status to Commercial 
   );
 });
 
-test("3c. Handoff pickup still completes, and Operations is notified, when the Handoff's tokens don't resolve to a real Matter -- never blocks the diagnosis Martin is waiting on", async (t) => {
+test("3c. Handoff pickup BLOCKS when the Handoff's tokens don't resolve to a real Matter -- the defect is named, the Handoff is Held, and no AI call happens", async (t) => {
   const originalFetch = globalThis.fetch;
-  const opsMessages: string[] = [];
+  const telegramMessages: string[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
     const method = init?.method ?? "GET";
     if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(init.body);
-      opsMessages.push(body.text ?? "");
+      telegramMessages.push(body.text ?? "");
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
     if (urlStr.endsWith("/pages/handoff-1") && method === "GET") {
@@ -738,7 +743,21 @@ test("3c. Handoff pickup still completes, and Operations is notified, when the H
           parent: { type: "data_source_id", data_source_id: "handoffs-ds" },
           properties: {
             Status: { select: { name: "Pending" } },
-            "Verified Facts & Sources": { rich_text: [{ plain_text: "Sales call notes: recurring client complaints." }] },
+            // Otherwise-valid Handoff: production-shaped provenance plus a
+            // real Passed marker bound to these very tokens, so the ONLY
+            // defect this pickup can find is the unresolvable Matter.
+            "Verified Facts & Sources": { rich_text: [{ plain_text: `Sales call notes: recurring client complaints.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}` }] },
+            Reason: {
+              rich_text: [
+                {
+                  plain_text: `Commercial fit approved for M-12. Entry type: inbound_enquiry.\n${buildSourceBoundaryMarker(
+                    { entityToken: "E-47", matterToken: "M-12" },
+                    "Passed",
+                    ["entityName", "matterName"],
+                  )}`,
+                },
+              ],
+            },
             Entity_Token: { rich_text: [{ plain_text: "E-47" }] },
             Matter_Token: { rich_text: [{ plain_text: "M-12" }] },
           },
@@ -778,13 +797,122 @@ test("3c. Handoff pickup still completes, and Operations is notified, when the H
   });
 
   const env = fakeEnv();
-  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  let aiCalls = 0;
+  env.AI = {
+    run: async () => {
+      aiCalls++;
+      throw new Error("AI must not be called for a pickup with a known Handoff defect");
+    },
+  } as any;
   const state = fakeState();
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.notStrictEqual(result.stage, "awaiting_pickup", "the diagnosis must still proceed even though the Matter status couldn't be advanced");
-  assert.ok(opsMessages.some((m) => /Matter status could not be advanced/.test(m)), "Operations must be notified so the status can be advanced by hand");
+  assert.strictEqual(result.stage, "strategy_blocked", "the defect stops the pickup via the existing handleBlocked path");
+  assert.strictEqual(result.awaiting, "strategy_clarification");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(aiCalls, 0, "zero AI calls on the fail-fast path");
+  const message = telegramMessages.join("\n");
+  assert.match(message, /Matter_Token 'M-12' does not resolve to a related Matter/, "the reason names the exact defect, on its own line");
+  assert.match(message, /Strategy diagnosis held/, "the stop is the existing held-diagnosis path, not a new mechanism");
+});
+
+// --- WP2: fail fast on known Handoff defects, before any AI call -----------
+//
+// handlePickup collects every defect it can see after its three reads --
+// unusable source-boundary attestation, missing Commercial Value Evidence
+// block (direct_request exempt, mirroring both proposal-gate checks),
+// present tokens that resolve to nothing -- and stops through the EXISTING
+// handleBlocked path with every defect named on its own line, in plain
+// words. No AI call happens on this path; the proposal-gate checks stay
+// unchanged as defence in depth.
+
+/** Any AI call on a fail-fast path is a bug: counted AND thrown. */
+function countingZeroAi(): { ai: Ai; calls: () => number } {
+  let calls = 0;
+  const ai = {
+    run: async () => {
+      calls++;
+      throw new Error("AI must not be called on the fail-fast pickup path");
+    },
+  } as any as Ai;
+  return { ai, calls: () => calls };
+}
+
+test("WP2a. An unusable source-boundary attestation stops the pickup before any AI call -- stage strategy_blocked, the reason names the defect", async (t) => {
+  const log = mockFetch(t, { sourceBoundaryMarker: null });
+  const env = fakeEnv();
+  const { ai, calls } = countingZeroAi();
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_clarification", "the existing handleBlocked stop -- no new hold mechanism");
+  assert.strictEqual(calls(), 0, "ZERO AI calls on the fail-fast path");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.strategyProposal, undefined, "no Proposal is ever staged");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /source-boundary attestation is not usable: no source_boundary_check attestation marker is recorded on this Handoff/, "the reason names the defect in plain words");
+  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented -- the proposal gate's own attestation check remains as defence in depth");
+});
+
+test("WP2b. A missing Commercial Value Evidence block stops the pickup before any AI call -- stage strategy_blocked, the reason names the defect", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: "Sales call notes: recurring client complaints about late delivery over two quarters." });
+  const env = fakeEnv();
+  const { ai, calls } = countingZeroAi();
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_clarification");
+  assert.strictEqual(calls(), 0, "ZERO AI calls on the fail-fast path");
+  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.commercialValueEvidenceBlock, undefined);
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Commercial Value Evidence is not usable: the === COMMERCIAL VALUE EVIDENCE === block is absent/, "the reason names the defect in plain words");
+  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented -- the proposal gate's own provenance check remains as defence in depth");
+});
+
+test("WP2c. Two defects at once are BOTH named -- one per line, in plain words", async (t) => {
+  const log = mockFetch(t, { sourceBoundaryMarker: null, verifiedFacts: "Sales call notes: recurring client complaints about late delivery over two quarters." });
+  const env = fakeEnv();
+  const { ai, calls } = countingZeroAi();
+  env.AI = ai;
+  const state = fakeState();
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(calls(), 0, "ZERO AI calls on the fail-fast path");
+  const held = log.sentTexts.find((m) => m.includes("Strategy diagnosis held"));
+  assert.ok(held, "the stop goes through the existing handleBlocked path");
+  const lines = held!.split("\n");
+  assert.ok(
+    lines.some((l) => l.includes("source-boundary attestation is not usable")),
+    "defect 1 is named on its own line",
+  );
+  assert.ok(
+    lines.some((l) => l.includes("Commercial Value Evidence is not usable")),
+    "defect 2 is named on its own line",
+  );
+});
+
+test("WP2d. A direct_request with no Commercial Value Evidence block is NOT blocked by this check -- pickup proceeds exactly like before", async (t) => {
+  const log = mockFetch(t, { verifiedFacts: "Sales call notes: recurring client complaints about late delivery over two quarters." });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const state = fakeState({ entryType: "direct_request" });
+
+  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.notStrictEqual(result.stage, "strategy_blocked", "direct_request is exempt from the Commercial Value Evidence check, mirroring both proposal-gate checks -- a direct request carries no Sales -> Strategy Handoff to read a block from");
+  assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup actually progressed");
+  assert.ok(result.strategyQuestion, "the diagnosis pipeline ran past the fail-fast check");
+  assert.ok(!log.sentTexts.some((m) => /Strategy diagnosis held/i.test(m)), "no fail-fast hold message on the exempt path");
 });
 
 test("Required Next Action content is folded into the diagnosis context, not silently ignored", async (t) => {
@@ -1235,8 +1363,11 @@ test("Missing durable boundary evidence fails closed -- a Passed WorkState sessi
   assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "no usable durable evidence must leave the attestation unset");
   assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
   assert.strictEqual(result.strategyProposalTokenSafety, undefined);
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.ok(log.sentTexts.some((t) => /no Sales source-boundary identity check is on record/.test(t)));
+  assert.strictEqual(result.stage, "strategy_blocked", "pickup fails fast -- before any AI call -- instead of diagnosis-then-gate");
+  assert.strictEqual(result.awaiting, "strategy_clarification", "the existing handleBlocked stop, no new hold mechanism");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Strategy diagnosis held/, "the defect stops the pickup through the existing handleBlocked path");
+  assert.match(message, /source-boundary attestation is not usable: no source_boundary_check attestation marker/, "the reason names the exact defect");
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
 });
 
@@ -1252,8 +1383,10 @@ test("Failed durable boundary evidence fails closed -- the Proposal is never pre
 
   assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "a recorded Failed result must never be accepted as evidence");
   assert.strictEqual(result.strategyProposal, undefined);
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.ok(log.sentTexts.some((t) => /no Sales source-boundary identity check is on record/.test(t)));
+  assert.strictEqual(result.stage, "strategy_blocked", "pickup fails fast -- before any AI call -- instead of diagnosis-then-gate");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Strategy diagnosis held/, "the defect stops the pickup through the existing handleBlocked path");
+  assert.match(message, /source-boundary attestation is not usable: the recorded source_boundary_check result is Failed/, "the reason names the exact defect");
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
 });
 
@@ -1589,15 +1722,17 @@ test("Provenance gate: a Sales -> Strategy Handoff with NO Commercial Value Evid
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.stage, "strategy_blocked", "missing provenance must fail closed");
+  assert.strictEqual(result.stage, "strategy_blocked", "missing provenance must fail closed -- now already at pickup, before any AI call");
   assert.strictEqual(result.awaiting, "strategy_clarification");
   assert.strictEqual(result.strategyApprovalState, undefined, "no approval request is staged without provenance");
   assert.strictEqual(result.strategyProposal, undefined, "the proposal is never adopted on a provenance failure");
   assert.strictEqual(result.commercialValueEvidenceBlock, undefined);
   assert.strictEqual(log.handoffCreateBody, null, "no Strategy -> Finance Handoff is ever created");
   const message = log.sentTexts.join("\n");
-  assert.match(message, /Commercial Value Evidence/, "the failure names the exact block that is missing");
-  assert.match(message, /never authors, estimates, or infers/i, "and says why Strategy will not fill the gap itself");
+  assert.match(message, /Strategy diagnosis held/, "the defect stops the pickup through the existing handleBlocked path");
+  assert.match(message, /Commercial Value Evidence is not usable/, "the failure names the exact block that is missing");
+  assert.match(message, /COMMERCIAL VALUE EVIDENCE/, "and the block's own marker, so the sender knows what to write");
+  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented -- the proposal-gate provenance check remains as defence in depth");
 });
 
 test("Provenance gate: a malformed Commercial Value Evidence block fails closed and names what could not be parsed -- never repaired, never ignored", async (t) => {
@@ -2158,7 +2293,23 @@ test("Material events use the existing logActivity mechanism", async (t) => {
           parent: { type: "data_source_id", data_source_id: "handoffs-ds" },
           properties: {
             Status: { select: { name: "Pending" } },
-            "Verified Facts & Sources": { rich_text: [{ plain_text: "Some documented situation with evidence." }] },
+            // Production-shaped evidence: the situation, the Commercial
+            // Value Evidence block Sales writes at creation, and a Passed
+            // source-boundary marker bound to these very tokens -- so the
+            // pickup's fail-fast checks pass and this test still exercises
+            // exactly what it means to: the material events themselves.
+            "Verified Facts & Sources": { rich_text: [{ plain_text: `Some documented situation with evidence.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}` }] },
+            Reason: {
+              rich_text: [
+                {
+                  plain_text: `Commercial fit approved for M-1. Entry type: inbound_enquiry.\n${buildSourceBoundaryMarker(
+                    { entityToken: "E-1", matterToken: "M-1" },
+                    "Passed",
+                    ["entityName", "matterName"],
+                  )}`,
+                },
+              ],
+            },
             Entity_Token: { rich_text: [{ plain_text: "E-1" }] },
             Matter_Token: { rich_text: [{ plain_text: "M-1" }] },
           },
@@ -2947,7 +3098,7 @@ test("Evidence order: when the Handoff holds substantive approved evidence of it
   const log = mockFetch(t, {
     callNotesId: "CN-007",
     callNotesAttestation: attestation,
-    verifiedFacts: "Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.",
+    verifiedFacts: `Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`,
   });
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
@@ -3271,7 +3422,7 @@ test("Evidence order: order 1 still wins outright -- a substantive Handoff never
   const log = mockFetch(t, {
     callNotesId: "CN-007",
     callNotesAttestation: attestation,
-    verifiedFacts: "Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.",
+    verifiedFacts: `Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`,
   });
   const env = fakeEnv();
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
