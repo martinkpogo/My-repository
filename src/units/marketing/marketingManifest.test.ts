@@ -5,6 +5,8 @@ import {
   handleTransitionApproval,
   handleDraftApproval,
   handlePaidMediaApproval,
+  handleMarketingFeedback,
+  handleMarketingClarification,
   MARKET_TRANSITION_CALLBACK_PREFIX,
   MARKET_DRAFT_CALLBACK_PREFIX,
   MARKET_PAID_CALLBACK_PREFIX,
@@ -157,8 +159,16 @@ test("findCallbackHandler resolves marketpaid on Digital Marketer and genuinely 
   assert.strictEqual(result.stage, "awaiting_paid_media_approval", "must not advance to complete on rejection");
 });
 
-test("marketingManifest: awaitingHandlers is empty for every Hat -- Marketing's own continuation states stay in executionEngine.ts's handleTextReply cases", () => {
-  for (const hat of Object.values(marketingManifest.hats)) {
-    assert.deepStrictEqual(hat.awaitingHandlers, {});
+test("marketingManifest: awaitingHandlers registers marketing_feedback and marketing_clarification on every Hat", () => {
+  for (const [hatName, hat] of Object.entries(marketingManifest.hats)) {
+    assert.deepStrictEqual(
+      Object.keys(hat.awaitingHandlers).sort(),
+      ["marketing_clarification", "marketing_feedback"],
+      `${hatName} must register exactly Marketing's two continuation states`,
+    );
+    // Identity assertions: each entry IS the same function the old
+    // handleTextReply switch case called -- same body, same arguments.
+    assert.strictEqual(hat.awaitingHandlers.marketing_feedback, handleMarketingFeedback, `${hatName}: feedback identity`);
+    assert.strictEqual(hat.awaitingHandlers.marketing_clarification, handleMarketingClarification, `${hatName}: clarification identity`);
   }
 });

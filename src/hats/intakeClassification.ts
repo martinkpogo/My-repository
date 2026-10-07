@@ -5,8 +5,8 @@ import { generate } from "../ai";
 
 /**
  * Generic Stage 1 candidate-Hat classification -- the reusable shape of
- * what was Marketing-only logic (executionEngine.ts's handleMarketingIntake
- * Stage 1 block, now built on this). Reads raw request text against a
+ * what was Marketing-only logic (handleMarketingIntake's Stage 1 block,
+ * now in marketingManifest.ts, built on this). Reads raw request text against a
  * Unit's own declared Hat list and identifies genuinely plausible
  * candidates, plus whether the request is establishing foundational
  * direction from scratch vs. executing against already-established
