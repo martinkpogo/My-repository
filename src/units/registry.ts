@@ -1,5 +1,5 @@
 import type { Unit } from "../types";
-import type { UnitManifest } from "./unitManifest";
+import { validateHatManifest, type UnitManifest } from "./unitManifest";
 import { businessDevelopmentManifest } from "./businessDevelopment/businessDevelopmentManifest";
 import { salesManifest } from "./sales/salesManifest";
 import { marketingManifest } from "./marketing/marketingManifest";
@@ -78,6 +78,45 @@ import { financeManifest } from "./finance/financeManifest";
 let manifestTable: Partial<Record<Unit, UnitManifest>> | undefined;
 
 /**
+ * Build a Unit registry table: run `validateHatManifest` over every Hat of
+ * every Unit manifest once, and return the table only if all of them are
+ * well-formed (WP8). On any defect this throws with the Unit, Hat and
+ * message for each failing Hat, so a malformed manifest fails the test run
+ * and the deploy gate (and, via `src/index.ts`'s module-scope
+ * `getUnitManifests()` call, isolate boot) -- never a live request
+ * mid-run.
+ *
+ * The real registry is built through here on first `getUnitManifests()`;
+ * the registry validation test builds deliberately broken fixture tables
+ * through here to prove the throw. Because the caller memoizes only a
+ * returned table, a build that throws can never be cached -- every later
+ * lookup re-raises instead of serving a bad registry.
+ *
+ * WHY THIS IS NOT IN registry.ts'S OWN MODULE BODY: reading a manifest
+ * binding during this module's evaluation is exactly the TDZ hazard the
+ * lazy table above exists to avoid (the `access.ts` cycle entered from a
+ * manifest's own evaluation), so validation necessarily runs where the
+ * table is assembled, not at this file's top level. `src/index.ts` -- the
+ * Worker entry -- calls `getUnitManifests()` at module scope, which is
+ * production's module load: validation runs before any request the
+ * isolate ever serves.
+ */
+export function buildUnitRegistry(manifests: Partial<Record<Unit, UnitManifest>>): Partial<Record<Unit, UnitManifest>> {
+  const defects: string[] = [];
+  for (const [unit, manifest] of Object.entries(manifests)) {
+    if (!manifest) continue;
+    for (const [hatName, hat] of Object.entries(manifest.hats)) {
+      const defect = validateHatManifest(hat);
+      if (defect) defects.push(`Unit "${unit}", Hat "${hatName}": ${defect}`);
+    }
+  }
+  if (defects.length > 0) {
+    throw new Error(`Invalid Unit registry manifest(s):\n${defects.join("\n")}`);
+  }
+  return manifests;
+}
+
+/**
  * Every registered manifest, built on first access.
  *
  * Exported for discoverability and for registry-level assertions; prefer
@@ -85,13 +124,13 @@ let manifestTable: Partial<Record<Unit, UnitManifest>> | undefined;
  */
 export function getUnitManifests(): Partial<Record<Unit, UnitManifest>> {
   if (manifestTable === undefined) {
-    manifestTable = {
+    manifestTable = buildUnitRegistry({
       "Business Development": businessDevelopmentManifest,
       Sales: salesManifest,
       Marketing: marketingManifest,
       Strategy: strategyManifest,
       Finance: financeManifest,
-    };
+    });
   }
   return manifestTable;
 }
