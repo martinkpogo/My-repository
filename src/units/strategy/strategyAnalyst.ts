@@ -764,6 +764,29 @@ export async function handleDirectRequestClarification(env: Env, state: WorkStat
 }
 
 export async function handlePickup(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
+  // Lifecycle guard: a WorkSession whose proposal is already in Martin's
+  // approval/refinement lifecycle must never re-enter pickup and diagnosis.
+  // The Handoff claim below only checks the Notion Status, so a Handoff
+  // returned to Pending by an external/manual edit would otherwise rerun
+  // the diagnosis and overwrite the pending proposal (HO-86, 2026-10-06).
+  // The next proposal version comes only through the governed Refine path.
+  // Refused before the claim and any AI call, with the WorkSession and the
+  // Handoff Status left exactly as they are.
+  if (state.strategyApprovalState === "AWAITING_INTERVENTION_APPROVAL" || state.strategyApprovalState === "REFINEMENT_REQUESTED") {
+    const version = state.strategyProposal?.proposalVersion;
+    console.error(`Strategy handlePickup: refused for work ${state.workId} -- proposal${version ? ` v${version}` : ""} is ${state.strategyApprovalState}`);
+    await logActivity(env, {
+      entry: `Strategy pickup refused — proposal already awaiting Martin's decision: ${state.matterToken || state.entityToken || state.workId}`,
+      type: "Blocker",
+      area: "Strategy",
+      decisionRationale: `This WorkSession's Strategy Proposal${version ? ` v${version}` : ""} is already in the approval/refinement lifecycle (${state.strategyApprovalState}). Picking the Handoff up again would rerun the diagnosis and replace the pending proposal, so the pickup was refused: no claim, no diagnosis, no proposal change. A new proposal version must come through the governed Refine path.`,
+      nextActions: "Resolve the pending proposal with Approve, Refine or Reject. The Handoff's Status was not changed.",
+      outcome: "Blocked",
+      workId: state.workId,
+    });
+    return state;
+  }
+
   // Idempotency guard: re-verifies the Handoff's live Status and claims it
   // (Pending -> Picked-up) at the actual processing boundary, not just
   // trusting the discovery query's Pending filter from moments earlier. A
