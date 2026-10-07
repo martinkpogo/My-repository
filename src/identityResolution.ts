@@ -48,6 +48,14 @@ export async function resolveMatterFromText(env: Env, text: string): Promise<Res
 export interface ResolvedEntityMatterIdentity {
   entityId: string;
   matterId: string;
+  /**
+   * The Matter record's own operational `Status` select value as read in
+   * this same resolution (e.g. "Qualified"), or null when no Status is
+   * set. Returned so a caller can gate a Status advance on the canonical
+   * transition instead of writing blindly; reading it here costs no
+   * additional data source or network read.
+   */
+  matterStatus: string | null;
 }
 
 /**
@@ -90,5 +98,5 @@ export async function resolveEntityMatterFromTokens(
   const entity = await getPage(env, entityId, workSessionReadContext());
   if (uniqueId(entity.properties.Entity_ID) !== entityToken) return null;
 
-  return { entityId, matterId: matter.id };
+  return { entityId, matterId: matter.id, matterStatus: matter.properties.Status?.select?.name ?? null };
 }
