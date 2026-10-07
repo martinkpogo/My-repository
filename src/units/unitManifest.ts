@@ -6,13 +6,12 @@ import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
 
 /**
  * Generic Unit Manifest contract (ENIG Operating Model design doc, "The
- * Unit Registry" section) -- draft, not yet wired into any of the three
- * chokepoints it is meant to replace (dispatchCowork, WorkSession,
- * handleTextReply). Per the design doc's "don't design the final schema
- * up front" guidance, this shape is deliberately built against Business
- * Development's real, already-defined actions
- * (businessDevelopmentManifest.ts) rather than invented in the abstract --
- * expect it to change once BD's manifest is actually exercised end to end.
+ * Unit Registry" section) -- wired into all three chokepoints it was
+ * built to replace (dispatchCowork, WorkSession, handleTextReply). Per
+ * the design doc's "don't design the final schema up front" guidance,
+ * this shape was deliberately built against Business Development's real,
+ * already-defined actions (businessDevelopmentManifest.ts) rather than
+ * invented in the abstract.
  *
  * Action lists are scoped per Hat, not flattened across the whole Unit:
  * BD's own three Hats each declare a `determine_next_move`,
@@ -138,7 +137,8 @@ export interface HatManifest<A extends string = string> {
   /**
    * This Hat's own `awaiting` states, keyed exactly as `state.awaiting` is set when a WorkSession pauses for a reply.
    * Empty if the Hat has no multi-turn flows. A state referenced in `state.awaiting` but missing here fails closed
-   * (per the design doc's fail-closed manifest completeness) rather than falling through to legacy handleTextReply behaviour.
+   * (per the design doc's fail-closed manifest completeness): handleTextReply resolves nothing and sends its unchanged
+   * "not awaiting a reply right now" fallback message, rather than reaching any handler.
    */
   awaitingHandlers: Record<string, AwaitingStateHandler>;
 

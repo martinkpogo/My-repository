@@ -12,6 +12,7 @@ import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { notifyMartinOfDiscoveryFailure } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
+import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
 import {
   handleGoogleAccountSelection,
@@ -171,10 +172,8 @@ export class WorkSession extends DurableObject<Env> {
       // completeness: a state.awaiting value the resolved Hat doesn't
       // declare in its own awaitingHandlers still falls through to the
       // same "not awaiting" message below, never a silent no-op.
-      const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
-      const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
-      const awaitingHandler = hat && state.awaiting ? hat.awaitingHandlers[state.awaiting] : undefined;
-      if (awaitingHandler && hat) {
+      const awaitingHandler = resolveAwaitingHandler(state);
+      if (awaitingHandler) {
         // The resumed Work runs under the Action it already recorded; that
         // Action's declared Skills are resolved through the Registry before
         // the handler runs, exactly as at entry.
