@@ -295,10 +295,28 @@ test("Pickup wiring: every production pickup executor is invoked only through Wo
   const session = fs.readFileSync(path.join(import.meta.dirname, "..", "session.ts"), "utf8");
   const pickups = ["finance.handlePickup", "strategy.handlePickup", "marketing.handleHandoffPickup", "salesProposal.handleProposalHandoffPickup", "sales.handleCallNotesHandoffPickup"];
   for (const call of pickups) {
-    const re = new RegExp(`this\\.runUnderRecordedSkills\\(state, \\(skills\\) => ${call.replace(".", "\\.")}\\(this\\.env, state, skills\\)\\)`);
+    // The bound state variable is the one the ownership adoption handed to
+    // the handler (`adopted`), not necessarily the name `state`.
+    const re = new RegExp(`this\\.runUnderRecordedSkills\\((\\w+), \\(skills\\) => ${call.replace(".", "\\.")}\\(this\\.env, \\1, skills\\)\\)`);
     assert.ok(re.test(session), `${call} must run under the recorded Action's resolved Skills`);
     assert.strictEqual(session.split(`${call}(`).length - 1, 1, `${call} must have exactly one production call site`);
   }
+  // Each of those runners first adopts the Handoff's destination as the
+  // Work's ownership, once each, naming the destination Unit it picks up
+  // for -- the receiving Unit owns the interaction from there on.
+  assert.strictEqual(
+    session.split("runWithAdoptedOwnership(this.env, state,").length - 1,
+    5,
+    "every pickup must adopt the Handoff destination before its handler runs",
+  );
+  for (const unit of ["Finance", "Strategy", "Marketing"]) {
+    assert.ok(session.includes(`runWithAdoptedOwnership(this.env, state, "${unit}"`), `${unit}'s pickup must name its destination Unit`);
+  }
+  assert.strictEqual(
+    session.split('runWithAdoptedOwnership(this.env, state, "Sales"').length - 1,
+    2,
+    "both Sales pickups (proposal and call notes) must name Sales as their destination",
+  );
   // Pickup discovery still only resolves + records; it adds no Skill logic of its own.
   const discovery = fs.readFileSync(path.join(import.meta.dirname, "..", "checkHandoffs.ts"), "utf8");
   assert.ok(!/resolveRecordedActionSkills|runWithRecordedActionSkills|bindExecutionSkills|resolveSkill/.test(discovery));

@@ -23,7 +23,8 @@ import { proposeLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
-import { findUnitManifest } from "./units/registry";
+import { runWithAdoptedOwnership } from "./handoffOwnership";
+import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
 import { recordWorkAction } from "./units/dispatch";
 import { workSessionContext } from "./access";
@@ -229,42 +230,70 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * Every scheduled pickup below runs through runWithAdoptedOwnership
+   * first: the Handoff's own destination facts (To Unit / To Hat) become
+   * this Work's recorded Unit/Hat/Action before its handler runs, so the
+   * receiving Unit owns the interaction from here on (buttons, awaiting
+   * replies, declared Skills, Access authority, the sessions index). See
+   * src/handoffOwnership.ts for why, and docs/enig-operating-model.md's
+   * "Handoff is a Business Object". It is a no-op when the Work already
+   * records that destination -- the external path, which inits the session
+   * with it -- so those pickups are unchanged.
+   *
    * Invoked independently by index.ts's scheduled Finance-Handoff discovery
    * (never by Sales directly) once a Pending Handoff addressed to Finance is
    * found. This is the actual cross-Unit execution boundary: Sales's own
    * call already returned before this ever runs.
    */
   async runFinancePickup(): Promise<WorkState> {
-    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => finance.handlePickup(this.env, state, skills)));
+    return this.execute((state) =>
+      runWithAdoptedOwnership(this.env, state, "Finance", (adopted) =>
+        this.runUnderRecordedSkills(adopted, (skills) => finance.handlePickup(this.env, adopted, skills)),
+      ),
+    );
   }
 
   /**
    * Invoked independently by index.ts's scheduled Strategy-Handoff
    * discovery once a Pending Handoff addressed to Strategy is found --
-   * mirrors runFinancePickup exactly.
+   * mirrors runFinancePickup exactly (ownership adopted the same way).
    */
   async runStrategyPickup(): Promise<WorkState> {
-    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => strategy.handlePickup(this.env, state, skills)));
+    return this.execute((state) =>
+      runWithAdoptedOwnership(this.env, state, "Strategy", (adopted) =>
+        this.runUnderRecordedSkills(adopted, (skills) => strategy.handlePickup(this.env, adopted, skills)),
+      ),
+    );
   }
 
   /**
    * The Marketing side of a <Unit> -> Marketing execution boundary,
    * invoked independently by index.ts's scheduled Marketing-Handoff
    * discovery once a Pending Handoff addressed to Marketing is found —
-   * mirrors runFinancePickup.
+   * mirrors runFinancePickup (including the ownership adoption).
    */
   async runMarketingHandoffPickup(): Promise<WorkState> {
-    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => marketing.handleHandoffPickup(this.env, state, skills)));
+    return this.execute((state) =>
+      runWithAdoptedOwnership(this.env, state, "Marketing", (adopted) =>
+        this.runUnderRecordedSkills(adopted, (skills) => marketing.handleHandoffPickup(this.env, adopted, skills)),
+      ),
+    );
   }
 
   /**
    * Runtime Sales Executive pickup of a Finance -> Sales Handoff: produces
    * the one canonical token-safe Proposal and asks Martin to authorize its
    * exact Version (see units/sales/tokenSafeProposal.ts). Invoked only by
-   * checkHandoffs.ts's Sales discovery, never by Finance directly.
+   * checkHandoffs.ts's Sales discovery, never by Finance directly. The
+   * Finance -> Sales leg is the second hop of a Strategy -> Finance -> Sales
+   * chain on the same session, so this is where ownership moves to Sales.
    */
   async runTokenSafeProposal(): Promise<WorkState> {
-    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => salesProposal.handleProposalHandoffPickup(this.env, state, skills)));
+    return this.execute((state) =>
+      runWithAdoptedOwnership(this.env, state, "Sales", (adopted) =>
+        this.runUnderRecordedSkills(adopted, (skills) => salesProposal.handleProposalHandoffPickup(this.env, adopted, skills)),
+      ),
+    );
   }
 
   /**
@@ -276,7 +305,11 @@ export class WorkSession extends DurableObject<Env> {
    * directly. Mirrors runFinancePickup/runTokenSafeProposal exactly.
    */
   async runCallNotesPickup(): Promise<WorkState> {
-    return this.execute((state) => this.runUnderRecordedSkills(state, (skills) => sales.handleCallNotesHandoffPickup(this.env, state, skills)));
+    return this.execute((state) =>
+      runWithAdoptedOwnership(this.env, state, "Sales", (adopted) =>
+        this.runUnderRecordedSkills(adopted, (skills) => sales.handleCallNotesHandoffPickup(this.env, adopted, skills)),
+      ),
+    );
   }
 
   /**
@@ -367,14 +400,28 @@ export class WorkSession extends DurableObject<Env> {
           // whose buttons carry richer payloads (entity/matter pickers,
           // sprop, salesprop) parse them exactly as their former switch
           // case did. Mirrors handleTextReply's own default-case manifest
-          // fallback for awaitingHandlers; an unknown prefix still resolves
-          // the state unchanged, as before.
+          // fallback for awaitingHandlers.
           const manifest = state.unit ? findUnitManifest(state.unit) : undefined;
           const hat = manifest && state.hat ? manifest.hats[state.hat] : undefined;
           const callbackHandler = hat ? findCallbackHandler(action, hat) : undefined;
           if (callbackHandler) {
             return callbackHandler(this.env, state, value === "approve", value);
           }
+          // A prefix this Work's own Hat does not declare, but another
+          // registered Unit/Hat does, is a STALE button: work ownership moved
+          // on (a Handoff pickup adopts the destination -- see
+          // src/handoffOwnership.ts) and the old Unit's buttons must not act
+          // on the new Unit's state. Refuse out loud instead of doing
+          // nothing, and still return the state unchanged.
+          const owner = findCallbackPrefixOwner(action);
+          if (owner) {
+            const message =
+              owner.unit === state.unit
+                ? `This button belongs to ${owner.unit}'s ${owner.hat} Hat, but this work item runs as ${state.hat ?? "another Hat"} -- nothing was run.`
+                : `This button belongs to ${owner.unit}, but this work item now runs as ${state.unit ?? "another Unit"} -- nothing was run.`;
+            return sendMessage(this.env, state.chatId, message, undefined, state.threadId).then(() => state);
+          }
+          // An unknown prefix still resolves the state unchanged, as before.
           return Promise.resolve(state);
         }
       }

@@ -3,6 +3,7 @@ import assert from "node:assert";
 
 import { buildUnitRegistry, getUnitManifests } from "./registry";
 import { salesManifest } from "./sales/salesManifest";
+import { financeManifest } from "./finance/financeManifest";
 import type { UnitManifest } from "./unitManifest";
 
 /**
@@ -107,4 +108,42 @@ test("registry build: the real registry builds cleanly -- every Hat of every reg
     ["Business Development", "Finance", "Marketing", "Sales", "Strategy"],
     "the five registered Units all build",
   );
+});
+
+test("registry build: a callback prefix declared by two different Units throws at build, naming both Units and the prefix", () => {
+  const financeHat = financeManifest.hats["Value-Based Pricing Assessor"];
+  const quotePrefix = Object.keys(financeHat.callbackHandlers ?? {})[0];
+  const quoteHandler = financeHat.callbackHandlers![quotePrefix];
+  assert.strictEqual(quotePrefix, "quote", "Finance owns the quote prefix -- the fixture relies on it");
+  const overlapping = withSalesExecutiveHat((hat) => ({ ...hat, callbackHandlers: { [quotePrefix]: quoteHandler } }));
+
+  assert.throws(
+    () => buildUnitRegistry({ Sales: overlapping, Finance: financeManifest }),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.ok(message.includes('Unit "Sales"'), `must name the first owner, got: ${message}`);
+      assert.ok(message.includes('Unit "Finance"'), `must name the second owner, got: ${message}`);
+      assert.ok(message.includes(`"${quotePrefix}"`), `must name the prefix, got: ${message}`);
+      assert.ok(message.includes("exactly one owning Unit"), `must state the invariant, got: ${message}`);
+      return true;
+    },
+    "a prefix crossing a Unit boundary would let one Unit's stale button act on another Unit's Work",
+  );
+});
+
+test("registry build: no prefix in the real registry crosses a Unit boundary -- the invariant stale-button refusal depends on", () => {
+  const ownerOf = new Map<string, string>();
+  for (const [unit, manifest] of Object.entries(getUnitManifests())) {
+    for (const hat of Object.values(manifest.hats)) {
+      for (const prefix of Object.keys(hat.callbackHandlers ?? {})) {
+        const owner = ownerOf.get(prefix);
+        if (owner === undefined) ownerOf.set(prefix, unit);
+        else assert.strictEqual(owner, unit, `prefix "${prefix}" is declared by ${owner} and ${unit} -- a stale button could cross between them`);
+      }
+    }
+  }
+  assert.ok(ownerOf.size >= 5, `several business prefixes must be registered, got ${ownerOf.size}`);
+  assert.strictEqual(ownerOf.get("quote"), "Finance");
+  assert.strictEqual(ownerOf.get("sprop"), "Strategy");
+  assert.strictEqual(ownerOf.get("salesprop"), "Sales");
 });
