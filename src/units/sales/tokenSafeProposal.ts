@@ -668,6 +668,7 @@ function decisionButtons(sp: RuntimeSalesProposal, version: number, includeAppro
   const row: InlineButton[] = [];
   if (includeApprove) row.push({ text: `✅ Approve ${sp.proposalId} ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.a` });
   row.push({ text: `✏️ Request changes to ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.r` });
+  if (sp.versions.find((r) => r.version === version)?.docUrl) return [row];
   return [row, [{ text: `📄 Create Google Doc for ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.g` }]];
 }
 
@@ -679,25 +680,30 @@ function withWorkId(buttons: InlineButton[][], workId: string): InlineButton[][]
 async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesProposal): Promise<WorkState> {
   const record = sp.versions.find((v) => v.version === sp.currentVersion);
   if (!record) return failClosed(env, state, `content for ${sp.proposalId} ${versionLabel(sp.currentVersion)} is not available to present.`);
-  const header = [
-    "*Proposal approval request*",
-    `Proposal: ${sp.proposalId} · Version: ${versionLabel(sp.currentVersion)}`,
-    `Entity: ${sp.entityToken} · Matter: ${sp.matterToken} · Source Handoff: ${sp.handoffRef}`,
-    `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
-    `Record: ${sp.pageUrl}`,
-    ...(record.pageUrl ? [`Read this version: ${record.pageUrl}`] : []),
-    ...(record.docUrl ? [`Google Doc (comment to request a change): ${record.docUrl}`] : []),
-  ].join("\n");
+  // Martin reads the Proposal in a Google Doc, never in Telegram: the Doc for
+  // this exact version is created here (token-safe content only) and the
+  // approval request carries its link. If the Doc can't be created the
+  // version's Notion page is the readable fallback, and the Create button
+  // retries -- the Proposal text is never written into the message.
+  const doc = await ensureProposalVersionDoc(env, state, sp, record);
+  const readLine = doc.ok
+    ? `Read it here (comment on the Doc to request a change): ${doc.url}`
+    : `⚠️ The Google Doc could not be created (${doc.error}).${record.pageUrl ? ` Read this version in Notion instead: ${record.pageUrl}` : ""}`;
   const notes = sp.facts
     ? buildReviewNotes(sp.facts, { proposalId: sp.proposalId, version: sp.currentVersion, amendments: sp.amendments })
     : "Unavailable: the upstream facts this Proposal was built from are not on this work item.";
   const message = [
-    header,
-    `=== PROPOSAL ${sp.proposalId} ${versionLabel(sp.currentVersion)} (the content being approved) ===`,
-    record.content,
+    [
+      "*Proposal approval request*",
+      `Proposal: ${sp.proposalId} · Version: ${versionLabel(sp.currentVersion)}`,
+      `Entity: ${sp.entityToken} · Matter: ${sp.matterToken} · Source Handoff: ${sp.handoffRef}`,
+      `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
+      `Record: ${sp.pageUrl}`,
+      readLine,
+    ].join("\n"),
     "=== INTERNAL REVIEW MATERIAL — not part of the Proposal, not stored in Proposal Content, not approved with it ===",
     notes,
-    `Approve exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}*? Approval applies to the Proposal content of this Version only.`,
+    `When you are happy with it, approve exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}* below. Approval applies to the Proposal content of this Version only.`,
   ].join("\n\n");
   const buttons = withWorkId(decisionButtons(sp, sp.currentVersion, true), state.workId);
   await finishWorkStatus(env, state, `✅ ${sp.proposalId} ${versionLabel(sp.currentVersion)} ready below -- awaiting your approval.`, "succeeded");
@@ -1251,37 +1257,34 @@ const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
  * never edits the Doc in place. Real-identity documents are built by
  * Isolated Sales from the approved version -- never here.
  */
-async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, version: number): Promise<WorkState> {
-  if (version !== sp.currentVersion) {
-    return staleDecision(env, state, `${versionLabel(version)} is not the current Version of ${sp.proposalId} (current: ${versionLabel(sp.currentVersion)}).`);
-  }
-  const record = sp.versions.find((v) => v.version === version);
-  if (!record) return staleDecision(env, state, `no record of the ${versionLabel(version)} content to copy into a Doc.`);
-  const say = (text: string) => sendWorkspaceHatMessage(env, { ...state, hat: HAT }, text);
-  if (record.docUrl) {
-    await say(`A Google Doc for ${sp.proposalId} ${versionLabel(version)} already exists: ${record.docUrl}`);
-    return state;
-  }
+type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
+
+/**
+ * Creates (once) the Google Doc for one Proposal version and registers it for
+ * comment watching. Never messages; callers report. Fails closed with the
+ * reason when no single authorized Google account exists or any Google step
+ * fails -- nothing is created in those cases.
+ */
+async function ensureProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, record: ProposalVersionRecord): Promise<EnsureDocResult> {
+  if (record.docUrl) return { ok: true, url: record.docUrl };
+  const version = record.version;
   const accounts = await listAuthorizedGoogleAccounts(env);
   if (accounts.length !== 1) {
-    await say(
-      accounts.length === 0
-        ? "Couldn't create the Google Doc: no Google account is authorized for the Runtime. Nothing was created."
-        : `Couldn't create the Google Doc: ${accounts.length} Google accounts are authorized and I won't guess which to use. Nothing was created.`,
-    );
-    return state;
+    return {
+      ok: false,
+      error:
+        accounts.length === 0
+          ? "no Google account is authorized for the Runtime"
+          : `${accounts.length} Google accounts are authorized and I won't guess which to use`,
+    };
   }
   const accountIdentifier = accounts[0];
   const folder = await ensureGoogleFolder(env, accountIdentifier, PROPOSAL_DOCS_FOLDER_NAME, "google_proposal_docs_folder");
-  if (!folder.ok) {
-    await say(`Couldn't create the Google Doc: ${folder.error}. Nothing was created.`);
-    return state;
-  }
+  if (!folder.ok) return { ok: false, error: folder.error ?? "folder could not be created" };
   const title = `${sp.proposalId} ${versionLabel(version)}`;
   const created = await createGoogleDoc(env, { type: "create_doc", title, content: record.content, folderId: folder.folderId, accountIdentifier });
   if (!created.ok || !created.documentId || !created.documentUrl) {
-    await say(`Couldn't create the Google Doc (${created.stage ?? "unknown stage"}): ${created.error ?? "unknown error"}.`);
-    return state;
+    return { ok: false, error: `${created.stage ?? "unknown stage"}: ${created.error ?? "unknown error"}` };
   }
   await registerWatchedGoogleDoc(env, {
     documentId: created.documentId,
@@ -1293,8 +1296,27 @@ async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeS
     proposal: { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version },
   });
   record.docUrl = created.documentUrl;
+  return { ok: true, url: created.documentUrl };
+}
+
+/** Retry path: the "Create Google Doc" button, shown only while a version has no Doc (creation at presentation failed). */
+async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, version: number): Promise<WorkState> {
+  if (version !== sp.currentVersion) {
+    return staleDecision(env, state, `${versionLabel(version)} is not the current Version of ${sp.proposalId} (current: ${versionLabel(sp.currentVersion)}).`);
+  }
+  const record = sp.versions.find((v) => v.version === version);
+  if (!record) return staleDecision(env, state, `no record of the ${versionLabel(version)} content to copy into a Doc.`);
+  const say = (text: string) => sendWorkspaceHatMessage(env, { ...state, hat: HAT }, text);
+  const had = !!record.docUrl;
+  const doc = await ensureProposalVersionDoc(env, state, sp, record);
+  if (!doc.ok) {
+    await say(`Couldn't create the Google Doc: ${doc.error}. Nothing was created.`);
+    return state;
+  }
   await say(
-    `📄 *Google Doc for ${sp.proposalId} ${versionLabel(version)}:* ${created.documentUrl}\n\nSelect text and comment to request a change. A comment doesn't edit this Doc -- it creates the next version (${versionLabel(version + 1)}), which comes back here for your approval. ${versionLabel(version)} stays as it is.`,
+    had
+      ? `A Google Doc for ${sp.proposalId} ${versionLabel(version)} already exists: ${doc.url}`
+      : `📄 *Google Doc for ${sp.proposalId} ${versionLabel(version)}:* ${doc.url}\n\nSelect text and comment to request a change. A comment doesn't edit this Doc -- it creates the next version (${versionLabel(version + 1)}), which comes back here for your approval.`,
   );
   return state;
 }
