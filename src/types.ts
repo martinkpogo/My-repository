@@ -474,6 +474,16 @@ export interface WorkState {
   /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
   pendingPaidMediaAction?: { description: string };
 
+  /**
+   * The live status checklist of this Work's current run, shown in one
+   * Workspace message edited in place (see src/runtime/workStatus.ts):
+   * the Hat it is labelled with, a header, the steps done, and the step
+   * running now. Cleared when the run reports its final line.
+   */
+  workStatus?: import("./runtime/workStatus").WorkStatus;
+  /** The Telegram message id of that status message. */
+  workStatusMessageId?: number;
+
   /** The strategic question/business situation a Strategy work item is diagnosing -- carried across clarification/feedback loops. */
   strategyQuestion?: string;
   /** Sanitized supplied context (from a Handoff's own record) the diagnosis is grounded in. */
