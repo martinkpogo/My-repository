@@ -251,6 +251,40 @@ export async function sendHatMessage(env: Env, target: HatMessageTarget, text: s
   return msgId;
 }
 
+/**
+ * Shows "<bot> is typing..." in the Workspace topic. Purely cosmetic:
+ * unconfigured streams and Telegram failures are logged, never thrown, so
+ * an indicator can never block the work it accompanies.
+ */
+export async function sendWorkspaceTypingAction(env: Env): Promise<void> {
+  const target = getWorkspaceTarget(env);
+  if (!target) return;
+  try {
+    const res = await call(env, "sendChatAction", { chat_id: target.chatId, message_thread_id: target.threadId, action: "typing" });
+    if (!res.ok) console.error("telegram sendChatAction failed", await res.text());
+  } catch (err) {
+    console.error("telegram sendChatAction failed", err);
+  }
+}
+
+/** Telegram clears a chat action after about five seconds; resending a little sooner keeps it visible for a long call. */
+const TYPING_REFRESH_MS = 4_500;
+
+/**
+ * Runs `work` while the Workspace topic shows the typing indicator, then
+ * stops it -- whether `work` resolves or throws. Never changes what `work`
+ * returns or throws.
+ */
+export async function withWorkspaceTypingIndicator<T>(env: Env, work: () => Promise<T>): Promise<T> {
+  await sendWorkspaceTypingAction(env);
+  const timer = setInterval(() => void sendWorkspaceTypingAction(env), TYPING_REFRESH_MS);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /** Like editMessageText, but re-applies the same "Hat: <name>." label sendHatMessage used, so an edited bubble doesn't drop it. */
 export async function editHatMessage(env: Env, target: HatMessageTarget, messageId: number, text: string): Promise<void> {
   return editMessageText(env, target.chatId, messageId, withHatLabel(target, text));

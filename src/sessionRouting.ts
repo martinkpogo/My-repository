@@ -57,6 +57,17 @@ export async function setActiveWorkId(env: Env, chatId: number, threadId: number
   await env.STATE_KV.put(`active:${chatId}:${threadId ?? "dm"}`, workId);
 }
 
+/**
+ * Clears a stream's active-work pointer ONLY when it still names `workId`
+ * -- the same compare-then-delete WorkSession.updateRegistry applies at
+ * terminal cleanup, so releasing a pointer can never wipe one another
+ * Work has since taken.
+ */
+export async function clearActiveWorkIdIfMatches(env: Env, chatId: number, threadId: number | undefined, workId: string): Promise<void> {
+  const key = `active:${chatId}:${threadId ?? "dm"}`;
+  if ((await env.STATE_KV.get(key)) === workId) await env.STATE_KV.delete(key);
+}
+
 export async function setReplyMessageWorkId(env: Env, messageId: number, workId: string): Promise<void> {
   await env.STATE_KV.put(`reply_msg:${messageId}`, workId, { expirationTtl: 60 * 60 * 24 * 7 });
 }

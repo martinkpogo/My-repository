@@ -128,6 +128,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Expands a completed, causation-disciplined Strategy diagnosis into the complete Strategic Intervention Proposal (strategic opportunity/objective/direction, proposed intervention with workstreams, deliverables, phased timeline, scope, assumptions, dependencies, risks/constraints, expected business effect, success criteria) Martin reviews for Approve/Refine/Reject. Never manufactures precision the diagnosis doesn't support; marks an unsupportable timeline Indicative rather than Confirmed.",
   },
+  "strategy.proposal_discussion": {
+    id: "strategy.proposal_discussion",
+    name: "Strategy Proposal Discussion",
+    description:
+      "Answers Martin's questions about the CURRENT Strategy Proposal and its reasoning, grounded only in what the Strategy Work already holds (sanitized evidence, Skill findings, diagnosis, proposal, governance). Read-only: never revises the proposal, creates a version, or decides anything -- a change goes through the existing Refine path on Martin's own instruction.",
+  },
   "lead.discovery_classification": {
     id: "lead.discovery_classification",
     name: "Lead Discovery Signal Classification",

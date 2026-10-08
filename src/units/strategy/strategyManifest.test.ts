@@ -136,13 +136,14 @@ test("strategyManifest: readHandler fails closed -- no read action is declared",
   );
 });
 
-test("strategyManifest: awaitingHandlers resumes Strategy's four continuation states through the manifest", () => {
+test("strategyManifest: awaitingHandlers resumes Strategy's five continuation states through the manifest", () => {
   const hat = strategyManifest.hats["Strategy Analyst"];
   assert.deepStrictEqual(
     Object.keys(hat.awaitingHandlers).sort(),
-    ["strategy_clarification", "strategy_direct_request_matter", "strategy_feedback", "strategy_refinement_reason"],
-    "exactly Strategy's four awaiting states must be registered",
+    ["strategy_clarification", "strategy_direct_request_matter", "strategy_discussion", "strategy_feedback", "strategy_refinement_reason"],
+    "exactly Strategy's five awaiting states must be registered",
   );
+  assert.strictEqual(hat.awaitingHandlers.strategy_discussion, strategy.handleStrategyDiscussion);
   // Identity assertions: each entry IS the same function the old
   // handleTextReply switch case called -- same body, same arguments,
   // same Skill-set passing (the three Skill-aware handlers keep their
