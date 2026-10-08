@@ -4201,3 +4201,11 @@ test("Status 4. A discussion question shows its own steps and ends on the answer
     assert.ok(final.includes(step), `"${step}" in:\n${final}`);
   }
 });
+
+test("Subrequest budget: a full pickup's status costs at most 1 send + 7 edits and ONE typing action (HO-86, 2026-10-08: the refresh loop exhausted the Worker's subrequest budget)", async (t) => {
+  const { log } = await presentedProposal(t);
+  const typing = log.requests.filter((r) => r.endsWith("/sendChatAction")).length;
+  const edits = log.requests.filter((r) => r.endsWith("/editMessageText")).length;
+  assert.strictEqual(typing, 1, "one typing signal for the whole AI-backed run");
+  assert.ok(edits <= 7, `status edits are capped (got ${edits})`);
+});

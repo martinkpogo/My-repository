@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { editHatMessage, editMessageText, editWorkspaceHatMessage, sendHatMessage, sendMessage, sendWorkspaceHatMessage } from "./telegram";
+import { editHatMessage, editMessageText, editWorkspaceHatMessage, sendHatMessage, sendMessage, sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "./telegram";
 import type { Env } from "./types";
 
 const fakeEnv = { TELEGRAM_BOT_TOKEN: "test-token" } as Env;
@@ -188,6 +188,24 @@ test("editWorkspaceHatMessage fails closed (logs, never throws) when the Workspa
   try {
     await assert.doesNotReject(editWorkspaceHatMessage(fakeEnv, { chatId: 1, hat: "Strategy Analyst" }, 4242, "progress"));
     assert.strictEqual(fetchCalled, false, "must never attempt an edit with no resolved chat -- fail closed, not against a guessed chat_id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("withWorkspaceTypingIndicator sends ONE typing action however long the work runs -- every Telegram call is a Worker subrequest", async () => {
+  const originalFetch = globalThis.fetch;
+  const methods: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    methods.push(String(url).split("/").pop()!);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const env = { TELEGRAM_BOT_TOKEN: "t", TELEGRAM_GROUP_CHAT_ID: "-100", WORKSPACE_TOPIC_ID: "7" } as any;
+    const result = await withWorkspaceTypingIndicator(env, () => new Promise((resolve) => setTimeout(() => resolve("done"), 60)));
+    assert.strictEqual(result, "done");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepStrictEqual(methods, ["sendChatAction"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

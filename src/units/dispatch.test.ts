@@ -263,8 +263,9 @@ test("resolveUnitRequest: a Cowork read Action reports a status run in the Works
   assert.deepStrictEqual(
     sent.filter((m) => m.text !== "").map((m) => m.text),
     [
-      "Hat: Toy Hat.\n\n🧭 Toy Hat — check_status\n⏳ Running check status",
-      "Hat: Toy Hat.\n\n🧭 Toy Hat — check_status\n✓ Running check status\n✅ Done -- the answer is below.",
+      // Markdown-escaped, so Telegram accepts it on the first call.
+      "Hat: Toy Hat.\n\n🧭 Toy Hat — check\\_status\n⏳ Running check status",
+      "Hat: Toy Hat.\n\n🧭 Toy Hat — check\\_status\n✓ Running check status\n✅ Done -- the answer is below.",
       "Hat: Toy Hat.\n\nhandled:check_status",
     ],
   );

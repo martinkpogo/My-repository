@@ -25,6 +25,29 @@ export interface WorkStatus {
   header: string;
   done: string[];
   current?: string;
+  /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
+  edits?: number;
+}
+
+/**
+ * Every send and edit is a Worker subrequest, and one invocation -- a whole
+ * Handoff pickup runs inside one Durable Object alarm -- has a hard
+ * subrequest budget shared with every Notion and AI-provider call. A run
+ * therefore makes at most this many intermediate edits; later steps are
+ * still recorded and appear in the next permitted edit or the final one,
+ * which is always made. Worst case per run: 1 send + this many edits + 1
+ * final edit.
+ */
+export const MAX_INTERMEDIATE_EDITS = 6;
+
+/**
+ * Escapes the characters Telegram's Markdown parse mode treats as entity
+ * markers, so a step naming e.g. `business_strategy` is accepted on the
+ * first call instead of being rejected and retried as plain text (two
+ * subrequests instead of one).
+ */
+function escapeTelegramMarkdown(text: string): string {
+  return text.replace(/([_*`\[])/g, "\\$1");
 }
 
 export type WorkStatusHolder = Pick<WorkState, "chatId" | "workStatus" | "workStatusMessageId"> & { workId?: string };
@@ -44,8 +67,8 @@ export function renderWorkStatus(status: WorkStatus, ending?: { line: string; cu
 
 /** Sends a fresh status message for a new run, with `firstStep` running. */
 export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: string, header: string, firstStep: string): Promise<void> {
-  holder.workStatus = { hat, header, done: [], current: firstStep };
-  holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, renderWorkStatus(holder.workStatus));
+  holder.workStatus = { hat, header, done: [], current: firstStep, edits: 0 };
+  holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
 /** Marks the running step done and shows `step` as running. A no-op when no run is being reported. */
@@ -54,7 +77,9 @@ export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step
   if (holder.workStatusMessageId === undefined || !status) return;
   if (status.current) status.done.push(status.current);
   status.current = step;
-  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, renderWorkStatus(status));
+  if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
+  status.edits = (status.edits ?? 0) + 1;
+  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, escapeTelegramMarkdown(renderWorkStatus(status)));
 }
 
 /**
@@ -87,5 +112,5 @@ export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line:
   holder.workStatus = undefined;
   holder.workStatusMessageId = undefined;
   if (messageId === undefined || !status) return;
-  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, renderWorkStatus(status, { line, currentFailed: outcome === "failed" }));
+  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
 }
