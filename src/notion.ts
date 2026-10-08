@@ -262,8 +262,51 @@ export async function appendTextBlocks(env: Env, pageId: string, heading: string
   }
 }
 
+/**
+ * Creates one child page under an existing record's page, holding `text`
+ * (paragraph blocks chunked to Notion's 2,000-char rich-text limit, at most
+ * 100 children per request). Used to keep each version of a canonical record
+ * as its own readable page, written once and never edited.
+ *
+ * Like appendTextBlocks this is a governed WRITE, not a cosmetic one: it is
+ * authorized as an `update` against the PARENT record's real data source
+ * (resolved from Notion, never accepted from the caller), so the Action that
+ * can commit a version is the Action that can create its page, and no
+ * separate "just a child page" exemption exists.
+ */
+export async function createVersionPage(
+  env: Env,
+  parentPageId: string,
+  pageTitle: string,
+  text: string,
+  access: AccessContext,
+): Promise<{ id: string; url: string }> {
+  const { target } = await resolvePageTarget(env, parentPageId, "update");
+  evaluateAccess(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access);
+  const blocks: Record<string, unknown>[] = [];
+  for (let i = 0; i < text.length; i += 2000) {
+    blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
+  }
+  const data = await notionFetch(env, `/pages`, {
+    method: "POST",
+    body: JSON.stringify({
+      parent: { type: "page_id", page_id: parentPageId },
+      properties: { title: { title: [{ text: { content: pageTitle.slice(0, 2000) } }] } },
+      children: blocks.slice(0, 100),
+    }),
+  });
+  for (let i = 100; i < blocks.length; i += 100) {
+    await notionFetch(env, `/blocks/${data.id}/children`, {
+      method: "PATCH",
+      body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
+    });
+  }
+  return { id: data.id, url: data.url };
+}
+
 export function plainText(prop: any): string {
   if (!prop) return "";
+  if (typeof prop.url === "string") return prop.url;
   if (prop.title) return prop.title.map((t: any) => t.plain_text).join("");
   if (prop.rich_text) return prop.rich_text.map((t: any) => t.plain_text).join("");
   if (prop.select) return prop.select?.name ?? "";
