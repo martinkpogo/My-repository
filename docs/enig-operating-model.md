@@ -569,6 +569,8 @@ Every read is fail-closed: a missing marker, a malformed marker (including a fie
 
 There is **no identity-bearing runtime Proposal path**. The earlier parallel lifecycle is removed as dead code rather than left reachable-but-unused, because two Proposal models are one too many even when only one is called. The same rule that governs Handoffs governs Proposals: an Entity is referred to by its opaque token, a Proposal names no real client identity in any field that becomes another Unit's AI input context, and real identity is resolved to tokens before anything is written.
 
+**The Strategy token-safety attestation proves the checks ran, not a fixed field list (Martin's decision, 2026-10-08).** Before drafting from an approved Strategy Proposal, `verifyStrategyProposalTokenSafety` requires two checks, both bound to that exact proposal ID and version: the Sales source-boundary identity check on the Sales -> Strategy Handoff, and Strategy's own known-identity check of the complete proposal. Each must be present and recorded as having run. The fields each compared are kept as evidence but are not a required set: under the identity architecture an Entity/Matter name is always its own token, so Strategy's proposal check records only the fields that can still be real identity (`contactName` / `email` / `phone`, when known) -- often none. The previous rule required both checks to name `entityName` and `matterName`, which Strategy's check can never record, so no Strategy-originated Proposal could ever be drafted (found on MAT-26, HO-86 -> HO-87).
+
 ---
 
 ## Tools

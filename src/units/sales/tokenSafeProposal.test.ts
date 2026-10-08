@@ -119,13 +119,19 @@ function approvedStrategyProposal(overrides: Partial<StrategyProposal> = {}): St
   } as StrategyProposal;
 }
 
-/** A fully-populated, honest attestation for a given (proposalId, proposalVersion) -- both required checks recorded as having covered the required (entityName, matterName) fields, matching what presentStrategyProposalForApproval would actually produce. */
+/**
+ * An honest attestation for a given (proposalId, proposalVersion), in the
+ * shape presentStrategyProposalForApproval actually produces: the Sales
+ * source-boundary fields its marker recorded, and a proposal-content check
+ * that compared no field (the Runtime holds no contact identity -- an
+ * Entity/Matter name is always its own token).
+ */
 function validAttestation(proposalId: string, proposalVersion: number): WorkState["strategyProposalTokenSafety"] {
   return {
     proposalId,
     proposalVersion,
     sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
-    proposalContent: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
+    proposalContent: { checked: true, identityFieldsChecked: [] },
   };
 }
 
@@ -910,28 +916,39 @@ test("S5. A legacy {proposalId, proposalVersion, basis} attestation (no sourceBo
   assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check/);
 });
 
-test("S6. An attestation whose sourceBoundary check did not cover the required identity fields fails verification", async (t) => {
-  const incomplete: WorkState["strategyProposalTokenSafety"] = {
+test("S6. An attestation whose sourceBoundary check is not recorded as having run fails verification", async (t) => {
+  const incomplete = {
     proposalId: "strategy-prop-1",
     proposalVersion: 1,
-    sourceBoundary: { checked: true, identityFieldsChecked: ["entityName"] }, // missing matterName
-    proposalContent: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
-  };
+    sourceBoundary: { checked: false, identityFieldsChecked: ["entityName", "matterName"] },
+    proposalContent: { checked: true, identityFieldsChecked: [] },
+  } as any;
   const { world, state } = await createV1(t, { strategyProposalTokenSafety: incomplete });
   assert.strictEqual(proposals(world).length, 0);
-  assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check ran against the required known-identity fields/);
+  assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check ran and passed/);
 });
 
-test("S7. An attestation whose proposalContent check did not cover the required identity fields fails verification", async (t) => {
-  const incomplete: WorkState["strategyProposalTokenSafety"] = {
+test("S7. An attestation with no proposalContent check fails verification", async (t) => {
+  const incomplete = {
     proposalId: "strategy-prop-1",
     proposalVersion: 1,
     sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
-    proposalContent: { checked: true, identityFieldsChecked: ["matterName"] }, // missing entityName
-  };
+  } as any;
   const { world, state } = await createV1(t, { strategyProposalTokenSafety: incomplete });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /does not confirm the complete Strategy Proposal was independently checked/);
+});
+
+test("S8. The attestation Strategy really produces for a Handoff-originated proposal passes -- a source-boundary marker naming entityName,contactName and a proposal check that compared no field (MAT-26, HO-86 -> HO-87)", async (t) => {
+  const asProduced: WorkState["strategyProposalTokenSafety"] = {
+    proposalId: "strategy-prop-1",
+    proposalVersion: 1,
+    sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "contactName"] },
+    proposalContent: { checked: true, identityFieldsChecked: [] },
+  };
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: asProduced });
+  assert.strictEqual(state.blockedReason, undefined);
+  assert.strictEqual(proposals(world).length, 1, "the Proposal is produced");
 });
 
 test("S4. Reprocessing an existing Proposal without verification does not re-hydrate Strategy facts, so no new Version can be built from them", async (t) => {

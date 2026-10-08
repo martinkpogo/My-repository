@@ -716,7 +716,10 @@ export interface WorkState {
    * version, per verifyStrategyProposalTokenSafety's exact-match discipline.
    * Never carries the identity values themselves, only which fields were
    * checked. Replaces the prior unconstrained `basis: string` shape, which
-   * could not honestly represent which checks had actually run.
+   * could not honestly represent which checks had actually run. The field
+   * lists are evidence of what each check compared, not a required set: an
+   * Entity/Matter name is always its own token, so the proposal check
+   * records only contactName/email/phone when known -- often none.
    */
   strategyProposalTokenSafety?: {
     proposalId: string;
