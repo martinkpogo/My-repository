@@ -21,7 +21,7 @@ import {
 } from "../../notion";
 import { mintApprovalProofForWork, workSessionContext, workSessionReadContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
-import { updateHandoff, findIdentityViolation, type HandoffIdentity, type KnownIdentityField } from "../../handoffWriter";
+import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
@@ -706,10 +706,17 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
  * known-identity set (proposalContent). Neither Martin's approval, the
  * Handoff merely existing, nor Outbound Data Gate passage is evidence of
  * either -- both are separate, unrelated gates. Fails closed if either
- * check is missing, marked false, or doesn't record the required
- * (entityName, matterName) fields as having been checked -- a legacy
+ * check is missing or not marked as having run -- a legacy
  * `{proposalId, proposalVersion, basis: string}` attestation cannot pass,
  * since it has neither `sourceBoundary` nor `proposalContent`.
+ *
+ * The field lists each check recorded are evidence, not a requirement
+ * (Martin's decision, 2026-10-08). Under the identity architecture an
+ * Entity/Matter name is always its own token, so Strategy's proposal check
+ * deliberately records only the fields that can still be real identity
+ * (contactName/email/phone, when known) -- requiring `entityName`/
+ * `matterName` there could never pass, and blocked every Strategy-originated
+ * Proposal (MAT-26, HO-86 -> HO-87).
  */
 export function verifyStrategyProposalTokenSafety(state: WorkState): string | null {
   const proposal = state.strategyProposal;
@@ -721,14 +728,13 @@ export function verifyStrategyProposalTokenSafety(state: WorkState): string | nu
   if (attestation.proposalId !== proposal.proposalId || attestation.proposalVersion !== proposal.proposalVersion) {
     return `the token-safety attestation on record is for Strategy proposal ${attestation.proposalId} v${attestation.proposalVersion}, not the approved ${proposal.proposalId} v${proposal.proposalVersion}.`;
   }
-  const required: KnownIdentityField[] = ["entityName", "matterName"];
   const sourceBoundary = attestation.sourceBoundary;
-  if (!sourceBoundary || sourceBoundary.checked !== true || !required.every((f) => sourceBoundary.identityFieldsChecked?.includes(f))) {
-    return `the token-safety attestation for ${proposal.proposalId} v${proposal.proposalVersion} does not confirm the Sales source-boundary identity check ran against the required known-identity fields (entityName, matterName).`;
+  if (!sourceBoundary || sourceBoundary.checked !== true) {
+    return `the token-safety attestation for ${proposal.proposalId} v${proposal.proposalVersion} does not confirm the Sales source-boundary identity check ran and passed.`;
   }
   const proposalContent = attestation.proposalContent;
-  if (!proposalContent || proposalContent.checked !== true || !required.every((f) => proposalContent.identityFieldsChecked?.includes(f))) {
-    return `the token-safety attestation for ${proposal.proposalId} v${proposal.proposalVersion} does not confirm the complete Strategy Proposal was independently checked against the required known-identity fields (entityName, matterName).`;
+  if (!proposalContent || proposalContent.checked !== true) {
+    return `the token-safety attestation for ${proposal.proposalId} v${proposal.proposalVersion} does not confirm the complete Strategy Proposal was independently checked for known identity.`;
   }
   return null;
 }
