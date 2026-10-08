@@ -404,17 +404,17 @@ export const matterChoiceCallback: ApprovalCallbackHandler = (env, state, _appro
   sales.handleMatterChoice(env, state, value ?? "");
 
 export const salesProposalDecisionCallback: ApprovalCallbackHandler = (env, state, _approved, value) => {
-  // value is "<proposalNumber>.<version>.<a|r>" -- binds the decision
+  // value is "<proposalNumber>.<version>.<a|r|g>" -- binds the decision
   // to the exact Proposal ID + Version; "." keeps it intact through
   // index.ts's split(":") and well under Telegram's 64-byte limit.
-  const m = (value ?? "").match(/^(\d+)\.(\d+)\.([ar])$/);
+  const m = (value ?? "").match(/^(\d+)\.(\d+)\.([arg])$/);
   if (!m) return Promise.resolve(state);
   return salesProposal.handleSalesProposalDecision(
     env,
     state,
     Number(m[1]),
     Number(m[2]),
-    m[3] === "a" ? "approve" : "revise",
+    m[3] === "a" ? "approve" : m[3] === "g" ? "doc" : "revise",
   );
 };
 

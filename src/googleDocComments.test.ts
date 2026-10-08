@@ -427,3 +427,98 @@ test("a comment already marked processed is never re-executed on a later poll", 
   assert.strictEqual(batchUpdated, false);
   assert.strictEqual(result.commentsProcessed, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Proposal-bound Docs: a comment is a change REQUEST for that exact version.
+// ---------------------------------------------------------------------------
+
+async function setUpProposalDoc(fakeEnv: Env, calls: any[], result: any) {
+  await persistGoogleTokens(fakeEnv, { access_token: "tok-1", refresh_token: "refresh-1", expires_in: 3600 }, OWNER_EMAIL);
+  await registerWatchedGoogleDoc(fakeEnv, {
+    documentId: DOC_ID,
+    accountIdentifier: OWNER_EMAIL,
+    title: "PROP-6 v1",
+    chatId: 123456789,
+    threadId: 604,
+    createdAt: new Date().toISOString(),
+    proposal: { workId: "work-1", proposalNumber: 6, proposalId: "PROP-6", version: 1 },
+  });
+  (fakeEnv as any).WORK_SESSION = {
+    idFromName: (name: string) => name,
+    get: () => ({
+      handleProposalDocComment: async (req: any) => {
+        calls.push(req);
+        return result;
+      },
+    }),
+  };
+}
+
+test("a comment on a proposal-bound Doc requests a change for its version, replies, resolves, and never edits the Doc", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+  let reply: any = null;
+  let resolved: string | null = null;
+  let edited = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-p1", content: "Make the scope shorter", resolved: false, author: { me: true }, quotedFileContent: { value: "Scope section" } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: (id) => (resolved = id),
+    onBatchUpdate: () => ((edited = true), true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.deepStrictEqual(calls, [{ proposalNumber: 6, version: 1, text: 'Regarding "Scope section": Make the scope shorter' }]);
+  assert.ok(reply.content.includes("PROP-6 v2") && reply.content.includes("unchanged"));
+  assert.strictEqual(resolved, "c-p1");
+  assert.strictEqual(edited, false);
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-p1"), "1");
+});
+
+test("a proposal-bound Doc comment from anyone but the authorizing account is ignored", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+  let replied = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-p2", content: "Change it", resolved: false, author: { me: false } }],
+    onReply: () => (replied = true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(calls.length, 0);
+  assert.strictEqual(replied, false);
+});
+
+test("a change the Work refuses (stale version) is answered 'Not applied' and the comment stays unresolved", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "stale", detail: "this Doc is v1 but PROP-6 is now v2." });
+  let reply: any = null;
+  let resolved = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-p3", content: "Shorten", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: () => (resolved = true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.ok(reply.content.startsWith("Not applied -- this Doc is v1"));
+  assert.strictEqual(resolved, false);
+});

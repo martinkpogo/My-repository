@@ -25,6 +25,7 @@ import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
+import { createGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
@@ -130,6 +131,12 @@ export interface ProposalVersionRecord {
   origin: "generated" | "revision";
   /** The readable child page holding exactly this version (see createVersionPage); absent for versions written before version pages existed. */
   pageUrl?: string;
+  /**
+   * The Google Doc created from this version on Martin's request: a readable,
+   * commentable copy of this version's token-safe content (see
+   * createProposalVersionDoc). A comment on it is a change REQUEST.
+   */
+  docUrl?: string;
 }
 
 export interface RuntimeSalesProposal {
@@ -661,7 +668,7 @@ function decisionButtons(sp: RuntimeSalesProposal, version: number, includeAppro
   const row: InlineButton[] = [];
   if (includeApprove) row.push({ text: `✅ Approve ${sp.proposalId} ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.a` });
   row.push({ text: `✏️ Request changes to ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.r` });
-  return [row];
+  return [row, [{ text: `📄 Create Google Doc for ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.g` }]];
 }
 
 function withWorkId(buttons: InlineButton[][], workId: string): InlineButton[][] {
@@ -679,6 +686,7 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
     `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
     `Record: ${sp.pageUrl}`,
     ...(record.pageUrl ? [`Read this version: ${record.pageUrl}`] : []),
+    ...(record.docUrl ? [`Google Doc (comment to request a change): ${record.docUrl}`] : []),
   ].join("\n");
   const notes = sp.facts
     ? buildReviewNotes(sp.facts, { proposalId: sp.proposalId, version: sp.currentVersion, amendments: sp.amendments })
@@ -1078,13 +1086,17 @@ export async function handleSalesProposalDecision(
   state: WorkState,
   proposalNumber: number,
   version: number,
-  decision: "approve" | "revise",
+  decision: "approve" | "revise" | "doc",
 ): Promise<WorkState> {
   const sp = state.salesProposal;
   if (!sp) return staleDecision(env, state, "there is no Runtime Proposal on this work item.");
   if (sp.proposalNumber !== proposalNumber) {
     return staleDecision(env, state, `this decision is for Proposal #${proposalNumber}, not ${sp.proposalId}.`);
   }
+
+  // Not a decision: a request for a readable, commentable copy. It changes
+  // nothing about the Proposal, its approval state or its versions.
+  if (decision === "doc") return createProposalVersionDoc(env, state, sp, version);
 
   if (decision === "revise") {
     if (version !== sp.currentVersion) {
@@ -1228,6 +1240,107 @@ export async function handleSalesProposalDecision(
  * Proposal page body; the new Version is Pending Approval and not released to
  * artifact execution until Martin approves that exact Version.
  */
+const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
+
+/**
+ * Creates a Google Doc holding exactly the current version's token-safe
+ * content, in a folder this system keeps for them, on Martin's tap of the
+ * "Create Google Doc" button (that tap is the approval for this Doc). The
+ * Doc is registered for comment watching, bound to this exact Proposal
+ * version: a comment on it requests a change (applyProposalDocComment), it
+ * never edits the Doc in place. Real-identity documents are built by
+ * Isolated Sales from the approved version -- never here.
+ */
+async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, version: number): Promise<WorkState> {
+  if (version !== sp.currentVersion) {
+    return staleDecision(env, state, `${versionLabel(version)} is not the current Version of ${sp.proposalId} (current: ${versionLabel(sp.currentVersion)}).`);
+  }
+  const record = sp.versions.find((v) => v.version === version);
+  if (!record) return staleDecision(env, state, `no record of the ${versionLabel(version)} content to copy into a Doc.`);
+  const say = (text: string) => sendWorkspaceHatMessage(env, { ...state, hat: HAT }, text);
+  if (record.docUrl) {
+    await say(`A Google Doc for ${sp.proposalId} ${versionLabel(version)} already exists: ${record.docUrl}`);
+    return state;
+  }
+  const accounts = await listAuthorizedGoogleAccounts(env);
+  if (accounts.length !== 1) {
+    await say(
+      accounts.length === 0
+        ? "Couldn't create the Google Doc: no Google account is authorized for the Runtime. Nothing was created."
+        : `Couldn't create the Google Doc: ${accounts.length} Google accounts are authorized and I won't guess which to use. Nothing was created.`,
+    );
+    return state;
+  }
+  const accountIdentifier = accounts[0];
+  const folder = await ensureGoogleFolder(env, accountIdentifier, PROPOSAL_DOCS_FOLDER_NAME, "google_proposal_docs_folder");
+  if (!folder.ok) {
+    await say(`Couldn't create the Google Doc: ${folder.error}. Nothing was created.`);
+    return state;
+  }
+  const title = `${sp.proposalId} ${versionLabel(version)}`;
+  const created = await createGoogleDoc(env, { type: "create_doc", title, content: record.content, folderId: folder.folderId, accountIdentifier });
+  if (!created.ok || !created.documentId || !created.documentUrl) {
+    await say(`Couldn't create the Google Doc (${created.stage ?? "unknown stage"}): ${created.error ?? "unknown error"}.`);
+    return state;
+  }
+  await registerWatchedGoogleDoc(env, {
+    documentId: created.documentId,
+    accountIdentifier,
+    title,
+    chatId: state.chatId,
+    threadId: state.threadId,
+    createdAt: new Date().toISOString(),
+    proposal: { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version },
+  });
+  record.docUrl = created.documentUrl;
+  await say(
+    `📄 *Google Doc for ${sp.proposalId} ${versionLabel(version)}:* ${created.documentUrl}\n\nSelect text and comment to request a change. A comment doesn't edit this Doc -- it creates the next version (${versionLabel(version + 1)}), which comes back here for your approval. ${versionLabel(version)} stays as it is.`,
+  );
+  return state;
+}
+
+export type ProposalDocCommentResult =
+  | { kind: "revised"; newVersion: number }
+  | { kind: "stale"; detail: string }
+  | { kind: "refused"; detail: string };
+
+/**
+ * A comment on a Proposal Doc is Martin's change request for that exact
+ * version. It runs the SAME revision path as "Request changes" -- the change
+ * recorded verbatim in a new Version that needs a new approval -- so the Doc
+ * is never edited in place, v(N) is kept as it is, and the hashed Proposal
+ * Content stays the source of truth. Refused (nothing created) when the Doc's
+ * version is no longer the current one, or the Work is not Sales'.
+ */
+export async function applyProposalDocComment(
+  env: Env,
+  state: WorkState,
+  input: { proposalNumber: number; version: number; text: string },
+): Promise<{ state: WorkState; result: ProposalDocCommentResult }> {
+  const sp = state.salesProposal;
+  if (!sp || sp.proposalNumber !== input.proposalNumber) {
+    return { state, result: { kind: "stale", detail: "this Doc does not belong to the Proposal on this work item." } };
+  }
+  if (state.unit !== "Sales") {
+    return { state, result: { kind: "refused", detail: `this work item now belongs to ${state.unit ?? "another Unit"}, so it can't revise the Proposal.` } };
+  }
+  if (input.version !== sp.currentVersion) {
+    return {
+      state,
+      result: { kind: "stale", detail: `this Doc is a copy of ${versionLabel(input.version)}, but ${sp.proposalId} is now at ${versionLabel(sp.currentVersion)}. Comment on the current version's Doc.` },
+    };
+  }
+  state.blockedReason = undefined;
+  state.pendingSalesProposalRevision = { proposalNumber: sp.proposalNumber, fromVersion: input.version };
+  await handleSalesProposalRevisionText(env, state, input.text);
+  const after = state.salesProposal!;
+  if (after.currentVersion === input.version + 1) {
+    return { state, result: { kind: "revised", newVersion: after.currentVersion } };
+  }
+  state.pendingSalesProposalRevision = undefined;
+  return { state, result: { kind: "refused", detail: state.blockedReason ?? "the change was not applied." } };
+}
+
 export async function handleSalesProposalRevisionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const sp = state.salesProposal;
   const pending = state.pendingSalesProposalRevision;

@@ -387,6 +387,24 @@ export class WorkSession extends DurableObject<Env> {
     });
   }
 
+  /**
+   * A change request arriving as a comment on a Runtime Sales Proposal's
+   * Google Doc (see googleDocComments.ts). Runs the Proposal's ordinary
+   * revision path on this Work -- nothing here edits the Doc or the approved
+   * version -- and reports how it ended so the poller can answer the
+   * comment. A thrown failure inside the Work is reported by execute() as
+   * usual and surfaces here as a refusal.
+   */
+  async handleProposalDocComment(input: { proposalNumber: number; version: number; text: string }): Promise<salesProposal.ProposalDocCommentResult> {
+    let result: salesProposal.ProposalDocCommentResult | undefined;
+    await this.execute(async (state) => {
+      const applied = await salesProposal.applyProposalDocComment(this.env, state, input);
+      result = applied.result;
+      return applied.state;
+    });
+    return result ?? { kind: "refused", detail: "the change could not be applied; Martin was notified." };
+  }
+
   async handleCallback(action: string, value: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (action) {

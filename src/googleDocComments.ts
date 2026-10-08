@@ -8,6 +8,7 @@ import {
 import { generate } from "./ai";
 import { logActivity } from "./log";
 import { sendWorkspaceHatMessage } from "./telegram";
+import { getSessionStub } from "./sessionRouting";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
@@ -110,12 +111,57 @@ export type CommentOutcome =
   | "anchor_not_unique"
   | "ai_not_understood"
   | "batch_update_failed"
-  | "applied";
+  | "applied"
+  | "change_requested"
+  | "change_not_applied"
+  | "empty_comment";
 
 interface ProcessCommentResult {
   handled: boolean;
   outcome: CommentOutcome;
   detail?: string;
+}
+
+/** Longest selected passage carried into a change request, so the request stays a sentence, not a paste. */
+const MAX_QUOTED_CHARS = 300;
+
+/**
+ * A comment on a Proposal Doc becomes the Proposal's own "Request changes"
+ * input for the Doc's exact version: the Work records it verbatim in the next
+ * version and sends that to Martin for approval (tokenSafeProposal.ts). No AI
+ * interprets the comment here, and the Doc is never edited. The comment is
+ * marked processed BEFORE the Work is called, so a retry can never create the
+ * same revision twice; if it fails, the reply says so and Martin comments again.
+ */
+async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
+  const binding = doc.proposal!;
+  const body = comment.content?.trim();
+  if (!body) {
+    await markProcessed(env, comment.id);
+    return { handled: false, outcome: "empty_comment" };
+  }
+  const quoted = comment.quotedFileContent?.value?.trim();
+  const text = quoted ? `Regarding "${quoted.slice(0, MAX_QUOTED_CHARS)}": ${body}` : body;
+  await markProcessed(env, comment.id);
+
+  const result = await getSessionStub(env, binding.workId).handleProposalDocComment({
+    proposalNumber: binding.proposalNumber,
+    version: binding.version,
+    text,
+  });
+
+  if (result.kind === "revised") {
+    await replyToComment(
+      token,
+      doc.documentId,
+      comment.id,
+      `Change requested -- ${binding.proposalId} v${result.newVersion} was created with it and sent to Martin for approval. This Doc (v${binding.version}) is unchanged.`,
+    );
+    await resolveComment(token, doc.documentId, comment.id);
+    return { handled: true, outcome: "change_requested", detail: `change request -> ${binding.proposalId} v${result.newVersion}` };
+  }
+  await replyToComment(token, doc.documentId, comment.id, `Not applied -- ${result.detail}`);
+  return { handled: true, outcome: "change_not_applied", detail: `${result.kind}: ${result.detail}` };
 }
 
 /**
@@ -150,6 +196,10 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
       detail: `comment author.me=${comment.author?.me ?? "undefined"} (displayName='${comment.author?.displayName ?? "unknown"}')`,
     };
   }
+
+  // A Doc created from a Runtime Sales Proposal version: a comment there is a
+  // change REQUEST for that exact version, never an in-place edit.
+  if (doc.proposal) return processProposalComment(env, doc, comment, token);
 
   const quoted = comment.quotedFileContent?.value?.trim();
   if (!quoted) {

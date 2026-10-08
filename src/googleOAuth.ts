@@ -989,6 +989,22 @@ export async function listAuthorizedGoogleAccounts(env: Env): Promise<string[]> 
   return accounts;
 }
 
+/**
+ * Binds a watched Doc to ONE version of a Runtime Sales Proposal. A comment
+ * on such a Doc is never an in-place edit: it is a change REQUEST routed to
+ * the Proposal's own revision path, which creates the next version (see
+ * googleDocComments.ts and tokenSafeProposal.ts's applyProposalDocComment).
+ */
+export interface WatchedDocProposalBinding {
+  /** The WorkSession that holds this Proposal. */
+  workId: string;
+  proposalNumber: number;
+  /** Display ID, e.g. "PROP-6". */
+  proposalId: string;
+  /** The version this Doc is a copy of. */
+  version: number;
+}
+
 export interface WatchedGoogleDoc {
   documentId: string;
   accountIdentifier: string;
@@ -996,6 +1012,7 @@ export interface WatchedGoogleDoc {
   chatId?: number;
   threadId?: number;
   createdAt: string;
+  proposal?: WatchedDocProposalBinding;
 }
 
 /**
@@ -1003,6 +1020,39 @@ export interface WatchedGoogleDoc {
  * googleDocComments.ts). Watching is opt-in-by-creation: only docs this
  * system itself created are watched, never arbitrary pre-existing files.
  */
+/**
+ * Returns the Drive folder id this system keeps documents of one kind in,
+ * creating the folder the first time and remembering it per account. The
+ * Runtime's `drive.file` scope covers files and folders this app creates.
+ */
+export async function ensureGoogleFolder(
+  env: Env,
+  accountIdentifier: string,
+  folderName: string,
+  kvKey: string,
+): Promise<{ ok: true; folderId: string } | { ok: false; error: string }> {
+  const key = `${kvKey}:${accountIdentifier}`;
+  const known = await env.STATE_KV.get(key);
+  if (known) return { ok: true, folderId: known };
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
+  let res: Response;
+  try {
+    res = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: folderName, mimeType: "application/vnd.google-apps.folder" }),
+    });
+  } catch {
+    return { ok: false, error: "Network error creating the Drive folder" };
+  }
+  if (!res.ok) return { ok: false, error: `Google Drive folder creation failed (HTTP ${res.status})` };
+  const data = (await res.json().catch(() => ({}))) as { id?: string };
+  if (!data.id) return { ok: false, error: "Google Drive folder creation returned no id" };
+  await env.STATE_KV.put(key, data.id);
+  return { ok: true, folderId: data.id };
+}
+
 export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc): Promise<void> {
   await env.STATE_KV.put(`google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
 }

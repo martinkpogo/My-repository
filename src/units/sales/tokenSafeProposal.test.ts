@@ -10,6 +10,7 @@ import {
   extractInvestmentTolerance,
   buildProposalContent,
   PROPOSAL_CALLBACK_ACTION,
+  applyProposalDocComment,
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import type { StrategyProposal } from "../strategy/strategyAnalyst";
@@ -649,7 +650,7 @@ test("10. The approval request presents the complete Proposal and identifies the
   const buttons = world.telegram.at(-1)!.buttons.flat();
   assert.deepStrictEqual(
     buttons.map((b: any) => b.callback_data),
-    [`${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.a`, `${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.r`],
+    [`${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.a`, `${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.r`, `${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.g`],
   );
   assert.ok(buttons.every((b: any) => Buffer.byteLength(b.callback_data) <= 64), "Telegram callback_data 64-byte limit");
 });
@@ -1255,4 +1256,183 @@ test("Version pages 4. A Proposal that predates version pages is approved withou
 
   assert.strictEqual(text(rec.properties["Approval Status"]), "Approved");
   assert.strictEqual(rec.properties["Approved Version Link"], undefined);
+});
+
+
+// ---------------------------------------------------------------------------
+// Google Doc per version, and comments on it as change requests.
+// A Doc is a readable, commentable copy of a token-safe version, created only
+// when Martin taps "Create Google Doc". A comment never edits it: it runs the
+// Proposal's own "Request changes" path and creates the next version.
+// ---------------------------------------------------------------------------
+
+function kvWithGoogleAccount(accounts: string[] = ["martin@example.com"]) {
+  const store = new Map<string, string>();
+  for (const a of accounts) {
+    store.set(`google_oauth_tokens:${a}`, JSON.stringify({ access_token: "tok", refresh_token: "r", expires_at: Date.now() + 3_600_000, updated_at: "now" }));
+  }
+  return {
+    store,
+    kv: {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => void store.set(k, v),
+      delete: async (k: string) => void store.delete(k),
+      list: async ({ prefix }: { prefix?: string } = {}) => ({ keys: [...store.keys()].filter((k) => !prefix || k.startsWith(prefix)).map((name) => ({ name })), list_complete: true }),
+    } as any,
+  };
+}
+
+/** Wraps the Notion/Telegram fake with a Google Drive/Docs fake, recording every Google call. */
+function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
+  const inner = globalThis.fetch;
+  const calls: { method: string; url: string; body?: any }[] = [];
+  let docText = "";
+  let docTitle = "";
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const u = String(url);
+    if (!u.includes("googleapis.com")) return inner(url as any, init);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(init.body) : undefined;
+    calls.push({ method, url: u, body });
+    const json = (o: any, status = 200) => new Response(JSON.stringify(o), { status });
+    if (u.endsWith("/drive/v3/files") && method === "POST") {
+      if (body.mimeType === "application/vnd.google-apps.folder") return json({ id: "folder-1" });
+      if (opts.failDocCreate) return json({}, 500);
+      docTitle = body.name;
+      return json({ id: "doc-1" });
+    }
+    if (u.includes("/documents/doc-1:batchUpdate")) {
+      docText = body.requests[0].insertText.text;
+      return json({});
+    }
+    if (u.endsWith("/documents/doc-1") && method === "GET") {
+      return json({ title: docTitle, body: { content: [{ paragraph: { elements: [{ textRun: { content: docText } }] } }] } });
+    }
+    throw new Error(`Unexpected Google call: ${method} ${u}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = inner;
+  });
+  return calls;
+}
+
+test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the current version in a dedicated folder, watches it bound to that version, and shows the link", async (t) => {
+  const { world, state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const { kv, store } = kvWithGoogleAccount();
+  const env = fakeEnv({ STATE_KV: kv });
+  const sp = state.salesProposal!;
+
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+
+  const creates = calls.filter((c) => c.method === "POST" && c.url.endsWith("/drive/v3/files"));
+  assert.strictEqual(creates.length, 2, "one folder, then one Doc");
+  assert.strictEqual(creates[0].body.name, "ENIG Proposals (token-safe)");
+  assert.strictEqual(creates[1].body.name, "PROP-7 v1");
+  assert.deepStrictEqual(creates[1].body.parents, ["folder-1"]);
+  assert.strictEqual(store.get("google_proposal_docs_folder:martin@example.com"), "folder-1", "the folder is remembered");
+  const watched = JSON.parse(store.get("google_doc_watch:doc-1")!);
+  assert.deepStrictEqual(watched.proposal, { workId: state.workId, proposalNumber: 7, proposalId: "PROP-7", version: 1 });
+  assert.strictEqual(sp.versions[0].docUrl, "https://docs.google.com/document/d/doc-1/edit");
+  assert.match(world.telegram.at(-1)!.text, /Google Doc for PROP-7 v1:\* https:\/\/docs\.google\.com\/document\/d\/doc-1\/edit/);
+  assert.strictEqual(sp.currentVersion, 1, "creating a Doc changes nothing about the Proposal");
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+});
+
+test("Google Doc 2. A second tap returns the existing Doc and creates nothing", async (t) => {
+  const { world, state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+  const before = calls.length;
+
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+
+  assert.strictEqual(calls.length, before, "no further Google call");
+  assert.match(world.telegram.at(-1)!.text, /already exists: https:\/\/docs\.google\.com\/document\/d\/doc-1\/edit/);
+});
+
+test("Google Doc 3. No authorized account, several accounts, or a failed create each say so and create nothing", async (t) => {
+  const { world, state } = await createV1(t);
+  const calls = withGoogleFake(t);
+
+  await handleSalesProposalDecision(fakeEnv({ STATE_KV: kvWithGoogleAccount([]).kv }), state, 7, 1, "doc");
+  assert.match(world.telegram.at(-1)!.text, /no Google account is authorized/);
+
+  await handleSalesProposalDecision(fakeEnv({ STATE_KV: kvWithGoogleAccount(["a@x.com", "b@x.com"]).kv }), state, 7, 1, "doc");
+  assert.match(world.telegram.at(-1)!.text, /2 Google accounts are authorized and I won't guess/);
+  assert.strictEqual(calls.length, 0, "nothing reached Google in either case");
+
+  const failing = withGoogleFake(t, { failDocCreate: true });
+  await handleSalesProposalDecision(fakeEnv({ STATE_KV: kvWithGoogleAccount().kv }), state, 7, 1, "doc");
+  assert.match(world.telegram.at(-1)!.text, /Couldn't create the Google Doc \(creation\)/);
+  assert.strictEqual(state.salesProposal!.versions[0].docUrl, undefined, "a failed create records no Doc");
+  assert.ok(failing.length > 0);
+});
+
+test("Google Doc 4. A button for a version that is no longer current makes no Doc", async (t) => {
+  const { state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+  await handleSalesProposalDecision(env, state, 7, 1, "revise");
+  await handleSalesProposalRevisionText(env, state, "Add a second training session.");
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+
+  assert.strictEqual(calls.length, 0);
+  assert.strictEqual(state.salesProposal!.versions[0].docUrl, undefined);
+});
+
+test("Doc comment 1. A change request on the current version's Doc runs the revision path: v2 with the change recorded verbatim, pending approval, v1 untouched", async (t) => {
+  const { world, env, state } = await createV1(t);
+  const v1Content = state.salesProposal!.versions[0].content;
+
+  const { result } = await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: 'Regarding "training": Add a second session for the retail team.' });
+
+  assert.deepStrictEqual(result, { kind: "revised", newVersion: 2 });
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(text(rec.Version), "v2");
+  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval");
+  assert.match(text(rec["Proposal Content"]), /Regarding "training": Add a second session for the retail team\./);
+  assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "v1 is kept unchanged");
+  assert.strictEqual(world.versionPages.length, 2, "v2 has its own page");
+  assert.ok(approvalRequests(world).at(-1)!.text.includes("Version: v2"), "v2 comes back to Martin for approval");
+});
+
+test("Doc comment 2. A comment on a superseded version's Doc creates nothing and says which version is current", async (t) => {
+  const { world, env, state } = await createV1(t);
+  await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "First change." });
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  const pagesBefore = world.versionPages.length;
+
+  const { result } = await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Second change on the old Doc." });
+
+  assert.strictEqual(result.kind, "stale");
+  assert.match((result as any).detail, /copy of v1, but PROP-7 is now at v2/);
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(world.versionPages.length, pagesBefore);
+});
+
+test("Doc comment 3. A comment that would put real identity into the Proposal is refused with the reason, and no version is created", async (t) => {
+  const { world, env, state } = await createV1(t, { entityName: "Acme Foods Ghana Ltd" });
+  const pagesBefore = world.versionPages.length;
+
+  const { result } = await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Mention Acme Foods Ghana Ltd by name." });
+
+  assert.strictEqual(result.kind, "refused");
+  assert.match((result as any).detail, /identity-bearing value/);
+  assert.strictEqual(state.salesProposal!.currentVersion, 1);
+  assert.strictEqual(world.versionPages.length, pagesBefore);
+  assert.strictEqual(state.pendingSalesProposalRevision, undefined, "no revision is left half-open");
+});
+
+test("Doc comment 4. A Work that no longer belongs to Sales refuses the request", async (t) => {
+  const { env, state } = await createV1(t);
+  state.unit = "Strategy";
+
+  const { result } = await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Change." });
+
+  assert.strictEqual(result.kind, "refused");
+  assert.match((result as any).detail, /now belongs to Strategy/);
 });
