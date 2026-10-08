@@ -24,6 +24,7 @@ import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscove
 import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
+import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
 import { recordWorkAction } from "./units/dispatch";
@@ -495,6 +496,12 @@ export class WorkSession extends DurableObject<Env> {
 
   private async save(state: WorkState): Promise<WorkState> {
     state.updatedAt = new Date().toISOString();
+    // Derive this Work's canonical Matter identity (its page id) from its
+    // token before it is persisted, so the Matter -> current Work pointer
+    // can be keyed the same way no matter which Unit learned the Matter
+    // first. Derived index only: never throws, and a Work with no Matter
+    // identity pays nothing (no KV, no read).
+    await ensureMatterIdentity(this.env, state);
     await this.ctx.storage.put("state", state);
     await this.updateRegistry(state);
     return state;
@@ -510,17 +517,27 @@ export class WorkSession extends DurableObject<Env> {
       label: state.pendingActionSummary?.label ?? state.entityName ?? state.matterName ?? state.enquiryText?.slice(0, 40) ?? "(new)",
       updatedAt: state.updatedAt,
       hasPendingApproval,
+      matterId: state.matterId,
     };
     const key = "sessions_index";
     const raw = await this.env.STATE_KV.get(key);
     const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
     const withoutSelf = index.filter((s) => s.workId !== state.workId);
-    const isTerminal = state.stage === "complete" || state.stage === "closed_not_qualified" || state.stage === "cancelled";
+    const isTerminal = isTerminalWorkStage(state.stage);
     // Terminal work items drop out of the index (they no longer show as "open").
     const combined = isTerminal ? withoutSelf : [...withoutSelf, summary];
 
     const kept = trimSessionsIndex(combined);
     await this.env.STATE_KV.put(key, JSON.stringify(kept));
+
+    // Matter continuation (src/matterContinuation.ts): the derived
+    // matter_current_work pointer is established/advanced from the index
+    // state this very write just made current -- a resumable save makes this
+    // Work current only when nothing else resumable already is, and a
+    // terminal save advances or removes the pointer. It runs AFTER the index
+    // write for exactly that reason (the index is how resumability is read),
+    // and never throws: a derived index must not fail the Work it indexes.
+    await syncMatterContinuationPointer(this.env, state, isTerminal);
 
     const pendingCount = combined.filter((s) => s.hasPendingApproval).length;
     await this.alertPendingApprovalBacklog(pendingCount);

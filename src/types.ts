@@ -405,6 +405,17 @@ export interface WorkState {
   /** Human-readable Entity name -- only ever populated by a Unit that has legitimately resolved the real identity (Sales). Never overload this with a token. */
   entityName?: string;
   matterId?: string;
+  /**
+   * Set once this Work's `matterToken` has been looked up and found to
+   * resolve to NO real Matter (an unbound placeholder such as "M-UNBOUND",
+   * or a token whose Matter no longer exists). It is the negative cache for
+   * that lookup, not a Matter identity: it stops WorkSession.save from
+   * re-querying the same dead token on every save, and it means this Work
+   * never gets a `matter_current_work` continuation pointer (see
+   * src/matterContinuation.ts). A transient read failure is deliberately
+   * NOT recorded here -- those retry on the next save.
+   */
+  matterIdUnresolved?: boolean;
   /** Human-readable Matter name -- only ever populated by a Unit that has legitimately resolved the real identity (Sales). Never overload this with a token. */
   matterName?: string;
   /**
@@ -817,4 +828,13 @@ export interface SessionSummary {
   updatedAt: string;
   /** Whether this work item currently has a pendingActionSummary -- drives sessions_index's bounded pending/general pool split. */
   hasPendingApproval?: boolean;
+  /**
+   * The Matter page id this Work belongs to, when known -- carried so the
+   * runtime's derived Matter -> current Work index can read resumability
+   * from the index it already maintains (src/matterContinuation.ts) instead
+   * of reading every candidate WorkSession. Runtime KV only: this is a
+   * derived pointer, never Matter state, and it is never written to the
+   * Matter Business Object in Notion.
+   */
+  matterId?: string;
 }
