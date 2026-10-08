@@ -1,5 +1,5 @@
 import type { Unit } from "../types";
-import { validateHatManifest, type UnitManifest } from "./unitManifest";
+import { findCallbackHandler, validateHatManifest, type UnitManifest } from "./unitManifest";
 import { businessDevelopmentManifest } from "./businessDevelopment/businessDevelopmentManifest";
 import { salesManifest } from "./sales/salesManifest";
 import { marketingManifest } from "./marketing/marketingManifest";
@@ -103,11 +103,29 @@ let manifestTable: Partial<Record<Unit, UnitManifest>> | undefined;
  */
 export function buildUnitRegistry(manifests: Partial<Record<Unit, UnitManifest>>): Partial<Record<Unit, UnitManifest>> {
   const defects: string[] = [];
+  // A callback prefix must be owned by EXACTLY ONE Unit. handleCallback
+  // dispatches a button purely by looking that prefix up on the Work's own
+  // Unit/Hat, which is what makes a stale button from before an ownership
+  // transfer unreachable -- two Units declaring the same prefix would let
+  // one Unit's old button act on the other Unit's state. Same-Unit Hats may
+  // repeat a prefix (each Hat resolves its own copy), but no prefix may
+  // cross a Unit boundary.
+  const prefixOwner: Record<string, string> = {};
   for (const [unit, manifest] of Object.entries(manifests)) {
     if (!manifest) continue;
     for (const [hatName, hat] of Object.entries(manifest.hats)) {
       const defect = validateHatManifest(hat);
       if (defect) defects.push(`Unit "${unit}", Hat "${hatName}": ${defect}`);
+      for (const prefix of Object.keys(hat.callbackHandlers ?? {})) {
+        const owner = prefixOwner[prefix];
+        if (owner !== undefined && owner !== unit) {
+          defects.push(
+            `Unit "${unit}", Hat "${hatName}": callback prefix "${prefix}" is already declared by Unit "${owner}" -- a prefix must have exactly one owning Unit, or a stale button can act on another Unit's Work`,
+          );
+        } else {
+          prefixOwner[prefix] = unit;
+        }
+      }
     }
   }
   if (defects.length > 0) {
@@ -137,4 +155,32 @@ export function getUnitManifests(): Partial<Record<Unit, UnitManifest>> {
 
 export function findUnitManifest(unit: Unit): UnitManifest | undefined {
   return getUnitManifests()[unit];
+}
+
+/**
+ * Which registered Unit/Hat owns an approval-callback prefix, across the
+ * whole registry -- the counterpart of unitManifest.findCallbackHandler,
+ * which only ever asks ONE Hat (the Work's own).
+ *
+ * It exists for stale-button protection: after a Handoff pickup transfers
+ * ownership, the sending Unit's buttons reach handleCallback still carrying
+ * their prefix, but the Work now records the receiving Unit, so the lookup
+ * on the Work's own Hat finds nothing. Declaring that the prefix does have
+ * an owner elsewhere -- rather than no owner at all -- is what lets the
+ * refusal say "this belongs to <Unit>, this work now runs as <Unit>"
+ * instead of silently doing nothing, while a genuinely unknown prefix keeps
+ * today's unchanged no-op. Uniqueness of the prefix across Units is
+ * enforced where the registry assembles (buildUnitRegistry).
+ *
+ * First match wins; a Unit whose Hats repeat the same prefix returns the
+ * first Hat that declares it.
+ */
+export function findCallbackPrefixOwner(prefix: string): { unit: Unit; hat: string } | undefined {
+  for (const [unit, manifest] of Object.entries(getUnitManifests())) {
+    if (!manifest) continue;
+    for (const [hatName, hat] of Object.entries(manifest.hats)) {
+      if (findCallbackHandler(prefix, hat)) return { unit: unit as Unit, hat: hatName };
+    }
+  }
+  return undefined;
 }

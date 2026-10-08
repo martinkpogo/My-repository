@@ -38,12 +38,18 @@ export async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string
   ).catch((notifyErr) => console.error(`Failed to notify Martin of pickup failure for ${handoffId}`, notifyErr));
 }
 
+export type HandoffDestination =
+  | { ok: true; unit: Unit; hat: string; actionName: string }
+  | { ok: false; reason: string };
+
 /**
  * Resolves the Organization (Unit/Hat/Responsibility) and exactly one
  * Action for Handoff-originated Work through the SAME resolution
  * boundaries every direct request uses (ENIG Operating Model: Organization
  * owns organizational resolution; Action Resolution requires exactly one
- * declared applicable Action) -- before the Work is created.
+ * declared applicable Action) -- before the Work is created, and again at
+ * the pickup boundary where an EXISTING Work adopts that destination (see
+ * src/handoffOwnership.ts).
  *
  * The Handoff's destination is a FACT, consumed as established: `To Unit`
  * says which Unit owns the Work, `To Hat` which of that Unit's Hats. This
@@ -54,24 +60,25 @@ export async function notifyMartinOfDiscoveryFailure(env: Env, handoffId: string
  * `proposal_draft`, `handle_request`, `diagnose` -- exactly
  * the Actions the pickup methods these loops call perform).
  *
- * Returns null, with Martin notified through the existing discovery
- * failure channel, when resolution fails closed: a record whose `To Unit`
- * doesn't match this discovery loop's Unit, a destination naming a Hat the
- * Unit doesn't declare, a Handoff naming no Hat for a multi-Hat Unit, or
- * an Action its declarations don't admit at pickup. The Handoff stays
- * Pending and retries next cycle -- ambiguity stops rather than guessing
- * the destination, and a hardcoded Hat is never substituted for one the
- * record does not establish.
+ * Returns `{ ok: false, reason }` -- never a guess -- when resolution fails
+ * closed: a record whose `To Unit` doesn't match the caller's Unit, a
+ * destination naming a Hat the Unit doesn't declare, a Handoff naming no
+ * Hat for a multi-Hat Unit, or an Action its declarations don't admit at
+ * pickup. The caller decides what that stops (discovery leaves the Handoff
+ * Pending for the next cycle; a pickup aborts before it claims anything),
+ * but a hardcoded Hat is never substituted for one the record does not
+ * establish.
+ *
+ * Deliberately free of notifications and side effects so both callers can
+ * report a failure through their own existing channel -- discovery through
+ * notifyMartinOfDiscoveryFailure, a pickup through WorkSession.execute's
+ * Operations message.
  */
-async function resolveHandoffEntry(
-  env: Env,
+export async function deriveHandoffDestination(
   handoff: { id: string; properties?: Record<string, any> },
   expectedUnit: Unit,
-): Promise<{ hat: string; actionName: string } | null> {
-  const fail = async (reason: string): Promise<null> => {
-    await notifyMartinOfDiscoveryFailure(env, handoff.id, new Error(`Handoff entry resolution failed: ${reason}`));
-    return null;
-  };
+): Promise<HandoffDestination> {
+  const fail = (reason: string): HandoffDestination => ({ ok: false, reason });
 
   const toUnit = plainText(handoff.properties?.["To Unit"]) || expectedUnit;
   if (toUnit !== expectedUnit) {
@@ -107,9 +114,29 @@ async function resolveHandoffEntry(
     return fail(`Action (${resolution.reason}): ${resolution.detail}`);
   }
   return {
+    ok: true,
+    unit: expectedUnit,
     hat: organization.organization.hat,
     actionName: resolution.execution.action.action_id,
   };
+}
+
+/**
+ * Discovery's wrapper over deriveHandoffDestination: the same resolution,
+ * reported through the discovery failure channel the loops below already
+ * use. Returns null, with Martin notified, so the loop skips that Handoff
+ * and it stays Pending -- ambiguity stops rather than guessing the
+ * destination, and retries next cycle.
+ */
+async function resolveHandoffEntry(
+  env: Env,
+  handoff: { id: string; properties?: Record<string, any> },
+  expectedUnit: Unit,
+): Promise<{ hat: string; actionName: string } | null> {
+  const destination = await deriveHandoffDestination(handoff, expectedUnit);
+  if (destination.ok) return { hat: destination.hat, actionName: destination.actionName };
+  await notifyMartinOfDiscoveryFailure(env, handoff.id, new Error(`Handoff entry resolution failed: ${destination.reason}`));
+  return null;
 }
 
 /**
