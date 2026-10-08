@@ -201,6 +201,8 @@ interface World {
   fetches: { method: string; url: string; body?: any }[];
   telegram: { text: string; buttons?: any }[];
   blockAppends: { pageId: string; children: any[] }[];
+  /** Child pages created under a Proposal record: one per version (createVersionPage). */
+  versionPages: { id: string; parentId: string; title: string; children: any[]; url: string }[];
   logs: Props[];
   handoffCreates: Props[];
   nextProposalNumber: number;
@@ -245,7 +247,7 @@ function matches(props: Props, filter: any): boolean {
 }
 
 function installWorld(t: any, opts: { ho64?: Props; withHo62?: boolean; proposalPrefix?: string | null; stripProposalId?: boolean } = {}): World {
-  const world: World = { pages: new Map(), fetches: [], telegram: [], blockAppends: [], logs: [], handoffCreates: [], nextProposalNumber: 7 };
+  const world: World = { pages: new Map(), fetches: [], telegram: [], blockAppends: [], versionPages: [], logs: [], handoffCreates: [], nextProposalNumber: 7 };
   world.pages.set(HO64_ID, { id: HO64_ID, url: "https://notion.so/ho64", parent: "handoffs-ds", properties: opts.ho64 ?? ho64Props() });
   if (opts.withHo62 !== false) world.pages.set(HO62_ID, { id: HO62_ID, url: "https://notion.so/ho62", parent: "handoffs-ds", properties: ho62Props() });
   const prefix = opts.proposalPrefix === undefined ? "PROP" : opts.proposalPrefix;
@@ -271,6 +273,18 @@ function installWorld(t: any, opts: { ho64?: Props; withHo62?: boolean; proposal
     if (blocks && method === "PATCH") {
       world.blockAppends.push({ pageId: blocks[1], children: body.children });
       return json({ results: [] });
+    }
+    if (u.endsWith("/pages") && method === "POST" && body.parent?.type === "page_id") {
+      const id = `version-page-${world.versionPages.length + 1}`;
+      const page = {
+        id,
+        parentId: body.parent.page_id,
+        title: body.properties?.title?.title?.[0]?.text?.content ?? "",
+        children: body.children ?? [],
+        url: `https://notion.so/${id}`,
+      };
+      world.versionPages.push(page);
+      return json({ id, url: page.url });
     }
     if (u.endsWith("/pages") && method === "POST") {
       const parent = body.parent.data_source_id;
@@ -386,7 +400,7 @@ test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, s
   assert.strictEqual(text(rec.properties["Proposal Content"]), contentBefore);
   assert.strictEqual(again.salesProposal?.currentVersion, 1);
   assert.strictEqual(fresh.salesProposal?.proposalId, "PROP-7");
-  assert.strictEqual(world.blockAppends.length, 1, "no additional version snapshot on reprocess");
+  assert.strictEqual(world.versionPages.length, 1, "no additional version page on reprocess");
   assert.strictEqual(approvalRequests(world).length, 3, "reprocessing re-presents the same pending Version");
   assert.ok(approvalRequests(world).every((m) => m.text.includes("Proposal: PROP-7 · Version: v1")));
 });
@@ -523,9 +537,9 @@ test("5. The complete Proposal content is stored (beyond 2,000 chars, not trunca
   }
   assert.ok(stored.includes("Unified Company Image and Messaging Framework"), "workstreams are carried in full");
   assert.ok(rec["Proposal Content"].rich_text.length > 1, "long content is split across rich-text items, not truncated");
-  assert.strictEqual(world.blockAppends.length, 1);
-  const snapshot = world.blockAppends[0].children.slice(1).map((b: any) => b.paragraph.rich_text[0].text.content).join("");
-  assert.strictEqual(snapshot, stored, "a v1 snapshot is kept in the page body");
+  assert.strictEqual(world.versionPages.length, 1);
+  const snapshot = world.versionPages[0].children.map((b: any) => b.paragraph.rich_text[0].text.content).join("");
+  assert.strictEqual(snapshot, stored, "a v1 child page holds exactly the stored content");
 });
 
 test("6. The Finance quote remains exactly GHS 420,000", async (t) => {
@@ -595,8 +609,8 @@ test("8b. Proposal Content holds commercial substance only; the approved hash co
   const v1 = state.salesProposal!.versions[0];
   assert.strictEqual(v1.content, content);
   assert.strictEqual(v1.contentHash, createHash("sha256").update(content).digest("hex"), "hash is of Proposal Content only");
-  const snapshot = world.blockAppends[0].children.slice(1).map((b: any) => b.paragraph.rich_text[0].text.content).join("");
-  assert.strictEqual(snapshot, content, "the page-body snapshot holds no review material either");
+  const snapshot = world.versionPages[0].children.map((b: any) => b.paragraph.rich_text[0].text.content).join("");
+  assert.strictEqual(snapshot, content, "the version page holds no review material either");
 });
 
 test("8c. The review material stays available to Martin: open items, sources and the rationale conflict", async (t) => {
@@ -713,7 +727,7 @@ test("14. A substantive revision after approval creates a new Version, keeps the
   assert.match(approvalRequests(world).at(-1)!.text + world.telegram.at(-1)!.text, /Amendment introduced in v2 at Martin's direction\./);
   assert.match(v2Content, /GHS 420,000/, "the Finance quote is untouched by a Sales revision");
   assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "approved v1 substance is kept unchanged");
-  assert.strictEqual(world.blockAppends.length, 2, "v1 and v2 snapshots both kept in the page body");
+  assert.strictEqual(world.versionPages.length, 2, "v1 and v2 each keep their own child page");
   assert.ok(approvalRequests(world).at(-1)!.text.includes("Proposal: PROP-7 · Version: v2"));
 
   await handleSalesProposalDecision(env, state, 7, 2, "approve");
@@ -1179,4 +1193,66 @@ test("Status: a fail-closed Proposal marks the step it stopped on, ends on the b
   const final = salesStatus(world).at(-1)!;
   assert.match(final, /✗ Checking the composed Proposal is token-safe\n⛔ Blocked -- the reason is below\.$/);
   assert.ok(!final.includes("Acme"));
+});
+
+// ---------------------------------------------------------------------------
+// Version pages: every version is its own readable child page; the Proposals
+// row links the current one and, once approved, exactly the approved one.
+// "Proposal Content" stays the hashed source of truth.
+// ---------------------------------------------------------------------------
+
+test("Version pages 1. v1 is a child page of the Proposal record, and the record's Current Version Link and the approval request point at it", async (t) => {
+  const { world, state } = await createV1(t);
+  const rec = proposals(world)[0];
+
+  assert.strictEqual(world.versionPages.length, 1);
+  const page = world.versionPages[0];
+  assert.strictEqual(page.parentId, rec.id, "a child of the Proposal record's page");
+  assert.strictEqual(page.title, "PROP-7 v1");
+  assert.strictEqual(rec.properties["Current Version Link"].url, page.url);
+  assert.strictEqual(rec.properties["Approved Version Link"], undefined, "nothing is approved yet");
+  assert.strictEqual(state.salesProposal!.versions[0].pageUrl, page.url);
+  assert.ok(approvalRequests(world)[0].text.includes(`Read this version: ${page.url}`), "Martin gets the link to read the version");
+  assert.strictEqual(
+    page.children.map((b: any) => b.paragraph.rich_text[0].text.content).join(""),
+    text(rec.properties["Proposal Content"]),
+    "the page holds exactly the hashed Proposal Content",
+  );
+});
+
+test("Version pages 2. Approval sets Approved Version Link to the approved version's page", async (t) => {
+  const { world, env, state } = await createV1(t);
+
+  await handleSalesProposalDecision(env, state, 7, 1, "approve");
+
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(text(rec["Approval Status"]), "Approved");
+  assert.strictEqual(rec["Approved Version Link"].url, world.versionPages[0].url);
+});
+
+test("Version pages 3. A revision gets its own new page, moves the Current link, clears the Approved link, and leaves the approved version's page untouched", async (t) => {
+  const { world, env, state } = await createV1(t);
+  await handleSalesProposalDecision(env, state, 7, 1, "approve");
+  const v1Page = structuredClone(world.versionPages[0]);
+
+  await handleSalesProposalDecision(env, state, 7, 1, "revise");
+  await handleSalesProposalRevisionText(env, state, "Add a second training session for the retail sales team.");
+
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(world.versionPages.length, 2);
+  assert.strictEqual(world.versionPages[1].title, "PROP-7 v2");
+  assert.strictEqual(rec["Current Version Link"].url, world.versionPages[1].url);
+  assert.strictEqual(rec["Approved Version Link"].url, null, "the prior approval's link does not carry over to the unapproved v2");
+  assert.deepStrictEqual(world.versionPages[0], v1Page, "v1's page is written once and never edited");
+});
+
+test("Version pages 4. A Proposal that predates version pages is approved without an Approved Version Link, not with a wrong one", async (t) => {
+  const { world, env, state } = await createV1(t);
+  const rec = proposals(world)[0];
+  delete rec.properties["Current Version Link"];
+
+  await handleSalesProposalDecision(env, state, 7, 1, "approve");
+
+  assert.strictEqual(text(rec.properties["Approval Status"]), "Approved");
+  assert.strictEqual(rec.properties["Approved Version Link"], undefined);
 });

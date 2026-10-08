@@ -4,8 +4,8 @@ import type { StrategyProposal, StrategyBoundaryRepresentation } from "../strate
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
 import {
-  appendTextBlocks,
   createPage,
+  createVersionPage,
   getPage,
   number,
   plainText,
@@ -14,6 +14,7 @@ import {
   richText,
   richTextLong,
   select,
+  url,
   title,
   uniqueId,
   updatePage,
@@ -127,6 +128,8 @@ export interface ProposalVersionRecord {
   contentHash: string;
   createdAt: string;
   origin: "generated" | "revision";
+  /** The readable child page holding exactly this version (see createVersionPage); absent for versions written before version pages existed. */
+  pageUrl?: string;
 }
 
 export interface RuntimeSalesProposal {
@@ -623,7 +626,17 @@ async function proposalFromRecord(page: NotionPage, base: Partial<RuntimeSalesPr
   const known = existingVersions.find((v) => v.version === version);
   const versions = known
     ? existingVersions
-    : [...existingVersions, { version, content, contentHash: await hashContent(content), createdAt: new Date().toISOString(), origin: "generated" as const }];
+    : [
+        ...existingVersions,
+        {
+          version,
+          content,
+          contentHash: await hashContent(content),
+          createdAt: new Date().toISOString(),
+          origin: "generated" as const,
+          ...(plainText(props["Current Version Link"]).trim() ? { pageUrl: plainText(props["Current Version Link"]).trim() } : {}),
+        },
+      ];
   return {
     pageId: page.id,
     pageUrl: page.url,
@@ -665,6 +678,7 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
     `Entity: ${sp.entityToken} · Matter: ${sp.matterToken} · Source Handoff: ${sp.handoffRef}`,
     `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
     `Record: ${sp.pageUrl}`,
+    ...(record.pageUrl ? [`Read this version: ${record.pageUrl}`] : []),
   ].join("\n");
   const notes = sp.facts
     ? buildReviewNotes(sp.facts, { proposalId: sp.proposalId, version: sp.currentVersion, amendments: sp.amendments })
@@ -981,9 +995,10 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   }
   const contentHash = await hashContent(content);
 
-  await appendTextBlocks(env, page.id, `${proposalId} ${versionLabel(1)} — snapshot`, content, workSessionContext(state, undefined, PROPOSAL_DRAFT_ACTION));
+  const versionPage = await createVersionPage(env, page.id, `${proposalId} ${versionLabel(1)}`, content, workSessionContext(state, undefined, PROPOSAL_DRAFT_ACTION));
   await updatePage(env, page.id, {
     "Proposal Content": richTextLong(content),
+    "Current Version Link": url(versionPage.url),
     Version: richText(versionLabel(1)),
     "Approval Status": select("Pending Approval"),
     "Approved Version": { rich_text: [] },
@@ -1013,7 +1028,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     currentVersion: 1,
     approvalStatus: "Pending Approval",
     artifactStatus: "Not Requested",
-    versions: [{ version: 1, content, contentHash, createdAt: new Date().toISOString(), origin: "generated" }],
+    versions: [{ version: 1, content, contentHash, createdAt: new Date().toISOString(), origin: "generated", pageUrl: versionPage.url }],
     amendments: [],
     facts,
   };
@@ -1128,6 +1143,7 @@ export async function handleSalesProposalDecision(
   // PROPOSAL_APPROVE_ACTION above -- so the proof and the resolved Action cannot
   // be two different names for this write.
   const approvalProof = mintApprovalProofForWork(state, env.PROPOSALS_DATA_SOURCE_ID);
+  const approvedVersionLink = plainText(live.properties["Current Version Link"]).trim();
 
   await updatePage(
     env,
@@ -1136,6 +1152,10 @@ export async function handleSalesProposalDecision(
       "Approval Status": select("Approved"),
       "Approved Version": richText(versionLabel(version)),
       "Artifact Status": select("Pending Identity Resolution"),
+      // The readable page of exactly the version approved (read from the
+      // record just verified as at this version and content hash). Left
+      // untouched for a version that predates version pages.
+      ...(approvedVersionLink ? { "Approved Version Link": url(approvedVersionLink) } : {}),
     },
     workSessionContext(state, approvalProof, PROPOSAL_APPROVE_ACTION),
   );
@@ -1252,12 +1272,14 @@ export async function handleSalesProposalRevisionText(env: Env, state: WorkState
   recordWorkAction(state, PROPOSAL_REVISION_ACTION);
   const revisionAccess = workSessionContext(state, undefined, PROPOSAL_REVISION_ACTION);
 
-  await appendTextBlocks(env, sp.pageId, `${sp.proposalId} ${versionLabel(newVersion)} — snapshot`, content, revisionAccess);
+  const versionPage = await createVersionPage(env, sp.pageId, `${sp.proposalId} ${versionLabel(newVersion)}`, content, revisionAccess);
   await updatePage(
     env,
     sp.pageId,
     {
       "Proposal Content": richTextLong(content),
+      "Current Version Link": url(versionPage.url),
+      "Approved Version Link": { url: null },
       Version: richText(versionLabel(newVersion)),
       "Approval Status": select("Pending Approval"),
       "Approved Version": { rich_text: [] },
@@ -1267,7 +1289,7 @@ export async function handleSalesProposalRevisionText(env: Env, state: WorkState
   );
 
   const previousApproved = sp.approvedVersion;
-  sp.versions.push({ version: newVersion, content, contentHash, createdAt: new Date().toISOString(), origin: "revision" });
+  sp.versions.push({ version: newVersion, content, contentHash, createdAt: new Date().toISOString(), origin: "revision", pageUrl: versionPage.url });
   sp.amendments = amendments;
   sp.currentVersion = newVersion;
   sp.approvalStatus = "Pending Approval";
