@@ -25,7 +25,8 @@ import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
-import { createGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { buildProposalDocLayout } from "../../proposalRedline";
+import { createGoogleDoc, rewriteGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
@@ -131,12 +132,6 @@ export interface ProposalVersionRecord {
   origin: "generated" | "revision";
   /** The readable child page holding exactly this version (see createVersionPage); absent for versions written before version pages existed. */
   pageUrl?: string;
-  /**
-   * The Google Doc created from this version on Martin's request: a readable,
-   * commentable copy of this version's token-safe content (see
-   * createProposalVersionDoc). A comment on it is a change REQUEST.
-   */
-  docUrl?: string;
 }
 
 export interface RuntimeSalesProposal {
@@ -157,6 +152,14 @@ export interface RuntimeSalesProposal {
   /** Martin's directed changes, verbatim, each tagged with the version that introduced it. */
   amendments: { version: number; text: string }[];
   facts?: ProposalFacts;
+  /**
+   * The ONE Google Doc for this Proposal: the current version as clean text on
+   * top and a struck-through / added redline of each revision below
+   * (proposalRedline.ts). `version` is the version the Doc currently shows;
+   * a comment on it is a change REQUEST, never an edit. Rewritten in place on
+   * every revision -- never one Doc per version.
+   */
+  doc?: { documentId: string; url: string; accountIdentifier: string; version: number };
 }
 
 export function versionLabel(version: number): string {
@@ -668,7 +671,7 @@ function decisionButtons(sp: RuntimeSalesProposal, version: number, includeAppro
   const row: InlineButton[] = [];
   if (includeApprove) row.push({ text: `✅ Approve ${sp.proposalId} ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.a` });
   row.push({ text: `✏️ Request changes to ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.r` });
-  if (sp.versions.find((r) => r.version === version)?.docUrl) return [row];
+  if (sp.doc && sp.doc.version === version) return [row];
   return [row, [{ text: `📄 Create Google Doc for ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.g` }]];
 }
 
@@ -685,7 +688,7 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
   // approval request carries its link. If the Doc can't be created the
   // version's Notion page is the readable fallback, and the Create button
   // retries -- the Proposal text is never written into the message.
-  const doc = await ensureProposalVersionDoc(env, state, sp, record);
+  const doc = await ensureProposalDoc(env, state, sp);
   const readLine = doc.ok
     ? `Read it here (comment on the Doc to request a change): ${doc.url}`
     : `⚠️ The Google Doc could not be created (${doc.error}).${record.pageUrl ? ` Read this version in Notion instead: ${record.pageUrl}` : ""}`;
@@ -1260,14 +1263,40 @@ const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
 type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
 
 /**
- * Creates (once) the Google Doc for one Proposal version and registers it for
- * comment watching. Never messages; callers report. Fails closed with the
- * reason when no single authorized Google account exists or any Google step
- * fails -- nothing is created in those cases.
+ * Brings the Proposal's single Google Doc up to its current version: creates
+ * it the first time (in the dedicated folder, watched and bound to this
+ * Proposal), and on every later version rewrites the same Doc -- clean current
+ * text on top, a redline of each revision below (proposalRedline.ts). Never
+ * messages; callers report. Fails closed with the reason when no single
+ * authorized Google account exists or any Google step fails; a Doc that could
+ * not be brought up to date is NOT offered as the current version (its watch
+ * binding stays at the version it shows, so comments on it are refused as stale).
  */
-async function ensureProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, record: ProposalVersionRecord): Promise<EnsureDocResult> {
-  if (record.docUrl) return { ok: true, url: record.docUrl };
-  const version = record.version;
+async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal): Promise<EnsureDocResult> {
+  const version = sp.currentVersion;
+  if (sp.doc && sp.doc.version === version) return { ok: true, url: sp.doc.url };
+  const layout = buildProposalDocLayout(
+    sp.proposalId,
+    sp.versions.filter((v) => v.version <= version).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
+  );
+  const binding = { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version };
+
+  if (sp.doc) {
+    const rewritten = await rewriteGoogleDoc(env, sp.doc.accountIdentifier, sp.doc.documentId, layout);
+    if (!rewritten.ok) return { ok: false, error: `the Doc is still at ${versionLabel(sp.doc.version)}: ${rewritten.error}` };
+    await registerWatchedGoogleDoc(env, {
+      documentId: sp.doc.documentId,
+      accountIdentifier: sp.doc.accountIdentifier,
+      title: sp.proposalId,
+      chatId: state.chatId,
+      threadId: state.threadId,
+      createdAt: new Date().toISOString(),
+      proposal: binding,
+    });
+    sp.doc.version = version;
+    return { ok: true, url: sp.doc.url };
+  }
+
   const accounts = await listAuthorizedGoogleAccounts(env);
   if (accounts.length !== 1) {
     return {
@@ -1281,42 +1310,44 @@ async function ensureProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeS
   const accountIdentifier = accounts[0];
   const folder = await ensureGoogleFolder(env, accountIdentifier, PROPOSAL_DOCS_FOLDER_NAME, "google_proposal_docs_folder");
   if (!folder.ok) return { ok: false, error: folder.error ?? "folder could not be created" };
-  const title = `${sp.proposalId} ${versionLabel(version)}`;
-  const created = await createGoogleDoc(env, { type: "create_doc", title, content: record.content, folderId: folder.folderId, accountIdentifier });
+  const created = await createGoogleDoc(env, { type: "create_doc", title: sp.proposalId, content: layout.text, folderId: folder.folderId, accountIdentifier });
   if (!created.ok || !created.documentId || !created.documentUrl) {
     return { ok: false, error: `${created.stage ?? "unknown stage"}: ${created.error ?? "unknown error"}` };
+  }
+  // A first Doc is created at the current version, which may already have earlier versions (a Proposal revised before any Doc existed): style its redline.
+  if (layout.styles.some((r) => r.kind !== "heading")) {
+    const styled = await rewriteGoogleDoc(env, accountIdentifier, created.documentId, layout);
+    if (!styled.ok) return { ok: false, error: styled.error };
   }
   await registerWatchedGoogleDoc(env, {
     documentId: created.documentId,
     accountIdentifier,
-    title,
+    title: sp.proposalId,
     chatId: state.chatId,
     threadId: state.threadId,
     createdAt: new Date().toISOString(),
-    proposal: { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version },
+    proposal: binding,
   });
-  record.docUrl = created.documentUrl;
+  sp.doc = { documentId: created.documentId, url: created.documentUrl, accountIdentifier, version };
   return { ok: true, url: created.documentUrl };
 }
 
-/** Retry path: the "Create Google Doc" button, shown only while a version has no Doc (creation at presentation failed). */
+/** Retry path: the "Create Google Doc" button, shown only while the Doc is missing or behind the current version (updating it at presentation failed). */
 async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, version: number): Promise<WorkState> {
   if (version !== sp.currentVersion) {
     return staleDecision(env, state, `${versionLabel(version)} is not the current Version of ${sp.proposalId} (current: ${versionLabel(sp.currentVersion)}).`);
   }
-  const record = sp.versions.find((v) => v.version === version);
-  if (!record) return staleDecision(env, state, `no record of the ${versionLabel(version)} content to copy into a Doc.`);
   const say = (text: string) => sendWorkspaceHatMessage(env, { ...state, hat: HAT }, text);
-  const had = !!record.docUrl;
-  const doc = await ensureProposalVersionDoc(env, state, sp, record);
+  const had = !!sp.doc && sp.doc.version === version;
+  const doc = await ensureProposalDoc(env, state, sp);
   if (!doc.ok) {
-    await say(`Couldn't create the Google Doc: ${doc.error}. Nothing was created.`);
+    await say(`Couldn't ${sp.doc ? "update" : "create"} the Google Doc: ${doc.error}. Nothing was changed.`);
     return state;
   }
   await say(
     had
-      ? `A Google Doc for ${sp.proposalId} ${versionLabel(version)} already exists: ${doc.url}`
-      : `📄 *Google Doc for ${sp.proposalId} ${versionLabel(version)}:* ${doc.url}\n\nSelect text and comment to request a change. A comment doesn't edit this Doc -- it creates the next version (${versionLabel(version + 1)}), which comes back here for your approval.`,
+      ? `The Google Doc for ${sp.proposalId} ${versionLabel(version)} already exists: ${doc.url}`
+      : `📄 *Google Doc for ${sp.proposalId} ${versionLabel(version)}:* ${doc.url}\n\nSelect text and comment to request a change. A comment doesn't edit this Doc -- it creates the next version (${versionLabel(version + 1)}) and this same Doc is updated, with the changes struck through and added.`,
   );
   return state;
 }
