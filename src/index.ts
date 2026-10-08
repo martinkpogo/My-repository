@@ -35,6 +35,8 @@ import { pollGoogleDocComments } from "./googleDocComments";
 import { pollGoogleSheetComments } from "./googleSheetComments";
 import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
+import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
+import { continueExistingWork, resumeNotice } from "./workContinuation";
 
 export { WorkSession } from "./session";
 
@@ -480,7 +482,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly.",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /continue <Matter> to resume a Matter's current work item (e.g. /continue MAT-20), /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly.",
         undefined,
         threadId,
       );
@@ -488,6 +490,46 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     }
     if (text === "/sessions") {
       await listSessions(env, chatId, threadId);
+      return;
+    }
+    // Matter continuation -- the user-facing "open a Matter -> Continue"
+    // entry point (docs/enig-operating-model.md, "Matter is the continuation
+    // anchor"). Matter resolution answers only "which Work?" and stops
+    // (src/matterContinuation.ts); entering the Work is the shared resume
+    // path every other workId-discovering entry point uses
+    // (src/workContinuation.ts), so no Unit, Hat, Work or Session is chosen
+    // by the user, no Matter-specific resume engine exists, and every
+    // ambiguity is refused with a reason instead of resuming something
+    // arbitrary.
+    const continueMatch = text.trim().match(/^\/continue(?:\s+(\S+))?$/i);
+    if (continueMatch) {
+      const target = continueMatch[1];
+      if (!target) {
+        await sendMessage(
+          env,
+          chatId,
+          "Usage: /continue <Matter> — e.g. /continue MAT-20 (see /lookup matters for the tokens).",
+          undefined,
+          threadId,
+        );
+        return;
+      }
+      const resumed = await continueMatterWork(env, chatId, threadId, target);
+      if (!resumed.ok) {
+        await sendMessage(env, chatId, `Couldn't continue Matter ${target}: ${resumed.reason} -- nothing was resumed.`, undefined, threadId);
+        return;
+      }
+      const { state } = resumed;
+      const waitHint = state.awaiting
+        ? threadId === undefined
+          ? " It's waiting for a reply -- reply to its message here, or continue in the Workspace topic."
+          : " It's waiting for a reply -- just send it in this topic."
+        : "";
+      const notice = resumeNotice(
+        state,
+        `Continuing Matter ${target}: work item ${state.workId} (${state.unit ?? "Standalone Capability"}${state.hat ? `/${state.hat}` : ""} -- ${humanizeStage(state.stage)}).${waitHint}`,
+      );
+      await sendMessage(env, chatId, notice.text, notice.buttons, threadId);
       return;
     }
     if (text === "/mode") {
@@ -529,7 +571,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
         await sendMessage(
           env,
           chatId,
-          `This would delete ${keys.length} KV key(s) (active/chat_history/handoff_workitem/sessions_index routing state) — Notion is never touched, and Read.ai's own credential is left alone. Send /clearsessions confirm to proceed.`,
+          `This would delete ${keys.length} KV key(s) (active/chat_history/handoff_workitem/matter_current_work routing state + sessions_index) — Notion is never touched, and Read.ai's own credential is left alone. Send /clearsessions confirm to proceed.`,
           undefined,
           threadId,
         );
@@ -602,21 +644,15 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     await answerCallbackQuery(env, cq.id);
 
     if (action === "switch") {
+      // Claim this interaction for the Work that was picked, then enter the
+      // SHARED resume path (workContinuation.ts) -- the same one an explicit
+      // message reply, this chat's active pointer, and Matter Continue use.
+      // The pending approval is re-sent through resumeNotice, so every
+      // workId-discovering entry point has exactly one resume behaviour.
       await setActiveWorkId(env, chatId, threadId, workId);
-      const switchedStub = getSessionStub(env, workId);
-      const switchedState = await switchedStub.getState();
-      const pending = switchedState?.pendingActionSummary;
-      if (pending) {
-        // Resurface the exact original approval message/buttons rather
-        // than just confirming the context switch -- this is the recovery
-        // path for a missed or dismissed approval message. The buttons are
-        // the same callback_data as the original send, so tapping them
-        // still routes through the same resolve handler and its own
-        // stale/already-resolved guard -- nothing here bypasses that.
-        await sendMessage(env, chatId, `Re-sending pending approval:\n\n${pending.message}`, pending.buttons, threadId);
-      } else {
-        await sendMessage(env, chatId, `Switched active context to work item ${workId}.`, undefined, threadId);
-      }
+      const switched = await continueExistingWork(env, chatId, threadId, workId);
+      const notice = resumeNotice(switched.kind === "missing" ? undefined : switched.state, `Switched active context to work item ${workId}.`);
+      await sendMessage(env, chatId, notice.text, notice.buttons, threadId);
       return;
     }
 
@@ -673,15 +709,15 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
 
 /**
  * Enumerates every KV key that represents routing/session state --
- * active/chat_history/handoff_workitem entries plus the sessions_index --
- * for /clearsessions. Deliberately excludes the cron/stale-digest
- * bookkeeping keys (harmless either way, not what "clear sessions"
- * means). Notion is never touched by this -- KV only holds routing
+ * active/chat_history/handoff_workitem/matter_current_work entries plus
+ * the sessions_index -- for /clearsessions. Deliberately excludes the
+ * cron/stale-digest bookkeeping keys (harmless either way, not what "clear
+ * sessions" means). Notion is never touched by this -- KV only holds routing
  * pointers, never business records.
  */
 async function listSessionKvKeys(env: Env): Promise<string[]> {
   const keys: string[] = [];
-  for (const prefix of ["active:", "chat_history:", "handoff_workitem:"]) {
+  for (const prefix of ["active:", "chat_history:", "handoff_workitem:", MATTER_CURRENT_WORK_PREFIX]) {
     let cursor: string | undefined;
     do {
       const page = await env.STATE_KV.list({ prefix, cursor });

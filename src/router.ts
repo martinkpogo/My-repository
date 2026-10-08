@@ -1,11 +1,11 @@
 import type { Env } from "./types";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { generalChatReply, generalDmReply } from "./chat";
-import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { classifyDataLookupRequest, runConversationalDataLookup } from "./dataLookup";
 import { findUnitManifest } from "./units/registry";
 import { resolveUnitRequest, tryResolveUnitAction } from "./units/dispatch";
+import { continueExistingWork } from "./workContinuation";
 import {
   getActiveWorkId,
   getReplyMessageWorkId,
@@ -23,8 +23,11 @@ import {
 // sessionRouting.ts -- re-exported here so every existing `from "./router"`
 // import keeps working unchanged. See sessionRouting.ts's doc comment for
 // why: checkHandoffs.ts needs these same primitives, and this file now
-// needs to call back into checkHandoffs.ts (maybeAutoContinueCheckHandoffs,
-// below) -- splitting the primitives out breaks that circular dependency.
+// needs to call back into checkHandoffs.ts -- splitting the primitives out
+// breaks that circular dependency. Picking an already-existing workId back
+// up is the other half of that story and lives in workContinuation.ts:
+// one path shared by this file's two association blocks below, the
+// /sessions switch button, and Matter Continue.
 export * from "./sessionRouting";
 
 // Every other Unit's chat is business_sensitive (see chatSensitivityForUnit
@@ -74,13 +77,8 @@ export async function routeIncomingText(
     if (options.replyToMessageId) {
       const matchedWorkId = await getReplyMessageWorkId(env, options.replyToMessageId);
       if (matchedWorkId) {
-        const stub = getSessionStub(env, matchedWorkId);
-        const state = await stub.getState();
-        if (state && state.awaiting) {
-          const result = await stub.handleTextReply(text);
-          await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
-          return;
-        }
+        const continued = await continueExistingWork(env, chatId, threadId, matchedWorkId, text);
+        if (continued.kind === "continued") return;
       }
     }
 
@@ -89,13 +87,8 @@ export async function routeIncomingText(
     if (streamType !== "dm") {
       const activeId = await getActiveWorkId(env, chatId, threadId);
       if (activeId) {
-        const stub = getSessionStub(env, activeId);
-        const state = await stub.getState();
-        if (state && state.awaiting) {
-          const result = await stub.handleTextReply(text);
-          await maybeAutoContinueCheckHandoffs(env, chatId, threadId, result);
-          return;
-        }
+        const continued = await continueExistingWork(env, chatId, threadId, activeId, text);
+        if (continued.kind === "continued") return;
       }
     }
   }
