@@ -31,13 +31,23 @@ import { recordWorkAction } from "./units/dispatch";
 import { workSessionContext } from "./access";
 
 export class WorkSession extends DurableObject<Env> {
+  /**
+   * Creates the Work. `matterId`/`matterToken` are the ALREADY-RESOLVED
+   * Matter identity (canonical page id + the token it came from), passed in
+   * only by the one boundary that creates a Work from a Handoff -- see
+   * checkHandoffs.ts's resolveHandoffMatterIdentity. Persisting them here is
+   * what lets sessions_index carry `matterId` and the existing
+   * syncMatterContinuationPointer establish `matter_current_work` from this
+   * Work's very first save. Optional for every other creation path, whose
+   * behavior is unchanged.
+   */
   async init(
     workId: string,
     chatId: number,
     unit?: Unit,
     hat?: string,
     threadId?: number,
-    extra?: { handoffId?: string; matterId?: string; actionName?: string },
+    extra?: { handoffId?: string; matterId?: string; matterToken?: string; actionName?: string },
   ): Promise<void> {
     const now = new Date().toISOString();
     const state: WorkState = {
@@ -51,6 +61,7 @@ export class WorkSession extends DurableObject<Env> {
       updatedAt: now,
       ...(extra?.handoffId ? { handoffId: extra.handoffId } : {}),
       ...(extra?.matterId ? { matterId: extra.matterId } : {}),
+      ...(extra?.matterToken ? { matterToken: extra.matterToken } : {}),
     };
     // The resolved Action identity is recorded at creation, before anything
     // can be performed, and validated against the Work's own manifest. Absent
