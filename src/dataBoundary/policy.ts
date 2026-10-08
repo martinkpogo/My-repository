@@ -91,6 +91,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // strategy.diagnosis (Entity_Token/Matter_Token + sanitized text), never
   // a real client identity.
   "strategy.proposal_drafting": "business_sensitive",
+  // Same rationale again -- Discuss reads only what the Strategy Work
+  // already holds for the drafting call above (the sanitized
+  // Entity_Token/Matter_Token-bound strategyContext, Skill findings,
+  // diagnosis and proposal) plus Martin's own question, never a real client
+  // identity. Registered per Martin's explicit approval (2026-10-08).
+  "strategy.proposal_discussion": "business_sensitive",
   // Strategy's composable-Skills diagnosis (ENIG Core Structure
   // v3.0; successor to LOG-845's specialist-Hat composition, whose Hats
   // are retired). Martin's explicit direction stands unchanged: classify
@@ -567,6 +573,10 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "strategy.diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.handoff_routing": "TOKEN_SAFE_RUNTIME",
   "strategy.proposal_drafting": "TOKEN_SAFE_RUNTIME",
+  // Discuss: the same token-safe payload as proposal drafting plus Martin's
+  // question, which the gate inspects like any other TOKEN_SAFE_RUNTIME
+  // content (Martin's explicit approval, 2026-10-08).
+  "strategy.proposal_discussion": "TOKEN_SAFE_RUNTIME",
   // Strategy's composable-Skills diagnosis (ENIG Core Structure
   // v3.0) -- same rationale as strategy.diagnosis/handoff_routing/
   // proposal_drafting directly above: every one of these five operates on

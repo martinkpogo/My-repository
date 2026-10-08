@@ -177,7 +177,7 @@ export const STRATEGY_HANDOFF_CALLBACK_PREFIX = "strategyhandoff" as const;
 /**
  * The intervention-proposal approval prefix (WP7), relocated from
  * session.ts's handleCallback switch -- its value carries
- * "<proposalVersion>.<a|r|j>" rather than a single approve/reject flag,
+ * "<proposalVersion>.<a|d|r|j|e>" rather than a single approve/reject flag,
  * so the former case's parsing moves here verbatim and the raw value
  * reaches it through ApprovalCallbackHandler's forwarded `value`
  * argument. Delegates to the exact same handler with the exact same
@@ -186,7 +186,7 @@ export const STRATEGY_HANDOFF_CALLBACK_PREFIX = "strategyhandoff" as const;
 export const INTERVENTION_APPROVAL_CALLBACK_PREFIX = "sprop" as const;
 
 export const interventionApprovalCallback: ApprovalCallbackHandler = (env, state, _approved, value) => {
-  // value is "<proposalVersion>.<a|r|j>" -- joined with "." (not
+  // value is "<proposalVersion>.<a|d|r|j|e>" -- joined with "." (not
   // ":") specifically so it survives index.ts's plain
   // data.split(":") destructure into [action, workId, value]
   // unchanged. Deliberately compact: Telegram's callback_data has a
@@ -199,8 +199,11 @@ export const interventionApprovalCallback: ApprovalCallbackHandler = (env, state
   const versionStr = dot === -1 ? "" : raw.slice(0, dot);
   const decisionChar = dot === -1 ? "" : raw.slice(dot + 1);
   const proposalVersion = Number(versionStr);
-  const decision = decisionChar === "a" ? "approve" : decisionChar === "r" ? "refine" : decisionChar === "j" ? "reject" : "";
-  if ((decision !== "approve" && decision !== "refine" && decision !== "reject") || !Number.isFinite(proposalVersion)) {
+  // "d" (Discuss) and "e" (End discussion) ride the same versioned value, so
+  // they get exactly the same stale-button protection as the decisions.
+  const decisions = { a: "approve", r: "refine", j: "reject", d: "discuss", e: "end_discussion" } as const;
+  const decision = Object.prototype.hasOwnProperty.call(decisions, decisionChar) ? decisions[decisionChar as keyof typeof decisions] : undefined;
+  if (!decision || !Number.isFinite(proposalVersion)) {
     return Promise.resolve(state);
   }
   return strategy.handleInterventionApproval(env, state, proposalVersion, decision);
@@ -230,6 +233,7 @@ const strategyAnalystHat: HatManifest<StrategyAction> = {
     strategy_direct_request_matter: strategy.handleDirectRequestClarification,
     strategy_feedback: strategy.handleStrategyFeedback,
     strategy_refinement_reason: strategy.handleStrategyRefinement,
+    strategy_discussion: strategy.handleStrategyDiscussion,
   },
   callbackHandlers: strategyAnalystCallbackHandlers,
 };

@@ -334,6 +334,7 @@ export interface WorkState {
     | "strategy_clarification"
     | "strategy_feedback"
     | "strategy_refinement_reason"
+    | "strategy_discussion"
     | "strategy_direct_request_matter"
     | "finance_direct_request_matter"
     | "finance_direct_request_context"
@@ -479,6 +480,14 @@ export interface WorkState {
   strategyContext?: string;
   /** The Telegram message id of the "diagnosing this now" acknowledgment, edited in place per stage. */
   strategyProgressMessageId?: number;
+  /**
+   * The live status checklist shown in that same message: a header, the
+   * steps already done, and the step running now. Only real steps the code
+   * is performing are ever recorded, and only tokens/record IDs/Skill
+   * names/counts -- never evidence text. Cleared once the run reports its
+   * final line, so a later run never edits a finished status.
+   */
+  strategyProgress?: { header: string; done: string[]; current?: string };
   /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
   strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
   /**
@@ -718,6 +727,24 @@ export interface WorkState {
    * transient control input for exactly one revision.
    */
   pendingStrategyRefinement?: { proposalId: string; proposalVersion: number };
+  /**
+   * An open Discuss conversation about the CURRENT Strategy Proposal, bound
+   * to the exact proposal identity it was opened on. Every question
+   * re-verifies that binding against state.strategyProposal and the
+   * pending approval before anything runs, so a stale question can never
+   * act on a newer version. Discussion is read-only with respect to the
+   * proposal, diagnosis, strategyContext and the Handoff: it never creates a
+   * version, never reaches Notion, and the turns are never fed into Revise
+   * (the existing Refine path takes Martin's own instruction only). Only a
+   * successful turn is saved; an answer the Outbound Data Gate's own
+   * detector would refuse is saved withheld, so saved turns can never
+   * block a later question.
+   */
+  strategyDiscussion?: {
+    proposalId: string;
+    proposalVersion: number;
+    turns: { question: string; answer: string }[];
+  };
 
   /**
    * Controlled Google Workspace action proposed by a Hat, awaiting explicit Martin approval.

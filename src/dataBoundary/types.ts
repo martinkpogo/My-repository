@@ -24,6 +24,7 @@ export type SemanticTaskId =
   | "strategy.diagnosis"
   | "strategy.handoff_routing"
   | "strategy.proposal_drafting"
+  | "strategy.proposal_discussion"
   | "lead.discovery_classification"
   | "lead.discovery_signal_evaluation"
   | "action.google_doc_intake"

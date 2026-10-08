@@ -62,9 +62,10 @@ test("1. Validates all 56 semantic task IDs in SEMANTIC_TASK_REGISTRY", () => {
     "strategy.brand_diagnosis",
     "strategy.communication_diagnosis",
     "strategy.specialist_synthesis",
+    "strategy.proposal_discussion",
   ];
 
-  assert.strictEqual(Object.keys(SEMANTIC_TASK_REGISTRY).length, 56);
+  assert.strictEqual(Object.keys(SEMANTIC_TASK_REGISTRY).length, 57);
   for (const id of expectedTaskIds) {
     assert.strictEqual(isSemanticTaskId(id), true);
     assert.ok(SEMANTIC_TASK_REGISTRY[id]);

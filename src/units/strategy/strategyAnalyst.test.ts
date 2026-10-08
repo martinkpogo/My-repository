@@ -11,6 +11,7 @@ import {
   handleInterventionApproval,
   handleStrategyClarification,
   handleStrategyRefinement,
+  handleStrategyDiscussion,
   evaluateCausationDiscipline,
   applyUnprovenCauseDiscipline,
   UNPROVEN_CAUSE_MARKER,
@@ -36,6 +37,8 @@ import { SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker } from "../../handoff
 import type { WorkState, Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { dispatchScheduledPickup, PENDING_PICKUP_KIND_KEY, type PickupAlarmStorage } from "../../sessionRouting";
+import { routeIncomingText } from "../../router";
+import { resolveAwaitingHandler } from "../awaitingDispatch";
 
 /**
  * The Skill set Strategy's own `diagnose` Action declares, resolved from the
@@ -3808,4 +3811,393 @@ test("failure observability: a hold costs exactly one plan call and one call per
     2,
     "the only Activity Log writes are the pre-existing pickup entry and this blocker -- the summary creates nothing new",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Discuss: a read-only, version-bound conversation about the CURRENT
+// proposal. It never changes the proposal, diagnosis, strategyContext, the
+// Handoff or Notion; Revise is the unchanged Refine path; End returns the
+// Work to the proposal awaiting a decision. Plus the live status message
+// and typing indicator the pickup, Discuss and Revise runs show.
+// ---------------------------------------------------------------------------
+
+const WORKSPACE_POINTER = "active:-1004435157576:100";
+const DISCUSSION_MARKER = "discussing the CURRENT Strategic Intervention Proposal";
+
+function memoryKv() {
+  const store = new Map<string, string>();
+  return {
+    store,
+    kv: {
+      get: async (key: string) => store.get(key) ?? null,
+      put: async (key: string, value: string) => void store.set(key, value),
+      delete: async (key: string) => void store.delete(key),
+      list: async () => ({ keys: [], list_complete: true, cursor: undefined }),
+    } as any,
+  };
+}
+
+interface DiscussionCall {
+  system: string;
+  user: string;
+}
+
+/**
+ * fakeAi for the whole pipeline, plus the discussion call: `answer(n)` gives
+ * the raw response for the n-th discussion call (0-based). Every discussion
+ * call's system prompt and user message are recorded.
+ */
+function discussionAi(answer: (n: number) => string, base: Ai = fakeAi(SUFFICIENT_DIAGNOSIS)): { ai: Ai; calls: DiscussionCall[] } {
+  const calls: DiscussionCall[] = [];
+  const ai = {
+    run: async (model: any, opts: any) => {
+      const system = String(opts?.messages?.[0]?.content ?? "");
+      if (system.includes(DISCUSSION_MARKER)) {
+        calls.push({ system, user: String(opts?.messages?.[opts.messages.length - 1]?.content ?? "") });
+        return { response: answer(calls.length - 1) };
+      }
+      return base.run(model, opts);
+    },
+  } as any;
+  return { ai, calls };
+}
+
+async function presentedProposal(t: any, answer: (n: number) => string = (n) => JSON.stringify({ answer: `Answer number ${n + 1}, from the client evidence.` })) {
+  const log = mockFetch(t);
+  const { kv, store } = memoryKv();
+  const env = fakeEnv({ STATE_KV: kv });
+  const { ai, calls } = discussionAi(answer);
+  env.AI = ai;
+  const state = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  assert.strictEqual(state.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "fixture: a proposal is awaiting Martin's decision");
+  return { log, env, state, store, calls };
+}
+
+const notionWrites = (requests: string[]) => requests.filter((r) => /^(POST|PATCH|PUT|DELETE) https:\/\/api\.notion\.com/.test(r) && !r.includes("/query"));
+
+test("Discuss 1. The proposal offers Approve, Discuss, Refine and Reject, each bound to the proposal version and within Telegram's 64-byte limit", async (t) => {
+  const { log, state } = await presentedProposal(t);
+  const buttons = log.sentButtons.at(-1)!.flat();
+  assert.deepStrictEqual(
+    buttons.map((b: any) => b.callback_data),
+    [`sprop:${state.workId}:1.a`, `sprop:${state.workId}:1.d`, `sprop:${state.workId}:1.r`, `sprop:${state.workId}:1.j`],
+  );
+  // The production workId is a 36-character UUID.
+  const uuidWork = `sprop:${"x".repeat(36)}:99.d`;
+  assert.ok(new TextEncoder().encode(uuidWork).length <= 64);
+  assert.deepStrictEqual(state.pendingActionSummary!.buttons, log.sentButtons.at(-1), "the /sessions resend carries the same four buttons");
+});
+
+test("Discuss 2. Opening a discussion makes no AI call and no Notion write, leaves the approval exactly as staged, and claims the Workspace reply pointer", async (t) => {
+  const { log, env, state, store, calls } = await presentedProposal(t);
+  const pendingBefore = structuredClone(state.pendingStrategyApproval);
+  const requestsBefore = log.requests.length;
+
+  const result = await handleInterventionApproval(env, state, 1, "discuss");
+
+  assert.strictEqual(calls.length, 0, "opening a discussion asks the AI nothing");
+  assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "opening a discussion writes nothing to Notion");
+  assert.strictEqual(result.awaiting, "strategy_discussion");
+  assert.strictEqual(result.stage, "strategy_discussing");
+  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "Discuss is not a decision");
+  assert.deepStrictEqual(result.pendingStrategyApproval, pendingBefore, "the staged approval is untouched, so Approve/Refine/Reject keep working");
+  assert.deepStrictEqual(result.strategyDiscussion, { proposalId: state.strategyProposal!.proposalId, proposalVersion: 1, turns: [] });
+  assert.strictEqual(store.get(WORKSPACE_POINTER), state.workId, "plain Workspace messages now reach this Work");
+  assert.deepStrictEqual(
+    log.sentButtons.at(-1)!.flat().map((b: any) => b.callback_data),
+    [`sprop:${state.workId}:1.r`, `sprop:${state.workId}:1.e`],
+    "every discussion message carries Revise and End, bound to v1",
+  );
+});
+
+test("Discuss 3. Several questions are answered from the Work's evidence, findings, diagnosis, proposal and governance -- and nothing they touch changes", async (t) => {
+  const { log, env, state, calls } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  const proposalBefore = structuredClone(state.strategyProposal);
+  const contextBefore = state.strategyContext;
+  const diagnosisBefore = structuredClone(state.strategyDiagnosis);
+  const requestsBefore = log.requests.length;
+
+  await handleStrategyDiscussion(env, state, "What did the client actually tell us about delivery?");
+  const after = await handleStrategyDiscussion(env, state, "Why is phase two needed?");
+
+  assert.strictEqual(calls.length, 2);
+  const [first, second] = calls;
+  assert.strictEqual(first.user, "What did the client actually tell us about delivery?", "the question is the call's own user message");
+  assert.match(first.system, /recurring client complaints about late delivery/, "grounded in the client evidence captured at pickup");
+  assert.match(first.system, /=== STRATEGY SKILL FINDINGS ===/);
+  assert.match(first.system, /=== DIAGNOSIS ===/);
+  assert.ok(first.system.includes(redactIdentityTerms(JSON.stringify(proposalBefore))), "grounded in the exact current proposal");
+  assert.match(first.system, /=== HAT DEFINITION ===/, "the Hat's governance is loaded live, not hardcoded");
+  assert.match(first.system, /=== UPSTREAM COMMERCIAL VALUE EVIDENCE/);
+  assert.match(second.system, /Q1: What did the client actually tell us about delivery\?\nA1: Answer number 1/, "an earlier exchange is carried, labelled as conversation");
+
+  assert.deepStrictEqual(after.strategyProposal, proposalBefore, "the proposal is unchanged");
+  assert.strictEqual(after.strategyProposal!.proposalVersion, 1, "no new version");
+  assert.strictEqual(after.strategyProposalHistory, undefined, "nothing was superseded");
+  assert.strictEqual(after.strategyContext, contextBefore, "strategyContext is unchanged");
+  assert.deepStrictEqual(after.strategyDiagnosis, diagnosisBefore, "the diagnosis is unchanged");
+  assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "no Handoff, Activity Log or other Notion write");
+  assert.strictEqual(after.strategyDiscussion!.turns.length, 2);
+  assert.strictEqual(after.awaiting, "strategy_discussion", "the discussion stays open until Martin ends it");
+  assert.ok(log.sentTexts.includes(`Hat: Strategy Analyst.\n\nAnswer number 2, from the client evidence.`), "the answer is shown to Martin");
+});
+
+test("Discuss 4. A question the Outbound Data Gate refuses is reported as a gate refusal with its code -- never 'no AI provider' -- and nothing is saved", async (t) => {
+  const { log, env, state, calls } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  const requestsBefore = log.requests.length;
+
+  const after = await handleStrategyDiscussion(env, state, "What did the Hotel Group say about pricing?");
+
+  assert.strictEqual(calls.length, 0, "the gate blocks before any provider executes");
+  const said = log.sentTexts.join("\n");
+  assert.match(said, /refused by the Outbound Data Gate \(COMPANY_SUFFIX_DETECTED\)/);
+  assert.match(said, /Your question or the material sent with it probably contains/);
+  assert.ok(!/no AI provider is currently available/i.test(said));
+  assert.match(said, /⛔ Refused by the Outbound Data Gate -- nothing was saved\./, "the status message ends on the real cause");
+  assert.deepStrictEqual(after.strategyDiscussion!.turns, [], "a failed turn never enters the saved conversation");
+  assert.strictEqual(after.awaiting, "strategy_discussion", "the discussion stays open");
+  assert.strictEqual(after.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "a failed question never touches the approval state");
+  assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "and never Holds the Handoff");
+});
+
+test("Discuss 5. An infrastructure failure says so plainly, and nothing is saved", async (t) => {
+  const { log, env, state, calls } = await presentedProposal(t, () => "not json at all");
+  await handleInterventionApproval(env, state, 1, "discuss");
+
+  const after = await handleStrategyDiscussion(env, state, "Why phase two?");
+
+  assert.ok(calls.length >= 1);
+  const said = log.sentTexts.join("\n");
+  assert.match(said, /No AI provider returned a usable result \(unparseable\)\. This is an infrastructure failure/);
+  assert.match(said, /⛔ No usable answer came back -- nothing was saved\./);
+  assert.deepStrictEqual(after.strategyDiscussion!.turns, []);
+});
+
+test("Discuss 6. An answer the gate's own detector would refuse is shown in full but saved withheld -- so it can never block the next question", async (t) => {
+  const { log, env, state, calls } = await presentedProposal(t, (n) =>
+    JSON.stringify({ answer: n === 0 ? "Name: Kwame Mensah raised the delivery issue." : "Phase two follows from the diagnosis." }),
+  );
+  await handleInterventionApproval(env, state, 1, "discuss");
+
+  await handleStrategyDiscussion(env, state, "Who raised the delivery issue?");
+  const after = await handleStrategyDiscussion(env, state, "Why phase two?");
+
+  assert.ok(log.sentTexts.includes("Hat: Strategy Analyst.\n\nName: Kwame Mensah raised the delivery issue."), "Martin still sees the full answer");
+  assert.match(after.strategyDiscussion!.turns[0].answer, /withheld from discussion memory/);
+  assert.strictEqual(calls.length, 2, "the next question still reached the AI -- the saved memory did not trip the gate");
+  assert.ok(!calls[1].system.includes("Kwame Mensah"), "the flagged answer is never re-sent");
+  assert.strictEqual(after.strategyDiscussion!.turns[1].answer, "Phase two follows from the diagnosis.");
+});
+
+test("Discuss 7. A question on a discussion the proposal has moved past is refused before any AI call, and the stale discussion is closed", async (t) => {
+  const { env, state, store, calls } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  // The proposal (and its staged approval) moved on to v2 while the v1
+  // discussion was still open: only the discussion's own binding is stale.
+  const movedOn = { ...state.strategyProposal!, proposalVersion: 2 };
+  state.strategyProposal = movedOn;
+  state.pendingStrategyApproval = { ...state.pendingStrategyApproval!, proposalVersion: 2 };
+
+  const after = await handleStrategyDiscussion(env, state, "Why phase two?");
+
+  assert.strictEqual(calls.length, 0, "never answered against a version it was not opened on");
+  assert.deepStrictEqual(after.strategyProposal, movedOn, "the proposal is untouched");
+  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(after.awaiting, undefined);
+  assert.strictEqual(store.get(WORKSPACE_POINTER), undefined, "the pointer is released");
+});
+
+test("Discuss 8. Old-version Discuss and End buttons do nothing -- no discussion opened, a current one left alone, no Activity Log write", async (t) => {
+  const { log, env, state } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "refine");
+  const v2 = await handleStrategyRefinement(env, state, "Tighten the timeline.");
+  assert.strictEqual(v2.strategyProposal!.proposalVersion, 2);
+  await handleInterventionApproval(env, v2, 2, "discuss");
+  const requestsBefore = log.requests.length;
+
+  await handleInterventionApproval(env, v2, 1, "discuss");
+  const after = await handleInterventionApproval(env, v2, 1, "end_discussion");
+
+  assert.strictEqual(after.strategyDiscussion?.proposalVersion, 2, "the v2 discussion is still open");
+  assert.strictEqual(after.awaiting, "strategy_discussion");
+  assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "a stale Discuss/End press writes nothing to Notion");
+  assert.match(log.sentTexts.at(-1)!, /already been resolved or superseded -- nothing to do/);
+});
+
+test("Discuss 9. End returns the Work to the proposal awaiting a decision and re-sends its four buttons; the pointer is released only if it is still this Work's", async (t) => {
+  const { log, env, state, store } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  await handleStrategyDiscussion(env, state, "Why phase two?");
+  const proposalBefore = structuredClone(state.strategyProposal);
+
+  const after = await handleInterventionApproval(env, state, 1, "end_discussion");
+
+  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(after.awaiting, undefined);
+  assert.strictEqual(after.stage, "awaiting_intervention_approval");
+  assert.strictEqual(after.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.deepStrictEqual(after.strategyProposal, proposalBefore);
+  assert.strictEqual(store.get(WORKSPACE_POINTER), undefined);
+  assert.deepStrictEqual(log.sentButtons.at(-1), after.pendingActionSummary!.buttons, "the proposal's own four buttons come back");
+
+  // Another Work took the pointer in the meantime: ending must not wipe it.
+  await handleInterventionApproval(env, state, 1, "discuss");
+  store.set(WORKSPACE_POINTER, "another-work");
+  await handleInterventionApproval(env, state, 1, "end_discussion");
+  assert.strictEqual(store.get(WORKSPACE_POINTER), "another-work");
+});
+
+test("Discuss 10. Revise is the unchanged Refine path: the discussion closes, Martin's own instruction makes v2, and nothing from the discussion reaches the revision", async (t) => {
+  const log = mockFetch(t);
+  const { kv, store } = memoryKv();
+  const env = fakeEnv({ STATE_KV: kv });
+  const revisionSystems: string[] = [];
+  const base = fakeAi(SUFFICIENT_DIAGNOSIS);
+  const { ai } = discussionAi(() => JSON.stringify({ answer: "UNIQUE-DISCUSSION-ANSWER about the rollout." }), {
+    run: async (model: any, opts: any) => {
+      const system = String(opts?.messages?.[0]?.content ?? "");
+      if (system.includes("revise this artifact")) revisionSystems.push(system + String(opts?.messages?.[1]?.content ?? ""));
+      return base.run(model, opts);
+    },
+  } as any);
+  env.AI = ai;
+  const state = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  await handleStrategyDiscussion(env, state, "UNIQUE-DISCUSSION-QUESTION: is the rollout too fast?");
+
+  const refining = await handleInterventionApproval(env, state, 1, "refine");
+  assert.strictEqual(refining.strategyDiscussion, undefined, "Revise closes the discussion");
+  assert.strictEqual(refining.awaiting, "strategy_refinement_reason");
+  assert.strictEqual(store.get(WORKSPACE_POINTER), state.workId, "the typed instruction will reach this Work");
+
+  const after = await handleStrategyRefinement(env, refining, "Make phase one six weeks.");
+
+  assert.strictEqual(after.strategyProposal!.proposalVersion, 2, "the existing Refine/versioning path made v2");
+  assert.strictEqual(after.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.strictEqual(revisionSystems.length, 1);
+  assert.ok(revisionSystems[0].includes("Make phase one six weeks."), "Martin's own instruction drives the revision");
+  assert.ok(!revisionSystems[0].includes("UNIQUE-DISCUSSION"), "no discussion question or answer is passed into Revise");
+  assert.strictEqual(store.get(WORKSPACE_POINTER), undefined, "the pointer is released once the instruction is consumed");
+  assert.ok(log.sentTexts.some((s) => s.includes("✅ Proposal v2 ready below")), "the Revise run's status message ends on the new version");
+});
+
+test("Discuss 11. Approve during a discussion closes it and then approves exactly as before", async (t) => {
+  const { log, env, state, store } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+
+  const after = await handleInterventionApproval(env, state, 1, "approve");
+
+  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(store.get(WORKSPACE_POINTER), undefined);
+  assert.strictEqual(after.strategyApprovalState, "APPROVED");
+  assert.ok(log.handoffCreateBody, "the Finance Handoff is created as before");
+});
+
+test("Discuss 12. Reject during a discussion closes it and then rejects exactly as before", async (t) => {
+  const { env, state, store } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+
+  const after = await handleInterventionApproval(env, state, 1, "reject");
+
+  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(store.get(WORKSPACE_POINTER), undefined);
+  assert.strictEqual(after.strategyApprovalState, "REJECTED");
+});
+
+test("Discuss 13. The re-pickup guard still refuses while a discussion is open", async (t) => {
+  const { env, state } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  env.AI = forbiddenAi();
+
+  const after = await handlePickup(env, state, STRATEGY_SKILLS);
+
+  assert.strictEqual(after.strategyDiscussion?.proposalVersion, 1, "the open discussion is untouched");
+  assert.strictEqual(after.strategyProposal!.proposalVersion, 1);
+});
+
+test("Discuss 14. With the pointer claimed, a plain Workspace message reaches the Strategy discussion handler through the router's existing pointer check", async (t) => {
+  const { env, state, calls } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+  (env as any).WORK_SESSION = {
+    idFromName: (id: string) => id,
+    get: (id: string) => ({
+      getState: async () => (id === state.workId ? state : undefined),
+      handleTextReply: async (text: string) => resolveAwaitingHandler(state)!(env, state, text, STRATEGY_SKILLS),
+    }),
+  };
+
+  await routeIncomingText(env, -1004435157576, "Why phase two?", 100);
+
+  assert.strictEqual(calls.length, 1, "the typed message became a discussion question");
+  assert.strictEqual(calls[0].user, "Why phase two?");
+});
+
+test("Status 1. The pickup status message shows the real steps in order, ends on the result, and never shows evidence text; the typing indicator runs", async (t) => {
+  const { log } = await presentedProposal(t);
+  const statuses = log.sentTexts.filter((s) => s.startsWith("Hat: Strategy Analyst.\n\n🧭"));
+  const final = statuses.at(-1)!;
+  const order = [
+    "✓ Reading the Sales -> Strategy Handoff",
+    "✓ Checking the Sales boundary record, the Commercial Value Evidence block and the Matter",
+    "✓ Planning which Strategy Skills (if any) this diagnosis needs",
+    "✓ Establishing the situation and running the diagnosis",
+    "✓ Developing the full Strategic Intervention Proposal",
+    "✓ Checking the drafted proposal is complete",
+    "✓ Checking the proposal against the approval gates",
+    "✅ Proposal v1 ready below -- awaiting your decision.",
+  ];
+  let at = -1;
+  for (const step of order) {
+    const next = final.indexOf(step);
+    assert.ok(next > at, `"${step}" appears, in order, in:\n${final}`);
+    at = next;
+  }
+  assert.match(final, /^Hat: Strategy Analyst\.\n\n🧭 Strategy Analyst — M-12/, "the header names the Matter by its token once known");
+  assert.ok(statuses.every((s) => !s.includes("late delivery")), "status lines never carry evidence text");
+  assert.ok(log.requests.some((r) => r.endsWith("/sendChatAction")), "the typing indicator was shown during the AI work");
+});
+
+test("Status 2. Reading approved Call Notes shows as its own step, naming only the record ID", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, { callNotesId: "CN-007", callNotesAttestation: attestation });
+  const env = fakeEnv();
+  env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
+
+  await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  const final = log.sentTexts.filter((s) => s.startsWith("Hat: Strategy Analyst.\n\n🧭")).at(-1)!;
+  assert.match(final, /✓ Read approved Call Notes CN-007 \(read-only, attestation re-verified\)/);
+  assert.match(final, /✅ Diagnosis ready below/);
+  assert.ok(!final.includes("20 staff hours"), "the Call Notes body never appears in the status");
+});
+
+test("Status 3. A held pickup marks the step it stopped on and ends on the hold", async (t) => {
+  const log = mockFetch(t, { sourceBoundaryMarker: null });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  const final = log.sentTexts.filter((s) => s.startsWith("Hat: Strategy Analyst.\n\n🧭")).at(-1)!;
+  assert.match(final, /✗ Checking the Sales boundary record, the Commercial Value Evidence block and the Matter\n⛔ Held -- the reason is below\./);
+});
+
+test("Status 4. A discussion question shows its own steps and ends on the answer", async (t) => {
+  const { log, env, state } = await presentedProposal(t);
+  await handleInterventionApproval(env, state, 1, "discuss");
+
+  await handleStrategyDiscussion(env, state, "Why phase two?");
+
+  const final = log.sentTexts.filter((s) => s.startsWith("Hat: Strategy Analyst.\n\n🧭")).at(-1)!;
+  for (const step of [
+    "✓ Checked this discussion is still on proposal v1",
+    "✓ Loading the Strategy Analyst's governance from Notion",
+    "✓ Gathering what this Work holds: the evidence captured at pickup, 0 Skill findings, the diagnosis, proposal v1",
+    "✓ Asking the AI (Strategy discussion task)",
+    "✅ Answered below -- proposal v1 is unchanged.",
+  ]) {
+    assert.ok(final.includes(step), `"${step}" in:\n${final}`);
+  }
 });

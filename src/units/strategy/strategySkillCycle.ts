@@ -178,7 +178,7 @@ export interface StrategySkillCycleParams {
   onProgress?: (message: string) => Promise<void>;
 }
 
-function findingsText(findings: StrategySkillFinding[]): string {
+export function findingsText(findings: readonly StrategySkillFinding[]): string {
   return findings
     .map((f) => {
       if (f.status === "failed") {
@@ -205,10 +205,10 @@ function findingsText(findings: StrategySkillFinding[]): string {
  * re-run), while providers_exhausted/unparseable are infrastructure
  * failures no rewording will fix. Codes only, never payload content.
  */
-export function describeAiFailure(cause: AiFailureCause, gateReasons: readonly string[]): string {
+export function describeAiFailure(cause: AiFailureCause, gateReasons: readonly string[], refusedText = "The Handoff text"): string {
   if (cause === "outbound_gate_blocked") {
     const codes = gateReasons.length > 0 ? gateReasons.join(", ") : "reason code not recorded";
-    return `The AI call was refused by the Outbound Data Gate (${codes}). The Handoff text probably contains a phrase the gate treats as identity, e.g. a capitalised phrase ending in Group/Ltd/Partners/Holdings. Reword it and re-run.`;
+    return `The AI call was refused by the Outbound Data Gate (${codes}). ${refusedText} probably contains a phrase the gate treats as identity, e.g. a capitalised phrase ending in Group/Ltd/Partners/Holdings. Reword it and re-run.`;
   }
   return `No AI provider returned a usable result (${cause}). This is an infrastructure failure, not an evidence judgement.`;
 }
@@ -448,6 +448,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   const strategyAnalysis = skills.get("strategy_analysis");
   const availableSkills = STRATEGY_DOMAIN_SKILL_IDS.filter((id) => skills.declared.includes(id));
 
+  await onProgress?.("Planning which Strategy Skills (if any) this diagnosis needs...");
   const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content });
   if (planOutcome.plan === null) {
     // Unchanged degradation: proceed to core diagnosis, only the CAUSE is
