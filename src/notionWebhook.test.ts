@@ -451,6 +451,26 @@ test("Webhook handler returns without awaiting any Unit pickup -- the background
     const urlStr = String(url);
     if (urlStr.includes("/data_sources/") && urlStr.includes("/query")) {
       const body = JSON.parse(init.body);
+      // The canonical Matter lookup the new-Work boundary runs first
+      // (checkHandoffs.resolveHandoffMatterIdentity): MAT-30 resolves to a
+      // real Matter, so the Strategy Work can be created carrying it.
+      if (body.filter?.unique_id !== undefined) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                url: "https://notion.so/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                properties: {
+                  Matter_ID: { unique_id: { prefix: "MAT", number: 30 } },
+                  Entity: { relation: [{ id: "entity-page-1" }] },
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
       const toUnit = body.filter?.and?.find((f: any) => f.property === "To Unit")?.select?.equals;
       if (toUnit === "Strategy") {
         return new Response(JSON.stringify({ results: [strategyHandoff] }), { status: 200 });

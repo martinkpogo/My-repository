@@ -1,8 +1,41 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fs from "node:fs";
+import path from "node:path";
 import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingSalesHandoffs, discoverPendingStrategyHandoffs } from "./checkHandoffs";
+import { ensureMatterIdentity, isTerminalWorkStage, matterCurrentWorkKey, syncMatterContinuationPointer } from "./matterContinuation";
 import type { Env, WorkState } from "./types";
+
+/** Canonical Matter page ids the mocks resolve their Handoff's Matter_Token to (32-hex, as real Notion page ids are). */
+const SALES_MATTER_PAGE_ID = "cccccccccccccccccccccccccccccccc";
+const STRATEGY_MATTER_PAGE_ID = "dddddddddddddddddddddddddddddddd";
+
+/**
+ * Answers the canonical MATTERS_DATA_SOURCE_ID query exactly the way
+ * `resolveMatterIdFromToken` reads it: unique_id number match -> the Matter
+ * page with its required Entity relation, or no results at all.
+ */
+function mattersQueryResponse(body: string, resolvable: Array<{ number: number; id: string }>): Response {
+  const number = JSON.parse(body).filter?.unique_id?.equals;
+  const match = resolvable.find((m) => m.number === number);
+  if (!match) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  return new Response(
+    JSON.stringify({
+      results: [
+        {
+          id: match.id,
+          url: `https://notion.so/${match.id}`,
+          properties: {
+            Matter_ID: { unique_id: { prefix: "MAT", number: match.number } },
+            Entity: { relation: [{ id: "entity-page-1" }] },
+          },
+        },
+      ],
+    }),
+    { status: 200 },
+  );
+}
 
 function fakeKv() {
   const store = new Map<string, string>();
@@ -330,6 +363,7 @@ function createMockWorkSession() {
 function mockSalesHandoffFetch(t: any, extraProperties: Record<string, any> = {}) {
   const originalFetch = globalThis.fetch;
   const operationsMessages: string[] = [];
+  const mattersQueries: string[] = [];
   const salesHandoff = {
     id: "handoff-sales-1",
     url: "https://notion.so/handoff-sales-1",
@@ -355,6 +389,12 @@ function mockSalesHandoffFetch(t: any, extraProperties: Record<string, any> = {}
       }
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
     }
+    if (urlStr.includes("/data_sources/matters-ds/query")) {
+      // The canonical Matter lookup behind resolveHandoffMatterIdentity:
+      // MAT-20 resolves to SALES_MATTER_PAGE_ID, anything else does not.
+      mattersQueries.push(urlStr);
+      return mattersQueryResponse(String(init.body), [{ number: 20, id: SALES_MATTER_PAGE_ID }]);
+    }
     if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(init.body);
       if (body.text) operationsMessages.push(body.text);
@@ -379,7 +419,7 @@ function mockSalesHandoffFetch(t: any, extraProperties: Record<string, any> = {}
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
-  return { operationsMessages };
+  return { operationsMessages, mattersQueries };
 }
 
 /** Modelled on mockSalesHandoffFetch, keyed to the Strategy discovery query. */
@@ -405,6 +445,10 @@ function mockStrategyHandoffFetch(t: any) {
         return new Response(JSON.stringify({ results: [strategyHandoff] }), { status: 200 });
       }
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.includes("/data_sources/matters-ds/query")) {
+      // MAT-30 resolves to STRATEGY_MATTER_PAGE_ID.
+      return mattersQueryResponse(String(init.body), [{ number: 30, id: STRATEGY_MATTER_PAGE_ID }]);
     }
     if (urlStr.includes("api.telegram.org")) {
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
@@ -665,8 +709,194 @@ test("discoverPendingStrategyHandoffs schedules pickup on the WorkSession alarm 
   const scheduled = await discoverPendingStrategyHandoffs(env);
 
   assert.strictEqual(calls.init.length, 1, "a WorkSession must be created for the externally-created Strategy Handoff");
+  // Same new-Work Matter boundary as the other Units: the Handoff's own
+  // Matter_Token (MAT-30) is resolved to its canonical page id first.
+  assert.strictEqual(calls.init[0][5]?.matterToken, "MAT-30");
+  assert.strictEqual(calls.init[0][5]?.matterId, STRATEGY_MATTER_PAGE_ID, "the new Strategy Work is born with the canonical Matter identity");
   assert.deepStrictEqual(calls.schedulePickup, ["strategy"], "discovery must record exactly one scheduled strategy pickup kind");
   assert.strictEqual(scheduled, 1, "a successfully scheduled pickup counts exactly as before -- once per Handoff");
   const mapped = await env.STATE_KV.get("handoff_workitem:handoff-strategy-1");
   assert.ok(mapped, "handoff_workitem mapping must be recorded before scheduling, exactly as before");
+});
+
+// ---------------------------------------------------------------------------
+// Matter identity at the ONE boundary that creates a Work from a Handoff:
+//
+//   Handoff.Matter_Token -> resolveMatterIdFromToken (canonical, existing)
+//   -> WorkSession.init(matterId, matterToken) -> WorkState
+//   -> sessions_index -> existing syncMatterContinuationPointer
+//      -> matter_current_work:<matterPageId>
+//
+// plus the two things this boundary must NOT touch: Work creation from any
+// other source, and same-Work Handoff pickup.
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors WorkSession.save -> updateRegistry's exact ordering (derive Matter
+ * identity, persist, write the summary, then sync the pointer) so the
+ * production save path is exercised the way it drives this seeded identity.
+ * session.ts cannot be imported under the node test runner (its
+ * `cloudflare:workers` import), so its wiring is pinned separately by the
+ * source contract at the bottom of this file -- same convention as
+ * matterContinuation.test.ts's simulateWorkSave.
+ */
+async function saveLikeProduction(env: Env, state: WorkState): Promise<void> {
+  await ensureMatterIdentity(env, state);
+  const isTerminal = isTerminalWorkStage(state.stage);
+  const raw = await env.STATE_KV.get("sessions_index");
+  const index = raw ? JSON.parse(raw) : [];
+  const summary = {
+    workId: state.workId,
+    unit: state.unit,
+    hat: state.hat,
+    stage: state.stage,
+    label: state.workId,
+    updatedAt: state.updatedAt,
+    matterId: state.matterId,
+  };
+  const withoutSelf = index.filter((s: any) => s.workId !== state.workId);
+  await env.STATE_KV.put("sessions_index", JSON.stringify(isTerminal ? withoutSelf : [...withoutSelf, summary]));
+  await syncMatterContinuationPointer(env, state, isTerminal);
+}
+
+function pointerKeys(env: ReturnType<typeof fakeEnv>): string[] {
+  return Array.from(env.STATE_KV.store.keys()).filter((k) => k.startsWith("matter_current_work:"));
+}
+
+test("A. a Handoff's Matter_Token resolves to its canonical Matter page id and seeds the new Work at init", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  mockSalesHandoffFetch(t);
+
+  await discoverPendingSalesHandoffs(env, true);
+
+  assert.strictEqual(calls.init.length, 1, "one Work is created for the externally-created Handoff");
+  const [, , initUnit, initHat, , initExtra] = calls.init[0];
+  assert.strictEqual(initUnit, "Sales");
+  assert.strictEqual(initHat, "Sales Executive");
+  assert.strictEqual(initExtra?.handoffId, "handoff-sales-1");
+  assert.strictEqual(initExtra?.matterToken, "MAT-20", "the identity comes from the Handoff's own Matter_Token fact");
+  assert.strictEqual(
+    initExtra?.matterId,
+    SALES_MATTER_PAGE_ID,
+    "resolved to the canonical page id by the existing unique_id + Entity-relation lookup -- never inferred from a label, title, Entity data or Handoff ordering",
+  );
+});
+
+test("B+C. the seeded identity reaches sessions_index and the existing save path establishes matter_current_work", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { mattersQueries } = mockSalesHandoffFetch(t);
+
+  await discoverPendingSalesHandoffs(env, true);
+  const [, , unit, hat, , initExtra] = calls.init[0];
+
+  // Exactly the WorkState WorkSession.init builds from that extra and hands
+  // straight to save() -- the state this Work exists with from its first save.
+  const state = {
+    workId: `work-${initExtra.handoffId}`,
+    chatId: Number(env.MARTIN_TELEGRAM_USER_ID),
+    unit,
+    hat,
+    stage: "new",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    handoffId: initExtra.handoffId,
+    matterId: initExtra.matterId,
+    matterToken: initExtra.matterToken,
+    actionName: initExtra.actionName,
+  } as WorkState;
+
+  const before = mattersQueries.length;
+  await saveLikeProduction(env, state);
+
+  const raw = await env.STATE_KV.get("sessions_index");
+  assert.ok(raw, "the Work is registered in sessions_index");
+  const index = JSON.parse(raw);
+  assert.strictEqual(index.length, 1);
+  assert.strictEqual(index[0].matterId, SALES_MATTER_PAGE_ID, "the Work summary carries the Matter id, so resumability is readable from the index");
+  assert.strictEqual(
+    await env.STATE_KV.get(matterCurrentWorkKey(SALES_MATTER_PAGE_ID)),
+    state.workId,
+    "and therefore the existing syncMatterContinuationPointer establishes the Matter -> current Work pointer -- no new write path",
+  );
+  assert.strictEqual(state.matterId, SALES_MATTER_PAGE_ID, "identity was seeded at creation, so save has nothing left to derive");
+  assert.strictEqual(mattersQueries.length, before, "no second Matter lookup was needed");
+});
+
+test("D. a Handoff with no Matter_Token fails closed -- no Work, no mapping, no pointer", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages, mattersQueries } = mockSalesHandoffFetch(t, { Matter_Token: { rich_text: [] } });
+
+  const scheduled = await discoverPendingSalesHandoffs(env, true);
+
+  assert.strictEqual(calls.init.length, 0, "a Work is never created without a canonical Matter");
+  assert.strictEqual(await env.STATE_KV.get("handoff_workitem:handoff-sales-1"), null, "no handoff_workitem mapping claims it either");
+  assert.strictEqual(scheduled, 0, "nothing is scheduled for a Handoff that could not be identified");
+  assert.deepStrictEqual(pointerKeys(env), [], "no continuation pointer is written without a resolved Matter");
+  assert.strictEqual(mattersQueries.length, 0, "an empty token is rejected before any lookup is made");
+  assert.ok(
+    operationsMessages.some((m) => m.includes("Automated pickup failed for Handoff handoff-sales-1")),
+    "the refusal is reported through the existing discovery failure channel and the Handoff stays Pending",
+  );
+  assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "a Handoff with no Matter identity is never announced as ready");
+});
+
+test("D2. a Matter_Token that does not resolve fails closed -- no falsely Matter-associated Work is created", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const { operationsMessages, mattersQueries } = mockSalesHandoffFetch(t, {
+    Matter_Token: { rich_text: [{ plain_text: "MAT-999" }] },
+  });
+
+  const scheduled = await discoverPendingSalesHandoffs(env, true);
+
+  assert.strictEqual(mattersQueries.length, 1, "the canonical lookup ran");
+  assert.strictEqual(calls.init.length, 0, "no result means no Work");
+  assert.strictEqual(await env.STATE_KV.get("handoff_workitem:handoff-sales-1"), null, "and no mapping");
+  assert.strictEqual(scheduled, 0);
+  assert.deepStrictEqual(pointerKeys(env), [], "no pointer is invented for a token that resolves to nothing");
+  assert.ok(operationsMessages.some((m) => m.includes("Automated pickup failed for Handoff handoff-sales-1")), "reported through the existing failure channel");
+});
+
+test("E. Work creation from any source other than a Handoff does not seed Matter identity -- unchanged by this boundary", () => {
+  const read = (rel: string) => fs.readFileSync(path.join(import.meta.dirname, rel), "utf8");
+
+  // Direct-request / control-Work creation: untouched by this change.
+  const router = read("./router.ts");
+  assert.ok(!router.includes("matterId") && !router.includes("matterToken"), "router.ts's Work creation seeds no Matter identity");
+  const google = read("./googleOAuth.ts");
+  assert.ok(!google.includes("matterId") && !google.includes("matterToken"), "the standalone Google Workspace control Work seeds no Matter identity");
+
+  // Only checkHandoffs' four new-Work sites seed, and all four of them do.
+  const check = read("./checkHandoffs.ts");
+  assert.strictEqual((check.match(/matterId: matter\.matterId/g) ?? []).length, 4, "Finance, Sales, Marketing and Strategy all seed the resolved Matter id");
+  assert.strictEqual((check.match(/await stub\.init\(/g) ?? []).length, 4, "…across exactly the four init call sites this file has");
+
+  // The WorkSession side: it persists what it is handed and derives nothing.
+  const session = read("./session.ts");
+  assert.ok(session.includes("...(extra?.matterId ? { matterId: extra.matterId } : {})"), "init persists the already-resolved matterId");
+  assert.ok(session.includes("...(extra?.matterToken ? { matterToken: extra.matterToken } : {})"), "init persists the token that id was resolved from");
+});
+
+test("F. same-Work Handoff pickup is unchanged -- an existing handoff_workitem mapping neither re-creates nor re-identifies the Work", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  await env.STATE_KV.put("handoff_workitem:handoff-sales-1", "existing-work-9");
+  const { mattersQueries } = mockSalesHandoffFetch(t);
+
+  const scheduled = await discoverPendingSalesHandoffs(env, false);
+
+  assert.strictEqual(calls.init.length, 0, "the Work already exists -- no second Work is created");
+  assert.deepStrictEqual(calls.schedulePickup, ["sales_proposal"], "the pickup is scheduled exactly as before");
+  assert.strictEqual(scheduled, 1);
+  assert.strictEqual(await env.STATE_KV.get("handoff_workitem:handoff-sales-1"), "existing-work-9", "the Handoff association is untouched");
+  assert.strictEqual(mattersQueries.length, 0, "Matter resolution is consulted only where a new Work would be created");
+  assert.deepStrictEqual(pointerKeys(env), [], "the boundary writes no pointer for a continuing Work");
 });

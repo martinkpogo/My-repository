@@ -7,6 +7,7 @@ import { findUnitManifest } from "./units/registry";
 import { resolveOrganization } from "./runtime/organization";
 import { resolveActionExecution } from "./runtime/actionResolution";
 import { workContractForRequest, type WorkRequest } from "./runtime/workContract";
+import { resolveMatterIdFromToken } from "./matterContinuation";
 
 /**
  * Handoff discovery -- the single implementation behind the /checkhandoffs
@@ -140,6 +141,57 @@ async function resolveHandoffEntry(
 }
 
 /**
+ * Matter identity at the ONE boundary where a Handoff creates a new Work.
+ *
+ * `Matter_Token` is a fact the Handoff already carries, so the new Work is
+ * born with the canonical Matter page id it will be indexed and pointed at
+ * by, instead of waiting for a later business action to discover it (the
+ * gap that left a Work's persisted state with no `matterId`, so Matter
+ * Continue had nothing to match against).
+ *
+ * Resolution is the existing canonical mechanism -- `resolveMatterIdFromToken`
+ * in src/matterContinuation.ts, the same lookup WorkSession.save's
+ * `ensureMatterIdentity` and Matter Continue use (exact unique_id match plus
+ * the required Entity relation). No second Matter lookup is introduced here,
+ * and identity is never inferred from a label, a title, Entity data, Handoff
+ * ordering or AI output. A read: nothing is written to Notion.
+ *
+ * Returns null when the Handoff names no token or the token does not resolve
+ * -- reported through the same discovery failure channel `resolveHandoffEntry`
+ * uses. The calling loop then creates NO Work and NO `handoff_workitem`
+ * mapping and leaves the Handoff Pending: failing closed beats a Work that is
+ * falsely associated with a Matter.
+ *
+ * Consulted ONLY where a new Work is about to be created. A Handoff that
+ * already has a `handoff_workitem` mapping continues its existing Work and
+ * never reaches this function, so same-Work Handoff continuity is untouched.
+ */
+async function resolveHandoffMatterIdentity(
+  env: Env,
+  handoff: { id: string; properties?: Record<string, any> },
+): Promise<{ matterId: string; matterToken: string } | null> {
+  const matterToken = plainText(handoff.properties?.Matter_Token).trim();
+  if (!matterToken) {
+    await notifyMartinOfDiscoveryFailure(
+      env,
+      handoff.id,
+      new Error("Handoff Matter resolution failed: the Handoff carries no Matter_Token -- no Work was created without a canonical Matter"),
+    );
+    return null;
+  }
+  const matterId = await resolveMatterIdFromToken(env, matterToken);
+  if (!matterId) {
+    await notifyMartinOfDiscoveryFailure(
+      env,
+      handoff.id,
+      new Error(`Handoff Matter resolution failed: Matter_Token "${matterToken}" does not resolve to an existing Matter -- no Work was created`),
+    );
+    return null;
+  }
+  return { matterId, matterToken };
+}
+
+/**
  * The Finance side of the Sales -> Finance execution boundary. Sales's Hat
  * code only ever creates the Handoff (Status: Pending) and records the
  * handoff_workitem mapping, then returns - it never calls into Finance
@@ -172,13 +224,16 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
       // than registering Work under a guessed Hat/Action.
       const entry = await resolveHandoffEntry(env, handoff, "Finance");
       if (!entry) continue;
+      // Matter identity is resolved BEFORE the Work exists (the Handoff's
+      // own Matter_Token fact -> canonical page id), so the new Work is
+      // created already carrying it. A token that does not resolve stops
+      // here: no Work, no handoff_workitem mapping, Handoff stays Pending.
+      const matter = await resolveHandoffMatterIdentity(env, handoff);
+      if (!matter) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
-        // The later quote-approval step resolves the real Matter page ID
-        // itself (via Matter_Token, the Handoffs schema no longer carries a
-        // Matter relation) -- nothing to seed here.
         const stub = getSessionStub(env, workId);
         await stub.init(workId, chatId, "Finance", entry.hat, threadId, {
           handoffId: handoff.id,
@@ -186,6 +241,12 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
           // so Work.actionName is the authority Access reads from the
           // moment this Work exists.
           actionName: entry.actionName,
+          // Canonical Matter identity, resolved above: WorkSession.save
+          // persists both, sessions_index then carries matterId, and the
+          // existing syncMatterContinuationPointer establishes the
+          // matter_current_work pointer -- no new write path.
+          matterId: matter.matterId,
+          matterToken: matter.matterToken,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
@@ -313,6 +374,12 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
       // never fabricate ownership).
       const entry = await resolveHandoffEntry(env, handoff, "Sales");
       if (!entry) continue;
+      // Same new-Work boundary as the other Units: the Handoff's Matter_Token
+      // fact is resolved to the canonical Matter page id first, so the Work
+      // starts associated with the real Matter (fail closed: no token or no
+      // resolution means no Work at all).
+      const matter = await resolveHandoffMatterIdentity(env, handoff);
+      if (!matter) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
@@ -324,6 +391,8 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
           // flow advances it to later Proposal-lifecycle Actions when its
           // own governed transitions run (see tokenSafeProposal.ts).
           actionName: entry.actionName,
+          matterId: matter.matterId,
+          matterToken: matter.matterToken,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Sales Handoff ${handoff.id} (no prior session)`);
@@ -396,6 +465,10 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
       // destination for this multi-Hat Unit fails closed.
       const entry = await resolveHandoffEntry(env, handoff, "Marketing");
       if (!entry) continue;
+      // Canonical Matter identity resolved before the Work exists -- see
+      // resolveHandoffMatterIdentity: no token/no resolution, no Work.
+      const matter = await resolveHandoffMatterIdentity(env, handoff);
+      if (!matter) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
@@ -405,6 +478,8 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
           handoffId: handoff.id,
           // The RESOLVED pickup Action (`handle_request`) is recorded at creation.
           actionName: entry.actionName,
+          matterId: matter.matterId,
+          matterToken: matter.matterToken,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Marketing Handoff ${handoff.id} (no prior session)`);
@@ -450,6 +525,10 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
       // `commit_diagnosis` is lifecycle-only and cannot resolve here.
       const entry = await resolveHandoffEntry(env, handoff, "Strategy");
       if (!entry) continue;
+      // Canonical Matter identity resolved before the Work exists -- see
+      // resolveHandoffMatterIdentity: no token/no resolution, no Work.
+      const matter = await resolveHandoffMatterIdentity(env, handoff);
+      if (!matter) continue;
       try {
         workId = newWorkId();
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
@@ -459,6 +538,8 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
           handoffId: handoff.id,
           // The RESOLVED pickup Action (`diagnose`) is recorded at creation.
           actionName: entry.actionName,
+          matterId: matter.matterId,
+          matterToken: matter.matterToken,
         });
         await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);
