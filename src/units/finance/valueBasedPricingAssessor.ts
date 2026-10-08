@@ -3,7 +3,8 @@ import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title } from "../../notion";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { sendWorkspaceHatMessage } from "../../telegram";
+import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
+import { advanceWorkStatus, continueWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { setActiveWorkId } from "../../sessionRouting";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -188,6 +189,8 @@ function commercialValueEvidenceHoldReason(record: CommercialValueEvidenceRecord
 // the Universal Role Contract's evidence rule (a consequential source must
 // be attributable, not guessed at by name match).
 const FINANCE_HAT_DEFINITION_PAGE_ID = "3cecb004-e583-81f9-a52e-e24872a52eff";
+/** The Hat the live work status is labelled with -- the same name every Finance message already uses. */
+const FINANCE_HAT_NAME = "Value-Based Pricing Assessor";
 
 /**
  * The Access context for an operation performed on behalf of this Work item's
@@ -424,9 +427,11 @@ export async function handlePickup(env: Env, state: WorkState, _skills: Resolved
   // Notion outage during context read fails closed with the Handoff
   // already claimed (Picked-up) rather than reprocessed by a later
   // duplicate trigger while still nominally Pending.
+  await startWorkStatus(env, state, FINANCE_HAT_NAME, workStatusHeader(FINANCE_HAT_NAME, state, "picking up a quote request"), "Reading the Strategy -> Finance Handoff");
   const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!, financeAccess(state));
   if (!evalResult.success) {
     console.error(`Finance handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
+    await finishWorkStatus(env, state, "⛔ Couldn't pick this up -- the reason is below.", "failed");
     await logActivity(env, {
       entry: `Finance pickup blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
       type: "Blocker",
@@ -491,6 +496,10 @@ async function judgeQuote(
   state.entityToken = entityToken;
   state.matterToken = matterToken;
 
+  // Continues the pickup's status run, or starts one for a redo/direct
+  // request/clarification re-run, which reach this judgment on their own.
+  await continueWorkStatus(env, state, FINANCE_HAT_NAME, workStatusHeader(FINANCE_HAT_NAME, state, "quote"), "Loading the Value-Based Pricing Assessor's governance from Notion");
+  if (state.workStatus) state.workStatus.header = workStatusHeader(FINANCE_HAT_NAME, state, "quote");
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, FINANCE_HAT_DEFINITION_PAGE_ID, "Finance Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
@@ -504,6 +513,7 @@ async function judgeQuote(
       .filter(Boolean)
       .join(" and ");
     console.error(`Finance judgeQuote: governance retrieval failed (${missing}) for handoff ${state.handoffId}`);
+    await finishWorkStatus(env, state, "⛔ Couldn't load the governance -- the reason is below.", "failed");
     await logActivity(env, {
       entry: `Finance quote judgment blocked — governance retrieval failed: ${matterToken}`,
       type: "Blocker",
@@ -554,6 +564,7 @@ async function judgeQuote(
   // around as prose. When it is absent (a direct request with no Handoff, or
   // a legacy Handoff created before this contract) nothing changes: the
   // existing free-text judgment path decides exactly as it did before.
+  await advanceWorkStatus(env, state, "Reading the upstream Commercial Value Evidence block");
   const valueEvidence = parseCommercialValueEvidenceBlock(judgmentContext);
   const structuredValueSection = valueEvidence.ok
     ? [
@@ -598,11 +609,15 @@ async function judgeQuote(
   let judgement: PriceJudgement | null = null;
   let holdReason: string | null = structuredHoldReason;
   if (holdReason === null) {
-    judgement = await generate<PriceJudgement>(env, {
-      taskId: "finance.quote_judgment",
-      mode: "json",
-      parts: { ...buildFinancePromptParts(hatDefinition, universalRoleContract), situation },
-    });
+    await advanceWorkStatus(env, state, "Judging the value-based price");
+    judgement = await withWorkspaceTypingIndicator(env, () =>
+      generate<PriceJudgement>(env, {
+        taskId: "finance.quote_judgment",
+        mode: "json",
+        parts: { ...buildFinancePromptParts(hatDefinition, universalRoleContract), situation },
+      }),
+    );
+    await advanceWorkStatus(env, state, "Validating the price judgment");
 
     // The AI's own "sufficient: true" is never taken as final authority --
     // per the Commercial Value & Pricing Operating Model, a structured
@@ -620,6 +635,7 @@ async function judgeQuote(
 
   if (holdReason !== null) {
     const reason = holdReason;
+    await finishWorkStatus(env, state, "⛔ Held -- the reason is below.", "failed");
     if (state.handoffId) {
       await updateHandoff(env, state.handoffId, {
         Status: select("Held"),
@@ -699,6 +715,7 @@ async function judgeQuote(
         ],
       ]
     : [[{ text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` }]];
+  await finishWorkStatus(env, state, "✅ Quote ready below -- awaiting your approval.", "succeeded");
   await sendWorkspaceHatMessage(env, { ...state, hat: "Value-Based Pricing Assessor" }, quoteMessage, quoteButtons);
   state.pendingActionSummary = {
     label: `Finance Quote: ${entityToken}`,

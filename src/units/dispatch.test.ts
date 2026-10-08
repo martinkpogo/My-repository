@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { tryResolveUnitAction, type UnitDispatchResult } from "./dispatch";
+import { resolveUnitRequest, tryResolveUnitAction, type UnitDispatchResult } from "./dispatch";
 import type { UnitManifest, HatManifest } from "./unitManifest";
 import type { Env } from "../types";
 import { resolveSkill } from "../platform/skillRegistry";
@@ -244,4 +244,29 @@ test("a write Action's execution context carries its resolved Skill content to t
   const bound = await bindExecutionSkills(execution.skills, action);
   assert.strictEqual(bound.get("opportunity_forward_planning").content, resolveSkill("opportunity_forward_planning").content);
   assert.strictEqual(received.skills.length, 0, "a write Action never runs a readHandler");
+});
+
+// ---------------------------------------------------------------------------
+// Live work status (src/runtime/workStatus.ts) for read Actions: in Cowork
+// mode the read reports one status run in the Workspace stream; Chat mode
+// keeps its one-reply contract (the tryResolveUnitAction tests above).
+// ---------------------------------------------------------------------------
+
+test("resolveUnitRequest: a Cowork read Action reports a status run in the Workspace stream, ending before its answer", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const env = mockAi({ TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" }, [{ action: "check_status" }]);
+
+  const result = await resolveUnitRequest(env, toyManifest(), { chatId: -999, threadId: 604 }, "what's the status?");
+
+  assert.deepStrictEqual(result, { kind: "handled" });
+  assert.ok(sent.some((m) => m.text === ""), "the typing indicator (a text-less chat action) ran during the read");
+  assert.deepStrictEqual(
+    sent.filter((m) => m.text !== "").map((m) => m.text),
+    [
+      "Hat: Toy Hat.\n\n🧭 Toy Hat — check_status\n⏳ Running check status",
+      "Hat: Toy Hat.\n\n🧭 Toy Hat — check_status\n✓ Running check status\n✅ Done -- the answer is below.",
+      "Hat: Toy Hat.\n\nhandled:check_status",
+    ],
+  );
+  assert.ok(sent.every((m) => m.chatId === -999 && (m.threadId === 604 || m.threadId === undefined)), "everything goes to the Workspace stream");
 });

@@ -484,3 +484,68 @@ test("every BD Action that consumes a Skill declares it, and a handler given no 
   // The `handoff_*` Actions consume no Skill and declare none.
   assert.strictEqual(opportunityDevelopmentHat.actions.find((a) => a.name === "handoff_to_sales")?.skill_requirements, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Live work status (src/runtime/workStatus.ts) for BD's AI-judged Actions.
+// ---------------------------------------------------------------------------
+
+function recordTelegram(t: any): string[] {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      sentTexts.push(JSON.parse(init.body).text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 200 });
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return sentTexts;
+}
+
+function workspaceEnv(response: Record<string, unknown>): Env {
+  return {
+    ...fakeEnv(),
+    TELEGRAM_BOT_TOKEN: "test-token",
+    TELEGRAM_GROUP_CHAT_ID: "-1004435157576",
+    WORKSPACE_TOPIC_ID: "100",
+    AI: { run: async () => ({ response: JSON.stringify(response) }) },
+  } as unknown as Env;
+}
+
+const bdStatus = (sentTexts: string[]) => sentTexts.filter((s) => s.startsWith("Hat: Business Development Manager.\n\n🧭")).at(-1)!;
+
+test("Status: an AI-judged BD Action shows its one real step and ends on the result", async (t) => {
+  const sentTexts = recordTelegram(t);
+  const env = workspaceEnv({ qualification: "Qualified", rationale: "Strong evidence" });
+
+  await opportunityDevelopmentHat.entryHandler(env, fakeWorkState(), "qualify_opportunity", "qualify this", await skillsFor(opportunityDevelopmentHat, "qualify_opportunity"));
+
+  assert.strictEqual(
+    bdStatus(sentTexts),
+    "Hat: Business Development Manager.\n\n🧭 Business Development Manager — opportunity\n✓ Judging the opportunity against the qualification evidence threshold\n✅ Finished -- the result is below.",
+  );
+});
+
+test("Status: a held qualification ends on the hold, and its evidence resume reports its own run", async (t) => {
+  const sentTexts = recordTelegram(t);
+  const env = workspaceEnv({});
+  const state = fakeWorkState();
+
+  await opportunityDevelopmentHat.entryHandler(env, state, "qualify_opportunity", "qualify this", await skillsFor(opportunityDevelopmentHat, "qualify_opportunity"));
+  assert.match(bdStatus(sentTexts), /⏸ Held -- more evidence is needed \(below\)\.$/);
+
+  await opportunityDevelopmentHat.awaitingHandlers.bd_opportunity_evidence_gap(env, state, "Here is a signed LOI.", await skillsFor(opportunityDevelopmentHat, "qualify_opportunity"));
+  assert.match(bdStatus(sentTexts), /✓ Re-judging qualification with the evidence you added\n⏸ Held/);
+});
+
+test("Status: a deterministic BD Action (a handoff proposal) sends no status message", async (t) => {
+  const sentTexts = recordTelegram(t);
+  const env = workspaceEnv({});
+
+  await opportunityDevelopmentHat.entryHandler(env, fakeWorkState(), "handoff_to_sales", "hand this to sales", await skillsFor(opportunityDevelopmentHat, "handoff_to_sales"));
+
+  assert.ok(!sentTexts.some((s) => s.includes("🧭")));
+});

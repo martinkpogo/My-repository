@@ -1488,3 +1488,25 @@ test("Pickup-origin provenance: an undeclared provenance value is rejected exact
   assert.strictEqual(result.handoffId, undefined);
   assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "a refused Handoff must not trigger the /checkhandoffs continuation");
 });
+
+test("Status: the call-notes pickup shows reading and consuming the approved Call Notes by record ID, and ends on where it stopped", async (t) => {
+  const { sentTexts } = mockPickupFetch(t);
+
+  // This harness serves no governance pages, so the run genuinely stops at
+  // governance -- the status must show exactly that step as where it stopped.
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+
+  const final = sentTexts.filter((s) => s.startsWith("Hat: Sales Executive.\n\n🧭")).at(-1)!;
+  let at = -1;
+  for (const step of [
+    "✓ Reading the call-notes Handoff",
+    "✓ Read and consumed approved Call Notes CN-007 (attestation re-verified)",
+    "✗ Loading the Sales Executive's governance from Notion",
+    "⛔ Held -- couldn't load the governance (details sent to Operations).",
+  ]) {
+    const next = final.indexOf(step);
+    assert.ok(next > at, `"${step}" in order, in:\n${final}`);
+    at = next;
+  }
+  assert.ok(!final.includes("De-identified call notes"), "no evidence text in the status");
+});

@@ -1127,3 +1127,39 @@ test("Ifc. Integration: a marked but malformed Finance block fails closed on its
 });
 
 
+
+// ---------------------------------------------------------------------------
+// Live work status (src/runtime/workStatus.ts) for the Finance -> Sales
+// Proposal pickup: the real steps, ending on the outcome.
+// ---------------------------------------------------------------------------
+
+const salesStatus = (world: World) => world.telegram.filter((m) => m.text.startsWith("Hat: Sales Executive.\n\n🧭")).map((m) => m.text);
+
+test("Status: a produced Proposal shows the pickup's real steps and ends on the version awaiting approval", async (t) => {
+  const { world } = await createV1(t);
+  const final = salesStatus(world).at(-1)!;
+  let at = -1;
+  for (const step of [
+    "✓ Reading the Finance -> Sales Handoff",
+    "✓ Checking the Handoff's tokens, context and Finance judgment block",
+    "✓ Looking for an existing Proposal for this Handoff",
+    "✓ Checking the Strategy Proposal's token-safety attestation",
+    "✓ Resolving the Proposal facts from the approved Strategy Proposal and the Finance quote",
+    "✓ Checking the composed Proposal is token-safe",
+    "✓ Creating the Proposal record and writing v1 to Notion",
+    "✅ PROP-7 v1 ready below -- awaiting your approval.",
+  ]) {
+    const next = final.indexOf(step);
+    assert.ok(next > at, `"${step}" in order, in:\n${final}`);
+    at = next;
+  }
+});
+
+test("Status: a fail-closed Proposal marks the step it stopped on, ends on the block, and never echoes the identity", async (t) => {
+  const leaked = approvedStrategyProposal();
+  leaked.executiveSummary = { ...leaked.executiveSummary, businessSituation: "Acme Foods Ghana Ltd is pursuing larger accounts" };
+  const { world } = await createV1(t, { entityName: "Acme Foods Ghana Ltd" }, { ho64: ho64Props({ "Verified Facts & Sources": rt(combinedHo64Facts(leaked)) }) });
+  const final = salesStatus(world).at(-1)!;
+  assert.match(final, /✗ Checking the composed Proposal is token-safe\n⛔ Blocked -- the reason is below\.$/);
+  assert.ok(!final.includes("Acme"));
+});

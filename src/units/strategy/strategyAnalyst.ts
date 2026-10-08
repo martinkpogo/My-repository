@@ -3,7 +3,7 @@ import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { editWorkspaceHatMessage, getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, withWorkspaceTypingIndicator, type InlineButton } from "../../telegram";
+import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, withWorkspaceTypingIndicator, type InlineButton } from "../../telegram";
 import { clearActiveWorkIdIfMatches, setActiveWorkId } from "../../sessionRouting";
 import { classifyOutboundText } from "../../ai/outboundGate";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -15,6 +15,7 @@ import { resolveMatterFromText, resolveEntityMatterFromTokens } from "../../iden
 import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
+import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
@@ -503,74 +504,22 @@ async function readCommercialValueEvidence(
   }
 }
 
-// ---- Live status checklist ------------------------------------------------
-// One Workspace message per run, edited in place: what has been done (✓),
-// what is running now (⏳), and how the run ended. Every step is recorded at
-// the moment the code actually starts it -- never a decorative "thinking"
-// line -- and names only tokens, record IDs, Skill names and counts, never
-// evidence text. See WorkState.strategyProgress.
-
-type StrategyProgress = NonNullable<WorkState["strategyProgress"]>;
+// ---- Live status ------------------------------------------------------------
+// Strategy reports its runs through the shared Runtime work-status service
+// (src/runtime/workStatus.ts): one Workspace message per run, steps recorded
+// only as the code actually starts them, never evidence text.
 
 function strategyProgressHeader(state: WorkState, fallback: string): string {
-  const ref = state.matterToken || state.entityToken;
-  return `Strategy Analyst — ${ref || fallback}`;
-}
-
-function renderStrategyProgress(progress: StrategyProgress, ending?: { line: string; currentFailed: boolean }): string {
-  const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
-  const lines = [`🧭 ${progress.header}`, ...progress.done.map((d) => `✓ ${step(d)}`)];
-  if (progress.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(progress.current)}`);
-  if (ending) lines.push(ending.line);
-  return lines.join("\n");
-}
-
-/** Sends a fresh status message for a new run, with `firstStep` running. */
-async function startStrategyProgress(env: Env, state: WorkState, header: string, firstStep: string): Promise<void> {
-  state.strategyProgress = { header, done: [], current: firstStep };
-  state.strategyProgressMessageId = await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, renderStrategyProgress(state.strategyProgress));
-}
-
-/** Marks the running step done and shows `stepText` as running. A no-op when no run is being reported. */
-async function advanceStrategyProgress(env: Env, state: WorkState, stepText: string): Promise<void> {
-  if (state.strategyProgressMessageId === undefined) return;
-  const progress = state.strategyProgress ?? { header: strategyProgressHeader(state, "work in progress"), done: [] };
-  if (progress.current) progress.done.push(progress.current);
-  progress.current = stepText;
-  state.strategyProgress = progress;
-  await editWorkspaceHatMessage(env, state, state.strategyProgressMessageId, renderStrategyProgress(progress));
-}
-
-/**
- * Rewords the running step once its outcome is known (e.g. which Call
- * Notes record was read), without an extra Telegram edit -- the next
- * advance or the ending shows it.
- */
-function noteStrategyProgress(state: WorkState, stepText: string): void {
-  if (state.strategyProgress?.current) state.strategyProgress.current = stepText;
-}
-
-/**
- * Ends the run's status message with a final line. A failure marks the
- * step that was running ✗, so the message shows exactly where it stopped.
- * Clears the run, so a later run never edits a finished message.
- */
-async function finishStrategyProgress(env: Env, state: WorkState, line: string, outcome: "succeeded" | "failed"): Promise<void> {
-  const progress = state.strategyProgress;
-  const messageId = state.strategyProgressMessageId;
-  state.strategyProgress = undefined;
-  state.strategyProgressMessageId = undefined;
-  if (messageId === undefined || !progress) return;
-  await editWorkspaceHatMessage(env, state, messageId, renderStrategyProgress(progress, { line, currentFailed: outcome === "failed" }));
+  return workStatusHeader(HAT_NAME, state, fallback);
 }
 
 async function sendStrategyInProgressAck(env: Env, state: WorkState): Promise<void> {
-  await startStrategyProgress(env, state, strategyProgressHeader(state, "diagnosis"), "Preparing the diagnosis from the evidence on record");
+  await startWorkStatus(env, state, HAT_NAME, strategyProgressHeader(state, "diagnosis"), "Preparing the diagnosis from the evidence on record");
 }
 
 /** Same mechanism, accurate wording for a revision -- a refinement never re-runs diagnosis, so it shouldn't say it is. */
 async function sendStrategyRefinementInProgressAck(env: Env, state: WorkState, version: number): Promise<void> {
-  await startStrategyProgress(env, state, `${strategyProgressHeader(state, "proposal")} · revising v${version}`, "Loading the Strategy Analyst's governance from Notion");
+  await startWorkStatus(env, state, HAT_NAME, `${strategyProgressHeader(state, "proposal")} · revising v${version}`, "Loading the Strategy Analyst's governance from Notion");
 }
 
 interface StrategyGovernance {
@@ -863,14 +812,14 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
     return state;
   }
 
-  await startStrategyProgress(env, state, strategyProgressHeader(state, "picking up a Handoff"), "Reading the Sales -> Strategy Handoff");
+  await startWorkStatus(env, state, HAT_NAME, strategyProgressHeader(state, "picking up a Handoff"), "Reading the Sales -> Strategy Handoff");
   const evalResult = await resolveStrategyHandoffContext(env, state.handoffId!, strategyAnalystAccess(state), {
-    advance: (step) => advanceStrategyProgress(env, state, step),
-    note: (step) => noteStrategyProgress(state, step),
+    advance: (step) => advanceWorkStatus(env, state, step),
+    note: (step) => noteWorkStatus(state, step),
   });
   if (!evalResult.success) {
     console.error(`Strategy handlePickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
-    await finishStrategyProgress(env, state, "⛔ Couldn't pick this up -- the reason is below.", "failed");
+    await finishWorkStatus(env, state, "⛔ Couldn't pick this up -- the reason is below.", "failed");
     await logActivity(env, {
       entry: `Strategy pickup blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
       type: "Blocker",
@@ -900,8 +849,8 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   state.matterToken = evalResult.contract.matterToken ?? "";
   state.strategyQuestion = evalResult.contract.sanitizedContext;
   state.strategyContext = evalResult.contract.sanitizedContext;
-  if (state.strategyProgress) state.strategyProgress.header = strategyProgressHeader(state, "picking up a Handoff");
-  await advanceStrategyProgress(env, state, "Checking the Sales boundary record, the Commercial Value Evidence block and the Matter");
+  if (state.workStatus) state.workStatus.header = strategyProgressHeader(state, "picking up a Handoff");
+  await advanceWorkStatus(env, state, "Checking the Sales boundary record, the Commercial Value Evidence block and the Matter");
 
   // Durable source-boundary evidence: seeded FROM THE HANDOFF RECORD the
   // sender wrote it to at creation, so a fresh session (no shared WorkState
@@ -1090,7 +1039,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     strategyQuestion,
     strategyContext,
     skills,
-    onProgress: (message) => advanceStrategyProgress(env, state, message),
+    onProgress: (message) => advanceWorkStatus(env, state, message),
   });
 
   if (cycle.status === "unavailable") {
@@ -1100,7 +1049,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     state.strategySkillCycleUnavailable = true;
     state.strategySkillCycleUnavailableCause = cycle.cause;
     state.strategySkillFindings = cycle.findings;
-    await advanceStrategyProgress(env, state, `Skill planning was unavailable (${cycle.cause ?? "no usable plan"}) -- continuing with the core diagnosis alone`);
+    await advanceWorkStatus(env, state, `Skill planning was unavailable (${cycle.cause ?? "no usable plan"}) -- continuing with the core diagnosis alone`);
     return runCoreDiagnosis(env, state);
   }
 
@@ -1124,7 +1073,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
       `Strategy runDiagnosis: Strategy Analysis ran for work ${state.workId} and determined no Strategy Skill was required -- proceeding directly to core diagnosis.`,
     );
     state.strategySkillCycleUnavailable = false;
-    await advanceStrategyProgress(env, state, "Strategy Analysis judged that no Strategy Skill is needed");
+    await advanceWorkStatus(env, state, "Strategy Analysis judged that no Strategy Skill is needed");
     return runCoreDiagnosis(env, state);
   }
 
@@ -1166,7 +1115,7 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
     return state;
   }
 
-  await advanceStrategyProgress(env, state, "Establishing the situation and running the diagnosis...");
+  await advanceWorkStatus(env, state, "Establishing the situation and running the diagnosis...");
 
   const outcome = await generateWithOutcome<StrategyDiagnosisResult>(env, {
     taskId: "strategy.diagnosis",
@@ -1228,7 +1177,7 @@ async function handleBlocked(env: Env, state: WorkState, reason: string): Promis
   // it. When the cycle recorded no findings this is byte-for-byte the same
   // `reason` as before, so non-cycle blockers are unchanged.
   const blockerReason = reason + skillInvocationSummary(state.strategySkillFindings);
-  await finishStrategyProgress(env, state, "⛔ Held -- the reason is below.", "failed");
+  await finishWorkStatus(env, state, "⛔ Held -- the reason is below.", "failed");
   await logActivity(env, {
     entry: `Strategy diagnosis blocked`,
     type: "Blocker",
@@ -1327,7 +1276,7 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
     decisionRationale: result.noRecommendationReason ?? "",
     outcome: "Complete",
   });
-  await finishStrategyProgress(env, state, "✅ Diagnosis ready below (no recommendation -- evidence insufficient for one).", "succeeded");
+  await finishWorkStatus(env, state, "✅ Diagnosis ready below (no recommendation -- evidence insufficient for one).", "succeeded");
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, formatDiagnosisForTelegram(result));
 
   await routeToUnit(env, state, result);
@@ -1828,7 +1777,7 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
     return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while developing the proposal. Refusing to proceed without it.");
   }
 
-  await advanceStrategyProgress(env, state, "Developing the full Strategic Intervention Proposal...");
+  await advanceWorkStatus(env, state, "Developing the full Strategic Intervention Proposal...");
 
   const raw = await generate<RawStrategyProposal>(env, {
     taskId: "strategy.proposal_drafting",
@@ -1843,7 +1792,7 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   const nextVersion = (state.strategyProposal?.proposalVersion ?? 0) + 1;
   const proposalId = crypto.randomUUID();
   const proposal = normalizeStrategyProposal(raw, proposalId, nextVersion);
-  await advanceStrategyProgress(env, state, "Checking the drafted proposal is complete");
+  await advanceWorkStatus(env, state, "Checking the drafted proposal is complete");
 
   const completeness = evaluateProposalCompleteness(proposal);
   if (!completeness.valid) {
@@ -1957,7 +1906,7 @@ async function presentStrategyProposalForApproval(
   proposal: StrategyProposal,
   logVerb: "created" | "revised",
 ): Promise<WorkState> {
-  await advanceStrategyProgress(env, state, "Checking the proposal against the approval gates (Entity/Matter reference, Sales boundary record, Commercial Value Evidence, known identity)");
+  await advanceWorkStatus(env, state, "Checking the proposal against the approval gates (Entity/Matter reference, Sales boundary record, Commercial Value Evidence, known identity)");
   // A direct_request diagnosis (Martin addressing Strategy directly, or
   // BD routed in via resolveUnitRequest) has no Sales -> Strategy
   // Handoff at all -- there is nothing for a source-boundary attestation
@@ -2058,7 +2007,7 @@ async function presentStrategyProposalForApproval(
     outcome: "Blocked",
   });
 
-  await finishStrategyProgress(env, state, `✅ Proposal v${proposalVersion} ready below -- awaiting your decision.`, "succeeded");
+  await finishWorkStatus(env, state, `✅ Proposal v${proposalVersion} ready below -- awaiting your decision.`, "succeeded");
   const message = formatProposalPreview(state, proposal);
   // Telegram's callback_data has a hard 64-byte limit. workId alone is a
   // 36-char UUID (required so index.ts's data.split(":") can resolve the
@@ -2134,7 +2083,7 @@ async function reviseStrategyProposal(
     return handleBlocked(env, state, "Could not retrieve canonical Strategy Analyst Hat Definition and/or Universal Role Contract from Notion while revising the proposal. Refusing to proceed without it.");
   }
 
-  await advanceStrategyProgress(env, state, `Applying your requested change to v${currentProposal.proposalVersion}`);
+  await advanceWorkStatus(env, state, `Applying your requested change to v${currentProposal.proposalVersion}`);
   const raw = await generate<RawStrategyProposal>(env, {
     taskId: "strategy.proposal_drafting",
     mode: "json",
@@ -2154,7 +2103,7 @@ async function reviseStrategyProposal(
   const proposalId = currentProposal.proposalId;
   const proposalVersion = currentProposal.proposalVersion + 1;
   const proposal = normalizeStrategyProposal(raw, proposalId, proposalVersion);
-  await advanceStrategyProgress(env, state, "Checking the revised proposal is complete");
+  await advanceWorkStatus(env, state, "Checking the revised proposal is complete");
 
   const completeness = evaluateProposalCompleteness(proposal);
   if (!completeness.valid) {
@@ -2781,11 +2730,11 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
     return state;
   }
 
-  await startStrategyProgress(env, state, `${strategyProgressHeader(state, "proposal")} · discussing v${version}`, `Checked this discussion is still on proposal v${version}`);
-  await advanceStrategyProgress(env, state, "Loading the Strategy Analyst's governance from Notion");
+  await startWorkStatus(env, state, HAT_NAME, `${strategyProgressHeader(state, "proposal")} · discussing v${version}`, `Checked this discussion is still on proposal v${version}`);
+  await advanceWorkStatus(env, state, "Loading the Strategy Analyst's governance from Notion");
   const governance = await getStrategyGovernance(env);
   if (!governance) {
-    await finishStrategyProgress(env, state, "⛔ Couldn't load the governance -- nothing was sent to the AI and nothing was saved.", "failed");
+    await finishWorkStatus(env, state, "⛔ Couldn't load the governance -- nothing was sent to the AI and nothing was saved.", "failed");
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: HAT_NAME },
@@ -2796,12 +2745,12 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
   }
 
   const findingsCount = state.strategySkillFindings?.length ?? 0;
-  await advanceStrategyProgress(
+  await advanceWorkStatus(
     env,
     state,
     `Gathering what this Work holds: the evidence captured at pickup, ${findingsCount} Skill finding${findingsCount === 1 ? "" : "s"}, the diagnosis, proposal v${version}${discussion.turns.length > 0 ? `, ${discussion.turns.length} earlier exchange${discussion.turns.length === 1 ? "" : "s"}` : ""}`,
   );
-  await advanceStrategyProgress(env, state, "Asking the AI (Strategy discussion task)");
+  await advanceWorkStatus(env, state, "Asking the AI (Strategy discussion task)");
   const outcome = await withWorkspaceTypingIndicator(env, () =>
     generateWithOutcome<{ answer?: unknown }>(env, {
       taskId: "strategy.proposal_discussion",
@@ -2815,7 +2764,7 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
       ? describeAiFailure(outcome.cause, outcome.gateReasons, "Your question or the material sent with it")
       : "The AI replied without an answer in it (unparseable). This is an infrastructure failure, not an evidence judgement.";
     const statusLine = !outcome.ok && outcome.cause === "outbound_gate_blocked" ? "⛔ Refused by the Outbound Data Gate" : "⛔ No usable answer came back";
-    await finishStrategyProgress(env, state, `${statusLine} -- nothing was saved.`, "failed");
+    await finishWorkStatus(env, state, `${statusLine} -- nothing was saved.`, "failed");
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: HAT_NAME },
@@ -2825,7 +2774,7 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
     return state;
   }
 
-  await finishStrategyProgress(env, state, `✅ Answered below -- proposal v${version} is unchanged.`, "succeeded");
+  await finishWorkStatus(env, state, `✅ Answered below -- proposal v${version} is unchanged.`, "succeeded");
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, answer.slice(0, 3800), buttons);
 
   // Saved only now, after a successful call. Checked with the gate's own

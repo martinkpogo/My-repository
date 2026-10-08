@@ -9,7 +9,8 @@ import { classifyCandidateHats } from "../../hats/intakeClassification";
 import { resolveMarketingCandidateRelationships, selectMarketingAmbiguityReasonCode } from "../../hats/relationships";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { sendWorkspaceHatMessage } from "../../telegram";
+import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
+import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { richText, select } from "../../notion";
 import { updateHandoff } from "../../handoffWriter";
@@ -114,9 +115,11 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   const hatName = state.hat as MarketingHatName;
   const hat = MARKETING_HAT_REGISTRY[hatName];
 
+  await startWorkStatus(env, state, hatName, workStatusHeader(hatName, state, "task"), "Loading the Universal Role Contract from Notion");
   const universalRoleContract = await getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract");
   if (!universalRoleContract) {
     console.error(`Marketing (${hatName}) blocked — Universal Role Contract retrieval failed for work ${state.workId}`);
+    await finishWorkStatus(env, state, "⛔ Couldn't load the governance -- see below.", "failed");
     await logActivity(env, {
       entry: `Marketing task blocked — governance retrieval failed: ${hatName}`,
       type: "Blocker",
@@ -128,14 +131,18 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
-  const decision = await generate<HatActionDecision>(env, {
-    taskId: "marketing.hat_action_decision",
-    mode: "json",
-    parts: { ...buildHatPromptParts(hat, universalRoleContract), situation: state.marketingTaskText ?? "" },
-  });
+  await advanceWorkStatus(env, state, `Deciding within ${hatName}'s ownership: draft, route to another Hat, or ask for clarification`);
+  const decision = await withWorkspaceTypingIndicator(env, () =>
+    generate<HatActionDecision>(env, {
+      taskId: "marketing.hat_action_decision",
+      mode: "json",
+      parts: { ...buildHatPromptParts(hat, universalRoleContract), situation: state.marketingTaskText ?? "" },
+    }),
+  );
 
   if (!decision) {
     console.error(`Marketing (${hatName}) action decision failed for work ${state.workId}`);
+    await finishWorkStatus(env, state, "⛔ No usable decision came back -- see below.", "failed");
     await logActivity(env, {
       entry: `Marketing task blocked — action decision failed: ${hatName}`,
       type: "Blocker",
@@ -148,6 +155,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   }
 
   if (decision.action === "clarify") {
+    await finishWorkStatus(env, state, "⏸ Needs clarification -- the question is below.", "succeeded");
     await logActivity(env, {
       entry: `${hatName} needs clarification`,
       type: "Blocker",
@@ -168,6 +176,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       // routing list (or an invalid/hallucinated target) — code-level
       // gate: never trust it, fail closed rather than route anywhere.
       console.error(`Marketing (${hatName}) proposed an unauthorized transition target: ${decision.target_hat}`);
+      await finishWorkStatus(env, state, "⛔ The proposed next Hat isn't one this Hat may route to -- see below.", "failed");
       await logActivity(env, {
         entry: `${hatName} proposed an unauthorized routing target`,
         type: "Blocker",
@@ -182,6 +191,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     }
 
     state.pendingTransition = { toHat: target, reason: decision.reason ?? "" };
+    await finishWorkStatus(env, state, `✅ Proposed handing this to ${target} -- confirm below.`, "succeeded");
     await logActivity(env, {
       entry: `${hatName} proposed routing to ${target}`,
       type: "Decision",
@@ -213,6 +223,12 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   const isPaidMedia = hatName === "Digital Marketer" && decision.involves_spend === true;
   state.marketingDraft = decision.draft ?? "";
 
+  await finishWorkStatus(
+    env,
+    state,
+    isPaidMedia ? "✅ Paid-media draft ready below -- it needs your spend approval." : "✅ Draft ready below -- awaiting your approval.",
+    "succeeded",
+  );
   if (isPaidMedia) {
     state.pendingPaidMediaAction = { description: decision.draft ?? "" };
     const paidMediaMessage = `*Paid media action*\n\n${decision.draft}\n\nThis involves spend and requires your explicit approval before anything runs. Approve this budget/spend?`;

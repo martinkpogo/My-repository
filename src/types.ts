@@ -474,20 +474,20 @@ export interface WorkState {
   /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
   pendingPaidMediaAction?: { description: string };
 
+  /**
+   * The live status checklist of this Work's current run, shown in one
+   * Workspace message edited in place (see src/runtime/workStatus.ts):
+   * the Hat it is labelled with, a header, the steps done, and the step
+   * running now. Cleared when the run reports its final line.
+   */
+  workStatus?: import("./runtime/workStatus").WorkStatus;
+  /** The Telegram message id of that status message. */
+  workStatusMessageId?: number;
+
   /** The strategic question/business situation a Strategy work item is diagnosing -- carried across clarification/feedback loops. */
   strategyQuestion?: string;
   /** Sanitized supplied context (from a Handoff's own record) the diagnosis is grounded in. */
   strategyContext?: string;
-  /** The Telegram message id of the "diagnosing this now" acknowledgment, edited in place per stage. */
-  strategyProgressMessageId?: number;
-  /**
-   * The live status checklist shown in that same message: a header, the
-   * steps already done, and the step running now. Only real steps the code
-   * is performing are ever recorded, and only tokens/record IDs/Skill
-   * names/counts -- never evidence text. Cleared once the run reports its
-   * final line, so a later run never edits a finished status.
-   */
-  strategyProgress?: { header: string; done: string[]; current?: string };
   /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
   strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
   /**
