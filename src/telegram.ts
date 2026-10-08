@@ -267,22 +267,19 @@ export async function sendWorkspaceTypingAction(env: Env): Promise<void> {
   }
 }
 
-/** Telegram clears a chat action after about five seconds; resending a little sooner keeps it visible for a long call. */
-const TYPING_REFRESH_MS = 4_500;
-
 /**
- * Runs `work` while the Workspace topic shows the typing indicator, then
- * stops it -- whether `work` resolves or throws. Never changes what `work`
- * returns or throws.
+ * Shows the typing indicator once as `work` starts, then runs it. Never
+ * changes what `work` returns or throws.
+ *
+ * Deliberately ONE signal, not a refresh loop: every Telegram call is a
+ * Worker subrequest, and a single invocation (a whole Handoff pickup runs in
+ * one Durable Object alarm) has a hard subrequest budget shared with every
+ * Notion and AI-provider call. Re-sending every few seconds exhausted it in
+ * production (2026-10-08, HO-86) and failed the pickup.
  */
 export async function withWorkspaceTypingIndicator<T>(env: Env, work: () => Promise<T>): Promise<T> {
   await sendWorkspaceTypingAction(env);
-  const timer = setInterval(() => void sendWorkspaceTypingAction(env), TYPING_REFRESH_MS);
-  try {
-    return await work();
-  } finally {
-    clearInterval(timer);
-  }
+  return work();
 }
 
 /** Like editMessageText, but re-applies the same "Hat: <name>." label sendHatMessage used, so an edited bubble doesn't drop it. */

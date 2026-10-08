@@ -9,6 +9,7 @@ import {
   renderWorkStatus,
   startWorkStatus,
   workStatusHeader,
+  MAX_INTERMEDIATE_EDITS,
   type WorkStatusHolder,
 } from "./workStatus";
 
@@ -82,4 +83,26 @@ test("workStatus: the header names the Matter, else the Entity, else the fallbac
   assert.strictEqual(workStatusHeader("H", { matterToken: "MAT-2", entityToken: "ENT-1" }, "new"), "H — MAT-2");
   assert.strictEqual(workStatusHeader("H", { entityToken: "ENT-1" }, "new"), "H — ENT-1");
   assert.strictEqual(workStatusHeader("H", {}, "new"), "H — new");
+});
+
+test("workStatus: a run makes at most 1 send + MAX_INTERMEDIATE_EDITS edits + 1 final edit, and the final message still lists every step", async (t) => {
+  const calls = mockTelegram(t);
+  const holder: WorkStatusHolder = { chatId: 1 };
+
+  await startWorkStatus(env, holder, "H", "H — x", "Step 0");
+  for (let i = 1; i <= 20; i++) await advanceWorkStatus(env, holder, `Step ${i}`);
+  await finishWorkStatus(env, holder, "✅ Done.", "succeeded");
+
+  assert.strictEqual(calls.length, 1 + MAX_INTERMEDIATE_EDITS + 1, "the subrequest cost of a run is bounded whatever its step count");
+  const final = calls.at(-1)!.body.text as string;
+  for (let i = 0; i <= 20; i++) assert.ok(final.includes(`✓ Step ${i}`), `Step ${i} is still shown`);
+});
+
+test("workStatus: Markdown entity characters are escaped, so Telegram accepts each send/edit on the first call", async (t) => {
+  const calls = mockTelegram(t);
+  const holder: WorkStatusHolder = { chatId: 1 };
+
+  await startWorkStatus(env, holder, "H", "H — x", "Running business_strategy, brand_strategy");
+
+  assert.strictEqual(calls[0].body.text, "Hat: H.\n\n🧭 H — x\n⏳ Running business\\_strategy, brand\\_strategy");
 });
