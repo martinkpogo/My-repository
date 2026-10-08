@@ -29,7 +29,8 @@ import {
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { sendWorkspaceHatMessage, sendOperationsMessage } from "../../telegram";
+import { sendWorkspaceHatMessage, sendOperationsMessage, withWorkspaceTypingIndicator } from "../../telegram";
+import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
@@ -42,6 +43,8 @@ import { serializeCommercialValueEvidenceBlock } from "./commercialValueEvidence
 // title search, per the Universal Role Contract's evidence rule (a
 // consequential source must be attributable, not guessed at by name match).
 const SALES_EXECUTIVE_HAT_DEFINITION_PAGE_ID = "3cfcb004-e583-810f-8281-c448edaa5de6";
+/** The Hat the call-notes pickup's live work status is labelled with. */
+const CALL_NOTES_STATUS_HAT = "Sales Executive";
 // Only needed where an Agent call performs the actual Entity lifecycle
 // judgment (qualification) — not fetched for stages where Entity handling
 // is already mechanically enforced by code.
@@ -1196,9 +1199,11 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
   // via an upstream Handoff -- the opposite of what happened here.
   state.entryType = "handoff_pickup";
 
+  await startWorkStatus(env, state, CALL_NOTES_STATUS_HAT, workStatusHeader(CALL_NOTES_STATUS_HAT, state, "picking up call notes"), "Reading the call-notes Handoff");
   const evalResult = await resolveCallNotesHandoffContext(env, state.handoffId!);
   if (!evalResult.success) {
     console.error(`Sales call-notes pickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
+    await finishWorkStatus(env, state, "⛔ Held -- the reason was sent to Operations.", "failed");
     await logActivity(env, {
       entry: `Sales call-notes pickup blocked [Insufficient Context] — ${evalResult.insufficientContext.category}`,
       type: "Blocker",
@@ -1222,8 +1227,10 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
   state.entityToken = contract.entityToken;
   state.matterToken = contract.matterToken;
   const displayToken = contract.matterToken ?? contract.entityToken;
+  if (state.workStatus) state.workStatus.header = workStatusHeader(CALL_NOTES_STATUS_HAT, state, "picking up call notes");
 
   await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
+  await advanceWorkStatus(env, state, "Reading and consuming the approved Call Notes record the Handoff references");
 
   // GOVERNED CALL NOTES CONSUMPTION (Architect decision): the Handoff now
   // carries a REFERENCE to the record, not the record's substance.
@@ -1243,6 +1250,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
   );
   if (!consumption.ok) {
     console.error(`Sales call-notes pickup: ${consumption.reason}`);
+    await finishWorkStatus(env, state, "⛔ Held -- the reason was sent to Operations.", "failed");
     await logActivity(env, {
       entry: `Sales call-notes pickup blocked [Call Notes consumption] — ${displayToken}`,
       type: "Blocker",
@@ -1280,10 +1288,13 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
   // be reached as a fallback -- and if the text were ever empty, callNotes
   // simply stays unset and Gate 3 refuses as it always did.
   state.callNotes = consumption.evidenceText;
+  noteWorkStatus(state, `Read and consumed approved Call Notes ${consumption.record.callNotesId} (attestation re-verified)`);
 
+  await advanceWorkStatus(env, state, "Loading the Sales Executive's governance from Notion");
   const governance = await getSalesExecutiveGovernance(env, { includeEntitySpecification: true });
   if (!governance) {
     console.error(`Sales call-notes pickup blocked — governance retrieval failed for handoff ${state.handoffId}`);
+    await finishWorkStatus(env, state, "⛔ Held -- couldn't load the governance (details sent to Operations).", "failed");
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(
@@ -1298,12 +1309,16 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
     return state;
   }
 
-  const result = await runQualificationAssessment(env, state, consumption.evidenceText, governance, {
-    evidenceExtraction: "sales.commercial_evidence_extraction_handoff",
-    qualification: "sales.call_qualification_handoff",
-  });
+  await advanceWorkStatus(env, state, "Extracting the commercial evidence and assessing qualification");
+  const result = await withWorkspaceTypingIndicator(env, () =>
+    runQualificationAssessment(env, state, consumption.evidenceText, governance, {
+      evidenceExtraction: "sales.commercial_evidence_extraction_handoff",
+      qualification: "sales.call_qualification_handoff",
+    }),
+  );
 
   if (!result) {
+    await finishWorkStatus(env, state, "⛔ Inconclusive -- Handoff held (details sent to Operations).", "failed");
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(
@@ -1331,6 +1346,12 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
     outcome: "Complete",
   });
 
+  await finishWorkStatus(
+    env,
+    state,
+    qualification.overall === "Qualified" ? "✅ Qualified -- the approval request is below." : `✅ Qualification complete: ${qualification.overall} -- written to the Handoff.`,
+    "succeeded",
+  );
   if (qualification.overall === "Qualified") {
     return presentQualifiedCallNotesForApproval(env, state, contract.entityToken, contract.matterToken ?? "", displayToken, evidenceText);
   }

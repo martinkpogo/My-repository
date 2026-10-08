@@ -488,16 +488,6 @@ export interface WorkState {
   strategyQuestion?: string;
   /** Sanitized supplied context (from a Handoff's own record) the diagnosis is grounded in. */
   strategyContext?: string;
-  /** The Telegram message id of the "diagnosing this now" acknowledgment, edited in place per stage. */
-  strategyProgressMessageId?: number;
-  /**
-   * The live status checklist shown in that same message: a header, the
-   * steps already done, and the step running now. Only real steps the code
-   * is performing are ever recorded, and only tokens/record IDs/Skill
-   * names/counts -- never evidence text. Cleared once the run reports its
-   * final line, so a later run never edits a finished status.
-   */
-  strategyProgress?: { header: string; done: string[]; current?: string };
   /** The most recently delivered structured diagnosis -- preserved so a downstream Handoff proposal can be built/rebuilt from it without re-running the AI call. */
   strategyDiagnosis?: import("./units/strategy/strategyAnalyst").StrategyDiagnosisResult;
   /**

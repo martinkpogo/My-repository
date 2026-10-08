@@ -172,3 +172,59 @@ test("marketingManifest: awaitingHandlers registers marketing_feedback and marke
     assert.strictEqual(hat.awaitingHandlers.marketing_clarification, handleMarketingClarification, `${hatName}: clarification identity`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Live work status (src/runtime/workStatus.ts) for a Marketing Hat run.
+// ---------------------------------------------------------------------------
+
+function mockHatRunFetch(t: any): string[] {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    if (u.includes("api.telegram.org")) {
+      sentTexts.push(JSON.parse(init.body).text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (u.includes("/blocks/") && u.includes("/children")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }), { status: 200 });
+    }
+    if (method === "GET" && u.includes("/v1/pages/")) {
+      const id = u.split("/v1/pages/").pop()!.split("?")[0];
+      return new Response(JSON.stringify({ id, url: u, parent: { type: "page", page_id: "governance-root" }, properties: {} }), { status: 200 });
+    }
+    if (method === "POST" && u.endsWith("/v1/pages")) {
+      return new Response(JSON.stringify({ id: "log", url: "https://notion.so/log", parent: { type: "data_source_id", data_source_id: "activity-log-ds" }, properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in marketingManifest status test: ${method} ${u}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return sentTexts;
+}
+
+test("Status: a Marketing Hat run shows its real steps and ends on the draft awaiting approval", async (t) => {
+  const sentTexts = mockHatRunFetch(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "A positioning brief draft." }) }) } as any,
+  });
+
+  await handleMarketingFeedback(env, fakeWorkState({ marketingTaskText: "Draft a positioning brief for MAT-9." }), "Make it shorter.");
+
+  const final = sentTexts.filter((s) => s.startsWith("Hat: Marketing Strategist.\n\n🧭")).at(-1)!;
+  let at = -1;
+  for (const step of [
+    "✓ Loading the Universal Role Contract from Notion",
+    "✓ Deciding within Marketing Strategist's ownership: draft, route to another Hat, or ask for clarification",
+    "✅ Draft ready below -- awaiting your approval.",
+  ]) {
+    const next = final.indexOf(step);
+    assert.ok(next > at, `"${step}" in order, in:\n${final}`);
+    at = next;
+  }
+});

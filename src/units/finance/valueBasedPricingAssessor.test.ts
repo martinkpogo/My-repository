@@ -1179,3 +1179,45 @@ test("No forbidden pricing basis can enter through the structured value-evidence
   assert.strictEqual(result.quote, undefined);
   assert.match(openQuestionsText(lastHandoffPatch(log)), /budget or willingness-to-pay used as the pricing basis/);
 });
+
+// ---------------------------------------------------------------------------
+// Live work status (src/runtime/workStatus.ts): one Workspace message per
+// run, the real steps in order, ending on the outcome -- never evidence text.
+// ---------------------------------------------------------------------------
+
+const statusMessages = (log: FetchLog) => log.sentTexts.filter((s) => s.startsWith("Hat: Value-Based Pricing Assessor.\n\n🧭"));
+
+test("Status: a priced pickup shows its real steps in order and ends on the quote", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
+
+  await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  const final = statusMessages(log).at(-1)!;
+  let at = -1;
+  for (const step of [
+    "✓ Reading the Strategy -> Finance Handoff",
+    "✓ Loading the Value-Based Pricing Assessor's governance from Notion",
+    "✓ Reading the upstream Commercial Value Evidence block",
+    "✓ Judging the value-based price",
+    "✓ Validating the price judgment",
+    "✅ Quote ready below -- awaiting your approval.",
+  ]) {
+    const next = final.indexOf(step);
+    assert.ok(next > at, `"${step}" in order, in:\n${final}`);
+    at = next;
+  }
+});
+
+test("Status: a held judgment marks the step it stopped on and ends on the hold", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi({ sufficient: false, reason_if_insufficient: "Value exists only as an unsupported assumption." });
+
+  await handlePickup(env, fakeState(), NO_ACTION_SKILLS);
+
+  const final = statusMessages(log).at(-1)!;
+  assert.match(final, /✗ Validating the price judgment\n⛔ Held -- the reason is below\.$/);
+  assert.ok(!final.includes("unsupported assumption"), "the hold reason itself stays in its own message, not the status");
+});

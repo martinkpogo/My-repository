@@ -2,7 +2,8 @@ import type { Env, Unit, WorkState } from "../types";
 import type { HatManifest, UnitManifest } from "./unitManifest";
 import { classifyCandidateHats, classifyAction } from "../hats/intakeClassification";
 import { dispatchAction } from "../hats/actionRegistry";
-import { sendWorkspaceHatMessage, sendHatMessage } from "../telegram";
+import { sendWorkspaceHatMessage, sendHatMessage, withWorkspaceTypingIndicator } from "../telegram";
+import { finishWorkStatus, startWorkStatus, type WorkStatusHolder } from "../runtime/workStatus";
 import { logActivity } from "../log";
 import { findUnitManifest } from "./registry";
 import { findManifestAction } from "./unitManifest";
@@ -291,7 +292,27 @@ async function dispatchResolvedAction(
       return { kind: "handled" };
     }
   }
-  const dispatchResult = await dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t, skills));
+  // A read Action runs to completion right here -- for every read declared
+  // today, a research or search run -- so in Cowork mode it reports live
+  // work status (one step: the Action itself) with the typing indicator.
+  // Unit-agnostic: the Hat and Action names come from the manifest. There is
+  // no Work yet, so the status lives on a local holder. Chat mode is left
+  // exactly as it was: its contract is one reply, to wherever the message
+  // came from, and the status/typing would go to the Workspace stream.
+  const isRead = declaredAction?.consequence === "read" && mode !== "chat";
+  const readStatus: WorkStatusHolder = { chatId: target.chatId };
+  if (isRead) await startWorkStatus(env, readStatus, hatName, `${hatName} — ${actionName}`, `Running ${actionName.replace(/_/g, " ")}`);
+  let dispatchResult: Awaited<ReturnType<typeof dispatchAction>>;
+  try {
+    const run = () => dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t, skills));
+    dispatchResult = isRead ? await withWorkspaceTypingIndicator(env, run) : await run();
+  } catch (err) {
+    await finishWorkStatus(env, readStatus, "⛔ Failed.", "failed");
+    throw err;
+  }
+  if (isRead) {
+    await finishWorkStatus(env, readStatus, dispatchResult?.kind === "read" && dispatchResult.reply.trim() ? "✅ Done -- the answer is below." : "✅ Done.", "succeeded");
+  }
   if (!dispatchResult) {
     // Unreachable: Resolution only ever returns manifest-exposed Actions.
     // Fail closed/silent anyway rather than silently continuing.

@@ -6,7 +6,8 @@ import { createHandoff } from "../../handoffWriter";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import { title, richText, select } from "../../notion";
-import { sendWorkspaceHatMessage } from "../../telegram";
+import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
+import { finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { logActivity } from "../../log";
 import { generate } from "../../ai";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
@@ -139,6 +140,60 @@ type OpportunityDevelopmentAction =
 const OPPORTUNITY_DEVELOPMENT_HAT_NAME = "Business Development Manager";
 const OPPORTUNITY_DEVELOPMENT_SPECIALIZATION = "Opportunity Development";
 const EVIDENCE_GAP_AWAITING_STATE = "bd_opportunity_evidence_gap" as const;
+
+/**
+ * Live work status for the BD Actions that wait on an AI judgment -- the
+ * one step each actually performs. Handoff proposals are deterministic and
+ * immediate, so they are deliberately not listed; an Action missing here
+ * simply runs without a status message.
+ */
+const BD_STATUS_STEPS: Readonly<Record<string, string>> = {
+  qualify_opportunity: "Judging the opportunity against the qualification evidence threshold",
+  qualify_partnership: "Judging the partnership against the qualification evidence threshold",
+  qualify_growth_opportunity: "Judging the growth opportunity against the qualification evidence threshold",
+  develop_opportunity: "Drafting how to develop this opportunity",
+  develop_partnership: "Drafting how to develop this partnership",
+  develop_growth_opportunity: "Drafting how to develop this growth opportunity",
+  determine_next_move: "Determining the next move",
+};
+
+async function runWithBDStatus(env: Env, state: WorkState, step: string, run: () => Promise<WorkState>): Promise<WorkState> {
+  const hat = state.hat ?? "Business Development";
+  await startWorkStatus(env, state, hat, workStatusHeader(hat, state, "opportunity"), step);
+  let result: WorkState;
+  try {
+    result = await withWorkspaceTypingIndicator(env, run);
+  } catch (err) {
+    await finishWorkStatus(env, state, "⛔ Failed -- the error was reported to Operations.", "failed");
+    throw err;
+  }
+  // Closed on the state that opened the run, so it can never be left open.
+  await finishWorkStatus(
+    env,
+    state,
+    result.awaiting === EVIDENCE_GAP_AWAITING_STATE ? "⏸ Held -- more evidence is needed (below)." : "✅ Finished -- the result is below.",
+    "succeeded",
+  );
+  return result;
+}
+
+/** Wraps a BD Hat's entryHandler so its AI-judged Actions report live status; every other Action runs exactly as before. */
+function withBDWorkStatus<A extends string>(
+  entry: (env: Env, state: WorkState, actionName: A, text: string, skills: ResolvedActionSkillSet) => Promise<WorkState>,
+): (env: Env, state: WorkState, actionName: A, text: string, skills: ResolvedActionSkillSet) => Promise<WorkState> {
+  return (env, state, actionName, text, skills) => {
+    const step = BD_STATUS_STEPS[actionName];
+    return step ? runWithBDStatus(env, state, step, () => entry(env, state, actionName, text, skills)) : entry(env, state, actionName, text, skills);
+  };
+}
+
+/** Wraps a qualification resume (Martin's added evidence) the same way. */
+function withBDResumeStatus(
+  resume: (env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet) => Promise<WorkState>,
+): (env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet) => Promise<WorkState> {
+  return (env, state, text, skills) =>
+    runWithBDStatus(env, state, "Re-judging qualification with the evidence you added", () => resume(env, state, text, skills));
+}
 
 /**
  * Every Business Development Action is INTERPRETATION-DRIVEN, unlike the
@@ -862,7 +917,7 @@ async function resumeQualifyOpportunity(env: Env, state: WorkState, text: string
 }
 
 const opportunityDevelopmentAwaitingHandlers: HatManifest<OpportunityDevelopmentAction>["awaitingHandlers"] = {
-  [EVIDENCE_GAP_AWAITING_STATE]: resumeQualifyOpportunity,
+  [EVIDENCE_GAP_AWAITING_STATE]: withBDResumeStatus(resumeQualifyOpportunity),
 };
 
 const opportunityDevelopmentHat: HatManifest<OpportunityDevelopmentAction> = {
@@ -873,7 +928,7 @@ const opportunityDevelopmentHat: HatManifest<OpportunityDevelopmentAction> = {
   actions: opportunityDevelopmentActions,
   responsibilityId: "develop_opportunities",
   readHandler: opportunityDevelopmentReadHandler,
-  entryHandler: opportunityDevelopmentEntryHandler,
+  entryHandler: withBDWorkStatus(opportunityDevelopmentEntryHandler),
   awaitingHandlers: opportunityDevelopmentAwaitingHandlers,
   callbackHandlers: businessDevelopmentHandoffCallbackHandlers,
 };
@@ -1178,7 +1233,7 @@ async function partnershipDevelopmentEntryHandler(
 }
 
 const partnershipDevelopmentAwaitingHandlers: HatManifest<PartnershipDevelopmentAction>["awaitingHandlers"] = {
-  [EVIDENCE_GAP_AWAITING_STATE]: resumeQualifyPartnership,
+  [EVIDENCE_GAP_AWAITING_STATE]: withBDResumeStatus(resumeQualifyPartnership),
 };
 
 const partnershipDevelopmentHat: HatManifest<PartnershipDevelopmentAction> = {
@@ -1189,7 +1244,7 @@ const partnershipDevelopmentHat: HatManifest<PartnershipDevelopmentAction> = {
   actions: partnershipDevelopmentActions,
   responsibilityId: "develop_partnerships",
   readHandler: partnershipDevelopmentReadHandler,
-  entryHandler: partnershipDevelopmentEntryHandler,
+  entryHandler: withBDWorkStatus(partnershipDevelopmentEntryHandler),
   awaitingHandlers: partnershipDevelopmentAwaitingHandlers,
   callbackHandlers: businessDevelopmentHandoffCallbackHandlers,
 };
@@ -1476,7 +1531,7 @@ async function growthMarketDevelopmentEntryHandler(
 }
 
 const growthMarketDevelopmentAwaitingHandlers: HatManifest<GrowthMarketDevelopmentAction>["awaitingHandlers"] = {
-  [EVIDENCE_GAP_AWAITING_STATE]: resumeQualifyGrowthOpportunity,
+  [EVIDENCE_GAP_AWAITING_STATE]: withBDResumeStatus(resumeQualifyGrowthOpportunity),
 };
 
 const growthMarketDevelopmentHat: HatManifest<GrowthMarketDevelopmentAction> = {
@@ -1487,7 +1542,7 @@ const growthMarketDevelopmentHat: HatManifest<GrowthMarketDevelopmentAction> = {
   actions: growthMarketDevelopmentActions,
   responsibilityId: "develop_growth",
   readHandler: growthMarketDevelopmentReadHandler,
-  entryHandler: growthMarketDevelopmentEntryHandler,
+  entryHandler: withBDWorkStatus(growthMarketDevelopmentEntryHandler),
   awaitingHandlers: growthMarketDevelopmentAwaitingHandlers,
   callbackHandlers: businessDevelopmentHandoffCallbackHandlers,
 };

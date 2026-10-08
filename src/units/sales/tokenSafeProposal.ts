@@ -24,6 +24,7 @@ import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity, type KnownIdentityField } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
+import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 
@@ -539,6 +540,7 @@ interface FailOptions {
 async function failClosed(env: Env, state: WorkState, reason: string, opts: FailOptions = {}): Promise<WorkState> {
   const ref = state.matterToken || state.entityToken || state.workId;
   console.error(`Runtime Sales Proposal blocked for work ${state.workId}: ${reason}`);
+  await finishWorkStatus(env, state, "⛔ Blocked -- the reason is below.", "failed");
   await logActivity(env, {
     entry: `Runtime Sales Proposal blocked — ${ref}`,
     type: "Blocker",
@@ -676,6 +678,7 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
     `Approve exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}*? Approval applies to the Proposal content of this Version only.`,
   ].join("\n\n");
   const buttons = withWorkId(decisionButtons(sp, sp.currentVersion, true), state.workId);
+  await finishWorkStatus(env, state, `✅ ${sp.proposalId} ${versionLabel(sp.currentVersion)} ready below -- awaiting your approval.`, "succeeded");
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT }, message, buttons);
   state.pendingActionSummary = {
     label: `Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} (${sp.matterToken})`,
@@ -814,6 +817,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   const handoffId = state.handoffId;
   if (!handoffId) return failClosed(env, state, "this work item has no Handoff to resolve.");
 
+  await startWorkStatus(env, state, HAT, workStatusHeader(HAT, state, "picking up a quote"), "Reading the Finance -> Sales Handoff");
   let handoff: NotionPage;
   try {
     handoff = await getPage(env, handoffId, workSessionContext(state));
@@ -831,8 +835,10 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     return failClosed(env, state, `Handoff ${handoffId} is not a Finance (${FINANCE_FROM_HAT}) → Sales Work Handoff; Runtime Proposal production only runs from one.`);
   }
 
+  await advanceWorkStatus(env, state, "Checking the Handoff's tokens, context and Finance judgment block");
   const entityToken = plainText(hp.Entity_Token).trim();
   const matterToken = plainText(hp.Matter_Token).trim();
+  if (state.workStatus && matterToken) state.workStatus.header = workStatusHeader(HAT, { matterToken, entityToken }, "picking up a quote");
   if (!TOKEN_PATTERN.test(entityToken) || !TOKEN_PATTERN.test(matterToken)) {
     return failClosed(env, state, "the Handoff's Entity_Token and/or Matter_Token is missing or not an opaque token.", { holdHandoffId: handoffId });
   }
@@ -849,6 +855,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   const parsed = parseFinanceJudgmentBlock(verifiedFacts);
   if ("error" in parsed) return failClosed(env, state, `missing or ambiguous: ${parsed.error}.`, { holdHandoffId: handoffId, tokens });
 
+  await advanceWorkStatus(env, state, "Looking for an existing Proposal for this Handoff");
   const existing = await findExistingProposal(env, state, handoffId, matterToken);
   if ("error" in existing) return failClosed(env, state, `Proposal identity: ${existing.error}`, { holdHandoffId: handoffId, tokens });
 
@@ -890,6 +897,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
       outcome: "Active",
     });
     if (sp.approvalStatus === "Approved") {
+      await finishWorkStatus(env, state, `✅ ${sp.proposalId} is already Approved -- nothing new was created.`, "succeeded");
       await sendWorkspaceHatMessage(env, { ...state, hat: HAT }, `${sp.proposalId} ${versionLabel(sp.currentVersion)} is already Approved (Artifact Status: ${sp.artifactStatus}). Nothing new was created.`);
       state.stage = "sales_proposal_approved";
       return state;
@@ -901,9 +909,11 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     return failClosed(env, state, `Handoff ${handoffId} is ${status || "in an unknown status"} and has no canonical Proposal; not producing one from a non-active Handoff.`);
   }
 
+  await advanceWorkStatus(env, state, "Checking the Strategy Proposal's token-safety attestation");
   const unverified = verifyStrategyProposalTokenSafety(state);
   if (unverified) return failClosed(env, state, `Strategy Proposal identity boundary: ${unverified}`, { holdHandoffId: handoffId, tokens });
 
+  await advanceWorkStatus(env, state, "Resolving the Proposal facts from the approved Strategy Proposal and the Finance quote");
   const resolved = await resolveFacts(env, state, handoff, tokens, parsed.quote);
   if ("missing" in resolved) {
     return failClosed(env, state, `required Proposal facts are missing: ${resolved.missing.join("; ")}.`, { holdHandoffId: handoffId, tokens });
@@ -911,6 +921,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   const facts = resolved.facts;
 
   // Pre-check the full composed content before anything is written.
+  await advanceWorkStatus(env, state, "Checking the composed Proposal is token-safe");
   if (!isTokenSafe(buildProposalContent(facts, { proposalId: "PENDING", version: 1, amendments: [] }), identity)) {
     return failClosed(env, state, "an identity-bearing value (a real name or contact detail) would enter the Runtime Proposal; nothing was written.", { holdHandoffId: handoffId, tokens });
   }
@@ -929,6 +940,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   // performed under the wrong operation.
   recordWorkAction(state, PROPOSAL_DRAFT_ACTION);
 
+  await advanceWorkStatus(env, state, "Creating the Proposal record and writing v1 to Notion");
   await updateHandoff(env, handoffId, { Status: select("Picked-up") }, workSessionContext(state), tokens);
 
   // Two-step create: the Proposal ID is only known once the record exists,
