@@ -10,7 +10,7 @@ import {
   executeResearch,
   resolveSelectedProtocols,
 } from "./executor";
-import { discoveryCronContext } from "../../access";
+import { AccessDeniedError, discoveryCronContext, workSessionReadContext } from "../../access";
 import type { Env } from "../../types";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
 import type { ResearchProtocolId } from "./protocols";
@@ -722,3 +722,47 @@ test("EXEC 22. No protocol creates a second execution mechanism -- no per-protoc
     assert.ok(!perProtocolEngine.test(source), `${file} must not export a per-protocol research engine -- a protocol is a descriptor, not a runtime`);
   }
 });
+
+test(
+  "EXEC 23. Access denial at the search egress propagates OUT of executeResearch as a typed AccessDeniedError -- the shared invocation boundary never converts it into a blocked/completed outcome or provider_failure, and no provider request leaves the runtime",
+  async (t) => {
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: string[] = [];
+    globalThis.fetch = (async (url: any) => {
+      fetchCalls.push(String(url));
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }) as typeof fetch;
+    t.after(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    // Tavily IS configured here on purpose: with no key the search would
+    // return provider_unavailable BEFORE Access runs -- the wrong outcome
+    // under test. Governance KV is seeded exactly as EXEC 15's full-pipeline
+    // run, so the pipeline executes all the way to the search egress
+    // (executeResearch's only use of `access`, at the gatherDimensionEvidence
+    // call) where the denial must surface.
+    const env: Env = { ...researchEnv(scriptedAi({})), TAVILY_API_KEY: "key" };
+
+    // The established denial mechanism, identical to access.test.ts's egress
+    // refusal: a Work that records no Action may read ENIG's own records but
+    // is deliberately NOT authorized to disclose a query to a third party.
+    await assert.rejects(
+      () => executeResearch(env, { question: QUESTION, context: "" }, workSessionReadContext("work-denied")),
+      (err: unknown) =>
+        err instanceof AccessDeniedError && /records no Action|outbound read/.test(String((err as Error).message)),
+      "the typed denial must reach the executeResearch caller -- never swallowed into a blocked ResearchOutcome, an empty-but-completed run, or a provider_failure",
+    );
+
+    // Distinguishability proof from this boundary's other results: any
+    // conversion of the denial into an ordinary SearchOutcome (success or
+    // provider_failure) would let the pipeline continue to synthesis and
+    // RESOLVE, failing assert.rejects above. And the denial happens before
+    // egress: the provider itself is never contacted.
+    assert.strictEqual(
+      fetchCalls.filter((url) => url.includes("api.tavily.com")).length,
+      0,
+      "no search-provider request may leave the runtime after Access denies the invocation",
+    );
+  },
+);
