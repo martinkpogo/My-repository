@@ -315,11 +315,21 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // succeeds without them):
     //   - google_docs.update_and_verify: rewriting an EXISTING Doc to the
     //     current Version (ensureProposalDoc's update path);
+    //   - google_docs.format_and_verify: the presentation-only pass over the
+    //     Doc this Proposal already has (applyProposalDocFormatting), reached
+    //     when a comment on that Doc asks only for formatting. It applies
+    //     THE canonical layout styling derived from this Proposal's own
+    //     Version data -- never from the comment -- changes no text, creates
+    //     no Version and touches no approval state. Under `proposal_approve`
+    //     it fails closed on the missing bound approval evidence, so a
+    //     formatting request arriving while approval is pending is refused
+    //     rather than silently styled (Martin's decision, 2026-10-09);
     //   - google_drive.ensure_folder: the dedicated Proposal-docs Drive
     //     folder the Doc is created into (ensureProposalDoc's folder step).
     tool_operations: [
       { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
+      { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", required: false },
       { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
     ],
     applicability: {
@@ -349,6 +359,7 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     tool_operations: [
       { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
+      { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", required: false },
       { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
     ],
     applicability: {
@@ -376,6 +387,7 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     tool_operations: [
       { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
+      { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", required: false },
       { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
     ],
     applicability: {
@@ -521,6 +533,7 @@ const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
     matter_redo_reason: sales.handleMatterRedoReason,
     entity_redo_reason: sales.handleEntityRedoReason,
     sales_proposal_revision: salesProposal.handleSalesProposalRevisionText,
+    proposal_doc_clarification: salesProposal.handleProposalDocClarificationText,
   },
   callbackHandlers: salesExecutiveCallbackHandlers,
 };

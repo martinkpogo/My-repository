@@ -78,6 +78,36 @@ async function markProcessed(env: Env, commentId: string): Promise<void> {
   });
 }
 
+/**
+ * The ONE "this comment is done" marker, shared by the poller and the
+ * Work's clarification resume so both paths agree: whatever route ends up
+ * handling a Proposal Doc comment, exactly one of them writes this before
+ * that route's mutation runs, which is what makes a duplicate poll or a
+ * resumed clarification unable to apply the same comment twice.
+ */
+export async function markProposalDocCommentProcessed(env: Env, commentId: string): Promise<void> {
+  await markProcessed(env, commentId);
+}
+
+/** "A clarification for this comment is already outstanding" -- asked once, never re-asked on every poll. */
+function clarificationKey(commentId: string): string {
+  return `google_comment_clarification_pending:${commentId}`;
+}
+
+export async function markProposalDocClarificationRequested(env: Env, commentId: string): Promise<void> {
+  await env.STATE_KV.put(clarificationKey(commentId), "1", { expirationTtl: COMMENT_PROCESSED_TTL_SECONDS });
+}
+
+/**
+ * True while a clarification for this comment is outstanding on its Work.
+ * The Work's own `state.awaiting` + `pendingProposalDocClarification` remain
+ * the authority on what happens next; this marker only keeps the poller from
+ * asking the same question again on every pass.
+ */
+export async function isProposalDocClarificationPending(env: Env, commentId: string): Promise<boolean> {
+  return Boolean(await env.STATE_KV.get(clarificationKey(commentId)));
+}
+
 export type CommentOutcome =
   | "already_processed"
   | "resolved_skip"
@@ -89,7 +119,11 @@ export type CommentOutcome =
   | "edit_not_authorized"
   | "change_requested"
   | "change_not_applied"
-  | "empty_comment";
+  | "empty_comment"
+  | "ambiguous_intent"
+  | "clarification_pending"
+  | "formatting_applied"
+  | "formatting_not_applied";
 
 interface ProcessCommentResult {
   handled: boolean;
@@ -100,13 +134,58 @@ interface ProcessCommentResult {
 /** Longest selected passage carried into a change request, so the request stays a sentence, not a paste. */
 const MAX_QUOTED_CHARS = 300;
 
+export type ProposalCommentIntent = "formatting" | "substantive" | "ambiguous";
+
 /**
- * A comment on a Proposal Doc becomes the Proposal's own "Request changes"
- * input for the Doc's exact version: the Work records it verbatim in the next
- * version and sends that to Martin for approval (tokenSafeProposal.ts). No AI
- * interprets the comment here, and the Doc is never edited. The comment is
- * marked processed BEFORE the Work is called, so a retry can never create the
- * same revision twice; if it fails, the reply says so and Martin comments again.
+ * Routing-only classification of a Proposal Doc comment (the approved
+ * three-way policy): "formatting" ONLY for unambiguous presentation-only
+ * requests that request no text change, "substantive" for any requested
+ * change to wording/text/terms/meaning (including a mixed request that also
+ * mentions formatting), "ambiguous" for anything unclear. The AI result is a
+ * routing signal alone -- it can never approve a Proposal, authorize a
+ * change, override a binding or bypass a gate -- and anything unexpected
+ * (classifier failure, null output, malformed output, an unrecognised
+ * label) fails closed to "ambiguous", never to a handler.
+ */
+export async function classifyProposalCommentIntent(env: Env, text: string): Promise<ProposalCommentIntent> {
+  let classified: { intent?: unknown } | null;
+  try {
+    classified = await generate<{ intent?: unknown }>(env, {
+      taskId: "action.google_doc_comment_intent",
+      mode: "json",
+      parts: {
+        persona:
+          'You classify ONE comment left on a Google Doc that is a faithful copy of a Proposal whose visible text is the exact source of truth. The Doc is never edited in place; your classification only routes the comment to the right handler. Return JSON {"intent": "..."}. "formatting" ONLY when the comment asks solely for presentation changes (layout, spacing, headings, bullets, fonts, colors, styling) and requests no change to any word, number, date, price, term, scope or meaning. "substantive" when the comment asks for ANY change to wording, text, content, numbers, dates, quantities, prices, terms, obligations, scope or meaning -- including a mixed request that also mentions formatting. "ambiguous" when the intent is unclear, or mixed without a clearly stated text change, or does not fit these rules. When in doubt, return "ambiguous"; never guess a text change into existence.',
+        situation: `Comment: "${text}"`,
+      },
+    });
+  } catch (err) {
+    console.error("classifyProposalCommentIntent: classifier threw", err);
+    return "ambiguous";
+  }
+  if (!classified || (classified.intent !== "formatting" && classified.intent !== "substantive" && classified.intent !== "ambiguous")) return "ambiguous";
+  return classified.intent;
+}
+
+/**
+ * A comment on a Proposal Doc is first CLASSIFIED (routing only, fail-closed
+ * ambiguous): a presentation-only request runs the Doc's formatting-only
+ * path (applyProposalDocFormatting -- the registered, governed
+ * `google_docs.format_and_verify` operation; styling only, no Version, no
+ * content change), anything requesting a text change becomes the Proposal's
+ * own "Request changes" input for the Doc's exact version: the Work records
+ * it verbatim in the next version and sends that to Martin for approval
+ * (tokenSafeProposal.ts), and an unclear request is ASKED ABOUT, with
+ * neither handler run. The Doc's text is never edited in place.
+ *
+ * The comment is marked processed immediately before whichever handler runs,
+ * so a retry can never create the same revision (or repeat the same
+ * formatting) twice; if a handler fails, the reply says so and Martin
+ * comments again. The one exception is the ambiguous case: no handler ran,
+ * so nothing may mark it processed -- the request is carried on its Work as
+ * an awaiting clarification (`state.awaiting`, resumed by Martin's Telegram
+ * reply) and stays recoverable. A later poll sees that clarification is
+ * outstanding and neither re-classifies nor re-asks.
  */
 async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
   const binding = doc.proposal!;
@@ -115,9 +194,72 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
     await markProcessed(env, comment.id);
     return { handled: false, outcome: "empty_comment" };
   }
+  // A clarification for this comment is already outstanding on its Work,
+  // where Martin's Telegram reply will resume it. Do not re-classify, do not
+  // ask the same question again, and above all do not mark it processed --
+  // that would close off the very request still waiting to be answered.
+  if (await isProposalDocClarificationPending(env, comment.id)) {
+    return { handled: false, outcome: "clarification_pending", detail: "awaiting Martin's clarification on Telegram" };
+  }
   const quoted = comment.quotedFileContent?.value?.trim();
   const text = quoted ? `Regarding "${quoted.slice(0, MAX_QUOTED_CHARS)}": ${body}` : body;
+
+  const intent = await classifyProposalCommentIntent(env, text);
+  if (intent === "ambiguous") {
+    // Neither mutation path may run. The request is recorded on its Work as
+    // an awaiting clarification -- the same continuation every other
+    // multi-turn flow uses -- and the comment is deliberately left
+    // unprocessed so it cannot be lost. If the Work cannot hold it, that is
+    // reported honestly and nothing is settled by guesswork.
+    const requested = await getSessionStub(env, binding.workId).requestProposalDocClarification({
+      proposalNumber: binding.proposalNumber,
+      version: binding.version,
+      commentId: comment.id,
+      documentId: doc.documentId,
+      text,
+    });
+    if (!requested.ok) {
+      // A transient ordering (another clarification is already outstanding)
+      // is left unprocessed so a later poll may retry it; a refusal that can
+      // never succeed for THIS comment is closed off honestly -- marked so it
+      // is not re-classified on every future poll, and answered in the thread.
+      if (requested.retryable) {
+        return { handled: false, outcome: "ambiguous_intent", detail: `clarification deferred: ${requested.detail}` };
+      }
+      await markProcessed(env, comment.id);
+      await replyToComment(token, doc.documentId, comment.id, `Nothing was changed -- ${requested.detail}`);
+      return { handled: true, outcome: "ambiguous_intent", detail: `clarification not recorded: ${requested.detail}` };
+    }
+    await markProposalDocClarificationRequested(env, comment.id);
+    await replyToComment(
+      token,
+      doc.documentId,
+      comment.id,
+      "I couldn't tell whether this is a presentation-only formatting request or a requested change to the Proposal's content. Nothing has been changed. Reply to me in Telegram, stating one of: (a) formatting only -- presentation changes, no text change; or (b) the exact content/text change you want.",
+    );
+    return { handled: true, outcome: "ambiguous_intent", detail: "clarification requested; the comment stays unprocessed until it is answered" };
+  }
+
   await markProcessed(env, comment.id);
+
+  if (intent === "formatting") {
+    const result = await getSessionStub(env, binding.workId).handleProposalDocFormatting({
+      proposalNumber: binding.proposalNumber,
+      version: binding.version,
+    });
+    if (result.kind === "formatted") {
+      await replyToComment(
+        token,
+        doc.documentId,
+        comment.id,
+        `Formatting applied -- the Doc's content is unchanged and no new version was created (this Doc stays at ${binding.proposalId} v${binding.version}).`,
+      );
+      await resolveComment(token, doc.documentId, comment.id);
+      return { handled: true, outcome: "formatting_applied", detail: `formatted ${binding.proposalId} v${binding.version}` };
+    }
+    await replyToComment(token, doc.documentId, comment.id, `Not applied -- ${result.detail}`);
+    return { handled: true, outcome: "formatting_not_applied", detail: `${result.kind}: ${result.detail}` };
+  }
 
   const result = await getSessionStub(env, binding.workId).handleProposalDocComment({
     proposalNumber: binding.proposalNumber,

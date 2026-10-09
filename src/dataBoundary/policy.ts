@@ -127,6 +127,11 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "lead.discovery_signal_evaluation": "public_sourced",
   "action.google_doc_intake": "business_sensitive",
   "action.google_doc_comment_edit": "business_sensitive",
+  // Same payload category as action.google_doc_comment_edit directly above:
+  // one Martin-authored comment on the Runtime's own token-safe Doc (no real
+  // identity anywhere in it). Classification only routes the comment to the
+  // formatting-only or substantive path; it decides nothing else.
+  "action.google_doc_comment_intent": "business_sensitive",
   "action.google_sheet_intake": "business_sensitive",
   "action.google_sheet_comment_edit": "business_sensitive",
   "lead.discovery_ondemand_intake": "business_sensitive",
@@ -595,6 +600,9 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "lead.discovery_ondemand_query_generation": "TOKEN_SAFE_RUNTIME",
   "action.google_doc_intake": "TOKEN_SAFE_RUNTIME",
   "action.google_doc_comment_edit": "TOKEN_SAFE_RUNTIME",
+  // Routing-signal classification over the exact same token-safe Runtime
+  // payload as action.google_doc_comment_edit above.
+  "action.google_doc_comment_intent": "TOKEN_SAFE_RUNTIME",
   "action.google_sheet_intake": "TOKEN_SAFE_RUNTIME",
   "action.google_sheet_comment_edit": "TOKEN_SAFE_RUNTIME",
   // Explicit, narrow, inspected exception -- see this map's own doc comment.

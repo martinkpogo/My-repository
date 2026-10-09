@@ -424,6 +424,25 @@ export class WorkSession extends DurableObject<Env> {
     return result ?? { kind: "refused", detail: "the Doc could not be formatted; Martin was notified." };
   }
 
+  /**
+   * Records that a comment on this Proposal's Doc could not be classified,
+   * and moves the Work onto `state.awaiting` for Martin's clarification of
+   * that exact comment. Runs inside `execute`, so the pending request and the
+   * awaiting state land in the same durable write as the rest of the Work --
+   * a crash cannot leave a half-recorded request behind. The comment itself
+   * is deliberately NOT marked processed here: it stays recoverable until a
+   * route actually handles it (see handleProposalDocClarificationText).
+   */
+  async requestProposalDocClarification(input: { proposalNumber: number; version: number; commentId: string; documentId: string; text: string }): Promise<salesProposal.ProposalDocClarificationResult> {
+    let result: salesProposal.ProposalDocClarificationResult | undefined;
+    await this.execute(async (state) => {
+      const requested = await salesProposal.requestProposalDocClarification(this.env, state, input);
+      result = requested.result;
+      return requested.state;
+    });
+    return result ?? { ok: false, detail: "the clarification could not be recorded; Martin was notified.", retryable: false };
+  }
+
   async handleCallback(action: string, value: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (action) {

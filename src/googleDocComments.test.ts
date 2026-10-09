@@ -440,10 +440,18 @@ test("a comment already marked processed is never re-executed on a later poll", 
 });
 
 // ---------------------------------------------------------------------------
-// Proposal-bound Docs: a comment is a change REQUEST for that exact version.
+// Proposal-bound Docs: a comment is first CLASSIFIED (routing only,
+// fail-closed ambiguous) -- presentation-only goes to the formatting-only
+// path, anything requesting a text change is a change REQUEST for that exact
+// version, unclear intent is held for clarification.
 // ---------------------------------------------------------------------------
 
-async function setUpProposalDoc(fakeEnv: Env, calls: any[], result: any) {
+async function setUpProposalDoc(
+  fakeEnv: Env,
+  calls: any[],
+  result: any,
+  opts: { intentResponse?: string; formattingCalls?: any[]; formattingResult?: any; clarificationCalls?: any[]; clarificationResult?: any } = {},
+) {
   await persistGoogleTokens(fakeEnv, { access_token: "tok-1", refresh_token: "refresh-1", expires_in: 3600 }, OWNER_EMAIL);
   await registerWatchedGoogleDoc(fakeEnv, {
     documentId: DOC_ID,
@@ -461,8 +469,32 @@ async function setUpProposalDoc(fakeEnv: Env, calls: any[], result: any) {
         calls.push(req);
         return result;
       },
+      handleProposalDocFormatting: async (req: any) => {
+        opts.formattingCalls?.push(req);
+        return opts.formattingResult ?? { kind: "formatted" };
+      },
+      // The clarified contract: an AMBIGUOUS comment is recorded on its Work
+      // as an awaiting clarification (resumed by Martin's Telegram reply)
+      // instead of being marked processed, so the request stays recoverable
+      // rather than being settled by guesswork or lost.
+      requestProposalDocClarification: async (req: any) => {
+        opts.clarificationCalls?.push(req);
+        return opts.clarificationResult ?? { ok: true };
+      },
     }),
   };
+  // The classifier runs BEFORE either handler: its persona carries
+  // "classify ONE comment" (in the system message) and its response is
+  // configurable per test -- default "substantive", the existing revision
+  // behavior. Any other AI prompt falls back to the understood-edit mock.
+  const fallback = defaultAiRun().run;
+  fakeEnv.AI = {
+    run: async (model: unknown, runOpts: any) => {
+      const prompt = (runOpts.messages ?? []).map((m: any) => m.content).join("\n");
+      if (prompt.includes("classify ONE comment")) return { response: opts.intentResponse ?? JSON.stringify({ intent: "substantive" }) };
+      return fallback(model, runOpts);
+    },
+  } as unknown as Ai;
 }
 
 test("a comment on a proposal-bound Doc requests a change for its version, replies, resolves, and never edits the Doc", async (t) => {
@@ -532,4 +564,218 @@ test("a change the Work refuses (stale version) is answered 'Not applied' and th
 
   assert.ok(reply.content.startsWith("Not applied -- this Doc is v1"));
   assert.strictEqual(resolved, false);
+});
+
+test("a presentation-only comment runs the formatting-only path: no revision, no Doc edit, and the reply says content unchanged and no new version", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const formattingCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "formatting" }), formattingCalls });
+  let reply: any = null;
+  let resolved: string | null = null;
+  let edited = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-f1", content: "Improve the formatting of this proposal", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: (id) => (resolved = id),
+    onBatchUpdate: () => ((edited = true), true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.deepStrictEqual(formattingCalls, [{ proposalNumber: 6, version: 1 }], "the formatting handler gets the Doc's exact binding");
+  assert.strictEqual(calls.length, 0, "a formatting-only request never enters the substantive revision path");
+  assert.strictEqual(edited, false, "the Doc's text is never edited in place");
+  assert.ok(reply.content.includes("content is unchanged") && reply.content.includes("no new version"), reply.content);
+  assert.strictEqual(resolved, "c-f1");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-f1"), "1");
+  assert.deepStrictEqual(
+    result.diagnostics.map((d: any) => d.outcome),
+    ["comments_fetched", "formatting_applied"],
+  );
+});
+
+test("a mixed-intent comment (formatting + a text change) is substantive: it never enters the formatting-only path", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const formattingCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "substantive" }), formattingCalls });
+  let reply: any = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-m1", content: "Improve the formatting and shorten the scope", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (reply = body),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(formattingCalls.length, 0, "a request containing a text change must never take the formatting-only path");
+  assert.strictEqual(calls.length, 1, "it takes the substantive revision path");
+  assert.ok(calls[0].text.includes("shorten the scope"), "the comment text still reaches the revision path verbatim");
+  assert.ok(reply.content.includes("PROP-6 v2"), reply.content);
+});
+
+test("an ambiguous comment is held for clarification: neither handler runs, nothing is created, the comment is answered once", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const formattingCalls: any[] = [];
+  const clarificationCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "ambiguous" }), formattingCalls, clarificationCalls });
+  let replies = 0;
+  let reply: any = null;
+  let resolved = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-a1", content: "Maybe improve it somehow?", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (replies++, (reply = body)),
+    onResolve: () => (resolved = true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+  const second = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(calls.length, 0, "the revision handler is never invoked");
+  assert.strictEqual(formattingCalls.length, 0, "the formatting handler is never invoked");
+  assert.ok(reply.content.includes("formatting only") && reply.content.includes("content/text change"), reply.content);
+  assert.strictEqual(resolved, false, "a held comment stays open for Martin's clarification");
+  assert.strictEqual(replies, 1, "the clarification is asked exactly once");
+  // The clarified contract: the request is recorded on its Work (with its
+  // exact bindings) instead of being marked processed, so it stays
+  // recoverable and Martin's Telegram reply resumes THIS request.
+  assert.strictEqual(clarificationCalls.length, 1, "the clarification is recorded on the Work exactly once");
+  assert.deepStrictEqual(clarificationCalls[0], {
+    proposalNumber: 6,
+    version: 1,
+    commentId: "c-a1",
+    documentId: DOC_ID,
+    text: "Maybe improve it somehow?",
+  });
+  assert.strictEqual(
+    await fakeEnv.STATE_KV.get("google_comment_processed:c-a1"),
+    null,
+    "a comment awaiting clarification is NOT marked processed -- marking it would close off the request still waiting to be answered",
+  );
+  assert.strictEqual(second.commentsProcessed, 0, "a duplicate delivery is skipped: the clarification is already outstanding on the Work");
+});
+
+test("classifier output that is malformed, unexpected or unparsable fails closed to ambiguous -- never to a handler", async (t) => {
+  for (const [idx, response] of ['{"intent":"banana"}', "this is not JSON at all", '{"intent":"FORMATTING"}'].entries()) {
+    const { fakeEnv } = createFakeEnv();
+    const calls: any[] = [];
+    const formattingCalls: any[] = [];
+    await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: response, formattingCalls });
+    let reply: any = null;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchWith({
+      comments: [{ id: `c-b${idx}`, content: "Improve the formatting", resolved: false, author: { me: true } }],
+      onReply: (_id, body) => (reply = body),
+    });
+    t.after(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    await pollGoogleDocComments(fakeEnv);
+
+    assert.strictEqual(calls.length, 0, `response ${response}: no revision`);
+    assert.strictEqual(formattingCalls.length, 0, `response ${response}: no formatting`);
+    assert.ok(reply.content.includes("couldn't tell"), `response ${response}: held for clarification, got: ${reply.content}`);
+  }
+});
+
+test("a formatting request the Work refuses is answered 'Not applied' and the comment stays unresolved", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const formattingCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+    intentResponse: JSON.stringify({ intent: "formatting" }),
+    formattingCalls,
+    formattingResult: { kind: "stale", detail: "this Doc is a copy of v1, but PROP-6 is now at v2. Comment on the current version's Doc." },
+  });
+  let reply: any = null;
+  let resolved = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-r1", content: "Make it look nicer", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: () => (resolved = true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(formattingCalls.length, 1);
+  assert.ok(reply.content.startsWith("Not applied -- this Doc is a copy of v1"), reply.content);
+  assert.strictEqual(resolved, false);
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "formatting_not_applied");
+});
+
+test("a clarification that can never be recorded is answered honestly and closed off, while one deferred behind another stays unprocessed and is retried", async () => {
+  // 1. The bindings no longer hold: nothing can ever route this comment, so
+  //    it is answered once and closed off rather than re-asked forever.
+  const never = createFakeEnv();
+  const neverCalls: any[] = [];
+  const neverClarifications: any[] = [];
+  await setUpProposalDoc(never.fakeEnv, neverCalls, { kind: "revised", newVersion: 2 }, {
+    intentResponse: JSON.stringify({ intent: "ambiguous" }),
+    clarificationCalls: neverClarifications,
+    clarificationResult: { ok: false, detail: "v1 is no longer the current Version of PROP-6, so no clarification was recorded.", retryable: false },
+  });
+  let neverReplies = 0;
+  let neverReply: any = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-a2", content: "Maybe improve it somehow?", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (neverReplies++, (neverReply = body)),
+  });
+  try {
+    await pollGoogleDocComments(never.fakeEnv);
+    const second = await pollGoogleDocComments(never.fakeEnv);
+
+    assert.strictEqual(neverReplies, 1, "the honest answer is sent exactly once");
+    assert.match(neverReply.content, /Nothing was changed/);
+    assert.match(neverReply.content, /no longer the current Version/, "the reason is reported, not swallowed");
+    assert.strictEqual(
+      await never.fakeEnv.STATE_KV.get("google_comment_processed:c-a2"),
+      "1",
+      "a comment that can never be clarified is closed off so it is not re-classified on every future poll",
+    );
+    assert.strictEqual(second.commentsProcessed, 0, "the closed-off comment is skipped on the next poll");
+    assert.strictEqual(neverClarifications.length, 1, "and its request is never re-recorded");
+
+    // 2. A deferred clarification (another one is already outstanding) stays
+    //    recoverable: not marked, not re-asked, and retried by a later poll.
+    globalThis.fetch = mockFetchWith({
+      comments: [{ id: "c-a3", content: "Maybe improve it somehow?", resolved: false, author: { me: true } }],
+      onReply: () => {
+        throw new Error("a deferred comment must not be asked about again on the same poll");
+      },
+    });
+    const deferredClarifications: any[] = [];
+    await setUpProposalDoc(never.fakeEnv, neverCalls, { kind: "revised", newVersion: 2 }, {
+      intentResponse: JSON.stringify({ intent: "ambiguous" }),
+      clarificationCalls: deferredClarifications,
+      clarificationResult: { ok: false, detail: "a clarification is already outstanding for another comment on PROP-6 v2; resolve that one first.", retryable: true },
+    });
+
+    await pollGoogleDocComments(never.fakeEnv);
+    assert.strictEqual(await never.fakeEnv.STATE_KV.get("google_comment_processed:c-a3"), null, "a deferred comment is never marked processed");
+    assert.strictEqual(deferredClarifications.length, 1);
+
+    await pollGoogleDocComments(never.fakeEnv);
+    assert.strictEqual(deferredClarifications.length, 2, "a later poll takes the deferred comment up again");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -1147,6 +1147,95 @@ export async function restyleGoogleDoc(
   return { ok: true };
 }
 
+/** One paragraph's ACTUAL styling, as the Docs API reports it. */
+export interface ObservedDocParagraph {
+  /** The named style the paragraph carries ("TITLE", "HEADING_1", "HEADING_2", "HEADING_3", "NORMAL_TEXT", ...). */
+  namedStyleType: string;
+  /** True when the paragraph carries a bullet. */
+  bulleted: boolean;
+  /** The paragraph's actual start indent, in points (0 when unset). */
+  indentStartPt: number;
+  /** The paragraph's own text, including its terminating newline. Needed to tell the body's required trailing empty paragraph from a real one. */
+  text: string;
+}
+
+/** One text run's ACTUAL inline styling, over its own Doc index range (1-based UTF-16 units, end exclusive). */
+export interface ObservedDocTextStyle {
+  start: number;
+  end: number;
+  bold: boolean;
+  strikethrough: boolean;
+  underline: boolean;
+}
+
+/**
+ * Reads a Doc's ACTUAL styling -- every body paragraph's named style, bullet
+ * and indent, plus every text run's bold / strikethrough / underline over its
+ * own index range -- together with the text those runs spell out, or null
+ * when the Doc cannot be read at all.
+ *
+ * This is what makes an interrupted FORMATTING attempt reconcilable: unlike
+ * a rewrite, a styling pass leaves the text untouched, so text alone can
+ * never show whether the styles were applied. Reconciliation reads them.
+ */
+export async function readGoogleDocStyling(
+  token: string,
+  documentId: string,
+): Promise<{ text: string; paragraphs: ObservedDocParagraph[]; runs: ObservedDocTextStyle[] } | null> {
+  try {
+    const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const doc = (await res.json()) as {
+      body?: {
+        content?: {
+          startIndex?: number;
+          paragraph?: {
+            namedStyleType?: string;
+            bullet?: unknown;
+            paragraphStyle?: { indentStart?: { magnitude?: number } };
+            elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean } } }[];
+          };
+        }[];
+      };
+    };
+    const paragraphs: ObservedDocParagraph[] = [];
+    const runs: ObservedDocTextStyle[] = [];
+    let text = "";
+    for (const structural of doc.body?.content ?? []) {
+      const paragraph = structural.paragraph;
+      if (!paragraph) continue;
+      let index = structural.startIndex ?? 0;
+      let paragraphText = "";
+      for (const element of paragraph.elements ?? []) {
+        const run = element.textRun;
+        const value = run?.content ?? "";
+        if (!value) continue;
+        runs.push({
+          start: index,
+          end: index + value.length,
+          bold: run?.textStyle?.bold === true,
+          strikethrough: run?.textStyle?.strikethrough === true,
+          underline: run?.textStyle?.underline === true,
+        });
+        text += value;
+        paragraphText += value;
+        index += value.length;
+      }
+      paragraphs.push({
+        namedStyleType: paragraph.namedStyleType ?? "",
+        bulleted: paragraph.bullet !== undefined && paragraph.bullet !== null,
+        indentStartPt: paragraph.paragraphStyle?.indentStart?.magnitude ?? 0,
+        text: paragraphText,
+      });
+    }
+    return { text, paragraphs, runs };
+  } catch {
+    return null;
+  }
+}
+
 export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc): Promise<void> {
   await env.STATE_KV.put(`google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
 }

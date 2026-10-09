@@ -174,7 +174,12 @@ test("registry build: an Action declaring a Tool operation that is not registere
 });
 
 test("registry build: the real registry's Tool declarations all resolve to registered operations, and its own Tool Registry is structurally sound", () => {
-  const registered = ["google_docs.create_and_verify", "google_docs.update_and_verify", "google_drive.ensure_folder"];
+  const registered = [
+    "google_docs.create_and_verify",
+    "google_docs.update_and_verify",
+    "google_docs.format_and_verify",
+    "google_drive.ensure_folder",
+  ];
   let declared = 0;
   for (const manifest of Object.values(getUnitManifests())) {
     for (const hat of Object.values(manifest.hats)) {
@@ -191,7 +196,7 @@ test("registry build: the real registry's Tool declarations all resolve to regis
       }
     }
   }
-  assert.strictEqual(declared, 9, `proposal_draft, proposal_submit and proposal_approve must each declare the three registered Google Workspace operations, got ${declared}`);
+  assert.strictEqual(declared, 12, `proposal_draft, proposal_submit and proposal_approve must each declare the four registered Google Workspace operations, got ${declared}`);
   // getUnitManifests() itself runs buildUnitRegistry over the real manifests;
   // reaching this line without a throw is the proof the real registry -- with
   // its Tool declarations and the Tool Registry integrity check -- assembles cleanly.

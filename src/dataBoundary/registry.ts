@@ -157,6 +157,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Given the exact text a Google Docs comment is anchored to and the comment's own instruction, determines the specific replacement text -- never which text to target (that comes from the comment's own anchor, not the AI), and never invents content beyond what the comment reasonably implies.",
   },
+  "action.google_doc_comment_intent": {
+    id: "action.google_doc_comment_intent",
+    name: "Proposal Doc Comment Intent Classification",
+    description:
+      "Routes one comment on a Runtime Proposal's own Google Doc -- presentation-only formatting vs a requested text/content change vs unclear (fail-closed ambiguous) -- as a routing signal only: it can never approve a Proposal, authorize a change, override a binding or bypass a gate, and any unexpected output fails closed to ambiguous.",
+  },
   "action.google_sheet_intake": {
     id: "action.google_sheet_intake",
     name: "Google Sheet Intake Classification & Parameter Extraction",

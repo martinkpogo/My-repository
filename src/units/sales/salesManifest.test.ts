@@ -234,12 +234,12 @@ test("salesManifest: Sales Executive's readHandler fails closed -- no read actio
   await assert.rejects(() => hat.readHandler(fakeEnv(), "new_enquiry", "text", NO_ACTION_SKILLS), /not a read action/);
 });
 
-test("salesManifest: Sales Executive's awaitingHandlers resumes the same five continuation states through the manifest", () => {
+test("salesManifest: Sales Executive's awaitingHandlers resumes the same six continuation states through the manifest", () => {
   const hat = salesManifest.hats["Sales Executive"];
   assert.deepStrictEqual(
     Object.keys(hat.awaitingHandlers).sort(),
-    ["call_notes", "entity_redo_reason", "intervention", "matter_redo_reason", "sales_proposal_revision"],
-    "exactly Sales Executive's five awaiting states must be registered",
+    ["call_notes", "entity_redo_reason", "intervention", "matter_redo_reason", "proposal_doc_clarification", "sales_proposal_revision"],
+    "exactly Sales Executive's six awaiting states must be registered",
   );
   // Identity assertions: the manifest entry IS the same function the old
   // handleTextReply switch case called -- same body, same arguments.
@@ -248,6 +248,7 @@ test("salesManifest: Sales Executive's awaitingHandlers resumes the same five co
   assert.strictEqual(hat.awaitingHandlers.matter_redo_reason, sales.handleMatterRedoReason);
   assert.strictEqual(hat.awaitingHandlers.entity_redo_reason, sales.handleEntityRedoReason);
   assert.strictEqual(hat.awaitingHandlers.sales_proposal_revision, salesProposal.handleSalesProposalRevisionText);
+  assert.strictEqual(hat.awaitingHandlers.proposal_doc_clarification, salesProposal.handleProposalDocClarificationText);
 });
 
 test("salesManifest: Sales Executive's entryHandler/dispatchSalesExecutiveHat genuinely delegates to salesExecutive.ts's handleIncomingEnquiry, which holds the enquiry at the Runtime identity boundary instead of extracting or matching identity", async (t) => {

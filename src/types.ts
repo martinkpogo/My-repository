@@ -409,6 +409,15 @@ export interface WorkState {
     | "finance_direct_request_context"
     | "sales_proposal_revision"
     /**
+     * Set when a comment on a Proposal's Google Doc could not be classified
+     * (ambiguous, mixed, malformed or failed classification): neither the
+     * formatting path nor the revision path may run, so the Work waits for
+     * Martin's Telegram reply, which re-classifies the SAME comment with his
+     * clarification and routes it exactly once. `pendingProposalDocClarification`
+     * carries the bindings (comment, document, Proposal, version, text).
+     */
+    | "proposal_doc_clarification"
+    /**
      * Set when a Business Development qualify_* action (any of the three
      * Hats' qualify_opportunity/qualify_partnership/qualify_growth_opportunity)
      * returns Held -- an "internal" consequence action pausing on missing
@@ -730,6 +739,18 @@ export interface WorkState {
    * version: a revision request for a superseded version is refused.
    */
   pendingSalesProposalRevision?: { proposalNumber: number; fromVersion: number };
+  /**
+   * Set when a comment on a Proposal's Google Doc could not be classified
+   * (ambiguous, mixed, malformed or failed classification) and Martin was
+   * asked which it was. Bound to that exact comment, document, Proposal and
+   * version, and to the comment's own text: the clarification continues the
+   * SAME request rather than starting an unrelated one, and the comment is
+   * NOT marked processed while this is outstanding, so a transient failure
+   * can never lose it. Cleared when the clarification resolves (the routed
+   * handler runs) or when the bindings no longer hold (answered honestly,
+   * never silently).
+   */
+  pendingProposalDocClarification?: { commentId: string; documentId: string; proposalNumber: number; version: number; text: string };
   /**
    * The result of the Sales-side source-boundary check performed when the
    * Sales -> Strategy Handoff was created (createHandoff already runs

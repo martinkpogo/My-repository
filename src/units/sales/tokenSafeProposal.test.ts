@@ -12,6 +12,8 @@ import {
   PROPOSAL_CALLBACK_ACTION,
   applyProposalDocComment,
   applyProposalDocFormatting,
+  requestProposalDocClarification,
+  handleProposalDocClarificationText,
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import { installStatePersistence } from "../../runtime/workPersistence";
@@ -1636,4 +1638,180 @@ test("Doc formatting 5. Repeating a formatting request is idempotent: same text,
   assert.strictEqual(calls.text(), docTextBefore, "a repeated delivery changes nothing about the Doc");
   assert.strictEqual(state.salesProposal!.currentVersion, 1, "no version is created by repeated formatting");
   assert.strictEqual(state.salesProposal!.versions.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Clarification continuity for a Doc comment the classifier cannot settle:
+// it is neither routed nor marked processed. It is carried on the Work as an
+// awaiting continuation (the same mechanism every other multi-turn flow
+// uses), resumed by Martin's Telegram reply, and then routed exactly once
+// through one of the two governed paths -- with the SAME comment, document,
+// Proposal and version bindings revalidated before anything runs.
+// ---------------------------------------------------------------------------
+
+/** The bindings every continuation below is recorded and revalidated against. */
+const CLARIFICATION = {
+  proposalNumber: 7,
+  version: 1,
+  commentId: "c-clar-1",
+  documentId: "doc-1",
+  text: "Maybe improve it somehow?",
+};
+
+/** An env.AI that answers ONLY the routing classifier's prompt -- any other AI call is a bug in the test. */
+function classifierAi(intent: "formatting" | "substantive" | "ambiguous") {
+  return {
+    run: async (_model: unknown, runOpts: any) => {
+      const prompt = (runOpts.messages ?? []).map((m: any) => m.content).join("\n");
+      if (prompt.includes("classify ONE comment")) return { response: JSON.stringify({ intent }) };
+      throw new Error(`unexpected AI call in a clarification test: ${prompt.slice(0, 120)}`);
+    },
+  };
+}
+
+/** Proposal at v1 with its Doc created and watched, plus a KV-backed env. */
+async function clarificationFixture(t: any, intent?: "formatting" | "substantive" | "ambiguous") {
+  const { world, state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const kv = kvWithGoogleAccount();
+  const env = fakeEnv({ STATE_KV: kv.kv });
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+  if (intent) (env as any).AI = classifierAi(intent);
+  return { world, state, calls, kv, env };
+}
+
+const batchUpdatesOn = (calls: { url: string }[]) => calls.filter((c) => c.url.includes(":batchUpdate")).length;
+
+test("Doc clarification 1. An unclassifiable comment is carried on the Work as awaiting, with its exact bindings, and Martin is asked on Telegram -- nothing is routed and nothing is created", async (t) => {
+  const { world, state, calls, env } = await clarificationFixture(t);
+  const versionsBefore = state.salesProposal!.versions.length;
+  const telegramBefore = world.telegram.length;
+  const stylingBefore = batchUpdatesOn(calls);
+
+  const { result } = await requestProposalDocClarification(env, state, CLARIFICATION);
+
+  assert.deepStrictEqual(result, { ok: true });
+  assert.strictEqual(state.awaiting, "proposal_doc_clarification", "the continuation uses the existing awaiting mechanism");
+  assert.strictEqual(state.stage, "awaiting_proposal_doc_clarification");
+  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "comment, document, Proposal, version and the comment's own text are all carried");
+  assert.strictEqual(world.telegram.length, telegramBefore + 1, "Martin is asked on Telegram, the channel that can actually be answered");
+  assert.match(world.telegram.at(-1)!.text, /formatting only/);
+  assert.match(world.telegram.at(-1)!.text, /new Version for your approval/);
+  assert.strictEqual(state.salesProposal!.versions.length, versionsBefore, "no Version is created by asking");
+  assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "no styling is applied by asking");
+});
+
+test("Doc clarification 2. The continuation is refused when its bindings do not hold -- a stale version, another Proposal, another Doc or a second outstanding comment are each answered, never re-pointed", async (t) => {
+  const { state, env } = await clarificationFixture(t);
+  // The Work moves to v2: the v1 continuation can no longer be recorded.
+  await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Add a second training session." });
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+
+  const stale = await requestProposalDocClarification(env, state, CLARIFICATION);
+  assert.strictEqual(stale.result.ok, false);
+  assert.match((stale.result as any).detail, /no longer the current Version/);
+  assert.strictEqual(state.pendingProposalDocClarification, undefined, "a superseded version's comment is never recorded as a live request");
+  assert.strictEqual(state.awaiting, undefined);
+
+  const wrongProposal = await requestProposalDocClarification(env, state, { ...CLARIFICATION, proposalNumber: 9 });
+  assert.strictEqual(wrongProposal.result.ok, false, "a comment for another Proposal is not recorded against this one");
+
+  const wrongDoc = await requestProposalDocClarification(env, state, { ...CLARIFICATION, version: 2, documentId: "doc-other" });
+  assert.strictEqual(wrongDoc.result.ok, false, "a comment on another document is not recorded against this Doc");
+
+  const recorded = await requestProposalDocClarification(env, state, { ...CLARIFICATION, version: 2 });
+  assert.strictEqual(recorded.result.ok, true);
+  const second = await requestProposalDocClarification(env, state, { ...CLARIFICATION, version: 2, commentId: "c-clar-2" });
+  assert.strictEqual(second.result.ok, false, "a second ambiguous comment is answered rather than queued");
+  assert.match((second.result as any).detail, /already outstanding for another comment/);
+  assert.strictEqual(state.pendingProposalDocClarification!.commentId, "c-clar-1", "the request Martin is already being asked about is never silently replaced");
+});
+
+test("Doc clarification 3. A clarification that resolves to formatting routes the SAME comment's request through the governed formatting pass: style-only, byte-identical text, no Version, comment closed out once", async (t) => {
+  const { world, state, calls, kv, env } = await clarificationFixture(t, "formatting");
+  await requestProposalDocClarification(env, state, CLARIFICATION);
+  const docTextBefore = calls.text();
+  const stylingBefore = batchUpdatesOn(calls);
+
+  await handleProposalDocClarificationText(env, state, "Formatting only -- just the headings.");
+
+  assert.ok(batchUpdatesOn(calls) > stylingBefore, "the routed request actually restyled the Doc");
+  const requests = calls.filter((c) => c.url.includes(":batchUpdate")).at(-1)!.body.requests;
+  assert.ok(requests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets), "the routed formatting pass is style-only: no insert, delete or replace");
+  assert.strictEqual(calls.text(), docTextBefore, "the Doc's text is byte-identical");
+  assert.strictEqual(state.salesProposal!.currentVersion, 1, "formatting never creates a Version");
+  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.awaiting, undefined, "the Work is no longer awaiting anything");
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "the comment is closed out exactly once, before the routed handler ran");
+  assert.match(world.telegram.at(-1)!.text, /restyled to the canonical layout/);
+});
+
+test("Doc clarification 4. A clarification that resolves to a text change routes the ORIGINAL comment through the ordinary revision path: v2 with the change verbatim, v1 untouched, comment closed out once", async (t) => {
+  const { state, calls, kv, env } = await clarificationFixture(t, "substantive");
+  const comment = { ...CLARIFICATION, text: 'Add a second session for "training".' };
+  await requestProposalDocClarification(env, state, comment);
+  const v1Content = state.salesProposal!.versions[0].content;
+  const stylingBefore = batchUpdatesOn(calls);
+
+  await handleProposalDocClarificationText(env, state, "Change the content as the comment says.");
+
+  assert.strictEqual(state.salesProposal!.currentVersion, 2, "the ordinary revision path ran");
+  assert.match(state.salesProposal!.versions[1].content, /Add a second session for/, "the ORIGINAL comment's text is recorded verbatim -- the clarification only chose the route");
+  assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "the approved-in-place v1 content is untouched");
+  assert.strictEqual(state.salesProposal!.approvedVersion, undefined, "a new Version still needs approval");
+  assert.ok(batchUpdatesOn(calls) > stylingBefore, "the revision path itself brings the watched Doc to v2 (as it always has) -- the clarification adds no Doc effect of its own");
+  assert.match(calls.text(), /Add a second session for/, "the Doc follows the revision path to v2, not a formatting pass of its own");
+  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.awaiting, undefined);
+  assert.strictEqual(kv.store.get(`google_comment_processed:${comment.commentId}`), "1", "the comment is closed out exactly once, before the revision ran");
+});
+
+test("Doc clarification 5. A clarification that is still ambiguous changes nothing: the Work keeps waiting, the SAME request stays carried, and the comment remains recoverable", async (t) => {
+  const { state, calls, kv, env } = await clarificationFixture(t, "ambiguous");
+  await requestProposalDocClarification(env, state, CLARIFICATION);
+  const stylingBefore = batchUpdatesOn(calls);
+
+  await handleProposalDocClarificationText(env, state, "Just, you know, make it better.");
+
+  assert.strictEqual(state.awaiting, "proposal_doc_clarification", "the Work keeps waiting for an answer");
+  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "the SAME request is still carried, unchanged");
+  assert.strictEqual(state.salesProposal!.currentVersion, 1, "no Version is created from an ambiguous request");
+  assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "no styling is applied to an ambiguous request");
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), undefined, "the comment is still unprocessed, so it cannot be lost");
+});
+
+test("Doc clarification 6. A clarification that arrives after the Version moved on is answered honestly and closed off -- never applied to the wrong Version, never re-asked forever", async (t) => {
+  const { world, state, calls, kv, env } = await clarificationFixture(t, "formatting");
+  await requestProposalDocClarification(env, state, CLARIFICATION);
+  // The Work reaches v2 before Martin answers.
+  await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Add a second training session." });
+  const stylingBefore = batchUpdatesOn(calls);
+
+  await handleProposalDocClarificationText(env, state, "Formatting only.");
+
+  assert.strictEqual(state.awaiting, undefined);
+  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.salesProposal!.currentVersion, 2, "nothing is routed for a superseded Version");
+  assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "and the superseded Doc is never restyled");
+  assert.match(world.telegram.at(-1)!.text, /Not applied/);
+  assert.match(world.telegram.at(-1)!.text, /now at v2/, "the honest answer says which Version is current");
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "a closed-off comment cannot be re-asked on every future poll");
+});
+
+test("Doc clarification 7. A resumed clarification is routed exactly once -- a duplicate delivery can never apply the same comment again", async (t) => {
+  const { state, calls, kv, env } = await clarificationFixture(t, "substantive");
+  await requestProposalDocClarification(env, state, CLARIFICATION);
+  const reply = "Add the second session the comment asks for.";
+
+  await handleProposalDocClarificationText(env, state, reply);
+  assert.strictEqual(state.salesProposal!.currentVersion, 2, "the first delivery routed the request");
+  const versionsAfterFirst = state.salesProposal!.versions.length;
+  const stylingAfterFirst = batchUpdatesOn(calls);
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1");
+
+  await handleProposalDocClarificationText(env, state, reply);
+
+  assert.strictEqual(state.salesProposal!.versions.length, versionsAfterFirst, "the same comment never creates a second Version");
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(batchUpdatesOn(calls), stylingAfterFirst, "and never restyles the Doc again");
 });
