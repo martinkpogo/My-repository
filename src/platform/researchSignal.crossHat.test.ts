@@ -5,7 +5,7 @@ import { salesManifest } from "../units/sales/salesManifest";
 import { evaluateCandidates } from "../units/sales/leadGenerationDiscovery";
 import { resolveSkill } from "./skillRegistry";
 import { resolveRecordedActionSkills } from "../runtime/actionSkills";
-import type { WebSearchResult } from "../runtime/research/webSearch";
+import type { SearchResult } from "../runtime/research/webSearch";
 import type { Env } from "../types";
 
 /**
@@ -113,7 +113,9 @@ test("research_signal: BD's discover_opportunity and Sales's evaluateCandidates 
     },
   } as any;
 
-  const results: WebSearchResult[] = [{ title: "Nova Inc positioning shift", url: "https://example.com/nova", snippet: "Nova expanded into a new market." }];
+  const results: SearchResult[] = [
+    { title: "Nova Inc positioning shift", url: "https://example.com/nova", snippet: "Nova expanded into a new market.", provider: "tavily", retrieved_at: "2026-10-09T00:00:00.000Z" },
+  ];
   await evaluateCandidates(salesEnv, results, await resolveRecordedActionSkills(salesManifest.hats["Lead Generation Specialist"], "discover_leads"));
 
   // 1. Both prompts contain the identical Skill content.

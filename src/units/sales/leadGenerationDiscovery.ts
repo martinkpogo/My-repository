@@ -1,6 +1,6 @@
 import type { Env, WorkState } from "../../types";
-import { isWebSearchConfigured, searchWeb } from "../../runtime/research/webSearch";
-import type { WebSearchResult } from "../../runtime/research/webSearch";
+import { executeSearch, isWebSearchConfigured } from "../../runtime/research/webSearch";
+import type { SearchResult } from "../../runtime/research/webSearch";
 import { createPage, richText, select, title } from "../../notion";
 import { generate } from "../../ai";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
@@ -8,6 +8,7 @@ import { logActivity } from "../../log";
 import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegram";
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
+import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { discoveryCronContext, workSessionContext, type AccessContext } from "../../access";
 
 /**
@@ -106,7 +107,7 @@ interface EvaluationBatchResponse {
  * mechanics and this action's own JSON output shape, neither of which
  * belongs in a Skill meant to stay reusable beyond this one Hat.
  */
-export async function evaluateCandidates(env: Env, results: WebSearchResult[], skills: ResolvedActionSkillSet): Promise<CandidateEvaluation[]> {
+export async function evaluateCandidates(env: Env, results: SearchResult[], skills: ResolvedActionSkillSet): Promise<CandidateEvaluation[]> {
   if (results.length === 0) return [];
 
   const governance = await getLeadDiscoveryGovernance(env);
@@ -118,7 +119,7 @@ export async function evaluateCandidates(env: Env, results: WebSearchResult[], s
   const skillContent = skills.get("research_signal").content;
 
   const candidatesText = results
-    .map((r, i) => `[${i}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${r.publishedDate ? `\nPublished: ${r.publishedDate}` : ""}`)
+    .map((r, i) => `[${i}] Title: ${r.title}\nURL: ${r.url}\nSnippet: ${r.snippet}${r.published_at ? `\nPublished: ${r.published_at}` : ""}`)
     .join("\n\n");
 
   const response = await generate<EvaluationBatchResponse>(env, {
@@ -159,10 +160,27 @@ interface DiscoveryRunSummary {
   screenedOut: number;
   skippedAsDuplicate: number;
   skippedAsInsufficient: number;
+  /**
+   * Queries whose search could not run this cycle (no provider
+   * configured) -- recorded so a digest can say "search was unavailable"
+   * instead of implying the searches came back empty.
+   */
+  searchUnavailable: number;
+  /** Queries whose search ran but failed (provider failure/invalid input) -- a failed search is never reported as "no results". */
+  searchFailed: number;
 }
 
 function emptyDiscoveryRunSummary(): DiscoveryRunSummary {
-  return { evaluated: 0, heldNoResearchPath: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 };
+  return {
+    evaluated: 0,
+    heldNoResearchPath: 0,
+    pendingApproval: 0,
+    screenedOut: 0,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
+  };
 }
 
 export interface PendingLeadOpportunity {
@@ -355,8 +373,28 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
  * owning Action will take it from here.
  */
 async function searchAndScreenForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext, skills: ResolvedActionSkillSet): Promise<void> {
-  const results = (await searchWeb(env, query, access)).slice(0, MAX_RESULTS_PER_QUERY);
-  if (results.length === 0) return;
+  // Defense in depth at the search edge, same as the research path: the
+  // queries are already generated from prompt-redacted inputs and the fixed
+  // DISCOVERY_QUERIES carry no identity, but an outbound disclosure re-check
+  // costs nothing (LOG-1068 security: identity_redaction_required_when_
+  // context_demands).
+  const outcome = await executeSearch(env, { query: redactIdentityTerms(query) }, access);
+
+  if (outcome.kind === "provider_unavailable") {
+    summary.searchUnavailable++;
+    return;
+  }
+  if (outcome.kind === "provider_failure" || outcome.kind === "invalid_input") {
+    // A failed search is recorded as a failed search -- never folded into
+    // "nothing found", which would misrepresent an unsearched query as an
+    // empty result.
+    summary.searchFailed++;
+    console.error(`Lead Discovery: search did not complete for a discovery query (${outcome.kind}: ${outcome.reason})`);
+    return;
+  }
+  if (outcome.kind === "success_no_results") return;
+
+  const results = outcome.results.slice(0, MAX_RESULTS_PER_QUERY);
 
   const evaluations = await evaluateCandidates(env, results, skills);
   for (let i = 0; i < results.length; i++) {
@@ -407,6 +445,9 @@ export async function runAutonomousLeadDiscovery(env: Env, skills: ResolvedActio
 
   if (!isWebSearchConfigured(env)) {
     console.error("Autonomous Lead Discovery: no web search provider configured -- nothing to do");
+    // Record the unavailability honestly: none of the queries were run, so
+    // the digest reports "search unavailable", not "searches found nothing".
+    summary.searchUnavailable = DISCOVERY_QUERIES.length;
     return summary;
   }
 
@@ -559,7 +600,7 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
       type: "Discovery",
       area: "Sales",
       activity: `Requested by Martin${focus ? ` -- focus: "${focus}"` : ""}. Queries: ${queries.map((q) => `"${q}"`).join(", ")}.`,
-      decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.`,
+      decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.${runSummary.searchUnavailable + runSummary.searchFailed > 0 ? ` Search did not complete for ${runSummary.searchUnavailable + runSummary.searchFailed} quer${runSummary.searchUnavailable + runSummary.searchFailed === 1 ? "y" : "ies"} (${runSummary.searchUnavailable} unavailable, ${runSummary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.` : ""}`,
       nextActions: runSummary.heldNoResearchPath > 0 ? "Candidates held: no owning Action exists yet for evidence-backed validation. No Lead is created without Martin's approval." : "No promising signal found this run.",
       outcome: "Active",
     });
@@ -611,16 +652,23 @@ export async function notifyDiscoveryRunSummary(env: Env, chatId: number, thread
 
   try {
     if (summary.evaluated === 0) {
+      const skippedSearches = summary.searchUnavailable + summary.searchFailed;
       const msgId = await sendOperationsHatMessage(
         env,
         target,
-        "Scheduled discovery run: no web search results to evaluate this cycle (search unconfigured, or nothing returned)."
+        skippedSearches > 0
+          ? `Scheduled discovery run: web search could not complete for ${skippedSearches} quer${skippedSearches === 1 ? "y" : "ies"} (${summary.searchUnavailable} unavailable, ${summary.searchFailed} failed) and nothing was evaluated. This is NOT evidence that no opportunities exist -- the search itself did not run successfully.`
+          : "Scheduled discovery run: searches completed but returned no results to evaluate this cycle.",
       );
       return msgId !== undefined;
     }
 
+    const searchNote =
+      summary.searchUnavailable + summary.searchFailed > 0
+        ? ` Search did not complete for ${summary.searchUnavailable + summary.searchFailed} quer${summary.searchUnavailable + summary.searchFailed === 1 ? "y" : "ies"} (${summary.searchUnavailable} unavailable, ${summary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.`
+        : "";
     const lines = [
-      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.heldNoResearchPath} held with no research path, ${summary.pendingApproval} opportunity finding(s) sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.`,
+      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.heldNoResearchPath} held with no research path, ${summary.pendingApproval} opportunity finding(s) sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.${searchNote}`,
     ];
     if (summary.pendingApproval > 0) {
       lines.push("", "No Lead is created until you approve each finding in the Workspace topic.");

@@ -85,11 +85,16 @@ export interface Env {
   NOTION_WEBHOOK_SECRET?: string;
 
   /**
-   * Tavily search API key, used only by the runtime's live web-search
-   * mechanism (src/runtime/research/webSearch.ts). Optional -- unset means
-   * research stays closed-book (reasons only over supplied context)
-   * rather than failing; never a required secret for the rest of the
-   * runtime.
+   * Tavily search API key -- the trusted runtime configuration for the
+   * ONE enabled provider behind the shared search Tool
+   * (src/runtime/research/webSearch.ts; canonical specification: ENIG HQ /
+   * 6. Tools > Search). Optional -- unset means every search invocation
+   * reports `provider_unavailable` (research stays closed-book over
+   * supplied context; lead discovery reports the unavailability honestly)
+   * rather than failing or silently returning empty results; never a
+   * required secret for the rest of the runtime. Provider selection is
+   * code-level trusted configuration: no caller, Hat, or Skill can choose
+   * a provider or supply credentials.
    */
   TAVILY_API_KEY?: string;
 
