@@ -72,10 +72,33 @@ async function fetchDocText(token: string, documentId: string): Promise<string |
   }
 }
 
+/**
+ * Thrown when a comment's REQUIRED persistence marker cannot be written
+ * (today: Cloudflare's per-day KV write quota). Both routes agree on what it
+ * means, because both write their marker BEFORE the effect it guards: a typed
+ * failure here means the effect never ran, the comment stays unprocessed, and
+ * a later retry may run it exactly once. It is never swallowed into a success
+ * and never left to surface as a generic handler failure.
+ */
+export class CommentMarkerPersistenceError extends Error {
+  readonly retryable = true;
+
+  constructor(commentId: string, cause: unknown) {
+    super(
+      `a required marker for comment ${commentId} could not be persisted (${cause instanceof Error ? cause.message : String(cause)}) -- nothing was changed and the comment remains unprocessed for a later retry`,
+    );
+    this.name = "CommentMarkerPersistenceError";
+  }
+}
+
 async function markProcessed(env: Env, commentId: string): Promise<void> {
-  await env.STATE_KV.put(`google_comment_processed:${commentId}`, "1", {
-    expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
-  });
+  try {
+    await env.STATE_KV.put(`google_comment_processed:${commentId}`, "1", {
+      expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
+    });
+  } catch (err) {
+    throw new CommentMarkerPersistenceError(commentId, err);
+  }
 }
 
 /**
@@ -95,7 +118,11 @@ function clarificationKey(commentId: string): string {
 }
 
 export async function markProposalDocClarificationRequested(env: Env, commentId: string): Promise<void> {
-  await env.STATE_KV.put(clarificationKey(commentId), "1", { expirationTtl: COMMENT_PROCESSED_TTL_SECONDS });
+  try {
+    await env.STATE_KV.put(clarificationKey(commentId), "1", { expirationTtl: COMMENT_PROCESSED_TTL_SECONDS });
+  } catch (err) {
+    throw new CommentMarkerPersistenceError(commentId, err);
+  }
 }
 
 /**
@@ -181,11 +208,16 @@ export async function classifyProposalCommentIntent(env: Env, text: string): Pro
  * The comment is marked processed immediately before whichever handler runs,
  * so a retry can never create the same revision (or repeat the same
  * formatting) twice; if a handler fails, the reply says so and Martin
- * comments again. The one exception is the ambiguous case: no handler ran,
- * so nothing may mark it processed -- the request is carried on its Work as
- * an awaiting clarification (`state.awaiting`, resumed by Martin's Telegram
- * reply) and stays recoverable. A later poll sees that clarification is
- * outstanding and neither re-classifies nor re-asks.
+ * comments again. If that marker itself cannot be persisted (a typed
+ * CommentMarkerPersistenceError, e.g. KV write quota), the flow stops before
+ * any handler runs: nothing is executed, nothing is claimed, the comment
+ * stays unprocessed, and the poll records a retryable
+ * `persistence_unavailable` outcome. The one exception is the ambiguous
+ * case: no handler ran, so nothing may mark it processed -- the request is
+ * carried on its Work as an awaiting clarification (`state.awaiting`,
+ * resumed by Martin's Telegram reply) and stays recoverable. A later poll
+ * sees that clarification is outstanding and neither re-classifies nor
+ * re-asks.
  */
 async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
   const binding = doc.proposal!;
@@ -415,7 +447,7 @@ export interface PollGoogleDocCommentsResult {
   diagnostics: {
     documentId: string;
     commentId: string | null;
-    outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "unhandled_exception";
+    outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception";
     detail?: string;
   }[];
 }
@@ -438,8 +470,12 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
   // /admin/last-google-doc-comment-poll to verify cron-job.org is really
   // hitting this on schedule (Cloudflare's basic Workers analytics doesn't
   // break requests down by path, so there's no other way to tell this
-  // endpoint's traffic apart from any other route's).
-  await env.STATE_KV.put("last_google_doc_comment_poll_run", new Date().toISOString());
+  // endpoint's traffic apart from any other route's). Diagnostics ONLY:
+  // best-effort, so a failed write (e.g. the per-day KV write quota) is
+  // logged and never blocks the poll itself from starting.
+  await env.STATE_KV.put("last_google_doc_comment_poll_run", new Date().toISOString()).catch((err) =>
+    console.error("pollGoogleDocComments: could not record the diagnostics timestamp (polling continues)", err),
+  );
 
   const docs = await listWatchedGoogleDocs(env);
   let commentsProcessed = 0;
@@ -474,6 +510,21 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
         diagnostics.push({ documentId: doc.documentId, commentId: comment.id, outcome: result.outcome, detail: result.detail });
         if (result.handled) commentsProcessed++;
       } catch (err) {
+        if (err instanceof CommentMarkerPersistenceError) {
+          // The marker this comment needed could not be written. Because
+          // every marker is written BEFORE the effect it guards, nothing
+          // was executed and nothing was claimed; the comment stays
+          // unprocessed and a later poll retries it. Recorded as its own
+          // truthful outcome instead of a generic handler failure.
+          console.error(`pollGoogleDocComments: persistence unavailable for comment ${comment.id} on ${doc.documentId}`, err);
+          diagnostics.push({
+            documentId: doc.documentId,
+            commentId: comment.id,
+            outcome: "persistence_unavailable",
+            detail: err.message,
+          });
+          continue;
+        }
         console.error(`pollGoogleDocComments: error processing comment ${comment.id} on ${doc.documentId}`, err);
         diagnostics.push({
           documentId: doc.documentId,

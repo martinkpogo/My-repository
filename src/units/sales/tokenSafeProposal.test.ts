@@ -1815,3 +1815,72 @@ test("Doc clarification 7. A resumed clarification is routed exactly once -- a d
   assert.strictEqual(state.salesProposal!.currentVersion, 2);
   assert.strictEqual(batchUpdatesOn(calls), stylingAfterFirst, "and never restyles the Doc again");
 });
+
+test("Doc clarification 8. A processed-marker write that fails (KV write quota) settles NOTHING: the Work keeps waiting, Martin is told the truth, and his retry completes the same request exactly once", async (t) => {
+  const { world, state, calls, kv, env } = await clarificationFixture(t, "substantive");
+  await requestProposalDocClarification(env, state, CLARIFICATION);
+  const reply = "Add the second session the comment asks for.";
+  const versionsBefore = state.salesProposal!.versions.length;
+  const stylingBefore = batchUpdatesOn(calls);
+  // Cloudflare's per-day KV write quota: the processed-marker cannot persist.
+  const originalPut = kv.kv.put;
+  kv.kv.put = async (key: string, value: string) => {
+    if (key === `google_comment_processed:${CLARIFICATION.commentId}`) throw new Error("KV put() limit exceeded for the day.");
+    return originalPut(key, value);
+  };
+
+  const returned = await handleProposalDocClarificationText(env, state, reply);
+
+  assert.strictEqual(returned, state, "the unchanged Work is returned -- nothing was settled");
+  assert.strictEqual(state.awaiting, "proposal_doc_clarification", "the continuation stays outstanding");
+  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "with the SAME comment, document, Proposal and version bindings");
+  assert.strictEqual(state.salesProposal!.versions.length, versionsBefore, "no Version was created from a comment whose marker did not persist");
+  assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "and no Doc effect ran");
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), undefined, "the comment stays unprocessed, so it cannot be lost");
+  assert.match(world.telegram.at(-1)!.text, /Storage write failure/, "Martin is told the truth, not a generic execution failure");
+  assert.match(world.telegram.at(-1)!.text, /still outstanding/, "and that his clarification is still owed");
+
+  // Writes recover: the SAME clarification now routes exactly once.
+  kv.kv.put = originalPut;
+  await handleProposalDocClarificationText(env, state, reply);
+
+  assert.strictEqual(state.salesProposal!.versions.length, versionsBefore + 1, "the retry completed the deferred request exactly once");
+  assert.match(state.salesProposal!.versions.at(-1)!.content, /Maybe improve it somehow/, "the ORIGINAL comment's text is what the retried request records verbatim -- the clarification only chose the route");
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "and closes the comment out");
+  assert.strictEqual(state.awaiting, undefined);
+  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+});
+
+test("Doc clarification 9. A stale continuation whose marker write fails is never half-closed: the Work keeps waiting, truthfully reported, and the later retry closes it off honestly", async (t) => {
+  const { world, state, calls, kv, env } = await clarificationFixture(t, "formatting");
+  await requestProposalDocClarification(env, state, CLARIFICATION);
+  // The Work reaches v2 before Martin answers: the v1 continuation is stale.
+  await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Add a second training session." });
+  const stylingBefore = batchUpdatesOn(calls);
+  const originalPut = kv.kv.put;
+  kv.kv.put = async (key: string, value: string) => {
+    if (key === `google_comment_processed:${CLARIFICATION.commentId}`) throw new Error("KV put() limit exceeded for the day.");
+    return originalPut(key, value);
+  };
+
+  await handleProposalDocClarificationText(env, state, "Formatting only.");
+
+  // NB: `awaiting` was already cleared by the v1->v2 revision itself (the
+  // new Version's approval request owns the flag), so the continuity signal
+  // that must survive a failed marker write is the carried request itself.
+  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "a failed marker write never half-closes the continuation");
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), undefined, "the comment is not closed off either");
+  assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "and the superseded Doc is never restyled");
+  assert.match(world.telegram.at(-1)!.text, /Storage write failure/, "the refusal is truthful, not a generic execution failure");
+
+  // Writes recover: the retry closes the stale continuation off honestly.
+  kv.kv.put = originalPut;
+  await handleProposalDocClarificationText(env, state, "Formatting only.");
+
+  assert.strictEqual(state.awaiting, undefined);
+  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "a closed-off comment cannot be re-asked on every future poll");
+  assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "still nothing routed for a superseded Version");
+  assert.match(world.telegram.at(-1)!.text, /Not applied/);
+  assert.match(world.telegram.at(-1)!.text, /now at v2/);
+});

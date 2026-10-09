@@ -779,3 +779,96 @@ test("a clarification that can never be recorded is answered honestly and closed
     globalThis.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------------------
+// KV write-quota resilience: the diagnostics timestamp is best-effort so it
+// can never block a poll, while the REQUIRED dedup/clarification markers stay
+// fail-closed -- a marker that cannot be written means the effect it guards
+// never runs, nothing is claimed, and a later poll retries the comment.
+// ---------------------------------------------------------------------------
+
+/** Makes STATE_KV.put reject for keys matching `failingPrefix`, everything else untouched. */
+function failKvWritesFor(fakeEnv: Env, failingPrefix: string) {
+  const kv = fakeEnv.STATE_KV as any;
+  const originalPut = kv.put.bind(kv);
+  kv.put = async (key: string, value: string, options?: any) => {
+    if (key.startsWith(failingPrefix)) throw new Error("KV put() limit exceeded for the day.");
+    return originalPut(key, value, options);
+  };
+}
+
+test("a failed diagnostics timestamp write never blocks the poll from starting", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+  failKvWritesFor(fakeEnv, "last_google_doc_comment_poll_run");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({ comments: [] });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(result.docsChecked, 1, "the poll ran past its diagnostics write and checked the watched doc");
+  assert.deepStrictEqual(
+    result.diagnostics.map((d: any) => d.outcome),
+    ["comments_fetched"],
+  );
+  assert.strictEqual(await fakeEnv.STATE_KV.get("last_google_doc_comment_poll_run"), null, "the timestamp was not recorded, and that is survivable");
+});
+
+test("when the dedup marker cannot be persisted, no handler runs, nothing is claimed, and the comment stays unprocessed for a retry", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const formattingCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "formatting" }), formattingCalls });
+  failKvWritesFor(fakeEnv, "google_comment_processed:");
+  let reply: any = null;
+  let resolved = false;
+  let edited = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-q1", content: "Improve the formatting of this proposal", resolved: false, author: { me: true } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: () => (resolved = true),
+    onBatchUpdate: () => ((edited = true), true),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(formattingCalls.length, 0, "the registered formatting handler never ran without its marker");
+  assert.strictEqual(calls.length, 0, "the substantive revision path never ran either");
+  assert.strictEqual(edited, false, "the Doc's text and styling are untouched");
+  assert.strictEqual(reply, null, "no success is claimed in the Doc thread");
+  assert.strictEqual(resolved, false, "the comment is not resolved");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-q1"), null, "the comment stays unprocessed, so nothing is lost");
+  assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-q1")?.outcome, "persistence_unavailable", "the failure is recorded as its own truthful outcome");
+});
+
+test("when the clarification marker cannot be persisted, the Doc thread is not told a clarification was requested, and the comment stays unprocessed", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const clarificationCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "ambiguous" }), clarificationCalls });
+  failKvWritesFor(fakeEnv, "google_comment_clarification_pending:");
+  let replies = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-q2", content: "Maybe improve it somehow?", resolved: false, author: { me: true } }],
+    onReply: () => (replies += 1),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(clarificationCalls.length, 1, "the Work was asked to carry the clarification");
+  assert.strictEqual(replies, 0, "the Doc thread is not told a clarification was requested when its marker did not persist");
+  assert.strictEqual(calls.length, 0, "and no handler is routed from an ambiguous comment");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-q2"), null, "the comment stays unprocessed, so nothing is lost");
+  assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-q2")?.outcome, "persistence_unavailable");
+});
