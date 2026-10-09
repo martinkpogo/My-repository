@@ -25,6 +25,8 @@ import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
+import { buildProposalDocLayout } from "../../proposalRedline";
+import { createGoogleDoc, rewriteGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
@@ -150,6 +152,14 @@ export interface RuntimeSalesProposal {
   /** Martin's directed changes, verbatim, each tagged with the version that introduced it. */
   amendments: { version: number; text: string }[];
   facts?: ProposalFacts;
+  /**
+   * The ONE Google Doc for this Proposal: the current version as clean text on
+   * top and a struck-through / added redline of each revision below
+   * (proposalRedline.ts). `version` is the version the Doc currently shows;
+   * a comment on it is a change REQUEST, never an edit. Rewritten in place on
+   * every revision -- never one Doc per version.
+   */
+  doc?: { documentId: string; url: string; accountIdentifier: string; version: number };
 }
 
 export function versionLabel(version: number): string {
@@ -661,7 +671,8 @@ function decisionButtons(sp: RuntimeSalesProposal, version: number, includeAppro
   const row: InlineButton[] = [];
   if (includeApprove) row.push({ text: `✅ Approve ${sp.proposalId} ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.a` });
   row.push({ text: `✏️ Request changes to ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.r` });
-  return [row];
+  if (sp.doc && sp.doc.version === version) return [row];
+  return [row, [{ text: `📄 Create Google Doc for ${v}`, callback_data: `${PROPOSAL_CALLBACK_ACTION}:__WORK__:${sp.proposalNumber}.${version}.g` }]];
 }
 
 function withWorkId(buttons: InlineButton[][], workId: string): InlineButton[][] {
@@ -672,24 +683,30 @@ function withWorkId(buttons: InlineButton[][], workId: string): InlineButton[][]
 async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesProposal): Promise<WorkState> {
   const record = sp.versions.find((v) => v.version === sp.currentVersion);
   if (!record) return failClosed(env, state, `content for ${sp.proposalId} ${versionLabel(sp.currentVersion)} is not available to present.`);
-  const header = [
-    "*Proposal approval request*",
-    `Proposal: ${sp.proposalId} · Version: ${versionLabel(sp.currentVersion)}`,
-    `Entity: ${sp.entityToken} · Matter: ${sp.matterToken} · Source Handoff: ${sp.handoffRef}`,
-    `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
-    `Record: ${sp.pageUrl}`,
-    ...(record.pageUrl ? [`Read this version: ${record.pageUrl}`] : []),
-  ].join("\n");
+  // Martin reads the Proposal in a Google Doc, never in Telegram: the Doc for
+  // this exact version is created here (token-safe content only) and the
+  // approval request carries its link. If the Doc can't be created the
+  // version's Notion page is the readable fallback, and the Create button
+  // retries -- the Proposal text is never written into the message.
+  const doc = await ensureProposalDoc(env, state, sp);
+  const readLine = doc.ok
+    ? `Read it here (comment on the Doc to request a change): ${doc.url}`
+    : `⚠️ The Google Doc could not be created (${doc.error}).${record.pageUrl ? ` Read this version in Notion instead: ${record.pageUrl}` : ""}`;
   const notes = sp.facts
     ? buildReviewNotes(sp.facts, { proposalId: sp.proposalId, version: sp.currentVersion, amendments: sp.amendments })
     : "Unavailable: the upstream facts this Proposal was built from are not on this work item.";
   const message = [
-    header,
-    `=== PROPOSAL ${sp.proposalId} ${versionLabel(sp.currentVersion)} (the content being approved) ===`,
-    record.content,
+    [
+      "*Proposal approval request*",
+      `Proposal: ${sp.proposalId} · Version: ${versionLabel(sp.currentVersion)}`,
+      `Entity: ${sp.entityToken} · Matter: ${sp.matterToken} · Source Handoff: ${sp.handoffRef}`,
+      `Approval Status: ${sp.approvalStatus} · Artifact Status: ${sp.artifactStatus}`,
+      `Record: ${sp.pageUrl}`,
+      readLine,
+    ].join("\n"),
     "=== INTERNAL REVIEW MATERIAL — not part of the Proposal, not stored in Proposal Content, not approved with it ===",
     notes,
-    `Approve exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}*? Approval applies to the Proposal content of this Version only.`,
+    `When you are happy with it, approve exactly *${sp.proposalId} ${versionLabel(sp.currentVersion)}* below. Approval applies to the Proposal content of this Version only.`,
   ].join("\n\n");
   const buttons = withWorkId(decisionButtons(sp, sp.currentVersion, true), state.workId);
   await finishWorkStatus(env, state, `✅ ${sp.proposalId} ${versionLabel(sp.currentVersion)} ready below -- awaiting your approval.`, "succeeded");
@@ -1078,13 +1095,17 @@ export async function handleSalesProposalDecision(
   state: WorkState,
   proposalNumber: number,
   version: number,
-  decision: "approve" | "revise",
+  decision: "approve" | "revise" | "doc",
 ): Promise<WorkState> {
   const sp = state.salesProposal;
   if (!sp) return staleDecision(env, state, "there is no Runtime Proposal on this work item.");
   if (sp.proposalNumber !== proposalNumber) {
     return staleDecision(env, state, `this decision is for Proposal #${proposalNumber}, not ${sp.proposalId}.`);
   }
+
+  // Not a decision: a request for a readable, commentable copy. It changes
+  // nothing about the Proposal, its approval state or its versions.
+  if (decision === "doc") return createProposalVersionDoc(env, state, sp, version);
 
   if (decision === "revise") {
     if (version !== sp.currentVersion) {
@@ -1228,6 +1249,151 @@ export async function handleSalesProposalDecision(
  * Proposal page body; the new Version is Pending Approval and not released to
  * artifact execution until Martin approves that exact Version.
  */
+const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
+
+/**
+ * Creates a Google Doc holding exactly the current version's token-safe
+ * content, in a folder this system keeps for them, on Martin's tap of the
+ * "Create Google Doc" button (that tap is the approval for this Doc). The
+ * Doc is registered for comment watching, bound to this exact Proposal
+ * version: a comment on it requests a change (applyProposalDocComment), it
+ * never edits the Doc in place. Real-identity documents are built by
+ * Isolated Sales from the approved version -- never here.
+ */
+type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
+
+/**
+ * Brings the Proposal's single Google Doc up to its current version: creates
+ * it the first time (in the dedicated folder, watched and bound to this
+ * Proposal), and on every later version rewrites the same Doc -- clean current
+ * text on top, a redline of each revision below (proposalRedline.ts). Never
+ * messages; callers report. Fails closed with the reason when no single
+ * authorized Google account exists or any Google step fails; a Doc that could
+ * not be brought up to date is NOT offered as the current version (its watch
+ * binding stays at the version it shows, so comments on it are refused as stale).
+ */
+async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal): Promise<EnsureDocResult> {
+  const version = sp.currentVersion;
+  if (sp.doc && sp.doc.version === version) return { ok: true, url: sp.doc.url };
+  const layout = buildProposalDocLayout(
+    sp.proposalId,
+    sp.versions.filter((v) => v.version <= version).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
+  );
+  const binding = { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version };
+
+  if (sp.doc) {
+    const rewritten = await rewriteGoogleDoc(env, sp.doc.accountIdentifier, sp.doc.documentId, layout);
+    if (!rewritten.ok) return { ok: false, error: `the Doc is still at ${versionLabel(sp.doc.version)}: ${rewritten.error}` };
+    await registerWatchedGoogleDoc(env, {
+      documentId: sp.doc.documentId,
+      accountIdentifier: sp.doc.accountIdentifier,
+      title: sp.proposalId,
+      chatId: state.chatId,
+      threadId: state.threadId,
+      createdAt: new Date().toISOString(),
+      proposal: binding,
+    });
+    sp.doc.version = version;
+    return { ok: true, url: sp.doc.url };
+  }
+
+  const accounts = await listAuthorizedGoogleAccounts(env);
+  if (accounts.length !== 1) {
+    return {
+      ok: false,
+      error:
+        accounts.length === 0
+          ? "no Google account is authorized for the Runtime"
+          : `${accounts.length} Google accounts are authorized and I won't guess which to use`,
+    };
+  }
+  const accountIdentifier = accounts[0];
+  const folder = await ensureGoogleFolder(env, accountIdentifier, PROPOSAL_DOCS_FOLDER_NAME, "google_proposal_docs_folder");
+  if (!folder.ok) return { ok: false, error: folder.error ?? "folder could not be created" };
+  const created = await createGoogleDoc(env, { type: "create_doc", title: sp.proposalId, content: layout.text, folderId: folder.folderId, accountIdentifier });
+  if (!created.ok || !created.documentId || !created.documentUrl) {
+    return { ok: false, error: `${created.stage ?? "unknown stage"}: ${created.error ?? "unknown error"}` };
+  }
+  // A first Doc is created at the current version, which may already have earlier versions (a Proposal revised before any Doc existed): style its redline.
+  if (layout.styles.some((r) => r.kind !== "heading")) {
+    const styled = await rewriteGoogleDoc(env, accountIdentifier, created.documentId, layout);
+    if (!styled.ok) return { ok: false, error: styled.error };
+  }
+  await registerWatchedGoogleDoc(env, {
+    documentId: created.documentId,
+    accountIdentifier,
+    title: sp.proposalId,
+    chatId: state.chatId,
+    threadId: state.threadId,
+    createdAt: new Date().toISOString(),
+    proposal: binding,
+  });
+  sp.doc = { documentId: created.documentId, url: created.documentUrl, accountIdentifier, version };
+  return { ok: true, url: created.documentUrl };
+}
+
+/** Retry path: the "Create Google Doc" button, shown only while the Doc is missing or behind the current version (updating it at presentation failed). */
+async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, version: number): Promise<WorkState> {
+  if (version !== sp.currentVersion) {
+    return staleDecision(env, state, `${versionLabel(version)} is not the current Version of ${sp.proposalId} (current: ${versionLabel(sp.currentVersion)}).`);
+  }
+  const say = (text: string) => sendWorkspaceHatMessage(env, { ...state, hat: HAT }, text);
+  const had = !!sp.doc && sp.doc.version === version;
+  const doc = await ensureProposalDoc(env, state, sp);
+  if (!doc.ok) {
+    await say(`Couldn't ${sp.doc ? "update" : "create"} the Google Doc: ${doc.error}. Nothing was changed.`);
+    return state;
+  }
+  await say(
+    had
+      ? `The Google Doc for ${sp.proposalId} ${versionLabel(version)} already exists: ${doc.url}`
+      : `📄 *Google Doc for ${sp.proposalId} ${versionLabel(version)}:* ${doc.url}\n\nSelect text and comment to request a change. A comment doesn't edit this Doc -- it creates the next version (${versionLabel(version + 1)}) and this same Doc is updated, with the changes struck through and added.`,
+  );
+  return state;
+}
+
+export type ProposalDocCommentResult =
+  | { kind: "revised"; newVersion: number }
+  | { kind: "stale"; detail: string }
+  | { kind: "refused"; detail: string };
+
+/**
+ * A comment on a Proposal Doc is Martin's change request for that exact
+ * version. It runs the SAME revision path as "Request changes" -- the change
+ * recorded verbatim in a new Version that needs a new approval -- so the Doc
+ * is never edited in place, v(N) is kept as it is, and the hashed Proposal
+ * Content stays the source of truth. Refused (nothing created) when the Doc's
+ * version is no longer the current one, or the Work is not Sales'.
+ */
+export async function applyProposalDocComment(
+  env: Env,
+  state: WorkState,
+  input: { proposalNumber: number; version: number; text: string },
+): Promise<{ state: WorkState; result: ProposalDocCommentResult }> {
+  const sp = state.salesProposal;
+  if (!sp || sp.proposalNumber !== input.proposalNumber) {
+    return { state, result: { kind: "stale", detail: "this Doc does not belong to the Proposal on this work item." } };
+  }
+  if (state.unit !== "Sales") {
+    return { state, result: { kind: "refused", detail: `this work item now belongs to ${state.unit ?? "another Unit"}, so it can't revise the Proposal.` } };
+  }
+  if (input.version !== sp.currentVersion) {
+    return {
+      state,
+      result: { kind: "stale", detail: `this Doc is a copy of ${versionLabel(input.version)}, but ${sp.proposalId} is now at ${versionLabel(sp.currentVersion)}. Comment on the current version's Doc.` },
+    };
+  }
+  state.blockedReason = undefined;
+  state.pendingSalesProposalRevision = { proposalNumber: sp.proposalNumber, fromVersion: input.version };
+  await handleSalesProposalRevisionText(env, state, input.text);
+  const after = state.salesProposal!;
+  if (after.currentVersion === input.version + 1) {
+    return { state, result: { kind: "revised", newVersion: after.currentVersion } };
+  }
+  state.pendingSalesProposalRevision = undefined;
+  return { state, result: { kind: "refused", detail: state.blockedReason ?? "the change was not applied." } };
+}
+
 export async function handleSalesProposalRevisionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
   const sp = state.salesProposal;
   const pending = state.pendingSalesProposalRevision;

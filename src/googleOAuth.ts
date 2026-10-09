@@ -989,6 +989,22 @@ export async function listAuthorizedGoogleAccounts(env: Env): Promise<string[]> 
   return accounts;
 }
 
+/**
+ * Binds a watched Doc to ONE version of a Runtime Sales Proposal. A comment
+ * on such a Doc is never an in-place edit: it is a change REQUEST routed to
+ * the Proposal's own revision path, which creates the next version (see
+ * googleDocComments.ts and tokenSafeProposal.ts's applyProposalDocComment).
+ */
+export interface WatchedDocProposalBinding {
+  /** The WorkSession that holds this Proposal. */
+  workId: string;
+  proposalNumber: number;
+  /** Display ID, e.g. "PROP-6". */
+  proposalId: string;
+  /** The version this Doc is a copy of. */
+  version: number;
+}
+
 export interface WatchedGoogleDoc {
   documentId: string;
   accountIdentifier: string;
@@ -996,6 +1012,7 @@ export interface WatchedGoogleDoc {
   chatId?: number;
   threadId?: number;
   createdAt: string;
+  proposal?: WatchedDocProposalBinding;
 }
 
 /**
@@ -1003,6 +1020,102 @@ export interface WatchedGoogleDoc {
  * googleDocComments.ts). Watching is opt-in-by-creation: only docs this
  * system itself created are watched, never arbitrary pre-existing files.
  */
+/**
+ * Returns the Drive folder id this system keeps documents of one kind in,
+ * creating the folder the first time and remembering it per account. The
+ * Runtime's `drive.file` scope covers files and folders this app creates.
+ */
+export async function ensureGoogleFolder(
+  env: Env,
+  accountIdentifier: string,
+  folderName: string,
+  kvKey: string,
+): Promise<{ ok: true; folderId: string } | { ok: false; error: string }> {
+  const key = `${kvKey}:${accountIdentifier}`;
+  const known = await env.STATE_KV.get(key);
+  if (known) return { ok: true, folderId: known };
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
+  let res: Response;
+  try {
+    res = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: folderName, mimeType: "application/vnd.google-apps.folder" }),
+    });
+  } catch {
+    return { ok: false, error: "Network error creating the Drive folder" };
+  }
+  if (!res.ok) return { ok: false, error: `Google Drive folder creation failed (HTTP ${res.status})` };
+  const data = (await res.json().catch(() => ({}))) as { id?: string };
+  if (!data.id) return { ok: false, error: "Google Drive folder creation returned no id" };
+  await env.STATE_KV.put(key, data.id);
+  return { ok: true, folderId: data.id };
+}
+
+/**
+ * Replaces the whole body of a Doc this system created with `layout.text` and
+ * applies its heading / struck-through / added styling, then reads the Doc
+ * back and confirms the text is exactly what was written. Used to bring a
+ * Proposal's single Doc up to its newest version.
+ */
+export async function rewriteGoogleDoc(
+  env: Env,
+  accountIdentifier: string,
+  documentId: string,
+  layout: { text: string; styles: { start: number; end: number; kind: "heading" | "del" | "add" }[] },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const docUrl = `https://docs.googleapis.com/v1/documents/${documentId}`;
+  const readBody = async (): Promise<{ text: string; endIndex: number } | null> => {
+    try {
+      const res = await fetch(docUrl, { headers });
+      if (!res.ok) return null;
+      const doc = (await res.json()) as { body?: { content?: { endIndex?: number; paragraph?: { elements?: { textRun?: { content?: string } }[] } }[] } };
+      const content = doc.body?.content ?? [];
+      const text = content.flatMap((c) => c.paragraph?.elements ?? []).map((e) => e.textRun?.content ?? "").join("");
+      return { text, endIndex: content.reduce((m, c) => Math.max(m, c.endIndex ?? 0), 1) };
+    } catch {
+      return null;
+    }
+  };
+  const before = await readBody();
+  if (!before) return { ok: false, error: "the Doc could not be read" };
+
+  const styleFor = {
+    heading: { textStyle: { bold: true }, fields: "bold" },
+    del: { textStyle: { strikethrough: true, foregroundColor: { color: { rgbColor: { red: 0.8, green: 0.1, blue: 0.1 } } } }, fields: "strikethrough,foregroundColor" },
+    add: { textStyle: { underline: true, foregroundColor: { color: { rgbColor: { red: 0.05, green: 0.5, blue: 0.2 } } } }, fields: "underline,foregroundColor" },
+  } as const;
+  const requests: unknown[] = [];
+  // The body always ends in a protected newline at endIndex-1; delete everything before it.
+  if (before.endIndex > 2) requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: before.endIndex - 1 } } });
+  requests.push({ insertText: { location: { index: 1 }, text: layout.text } });
+  // Clear any carried-over formatting, then style the marked ranges.
+  requests.push({
+    updateTextStyle: {
+      range: { startIndex: 1, endIndex: 1 + layout.text.length },
+      textStyle: { bold: false, strikethrough: false, underline: false },
+      fields: "bold,strikethrough,underline",
+    },
+  });
+  for (const r of layout.styles) {
+    requests.push({ updateTextStyle: { range: { startIndex: r.start, endIndex: r.end }, ...styleFor[r.kind] } });
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${docUrl}:batchUpdate`, { method: "POST", headers, body: JSON.stringify({ requests }) });
+  } catch {
+    return { ok: false, error: "network error rewriting the Doc" };
+  }
+  if (!res.ok) return { ok: false, error: `Google Docs rewrite failed (HTTP ${res.status})` };
+  const after = await readBody();
+  if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc did not read back as written" };
+  return { ok: true };
+}
+
 export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc): Promise<void> {
   await env.STATE_KV.put(`google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
 }
