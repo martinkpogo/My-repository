@@ -8,7 +8,7 @@ import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, r
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { generateResearchPlan } from "./researchPlan";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
-import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
+import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatFailedSearchesWarning, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
 import type { ResearchBlockCode, ResearchExecutionInput, ResearchOutcome, ResearchSynthesis } from "./types";
 
 /**
@@ -296,20 +296,24 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
   }
 
   // Evidence gathering executes the plan -- one search per dimension, not
-  // per protocol -- and degrades to empty results per dimension when no
-  // search provider is configured. Real fetched URLs/snippets become part
-  // of the supplied evidence below, so findUnverifiableSources naturally
-  // extends to verify against them.
+  // per protocol. Each dimension carries its own search outcome: an
+  // unconfigured or failing provider degrades to a FAILED search per
+  // dimension (reported as a search limitation), never to silent empty
+  // results. Real fetched URLs/snippets become part of the supplied
+  // evidence below, so findUnverifiableSources naturally extends to verify
+  // against them.
   const dimensionEvidence = await gatherDimensionEvidence(env, plan, access);
-  const { covered, uncovered } = assessDimensionCoverage(dimensionEvidence);
+  const { covered, uncovered, failed } = assessDimensionCoverage(dimensionEvidence);
   const webResultCount = covered.reduce((sum, d) => sum + d.results.length, 0);
   const webEvidence = formatDimensionEvidenceForContext(dimensionEvidence);
-  const uncoveredWarning = formatUncoveredDimensionsWarning(uncovered);
+  const uncoveredWarning = [formatUncoveredDimensionsWarning(uncovered), formatFailedSearchesWarning(failed)].filter(Boolean).join("\n\n");
 
   await progress(
     webResultCount > 0
       ? `Gathered ${webResultCount} source(s) across ${covered.length}/${plan.length} research dimension(s) -- synthesizing findings now...`
-      : "No live search results came back -- synthesizing from what's available now...",
+      : failed.length > 0
+        ? `Web search was unavailable or failed for ${failed.length}/${plan.length} research dimension(s) -- synthesizing from what's available now; this is a search limitation, not evidence that no information exists.`
+        : "No live search results came back -- synthesizing from what's available now...",
   );
 
   // Research execution boundary: the research-facing content receives only
@@ -317,8 +321,9 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
   // summary -- never the full governed page or the role/authority
   // governance) plus the relevance framing, the question, and whatever was
   // actually supplied (the caller's own context, any live web search
-  // results grouped by research dimension, and an explicit warning for
-  // dimensions that returned no evidence at all).
+  // results grouped by research dimension, and explicit warnings for
+  // dimensions that found no evidence and for dimensions whose search
+  // itself failed -- reported distinctly, never conflated).
   const suppliedEvidence = capSuppliedEvidence([input.context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 

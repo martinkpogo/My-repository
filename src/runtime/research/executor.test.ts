@@ -340,13 +340,23 @@ test("23. Regression -- the representative failed live request: a Ghana market/i
   // article case (the actual live failure) must never be treated as
   // adequate evidence for a market-growth dimension.
   const dimensionEvidence: DimensionEvidence[] = [
-    { ...plan[0], results: [] }, // no real market data found -- the actual live outcome
-    { ...plan[1], results: [] },
+    { ...plan[0], searchOutcome: "success_no_results", results: [] }, // no real market data found -- the actual live outcome
+    { ...plan[1], searchOutcome: "success_no_results", results: [] },
     {
       ...plan[2],
-      results: [{ title: "How to Do Competitor Analysis", url: "https://example.com/how-to", snippet: "A generic guide to competitor analysis methodology.", publishedDate: "2025-01-01" }],
+      searchOutcome: "success_with_results",
+      results: [
+        {
+          title: "How to Do Competitor Analysis",
+          url: "https://example.com/how-to",
+          snippet: "A generic guide to competitor analysis methodology.",
+          provider: "tavily",
+          retrieved_at: "2025-01-01T00:00:00.000Z",
+          published_at: "2025-01-01",
+        },
+      ],
     },
-    { ...plan[3], results: [] },
+    { ...plan[3], searchOutcome: "success_no_results", results: [] },
   ];
   const { covered, uncovered } = assessDimensionCoverage(dimensionEvidence);
   assert.strictEqual(uncovered.length, 3);

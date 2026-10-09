@@ -98,7 +98,109 @@ test("DISCOVERY_QUERIES targets observable business situations without presuppos
 
 test("runAutonomousLeadDiscovery does nothing when web search isn't configured -- never fabricates a run", async () => {
   const summary = await runAutonomousLeadDiscovery(fakeEnv(), await lgsSkills());
-  assert.deepStrictEqual(summary, { evaluated: 0, heldNoResearchPath: 0, pendingApproval: 0, screenedOut: 0, skippedAsDuplicate: 0, skippedAsInsufficient: 0 });
+  assert.deepStrictEqual(summary, {
+    evaluated: 0,
+    heldNoResearchPath: 0,
+    pendingApproval: 0,
+    screenedOut: 0,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+    searchUnavailable: DISCOVERY_QUERIES.length,
+    searchFailed: 0,
+  });
+});
+
+test("LGS: a provider failure during the run is recorded as a FAILED search, never as an empty result -- the digest says the search did not run", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  globalThis.fetch = (async () => {
+    throw new Error("Tavily 500");
+  }) as typeof fetch;
+
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key" }), await lgsSkills());
+  assert.strictEqual(summary.evaluated, 0, "a failed search must never produce evaluations");
+  assert.strictEqual(summary.searchFailed, DISCOVERY_QUERIES.length, "every failed query is recorded as failed, not as empty");
+  assert.strictEqual(summary.searchUnavailable, 0);
+
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      sentTexts.push(JSON.parse(init.body).text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ id: "activity-log-entry", properties: {} }), { status: 200 });
+  }) as typeof fetch;
+
+  const ok = await notifyDiscoveryRunSummary(fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" }), 1, undefined, summary);
+  assert.strictEqual(ok, true);
+  assert.strictEqual(sentTexts.length, 1);
+  assert.ok(sentTexts[0].includes("web search could not complete"), sentTexts[0]);
+  assert.ok(sentTexts[0].includes(`${DISCOVERY_QUERIES.length} failed`), sentTexts[0]);
+  assert.ok(sentTexts[0].includes("NOT evidence that no opportunities exist"), `a provider failure must never read as "no opportunities exist": ${sentTexts[0]}`);
+});
+
+test("notifyDiscoveryRunSummary distinguishes 'searches completed, nothing found' from 'search never ran'", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (_url: string, init: any) => {
+    sentTexts.push(JSON.parse(init.body).text);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" });
+  const emptySummary = {
+    evaluated: 0,
+    heldNoResearchPath: 0,
+    pendingApproval: 0,
+    screenedOut: 0,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
+  };
+
+  // Every query ran and the provider genuinely returned nothing.
+  await notifyDiscoveryRunSummary(env, 1, undefined, { ...emptySummary });
+  assert.ok(sentTexts[0].includes("searches completed but returned no results"), sentTexts[0]);
+  assert.ok(!sentTexts[0].includes("unavailable"), `a clean empty run must not claim unavailability: ${sentTexts[0]}`);
+
+  // The search itself could not run at all.
+  await notifyDiscoveryRunSummary(env, 1, undefined, { ...emptySummary, searchUnavailable: DISCOVERY_QUERIES.length });
+  assert.ok(sentTexts[1].includes("web search could not complete"), sentTexts[1]);
+  assert.ok(sentTexts[1].includes(`${DISCOVERY_QUERIES.length} unavailable`), sentTexts[1]);
+  assert.ok(sentTexts[1].includes("NOT evidence that no opportunities exist"), sentTexts[1]);
+});
+
+test("notifyDiscoveryRunSummary appends the search-failure note to a digest that did evaluate candidates", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (_url: string, init: any) => {
+    sentTexts.push(JSON.parse(init.body).text);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await notifyDiscoveryRunSummary(fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" }), 1, undefined, {
+    evaluated: 12,
+    heldNoResearchPath: 1,
+    pendingApproval: 0,
+    screenedOut: 11,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+    searchUnavailable: 1,
+    searchFailed: 2,
+  });
+  assert.ok(sentTexts[0].includes("12 candidate(s) evaluated"), sentTexts[0]);
+  assert.ok(sentTexts[0].includes("Search did not complete for 3 queries (1 unavailable, 2 failed)"), sentTexts[0]);
+  assert.ok(sentTexts[0].includes("absence of results from those is not evidence"), sentTexts[0]);
 });
 
 test("Test A: Candidate signal passes lightweight screening -> held; no Handoff and no Lead is created", async (t) => {
@@ -399,6 +501,8 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
     screenedOut: 9,
     skippedAsDuplicate: 1,
     skippedAsInsufficient: 1,
+    searchUnavailable: 0,
+    searchFailed: 0,
   });
 
   assert.strictEqual(success, true, "notifyDiscoveryRunSummary should return true when message succeeds");
@@ -425,6 +529,8 @@ test("notifyDiscoveryRunSummary catches Telegram errors gracefully without throw
     screenedOut: 4,
     skippedAsDuplicate: 0,
     skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
   });
 
   assert.strictEqual(success, false, "notifyDiscoveryRunSummary should return false when Telegram fetch throws");
@@ -463,6 +569,8 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
     screenedOut: 1,
     skippedAsDuplicate: 0,
     skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
   });
   assert.strictEqual(success1, false, "a rejected notification reports failure rather than throwing");
 
@@ -473,6 +581,8 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
     screenedOut: 1,
     skippedAsDuplicate: 0,
     skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
   });
   assert.strictEqual(success2, false);
 
@@ -904,6 +1014,7 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
   let ackText = "";
   let handoffsCreatedCount = 0;
   let leadsCreatedCount = 0;
+  const outboundQueries: string[] = [];
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
@@ -919,6 +1030,7 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
     }
     if (urlStr.includes("api.tavily.com")) {
+      outboundQueries.push(JSON.parse(init.body).query);
       return new Response(JSON.stringify({ results: [{ title: "Nova Inc positioning shift", url: "https://example.com/nova", content: "Nova expansion." }] }), { status: 200 });
     }
     if (urlStr.includes("leads-ds") && method === "POST" && urlStr.endsWith("/query")) {
@@ -937,7 +1049,9 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ isDiscoveryRequest: true, count: 2, focus: "positioning problem" }) } }] }), { status: 200 });
     }
     if (body.includes("distinct web search queries")) {
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ queries: ["positioning problem query one", "positioning problem query two"] }) } }] }), { status: 200 });
+      // Deliberately identity-bearing: the outbound search edge must redact
+      // these before they leave the runtime (LOG-1068 identity_redaction).
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ queries: ["positioning problem like ENIG has", "struggling brands Martin would notice"] }) } }] }), { status: 200 });
     }
     if (body.includes("evidence-threshold hard gate")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: PASS_EVALUATION } }] }), { status: 200 });
@@ -976,6 +1090,13 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
   assert.ok(!ackText.includes("Research & Intelligence"), "the acknowledgement must not promise routing to a retired Unit");
   assert.strictEqual(handoffsCreatedCount, 0, "promising signals are held; no Handoff is produced");
   assert.strictEqual(leadsCreatedCount, 0, "on-demand discovery must never create a Lead directly");
+  assert.strictEqual(outboundQueries.length, 2, "both generated queries must have been searched");
+  for (const query of outboundQueries) {
+    assert.ok(!/\bENIG\b/i.test(query), `identity must not leave the runtime in a search query: ${query}`);
+    assert.ok(!/\bMartin\b/i.test(query), `identity must not leave the runtime in a search query: ${query}`);
+  }
+  assert.ok(outboundQueries[0].includes("the business"), `the canonical redaction replacement must be applied: ${outboundQueries[0]}`);
+  assert.ok(outboundQueries[1].includes("the operator"), `the canonical redaction replacement must be applied: ${outboundQueries[1]}`);
 });
 
 test("LeadOpportunityDiscoveryCapability fails closed when search strategy generation is unavailable, without silently falling through", async (t) => {
