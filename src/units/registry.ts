@@ -1,5 +1,6 @@
 import type { Unit } from "../types";
 import { findCallbackHandler, validateHatManifest, type UnitManifest } from "./unitManifest";
+import { validateActionToolDeclarations, validateToolRegistry } from "../runtime/toolRegistry";
 import { businessDevelopmentManifest } from "./businessDevelopment/businessDevelopmentManifest";
 import { salesManifest } from "./sales/salesManifest";
 import { marketingManifest } from "./marketing/marketingManifest";
@@ -103,6 +104,12 @@ let manifestTable: Partial<Record<Unit, UnitManifest>> | undefined;
  */
 export function buildUnitRegistry(manifests: Partial<Record<Unit, UnitManifest>>): Partial<Record<Unit, UnitManifest>> {
   const defects: string[] = [];
+  // The Tool Registry itself must be structurally sound before any manifest
+  // declaration may point at it: a malformed, duplicate or misnamespaced
+  // registration fails HERE, at assembly, and never becomes resolvable on a
+  // live request.
+  const toolRegistryDefect = validateToolRegistry();
+  if (toolRegistryDefect) defects.push(`Tool Registry: ${toolRegistryDefect}`);
   // A callback prefix must be owned by EXACTLY ONE Unit. handleCallback
   // dispatches a button purely by looking that prefix up on the Work's own
   // Unit/Hat, which is what makes a stale button from before an ownership
@@ -116,6 +123,11 @@ export function buildUnitRegistry(manifests: Partial<Record<Unit, UnitManifest>>
     for (const [hatName, hat] of Object.entries(manifest.hats)) {
       const defect = validateHatManifest(hat);
       if (defect) defects.push(`Unit "${unit}", Hat "${hatName}": ${defect}`);
+      // Every Tool operation an Action DECLARES must resolve to an exact
+      // registered operation -- a declaration naming an unknown Tool or
+      // operation fails at assembly, before production requests are served.
+      const toolDeclarationDefect = validateActionToolDeclarations(hat.actions);
+      if (toolDeclarationDefect) defects.push(`Unit "${unit}", Hat "${hatName}": ${toolDeclarationDefect}`);
       for (const prefix of Object.keys(hat.callbackHandlers ?? {})) {
         const owner = prefixOwner[prefix];
         if (owner !== undefined && owner !== unit) {

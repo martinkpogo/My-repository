@@ -147,3 +147,49 @@ test("registry build: no prefix in the real registry crosses a Unit boundary -- 
   assert.strictEqual(ownerOf.get("sprop"), "Strategy");
   assert.strictEqual(ownerOf.get("salesprop"), "Sales");
 });
+
+test("registry build: an Action declaring a Tool operation that is not registered in the Tool Registry throws at build, naming the Unit, Hat, Action and operation", () => {
+  const withUndeclaredTool = withSalesExecutiveHat((hat) => ({
+    ...hat,
+    actions: hat.actions.map((action) =>
+      action.name === "proposal_submit"
+        ? { ...action, tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.frobnicate", required: false }] }
+        : action,
+    ),
+  }));
+
+  assert.throws(
+    () => buildUnitRegistry({ Sales: withUndeclaredTool }),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.ok(message.includes('Unit "Sales"'), `must name the Unit, got: ${message}`);
+      assert.ok(message.includes('"Sales Executive"'), `must name the Hat, got: ${message}`);
+      assert.ok(message.includes('"proposal_submit"'), `must name the Action, got: ${message}`);
+      assert.ok(message.includes("google_docs.frobnicate"), `must name the operation, got: ${message}`);
+      assert.ok(message.includes("not registered in the Tool Registry"), ` must state the invariant, got: ${message}`);
+      return true;
+    },
+    "a declaration naming an unregistered operation must fail at assembly, before production requests are served",
+  );
+});
+
+test("registry build: the real registry's Tool declarations all resolve to registered operations, and its own Tool Registry is structurally sound", () => {
+  let declared = 0;
+  for (const manifest of Object.values(getUnitManifests())) {
+    for (const hat of Object.values(manifest.hats)) {
+      for (const action of hat.actions) {
+        for (const declaration of action.tool_operations ?? []) {
+          declared += 1;
+          assert.strictEqual(declaration.tool_id, "google_docs", "the only registered Tool today is google_docs");
+          assert.strictEqual(declaration.operation_id, "google_docs.create_and_verify");
+          assert.strictEqual(declaration.required, false, "the review Doc is permitted, never required, for every declaring Proposal Action");
+        }
+      }
+    }
+  }
+  assert.ok(declared >= 3, `draft, submit and approve must declare the operation, got ${declared}`);
+  // getUnitManifests() itself runs buildUnitRegistry over the real manifests;
+  // reaching this line without a throw is the proof the real registry -- with
+  // its Tool declarations and the Tool Registry integrity check -- assembles cleanly.
+  assert.ok(Object.keys(getUnitManifests()).length >= 5);
+});

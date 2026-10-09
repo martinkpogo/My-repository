@@ -291,6 +291,27 @@ export interface ApprovalProof {
   targetDataSourceId: string;
   approvalToken: string;
   approvedAt: string;
+  /**
+   * The exact external Tool Operation this proof authorizes -- present
+   * exactly when it authorizes an EXTERNAL Tool mutation rather than a
+   * Notion write, in which case `targetDataSourceId` is the
+   * `EXTERNAL_TOOL_TARGET` marker (src/access.ts) and the external resource
+   * is bound here instead.
+   *
+   * The binding exists because a Notion data-source id must never stand in
+   * for an external target: a Notion-bound proof (no `toolOperation`) can
+   * therefore never authorize a Tool mutation, and a Tool-bound proof can
+   * never satisfy a Notion write, whose check still compares
+   * `targetDataSourceId` against the real governed source. Every field is
+   * compared by verifyExternalToolProof (src/access.ts); a proof either
+   * wholly authorizes this exact operation on this exact resource or it
+   * authorizes nothing.
+   */
+  toolOperation?: {
+    toolId: string;
+    operationId: string;
+    targetResourceId: string;
+  };
 }
 
 export interface WorkState {

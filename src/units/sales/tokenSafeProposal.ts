@@ -26,7 +26,8 @@ import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../.
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
-import { createGoogleDoc, rewriteGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { rewriteGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
@@ -1310,17 +1311,41 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
   const accountIdentifier = accounts[0];
   const folder = await ensureGoogleFolder(env, accountIdentifier, PROPOSAL_DOCS_FOLDER_NAME, "google_proposal_docs_folder");
   if (!folder.ok) return { ok: false, error: folder.error ?? "folder could not be created" };
-  const created = await createGoogleDoc(env, { type: "create_doc", title: sp.proposalId, content: layout.text, folderId: folder.folderId, accountIdentifier });
-  if (!created.ok || !created.documentId || !created.documentUrl) {
-    return { ok: false, error: `${created.stage ?? "unknown stage"}: ${created.error ?? "unknown error"}` };
+  // The Doc's CREATION runs through the shared Tool Registry's invocation
+  // boundary: exact registered operation (google_docs.create_and_verify),
+  // the Work's own resolved Action's declaration (proposal_draft /
+  // proposal_submit -- see salesManifest), Access's external-mutation
+  // decision, exact input validation, the trusted account/folder target,
+  // and the canonical five outcomes. Holding Google OAuth access was never
+  // authorization, and the boundary is what supplies it now. `title` and
+  // `content` are this Version's exact, token-safe layout text; nothing
+  // identity-bearing ever enters this Doc (Isolated Sales owns that).
+  const outcome = await invokeTool(
+    env,
+    {
+      tool_id: "google_docs",
+      operation_id: "google_docs.create_and_verify",
+      input: { title: sp.proposalId, content: layout.text, folder_id: folder.folderId, account_identifier: accountIdentifier },
+    },
+    workSessionContext(state),
+  );
+  if (outcome.state !== "succeeded" || !outcome.remote_resource?.document_id || !outcome.remote_resource.url) {
+    // Every non-success keeps its honest shape: `failed` names the stage,
+    // `partially_completed`/`unverified` preserve any remote id for
+    // reconciliation before any retry (no blind re-creation), and `denied`
+    // never made a request. Callers report; nothing here messages.
+    return { ok: false, error: outcome.reason ?? `${outcome.state}: no detail` };
   }
-  // A first Doc is created at the current version, which may already have earlier versions (a Proposal revised before any Doc existed): style its redline.
-  if (layout.styles.some((r) => r.kind !== "heading")) {
-    const styled = await rewriteGoogleDoc(env, accountIdentifier, created.documentId, layout);
-    if (!styled.ok) return { ok: false, error: styled.error };
-  }
+  const documentId = outcome.remote_resource.document_id;
+  const documentUrl = outcome.remote_resource.url;
+  // The canonical styling pass always runs, including on a v1 Doc -- no
+  // redline is required to trigger it: the title / section-heading / bullet
+  // layout comes from the content's own structure (buildProposalDocLayout),
+  // and the Doc must read back exactly as written before it is offered.
+  const styled = await rewriteGoogleDoc(env, accountIdentifier, documentId, layout);
+  if (!styled.ok) return { ok: false, error: styled.error };
   await registerWatchedGoogleDoc(env, {
-    documentId: created.documentId,
+    documentId,
     accountIdentifier,
     title: sp.proposalId,
     chatId: state.chatId,
@@ -1328,8 +1353,8 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
     createdAt: new Date().toISOString(),
     proposal: binding,
   });
-  sp.doc = { documentId: created.documentId, url: created.documentUrl, accountIdentifier, version };
-  return { ok: true, url: created.documentUrl };
+  sp.doc = { documentId, url: documentUrl, accountIdentifier, version };
+  return { ok: true, url: documentUrl };
 }
 
 /** Retry path: the "Create Google Doc" button, shown only while the Doc is missing or behind the current version (updating it at presentation failed). */
