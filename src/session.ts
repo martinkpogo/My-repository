@@ -7,6 +7,7 @@ import { handleMarketingIntake } from "./units/marketing/marketingManifest";
 import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
+import { installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
@@ -510,6 +511,21 @@ export class WorkSession extends DurableObject<Env> {
     // this true again, so a caller inspecting the returned state never
     // sees a stale signal left over from an earlier, unrelated call.
     state.pendingHandoffAutoCheck = false;
+    // Durable operation persistence for THIS Work and THIS call only (see
+    // src/runtime/workPersistence.ts): the Tool Registry persists its
+    // execution intent and outcome into `state.externalOperations` and
+    // flushes them straight to this Work's own DO storage, so the records
+    // survive even when the handler throws and `save` below never runs --
+    // which is exactly the interruption window recovery exists for. The flush
+    // writes ONLY those operation records over the last saved state; a thrown
+    // handler still rolls back its own partial state exactly as before.
+    const release = installWorkPersistence(
+      String(state.workId),
+      workStatePersistence(state, async () => {
+        const persisted = (await this.ctx.storage.get<WorkState>("state")) ?? state;
+        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations });
+      }),
+    );
     try {
       return await this.save(await fn(state));
     } catch (err) {
@@ -520,6 +536,8 @@ export class WorkSession extends DurableObject<Env> {
         `⚠️ WorkSession ${state.workId} (${state.unit ? `${state.unit}/${state.hat}` : "Standalone Capability"}) execution failed: ${detail.slice(0, 500)}`,
       ).catch((notifyErr) => console.error(`WorkSession ${state.workId} failure notification also failed`, notifyErr));
       return state;
+    } finally {
+      release();
     }
   }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 
-import type { Env, WorkState } from "../types";
+import type { Env, ExternalToolOperationRecord, WorkState } from "../types";
 import {
   AccessDeniedError,
   EXTERNAL_TOOL_TARGET,
@@ -13,6 +13,7 @@ import {
 } from "../access";
 import {
   invokeTool,
+  operationRecordKey,
   resolveToolOperation,
   validateActionToolDeclarations,
   validateOutcomeShape,
@@ -21,11 +22,16 @@ import {
   type ToolOperationDefinition,
 } from "./toolRegistry";
 import { GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, GOOGLE_DOCS_TOOL_ID } from "./tools/googleDocsTool";
+import { GOOGLE_DOCS_UPDATE_OPERATION_ID } from "./tools/googleDocsUpdateTool";
+import { GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, GOOGLE_DRIVE_TOOL_ID } from "./tools/googleDriveFolderTool";
+import { installStatePersistence } from "./workPersistence";
+import { buildProposalDocLayout } from "../proposalRedline";
 
 /**
  * The Tool Registry contract, proven at the invocation boundary:
  * registration and declarations, the external-mutation authorization model,
- * the five canonical Google Docs outcomes, and mandatory retry safety.
+ * the five canonical Google Docs outcomes, mandatory retry safety, and the
+ * durable recovery records (intent before the effect, outcome after).
  *
  * Every Google interaction here is a scripted fetch fake with call counters
  * -- no real Google document is ever created -- and every denial asserts
@@ -163,6 +169,35 @@ const submitContext = () => workSessionContext(toolState());
 
 const googleCalls = (calls: GoogleCall[]) => calls.filter((c) => c.url.includes("googleapis.com") && !c.url.includes("/oauth2/"));
 const driveCreates = (calls: GoogleCall[]) => googleCalls(calls).filter((c) => c.url.endsWith("/drive/v3/files") && c.method === "POST");
+
+// ---------------------------------------------------------------------------
+// Durable operation persistence -- the invocation boundary refuses any
+// external effect without an installed adapter, so every test starts with a
+// fresh one (its own empty record store, so no test inherits another's
+// persisted outcome) and releases it afterwards. `flushes` captures a
+// snapshot of the record set at every durable write, which is how a test
+// proves the INTENT landed before the effect and the OUTCOME right after.
+// ---------------------------------------------------------------------------
+
+let workRecords: Record<string, ExternalToolOperationRecord> = {};
+let flushes: Record<string, ExternalToolOperationRecord>[] = [];
+let releasePersistence: (() => void) | null = null;
+
+beforeEach(() => {
+  releasePersistence?.();
+  releasePersistence = null;
+  workRecords = {};
+  flushes = [];
+  const installed = installStatePersistence("work-tool-1", workRecords, async () => {
+    flushes.push({ ...workRecords });
+  });
+  releasePersistence = installed.release;
+});
+
+afterEach(() => {
+  releasePersistence?.();
+  releasePersistence = null;
+});
 
 // ---------------------------------------------------------------------------
 // Registry and declarations.
@@ -313,7 +348,7 @@ test("K. an Action that does not declare the operation is denied (undeclared Act
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
   const undeclaredContext = workSessionContext(toolState({ actionName: "new_enquiry" }));
-  await expectDenied(env, undeclaredContext, /does not declare Tool operation google_docs\.google_docs\.create_and_verify|does not declare Tool operation/, t);
+  await expectDenied(env, undeclaredContext, /does not declare Tool operation google_docs\.create_and_verify/, t);
 });
 
 test("L. a caller cannot substitute a different Action: an asserted-Action mismatch fails closed", async (t) => {
@@ -622,9 +657,11 @@ test("AA. only reconciliation that establishes NO remote effect (404) permits a 
   assert.equal(driveCreates(calls).length, 1, "one creation, and only after the read proved nothing exists");
 });
 
-test("AB. a prior uncertain outcome with no resource identifier refuses outright -- zero Google calls", async (t) => {
+test("AB. a prior uncertain outcome with no resource identifier is settled by the operation's own reconciliation search -- never a blind re-creation", async (t) => {
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
+  // The happy server throws on the reconciliation list read, which is the
+  // "remote state cannot be established" case.
   const { calls } = installGoogleFake(t, docServer());
   const outcome = await invokeTool(
     env,
@@ -633,8 +670,8 @@ test("AB. a prior uncertain outcome with no resource identifier refuses outright
   );
   assert.equal(outcome.state, "unverified");
   assert.equal(outcome.reconciliation_required, true);
-  assert.match(outcome.reason ?? "", /no resource identifier to reconcile/);
-  assert.equal(googleCalls(calls).length, 0, "nothing may run when the remote state cannot be established");
+  assert.match(outcome.reason ?? "", /no new creation may start/);
+  assert.equal(driveCreates(calls).length, 0, "nothing may run when the remote state cannot be established");
 });
 
 test("AC. a prior succeeded outcome is returned as-is -- the verified effect is never recreated", async (t) => {
@@ -750,4 +787,514 @@ test("AH. a resolution of an unregistered operation is null, not a partial or fu
   assert.equal(resolveToolOperation("google_docs", "create_and_verify"), null, "an un-namespaced operation id must not match");
   assert.equal(resolveToolOperation("Google_Docs", "google_docs.create_and_verify"), null, "ids are exact and case-sensitive");
   assert.equal(resolveToolOperation(undefined as any, undefined as any), null);
+});
+
+// ---------------------------------------------------------------------------
+// Durable recovery -- the intent is durable before the first effect, the
+// outcome after it, an interruption is reconciled against the provider, and a
+// concurrent duplicate never starts a second remote effect.
+// ---------------------------------------------------------------------------
+
+const createTarget = "gdrive:folder:folder-1";
+const createKey = operationRecordKey(GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, createTarget, VALID_INPUT);
+
+function seededRecord(overrides: Partial<ExternalToolOperationRecord> = {}): ExternalToolOperationRecord {
+  return {
+    work_id: "work-tool-1",
+    tool_id: GOOGLE_DOCS_TOOL_ID,
+    operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID,
+    version: "1.0",
+    target_resource_id: createTarget,
+    status: "in_progress",
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+test("AI. with no WorkSession persistence adapter installed for the Work, no effect may start -- the boundary fails closed instead of risking an unrecoverable mutation", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, docServer());
+  // This Work has no adapter (beforeEach installs one only for "work-tool-1"),
+  // exactly like a handler reached outside WorkSession.execute.
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    workSessionContext(toolState({ workId: "work-no-persistence" })),
+  );
+  assert.equal(outcome.state, "denied");
+  assert.match(outcome.reason ?? "", /durable operation persistence is not available/);
+  assert.equal(googleCalls(calls).length, 0, "an effect that could not be recovered must never be initiated");
+});
+
+test("AJ. the execution intent is durable BEFORE the first Google call and the terminal outcome immediately after it", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  let statusDuringEffect: string | undefined;
+  const server = docServer();
+  const { calls } = installGoogleFake(t, (call) => {
+    if (call.url.endsWith("/drive/v3/files") && call.method === "POST") {
+      statusDuringEffect = workRecords[createKey]?.status;
+    }
+    return server(call);
+  });
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded");
+  assert.equal(statusDuringEffect, "in_progress", "the intent must be durable before the first protected external effect");
+  assert.ok(flushes.length >= 2, `intent and outcome must each be flushed durably (got ${flushes.length} flushes)`);
+  assert.equal(flushes[0][createKey]?.status, "in_progress", "the first durable write is the intent, never the outcome");
+  const stored = workRecords[createKey];
+  assert.equal(stored?.status, "succeeded", "the terminal outcome is persisted over the same record");
+  assert.equal(stored?.outcome?.state, "succeeded");
+  assert.equal(stored?.outcome?.verified, true);
+  assert.equal(stored?.work_id, "work-tool-1");
+  assert.equal(stored?.target_resource_id, createTarget);
+  assert.equal(stored?.version, "1.0");
+  assert.equal(Object.keys(workRecords).length, 1, "one logical operation keeps exactly one durable record");
+  assert.equal(calls.filter((c) => c.url.includes("googleapis.com")).length > 0, true);
+});
+
+test("AK. an interruption (intent durable, outcome never written) is reconciled against Drive instead of repeated -- found with the content, recovered as a verified success with zero creations", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  workRecords[createKey] = seededRecord();
+  const { calls } = installGoogleFake(t, (call) => {
+    if (call.url.startsWith("https://www.googleapis.com/drive/v3/files?") && call.method === "GET") {
+      return json({ files: [{ id: "recovered-doc", name: VALID_INPUT.title }] });
+    }
+    if (call.url.includes("/documents/recovered-doc") && call.method === "GET") {
+      return json({ title: VALID_INPUT.title, body: { content: [{ paragraph: { elements: [{ textRun: { content: VALID_INPUT.content } }] } }] } });
+    }
+    return docServer()(call);
+  });
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded", `expected recovery, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.match(outcome.reason ?? "", /reconciled/);
+  assert.equal(outcome.remote_resource?.document_id, "recovered-doc");
+  assert.equal(driveCreates(calls).length, 0, "a recovered effect is never created again");
+  assert.equal(workRecords[createKey]?.status, "succeeded", "reconciliation settles the interrupted record");
+});
+
+test("AL. an interrupted attempt that reconciliation proves did NOT happen proceeds with exactly one fresh creation", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  workRecords[createKey] = seededRecord();
+  const server = docServer();
+  const { calls } = installGoogleFake(t, (call) => {
+    if (call.url.startsWith("https://www.googleapis.com/drive/v3/files?") && call.method === "GET") {
+      return json({ files: [] });
+    }
+    return server(call);
+  });
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded", `expected a fresh creation, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(driveCreates(calls).length, 1, "only confirmed absence permits a new creation");
+});
+
+test("AM. the Work's persisted record wins over the caller's remembered prior_outcome -- a stored verified success is returned with zero Google calls", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  workRecords[createKey] = seededRecord({
+    status: "succeeded",
+    outcome: {
+      state: "succeeded",
+      tool_id: GOOGLE_DOCS_TOOL_ID,
+      operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID,
+      verified: true,
+      remote_resource: { document_id: "doc-1" },
+    },
+  });
+  const { calls } = installGoogleFake(t, docServer());
+  const outcome = await invokeTool(
+    env,
+    {
+      tool_id: GOOGLE_DOCS_TOOL_ID,
+      operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID,
+      input: VALID_INPUT,
+      prior_outcome: priorUncertain("doc-1"),
+    },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded");
+  assert.equal(googleCalls(calls).length, 0, "the durable record is authoritative, so nothing remote is touched");
+});
+
+test("AN. a persisted record that does not match this invocation is refused -- Work, operation, target and contract version must all agree", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, docServer());
+  const mismatches: [string, Partial<ExternalToolOperationRecord>, RegExp][] = [
+    ["another Work's record", { work_id: "work-other" }, /belongs to Work work-other/],
+    ["a different operation", { operation_id: "google_docs.other_op" }, /is for operation google_docs\.other_op/],
+    ["a different target", { target_resource_id: "gdrive:folder:folder-2" }, /targets gdrive:folder:folder-2/],
+    ["an older contract version", { version: "0.9" }, /under operation version 0\.9/],
+  ];
+  for (const [label, overrides, pattern] of mismatches) {
+    workRecords[createKey] = seededRecord(overrides);
+    const outcome = await invokeTool(
+      env,
+      { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+      submitContext(),
+    );
+    assert.equal(outcome.state, "denied", `${label} must be refused`);
+    assert.match(outcome.reason ?? "", pattern, label);
+    delete workRecords[createKey];
+  }
+  assert.equal(googleCalls(calls).length, 0, "an incompatible record is refused before any external request");
+});
+
+test("AO. a concurrent duplicate attempt at the same operation in the same Work is refused before a second remote effect", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const server = docServer();
+  const { calls } = installGoogleFake(t, async (call) => {
+    if (call.url.endsWith("/drive/v3/files") && call.method === "POST") {
+      // Record the creation in the fake server's state, then hold the first
+      // attempt inside its remote call so both attempts are genuinely in
+      // flight at the same time.
+      const response = server(call);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      return response;
+    }
+    return server(call);
+  });
+  const request = { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT };
+  const [first, second] = await Promise.all([
+    invokeTool(env, request, submitContext()),
+    invokeTool(env, request, submitContext()),
+  ]);
+  const states = [first.state, second.state].sort();
+  assert.deepEqual(states, ["denied", "succeeded"], `one attempt must win and the other must be refused, got ${JSON.stringify([first, second])}`);
+  const deniedOutcome = first.state === "denied" ? first : second;
+  assert.match(deniedOutcome.reason ?? "", /already in progress/);
+  assert.equal(driveCreates(calls).length, 1, "exactly one remote effect may ever start");
+});
+
+test("AP. an execution intent that cannot be persisted fails closed -- the effect never starts", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const broken = installStatePersistence("work-tool-1", workRecords, async () => {
+    throw new Error("storage unavailable");
+  });
+  t.after(broken.release);
+  const { calls } = installGoogleFake(t, docServer());
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "failed");
+  assert.equal(outcome.stage, "persistence");
+  assert.match(outcome.reason ?? "", /refusing to start an external effect/);
+  assert.equal(googleCalls(calls).length, 0, "no effect may start when its intent cannot be recovered after an interruption");
+});
+
+// ---------------------------------------------------------------------------
+// The other registered operations -- exact input contracts, trusted targets,
+// the five outcomes, and their own operation-specific reconciliation.
+// ---------------------------------------------------------------------------
+
+const UPDATE_INPUT = {
+  document_id: "doc-1",
+  account_identifier: "martin@example.com",
+  proposal_id: "PROP-7",
+  versions: [{ version: 1, content: "Version one, exactly as Martin approved it." }],
+};
+
+const FOLDER_INPUT = {
+  account_identifier: "martin@example.com",
+  folder_name: "ENIG Proposals (token-safe)",
+  kv_key: "google_proposal_docs_folder",
+};
+
+const FOLDER_TARGET = `gdrive:folder:${FOLDER_INPUT.account_identifier}:${FOLDER_INPUT.folder_name}`;
+const UPDATE_TARGET = `gdrive:document:${UPDATE_INPUT.document_id}`;
+
+/** A Docs server for the UPDATE operation: pre-read, batchUpdate, read-back. */
+function updateServer() {
+  let text = "";
+  return (call: GoogleCall): Response => {
+    if (call.url.includes(":batchUpdate")) {
+      const insert = (call.body?.requests ?? []).find((request: any) => request.insertText);
+      text = insert?.insertText?.text ?? text;
+      return json({});
+    }
+    if (call.url.endsWith("/documents/doc-1") && call.method === "GET") {
+      return json({ body: { content: [{ endIndex: Math.max(text.length + 2, 3), paragraph: { elements: [{ textRun: { content: text } }] } }] } });
+    }
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  };
+}
+
+/** A Drive server for the folder operation: files.create + the verifying read. */
+function folderServer(name = FOLDER_INPUT.folder_name, folderId = "folder-1") {
+  return (call: GoogleCall): Response => {
+    if (call.url.endsWith("/drive/v3/files") && call.method === "POST") return json({ id: folderId });
+    if (call.url.includes(`/drive/v3/files/${folderId}`) && call.method === "GET") {
+      return json({ id: folderId, name, mimeType: "application/vnd.google-apps.folder", trashed: false });
+    }
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  };
+}
+
+test("AQ. all three registered Google Workspace operations resolve exactly -- id, contract version, effect, handlers and reconciliation", () => {
+  const create = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID);
+  const update = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID);
+  const folder = resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID);
+  for (const operation of [create, update, folder]) {
+    assert.ok(operation, "every declared operation must be exactly registered");
+    assert.equal(operation.version, "1.0");
+    assert.equal(operation.effect, "external_mutation");
+    assert.equal(typeof operation.validateInput, "function");
+    assert.equal(typeof operation.resolveTarget, "function");
+    assert.equal(typeof operation.run, "function");
+    assert.equal(typeof operation.reconcile, "function");
+  }
+  assert.equal(update!.operationId, "google_docs.update_and_verify");
+  assert.equal(folder!.toolId, "google_drive");
+  assert.equal(resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID), null, "operations never resolve across Tools");
+});
+
+test("AR. the update operation's input contract is exact -- unknown fields, an unusable document id and a malformed version list are all denied with zero Google calls", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, updateServer());
+  const cases: unknown[] = [
+    { ...UPDATE_INPUT, extra: "field" },
+    { ...UPDATE_INPUT, document_id: "https://docs.google.com/document/d/doc-1" },
+    { ...UPDATE_INPUT, document_id: "" },
+    { ...UPDATE_INPUT, proposal_id: "  " },
+    { ...UPDATE_INPUT, versions: [] },
+    { ...UPDATE_INPUT, versions: [{ version: 0, content: "x" }] },
+    { ...UPDATE_INPUT, versions: [{ version: 1.5, content: "x" }] },
+    { ...UPDATE_INPUT, versions: [{ version: 1, content: "   " }] },
+    { ...UPDATE_INPUT, versions: [{ version: 1, content: "x", note: "extra" }] },
+    "not an object",
+  ];
+  for (const input of cases) {
+    const outcome = await invokeTool(env, { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input }, submitContext());
+    assert.equal(outcome.state, "denied", `input ${JSON.stringify(input)} must be denied`);
+    assert.match(outcome.reason ?? "", /invalid input|target input is invalid/);
+  }
+  assert.equal(googleCalls(calls).length, 0, "invalid input must never reach Google");
+});
+
+test("AS. the update operation resolves its target from trusted state: an account this Worker is not authorized for is denied with zero Google calls", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, updateServer());
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: { ...UPDATE_INPUT, account_identifier: "attacker@example.com" } },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "denied");
+  assert.match(outcome.reason ?? "", /not one of the 1 account\(s\) this Worker is authorized for/);
+  assert.equal(googleCalls(calls).length, 0);
+});
+
+test("AT. a successful update writes the exact version content once and claims success only after the read-back verification", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, updateServer());
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: UPDATE_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded", `expected success, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(outcome.verified, true);
+  assert.equal(outcome.remote_resource?.document_id, "doc-1");
+  const urls = googleCalls(calls).map((call) => call.url);
+  assert.equal(urls.filter((url) => url.includes(":batchUpdate")).length, 1, "exactly one write");
+  assert.ok(urls.filter((url) => url.endsWith("/documents/doc-1")).length >= 2, "read before and after the write");
+  const key = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
+  assert.equal(workRecords[key]?.status, "succeeded", "the update's own durable record is persisted under its own target");
+});
+
+test("AU. an interrupted update is settled by reading THE document it targeted: content match recovers as verified success with no new write, differing content permits exactly one fresh write", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const key = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
+
+  // 1. Content already matches: recovered, never rewritten.
+  const desired = buildProposalDocLayout(UPDATE_INPUT.proposal_id, UPDATE_INPUT.versions).text;
+  workRecords[key] = seededRecord({ operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, target_resource_id: UPDATE_TARGET });
+  let writes = 0;
+  const matching = installGoogleFake(t, (call) => {
+    if (call.url.includes(":batchUpdate")) {
+      writes += 1;
+      return json({});
+    }
+    if (call.url.endsWith("/documents/doc-1")) {
+      return json({ body: { content: [{ endIndex: desired.length + 2, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
+    }
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  });
+  const recovered = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: UPDATE_INPUT },
+    submitContext(),
+  );
+  assert.equal(recovered.state, "succeeded", `expected recovery, got ${recovered.state}: ${recovered.reason ?? ""}`);
+  assert.match(recovered.reason ?? "", /reconciled/);
+  assert.equal(writes, 0, "a document that already holds the content is never rewritten");
+  assert.equal(matching.calls.length > 0, true);
+  assert.equal(workRecords[key]?.status, "succeeded");
+
+  // 2. Content differs: the requested effect is absent, so one fresh write runs.
+  delete workRecords[key];
+  workRecords[key] = seededRecord({ operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, target_resource_id: UPDATE_TARGET });
+  installGoogleFake(t, updateServer());
+  const fresh = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: UPDATE_INPUT },
+    submitContext(),
+  );
+  assert.equal(fresh.state, "succeeded", `expected a fresh write, got ${fresh.state}: ${fresh.reason ?? ""}`);
+  assert.equal(workRecords[key]?.status, "succeeded");
+});
+
+test("AV0. a verified success recorded for ONE requested content never suppresses a DIFFERENT requested content for the same document -- each requested remote state is its own logical operation", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const firstKey = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
+  workRecords[firstKey] = seededRecord({
+    operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID,
+    target_resource_id: UPDATE_TARGET,
+    status: "succeeded",
+    outcome: {
+      state: "succeeded",
+      tool_id: GOOGLE_DOCS_TOOL_ID,
+      operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID,
+      verified: true,
+      remote_resource: { document_id: "doc-1" },
+    },
+  });
+  const revised = { ...UPDATE_INPUT, versions: [{ version: 2, content: "Version two, revised with Martin's change." }] };
+  const secondKey = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, revised);
+  assert.notEqual(secondKey, firstKey, "different requested content is a different logical operation");
+
+  const server = updateServer();
+  let writes = 0;
+  installGoogleFake(t, (call) => {
+    if (call.url.includes(":batchUpdate")) writes += 1;
+    return server(call);
+  });
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: revised },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded", `expected the revised write, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(writes, 1, "a record for v1 must never stand in for the v2 write");
+  assert.equal(workRecords[secondKey]?.status, "succeeded", "the revised operation keeps its own durable record");
+});
+
+test("AV. the folder operation creates one folder and claims success only after the Drive read confirms it", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, folderServer());
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, input: FOLDER_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded", `expected success, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(outcome.verified, true);
+  assert.equal(outcome.remote_resource?.document_id, "folder-1");
+  assert.equal(driveCreates(calls).length, 1, "exactly one folder creation");
+  assert.ok(googleCalls(calls).some((call) => call.url.includes("/drive/v3/files/folder-1") && call.method === "GET"), "success is claimed only after the verifying read");
+  const key = operationRecordKey(GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, FOLDER_TARGET, FOLDER_INPUT);
+  assert.equal(workRecords[key]?.status, "succeeded");
+});
+
+test("AW. a cached folder id is still read-verified on Drive before success is claimed -- the cache is never authorization", async (t) => {
+  const { store, kv } = kvWithGoogleAccounts();
+  store.set(`${FOLDER_INPUT.kv_key}:${FOLDER_INPUT.account_identifier}`, "folder-9");
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, folderServer(FOLDER_INPUT.folder_name, "folder-9"));
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, input: FOLDER_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "succeeded", `expected success, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(driveCreates(calls).length, 0, "the cached id is reused, not recreated");
+  assert.ok(googleCalls(calls).some((call) => call.url.includes("/drive/v3/files/folder-9") && call.method === "GET"), "the cached id must still be verified");
+});
+
+test("AX. a folder id that does not read back as the requested folder is unverified -- never reported as a success", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, folderServer("Some other folder", "folder-1"));
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, input: FOLDER_INPUT },
+    submitContext(),
+  );
+  assert.equal(outcome.state, "unverified");
+  assert.equal(outcome.reconciliation_required, true);
+  assert.match(outcome.reason ?? "", /did not read back as the requested folder/);
+});
+
+test("AY. the folder operation's input contract is exact and its reconciliation lists by name: found recovers as verified success, absent permits a fresh attempt", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, folderServer());
+  for (const input of [
+    { ...FOLDER_INPUT, kv_key: "Not A Key" },
+    { ...FOLDER_INPUT, folder_name: "   " },
+    { ...FOLDER_INPUT, folder_name: "bad\u0000name" },
+    { ...FOLDER_INPUT, folder_name: "x".repeat(101) },
+    { ...FOLDER_INPUT, unexpected: true },
+  ]) {
+    const outcome = await invokeTool(env, { tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, input }, submitContext());
+    assert.equal(outcome.state, "denied", `input ${JSON.stringify(input)} must be denied`);
+    assert.match(outcome.reason ?? "", /invalid input|target input is invalid/);
+  }
+  assert.equal(googleCalls(calls).length, 0);
+
+  // Interruption: the folder with this name already exists -> recovered.
+  const key = operationRecordKey(GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, FOLDER_TARGET, FOLDER_INPUT);
+  workRecords[key] = seededRecord({ tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, target_resource_id: FOLDER_TARGET });
+  let creates = 0;
+  installGoogleFake(t, (call) => {
+    if (call.url.endsWith("/drive/v3/files") && call.method === "POST") {
+      creates += 1;
+      return json({ id: "folder-1" });
+    }
+    if (call.url.startsWith("https://www.googleapis.com/drive/v3/files?")) {
+      return json({ files: [{ id: "folder-1", name: FOLDER_INPUT.folder_name }] });
+    }
+    if (call.url.includes("/drive/v3/files/folder-1")) {
+      return json({ id: "folder-1", name: FOLDER_INPUT.folder_name, mimeType: "application/vnd.google-apps.folder", trashed: false });
+    }
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  });
+  const recovered = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, input: FOLDER_INPUT },
+    submitContext(),
+  );
+  assert.equal(recovered.state, "succeeded", `expected recovery, got ${recovered.state}: ${recovered.reason ?? ""}`);
+  assert.match(recovered.reason ?? "", /reconciled/);
+  assert.equal(creates, 0, "an existing folder is recovered, never created again");
+  assert.equal(
+    await env.STATE_KV.get(`${FOLDER_INPUT.kv_key}:${FOLDER_INPUT.account_identifier}`),
+    "folder-1",
+    "the recovered folder id is memoized into ENIG's own cache so the next ensure reuses it",
+  );
 });

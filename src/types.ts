@@ -314,6 +314,49 @@ export interface ApprovalProof {
   };
 }
 
+/**
+ * THE durable record of one external Tool operation this Work has initiated
+ * (ENIG Operating Model: Work owns the persisted execution state; Tool
+ * Registry durable-recovery contract, src/runtime/toolRegistry.ts).
+ *
+ * Why a record instead of an argument: `ToolInvocationRequest.prior_outcome`
+ * is a function argument -- it survives a retry within one call chain, but a
+ * process interruption between the remote provider accepting a mutation and
+ * ENIG persisting its result destroys it. This record closes that window: it
+ * is written to the Work's own Durable Object storage (WorkState below, one
+ * WorkSession per Work) BEFORE the first protected external effect, and
+ * updated with the verified outcome -- or the honest failure/uncertainty
+ * state -- immediately after. On resumption the invocation boundary reads it
+ * back and reconciles an uncertain operation before anything may run again.
+ *
+ * `status: "in_progress"` means exactly "the intent is durable; no outcome
+ * has been" -- the interruption window itself. It is never a success, never
+ * a failure, and never a licence to retry: the boundary reconciles it
+ * against the provider first.
+ *
+ * The record never carries the operation input, document content, OAuth
+ * tokens or any credential -- only operation identity, the trusted target,
+ * the outcome and the remote resource id needed for reconciliation.
+ */
+export interface ExternalToolOperationRecord {
+  /** The Work that owns this operation -- always the WorkState it is stored on. */
+  work_id: string;
+  tool_id: string;
+  operation_id: string;
+  /** The operation contract version this attempt ran under; a mismatch on resumption fails closed. */
+  version: string;
+  /** The trusted resolved target the attempt was authorized against (src/runtime/toolRegistry.ts resolveTarget). */
+  target_resource_id: string;
+  /** `in_progress` (intent persisted, outcome not yet) or one of the canonical terminal outcome states. */
+  status: "in_progress" | import("./runtime/toolRegistry").ToolOutcomeState;
+  /** The persisted outcome, present exactly when `status` is terminal. */
+  outcome?: import("./runtime/toolRegistry").ToolInvocationOutcome;
+  /** The remote resource, when one is known -- carried so a later attempt reconciles instead of duplicating. */
+  remote_resource?: { document_id?: string; url?: string };
+  /** When this record was last written. */
+  updatedAt: string;
+}
+
 export interface WorkState {
   workId: string;
   chatId: number;
@@ -468,6 +511,23 @@ export interface WorkState {
   candidateEntities?: { id: string; name: string }[];
   candidateMatters?: { id: string; name: string }[];
   blockedReason?: string;
+
+  /**
+   * Durable records of the external Tool operations this Work has initiated
+   * (src/runtime/toolRegistry.ts's durable-recovery contract), keyed by
+   * `<operation_id>|<target_resource_id>` -- the stable operation identity
+   * for this Work. Written to the Work's own Durable Object storage in two
+   * places only: an `in_progress` intent BEFORE the first protected external
+   * effect, and the terminal outcome immediately after. On resumption the
+   * invocation boundary reads this back, so an interrupted operation is
+   * reconciled against the provider (or held unverified) and never blindly
+   * retried, and a verified success is returned as-is instead of repeated.
+   *
+   * Deliberately free of input, document content, tokens and credentials --
+   * see ExternalToolOperationRecord. Absent until this Work performs its
+   * first external operation.
+   */
+  externalOperations?: Record<string, ExternalToolOperationRecord>;
 
   /**
    * A proposed new Matter's drafted title + stated need, shown to Martin

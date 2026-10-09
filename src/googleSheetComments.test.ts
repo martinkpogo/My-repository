@@ -145,7 +145,7 @@ test("pollGoogleSheetComments does nothing when no sheets are watched", async ()
   assert.strictEqual(result.commentsProcessed, 0);
 });
 
-test("applies a comment-anchored cell edit from the sheet's own authorized account, replies, and resolves it", async (t) => {
+test("refuses a comment-anchored cell edit from the sheet's own authorized account -- no authorization path exists, so nothing is written and the refusal is reported", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
 
@@ -190,13 +190,17 @@ test("applies a comment-anchored cell edit from the sheet's own authorized accou
   const result = await pollGoogleSheetComments(fakeEnv);
 
   assert.strictEqual(result.sheetsChecked, 1);
-  assert.strictEqual(result.commentsProcessed, 1);
+  assert.strictEqual(result.commentsProcessed, 1, "the comment is handled -- marked processed so the same request is never re-attempted on every poll");
   assert.strictEqual(repliedCommentId, "comment-1");
-  assert.ok(repliedBody.content.includes("Published"));
-  assert.strictEqual(resolvedCommentId, "comment-1");
-  // "Planned" is at row index 1, col index 2 -> C2
-  assert.strictEqual(updatedRange, "C2");
-  assert.deepStrictEqual(updatedBody.values, [["Published"]]);
+  assert.ok(
+    repliedBody.content.includes("not an authorized operation"),
+    `the refusal must state the missing authorization honestly, got: ${repliedBody?.content}`,
+  );
+  assert.ok(repliedBody.content.includes("nothing in this spreadsheet was changed"), "the refusal must state that nothing changed");
+  assert.strictEqual(resolvedCommentId, null, "an edit that was not applied is never resolved");
+  assert.strictEqual(updatedRange, null, "no cell may be written outside the governed external-effect boundary");
+  assert.strictEqual(updatedBody, null, "no cell value may be sent");
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "edit_not_authorized");
 
   const processedMarker = await fakeEnv.STATE_KV.get("google_comment_processed:comment-1");
   assert.strictEqual(processedMarker, "1");

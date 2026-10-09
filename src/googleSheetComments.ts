@@ -7,7 +7,6 @@ import {
 } from "./googleOAuth";
 import { generate } from "./ai";
 import { logActivity } from "./log";
-import { sendWorkspaceHatMessage } from "./telegram";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 const VALUES_RANGE = "A1:ZZ10000";
@@ -50,14 +49,6 @@ async function replyToComment(token: string, spreadsheetId: string, commentId: s
   });
 }
 
-async function resolveComment(token: string, spreadsheetId: string, commentId: string): Promise<void> {
-  await fetch(`https://www.googleapis.com/drive/v3/files/${spreadsheetId}/comments/${commentId}?fields=id`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ resolved: true }),
-  });
-}
-
 async function fetchSheetValues(token: string, spreadsheetId: string): Promise<string[][] | null> {
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${VALUES_RANGE}`,
@@ -70,23 +61,6 @@ async function fetchSheetValues(token: string, spreadsheetId: string): Promise<s
   } catch {
     return null;
   }
-}
-
-async function applyCellReplacement(
-  token: string,
-  spreadsheetId: string,
-  a1Cell: string,
-  replaceText: string,
-): Promise<boolean> {
-  const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${a1Cell}?valueInputOption=USER_ENTERED`,
-    {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ range: a1Cell, values: [[replaceText]] }),
-    },
-  );
-  return res.ok;
 }
 
 async function markProcessed(env: Env, commentId: string): Promise<void> {
@@ -103,8 +77,7 @@ export type SheetCommentOutcome =
   | "sheet_read_failed"
   | "anchor_not_unique"
   | "ai_not_understood"
-  | "cell_update_failed"
-  | "applied";
+  | "edit_not_authorized";
 
 interface ProcessSheetCommentResult {
   handled: boolean;
@@ -121,7 +94,14 @@ interface ProcessSheetCommentResult {
  * sheet's current cells, so a misfire can't silently clobber the wrong
  * cell. Unlike a Doc's free-text selection, a Sheets comment always
  * anchors to one whole cell -- so there's no "occurs within a cell"
- * ambiguity, only "which cell has this exact value".
+ * ambiguity, only "which cell has this exact value". The replacement is
+ * then NEVER applied: comment-triggered cell edits have no registered Tool
+ * operation, no Action declaration and no Architect-approved authorization
+ * path, and this boundary never mints authorization -- so the flow fails
+ * closed with an honest reply and reports the missing authorization
+ * decision (outcome `edit_not_authorized`) instead of mutating the sheet.
+ * The dedup marker still runs, so the same request is never re-attempted on
+ * every poll.
  */
 async function processSheetComment(
   env: Env,
@@ -216,41 +196,33 @@ async function processSheetComment(
   }
 
   const replacementText = instruction.replacementText.trim();
-  const applied = await applyCellReplacement(token, sheet.spreadsheetId, a1Cell, replacementText);
-
-  if (!applied) {
-    await logActivity(env, {
-      entry: "Google Sheet comment-triggered edit failed",
-      type: "Activity",
-      area: "Operations",
-      activity: `Sheets values.update failed applying comment ${comment.id}'s edit to spreadsheet ${sheet.spreadsheetId} (cell ${a1Cell})`,
-      outcome: "Blocked",
-    });
-    // Leave unprocessed -- retry next poll; may be transient.
-    return { handled: false, outcome: "cell_update_failed" };
-  }
-
-  await replyToComment(token, sheet.spreadsheetId, comment.id, `Done — changed to: "${replacementText}"`);
-  await resolveComment(token, sheet.spreadsheetId, comment.id);
+  // Applying that replacement would be a direct Sheets values.update outside
+  // the governed Tool Registry. Comment-triggered cell edits have no
+  // registered operation, no Action declaration and no Architect-approved
+  // authorization path behind them, and this boundary never mints
+  // authorization -- so it FAILS CLOSED with an honest report instead of
+  // mutating the sheet: the cell, its value and its comments are left
+  // exactly as they are, the comment is marked processed (a later, different
+  // comment is a new request), and the missing authorization decision is
+  // reported rather than silently resolved. See docs/enig-operating-model.md
+  // (Governance: reserved flows).
+  await replyToComment(
+    token,
+    sheet.spreadsheetId,
+    comment.id,
+    `I can't apply this edit: comment-triggered cell edits are not an authorized operation in the governed external-effect boundary, so nothing in this spreadsheet was changed. This is reported to Martin as a missing authorization decision, not carried out.`,
+  );
   await markProcessed(env, comment.id);
 
   await logActivity(env, {
-    entry: "Google Sheet comment-triggered edit applied",
+    entry: "Google Sheet comment-triggered edit refused",
     type: "Activity",
     area: "Operations",
-    activity: `Replaced cell ${a1Cell} ("${quoted}" -> "${replacementText}") in spreadsheet '${sheet.title}' (${sheet.spreadsheetId}) per comment ${comment.id}`,
-    outcome: "Complete",
+    activity: `Refused comment ${comment.id}'s edit to spreadsheet ${sheet.spreadsheetId} (cell ${a1Cell}): comment-triggered cell edits are not an authorized operation, so no values.update was sent`,
+    outcome: "Blocked",
   });
 
-  if (sheet.chatId) {
-    await sendWorkspaceHatMessage(
-      env,
-      { chatId: sheet.chatId, threadId: sheet.threadId },
-      `✏️ Applied a comment-requested edit to *${sheet.title}* (${a1Cell}): "${quoted}" → "${replacementText}"`,
-    );
-  }
-
-  return { handled: true, outcome: "applied", detail: `${a1Cell}: "${quoted}" -> "${replacementText}"` };
+  return { handled: true, outcome: "edit_not_authorized", detail: `comment ${comment.id} requested ${a1Cell} = "${replacementText}" -- refused (no authorization path)` };
 }
 
 export interface PollGoogleSheetCommentsResult {
@@ -267,7 +239,9 @@ export interface PollGoogleSheetCommentsResult {
 /**
  * Polls every sheet this system has created (see registerWatchedGoogleSheet)
  * for new, unresolved comments from the sheet's own authorized account, and
- * applies any that resolve to a specific, unambiguous cell replacement.
+ * evaluates any that resolve to a specific, unambiguous cell replacement --
+ * which is then REFUSED (fail-closed, no mutation) because comment-triggered
+ * cell edits are not an authorized operation (see processSheetComment).
  * Meant to be hit every 30-60s by an external scheduler (cron-job.org),
  * same pattern as pollGoogleDocComments -- Google Drive has no push
  * notification for comment events, so polling is the only option.

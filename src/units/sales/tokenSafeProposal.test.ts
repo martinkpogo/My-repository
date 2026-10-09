@@ -13,6 +13,7 @@ import {
   applyProposalDocComment,
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
+import { installStatePersistence } from "../../runtime/workPersistence";
 import type { StrategyProposal } from "../strategy/strategyAnalyst";
 import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../strategy/strategyAnalyst";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END, handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
@@ -1282,8 +1283,15 @@ function kvWithGoogleAccount(accounts: string[] = ["martin@example.com"]) {
   };
 }
 
-/** Wraps the Notion/Telegram fake with a Google Drive/Docs fake, recording every Google call. */
+/**
+ * Wraps the Notion/Telegram fake with a Google Drive/Docs fake, recording
+ * every Google call, and installs the Work's durable operation persistence --
+ * the Tool Registry refuses any external effect without it (this Work's
+ * adapter is released when the test ends).
+ */
 function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
+  const persistence = installStatePersistence("11111111-2222-3333-4444-555555555555");
+  t.after(persistence.release);
   const inner = globalThis.fetch;
   const calls: { method: string; url: string; body?: any }[] = [];
   let docText = "";
@@ -1301,6 +1309,11 @@ function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
       if (opts.failDocCreate) return json({}, 500);
       docTitle = body.name;
       return json({ id: "doc-1" });
+    }
+    if (u.includes("/drive/v3/files/folder-1") && method === "GET") {
+      // google_drive.ensure_folder reads the folder back before it claims
+      // success -- a cached or just-created id is never trusted on its own.
+      return json({ id: "folder-1", name: "ENIG Proposals (token-safe)", mimeType: "application/vnd.google-apps.folder", trashed: false });
     }
     if (u.includes("/documents/doc-1:batchUpdate")) {
       for (const r of body.requests) {

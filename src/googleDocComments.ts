@@ -7,7 +7,6 @@ import {
 } from "./googleOAuth";
 import { generate } from "./ai";
 import { logActivity } from "./log";
-import { sendWorkspaceHatMessage } from "./telegram";
 import { getSessionStub } from "./sessionRouting";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
@@ -73,29 +72,6 @@ async function fetchDocText(token: string, documentId: string): Promise<string |
   }
 }
 
-async function applyReplacement(
-  token: string,
-  documentId: string,
-  containsText: string,
-  replaceText: string,
-): Promise<boolean> {
-  const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      requests: [
-        {
-          replaceAllText: {
-            containsText: { text: containsText, matchCase: true },
-            replaceText,
-          },
-        },
-      ],
-    }),
-  });
-  return res.ok;
-}
-
 async function markProcessed(env: Env, commentId: string): Promise<void> {
   await env.STATE_KV.put(`google_comment_processed:${commentId}`, "1", {
     expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
@@ -110,8 +86,7 @@ export type CommentOutcome =
   | "doc_read_failed"
   | "anchor_not_unique"
   | "ai_not_understood"
-  | "batch_update_failed"
-  | "applied"
+  | "edit_not_authorized"
   | "change_requested"
   | "change_not_applied"
   | "empty_comment";
@@ -170,7 +145,14 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
  * set by the human selecting text before commenting. The AI is only ever
  * asked to determine the replacement text, and only proceeds when the
  * anchored text is verified unique in the doc's current content, so a
- * misfire can't silently clobber the wrong occurrence.
+ * misfire can't silently clobber the wrong occurrence. The replacement is
+ * then NEVER applied: comment-triggered in-place edits have no registered
+ * Tool operation, no Action declaration and no Architect-approved
+ * authorization path, and this boundary never mints authorization -- so the
+ * flow fails closed with an honest reply and reports the missing
+ * authorization decision (outcome `edit_not_authorized`) instead of
+ * mutating the document. The dedup marker still runs, so the same request
+ * is never re-attempted on every poll.
  */
 async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
   const alreadyProcessed = await env.STATE_KV.get(`google_comment_processed:${comment.id}`);
@@ -256,41 +238,33 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   }
 
   const replacementText = instruction.replacementText.trim();
-  const applied = await applyReplacement(token, doc.documentId, quoted, replacementText);
-
-  if (!applied) {
-    await logActivity(env, {
-      entry: "Google Doc comment-triggered edit failed",
-      type: "Activity",
-      area: "Operations",
-      activity: `Docs batchUpdate failed applying comment ${comment.id}'s edit to document ${doc.documentId}`,
-      outcome: "Blocked",
-    });
-    // Leave unprocessed -- retry next poll; may be transient.
-    return { handled: false, outcome: "batch_update_failed" };
-  }
-
-  await replyToComment(token, doc.documentId, comment.id, `Done — changed to: "${replacementText}"`);
-  await resolveComment(token, doc.documentId, comment.id);
+  // Applying that replacement would be a direct Docs batchUpdate outside the
+  // governed Tool Registry. Comment-triggered in-place edits have no
+  // registered operation, no Action declaration and no Architect-approved
+  // authorization path behind them, and this boundary never mints
+  // authorization -- so it FAILS CLOSED with an honest report instead of
+  // mutating the document: the Doc, its anchored text and its comments are
+  // left exactly as they are, the comment is marked processed (a later,
+  // different comment is a new request), and the missing authorization
+  // decision is reported rather than silently resolved. See
+  // docs/enig-operating-model.md (Governance: reserved flows).
+  await replyToComment(
+    token,
+    doc.documentId,
+    comment.id,
+    `I can't apply this edit: comment-triggered in-place edits are not an authorized operation in the governed external-effect boundary, so nothing in this document was changed. This is reported to Martin as a missing authorization decision, not carried out.`,
+  );
   await markProcessed(env, comment.id);
 
   await logActivity(env, {
-    entry: "Google Doc comment-triggered edit applied",
+    entry: "Google Doc comment-triggered edit refused",
     type: "Activity",
     area: "Operations",
-    activity: `Replaced "${quoted}" with "${replacementText}" in document '${doc.title}' (${doc.documentId}) per comment ${comment.id}`,
-    outcome: "Complete",
+    activity: `Refused comment ${comment.id}'s edit to document ${doc.documentId}: comment-triggered in-place edits are not an authorized operation, so no batchUpdate was sent`,
+    outcome: "Blocked",
   });
 
-  if (doc.chatId) {
-    await sendWorkspaceHatMessage(
-      env,
-      { chatId: doc.chatId, threadId: doc.threadId },
-      `✏️ Applied a comment-requested edit to *${doc.title}*: "${quoted}" → "${replacementText}"`,
-    );
-  }
-
-  return { handled: true, outcome: "applied", detail: `"${quoted}" -> "${replacementText}"` };
+  return { handled: true, outcome: "edit_not_authorized", detail: `comment ${comment.id} requested a replacement of "${quoted}" with "${replacementText}" -- refused (no authorization path)` };
 }
 
 export interface PollGoogleDocCommentsResult {

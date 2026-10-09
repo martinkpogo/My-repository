@@ -26,7 +26,7 @@ import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../.
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
-import { rewriteGoogleDoc, ensureGoogleFolder, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
 import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -1252,6 +1252,25 @@ export async function handleSalesProposalDecision(
  */
 const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
 
+/** The ENIG folder cache key `google_drive.ensure_folder` memoizes the Proposal-docs folder id under (the same key ensureGoogleFolder used). */
+const PROPOSAL_DOCS_FOLDER_KV_KEY = "google_proposal_docs_folder";
+
+/**
+ * The `google_docs.update_and_verify` input for THIS Proposal's Doc. It
+ * carries business data only -- the opaque document id, the trusted account,
+ * the Proposal id and this Proposal's exact Version content in order -- and
+ * the registered operation rebuilds the canonical layout itself, so no
+ * provider request structure and no styling detail ever enters the contract.
+ */
+function docWriteInput(sp: RuntimeSalesProposal, documentId: string, accountIdentifier: string) {
+  return {
+    document_id: documentId,
+    account_identifier: accountIdentifier,
+    proposal_id: sp.proposalId,
+    versions: sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
+  };
+}
+
 /**
  * Creates a Google Doc holding exactly the current version's token-safe
  * content, in a folder this system keeps for them, on Martin's tap of the
@@ -1268,7 +1287,13 @@ type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
  * it the first time (in the dedicated folder, watched and bound to this
  * Proposal), and on every later version rewrites the same Doc -- clean current
  * text on top, a redline of each revision below (proposalRedline.ts). Never
- * messages; callers report. Fails closed with the reason when no single
+ * messages; callers report. Every Google step here -- the folder, the
+ * creation, the update of an existing Doc and the canonical pass over a
+ * just-created Doc -- is a registered external mutation invoked through the
+ * shared Tool Registry (see src/runtime/toolRegistry.ts), never a direct
+ * Google call: each carries the Work's own resolved Action's declaration,
+ * Access's decision, durable intent/outcome records and the canonical five
+ * outcomes. Fails closed with the reason when no single
  * authorized Google account exists or any Google step fails; a Doc that could
  * not be brought up to date is NOT offered as the current version (its watch
  * binding stays at the version it shows, so comments on it are refused as stale).
@@ -1283,8 +1308,22 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
   const binding = { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version };
 
   if (sp.doc) {
-    const rewritten = await rewriteGoogleDoc(env, sp.doc.accountIdentifier, sp.doc.documentId, layout);
-    if (!rewritten.ok) return { ok: false, error: `the Doc is still at ${versionLabel(sp.doc.version)}: ${rewritten.error}` };
+    // Rewriting an EXISTING Doc to the current Version is a registered
+    // external mutation (google_docs.update_and_verify): exact operation,
+    // this Work's own resolved Action's declaration (see salesManifest),
+    // Access's external-mutation decision, durable intent/outcome records,
+    // and the canonical five outcomes -- never a direct Docs call.
+    const outcome = await invokeTool(
+      env,
+      { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", input: docWriteInput(sp, sp.doc.documentId, sp.doc.accountIdentifier) },
+      workSessionContext(state),
+    );
+    if (outcome.state !== "succeeded" || !outcome.remote_resource?.document_id) {
+      // Every non-success keeps its honest shape: `failed` names the stage,
+      // `partially_completed`/`unverified` preserve the document id for
+      // reconciliation before any retry, and `denied` made no request.
+      return { ok: false, error: `the Doc is still at ${versionLabel(sp.doc.version)}: ${outcome.reason ?? outcome.state}` };
+    }
     await registerWatchedGoogleDoc(env, {
       documentId: sp.doc.documentId,
       accountIdentifier: sp.doc.accountIdentifier,
@@ -1309,8 +1348,22 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
     };
   }
   const accountIdentifier = accounts[0];
-  const folder = await ensureGoogleFolder(env, accountIdentifier, PROPOSAL_DOCS_FOLDER_NAME, "google_proposal_docs_folder");
-  if (!folder.ok) return { ok: false, error: folder.error ?? "folder could not be created" };
+  // The folder the Doc is created into is itself an EXTERNAL effect and runs
+  // through the same boundary (google_drive.ensure_folder): find-or-create
+  // under the dedicated cache key, verified by an actual Drive read.
+  const folderOutcome = await invokeTool(
+    env,
+    {
+      tool_id: "google_drive",
+      operation_id: "google_drive.ensure_folder",
+      input: { account_identifier: accountIdentifier, folder_name: PROPOSAL_DOCS_FOLDER_NAME, kv_key: PROPOSAL_DOCS_FOLDER_KV_KEY },
+    },
+    workSessionContext(state),
+  );
+  if (folderOutcome.state !== "succeeded" || !folderOutcome.remote_resource?.document_id) {
+    return { ok: false, error: folderOutcome.reason ?? `the Proposal-docs folder could not be ensured (${folderOutcome.state})` };
+  }
+  const folderId = folderOutcome.remote_resource.document_id;
   // The Doc's CREATION runs through the shared Tool Registry's invocation
   // boundary: exact registered operation (google_docs.create_and_verify),
   // the Work's own resolved Action's declaration (proposal_draft /
@@ -1325,7 +1378,7 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
     {
       tool_id: "google_docs",
       operation_id: "google_docs.create_and_verify",
-      input: { title: sp.proposalId, content: layout.text, folder_id: folder.folderId, account_identifier: accountIdentifier },
+      input: { title: sp.proposalId, content: layout.text, folder_id: folderId, account_identifier: accountIdentifier },
     },
     workSessionContext(state),
   );
@@ -1340,10 +1393,17 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
   const documentUrl = outcome.remote_resource.url;
   // The canonical styling pass always runs, including on a v1 Doc -- no
   // redline is required to trigger it: the title / section-heading / bullet
-  // layout comes from the content's own structure (buildProposalDocLayout),
-  // and the Doc must read back exactly as written before it is offered.
-  const styled = await rewriteGoogleDoc(env, accountIdentifier, documentId, layout);
-  if (!styled.ok) return { ok: false, error: styled.error };
+  // layout comes from the content's own structure, and the Doc must read
+  // back exactly as written before it is offered. It is the registered
+  // update operation (the same boundary as above), never a direct Docs call.
+  const styled = await invokeTool(
+    env,
+    { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", input: docWriteInput(sp, documentId, accountIdentifier) },
+    workSessionContext(state),
+  );
+  if (styled.state !== "succeeded" || !styled.remote_resource?.document_id) {
+    return { ok: false, error: styled.reason ?? `${styled.state}: no detail` };
+  }
   await registerWatchedGoogleDoc(env, {
     documentId,
     accountIdentifier,
