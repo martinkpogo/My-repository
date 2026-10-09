@@ -26,7 +26,7 @@ import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../.
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
-import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { restyleGoogleDoc, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
 import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -1282,6 +1282,14 @@ function docWriteInput(sp: RuntimeSalesProposal, documentId: string, accountIden
  */
 type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
 
+/** The canonical Doc layout for the Proposal's current version: every version's content in order, last is current (see proposalRedline.ts). */
+function currentDocLayout(sp: RuntimeSalesProposal) {
+  return buildProposalDocLayout(
+    sp.proposalId,
+    sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
+  );
+}
+
 /**
  * Brings the Proposal's single Google Doc up to its current version: creates
  * it the first time (in the dedicated folder, watched and bound to this
@@ -1301,10 +1309,7 @@ type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
 async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal): Promise<EnsureDocResult> {
   const version = sp.currentVersion;
   if (sp.doc && sp.doc.version === version) return { ok: true, url: sp.doc.url };
-  const layout = buildProposalDocLayout(
-    sp.proposalId,
-    sp.versions.filter((v) => v.version <= version).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
-  );
+  const layout = currentDocLayout(sp);
   const binding = { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version };
 
   if (sp.doc) {
@@ -1477,6 +1482,48 @@ export async function applyProposalDocComment(
   }
   state.pendingSalesProposalRevision = undefined;
   return { state, result: { kind: "refused", detail: state.blockedReason ?? "the change was not applied." } };
+}
+
+export type ProposalDocFormattingResult =
+  | { kind: "formatted" }
+  | { kind: "stale"; detail: string }
+  | { kind: "refused"; detail: string };
+
+/**
+ * Applies the canonical Proposal layout styling to the Proposal's existing
+ * Doc, in full, without changing one character of its text and without
+ * touching anything governance holds: no new Version, no amendment, no
+ * content hash, no Approval Status / Approved Version change, no Work Action
+ * (a presentation-only request is not a Proposal event). Runs the SAME
+ * binding guards as applyProposalDocComment -- the Doc belongs to this
+ * Proposal, the Work is still Sales', the Doc's version is still the current
+ * one -- and refuses (nothing applied) when the Doc's text no longer matches
+ * the version it is bound to (restyleGoogleDoc verifies before and after).
+ */
+export async function applyProposalDocFormatting(
+  env: Env,
+  state: WorkState,
+  input: { proposalNumber: number; version: number },
+): Promise<{ state: WorkState; result: ProposalDocFormattingResult }> {
+  const sp = state.salesProposal;
+  if (!sp || sp.proposalNumber !== input.proposalNumber) {
+    return { state, result: { kind: "stale", detail: "this Doc does not belong to the Proposal on this work item." } };
+  }
+  if (state.unit !== "Sales") {
+    return { state, result: { kind: "refused", detail: `this work item now belongs to ${state.unit ?? "another Unit"}, so it can't format the Proposal Doc.` } };
+  }
+  if (!sp.doc) {
+    return { state, result: { kind: "refused", detail: `no Google Doc exists yet for ${sp.proposalId}; use the "Create Google Doc" button first.` } };
+  }
+  if (input.version !== sp.currentVersion || sp.doc.version !== input.version) {
+    return {
+      state,
+      result: { kind: "stale", detail: `this Doc is a copy of ${versionLabel(input.version)}, but ${sp.proposalId} is now at ${versionLabel(sp.currentVersion)}. Comment on the current version's Doc.` },
+    };
+  }
+  const styled = await restyleGoogleDoc(env, sp.doc.accountIdentifier, sp.doc.documentId, currentDocLayout(sp));
+  if (!styled.ok) return { state, result: { kind: "refused", detail: styled.error } };
+  return { state, result: { kind: "formatted" } };
 }
 
 export async function handleSalesProposalRevisionText(env: Env, state: WorkState, text: string): Promise<WorkState> {

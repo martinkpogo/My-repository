@@ -406,6 +406,24 @@ export class WorkSession extends DurableObject<Env> {
     return result ?? { kind: "refused", detail: "the change could not be applied; Martin was notified." };
   }
 
+  /**
+   * A presentation-only request arriving as a comment on a Runtime Sales
+   * Proposal's own Google Doc (see googleDocComments.ts's classification
+   * step). Applies the canonical layout styling to that exact Doc and
+   * reports how it ended so the poller can answer the comment. Creates no
+   * Version and changes no content, hash, approval state or Action -- only
+   * the Doc's presentation, verified text-identical before and after.
+   */
+  async handleProposalDocFormatting(input: { proposalNumber: number; version: number }): Promise<salesProposal.ProposalDocFormattingResult> {
+    let result: salesProposal.ProposalDocFormattingResult | undefined;
+    await this.execute(async (state) => {
+      const applied = await salesProposal.applyProposalDocFormatting(this.env, state, input);
+      result = applied.result;
+      return applied.state;
+    });
+    return result ?? { kind: "refused", detail: "the Doc could not be formatted; Martin was notified." };
+  }
+
   async handleCallback(action: string, value: string): Promise<WorkState> {
     return this.execute((state) => {
       switch (action) {
