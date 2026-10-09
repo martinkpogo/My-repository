@@ -127,8 +127,16 @@ export interface ActionExecutionContext {
   completion_criteria: null;
   /** Data Boundary classification is resolved per AI task at execution time (src/dataBoundary/policy.ts), not per Action. */
   data_context: null;
-  /** No Tool registry exists in this repository. */
-  tool_context: null;
+  /**
+   * The Tool Operations this resolved Action DECLARES it may request --
+   * read straight off the registered manifest definition (exact ids only),
+   * so it is a RECORD of the Action's allowlist, never a grant: the
+   * invocation boundary (src/runtime/toolRegistry.ts) independently requires
+   * the Work's own resolved Action to declare the exact operation it is
+   * asked to run, plus Access, valid input and bound approval evidence. null
+   * when the Action declares no Tool operation -- never invented.
+   */
+  tool_context: { permitted_operations: { tool_id: string; operation_id: string; required: boolean }[] } | null;
   evidence: ActionResolutionEvidence;
 }
 
@@ -343,7 +351,16 @@ async function finalize(
       expected_result: null,
       completion_criteria: null,
       data_context: null,
-      tool_context: null,
+      tool_context:
+        action.tool_operations && action.tool_operations.length > 0
+          ? {
+              permitted_operations: action.tool_operations.map((declaration) => ({
+                tool_id: declaration.tool_id,
+                operation_id: declaration.operation_id,
+                required: declaration.required,
+              })),
+            }
+          : null,
       evidence: {
         responsibility: organization.responsibility,
         manifest: { unit: manifest.unit, hat: hat.name },

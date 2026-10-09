@@ -715,13 +715,34 @@ test("resolved Action Execution Context is self-sufficient: the Worker selects n
   assert.strictEqual(execution.inputs.requested_outcome, "privileged work");
   assert.strictEqual(execution.inputs.origin, "direct_request");
   assert.strictEqual(execution.inputs.mode, "cowork");
-  // No Tool registry / per-Action data classification exists: carried as
-  // explicit nulls rather than invented, and tool availability is never
-  // present here to be mistaken for permission.
+  // This toy Action declares no Tool operation, so tool_context is null
+  // (never invented); per-Action data classification still has no mechanism.
+  // A declaration would be recorded here as the Action's allowlist -- a
+  // record, never a grant: permission stays with the invocation boundary.
   assert.strictEqual(execution.tool_context, null);
   assert.strictEqual(execution.data_context, null);
   assert.strictEqual(execution.preconditions, null);
   assert.strictEqual(execution.expected_result, null);
   assert.strictEqual(execution.completion_criteria, null);
   assert.strictEqual(execution.evidence.resolved_action, "privileged_task");
+});
+
+test("resolveActionExecution: a declared Tool operation is recorded verbatim in tool_context -- the Action's allowlist, never a grant", async (t) => {
+  forbidNetwork(t);
+  const manifest = makeManifest({
+    "Toy Hat": makeHat("Toy Hat", [
+      makeAction("tool_task", {
+        consequence: "write",
+        tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
+      }),
+    ]),
+  });
+
+  const result = await resolveActionExecution(manifest, orgFor(), contractFor({}, "tool work"));
+
+  assert.strictEqual(result.kind, "resolved");
+  if (result.kind !== "resolved") return;
+  assert.deepStrictEqual(result.execution.tool_context, {
+    permitted_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
+  });
 });

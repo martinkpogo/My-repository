@@ -53,6 +53,7 @@
 
 import type { ApprovalProof, Env, Unit, WorkState } from "./types";
 import type { ActionDefinition } from "./hats/actionRegistry";
+import type { ToolEffectClassification } from "./runtime/toolRegistry";
 import { findUnitManifest } from "./units/registry";
 import { findManifestAction } from "./units/unitManifest";
 
@@ -178,6 +179,28 @@ export const EXTERNAL_EGRESS_TARGET = "external:egress";
  * arbitrary-target bypass this module exists to prevent.
  */
 const AUTHORIZED_EXTERNAL_READ_TARGETS: readonly string[] = [EXTERNAL_EGRESS_TARGET];
+
+/**
+ * The target marker on an ApprovalProof that authorizes an EXTERNAL Tool
+ * mutation (a registered operation with effect `external_mutation`) instead
+ * of a Notion write.
+ *
+ * External reads and external state changes are different questions, and this
+ * is the second, separate answer -- `EXTERNAL_EGRESS_TARGET` above stays
+ * read-only and untouched. The marker exists because the external resource
+ * (a Google Drive folder, say) must not be written into
+ * `ApprovalProof.targetDataSourceId`: that field asks "which governed Notion
+ * source", and reusing it for an external target would make a Notion-shaped
+ * proof authorize a non-Notion effect. With this marker the two proof kinds
+ * can never substitute for each other: verifyProof (Notion writes) compares
+ * `targetDataSourceId` to the real governed source, and verifyExternalToolProof
+ * requires this marker plus an exact `toolOperation` binding.
+ *
+ * Usable only as the proof's target marker -- never as a target inside an
+ * AccessRequest, which continues to recognize only governed Notion sources,
+ * NON_GOVERNED_PAGE_TARGET, and the read-only EXTERNAL_EGRESS_TARGET.
+ */
+export const EXTERNAL_TOOL_TARGET = "external:tool";
 
 export class AccessDeniedError extends Error {
   readonly reason: string;
@@ -585,11 +608,215 @@ export function evaluateAccess(env: Env, request: AccessRequest, context: Access
   }
 }
 
+// ---------------------------------------------------------------------------
+// External mutations -- the dedicated, explicit model for a registered
+// operation whose effect changes remote state OUTSIDE Notion.
+//
+// This is a separate decision function on purpose: EXTERNAL_EGRESS_TARGET
+// stays read-only above, and "read from an external API" and "mutate external
+// state" are never the same question. An external mutation is judged ONLY
+// from trusted execution state -- the Work's own resolved Action, the Action's
+// declaration, its consequence, its authoritative approval requirement, and a
+// proof bound to work + action + operation + external target. Nothing about
+// the decision comes from a model response, Skill content, invocation
+// arguments, or a caller-supplied approval boolean, and OAuth credentials
+// never appear here: holding Google API access is authentication, not ENIG
+// authorization. Every failure throws AccessDeniedError, which the invocation
+// boundary reports as the `denied` outcome BEFORE any external request.
+// ---------------------------------------------------------------------------
+
+/**
+ * The request `evaluateExternalMutationAccess` judges. Every field is a fact
+ * the invocation boundary resolved from REGISTERED definitions and validated
+ * runtime state -- never a value a Tool caller can choose: `toolId` and
+ * `operationId` come from the exact registry lookup, `effect` from the
+ * registered operation's own declaration, and `targetResourceId` from the
+ * boundary's trusted target resolution (see `invokeTool`,
+ * src/runtime/toolRegistry.ts).
+ */
+export interface ExternalMutationRequest {
+  /** Exact registered Tool id, resolved by the invocation boundary. */
+  toolId: string;
+  /** Exact registered operation id, resolved by the invocation boundary. */
+  operationId: string;
+  /** The registered operation's declared effect classification. */
+  effect: ToolEffectClassification;
+  /** The external resource the mutation targets, resolved and validated by the invocation boundary. */
+  targetResourceId: string;
+}
+
+function describeExternalMutation(request: ExternalMutationRequest, context: AccessContext): string {
+  // The operation id is already Tool-scoped ("google_docs.create_and_verify"), so it is named alone -- no doubled prefix.
+  return `external mutation ${request.operationId} on ${request.targetResourceId} under context "${context.kind}"${
+    context.unit ? ` (${context.unit}${context.hat ? `/${context.hat}` : ""})` : ""
+  }${context.actionName ? ` action "${context.actionName}"` : ""}`;
+}
+
+/**
+ * Authorizes one external mutation. Returns void or throws AccessDeniedError;
+ * it performs nothing itself and is always called before the external request.
+ *
+ * In order, all fail-closed:
+ *  1. a known context kind, and specifically a `work_session` -- an external
+ *     mutation is only ever judged by a Work's own Action, so system,
+ *     discovery_cron and user_lookup contexts are denied outright;
+ *  2. a known effect classification (no effect, no request);
+ *  3. a resolvable Action (no recorded Action, unknown Unit/Hat/Action ->
+ *     denial, never "un-gated");
+ *  4. the Action's declared consequence permits the effect (`external_mutation`
+ *     requires `write` -- read/internal Actions can never reach external
+ *     state);
+ *  5. the Work's own resolved Action DECLARES this exact operation;
+ *  6. approval evidence, per the ONE authoritative source -- the resolved
+ *     Action's `requiresApproval`: required -> a bound proof must exist;
+ *     not required -> any proof that IS supplied is still verified, so a
+ *     supplied proof can only tighten, never loosen.
+ */
+export function evaluateExternalMutationAccess(env: Env, request: ExternalMutationRequest, context: AccessContext): void {
+  void env;
+  if (!ACCESS_CONTEXT_KINDS.includes(context.kind)) {
+    throw new AccessDeniedError(`unknown execution context kind "${String(context.kind)}" for ${describeExternalMutation(request, context)} -- refusing to proceed unclassified.`);
+  }
+  if (request.effect !== "external_mutation") {
+    throw new AccessDeniedError(`unknown effect classification "${String(request.effect)}" on ${describeExternalMutation(request, context)} -- only a registered, known effect can be judged.`);
+  }
+  if (context.kind !== "work_session") {
+    throw new AccessDeniedError(
+      `${describeExternalMutation(request, context)} requires a "work_session" context carrying the Work's own resolved Action -- an external state change is never authorized by a "${context.kind}" context.`,
+    );
+  }
+  if (typeof request.targetResourceId !== "string" || request.targetResourceId.length === 0) {
+    throw new AccessDeniedError(`${describeExternalMutation(request, context)} has no resolvable external target -- an external mutation without a resolved target cannot proceed.`);
+  }
+
+  const resolved = resolveActionRequirement(context);
+  if (resolved === null) {
+    throw new AccessDeniedError(
+      `${describeExternalMutation(request, context)} has no resolved Unit Action -- an external mutation requires a registered Action behind it and is never permitted as an action-less operation.`,
+    );
+  }
+  if (resolved.action.consequence !== "write") {
+    throw new AccessDeniedError(
+      `action "${resolved.action.name}" is declared "${resolved.action.consequence}" and cannot carry effect "external_mutation" on ${describeExternalMutation(request, context)} -- only a "write" Action may mutate external state.`,
+    );
+  }
+  const declared = (resolved.action.tool_operations ?? []).some(
+    (declaration) => declaration.tool_id === request.toolId && declaration.operation_id === request.operationId,
+  );
+  if (!declared) {
+    throw new AccessDeniedError(
+      `action "${resolved.action.name}" does not declare Tool operation ${request.operationId} -- a Tool operation is permitted only when the Work's own resolved Action declares it, and availability of the Tool grants nothing.`,
+    );
+  }
+
+  const binding = {
+    workId: context.workId ?? "",
+    actionName: resolved.action.name,
+    toolId: request.toolId,
+    operationId: request.operationId,
+    targetResourceId: request.targetResourceId,
+  };
+  if (resolved.action.requiresApproval) {
+    if (!context.proof) {
+      throw new AccessDeniedError(
+        `action "${resolved.action.name}" requires Martin's explicit approval before ${describeExternalMutation(request, context)} may proceed, and no ApprovalProof was supplied.`,
+      );
+    }
+    verifyExternalToolProof(context.proof, binding);
+    return;
+  }
+  if (context.proof) {
+    verifyExternalToolProof(context.proof, binding);
+  }
+}
+
+/** The exact facts an ApprovalProof must match to authorize one external mutation. */
+export interface ExternalToolProofBinding {
+  workId: string;
+  actionName: string;
+  toolId: string;
+  operationId: string;
+  targetResourceId: string;
+}
+
+/**
+ * Verifies an ApprovalProof against the exact external mutation it is being
+ * offered for. Every field is checked; a proof either wholly authorizes this
+ * operation on this resource or it authorizes nothing. A Notion-bound proof
+ * (targetDataSourceId set to a governed source, or no `toolOperation` binding)
+ * can never pass here, and vice versa -- see EXTERNAL_TOOL_TARGET.
+ */
+export function verifyExternalToolProof(proof: ApprovalProof, binding: ExternalToolProofBinding): void {
+  if (typeof proof.approvalToken !== "string" || proof.approvalToken.length < 8) {
+    throw new AccessDeniedError(`the supplied approval proof has no usable approval token for ${binding.operationId}.`);
+  }
+  if (typeof proof.approvedAt !== "string" || proof.approvedAt.length === 0) {
+    throw new AccessDeniedError(`the supplied approval proof has no approval timestamp for ${binding.operationId}.`);
+  }
+  if (proof.workId !== binding.workId) {
+    throw new AccessDeniedError(
+      `the supplied approval proof is for Work ${proof.workId}, not the current Work ${binding.workId || "(none)"} -- an approval never carries across work items.`,
+    );
+  }
+  if (proof.actionName !== binding.actionName) {
+    throw new AccessDeniedError(`the supplied approval proof is for action "${proof.actionName}", not the resolved action "${binding.actionName}".`);
+  }
+  if (proof.targetDataSourceId !== EXTERNAL_TOOL_TARGET) {
+    throw new AccessDeniedError(
+      `the supplied approval proof targets ${proof.targetDataSourceId}, not an external Tool operation -- a Notion-bound approval never authorizes an external mutation, and an external approval must be minted against "${EXTERNAL_TOOL_TARGET}".`,
+    );
+  }
+  const bound = proof.toolOperation;
+  if (!bound) {
+    throw new AccessDeniedError(`the supplied approval proof carries no external Tool operation binding, so it cannot authorize ${binding.operationId}.`);
+  }
+  if (bound.toolId !== binding.toolId || bound.operationId !== binding.operationId) {
+    throw new AccessDeniedError(
+      `the supplied approval proof authorizes Tool operation ${bound.operationId}, not ${binding.operationId} -- an approval never carries across operations.`,
+    );
+  }
+  if (bound.targetResourceId !== binding.targetResourceId) {
+    throw new AccessDeniedError(
+      `the supplied approval proof authorizes external target ${bound.targetResourceId}, not ${binding.targetResourceId} -- an approval never carries across external targets.`,
+    );
+  }
+}
+
+/**
+ * The sanctioned minter for an external-mutation ApprovalProof: bound to the
+ * Action the Work ACTUALLY records (same rule as mintApprovalProofForWork --
+ * a call site never names the Action) plus the exact operation and external
+ * target. It goes through mintApprovalProof, the only sanctioned way to
+ * produce a proof, with EXTERNAL_TOOL_TARGET standing in for the Notion data
+ * source so the two proof kinds stay mutually exclusive.
+ *
+ * Fails closed when the Work records no Action: there is no operation to bind
+ * an approval to, and a proof without one could never be verified.
+ */
+export function mintExternalToolApprovalProof(
+  state: WorkState,
+  binding: { toolId: string; operationId: string; targetResourceId: string },
+): ApprovalProof {
+  if (typeof state.actionName !== "string" || state.actionName.length === 0) {
+    throw new AccessDeniedError(
+      `Work ${state.workId} records no Action, so Martin's approval of ${binding.operationId} cannot be bound to one -- refusing to mint a proof that could not be verified.`,
+    );
+  }
+  return mintApprovalProof({
+    workId: state.workId,
+    actionName: state.actionName,
+    targetDataSourceId: EXTERNAL_TOOL_TARGET,
+    toolOperation: binding,
+  });
+}
+
 /** The single input a verified approval callback needs to mint a proof. */
 export interface MintApprovalProofInput {
   workId: string;
   actionName: string;
   targetDataSourceId: string;
+  /** The exact external Tool Operation this proof authorizes -- required for an external mutation (minted via mintExternalToolApprovalProof), never set for a Notion write. */
+  toolOperation?: { toolId: string; operationId: string; targetResourceId: string };
   /** Injected for deterministic tests; production callers omit it and get crypto.randomUUID(). */
   token?: string;
   /** Injected for deterministic tests; production callers omit it and get the current time. */
@@ -621,6 +848,7 @@ export function mintApprovalProof(input: MintApprovalProofInput): ApprovalProof 
     targetDataSourceId: input.targetDataSourceId,
     approvalToken: input.token ?? crypto.randomUUID(),
     approvedAt: input.approvedAt ?? new Date().toISOString(),
+    ...(input.toolOperation ? { toolOperation: input.toolOperation } : {}),
   };
 }
 

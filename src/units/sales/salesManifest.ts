@@ -287,6 +287,28 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // Entered only from a Handoff pickup -- the Finance-quote and other
     // Sales Handoffs create this Work with `proposal_draft` as their Action
     // (checkHandoffs' Sales pickup), never from a direct chat request.
+    //
+    // CREATION of the Proposal review Google Doc is an EXTERNAL effect that
+    // runs through the shared Tool Registry (google_docs.create_and_verify,
+    // invoked from ensureProposalDoc), so the invocation boundary requires
+    // the Work's own resolved Action to declare the operation -- this is the
+    // allowlist half of the decision, never the permission itself (exact
+    // registration, Access, effect classification, input validation and
+    // bound approval evidence when an Action is gated all still apply).
+    // Declared on the three Actions whose state the creation is reachable
+    // under: `proposal_draft` (the idempotent handoff-pickup presentation,
+    // which presents while the pickup Work still records this Action),
+    // `proposal_submit` (every presentation, and the "Create Google Doc"
+    // retry button) and `proposal_approve` (the same retry button stays live
+    // on the approval-request message after Martin approves -- since this
+    // Action is approval-gated, an invocation under it demands approval
+    // evidence bound to this work, action, operation and target, which the
+    // current flow never mints, so that stale tap fails closed with an
+    // approval denial; converting it into minted evidence would change the
+    // approval lifecycle and is reported, not invented). `required: false`:
+    // presenting or approving a Version succeeds without a Doc. See
+    // tokenSafeProposal.ts ensureProposalDoc.
+    tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
     applicability: {
       mode: "any",
       conditions: [
@@ -304,6 +326,13 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     requiresApproval: false,
     // Performed inside the Proposal lifecycle (recorded on the Work there)
     // -- never resolved as an entry Action.
+    //
+    // Declares google_docs.create_and_verify for the same reason as
+    // proposal_draft (see its comment): this is the Action every
+    // presentation of a Version -- and therefore the review Doc's creation
+    // in ensureProposalDoc -- runs under, recorded before presentForApproval
+    // and again on the retry button's flow.
+    tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
     applicability: {
       mode: "all",
       conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
@@ -317,6 +346,16 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     consequence: "write",
     requiresApproval: true,
     // Same as `proposal_submit`: an in-flow operation, never an entry Action.
+    //
+    // Declares google_docs.create_and_verify because the "Create Google Doc"
+    // retry button stays live on the approval-request message after Martin
+    // approves -- the operation is reachable under this Action. Since this
+    // Action is approval-gated, an invocation under it demands approval
+    // evidence bound to this work, action, operation and target (which the
+    // current flow never mints), so a stale tap fails closed with an
+    // approval denial rather than creating anything. Full rationale: see
+    // proposal_draft's tool_operations comment.
+    tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
     applicability: {
       mode: "all",
       conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],

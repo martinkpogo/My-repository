@@ -50,6 +50,31 @@ export interface SkillRequirement {
   skill_id: SkillId;
 }
 
+/**
+ * One exact Tool Operation an Action DECLARES it may request -- see
+ * ActionDefinition.tool_operations.
+ *
+ * A declaration is the Action's permitted allowlist entry, nothing more. It
+ * grants no permission by existing: the invocation boundary still resolves
+ * the operation in the Tool Registry, resolves the Work's own Action, has
+ * Access judge the effect, validates the input, and requires bound approval
+ * evidence whenever this Action is approval-gated. An operation missing here
+ * is refused fail-closed.
+ */
+export interface ActionToolOperation {
+  /** The registered Tool's exact id -- e.g. "google_docs". Resolution is exact: no prefix match, no fallback. */
+  tool_id: string;
+  /** The registered operation's exact id -- e.g. "google_docs.create_and_verify". */
+  operation_id: string;
+  /**
+   * Whether the Action's completion REQUIRES this operation. Required
+   * entries are, by construction, part of the permitted allowlist, so
+   * "every required operation must be permitted" is structural rather than a
+   * separate question. Explicit true/false: omission is never a declaration.
+   */
+  required: boolean;
+}
+
 export interface ActionDefinition<A extends string> {
   /** The action's own registered name -- e.g. "status_check". Never invented on the spot; always one of a Unit's own declared verbs. */
   name: A;
@@ -109,6 +134,26 @@ export interface ActionDefinition<A extends string> {
    * assigns no Work.
    */
   skill_requirements?: readonly SkillRequirement[];
+  /**
+   * The exact Tool Operations this Action DECLARES it may request -- the
+   * permitted allowlist, with `required` marking the ones the Action's
+   * completion needs (every required entry is an entry, so required is
+   * permitted by construction). Declared here, next to the Skills the Worker
+   * follows, because both are deterministic per-Action facts read from the
+   * registered definition -- neither is authorization on its own: a Skill
+   * grants no access, and a Tool declaration is only the allowlist half of
+   * the decision the invocation boundary makes (registration + the Work's
+   * own resolved Action + effect classification + Access + valid input +
+   * bound ApprovalProof when this Action is approval-gated).
+   *
+   * Optional: an Action with no external Tool needs no declaration. When
+   * present, each entry is shape-validated here and cross-checked against
+   * the registered Tool Registry at registry assembly
+   * (`validateActionToolDeclarations`, src/runtime/toolRegistry.ts), so a
+   * declaration naming an unregistered operation fails before production
+   * requests are served.
+   */
+  tool_operations?: readonly ActionToolOperation[];
   /**
    * THE declared deterministic applicability of this Action (ENIG
    * Operating Model, "Action Resolution"): the conditions under which this
@@ -278,6 +323,23 @@ export function validateActionDefinition(action: ActionDefinition<string>): stri
     if (!SKILL_IDS.includes(requirement.skill_id)) {
       return `${action.name}: declares an unknown Skill id "${String(requirement.skill_id)}" -- Skill requirements resolve by exact id only`;
     }
+  }
+  const declaredToolOperations = new Set<string>();
+  for (const declaration of action.tool_operations ?? []) {
+    if (typeof declaration?.tool_id !== "string" || !declaration.tool_id.trim()) {
+      return `${action.name}: a declared Tool operation must carry a non-empty tool id -- omission is never "any Tool"`;
+    }
+    if (typeof declaration.operation_id !== "string" || !declaration.operation_id.trim()) {
+      return `${action.name}: a declared Tool operation must carry a non-empty operation id -- omission is never "any operation"`;
+    }
+    if (typeof declaration.required !== "boolean") {
+      return `${action.name}: declared Tool operation ${declaration.tool_id}.${declaration.operation_id} must state "required" explicitly -- omission is never a declaration`;
+    }
+    const key = `${declaration.tool_id}.${declaration.operation_id}`;
+    if (declaredToolOperations.has(key)) {
+      return `${action.name}: declares Tool operation ${key} more than once -- a declaration is stated exactly once`;
+    }
+    declaredToolOperations.add(key);
   }
   const applicabilityDefect = validateApplicability(action.name, action.applicability);
   if (applicabilityDefect) return applicabilityDefect;

@@ -157,3 +157,56 @@ test("findAction: returns the matching definition or undefined for an unregister
   assert.deepEqual(findAction("lookup_status", TOY_REGISTRY), TOY_REGISTRY[0]);
   assert.equal(findAction("nonexistent", TOY_REGISTRY), undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Tool operation declarations (ActionDefinition.tool_operations): shape only
+// here -- whether a declared operation is REGISTERED is the Tool Registry's
+// cross-check at registry assembly (validateActionToolDeclarations).
+// ---------------------------------------------------------------------------
+
+const TOOL_DECLARING_ACTION = (overrides: Partial<ActionDefinition<string>> = {}): ActionDefinition<string> => ({
+  name: "declares_tools",
+  responsibility: TOY_RESPONSIBILITY,
+  consequence: "write",
+  requiresApproval: false,
+  tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
+  applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "declares_tools" }] },
+  description: "Declares a Tool operation.",
+  ...overrides,
+});
+
+test("validateActionDefinition: a well-formed Tool operation declaration validates, and an Action with none needs none", () => {
+  assert.equal(validateActionDefinition(TOOL_DECLARING_ACTION()), null);
+  assert.equal(validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: undefined })), null, "no declaration is valid -- the field is optional");
+});
+
+test("validateActionDefinition: malformed Tool operation declarations fail closed", () => {
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [{ tool_id: "  ", operation_id: "google_docs.create_and_verify", required: false }] })) ?? "",
+    /non-empty tool id/,
+    "omission or a blank id is never 'any Tool'",
+  );
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [{ tool_id: "google_docs", operation_id: "", required: false }] })) ?? "",
+    /non-empty operation id/,
+  );
+  assert.match(
+    validateActionDefinition(
+      TOOL_DECLARING_ACTION({ tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify" }] as any }),
+    ) ?? "",
+    /must state "required" explicitly/,
+    "a missing required flag is never a declaration",
+  );
+  assert.match(
+    validateActionDefinition(
+      TOOL_DECLARING_ACTION({
+        tool_operations: [
+          { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
+          { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: true },
+        ],
+      }),
+    ) ?? "",
+    /more than once/,
+    "a duplicate declaration makes the allowlist ambiguous",
+  );
+});
