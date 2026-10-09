@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "./types";
+import { buildProposalDocStyleRequests, type ProposalDocLayout } from "./proposalRedline";
 import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from "./telegram";
 import { generate } from "./ai";
@@ -1054,65 +1055,95 @@ export async function ensureGoogleFolder(
 }
 
 /**
+ * Reads a Doc's body text and end index (Docs indexes, UTF-16 units), or
+ * null when the Doc cannot be read at all.
+ */
+async function readGoogleDocBody(token: string, documentId: string): Promise<{ text: string; endIndex: number } | null> {
+  try {
+    const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const doc = (await res.json()) as { body?: { content?: { endIndex?: number; paragraph?: { elements?: { textRun?: { content?: string } }[] } }[] } };
+    const content = doc.body?.content ?? [];
+    const text = content.flatMap((c) => c.paragraph?.elements ?? []).map((e) => e.textRun?.content ?? "").join("");
+    return { text, endIndex: content.reduce((m, c) => Math.max(m, c.endIndex ?? 0), 1) };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Replaces the whole body of a Doc this system created with `layout.text` and
- * applies its heading / struck-through / added styling, then reads the Doc
- * back and confirms the text is exactly what was written. Used to bring a
- * Proposal's single Doc up to its newest version.
+ * applies the canonical Proposal layout styling (buildProposalDocStyleRequests:
+ * paragraph hierarchy, bullets, bold headings/labels, struck removed text,
+ * underlined added text), then reads the Doc back and confirms the text is
+ * exactly what was written. Used to bring a Proposal's single Doc up to its
+ * newest version.
  */
 export async function rewriteGoogleDoc(
   env: Env,
   accountIdentifier: string,
   documentId: string,
-  layout: { text: string; styles: { start: number; end: number; kind: "heading" | "del" | "add" }[] },
+  layout: ProposalDocLayout,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-  const docUrl = `https://docs.googleapis.com/v1/documents/${documentId}`;
-  const readBody = async (): Promise<{ text: string; endIndex: number } | null> => {
-    try {
-      const res = await fetch(docUrl, { headers });
-      if (!res.ok) return null;
-      const doc = (await res.json()) as { body?: { content?: { endIndex?: number; paragraph?: { elements?: { textRun?: { content?: string } }[] } }[] } };
-      const content = doc.body?.content ?? [];
-      const text = content.flatMap((c) => c.paragraph?.elements ?? []).map((e) => e.textRun?.content ?? "").join("");
-      return { text, endIndex: content.reduce((m, c) => Math.max(m, c.endIndex ?? 0), 1) };
-    } catch {
-      return null;
-    }
-  };
-  const before = await readBody();
+  const before = await readGoogleDocBody(token, documentId);
   if (!before) return { ok: false, error: "the Doc could not be read" };
 
-  const styleFor = {
-    heading: { textStyle: { bold: true }, fields: "bold" },
-    del: { textStyle: { strikethrough: true, foregroundColor: { color: { rgbColor: { red: 0.8, green: 0.1, blue: 0.1 } } } }, fields: "strikethrough,foregroundColor" },
-    add: { textStyle: { underline: true, foregroundColor: { color: { rgbColor: { red: 0.05, green: 0.5, blue: 0.2 } } } }, fields: "underline,foregroundColor" },
-  } as const;
   const requests: unknown[] = [];
   // The body always ends in a protected newline at endIndex-1; delete everything before it.
   if (before.endIndex > 2) requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: before.endIndex - 1 } } });
   requests.push({ insertText: { location: { index: 1 }, text: layout.text } });
-  // Clear any carried-over formatting, then style the marked ranges.
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: 1, endIndex: 1 + layout.text.length },
-      textStyle: { bold: false, strikethrough: false, underline: false },
-      fields: "bold,strikethrough,underline",
-    },
-  });
-  for (const r of layout.styles) {
-    requests.push({ updateTextStyle: { range: { startIndex: r.start, endIndex: r.end }, ...styleFor[r.kind] } });
-  }
+  requests.push(...buildProposalDocStyleRequests(layout));
   let res: Response;
   try {
-    res = await fetch(`${docUrl}:batchUpdate`, { method: "POST", headers, body: JSON.stringify({ requests }) });
+    res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, { method: "POST", headers, body: JSON.stringify({ requests }) });
   } catch {
     return { ok: false, error: "network error rewriting the Doc" };
   }
   if (!res.ok) return { ok: false, error: `Google Docs rewrite failed (HTTP ${res.status})` };
-  const after = await readBody();
+  const after = await readGoogleDocBody(token, documentId);
   if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc did not read back as written" };
+  return { ok: true };
+}
+
+/**
+ * Applies the canonical Proposal layout styling to a Doc WITHOUT touching a
+ * single character of its text: reads the Doc, refuses (nothing applied) when
+ * its text no longer matches the layout it should show, sends only style
+ * requests, and reads back to confirm the text is still byte-identical.
+ * Used by the formatting-only path for "presentation-only" comments on a
+ * Proposal's Doc (tokenSafeProposal.ts's applyProposalDocFormatting).
+ */
+export async function restyleGoogleDoc(
+  env: Env,
+  accountIdentifier: string,
+  documentId: string,
+  layout: ProposalDocLayout,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
+  const before = await readGoogleDocBody(token, documentId);
+  if (!before) return { ok: false, error: "the Doc could not be read" };
+  if (before.text.trimEnd() !== layout.text.trimEnd()) {
+    return { ok: false, error: "the Doc's text no longer matches the current version, so formatting was refused rather than applied to drifted content" };
+  }
+  let res: Response;
+  try {
+    res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: buildProposalDocStyleRequests(layout) }),
+    });
+  } catch {
+    return { ok: false, error: "network error formatting the Doc" };
+  }
+  if (!res.ok) return { ok: false, error: `Google Docs formatting failed (HTTP ${res.status})` };
+  const after = await readGoogleDocBody(token, documentId);
+  if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc's text changed while it was being formatted" };
   return { ok: true };
 }
 

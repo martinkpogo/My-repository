@@ -11,6 +11,7 @@ import {
   buildProposalContent,
   PROPOSAL_CALLBACK_ACTION,
   applyProposalDocComment,
+  applyProposalDocFormatting,
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import { installStatePersistence } from "../../runtime/workPersistence";
@@ -1331,7 +1332,7 @@ function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
   t.after(() => {
     globalThis.fetch = inner;
   });
-  return Object.assign(calls, { docRequests, text: () => docText });
+  return Object.assign(calls, { docRequests, text: () => docText, setDocText: (next: string) => void (docText = next) });
 }
 
 test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the current version in a dedicated folder, watches it bound to that version, and shows the link", async (t) => {
@@ -1353,6 +1354,9 @@ test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the curre
   assert.deepStrictEqual(watched.proposal, { workId: state.workId, proposalNumber: 7, proposalId: "PROP-7", version: 1 });
   assert.strictEqual(sp.doc?.url, "https://docs.google.com/document/d/doc-1/edit");
   assert.match(world.telegram.at(-1)!.text, /Google Doc for PROP-7 v1:\* https:\/\/docs\.google\.com\/document\/d\/doc-1\/edit/);
+  const layoutRequests = calls.docRequests.filter((r: any) => r.updateParagraphStyle || r.createParagraphBullets);
+  assert.ok(layoutRequests.some((r: any) => r.updateParagraphStyle?.textStyle?.namedStyleType === "TITLE"), "a v1 Doc gets the canonical layout -- no redline is required to trigger styling");
+  assert.ok(layoutRequests.some((r: any) => r.createParagraphBullets), "its lists are native Google Docs bullets");
   assert.strictEqual(sp.currentVersion, 1, "creating a Doc changes nothing about the Proposal");
   assert.strictEqual(sp.approvalStatus, "Pending Approval");
 });
@@ -1524,4 +1528,112 @@ test("Doc comment 4. A Work that no longer belongs to Sales refuses the request"
 
   assert.strictEqual(result.kind, "refused");
   assert.match((result as any).detail, /now belongs to Strategy/);
+});
+
+// ---------------------------------------------------------------------------
+// Formatting-only path: a presentation-only request restyles the Doc in
+// place and changes nothing governance holds -- no Version, no content, no
+// hash, no approval state, no Work Action, no Doc text.
+// ---------------------------------------------------------------------------
+
+test("Doc formatting 1. A formatting request on the current version's Doc restyles it in place: the text is byte-identical and no governance state moves", async (t) => {
+  const { world, state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+  const docTextBefore = calls.text();
+  const v1Content = state.salesProposal!.versions[0].content;
+  const versionPagesBefore = world.versionPages.length;
+  const telegramBefore = world.telegram.length;
+  const actionBefore = state.actionName;
+  const rec = proposals(world)[0].properties;
+
+  const { result } = await applyProposalDocFormatting(env, state, { proposalNumber: 7, version: 1 });
+
+  assert.deepStrictEqual(result, { kind: "formatted" });
+  assert.strictEqual(calls.text(), docTextBefore, "the Doc's text is byte-identical after formatting");
+  const batchUpdates = calls.filter((c) => c.url.includes(":batchUpdate"));
+  const lastRequests = batchUpdates.at(-1)!.body.requests;
+  assert.ok(
+    lastRequests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets),
+    "the formatting call is style-only: no insert, delete or replace request",
+  );
+  assert.ok(lastRequests.some((r: any) => r.updateParagraphStyle?.textStyle?.namedStyleType === "HEADING_1"), "canonical section-heading style applied");
+  assert.ok(lastRequests.some((r: any) => r.createParagraphBullets), "native bullets applied");
+  // Governance state: nothing moved.
+  assert.strictEqual(state.salesProposal!.currentVersion, 1);
+  assert.strictEqual(state.salesProposal!.versions.length, 1);
+  assert.strictEqual(state.salesProposal!.approvalStatus, "Pending Approval");
+  assert.strictEqual(state.salesProposal!.approvedVersion, undefined);
+  assert.strictEqual(state.actionName, actionBefore, "no Work Action progression");
+  assert.strictEqual(world.versionPages.length, versionPagesBefore, "no version page created");
+  assert.strictEqual(world.telegram.length, telegramBefore, "no message sent");
+  assert.strictEqual(text(rec.Version), "v1");
+  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval");
+  assert.strictEqual(text(rec["Proposal Content"]), v1Content, "Proposal Content untouched");
+});
+
+test("Doc formatting 2. A formatting request on a superseded version's Doc is refused as stale and changes nothing", async (t) => {
+  const { world, state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+  await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Add a second training session." });
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  const pagesBefore = world.versionPages.length;
+  const docTextAtV2 = calls.text();
+
+  const { result } = await applyProposalDocFormatting(env, state, { proposalNumber: 7, version: 1 });
+
+  assert.strictEqual(result.kind, "stale");
+  assert.match((result as any).detail, /copy of v1, but PROP-7 is now at v2/);
+  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(world.versionPages.length, pagesBefore);
+  assert.strictEqual(calls.text(), docTextAtV2, "the Doc is not touched by the refused request");
+});
+
+test("Doc formatting 3. A Work no longer in Sales refuses, and a missing Doc is refused rather than guessed", async (t) => {
+  const { env, state } = await createV1(t);
+
+  state.unit = "Strategy";
+  const notSales = await applyProposalDocFormatting(env, state, { proposalNumber: 7, version: 1 });
+  assert.strictEqual(notSales.result.kind, "refused");
+  assert.match((notSales.result as any).detail, /now belongs to Strategy/);
+
+  state.unit = "Sales";
+  const noDoc = await applyProposalDocFormatting(env, state, { proposalNumber: 7, version: 1 });
+  assert.strictEqual(noDoc.result.kind, "refused");
+  assert.match((noDoc.result as any).detail, /no Google Doc exists yet/);
+});
+
+test("Doc formatting 4. A Doc whose text has drifted from the version it is bound to is refused, never restyled", async (t) => {
+  const { state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const googleEnv = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+  await handleSalesProposalDecision(googleEnv, state, 7, 1, "doc");
+  const drifted = `${calls.text()}Handwritten client note.`;
+  calls.setDocText(drifted);
+
+  const { result } = await applyProposalDocFormatting(googleEnv, state, { proposalNumber: 7, version: 1 });
+
+  assert.strictEqual(result.kind, "refused");
+  assert.match((result as any).detail, /no longer matches/);
+  assert.strictEqual(calls.text(), drifted, "the drifted text is left exactly as it is");
+});
+
+test("Doc formatting 5. Repeating a formatting request is idempotent: same text, only style requests, still no version", async (t) => {
+  const { state } = await createV1(t);
+  const calls = withGoogleFake(t);
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+  await handleSalesProposalDecision(env, state, 7, 1, "doc");
+  const docTextBefore = calls.text();
+
+  const first = await applyProposalDocFormatting(env, state, { proposalNumber: 7, version: 1 });
+  const second = await applyProposalDocFormatting(env, state, { proposalNumber: 7, version: 1 });
+
+  assert.deepStrictEqual(first.result, { kind: "formatted" });
+  assert.deepStrictEqual(second.result, { kind: "formatted" });
+  assert.strictEqual(calls.text(), docTextBefore, "a repeated delivery changes nothing about the Doc");
+  assert.strictEqual(state.salesProposal!.currentVersion, 1, "no version is created by repeated formatting");
+  assert.strictEqual(state.salesProposal!.versions.length, 1);
 });
