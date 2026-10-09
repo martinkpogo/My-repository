@@ -23,9 +23,10 @@ import {
 } from "./toolRegistry";
 import { GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, GOOGLE_DOCS_TOOL_ID } from "./tools/googleDocsTool";
 import { GOOGLE_DOCS_UPDATE_OPERATION_ID } from "./tools/googleDocsUpdateTool";
+import { GOOGLE_DOCS_FORMAT_OPERATION_ID } from "./tools/googleDocsFormatTool";
 import { GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, GOOGLE_DRIVE_TOOL_ID } from "./tools/googleDriveFolderTool";
 import { installStatePersistence } from "./workPersistence";
-import { buildProposalDocLayout } from "../proposalRedline";
+import { buildProposalDocLayout, buildProposalDocStyleRequests, expectedDocParagraphStyles } from "../proposalRedline";
 
 /**
  * The Tool Registry contract, proven at the invocation boundary:
@@ -1049,11 +1050,12 @@ function folderServer(name = FOLDER_INPUT.folder_name, folderId = "folder-1") {
   };
 }
 
-test("AQ. all three registered Google Workspace operations resolve exactly -- id, contract version, effect, handlers and reconciliation", () => {
+test("AQ. all four registered Google Workspace operations resolve exactly -- id, contract version, effect, handlers and reconciliation", () => {
   const create = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID);
   const update = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID);
+  const format = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_FORMAT_OPERATION_ID);
   const folder = resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID);
-  for (const operation of [create, update, folder]) {
+  for (const operation of [create, update, format, folder]) {
     assert.ok(operation, "every declared operation must be exactly registered");
     assert.equal(operation.version, "1.0");
     assert.equal(operation.effect, "external_mutation");
@@ -1063,6 +1065,7 @@ test("AQ. all three registered Google Workspace operations resolve exactly -- id
     assert.equal(typeof operation.reconcile, "function");
   }
   assert.equal(update!.operationId, "google_docs.update_and_verify");
+  assert.equal(format!.operationId, "google_docs.format_and_verify");
   assert.equal(folder!.toolId, "google_drive");
   assert.equal(resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID), null, "operations never resolve across Tools");
 });
@@ -1297,4 +1300,306 @@ test("AY. the folder operation's input contract is exact and its reconciliation 
     "folder-1",
     "the recovered folder id is memoized into ENIG's own cache so the next ensure reuses it",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The registered FORMATTING operation (google_docs.format_and_verify): the
+// presentation-only pass over a Doc the Proposal already has. Style-only by
+// construction -- it may never insert, delete or replace a character -- and
+// reconciled by reading the Doc's ACTUAL styling, because a styling pass
+// leaves the text untouched and text alone can never show whether styles
+// were applied.
+// ---------------------------------------------------------------------------
+
+/** Deliberately free of "Label: value" lines and (single-version) redline marks, so the canonical layout carries paragraph styling only. */
+const FORMAT_INPUT = {
+  document_id: "doc-1",
+  account_identifier: "martin@example.com",
+  proposal_id: "PROP-7",
+  versions: [{ version: 1, content: "The scope covers two workshops.\nThe timeline is six weeks." }],
+};
+const FORMAT_TARGET = `gdrive:document:${FORMAT_INPUT.document_id}`;
+
+/** The canonical layout, rebuilt from the Proposal's OWN Version data -- never from a request. */
+const FORMAT_LAYOUT = buildProposalDocLayout(FORMAT_INPUT.proposal_id, FORMAT_INPUT.versions);
+
+/**
+ * A Docs server for the formatting operation. The document always carries
+ * the exact canonical TEXT (a formatting pass may never change it) and
+ * either already shows the canonical styling or is plain. The body ends with
+ * the API's own required empty paragraph, exactly as the real one does.
+ */
+function formatServer(
+  counters: { batchUpdates: number; requests?: unknown[] },
+  opts: { styled: boolean; text?: string; unreadable?: boolean; changeTextAfterUpdate?: boolean } = { styled: false },
+) {
+  let text = opts.text ?? FORMAT_LAYOUT.text;
+  return (call: GoogleCall): Response => {
+    if (call.url.includes(":batchUpdate")) {
+      counters.batchUpdates += 1;
+      counters.requests = call.body?.requests ?? [];
+      if (opts.changeTextAfterUpdate) text = `${text}A handwritten client note.\n`;
+      return json({});
+    }
+    if (call.url.endsWith("/documents/doc-1") && call.method === "GET") {
+      if (opts.unreadable) return new Response("upstream sad", { status: 500 });
+      const expected = expectedDocParagraphStyles(FORMAT_LAYOUT);
+      const lines = text.split("\n");
+      // Every newline is a paragraph separator, so the body ends with one
+      // required empty paragraph after the text's final newline.
+      const paragraphTexts = lines.slice(0, -1).map((line) => `${line}\n`);
+      const content: any[] = [];
+      let index = 1;
+      paragraphTexts.forEach((paragraphText, paragraphIndex) => {
+        const startIndex = index;
+        index += paragraphText.length;
+        const want = expected[paragraphIndex] ?? { namedStyleType: "NORMAL_TEXT", bulleted: false, indentStartPt: 0 };
+        // Runs are split at the layout's inline-style boundaries, exactly as
+        // the real API reports them, so the read-back verification sees the
+        // canonical bold heading rather than one plain run per paragraph.
+        const boundaries = [startIndex, index];
+        for (const style of FORMAT_LAYOUT.styles) {
+          for (const edge of [style.start, style.end]) {
+            if (edge > startIndex && edge < index) boundaries.push(edge);
+          }
+        }
+        const marks = [...new Set(boundaries)].sort((a, b) => a - b);
+        const elements = marks.slice(0, -1).map((start, markIndex) => {
+          const end = marks[markIndex + 1];
+          const covering = FORMAT_LAYOUT.styles.find((style) => start >= style.start && end <= style.end);
+          return { textRun: { content: text.slice(start - 1, end - 1), ...(covering ? { textStyle: { bold: true } } : {}) } };
+        });
+        content.push({
+          startIndex,
+          endIndex: index,
+          paragraph: {
+            namedStyleType: opts.styled ? want.namedStyleType : "NORMAL_TEXT",
+            ...(opts.styled && want.bulleted ? { bullet: {} } : {}),
+            ...(opts.styled && want.indentStartPt ? { paragraphStyle: { indentStart: { magnitude: want.indentStartPt } } } : {}),
+            elements,
+          },
+        });
+      });
+      content.push({ startIndex: index, endIndex: index, paragraph: { namedStyleType: "NORMAL_TEXT", elements: [] } });
+      return json({ body: { content } });
+    }
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  };
+}
+
+const formatCall = (input: unknown = FORMAT_INPUT) => ({
+  tool_id: GOOGLE_DOCS_TOOL_ID,
+  operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID,
+  input,
+});
+
+test("AZ. the formatting operation's input contract is exact -- unknown fields, a URL for a document id and a malformed version list are all denied with zero Google calls", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  const { calls } = installGoogleFake(t, formatServer(counters));
+  const cases: unknown[] = [
+    { ...FORMAT_INPUT, extra: "field" },
+    { ...FORMAT_INPUT, document_id: "https://docs.google.com/document/d/doc-1" },
+    { ...FORMAT_INPUT, document_id: "" },
+    { ...FORMAT_INPUT, proposal_id: "   " },
+    { ...FORMAT_INPUT, versions: [] },
+    { ...FORMAT_INPUT, versions: [{ version: 0, content: "x" }] },
+    { ...FORMAT_INPUT, versions: [{ version: 1, content: "   " }] },
+    { ...FORMAT_INPUT, versions: [{ version: 1, content: "x", note: "extra" }] },
+    "not an object",
+  ];
+  for (const input of cases) {
+    const outcome = await invokeTool(env, formatCall(input), submitContext());
+    assert.equal(outcome.state, "denied", `input ${JSON.stringify(input)} must be denied`);
+  }
+  assert.equal(googleCalls(calls).length, 0, "invalid input must never reach Google");
+});
+
+test("BA. the formatting target resolves from trusted state: an account this Worker is not authorized for is denied with zero Google calls", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  const { calls } = installGoogleFake(t, formatServer(counters));
+  const outcome = await invokeTool(env, formatCall({ ...FORMAT_INPUT, account_identifier: "attacker@example.com" }), submitContext());
+  assert.equal(outcome.state, "denied");
+  assert.match(outcome.reason ?? "", /not one of the 1 account\(s\) this Worker is authorized for/);
+  assert.equal(googleCalls(calls).length, 0);
+});
+
+test("BB. a formatting pass sends ONLY style requests -- never an insert or a delete -- and claims success only after the text reads back byte-identical", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false }));
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "succeeded", outcome.reason ?? "");
+  assert.equal(outcome.verified, true, "success is claimed only after the read-back verification");
+  assert.equal(outcome.remote_resource?.document_id, FORMAT_INPUT.document_id);
+  assert.equal(counters.batchUpdates, 1, "exactly one styling request is sent");
+  const requests: any[] = counters.requests ?? [];
+  assert.ok(requests.length > 0, "the canonical styling must actually be sent");
+  assert.deepEqual(
+    requests,
+    buildProposalDocStyleRequests(FORMAT_LAYOUT),
+    "the styling applied is exactly the canonical set derived from the Proposal's own Versions",
+  );
+  assert.equal(
+    requests.filter((request: any) => request.insertText || request.deleteContentRange).length,
+    0,
+    "a formatting pass may never insert, delete or replace a single character of text",
+  );
+});
+
+test("BC. a Doc whose text has drifted from the Version it is bound to is refused BEFORE any styling is sent", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false, text: `${FORMAT_LAYOUT.text}A handwritten client note.\n` }));
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "failed");
+  assert.equal(outcome.stage, "baseline");
+  assert.match(outcome.reason ?? "", /no longer matches the current version/);
+  assert.equal(counters.batchUpdates, 0, "drifted content is never styled");
+});
+
+test("BD. a styling pass whose verification read no longer matches is partially_completed -- never a success, and reconciled before any retry", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false, changeTextAfterUpdate: true }));
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "partially_completed");
+  assert.equal(outcome.stage, "verification");
+  assert.equal(outcome.reconciliation_required, true);
+  assert.equal(outcome.remote_resource?.document_id, FORMAT_INPUT.document_id, "the document id is preserved so the attempt can be reconciled");
+});
+
+test("BE. a styling request whose response is lost is unverified -- a possible remote effect, reconciled rather than repeated", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  const server = formatServer(counters, { styled: false });
+  installGoogleFake(t, (call) => {
+    if (call.url.includes(":batchUpdate")) {
+      counters.batchUpdates += 1; // the request was ATTEMPTED; only its response was lost
+      throw new Error("network error formatting the Doc");
+    }
+    return server(call);
+  });
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "unverified");
+  assert.equal(outcome.reconciliation_required, true);
+  assert.equal(counters.batchUpdates, 1);
+});
+
+test("BF. under the approval-gated proposal_approve the formatting operation fails closed without bound evidence, and a proof bound to another operation or target never authorizes it", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const approveState = toolState({ actionName: "proposal_approve" });
+  const binding = { toolId: "google_docs", operationId: GOOGLE_DOCS_FORMAT_OPERATION_ID, targetResourceId: FORMAT_TARGET };
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false }));
+
+  const noProof = await invokeTool(env, formatCall(), workSessionContext(approveState));
+  assert.equal(noProof.state, "denied", "a presentation-only pass still needs bound approval evidence under an approval-gated Action");
+  assert.match(noProof.reason ?? "", /requires Martin's explicit approval.*no ApprovalProof was supplied/);
+
+  const wrongOperation = await invokeTool(
+    env,
+    formatCall(),
+    workSessionContext(approveState, mintExternalToolApprovalProof(approveState, { ...binding, operationId: GOOGLE_DOCS_UPDATE_OPERATION_ID })),
+  );
+  assert.equal(wrongOperation.state, "denied", "evidence bound to another operation never authorizes this one");
+
+  const wrongTarget = await invokeTool(
+    env,
+    formatCall(),
+    workSessionContext(approveState, mintExternalToolApprovalProof(approveState, { ...binding, targetResourceId: "gdrive:document:doc-9" })),
+  );
+  assert.equal(wrongTarget.state, "denied", "evidence bound to another document never authorizes this one");
+
+  assert.equal(counters.batchUpdates, 0, "every denial happens before any styling is sent");
+
+  const authorized = await invokeTool(env, formatCall(), workSessionContext(approveState, mintExternalToolApprovalProof(approveState, binding)));
+  assert.equal(authorized.state, "succeeded", authorized.reason ?? "");
+  assert.equal(counters.batchUpdates, 1, "correctly bound evidence authorizes exactly this operation on exactly this document");
+});
+
+test("BG. an Action that does not declare the formatting operation is denied -- availability of the operation grants nothing", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  const { calls } = installGoogleFake(t, formatServer(counters, { styled: false }));
+  const outcome = await invokeTool(env, formatCall(), workSessionContext(toolState({ actionName: "new_enquiry" })));
+  assert.equal(outcome.state, "denied");
+  assert.match(outcome.reason ?? "", /does not declare Tool operation google_docs\.format_and_verify/);
+  assert.equal(googleCalls(calls).length, 0);
+});
+
+test("BH. an interrupted styling pass is reconciled by reading the Doc's ACTUAL styling: a Doc already styled is recovered as a verified success and is never re-sent", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: true }));
+  workRecords[operationRecordKey(GOOGLE_DOCS_FORMAT_OPERATION_ID, FORMAT_TARGET, FORMAT_INPUT)] = seededRecord({
+    tool_id: GOOGLE_DOCS_TOOL_ID,
+    operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID,
+    target_resource_id: FORMAT_TARGET,
+  });
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "succeeded", outcome.reason ?? "");
+  assert.equal(outcome.verified, true);
+  assert.match(outcome.reason ?? "", /already shows the canonical styling/);
+  assert.equal(counters.batchUpdates, 0, "the effect already exists: it is recovered, never repeated");
+});
+
+test("BI. an interrupted styling pass whose Doc is not yet styled proceeds with exactly one fresh styling request", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false }));
+  workRecords[operationRecordKey(GOOGLE_DOCS_FORMAT_OPERATION_ID, FORMAT_TARGET, FORMAT_INPUT)] = seededRecord({
+    tool_id: GOOGLE_DOCS_TOOL_ID,
+    operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID,
+    target_resource_id: FORMAT_TARGET,
+  });
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "succeeded", outcome.reason ?? "");
+  assert.equal(counters.batchUpdates, 1, "no styling effect existed, so exactly one fresh (idempotent, text-verified) pass may run");
+});
+
+test("BJ. an interrupted styling pass whose Doc cannot be read stays unverified and starts nothing", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false, unreadable: true }));
+  workRecords[operationRecordKey(GOOGLE_DOCS_FORMAT_OPERATION_ID, FORMAT_TARGET, FORMAT_INPUT)] = seededRecord({
+    tool_id: GOOGLE_DOCS_TOOL_ID,
+    operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID,
+    target_resource_id: FORMAT_TARGET,
+  });
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "unverified", "an unreadable Doc leaves the earlier attempt's effect unknown -- never guessed either way");
+  assert.equal(outcome.reconciliation_required, true);
+  assert.equal(counters.batchUpdates, 0);
+});
+
+test("BK. a persisted verified formatting success is returned as-is -- a repeated request or a duplicate poll never restyles the Doc", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  const { calls } = installGoogleFake(t, formatServer(counters, { styled: true }));
+  const key = operationRecordKey(GOOGLE_DOCS_FORMAT_OPERATION_ID, FORMAT_TARGET, FORMAT_INPUT);
+  workRecords[key] = seededRecord({
+    tool_id: GOOGLE_DOCS_TOOL_ID,
+    operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID,
+    target_resource_id: FORMAT_TARGET,
+    status: "succeeded",
+    outcome: { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID, state: "succeeded", verified: true },
+  });
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "succeeded");
+  assert.equal(outcome.verified, true);
+  assert.equal(googleCalls(calls).length, 0, "the stored verified outcome is returned with no request at all");
 });

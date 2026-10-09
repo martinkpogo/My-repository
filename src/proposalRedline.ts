@@ -239,3 +239,26 @@ export function buildProposalDocStyleRequests(layout: ProposalDocLayout): unknow
   }
   return requests;
 }
+
+/**
+ * The paragraph signature each block of a layout must actually show in the
+ * Doc: the named style it asks for, whether it is bulleted, and its start
+ * indent. Derived from the SAME canonical table the style requests use, so
+ * the expected styling and the applied styling can never drift apart. Used
+ * by the registered formatting operation's reconciliation, which must settle
+ * an interrupted attempt by reading the Doc -- text alone cannot show
+ * whether styles were applied.
+ */
+export function expectedDocParagraphStyles(
+  layout: ProposalDocLayout,
+): { kind: DocBlockKind; namedStyleType: string; bulleted: boolean; indentStartPt: number }[] {
+  return layout.blocks.map((block) => {
+    const paragraph = PARAGRAPH_STYLES[block.kind];
+    return {
+      kind: block.kind,
+      namedStyleType: paragraph.namedStyleType,
+      bulleted: block.kind === "bullet" || block.kind === "subBullet",
+      indentStartPt: paragraph.indentStartPt ?? 0,
+    };
+  });
+}

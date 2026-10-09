@@ -55,6 +55,7 @@ import { AccessDeniedError, evaluateExternalMutationAccess } from "../access";
 import type { ActionDefinition } from "../hats/actionRegistry";
 import { googleDocsToolOperation } from "./tools/googleDocsTool";
 import { googleDocsUpdateToolOperation } from "./tools/googleDocsUpdateTool";
+import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
 import { googleDriveEnsureFolderToolOperation } from "./tools/googleDriveFolderTool";
 import { getWorkPersistence, type ToolOperationPersistence } from "./workPersistence";
 
@@ -154,6 +155,7 @@ export interface ToolOperationDefinition {
 const TOOL_OPERATIONS: readonly ToolOperationDefinition[] = [
   googleDocsToolOperation,
   googleDocsUpdateToolOperation,
+  googleDocsFormatToolOperation,
   googleDriveEnsureFolderToolOperation,
 ];
 

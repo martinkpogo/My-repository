@@ -26,7 +26,8 @@ import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../.
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
-import { restyleGoogleDoc, listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { classifyProposalCommentIntent, markProposalDocCommentProcessed } from "../../googleDocComments";
 import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -63,6 +64,8 @@ import { resolveEntityMatterFromTokens } from "../../identityResolution";
  */
 
 const HAT = "Sales Executive";
+/** How much of an unclassifiable Doc comment is quoted back to Martin in Telegram when asking what it means. */
+const MAX_COMMENT_CHARS_FOR_CHAT = 300;
 const FINANCE_FROM_UNIT = "Finance";
 const FINANCE_FROM_HAT = "Value-Based Pricing Assessor";
 
@@ -1498,7 +1501,15 @@ export type ProposalDocFormattingResult =
  * binding guards as applyProposalDocComment -- the Doc belongs to this
  * Proposal, the Work is still Sales', the Doc's version is still the current
  * one -- and refuses (nothing applied) when the Doc's text no longer matches
- * the version it is bound to (restyleGoogleDoc verifies before and after).
+ * the version it is bound to.
+ *
+ * The styling itself is a REGISTERED external mutation
+ * (google_docs.format_and_verify, invoked through src/runtime/toolRegistry.ts)
+ * rather than a direct Docs call: it carries this Work's own resolved Action's
+ * declaration, Access's external-mutation decision -- including bound
+ * approval evidence when that Action is approval-gated, which is why a
+ * formatting request arriving under `proposal_approve` is refused rather than
+ * applied -- durable intent/outcome records, and the canonical five outcomes.
  */
 export async function applyProposalDocFormatting(
   env: Env,
@@ -1521,9 +1532,185 @@ export async function applyProposalDocFormatting(
       result: { kind: "stale", detail: `this Doc is a copy of ${versionLabel(input.version)}, but ${sp.proposalId} is now at ${versionLabel(sp.currentVersion)}. Comment on the current version's Doc.` },
     };
   }
-  const styled = await restyleGoogleDoc(env, sp.doc.accountIdentifier, sp.doc.documentId, currentDocLayout(sp));
-  if (!styled.ok) return { state, result: { kind: "refused", detail: styled.error } };
-  return { state, result: { kind: "formatted" } };
+  const outcome = await invokeTool(
+    env,
+    { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", input: docWriteInput(sp, sp.doc.documentId, sp.doc.accountIdentifier) },
+    workSessionContext(state),
+  );
+  if (outcome.state === "succeeded") return { state, result: { kind: "formatted" } };
+  // Every non-success keeps its honest shape: `denied` (no declaration on the
+  // Work's Action, or missing bound approval evidence) made no request,
+  // `failed` names the stage -- including `baseline`, where the operation's
+  // own drift gate refused before anything was applied, so the Doc's text is
+  // left exactly as it is -- and `partially_completed`/`unverified` preserve
+  // the document id for reconciliation before any retry.
+  return { state, result: { kind: "refused", detail: outcome.reason ?? `${outcome.state}: no detail` } };
+}
+
+/**
+ * `retryable: false` marks a refusal that can never succeed for this comment
+ * (its Doc, Proposal or Version no longer matches the Work), so the poller
+ * closes the comment off honestly instead of re-classifying it forever;
+ * `retryable: true` is a transient ordering (another clarification is already
+ * outstanding) that a later poll may legitimately retry.
+ */
+export type ProposalDocClarificationResult = { ok: true } | { ok: false; detail: string; retryable: boolean };
+
+/**
+ * Records that a Proposal Doc comment could not be classified and that the
+ * Work is now WAITING for Martin's clarification of that exact comment
+ * (`state.awaiting` + `pendingProposalDocClarification`, the same continuation
+ * mechanism every other multi-turn Work flow uses -- resumed by his ordinary
+ * Telegram reply through the Hat's declared awaitingHandlers).
+ *
+ * Deliberately records the request instead of settling it: neither the
+ * formatting path nor the revision path may run on an ambiguous, mixed,
+ * malformed or failed classification, and the comment must stay recoverable
+ * rather than be marked processed and lost. The bindings carried here (Work,
+ * comment, document, Proposal, version, text) are what the resume revalidates,
+ * so a clarification can only ever continue the SAME request.
+ */
+export async function requestProposalDocClarification(
+  env: Env,
+  state: WorkState,
+  input: { proposalNumber: number; version: number; commentId: string; documentId: string; text: string },
+): Promise<{ state: WorkState; result: ProposalDocClarificationResult }> {
+  const sp = state.salesProposal;
+  if (!sp || sp.proposalNumber !== input.proposalNumber) {
+    return { state, result: { ok: false, detail: "this Doc does not belong to the Proposal on this work item.", retryable: false } };
+  }
+  if (state.unit !== "Sales") {
+    return { state, result: { ok: false, detail: `this work item now belongs to ${state.unit ?? "another Unit"}, so it can't hold a clarification for the Proposal Doc.`, retryable: false } };
+  }
+  if (!sp.doc || sp.doc.documentId !== input.documentId) {
+    return { state, result: { ok: false, detail: "this comment is not on the Doc this Proposal is currently bound to, so no clarification was recorded.", retryable: false } };
+  }
+  if (input.version !== sp.currentVersion || sp.doc.version !== input.version) {
+    return {
+      state,
+      result: { ok: false, detail: `${versionLabel(input.version)} is no longer the current Version of ${sp.proposalId}, so no clarification was recorded.`, retryable: false },
+    };
+  }
+  if (state.pendingProposalDocClarification && state.pendingProposalDocClarification.commentId !== input.commentId) {
+    // One outstanding clarification per Work: a second ambiguous comment is
+    // answered rather than silently replacing the request Martin is already
+    // being asked about.
+    return {
+      state,
+      result: { ok: false, detail: `a clarification is already outstanding for another comment on ${sp.proposalId} ${versionLabel(input.version)}; resolve that one first.`, retryable: true },
+    };
+  }
+  state.pendingProposalDocClarification = {
+    commentId: input.commentId,
+    documentId: input.documentId,
+    proposalNumber: input.proposalNumber,
+    version: input.version,
+    text: input.text,
+  };
+  state.stage = "awaiting_proposal_doc_clarification";
+  state.awaiting = "proposal_doc_clarification";
+  // Telegram is the route that can actually be answered (a reply on the Doc
+  // thread is write-only for this Worker -- Drive comment replies are never
+  // read back), so Martin is asked here, on the governed continuation
+  // channel, and his reply resumes this exact request.
+  await sendWorkspaceHatMessage(
+    env,
+    { ...state, hat: HAT },
+    `A comment on ${sp.proposalId} ${versionLabel(input.version)}'s Doc is unclear, so nothing has been changed:\n"${input.text.slice(0, MAX_COMMENT_CHARS_FOR_CHAT)}"\n\nReply here: say "formatting only" if it is just about presentation, or describe the text change and I'll record it as a new Version for your approval.`,
+  );
+  return { state, result: { ok: true } };
+}
+
+/**
+ * Martin's Telegram reply to a Doc-comment clarification. Re-classifies the
+ * SAME comment with his clarification appended -- classification stays a
+ * routing signal only, still failing closed to ambiguous -- and then routes
+ * it exactly once: formatting goes to the registered, governed
+ * google_docs.format_and_verify operation (applyProposalDocFormatting), a
+ * text change goes to the ordinary Request-changes revision path
+ * (applyProposalDocComment). Nothing else may run from here: no approval, no
+ * Version, no Doc text is touched by the clarification itself.
+ *
+ * The comment is marked processed immediately BEFORE that routed handler
+ * runs -- the same contract the poller uses -- so an interruption or a second
+ * reply can never apply the same comment twice; if the routed handler then
+ * fails it says so, exactly as the poller's own failure path does.
+ */
+export async function handleProposalDocClarificationText(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const sp = state.salesProposal;
+  const pending = state.pendingProposalDocClarification;
+
+  // The clarification only ever continues the SAME comment. When the Work or
+  // the Proposal moved on, it is answered honestly, the comment is closed off
+  // so it is not re-asked on every future poll, and nothing is mutated.
+  const closeStale = async (detail: string): Promise<WorkState> => {
+    const commentId = pending?.commentId;
+    state.pendingProposalDocClarification = undefined;
+    state.awaiting = undefined;
+    if (commentId) await markProposalDocCommentProcessed(env, commentId);
+    return staleDecision(env, state, detail);
+  };
+  if (!sp || !pending || pending.proposalNumber !== sp.proposalNumber) {
+    return closeStale("that Doc-comment clarification no longer matches a Proposal on this work item, so nothing was changed.");
+  }
+  if (pending.version !== sp.currentVersion) {
+    return closeStale(`that comment was on ${versionLabel(pending.version)}, and ${sp.proposalId} is now at ${versionLabel(sp.currentVersion)}; it was not applied. Comment on the current Version's Doc if the request still stands.`);
+  }
+  if (!sp.doc || sp.doc.documentId !== pending.documentId) {
+    return closeStale(`the Doc that comment was left on is no longer ${sp.proposalId}'s Doc, so nothing was changed.`);
+  }
+
+  const clarification = text.trim();
+  if (!clarification) {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT },
+      `What should I do with that comment on ${sp.proposalId} ${versionLabel(pending.version)} -- treat it as formatting only, or as a change to the Proposal's content? Nothing has been changed.`,
+    );
+    return state;
+  }
+
+  const intent = await classifyProposalCommentIntent(env, `${pending.text}\n\nClarification from Martin: ${clarification}`);
+  if (intent === "ambiguous") {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT },
+      `Still unclear, so I have changed nothing. Say "formatting only" if the comment is just about presentation, or describe the text change and I'll record it as a new Version for your approval.`,
+    );
+    return state;
+  }
+
+  // The ambiguity is resolved: close the comment out BEFORE the routed
+  // handler runs, so a duplicate poll or a second reply can never apply it
+  // twice -- the same contract the poller applies to an unambiguous comment.
+  await markProposalDocCommentProcessed(env, pending.commentId);
+  state.pendingProposalDocClarification = undefined;
+  state.awaiting = undefined;
+  state.stage = "proposal_doc_clarification_resolved";
+
+  if (intent === "formatting") {
+    const applied = await applyProposalDocFormatting(env, state, { proposalNumber: pending.proposalNumber, version: pending.version });
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT },
+      applied.result.kind === "formatted"
+        ? `Done: ${sp.proposalId} ${versionLabel(pending.version)}'s Doc was restyled to the canonical layout. Its text is unchanged and no new Version was created.`
+        : `Not applied -- ${applied.result.detail}`,
+    );
+    return applied.state;
+  }
+
+  const revised = await applyProposalDocComment(env, state, { proposalNumber: pending.proposalNumber, version: pending.version, text: pending.text });
+  if (revised.result.kind === "revised") {
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT },
+      `Change recorded -- ${sp.proposalId} ${versionLabel(revised.result.newVersion)} was created from that comment and sent to you for approval. ${versionLabel(pending.version)} is unchanged.`,
+    );
+    return revised.state;
+  }
+  await sendWorkspaceHatMessage(env, { ...state, hat: HAT }, `Not applied -- ${revised.result.detail}`);
+  return revised.state;
 }
 
 export async function handleSalesProposalRevisionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
