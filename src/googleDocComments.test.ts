@@ -88,6 +88,7 @@ function mockFetchWith(handlers: {
   onReply?: (commentId: string, body: any) => void;
   onResolve?: (commentId: string) => void;
   onBatchUpdate?: (body: any) => boolean;
+  onTelegram?: (body: any) => void;
 }) {
   return (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
@@ -99,6 +100,7 @@ function mockFetchWith(handlers: {
       return new Response(JSON.stringify({ id: "notion-page-1" }), { status: 200, headers: { "content-type": "application/json" } });
     }
     if (urlStr.startsWith("https://api.telegram.org/")) {
+      handlers.onTelegram?.(init?.body ? JSON.parse(String(init.body)) : undefined);
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
     }
 
@@ -150,7 +152,7 @@ test("pollGoogleDocComments does nothing when no docs are watched", async () => 
   assert.strictEqual(result.commentsProcessed, 0);
 });
 
-test("applies a comment-anchored edit from the doc's own authorized account, replies, and resolves it", async (t) => {
+test("refuses a comment-anchored edit from the doc's own authorized account -- no authorization path exists, so nothing is written and the refusal is reported", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
 
@@ -158,6 +160,7 @@ test("applies a comment-anchored edit from the doc's own authorized account, rep
   let repliedBody: any = null;
   let resolvedCommentId: string | null = null;
   let batchUpdateBody: any = null;
+  let telegramSent = false;
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -182,6 +185,9 @@ test("applies a comment-anchored edit from the doc's own authorized account, rep
       batchUpdateBody = body;
       return true;
     },
+    onTelegram: () => {
+      telegramSent = true;
+    },
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -190,12 +196,17 @@ test("applies a comment-anchored edit from the doc's own authorized account, rep
   const result = await pollGoogleDocComments(fakeEnv);
 
   assert.strictEqual(result.docsChecked, 1);
-  assert.strictEqual(result.commentsProcessed, 1);
+  assert.strictEqual(result.commentsProcessed, 1, "the comment is handled -- marked processed so the same request is never re-attempted on every poll");
   assert.strictEqual(repliedCommentId, "comment-1");
-  assert.ok(repliedBody.content.includes("Monday"));
-  assert.strictEqual(resolvedCommentId, "comment-1");
-  assert.strictEqual(batchUpdateBody.requests[0].replaceAllText.containsText.text, "Friday");
-  assert.strictEqual(batchUpdateBody.requests[0].replaceAllText.replaceText, "Monday");
+  assert.ok(
+    repliedBody.content.includes("not an authorized operation"),
+    `the refusal must state the missing authorization honestly, got: ${repliedBody?.content}`,
+  );
+  assert.ok(repliedBody.content.includes("nothing in this document was changed"), "the refusal must state that nothing changed");
+  assert.strictEqual(resolvedCommentId, null, "an edit that was not applied is never resolved");
+  assert.strictEqual(batchUpdateBody, null, "no Docs batchUpdate may be sent outside the governed external-effect boundary");
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "edit_not_authorized");
+  assert.strictEqual(telegramSent, false, "the refusal reaches the commenter directly; no extra Telegram signal is manufactured");
 
   const processedMarker = await fakeEnv.STATE_KV.get("google_comment_processed:comment-1");
   assert.strictEqual(processedMarker, "1");

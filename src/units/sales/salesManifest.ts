@@ -308,7 +308,20 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // approval lifecycle and is reported, not invented). `required: false`:
     // presenting or approving a Version succeeds without a Doc. See
     // tokenSafeProposal.ts ensureProposalDoc.
-    tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
+    //
+    // The same three Actions also declare the operations ensureProposalDoc's
+    // other steps run under the same reasoning (same call sites, same
+    // reachability, same `required: false` -- a presentation or approval
+    // succeeds without them):
+    //   - google_docs.update_and_verify: rewriting an EXISTING Doc to the
+    //     current Version (ensureProposalDoc's update path);
+    //   - google_drive.ensure_folder: the dedicated Proposal-docs Drive
+    //     folder the Doc is created into (ensureProposalDoc's folder step).
+    tool_operations: [
+      { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
+      { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
+      { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
+    ],
     applicability: {
       mode: "any",
       conditions: [
@@ -327,12 +340,17 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // Performed inside the Proposal lifecycle (recorded on the Work there)
     // -- never resolved as an entry Action.
     //
-    // Declares google_docs.create_and_verify for the same reason as
-    // proposal_draft (see its comment): this is the Action every
-    // presentation of a Version -- and therefore the review Doc's creation
-    // in ensureProposalDoc -- runs under, recorded before presentForApproval
-    // and again on the retry button's flow.
-    tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
+    // Declares the three Google Workspace operations for the same reason as
+    // proposal_draft (see its full rationale): this is the Action every
+    // presentation of a Version -- and therefore the Doc creation, the
+    // folder step and the update of an existing Doc in ensureProposalDoc --
+    // runs under, recorded before presentForApproval and again on the retry
+    // button's flow.
+    tool_operations: [
+      { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
+      { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
+      { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
+    ],
     applicability: {
       mode: "all",
       conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
@@ -347,15 +365,19 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     requiresApproval: true,
     // Same as `proposal_submit`: an in-flow operation, never an entry Action.
     //
-    // Declares google_docs.create_and_verify because the "Create Google Doc"
-    // retry button stays live on the approval-request message after Martin
-    // approves -- the operation is reachable under this Action. Since this
+    // Declares the three Google Workspace operations because the "Create
+    // Google Doc" retry button stays live on the approval-request message
+    // after Martin approves -- reachable under this Action. Since this
     // Action is approval-gated, an invocation under it demands approval
     // evidence bound to this work, action, operation and target (which the
     // current flow never mints), so a stale tap fails closed with an
-    // approval denial rather than creating anything. Full rationale: see
+    // approval denial rather than mutating anything. Full rationale: see
     // proposal_draft's tool_operations comment.
-    tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
+    tool_operations: [
+      { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
+      { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
+      { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
+    ],
     applicability: {
       mode: "all",
       conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
@@ -368,7 +390,12 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     responsibility: "own_client_acquisition",
     consequence: "write",
     requiresApproval: false,
-    // Same as `proposal_submit`: an in-flow operation, never an entry Action.
+    // Same as `proposal_submit`: an in-flow operation, never an entry
+    // Action. Declares NO Tool operations: a revision writes the new
+    // Version to Notion and then advances the Work to proposal_submit
+    // BEFORE presentForApproval touches any Doc (see
+    // handleSalesProposalRevisionText), so no Google Workspace operation is
+    // ever invoked while this Action is recorded.
     applicability: {
       mode: "all",
       conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],

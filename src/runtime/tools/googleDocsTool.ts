@@ -137,13 +137,30 @@ function extractGoogleDocText(data: unknown): string | null {
   return text;
 }
 
+/** Escapes a literal value for use inside a Drive query string. */
+function escapeQueryValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
 /**
  * Reconciles the remote state left by an uncertain earlier attempt BEFORE any
- * new creation: reads the document back by its preserved id and reports what
- * is actually there. Returns `outcome: null` only when the read establishes
- * that no document exists (404) -- the one case a fresh creation may proceed.
- * An unreachable read keeps the outcome unverified; it never becomes a
- * definite failure.
+ * new creation. Two cases, both operation-specific to creation:
+ *
+ *  - a known document id (the earlier attempt reported one): read THAT
+ *    document back and report what is actually there;
+ *  - no usable id (an attempt whose outcome never landed -- the durable
+ *    record's interruption window): LIST the target folder for a document
+ *    with the exact requested title, which is the only identity a creation
+ *    attempt leaves behind. Found with the requested content means the
+ *    effect exists (recovered as verified success); found with different
+ *    content means it exists but is not the requested effect (held, never
+ *    duplicated); absent means no effect exists and a fresh creation may
+ *    proceed.
+ *
+ * Returns `outcome: null` only when the read establishes that no document
+ * with the requested content exists -- the one case a fresh creation may
+ * proceed. An unreachable read keeps the outcome unverified; it never
+ * becomes a definite failure.
  */
 async function reconcileGoogleDocCreation(
   env: Env,
@@ -159,14 +176,76 @@ async function reconcileGoogleDocCreation(
     ...(prior.remote_resource ? { remote_resource: prior.remote_resource } : {}),
     reconciliation_required: true,
   });
-  if (!documentId || typeof parsed === "string") {
-    return { outcome: uncertain("the earlier attempt's remote effect cannot be reconciled (no usable document id or input) -- refusing to create again until it is resolved") };
+  if (typeof parsed === "string") {
+    return { outcome: uncertain("the earlier attempt's remote effect cannot be reconciled (no usable input) -- refusing to create again until it is resolved") };
   }
   try {
     const token = await getValidGoogleAccessToken(env, parsed.account_identifier);
     if (!token) {
       return {
         outcome: uncertain(`the authorized account has no valid access token, so the earlier document could not be read back -- still unverified; the account must be re-authorized before retrying`),
+      };
+    }
+    if (!documentId) {
+      // Interruption window: the intent is durable but no id ever landed.
+      // Search the target folder for this exact title -- the only identity a
+      // creation attempt leaves behind.
+      const query =
+        `'${escapeQueryValue(parsed.folder_id)}' in parents and name='${escapeQueryValue(parsed.title)}'` +
+        ` and mimeType='application/vnd.google-apps.document' and trashed=false`;
+      const listResponse = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)&pageSize=10`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!listResponse.ok) {
+        return { outcome: uncertain(`reconciliation search for an earlier document failed (HTTP ${listResponse.status}) -- its state is still unconfirmed, so no new creation may start`) };
+      }
+      const listed = (await listResponse.json().catch(() => ({}))) as { files?: { id?: string; name?: string }[] };
+      const files = (listed.files ?? []).filter((file) => typeof file.id === "string" && file.id.length > 0 && file.name === parsed.title);
+      if (files.length === 0) {
+        // Confirmed absence: the earlier attempt left no document behind, so
+        // a fresh creation may proceed.
+        return { outcome: null };
+      }
+      if (files.length > 1) {
+        return {
+          outcome: {
+            ...BASE,
+            state: "partially_completed",
+            reason: `reconciled: ${files.length} documents with the requested title exist in the target folder after an interrupted attempt -- the earlier effect cannot be identified, so no new document may be created`,
+            reconciliation_required: true,
+          },
+        };
+      }
+      const foundId = files[0].id!;
+      const readResponse = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(foundId)}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!readResponse.ok) {
+        return { outcome: uncertain(`the document found during reconciliation could not be read back (HTTP ${readResponse.status}) -- no new creation may start`) };
+      }
+      const data: unknown = await readResponse.json();
+      const text = extractGoogleDocText(data);
+      if (text !== null && text.includes(parsed.content)) {
+        return {
+          outcome: {
+            ...BASE,
+            state: "succeeded",
+            verified: true,
+            remote_resource: { document_id: foundId, url: `https://docs.google.com/document/d/${foundId}/edit` },
+            reason: "reconciled: the earlier interrupted attempt already created this document with the requested content",
+          },
+        };
+      }
+      return {
+        outcome: {
+          ...BASE,
+          state: "partially_completed",
+          remote_resource: { document_id: foundId, url: `https://docs.google.com/document/d/${foundId}/edit` },
+          reason: "reconciled: a document with the requested title exists but does not hold the requested content -- it must be reconciled, not recreated",
+          reconciliation_required: true,
+        },
       };
     }
     const response = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}`, {
