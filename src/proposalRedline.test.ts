@@ -115,12 +115,12 @@ test("buildProposalDocStyleRequests: style-only requests with valid indexes -- n
     assert.ok(range.startIndex >= 1 && range.endIndex <= l.text.length + 1, "every range is inside the text");
   }
   const para = (line: string) => requests.find((r) => r.updateParagraphStyle && l.text.slice(r.updateParagraphStyle.range.startIndex - 1, r.updateParagraphStyle.range.endIndex - 1) === `${line}\n`);
-  assert.strictEqual(para("PROPOSAL \u2014 Audit & Advisory \ud83d\ude80").updateParagraphStyle.textStyle.namedStyleType, "TITLE");
-  assert.strictEqual(para("1. PROPOSAL IDENTIFICATION").updateParagraphStyle.textStyle.namedStyleType, "HEADING_1");
-  assert.strictEqual(para("Changes").updateParagraphStyle.textStyle.namedStyleType, "HEADING_2");
+  assert.strictEqual(para("PROPOSAL \u2014 Audit & Advisory \ud83d\ude80").updateParagraphStyle.paragraphStyle.namedStyleType, "TITLE");
+  assert.strictEqual(para("1. PROPOSAL IDENTIFICATION").updateParagraphStyle.paragraphStyle.namedStyleType, "HEADING_1");
+  assert.strictEqual(para("Changes").updateParagraphStyle.paragraphStyle.namedStyleType, "HEADING_2");
   const nested = para("  - Sample the ledger").updateParagraphStyle;
-  assert.strictEqual(nested.textStyle.namedStyleType, "NORMAL_TEXT");
-  assert.strictEqual(nested.textStyle.indentStart.magnitude, 36, "nested bullets are indented");
+  assert.strictEqual(nested.paragraphStyle.namedStyleType, "NORMAL_TEXT");
+  assert.strictEqual(nested.paragraphStyle.indentStart.magnitude, 36, "nested bullets are indented");
   const bullets = requests.filter((r) => r.createParagraphBullets).map((r) => l.text.slice(r.createParagraphBullets.range.startIndex - 1, r.createParagraphBullets.range.endIndex - 1));
   assert.ok(bullets.includes("- Audit every ledger carefully\n") && bullets.includes("- Review controls \u00c9lev\u00e9\n") && bullets.includes("  - Sample the ledger\n"), JSON.stringify(bullets));
   const inline = requests.filter((r) => r.updateTextStyle && r.updateTextStyle.fields !== "bold,strikethrough,underline");
@@ -128,4 +128,64 @@ test("buildProposalDocStyleRequests: style-only requests with valid indexes -- n
   assert.ok(inline.some((r) => r.updateTextStyle.fields === "underline,foregroundColor"), "added text still underlined");
   const bolds = inline.filter((r) => r.updateTextStyle.fields === "bold").map((r) => l.text.slice(r.updateTextStyle.range.startIndex - 1, r.updateTextStyle.range.endIndex - 1));
   assert.ok(bolds.includes("In scope:"), "labels are bolded inline");
+});
+
+// Regression for the live PROP-6 v4 rewrite failure (HTTP 400): batchUpdate
+// validates every request against the Docs API v1 schema and rejects the whole
+// batch for one unknown field name or one invalid enum value. These two shapes
+// were the confirmed cause -- `updateParagraphStyle` carried `textStyle`
+// (the updateTextStyle field name) instead of `paragraphStyle`, and the bullet
+// preset carried `BULLET_PRESET_TYPE_DISC_CIRCLE_SQUARE`, which is not a
+// `BulletGlyphPreset` value. The allowed keys and enum values below are taken
+// verbatim from the Docs API v1 discovery schema, so this test fails if either
+// shape ever drifts back to a request Google would reject.
+test("buildProposalDocStyleRequests: every request matches the Docs API v1 schema -- updateParagraphStyle uses paragraphStyle and bulletPreset is a real BulletGlyphPreset value", () => {
+  const l = buildProposalDocLayout("PROP-7", [
+    { version: 1, content: CONTENT },
+    { version: 2, content: V2_CONTENT },
+  ]);
+  const requests = buildProposalDocStyleRequests(l) as any[];
+
+  // The exact property sets of the Docs API v1 request messages (discovery schema).
+  const allowedKeys: Record<string, string[]> = {
+    updateTextStyle: ["range", "textStyle", "fields"],
+    updateParagraphStyle: ["range", "paragraphStyle", "fields"],
+    createParagraphBullets: ["range", "bulletPreset"],
+  };
+  const bulletGlyphPresets = [
+    "BULLET_GLYPH_PRESET_UNSPECIFIED",
+    "BULLET_DISC_CIRCLE_SQUARE",
+    "BULLET_DIAMONDX_ARROW3D_SQUARE",
+    "BULLET_CHECKBOX",
+    "BULLET_ARROW_DIAMOND_DISC",
+    "BULLET_STAR_CIRCLE_SQUARE",
+    "BULLET_ARROW3D_CIRCLE_SQUARE",
+    "BULLET_LEFTTRIANGLE_DIAMOND_DISC",
+    "BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE",
+    "BULLET_DIAMOND_CIRCLE_SQUARE",
+    "NUMBERED_DECIMAL_ALPHA_ROMAN",
+    "NUMBERED_DECIMAL_ALPHA_ROMAN_PARENS",
+    "NUMBERED_DECIMAL_NESTED",
+    "NUMBERED_UPPERALPHA_ALPHA_ROMAN",
+    "NUMBERED_UPPERROMAN_UPPERALPHA_DECIMAL",
+    "NUMBERED_ZERODECIMAL_ALPHA_ROMAN",
+  ];
+
+  for (const [i, r] of requests.entries()) {
+    const kind = Object.keys(r)[0];
+    assert.ok(allowedKeys[kind], `requests[${i}] is a known request type (got ${kind})`);
+    assert.deepStrictEqual(
+      Object.keys(r[kind]).sort(),
+      [...allowedKeys[kind]].sort(),
+      `requests[${i}].${kind} carries exactly the documented fields -- a stray/misnamed field is a whole-batch HTTP 400`,
+    );
+    if (kind === "updateParagraphStyle") {
+      assert.strictEqual(r[kind].textStyle, undefined, "updateParagraphStyle must NOT carry the updateTextStyle-only textStyle field");
+      assert.ok(r[kind].paragraphStyle.namedStyleType, "the paragraph style is nested under paragraphStyle");
+    }
+    if (kind === "createParagraphBullets") {
+      assert.ok(bulletGlyphPresets.includes(r[kind].bulletPreset), `requests[${i}].bulletPreset ${r[kind].bulletPreset} must be a BulletGlyphPreset value`);
+      assert.strictEqual(r[kind].bulletPreset, "BULLET_DISC_CIRCLE_SQUARE", "the canonical disc/circle/square preset");
+    }
+  }
 });

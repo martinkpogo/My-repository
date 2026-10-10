@@ -205,6 +205,15 @@ const INLINE_STYLE_REQUEST: Record<DocStyleKind, { textStyle: Record<string, unk
  * the bullet paragraphs, then the inline marks -- bold headings and labels,
  * struck removed text, underlined added text. Style-only by construction:
  * no request here inserts, deletes or replaces a single character of text.
+ *
+ * Every request uses the exact Docs API v1 `Request` shape, which is not
+ * interchangeable between update requests: `updateTextStyle` carries
+ * `textStyle`/`fields`, while `updateParagraphStyle` carries
+ * `paragraphStyle`/`fields` (there is no `textStyle`). `bulletPreset` must be
+ * one of the `BulletGlyphPreset` values; the canonical disc/circle/square
+ * preset is `BULLET_DISC_CIRCLE_SQUARE`. An unknown field name or enum value
+ * is rejected by batchUpdate as a whole with HTTP 400, so these names are
+ * load-bearing, not cosmetic.
  */
 export function buildProposalDocStyleRequests(layout: ProposalDocLayout): unknown[] {
   const requests: unknown[] = [];
@@ -217,21 +226,21 @@ export function buildProposalDocStyleRequests(layout: ProposalDocLayout): unknow
   });
   for (const b of layout.blocks) {
     const p = PARAGRAPH_STYLES[b.kind];
-    const textStyle: Record<string, unknown> = {
+    const paragraphStyle: Record<string, unknown> = {
       namedStyleType: p.namedStyleType,
       spaceAbove: { magnitude: p.spaceAbovePt, unit: "PT" },
       spaceBelow: { magnitude: p.spaceBelowPt, unit: "PT" },
     };
     let fields = "namedStyleType,spaceAbove,spaceBelow";
     if (p.indentStartPt) {
-      textStyle.indentStart = { magnitude: p.indentStartPt, unit: "PT" };
+      paragraphStyle.indentStart = { magnitude: p.indentStartPt, unit: "PT" };
       fields += ",indentStart";
     }
-    requests.push({ updateParagraphStyle: { range: { startIndex: b.start, endIndex: b.end }, textStyle, fields } });
+    requests.push({ updateParagraphStyle: { range: { startIndex: b.start, endIndex: b.end }, paragraphStyle, fields } });
   }
   for (const b of layout.blocks) {
     if (b.kind === "bullet" || b.kind === "subBullet") {
-      requests.push({ createParagraphBullets: { range: { startIndex: b.start, endIndex: b.end }, bulletPreset: "BULLET_PRESET_TYPE_DISC_CIRCLE_SQUARE" } });
+      requests.push({ createParagraphBullets: { range: { startIndex: b.start, endIndex: b.end }, bulletPreset: "BULLET_DISC_CIRCLE_SQUARE" } });
     }
   }
   for (const r of layout.styles) {

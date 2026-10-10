@@ -1357,7 +1357,7 @@ test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the curre
   assert.strictEqual(sp.doc?.url, "https://docs.google.com/document/d/doc-1/edit");
   assert.match(world.telegram.at(-1)!.text, /Google Doc for PROP-7 v1:\* https:\/\/docs\.google\.com\/document\/d\/doc-1\/edit/);
   const layoutRequests = calls.docRequests.filter((r: any) => r.updateParagraphStyle || r.createParagraphBullets);
-  assert.ok(layoutRequests.some((r: any) => r.updateParagraphStyle?.textStyle?.namedStyleType === "TITLE"), "a v1 Doc gets the canonical layout -- no redline is required to trigger styling");
+  assert.ok(layoutRequests.some((r: any) => r.updateParagraphStyle?.paragraphStyle?.namedStyleType === "TITLE"), "a v1 Doc gets the canonical layout -- no redline is required to trigger styling");
   assert.ok(layoutRequests.some((r: any) => r.createParagraphBullets), "its lists are native Google Docs bullets");
   assert.strictEqual(sp.currentVersion, 1, "creating a Doc changes nothing about the Proposal");
   assert.strictEqual(sp.approvalStatus, "Pending Approval");
@@ -1560,7 +1560,7 @@ test("Doc formatting 1. A formatting request on the current version's Doc restyl
     lastRequests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets),
     "the formatting call is style-only: no insert, delete or replace request",
   );
-  assert.ok(lastRequests.some((r: any) => r.updateParagraphStyle?.textStyle?.namedStyleType === "HEADING_1"), "canonical section-heading style applied");
+  assert.ok(lastRequests.some((r: any) => r.updateParagraphStyle?.paragraphStyle?.namedStyleType === "HEADING_1"), "canonical section-heading style applied");
   assert.ok(lastRequests.some((r: any) => r.createParagraphBullets), "native bullets applied");
   // Governance state: nothing moved.
   assert.strictEqual(state.salesProposal!.currentVersion, 1);

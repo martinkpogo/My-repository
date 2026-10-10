@@ -1090,6 +1090,38 @@ async function readGoogleDocBody(token: string, documentId: string): Promise<{ t
 }
 
 /**
+ * A bounded, single-line diagnostic summary of a non-OK Docs/Drive API
+ * response: the HTTP status plus Google's OWN error message when the body
+ * carries one. Only the declared `error.status`/`error.message` fields are
+ * read, then collapsed to one line and truncated -- a large or unexpected
+ * body can never flood logs. The OAuth bearer token lives only in the
+ * request header and is never part of a response; no request payload and no
+ * document content is echoed. What remains is exactly what is needed to see
+ * WHICH request the API rejected (for example an unknown field name or an
+ * invalid enum value) instead of discarding the only diagnostic Google gave.
+ */
+async function describeGoogleApiFailure(res: Response): Promise<string> {
+  let detail = "";
+  try {
+    const raw = await res.text();
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { error?: { status?: unknown; message?: unknown } };
+        const status = typeof parsed?.error?.status === "string" ? parsed.error.status : "";
+        const message = typeof parsed?.error?.message === "string" ? parsed.error.message : "";
+        detail = [status, message].filter(Boolean).join(": ");
+      } catch {
+        detail = raw;
+      }
+    }
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+  detail = detail.replace(/\s+/g, " ").trim().slice(0, 300);
+  return detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status}`;
+}
+
+/**
  * Replaces the whole body of a Doc this system created with `layout.text` and
  * applies the canonical Proposal layout styling (buildProposalDocStyleRequests:
  * paragraph hierarchy, bullets, bold headings/labels, struck removed text,
@@ -1120,7 +1152,7 @@ export async function rewriteGoogleDoc(
   } catch {
     return { ok: false, error: "network error rewriting the Doc" };
   }
-  if (!res.ok) return { ok: false, error: `Google Docs rewrite failed (HTTP ${res.status})` };
+  if (!res.ok) return { ok: false, error: `Google Docs rewrite failed (${await describeGoogleApiFailure(res)})` };
   const after = await readGoogleDocBody(token, documentId);
   if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc did not read back as written" };
   return { ok: true };
@@ -1157,7 +1189,7 @@ export async function restyleGoogleDoc(
   } catch {
     return { ok: false, error: "network error formatting the Doc" };
   }
-  if (!res.ok) return { ok: false, error: `Google Docs formatting failed (HTTP ${res.status})` };
+  if (!res.ok) return { ok: false, error: `Google Docs formatting failed (${await describeGoogleApiFailure(res)})` };
   const after = await readGoogleDocBody(token, documentId);
   if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc's text changed while it was being formatted" };
   return { ok: true };

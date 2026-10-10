@@ -30,10 +30,12 @@ import {
   handleGoogleActionApproval,
   registerWatchedGoogleDoc,
   registerWatchedGoogleSheet,
+  rewriteGoogleDoc,
   saveOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
 } from "./googleOAuth";
+import { buildProposalDocLayout } from "./proposalRedline";
 import type { WorkState } from "./types";
 
 function createMockKv() {
@@ -728,6 +730,88 @@ test("createGoogleDoc fails closed when creation, insertion, or verification sta
     const resVerifyFail = await createGoogleDoc(fakeEnv, action);
     assert.strictEqual(resVerifyFail.ok, false);
     assert.strictEqual(resVerifyFail.stage, "verification");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rewriteGoogleDoc surfaces Google's rejection detail without leaking the token, and still verifies the read-back", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "rewrite-access-token-secret", refresh_token: "rewrite-refresh-secret", expires_in: 3600 },
+    "writer@enig.com",
+  );
+
+  const layout = buildProposalDocLayout("PROP-6", [
+    { version: 1, content: "Scope A." },
+    { version: 2, content: "Scope B." },
+  ]);
+  const documentId = "doc-rewrite-1";
+  const beforeText = "PROP-6 v1 -- current version\nScope A.\n";
+  const docGet = () =>
+    new Response(
+      JSON.stringify({ body: { content: [{ endIndex: beforeText.length + 1, paragraph: { elements: [{ textRun: { content: beforeText } }] } }] } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  try {
+    // 1. A batch Google rejects: the whole batch fails, and the error must
+    // carry Google's own status + message so the rejected request is knowable
+    // -- while never echoing the token or document content.
+    globalThis.fetch = (async (url: string) => {
+      const u = String(url);
+      if (u === `https://docs.googleapis.com/v1/documents/${documentId}`) return docGet();
+      if (u === `https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 400,
+              status: "INVALID_ARGUMENT",
+              message: `Invalid JSON payload received. Unknown name "textStyle" at 'requests[4].updateParagraphStyle': Cannot find field.`,
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected call ${u}`);
+    }) as typeof fetch;
+
+    const rejected = await rewriteGoogleDoc(fakeEnv, "writer@enig.com", documentId, layout);
+    assert.strictEqual(rejected.ok, false);
+    if (!rejected.ok) {
+      assert.match(rejected.error, /Google Docs rewrite failed \(HTTP 400/);
+      assert.match(rejected.error, /INVALID_ARGUMENT/);
+      assert.match(rejected.error, /requests\[4\]\.updateParagraphStyle/, "the rejected request is named");
+      assert.ok(rejected.error.length < 500, "the diagnostic is bounded");
+      assert.ok(!rejected.error.includes("rewrite-access-token-secret"), "the access token is never echoed");
+      assert.ok(!rejected.error.includes(beforeText), "document content is never echoed");
+    }
+
+    // 2. An accepted batch whose read-back does not match stays an uncertain
+    // failure -- never a success claim.
+    let reads = 0;
+    globalThis.fetch = (async (url: string) => {
+      const u = String(url);
+      if (u === `https://docs.googleapis.com/v1/documents/${documentId}`) {
+        reads++;
+        const text = reads === 1 ? beforeText : "something else entirely";
+        return new Response(
+          JSON.stringify({ body: { content: [{ endIndex: text.length + 1, paragraph: { elements: [{ textRun: { content: text } }] } }] } }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (u === `https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`) {
+        return new Response(JSON.stringify({ documentId }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected call ${u}`);
+    }) as typeof fetch;
+
+    const drifted = await rewriteGoogleDoc(fakeEnv, "writer@enig.com", documentId, layout);
+    assert.strictEqual(drifted.ok, false);
+    if (!drifted.ok) assert.strictEqual(drifted.error, "the Doc did not read back as written");
   } finally {
     globalThis.fetch = originalFetch;
   }
