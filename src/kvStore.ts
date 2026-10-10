@@ -23,21 +23,56 @@ import type { Env } from "./types";
  * passthrough to env.STATE_KV, so tests and any environment without the
  * binding behave exactly as before.
  *
- * DATA-CLASS POLICY (Architect-approved decision, 2026-10-10): only
- * "coordination + state" keys may fall back to Turso -- routing pointers,
- * dedup/clarification markers, digest/alert throttles, poll diagnostics,
- * the sessions index, the watch registries. Conversation content and raw
- * message text stay Cloudflare-only, and OAuth tokens, CSRF state and
- * client secrets NEVER leave Cloudflare under any circumstance. The
- * classification is an ALLOWLIST (isFallbackEligible): an unknown key
- * defaults to Cloudflare-only, so a new key written by future code cannot
- * silently leave the boundary -- it simply keeps today's fail-closed
- * behaviour (the KV error surfaces) until it is classified explicitly.
- * Deliberately excluded although they are not conversation content:
- * `governance:` (cached Notion page content -- a pure refetchable cache),
- * `lookup_history:` (lookup results that can carry real client identity,
- * so leaving it Cloudflare-only is the conservative data-boundary call),
- * and every `google_oauth_*` key.
+ * DATA-CLASS POLICY (Architect-approved decision 2026-10-10, audited at
+ * the VALUE level 2026-10-10): only "coordination + state" keys may fall
+ * back to Turso, and eligibility is asserted against the value actually
+ * stored, not the key's name. Conversation content and raw message text
+ * stay Cloudflare-only; OAuth tokens, CSRF state and client secrets NEVER
+ * leave Cloudflare under any circumstance. The classification is an
+ * ALLOWLIST (isFallbackEligible): an unknown key defaults to
+ * Cloudflare-only, so a new key written by future code cannot silently
+ * leave the boundary -- it keeps today's fail-closed behaviour (the KV
+ * error surfaces) until it is classified explicitly.
+ *
+ * Value-level rulings from the allowlist audit (each carries a line in
+ * FALLBACK_ELIGIBLE_PREFIXES or NEVER_FALLBACK_EXACT_PREFIXES):
+ * - `sessions_index` stays eligible because its stored labels are now a
+ *   SAFE REPRESENTATION: token references (`ENT-<n>`/`MAT-<n>`) or fixed
+ *   generic metadata only (sessionsIndex.ts deriveSessionLabel /
+ *   sanitizeSessionsIndex rewrite every entry on every save). Human
+ *   names, enquiry text and free-text approval labels are never stored.
+ * - `google_option:` is Cloudflare-only: optionData is arbitrary and
+ *   carries Google Doc bodies, Sheet rows and the account email
+ *   (googleOAuth.ts saveOpaqueOption call sites).
+ * - `google_doc_watch:` / `google_sheet_watch:` are Cloudflare-only: the
+ *   records carry the account email and file titles, and the poll cannot
+ *   function without them, so no minimal Turso representation exists.
+ * - Drive folder caches (`google_drive_default_folder:`,
+ *   `google_proposal_docs_folder:`) are Cloudflare-only: the KEY embeds
+ *   the account email, and a failed cache write is surfaced truthfully by
+ *   the writer instead of being absorbed by a fallback.
+ * - `governance:` (cached Notion page content), `lookup_history:` (may
+ *   carry real client identity) and every `google_oauth_*` key were
+ *   already excluded.
+ *
+ * CONFLICT-RESOLUTION CONTRACT (KV vs Turso): neither store is trusted as
+ * newer merely by name. Every eligible value written by kvPut is wrapped
+ * in a versioned envelope {"__enig_kv":1,"seq":<epoch ms>,"val":<raw>};
+ * an unwrapped (legacy) value decodes to seq 0, and a legacy Turso row's
+ * seq is its updated_at column (actual write-time evidence). Reads compare
+ * versions: the higher seq wins, a TIE goes to KV (the store that accepted
+ * the write), and Turso is consulted on every eligible read so a fallback
+ * row written for a failed KV write can never be shadowed by the older KV
+ * value -- including after an isolate restart (versions live in the stored
+ * bytes, not in isolate memory). Deleting a key clears both stores; when
+ * the KV delete succeeds but the shadow delete fails, the row is
+ * OVERWRITTEN with a tombstone so no read or sweep can resurrect it.
+ * Sweep and read-repair apply the same version comparison and skip (and
+ * clear) rows whose KV value is the same or newer. Residuals: KV has no
+ * compare-and-swap, so a sweep racing a concurrent write inside the same
+ * millisecond can lose the loser (bounded, pre-existing); and a shadow
+ * delete that fails with Turso entirely down survives as a resurrection
+ * window until the tombstone write retries or the key's next write.
  *
  * FAILURE SEMANTICS:
  * - KV put fails, key eligible, Turso write succeeds -> no error; the
@@ -51,14 +86,16 @@ import type { Env } from "./types";
  *
  * RECONCILIATION: a successful KV put (or delete) of an eligible key also
  * removes its Turso shadow row, so in steady state the fallback holds
- * nothing. Rows that accumulated during an outage are swept back into KV
+ * nothing -- and because reads/sweeps are version-aware, losing that
+ * best-effort delete can no longer corrupt state: the stale row is either
+ * superseded by the newer KV value or (post-delete) overwritten by a
+ * tombstone. Rows that accumulated during an outage are swept back into KV
  * by sweepKvFallback (throttled, called from the doc-comment poll -- the
  * runtime's de-facto heartbeat -- and from scheduled()), and a KV read
- * that misses while a fresh fallback row exists repairs KV opportunistically
- * on the spot. The one residual staleness window (isolate restarted between
- * a fallback write and its repair, leaving a stale shadow row that a sweep
- * copies over an older-but-present KV value) is bounded by the next write
- * to that key and was documented to the Architect as a v1 simplification.
+ * whose fallback row is newer repairs KV opportunistically on the spot.
+ * The previously documented v1 staleness window (an isolate restart
+ * letting a stale shadow row be copied over an older KV value) is closed
+ * by the versioned envelope -- the version travels in the stored bytes.
  */
 
 const TURSO_TABLE = "kv_fallback";
@@ -80,35 +117,37 @@ const SWEEP_DEFAULT_LIMIT = 100;
  */
 const FALLBACK_ELIGIBLE_PREFIXES: readonly string[] = [
   // sessionRouting.ts / matterContinuation.ts routing + interaction state
+  // (values: workId / mode / "1" strings -- no content, no identity)
   "active:",
   "mode:",
   "cowork_pending:",
   "reply_msg:",
   "matter_current_work:",
-  // session registry + its alert throttle (session.ts)
+  // session registry + its alert throttle (session.ts). Value-level safe:
+  // SessionSummary labels are token references / fixed generic metadata
+  // only -- sessionsIndex.ts sanitizeSessionsIndex rewrites EVERY entry on
+  // every save, so names, enquiry text and free-text approval labels never
+  // reach this value (see the policy note above).
   "sessions_index",
   "pending_approval_backlog_last_alert",
   // comment-processing coordination (googleDocComments.ts / googleSheetComments.ts)
+  // (values: the literal "1" plus a 90-day TTL -- nothing else)
   "google_comment_processed:",
   "google_comment_clarification_pending:",
   // handoff discovery coordination (checkHandoffs.ts + Unit pickup sites)
+  // (values: workId, epoch-ms timestamps, pageId:Status fingerprint --
+  // ids and statuses only, never Handoff text)
   "handoff_workitem:",
   "sales_handoff_notified:",
   "stale_handoff_digest_last_sent",
   "stale_handoff_digest_last_fingerprint",
   "checkhandoffs_auto_inflight",
   // operational diagnostics timestamps (index.ts, comment pollers)
+  // (values: ISO-8601 / epoch-ms strings)
   "last_cron_run",
   "last_google_doc_comment_poll_run",
   "last_google_sheet_comment_poll_run",
   "watchdog_alert_last_sent",
-  // Google Workspace watch registries (googleOAuth.ts) -- ids/metadata, not document content
-  "google_doc_watch:",
-  "google_sheet_watch:",
-  // approval-callback option staging (googleOAuth.ts saveOpaqueOption) -- 10-min TTL control state
-  "google_option:",
-  // Drive folder-id cache (runtime/tools/googleDriveFolderTool.ts)
-  "google_drive_default_folder:",
 ];
 
 /** Exact-key allowlist, kept separate for readability. */
@@ -117,7 +156,8 @@ const FALLBACK_ELIGIBLE_EXACT: readonly string[] = ["sessions_index"];
 /**
  * Named exclusions -- documentation of the never-fallback classes. The
  * allowlist above already excludes them; these exist so a reader (and the
- * classification test) can state the boundary positively.
+ * classification test) can state the boundary positively. Each entry's
+ * reason is the VALUE it stores, audited at the value level.
  */
 const NEVER_FALLBACK_EXACT_PREFIXES: readonly string[] = [
   "chat_history:", // conversation content (chat.ts)
@@ -125,6 +165,22 @@ const NEVER_FALLBACK_EXACT_PREFIXES: readonly string[] = [
   "governance:", // cached Notion page content (governance.ts) -- refetchable, so never needed as a fallback
   "google_oauth_state:", // OAuth CSRF state (googleOAuth.ts)
   "google_oauth_tokens:", // OAuth tokens (googleOAuth.ts)
+  // Approval-option staging (googleOAuth.ts saveOpaqueOption): optionData is
+  // arbitrary -- Google Doc bodies, Sheet rows, titles and the account email
+  // (call sites :1430/:1516/:1628). No minimal safe contract exists at every
+  // writer, so the class is Cloudflare-only and a failed save stays explicit.
+  "google_option:",
+  // Watch registries (googleOAuth.ts): records carry the account email and
+  // the file title, and the comment poll cannot run without them -- there is
+  // no reduced schema that would still function, so they stay Cloudflare-only.
+  "google_doc_watch:",
+  "google_sheet_watch:",
+  // Drive folder-id caches: the KEY embeds the account email
+  // (`<kv_key>:<account>`), so both the key and the class stay
+  // Cloudflare-only; writers surface a failed cache write truthfully instead
+  // of absorbing it (never silently re-added to the allowlist -- see policy).
+  "google_drive_default_folder:",
+  "google_proposal_docs_folder:",
 ];
 
 export function isFallbackEligible(key: string): boolean {
@@ -152,6 +208,7 @@ interface TursoRow {
   key: string;
   value: string;
   expiresAt: number | null;
+  updatedAt: number | null;
 }
 
 type TursoArg = { type: "text"; value: string } | { type: "integer"; value: string } | null;
@@ -282,6 +339,69 @@ function decodeInteger(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+// ---------------------------------------------------------------------------
+// Versioned value envelope -- the conflict-resolution contract (see the
+// header). Every eligible value written by kvPut is wrapped so that KV and
+// Turso versions can be compared deterministically regardless of which
+// store is called primary or whether an isolate restarted in between:
+//   {"__enig_kv":1,"seq":<epoch ms>,"val":<caller's raw value string>}
+// A tombstone (delete marker) has no val and flag "tombstone":1.
+// A value that does not decode as an envelope is LEGACY: KV legacy = seq 0
+// (no timestamp evidence), Turso legacy = the row's updated_at column.
+// ---------------------------------------------------------------------------
+
+const ENVELOPE_SENTINEL = "__enig_kv";
+const ENVELOPE_VERSION = 1;
+
+interface DecodedValue {
+  seq: number;
+  value: string;
+  tombstone: boolean;
+}
+
+function wrapValue(value: string, seq: number): string {
+  return JSON.stringify({ [ENVELOPE_SENTINEL]: ENVELOPE_VERSION, seq, val: value });
+}
+
+function wrapTombstone(seq: number): string {
+  return JSON.stringify({ [ENVELOPE_SENTINEL]: ENVELOPE_VERSION, seq, tombstone: 1 });
+}
+
+function decodeEnvelope(raw: string): DecodedValue | null {
+  // Fast path: envelopes are objects, so they start with '{'. Legacy plain
+  // values (workIds, "1", ISO timestamps, JSON arrays like sessions_index)
+  // and arbitrary non-JSON bytes fall through to seq 0.
+  if (!raw || raw.charCodeAt(0) !== 123) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const record = parsed as Record<string, unknown>;
+  if (record[ENVELOPE_SENTINEL] !== ENVELOPE_VERSION || typeof record.seq !== "number") return null;
+  if (record.tombstone === 1) return { seq: record.seq, value: "", tombstone: true };
+  if (typeof record.val === "string") return { seq: record.seq, value: record.val, tombstone: false };
+  return null;
+}
+
+/** Decode any stored bytes (KV value or Turso row value) into version + raw value. */
+function decodeStored(raw: string): DecodedValue {
+  return decodeEnvelope(raw) ?? { seq: 0, value: raw, tombstone: false };
+}
+
+/**
+ * A Turso row's effective version: the envelope's seq when present,
+ * otherwise the row's updated_at column (actual write-time evidence from
+ * the store that held the row) -- never "assume Turso is newer".
+ */
+function decodeRow(row: TursoRow): DecodedValue {
+  const envelope = decodeEnvelope(row.value);
+  if (envelope) return envelope;
+  return { seq: row.updatedAt ?? 0, value: row.value, tombstone: false };
+}
+
 async function tursoUpsert(cfg: TursoConfig, key: string, value: string, expiresAt: number | null): Promise<void> {
   await ensureSchema(cfg);
   await tursoRequest(cfg, [
@@ -301,12 +421,12 @@ async function tursoGet(cfg: TursoConfig, key: string): Promise<TursoRow | null>
   const results = await tursoRequest(cfg, [
     {
       type: "execute",
-      stmt: { sql: `SELECT "value", "expires_at" FROM ${TURSO_TABLE} WHERE "key" = ?`, args: [textArg(key)] },
+      stmt: { sql: `SELECT "value", "expires_at", "updated_at" FROM ${TURSO_TABLE} WHERE "key" = ?`, args: [textArg(key)] },
     },
   ]);
   const rows = execRows(results);
   if (rows.length === 0) return null;
-  return { key, value: decodeText(rows[0][0]), expiresAt: decodeInteger(rows[0][1]) };
+  return { key, value: decodeText(rows[0][0]), expiresAt: decodeInteger(rows[0][1]), updatedAt: decodeInteger(rows[0][2]) };
 }
 
 async function tursoDelete(cfg: TursoConfig, key: string): Promise<void> {
@@ -339,7 +459,7 @@ async function tursoSelectForSweep(cfg: TursoConfig, limit: number): Promise<Tur
     {
       type: "execute",
       stmt: {
-        sql: `SELECT "key", "value", "expires_at" FROM ${TURSO_TABLE} ORDER BY "updated_at" LIMIT ${limit}`,
+        sql: `SELECT "key", "value", "expires_at", "updated_at" FROM ${TURSO_TABLE} ORDER BY "updated_at" LIMIT ${limit}`,
         args: [],
       },
     },
@@ -348,6 +468,7 @@ async function tursoSelectForSweep(cfg: TursoConfig, limit: number): Promise<Tur
     key: decodeText(row[0]),
     value: decodeText(row[1]),
     expiresAt: decodeInteger(row[2]),
+    updatedAt: decodeInteger(row[3]),
   }));
 }
 
@@ -406,54 +527,112 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
   const cfg = tursoConfig(env);
   if (!cfg || !isFallbackEligible(key)) return env.STATE_KV.get(key);
 
+  // Both stores are consulted on EVERY eligible read (conflict-resolution
+  // contract in the header): a fallback row can be newer than a KV value
+  // that is still present -- the KV write of the newer value failed -- and
+  // isolate memory cannot decide that after a restart, so the decision uses
+  // the version envelopes stored with the bytes. In steady state Turso
+  // holds no rows, making the Turso side an empty-table probe.
   let kvValue: string | null = null;
   let kvError: unknown = null;
-  try {
-    kvValue = await env.STATE_KV.get(key);
-  } catch (err) {
-    kvError = err;
-  }
-  if (kvValue !== null && kvValue !== undefined) return kvValue;
-
   let row: TursoRow | null = null;
-  try {
-    row = await tursoGet(cfg, key);
-  } catch (err) {
-    console.error(`kvStore: Turso read failed for ${key}`, err);
+  const [kvResult, rowResult] = await Promise.allSettled([env.STATE_KV.get(key), tursoGet(cfg, key)]);
+  if (kvResult.status === "fulfilled") {
+    kvValue = kvResult.value;
+  } else {
+    kvError = kvResult.reason;
   }
+  if (rowResult.status === "fulfilled") {
+    row = rowResult.value;
+  } else {
+    console.error(`kvStore: Turso read failed for ${key}`, rowResult.reason);
+  }
+
+  const kvEntry = kvValue === null || kvValue === undefined ? null : decodeStored(kvValue);
+
+  // Resolve the Turso side once. Tombstones (delete markers) and expired
+  // rows are never live state and are dropped here, so no later path --
+  // including a KV read error -- can serve them.
+  let liveRow: { row: TursoRow; entry: DecodedValue; ttl: number | null } | null = null;
+  if (row) {
+    const entry = decodeRow(row);
+    const ttl = remainingTtlSeconds(row.expiresAt);
+    if (entry.tombstone) {
+      await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: failed to drop tombstone row ${key}`, err));
+    } else if (ttl !== null && ttl <= 0) {
+      await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: failed to drop expired fallback row ${key}`, err));
+    } else {
+      liveRow = { row, entry, ttl };
+    }
+  }
+
   if (kvError) {
-    if (row) return row.value; // KV itself is erroring; the fallback copy is the best durable truth we have
+    // A LIVE fallback row is the best durable truth we have while KV itself
+    // is erroring; with no live row the KV error surfaces unchanged
+    // (pre-§5B contract -- an expired row counts as "no live row" and is
+    // never returned as live state).
+    if (liveRow) return serveRow(env, cfg, key, liveRow);
     throw kvError;
   }
-  if (!row) return null;
-  const ttl = remainingTtlSeconds(row.expiresAt);
-  if (ttl !== null && ttl <= 0) {
-    // Expired fallback row: drop it and report a miss, matching KV's own TTL semantics.
-    await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: failed to drop expired fallback row ${key}`, err));
-    return null;
+
+  if (kvEntry && liveRow) {
+    if (liveRow.entry.seq > kvEntry.seq) {
+      // The row is the newer write (its KV attempt failed) -- it wins. This
+      // is exactly the case a KV-only read would have silently gotten wrong
+      // by returning the older KV value as if the write had succeeded.
+      return serveRow(env, cfg, key, liveRow);
+    }
+    // KV holds this version or a newer one -- the row is obsolete; clear it
+    // so no later sweep can resurrect it.
+    await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: stale row delete failed for ${key}`, err));
+    return kvEntry.value;
   }
-  // Opportunistic repair: KV missed but has quota again (or never had this key), so
-  // restore the value into KV and clear the shadow, making this a one-time Turso read.
+  if (kvEntry) return kvEntry.value;
+  if (liveRow) return serveRow(env, cfg, key, liveRow);
+  return null;
+}
+
+/**
+ * Serve a live fallback row: restore it into KV preserving its version
+ * envelope and remaining TTL (so every later comparison keeps the same
+ * ordering), clear the shadow on success, and hand the value back either
+ * way -- when the repair write fails the row remains the only durable copy.
+ */
+async function serveRow(
+  env: Env,
+  cfg: TursoConfig,
+  key: string,
+  live: { row: TursoRow; entry: DecodedValue; ttl: number | null },
+): Promise<string> {
+  const bytes = decodeEnvelope(live.row.value) ? live.row.value : wrapValue(live.entry.value, live.entry.seq);
   try {
-    await env.STATE_KV.put(key, row.value, ttl !== null ? { expirationTtl: Math.max(ttl, 60) } : undefined);
+    await env.STATE_KV.put(key, bytes, live.ttl !== null ? { expirationTtl: Math.max(live.ttl, 60) } : undefined);
   } catch (err) {
     console.error(`kvStore: KV repair write failed for ${key}`, err);
-    return row.value; // the shadow row stays -- it is still the only durable copy
+    return live.entry.value;
   }
   await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: repaired shadow delete failed for ${key}`, err));
-  return row.value;
+  return live.entry.value;
 }
 
 export async function kvPut(env: Env, key: string, value: string, opts?: { expirationTtl?: number }): Promise<void> {
   const cfg = tursoConfig(env);
   if (!cfg || !isFallbackEligible(key)) return env.STATE_KV.put(key, value, opts);
 
+  // Versioned envelope: the seq stamps this write so reads/sweeps can tell
+  // which store holds the newer value without assuming either is newer.
+  const seq = now();
+  const bytes = wrapValue(value, seq);
+
   let kvError: unknown = null;
   if (!circuitIsOpen()) {
     try {
-      await env.STATE_KV.put(key, value, opts);
+      await env.STATE_KV.put(key, bytes, opts);
       circuitNoteSuccess();
-      // Clear any stale shadow so a later sweep can never overwrite this fresher value.
+      // Clear any stale shadow so it cannot linger as a conflict candidate.
+      // Best-effort by design: correctness no longer depends on this delete
+      // succeeding -- reads and the sweep compare versions, so a surviving
+      // (older) row is superseded instead of resurrected.
       await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: shadow delete failed for ${key}`, err));
       return;
     } catch (err) {
@@ -464,7 +643,7 @@ export async function kvPut(env: Env, key: string, value: string, opts?: { expir
   }
   const expiresAt = opts?.expirationTtl ? now() + opts.expirationTtl * 1000 : null;
   try {
-    await tursoUpsert(cfg, key, value, expiresAt);
+    await tursoUpsert(cfg, key, bytes, expiresAt);
   } catch (tursoErr) {
     console.error(`kvStore: Turso fallback write failed for ${key} -- both stores refused this write`, tursoErr);
     // Fail-closed continuity: the caller sees the same KV error it always saw when
@@ -481,11 +660,32 @@ export async function kvDelete(env: Env, key: string): Promise<void> {
     await env.STATE_KV.delete(key);
   } catch (err) {
     // Clear the fallback copy too -- a swept row must never resurrect a pointer this call just cleared --
-    // then surface the KV failure exactly as the pre-§5B code did.
+    // then surface the KV failure exactly as the pre-§5B code did. The KV
+    // key itself survives (the delete did not happen), so the caller both
+    // sees the error and keeps a consistent view of the still-present value.
     await tursoDelete(cfg, key).catch((tursoErr) => console.error(`kvStore: fallback delete failed for ${key}`, tursoErr));
     throw err;
   }
-  await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: shadow delete failed for ${key}`, err));
+  try {
+    await tursoDelete(cfg, key);
+  } catch (err) {
+    // The KV delete succeeded: this key is deleted. The shadow row (if any)
+    // is now stale and must never be served or swept back. Plain delete
+    // failed, so OVERWRITE the row with a tombstone -- that destroys the
+    // stale value at its source; readers and the sweep drop tombstones on
+    // sight. If even the tombstone write fails (Turso down), it is logged
+    // loudly: the stale row would otherwise survive as a resurrection
+    // window until Turso's next successful contact with this key.
+    console.error(`kvStore: shadow delete failed for ${key} -- overwriting with a tombstone`, err);
+    try {
+      await tursoUpsert(cfg, key, wrapTombstone(now()), null);
+    } catch (tombstoneErr) {
+      console.error(
+        `kvStore: tombstone write failed for ${key} -- a stale shadow row may survive Turso recovery until this key's next write`,
+        tombstoneErr,
+      );
+    }
+  }
 }
 
 export interface KvListResult {
@@ -526,11 +726,13 @@ export async function kvList(env: Env, opts: { prefix: string; cursor?: string }
 export interface SweepResult {
   swept: number;
   expired: number;
+  /** Rows dropped without restoring: tombstones and rows already superseded by an equal-or-newer KV value. */
+  superseded: number;
   remaining: boolean;
 }
 
 export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Promise<SweepResult> {
-  const result: SweepResult = { swept: 0, expired: 0, remaining: false };
+  const result: SweepResult = { swept: 0, expired: 0, superseded: 0, remaining: false };
   const cfg = tursoConfig(env);
   if (!cfg) return result;
   let rows: TursoRow[];
@@ -542,6 +744,14 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
   }
   result.remaining = rows.length > limit;
   for (const row of rows.slice(0, limit)) {
+    const entry = decodeRow(row);
+    if (entry.tombstone) {
+      // A delete marker: its whole purpose was to destroy a stale value.
+      // Drop it so the table returns to its empty steady state.
+      await tursoDelete(cfg, row.key).catch((err) => console.error(`kvStore: sweep tombstone drop failed for ${row.key}`, err));
+      result.superseded += 1;
+      continue;
+    }
     const ttl = remainingTtlSeconds(row.expiresAt);
     if (ttl !== null && ttl <= 60) {
       // Expired (or expiring inside KV's 60-second TTL floor): the value's life is over.
@@ -549,12 +759,38 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
       result.expired += 1;
       continue;
     }
+    // Version-aware conflict check: read what KV actually holds for this key
+    // and only restore when the row is newer. Never assume either store is
+    // newer by name -- this is the check that stops a stale row (e.g. one
+    // whose shadow delete failed) from overwriting a fresher KV value.
+    let kvRaw: string | null = null;
+    let kvError: unknown = null;
     try {
-      await env.STATE_KV.put(row.key, row.value, ttl !== null ? { expirationTtl: Math.max(ttl, 60) } : undefined);
+      kvRaw = await env.STATE_KV.get(row.key);
+    } catch (err) {
+      kvError = err;
+    }
+    if (kvError) {
+      console.error(`kvStore: sweep cannot version-check ${row.key}; row held for a later pass`, kvError);
+      break;
+    }
+    const kvEntry = kvRaw === null || kvRaw === undefined ? null : decodeStored(kvRaw);
+    if (kvEntry && kvEntry.seq >= entry.seq) {
+      await tursoDelete(cfg, row.key).catch((err) => console.error(`kvStore: sweep superseded-row delete failed for ${row.key}`, err));
+      result.superseded += 1;
+      continue;
+    }
+    try {
+      // Preserve the row's version when restoring, so a row whose shadow
+      // delete later fails can never win against a subsequent KV write.
+      const bytes = decodeEnvelope(row.value) ? row.value : wrapValue(entry.value, entry.seq);
+      await env.STATE_KV.put(row.key, bytes, ttl !== null ? { expirationTtl: Math.max(ttl, 60) } : undefined);
     } catch (err) {
       console.error(`kvStore: sweep KV write failed at ${row.key}; remaining rows held for a later pass`, err);
       break;
     }
+    // If this delete fails, both stores now hold the SAME version+value --
+    // a tie the contract resolves to KV -- so nothing stale can be restored.
     await tursoDelete(cfg, row.key).catch((err) => console.error(`kvStore: sweep row delete failed for ${row.key}`, err));
     result.swept += 1;
   }

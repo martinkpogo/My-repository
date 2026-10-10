@@ -174,7 +174,18 @@ async function reconcileFolderEnsure(env: Env, input: unknown): Promise<{ outcom
     const folderId = files[0].id!;
     // Memoize into ENIG's own cache (the same key ensureGoogleFolder uses),
     // so the next ensure reuses the folder this reconciliation recovered.
-    await kvPut(env, `${parsed.kv_key}:${parsed.account_identifier}`, folderId);
+    // Truthful post-effect failure: this key class is Cloudflare-only (its
+    // key embeds the account email), so a refused cache write must NOT be
+    // reported as "unverified" -- the reconciliation above succeeded and
+    // the recovered folder id is real. Log the degraded cache instead.
+    try {
+      await kvPut(env, `${parsed.kv_key}:${parsed.account_identifier}`, folderId);
+    } catch (cacheErr) {
+      console.error(
+        `googleDriveFolderTool: reconciliation recovered folder ${folderId} but its folder-id cache write was refused -- the id is returned; a later ensure may re-create this folder while the cache is unwritable`,
+        cacheErr,
+      );
+    }
     return {
       outcome: {
         ...BASE,

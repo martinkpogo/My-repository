@@ -944,6 +944,15 @@ export interface SessionSummary {
   unit?: Unit;
   hat?: string;
   stage: string;
+  /**
+   * Display label for /sessions -- SAFE VALUES ONLY: canonical token
+   * references (`ENT-<n>` / `MAT-<n>`) or fixed generic metadata
+   * ("pending approval", "(new)"), produced solely by
+   * sessionsIndex.ts deriveSessionLabel and re-derived for EVERY entry on
+   * every save (sanitizeSessionsIndex). Human-readable names, enquiry text
+   * and free-text approval labels are never stored here: this value is
+   * coordination state that may fall back to Turso (Option 1 boundary).
+   */
   label: string;
   updatedAt: string;
   /** Whether this work item currently has a pendingActionSummary -- drives sessions_index's bounded pending/general pool split. */
@@ -957,4 +966,14 @@ export interface SessionSummary {
    * Matter Business Object in Notion.
    */
   matterId?: string;
+  /**
+   * The Work's canonical Entity token (e.g. "ENT-7") when it has one --
+   * the safe display reference the label is derived from. A reference for
+   * display only: never authorization, never Work identity (workId is the
+   * execution reference), and only stored when it matches the canonical
+   * token shape.
+   */
+  entityToken?: string;
+  /** The Work's canonical Matter token (e.g. "MAT-20") -- same semantics as entityToken, Matter side. */
+  matterToken?: string;
 }

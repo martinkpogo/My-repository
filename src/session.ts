@@ -22,7 +22,7 @@ import {
 } from "./googleOAuth";
 import { proposeLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
-import { SESSIONS_INDEX_PENDING_CAP, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
+import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
@@ -594,15 +594,27 @@ export class WorkSession extends DurableObject<Env> {
 
   private async updateRegistry(state: WorkState): Promise<void> {
     const hasPendingApproval = !!state.pendingActionSummary;
+    // Value-level data boundary for this index (Architect ruling): the label
+    // is DERIVED from canonical token references (or fixed generic metadata)
+    // and never from state.entityName/matterName/enquiryText or a
+    // pendingActionSummary label -- those can carry human names, organisation
+    // names and raw enquiry text, which must never enter a value that may
+    // fall back to Turso. Token-shaped state.entityName/matterName values
+    // are accepted only because the canonical `ENT-<n>`/`MAT-<n>` shape is
+    // what is tested (safeTokenRef), so a real name cannot pass.
+    const entityToken = safeTokenRef(state.entityToken) ?? safeTokenRef(state.entityName);
+    const matterToken = safeTokenRef(state.matterToken) ?? safeTokenRef(state.matterName);
     const summary: SessionSummary = {
       workId: state.workId,
       unit: state.unit,
       hat: state.hat,
       stage: state.stage,
-      label: state.pendingActionSummary?.label ?? state.entityName ?? state.matterName ?? state.enquiryText?.slice(0, 40) ?? "(new)",
+      label: deriveSessionLabel({ entityToken, matterToken, hasPendingApproval }),
       updatedAt: state.updatedAt,
       hasPendingApproval,
       matterId: state.matterId,
+      entityToken,
+      matterToken,
     };
     const key = "sessions_index";
     const raw = await kvGet(this.env, key);
@@ -612,7 +624,10 @@ export class WorkSession extends DurableObject<Env> {
     // Terminal work items drop out of the index (they no longer show as "open").
     const combined = isTerminal ? withoutSelf : [...withoutSelf, summary];
 
-    const kept = trimSessionsIndex(combined);
+    // Sanitize the WHOLE array, not just this Work's entry: legacy entries
+    // written before this contract carry free-text labels, and one save
+    // rewrites every entry so no free-text label survives in the stored JSON.
+    const kept = trimSessionsIndex(sanitizeSessionsIndex(combined));
     await kvPut(this.env, key, JSON.stringify(kept));
 
     // Matter continuation (src/matterContinuation.ts): the derived
