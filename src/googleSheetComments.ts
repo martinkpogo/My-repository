@@ -249,8 +249,12 @@ export interface PollGoogleSheetCommentsResult {
 export async function pollGoogleSheetComments(env: Env): Promise<PollGoogleSheetCommentsResult> {
   // Records that the external scheduler actually fired, independent of
   // whether there was anything to do -- read back via
-  // /admin/last-google-sheet-comment-poll.
-  await env.STATE_KV.put("last_google_sheet_comment_poll_run", new Date().toISOString());
+  // /admin/last-google-sheet-comment-poll. Diagnostics ONLY: best-effort,
+  // so a failed write (e.g. the per-day KV write quota) is logged and never
+  // blocks the poll itself from starting.
+  await env.STATE_KV.put("last_google_sheet_comment_poll_run", new Date().toISOString()).catch((err) =>
+    console.error("pollGoogleSheetComments: could not record the diagnostics timestamp (polling continues)", err),
+  );
 
   const sheets = await listWatchedGoogleSheets(env);
   let commentsProcessed = 0;

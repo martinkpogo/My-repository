@@ -27,7 +27,7 @@ import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
 import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
-import { classifyProposalCommentIntent, markProposalDocCommentProcessed } from "../../googleDocComments";
+import { classifyProposalCommentIntent, markProposalDocCommentProcessed, CommentMarkerPersistenceError } from "../../googleDocComments";
 import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
@@ -1640,14 +1640,40 @@ export async function handleProposalDocClarificationText(env: Env, state: WorkSt
   const sp = state.salesProposal;
   const pending = state.pendingProposalDocClarification;
 
+  // A processed-marker that cannot be persisted (today: the per-day KV
+  // write quota) settles NOTHING. Both marker writes below run BEFORE any
+  // state change or routed handler, so a typed failure leaves the
+  // continuation exactly as it was -- still awaiting, still carrying the
+  // same comment -- and Martin is told the truth (a storage failure, not a
+  // success and not a generic "execution failed" alert). His next reply,
+  // or the next poll of the comment itself, retries it.
+  const persistenceRefusal = async (commentId: string, err: unknown): Promise<WorkState> => {
+    console.error(`handleProposalDocClarificationText: could not persist the processed-marker for comment ${commentId}`, err);
+    await sendWorkspaceHatMessage(
+      env,
+      { ...state, hat: HAT },
+      `Storage write failure: I could not record that comment ${commentId} is handled, so NOTHING was changed and your clarification is still outstanding. Send it again once this clears and I will complete it then.`,
+    ).catch((notifyErr) => console.error("handleProposalDocClarificationText: could not send the persistence-failure notice", notifyErr));
+    return state;
+  };
+
   // The clarification only ever continues the SAME comment. When the Work or
   // the Proposal moved on, it is answered honestly, the comment is closed off
-  // so it is not re-asked on every future poll, and nothing is mutated.
+  // so it is not re-asked on every future poll, and nothing is mutated. The
+  // marker is written FIRST (the same order the resolved path uses), so a
+  // failed write leaves the stale continuation waiting rather than half-closed.
   const closeStale = async (detail: string): Promise<WorkState> => {
     const commentId = pending?.commentId;
+    if (commentId) {
+      try {
+        await markProposalDocCommentProcessed(env, commentId);
+      } catch (err) {
+        if (err instanceof CommentMarkerPersistenceError) return persistenceRefusal(commentId, err);
+        throw err;
+      }
+    }
     state.pendingProposalDocClarification = undefined;
     state.awaiting = undefined;
-    if (commentId) await markProposalDocCommentProcessed(env, commentId);
     return staleDecision(env, state, detail);
   };
   if (!sp || !pending || pending.proposalNumber !== sp.proposalNumber) {
@@ -1683,7 +1709,14 @@ export async function handleProposalDocClarificationText(env: Env, state: WorkSt
   // The ambiguity is resolved: close the comment out BEFORE the routed
   // handler runs, so a duplicate poll or a second reply can never apply it
   // twice -- the same contract the poller applies to an unambiguous comment.
-  await markProposalDocCommentProcessed(env, pending.commentId);
+  // If that marker cannot be persisted, nothing is settled and nothing is
+  // routed: the Work keeps waiting and Martin is told the truth.
+  try {
+    await markProposalDocCommentProcessed(env, pending.commentId);
+  } catch (err) {
+    if (err instanceof CommentMarkerPersistenceError) return persistenceRefusal(pending.commentId, err);
+    throw err;
+  }
   state.pendingProposalDocClarification = undefined;
   state.awaiting = undefined;
   state.stage = "proposal_doc_clarification_resolved";
