@@ -91,6 +91,16 @@ OPERATIONS_TOPIC_ID = "588"
 # wiping the dashboard-only value on every push once Workers Builds
 # started deploying on every merge.
 GOOGLE_OAUTH_CLIENT_ID = "495614288300-5k7fd812fk86jutgamtbhs5s1kbjvved.apps.googleusercontent.com"
+# Turso fallback database URL -- the secondary persistence store behind the
+# KV-primary design (KV remains primary; Turso takes over only classified
+# KV write failures such as the per-day write quota). Plain var, not a
+# secret: Turso authenticates with TURSO_AUTH_TOKEN, which stays a
+# Cloudflare Secret and is never committed here or in source. Declared here
+# (mirroring the deployed configuration, where this var is already live) for
+# the same reason as GOOGLE_OAUTH_CLIENT_ID above: `wrangler deploy` treats
+# [vars] as the complete set of plain-text environment variables and deletes
+# any dashboard-added var not declared here on every deploy.
+TURSO_DATABASE_URL = "libsql://enig-fallback-martinkpogo.aws-eu-west-1.turso.io"
 
 # Secrets (set with `wrangler secret put <NAME>`, never committed):
 #   TELEGRAM_BOT_TOKEN
@@ -108,6 +118,7 @@ GOOGLE_OAUTH_CLIENT_ID = "495614288300-5k7fd812fk86jutgamtbhs5s1kbjvved.apps.goo
 #   GEMINI_API_KEY (optional — same, additional fallback)
 #   SAMBANOVA_API_KEY (optional — same, additional fallback)
 #   GOOGLE_OAUTH_CLIENT_SECRET (required for Google Workspace OAuth -- confidential, unlike GOOGLE_OAUTH_CLIENT_ID above, which is a plain var)
+#   TURSO_AUTH_TOKEN (required -- authenticates TURSO_DATABASE_URL above, the Turso fallback database `enig-fallback`; stored ONLY as a Cloudflare Secret, never committed to this file, source, logs or git)
 #
 # No Read.ai secrets: a live, direct Runtime<->Read.ai integration
 # (readai.ts/readaiOAuth.ts, /readai/webhook, /oauth/readai/*) previously
