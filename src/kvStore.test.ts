@@ -82,7 +82,7 @@ function makeKv(): KvFake {
 
 interface TursoFake {
   rows: Map<string, { value: string; expires_at: number | null; updated_at: number }>;
-  calls: Array<{ url: string; requests: Array<{ type: string; stmt: { sql: string; args: unknown[] } }> }>;
+  calls: Array<{ url: string; requests: Array<{ type: string; stmt?: { sql: string; args: unknown[] } }> }>;
   failAll: boolean;
   fetch: typeof fetch;
 }
@@ -94,81 +94,61 @@ function makeTurso(): TursoFake {
     if (typeof a === "object") return (a as { value: string | number }).value;
     return a as string | number;
   };
-  const handle = (request: { stmt: { sql: string; args?: unknown[] } }): Record<string, unknown> => {
-    const sql = request.stmt.sql;
-    const args = (request.stmt.args ?? []).map(argValue);
-    if (sql.startsWith("CREATE TABLE")) return { type: "execute", response: { type: "ok" } };
+  const handle = (request: { type: string; stmt?: { sql: string; args?: unknown[] } }): Record<string, unknown> => {
+    if (request.type === "close") return { type: "ok", response: { type: "close" } };
+    const sql = request.stmt?.sql ?? "";
+    const args = (request.stmt?.args ?? []).map(argValue);
+    // Turso's documented /v2/pipeline envelope: {type:"ok", response:{type:"execute", result:{cols, rows, ...}}}
+    // with rows as arrays of typed cells ({type, value} | null).
+    const executed = (rows: Array<Array<{ type: string; value: string } | null>>, affected = 0): Record<string, unknown> => ({
+      type: "ok",
+      response: { type: "execute", result: { cols: [], rows, affected_row_count: affected, last_insert_rowid: null } },
+    });
+    if (sql.startsWith("CREATE TABLE")) return executed([], 0);
     if (sql.startsWith("INSERT INTO")) {
       const [key, value, expiresAt, updatedAt] = args as [string, string, string | null, string];
       fake.rows.set(key, { value, expires_at: expiresAt === null ? null : Number(expiresAt), updated_at: Number(updatedAt) });
-      return { type: "execute", response: { type: "ok" } };
+      return executed([], 1);
     }
     if (sql.startsWith("DELETE FROM")) {
       fake.rows.delete(args[0] as string);
-      return { type: "execute", response: { type: "ok" } };
+      return executed([], 1);
     }
     if (sql.startsWith('SELECT "value"')) {
       const row = fake.rows.get(args[0] as string);
-      return {
-        type: "query",
-        response: {
-          type: "rows",
-          columns: ["value", "expires_at"],
-          rows: row
-            ? [
-                {
-                  name: "r",
-                  columns: [
-                    { type: "text", value: row.value },
-                    row.expires_at === null ? null : { type: "integer", value: String(row.expires_at) },
-                  ],
-                },
-              ]
-            : [],
-        },
-      };
+      return executed(
+        row
+          ? [[{ type: "text", value: row.value }, row.expires_at === null ? null : { type: "integer", value: String(row.expires_at) }]]
+          : [],
+      );
     }
     if (sql.startsWith('SELECT "key" FROM') && sql.includes("substr")) {
       const prefix = args[0] as string;
-      const matched = [...fake.rows.keys()]
-        .filter((k) => k.startsWith(prefix))
-        .map((k) => ({ name: "r", columns: [{ type: "text", value: k }] }));
-      return { type: "query", response: { type: "rows", columns: ["key"], rows: matched } };
+      return executed([...fake.rows.keys()].filter((k) => k.startsWith(prefix)).map((k) => [{ type: "text", value: k }]));
     }
     if (sql.startsWith('SELECT "key", "value", "expires_at"')) {
       const limitMatch = sql.match(/LIMIT (\d+)/);
       const limit = limitMatch ? Number(limitMatch[1]) : fake.rows.size;
       const sorted = [...fake.rows.entries()].sort((a, b) => a[1].updated_at - b[1].updated_at).slice(0, limit);
-      return {
-        type: "query",
-        response: {
-          type: "rows",
-          columns: ["key", "value", "expires_at"],
-          rows: sorted.map(([k, row]) => ({
-            name: "r",
-            columns: [
-              { type: "text", value: k },
-              { type: "text", value: row.value },
-              row.expires_at === null ? null : { type: "integer", value: String(row.expires_at) },
-            ],
-          })),
-        },
-      };
+      return executed(
+        sorted.map(([k, row]) => [
+          { type: "text", value: k },
+          { type: "text", value: row.value },
+          row.expires_at === null ? null : { type: "integer", value: String(row.expires_at) },
+        ]),
+      );
     }
     if (sql.startsWith("SELECT COUNT(*)")) {
-      return {
-        type: "query",
-        response: { type: "rows", columns: ["n"], rows: [{ name: "r", columns: [{ type: "integer", value: String(fake.rows.size) }] }] },
-      };
+      return executed([[{ type: "integer", value: String(fake.rows.size) }]]);
     }
     throw new Error(`fake Turso got unexpected SQL: ${sql}`);
   };
   fake.fetch = (async (url: unknown, init: unknown) => {
     const requests = (JSON.parse((init as { body: string }).body) as { requests: TursoFake["calls"][number]["requests"] }).requests;
     fake.calls.push({ url: String(url), requests });
-    if (fake.failAll) return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
-    const results = requests.map((r) => handle(r));
-    return { ok: true, status: 200, json: async () => ({ results }) } as unknown as Response;
+    if (fake.failAll) return { ok: false, status: 500, json: async () => ({}), text: async () => "simulated Turso outage" } as unknown as Response;
+    const results = requests.map((r) => handle(r as { type: string; stmt?: { sql: string; args?: unknown[] } }));
+    return { ok: true, status: 200, json: async () => ({ results }), text: async () => "" } as unknown as Response;
   }) as typeof fetch;
   return fake;
 }
@@ -528,8 +508,7 @@ test("kvFallbackStatus: reports configuration and counts, and never leaks the au
 // 8. End-to-end quota window
 // ---------------------------------------------------------------------------
 
-test("quota window end to end: outage absorbed for coordination state, recovery reconciled, content never sent", async () => {
-  reset();
+test("quota window end to end: outage absorbed for coordination state, recovery reconciled, content never sent", async () => {  reset();
   const kv = makeKv();
   const turso = makeTurso();
   __setTursoFetchForTests(turso.fetch);
@@ -559,4 +538,47 @@ test("quota window end to end: outage absorbed for coordination state, recovery 
   assert.equal(kv.store.get("google_comment_processed:c-1"), "1");
   assert.equal(turso.rows.size, 0, "steady state holds nothing in Turso");
   assert.equal(kv.store.has("chat_history:1:dm"), false, "conversation content never left Cloudflare at any point");
+});
+
+test("Turso wire contract: only execute/close request types are sent and every pipeline ends with close (regression: the legacy 'query' type is rejected HTTP 400)", async () => {
+  reset();
+  const kv = makeKv();
+  const turso = makeTurso();
+  __setTursoFetchForTests(turso.fetch);
+  const env = makeEnv(kv, turso);
+  seedRow(turso, "active:1:dm", "work-1");
+  await kvGet(env, "active:1:dm"); // SELECT path (+ repair)
+  await kvPut(env, "sessions_index", "[]"); // INSERT path (+ shadow DELETE)
+  await kvDelete(env, "active:1:dm"); // DELETE path
+  await sweepKvFallback(env); // sweep SELECT + DELETE
+  await kvFallbackStatus(env); // COUNT path
+  assert.ok(turso.calls.length > 0, "the exercise must have produced Turso traffic");
+  for (const call of turso.calls) {
+    const types = call.requests.map((r) => r.type);
+    assert.ok(
+      types.every((t) => t === "execute" || t === "close"),
+      `only execute/close may be sent (Turso rejects anything else with HTTP 400): ${JSON.stringify(types)}`,
+    );
+    assert.equal(types[types.length - 1], "close", "every pipeline must close its connection");
+    for (const request of call.requests) {
+      if (request.type === "execute") assert.ok(request.stmt?.sql, "every execute request carries its statement");
+    }
+  }
+});
+
+test("HTTP failures surface Turso's response body in the error (diagnosability regression)", async () => {
+  reset();
+  const kv = makeKv();
+  const turso = makeTurso();
+  __setTursoFetchForTests(turso.fetch);
+  const env = makeEnv(kv, turso);
+  kv.failPut = true;
+  turso.failAll = true;
+  // Both stores refusing with the circuit still closed surfaces the KV error
+  // (fail-closed continuity, tested above); once the circuit is open no KV
+  // attempt happens, so the Turso error is the only evidence and must carry
+  // the response body -- without it the production 400s were undiagnosable.
+  await assert.rejects(() => kvPut(env, "sessions_index", "[]"), /kv put boom/);
+  await assert.rejects(() => kvPut(env, "sessions_index", "[]"), /kv put boom/); // second consecutive failure opens the circuit
+  await assert.rejects(() => kvPut(env, "sessions_index", "[]"), /Turso HTTP 500: simulated Turso outage/);
 });
