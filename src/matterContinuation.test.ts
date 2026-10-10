@@ -413,6 +413,38 @@ test("missing Matter pointer fails cleanly (Matter with no Work at all)", async 
   assert.match(noSuchMatter.reason, /does not resolve to an existing Matter/);
 });
 
+test("hostile legacy labels in sessions_index never break Matter continuation (read path sanitizes, continuation fields survive)", async () => {
+  const world = fakeWorld();
+  // A pre-contract index value seeded straight at the storage seam: a
+  // free-text label carrying a name and an enquiry excerpt, plus poisoned
+  // token fields. readSessionsIndex sanitizes every entry before any field
+  // is consumed here.
+  world.kv.set(
+    "sessions_index",
+    JSON.stringify([
+      {
+        workId: "w-hostile",
+        unit: "Sales",
+        hat: "Sales Executive",
+        stage: "awaiting_strategy_handoff",
+        label: "New Entity: John Smith for ACME Corp -- renewal enquiry",
+        updatedAt: new Date().toISOString(),
+        matterId: MATTER_A,
+        entityToken: "John Smith",
+        matterToken: "HO-64",
+      },
+    ]),
+  );
+
+  const resolved = await resolveMatterCurrentWork(world.env, MATTER_A);
+  assert.deepStrictEqual(
+    resolved,
+    { ok: true, workId: "w-hostile" },
+    "sanitization preserves every continuation field (workId/matterId/stage) -- the legacy label is discarded, the Work is not",
+  );
+  assert.strictEqual(world.kv.get(matterCurrentWorkKey(MATTER_A)), "w-hostile", "the unique-candidate pointer is re-established exactly as before");
+});
+
 test("stale pointer fails cleanly: one to a missing Work, one to a terminal Work", async (t) => {
   const world = fakeWorld();
   mockNotion(t);

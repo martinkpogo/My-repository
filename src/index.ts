@@ -24,7 +24,6 @@ import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
 import { findUnitManifest, getUnitManifests } from "./units/registry";
 import { resolveRecordedActionSkills } from "./runtime/actionSkills";
-import type { SessionSummary } from "./types";
 import {
   handleGoogleOAuthStart,
   handleGoogleOAuthCallback,
@@ -38,6 +37,7 @@ import { handleWorkSessionState } from "./workSessionInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { kvDelete, kvGet, kvList, kvPut, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
+import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 
 export { WorkSession } from "./session";
 
@@ -704,16 +704,18 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
   }
 }
 
-// Work-item stages are internal code states (e.g. "awaiting_qualification_approval")
-// used for control flow, not written for a human reader — this turns any of
-// them into plain English for display without needing a maintained mapping.
-function humanizeStage(stage: string): string {
-  return stage.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
-}
+// Work-item stages are humanized for display by sessionsIndex.ts's
+// humanizeStage (kept next to the /sessions row template it feeds, where it
+// is unit-testable -- this module imports the Workers runtime and cannot be
+// loaded in tests).
 
 async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
-  const raw = await kvGet(env, "sessions_index");
-  const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
+  // The stored index is untrusted: loadSessionsIndexForRead sanitizes every
+  // entry (legacy free-text labels never reach a Telegram message -- not
+  // even when the bytes came from Turso through kvGet) and rewrites a
+  // still-legacy stored value once through the same kvPut seam. Terminal
+  // works drop out of the listing below, exactly as before.
+  const index = await loadSessionsIndexForRead(env);
   const open = index.filter((s) => s.stage !== "complete" && s.stage !== "closed_not_qualified");
   if (open.length === 0) {
     await sendMessage(env, chatId, "No open work items. Send a new enquiry to start one.", undefined, threadId);
@@ -722,7 +724,7 @@ async function listSessions(env: Env, chatId: number, threadId?: number): Promis
   const activeId = await getActiveWorkId(env, chatId, threadId);
   const buttons: InlineButton[][] = open.map((s) => [
     {
-      text: `${s.workId === activeId ? "• " : ""}${s.unit}/${s.hat} — ${s.label} (${humanizeStage(s.stage)})`,
+      text: sessionRowText(s, activeId),
       callback_data: `switch:${s.workId}:`,
     },
   ]);

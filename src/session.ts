@@ -22,7 +22,7 @@ import {
 } from "./googleOAuth";
 import { proposeLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
-import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
+import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
@@ -599,11 +599,13 @@ export class WorkSession extends DurableObject<Env> {
     // and never from state.entityName/matterName/enquiryText or a
     // pendingActionSummary label -- those can carry human names, organisation
     // names and raw enquiry text, which must never enter a value that may
-    // fall back to Turso. Token-shaped state.entityName/matterName values
-    // are accepted only because the canonical `ENT-<n>`/`MAT-<n>` shape is
-    // what is tested (safeTokenRef), so a real name cannot pass.
-    const entityToken = safeTokenRef(state.entityToken) ?? safeTokenRef(state.entityName);
-    const matterToken = safeTokenRef(state.matterToken) ?? safeTokenRef(state.matterName);
+    // fall back to Turso. The entityName/matterName fallbacks are accepted
+    // only because the role-exact canonical shapes are what is tested
+    // (safeEntityTokenRef `ENT-<n>` / safeMatterTokenRef `MAT-<n>`, the live
+    // Notion unique_id displays) -- some Sales paths carry the token on the
+    // name field, and a real name cannot pass either shape.
+    const entityToken = safeEntityTokenRef(state.entityToken) ?? safeEntityTokenRef(state.entityName);
+    const matterToken = safeMatterTokenRef(state.matterToken) ?? safeMatterTokenRef(state.matterName);
     const summary: SessionSummary = {
       workId: state.workId,
       unit: state.unit,
