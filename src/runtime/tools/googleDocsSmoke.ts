@@ -51,6 +51,11 @@ export const GOOGLE_DOCS_SMOKE_FOLDER_KEY_PREFIX = "google_smoke_test_folder";
 /** Every smoke Work id begins with this prefix; a real Work id can never be used for the smoke. */
 export const GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX = "smoke-googledocs-";
 
+/** Whether a Work id belongs to a Registry smoke flow (never a real business Work). */
+export function isGoogleDocsSmokeWorkId(workId: unknown): workId is string {
+  return typeof workId === "string" && workId.startsWith(GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX);
+}
+
 /**
  * The governed Work the smoke records: a real Sales Executive write Action
  * that declares `google_docs.create_and_verify` and is not approval-gated
@@ -160,13 +165,64 @@ export async function runGoogleDocsSmoke(
     return blocked(established.reason);
   }
 
-  // Exactly one registered invocation, judged by the Work's own recorded
-  // Action, under the durable persistence `execute` installs.
-  const input = googleDocsSmokeInput(workId, folderId, accountIdentifier);
+  // The shared invocation core -- the same one the interactive Telegram
+  // confirmation path uses (src/googleDocsSmokeFlow.ts), so every smoke
+  // entry has exactly one Registry execution and one close rule.
+  return runGoogleDocsSmokeInvocation(
+    env,
+    { workId, accountIdentifier, folderId },
+    { runWithWorkPersistence: runner.runWithWorkPersistence, closeGovernedWork: runner.closeGovernedWork },
+  );
+}
+
+/** The target one smoke run is bound to: one account of the Worker's authorized set and one disposable folder. */
+export interface GoogleDocsSmokeInvocationTarget {
+  workId: string;
+  accountIdentifier: string;
+  folderId: string;
+}
+
+/** The Work-side seams the invocation core needs (a subset of the full runner). */
+export interface GoogleDocsSmokeInvocationRunner {
+  runWithWorkPersistence(workId: string, fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState>;
+  closeGovernedWork(workId: string): Promise<void>;
+}
+
+/**
+ * THE shared smoke invocation core: validates the chosen account against
+ * the Worker's OWN authorized set (a confirmed selection alone is never
+ * authority), invokes EXACTLY one registered `google_docs.create_and_verify`
+ * through `invokeTool` judged by the Work's own recorded Action, under the
+ * durable persistence the runner's execute cycle installs, and applies the
+ * terminal-only close rule -- succeeded/denied closes the Work; a
+ * failed/partially_completed/unverified effect keeps it open with its
+ * durable records intact for reconciliation. Entries add their own target
+ * gates around this; this core never chooses an account or folder itself.
+ */
+export async function runGoogleDocsSmokeInvocation(
+  env: Env,
+  target: GoogleDocsSmokeInvocationTarget,
+  runner: GoogleDocsSmokeInvocationRunner,
+): Promise<GoogleDocsSmokeResult> {
+  const blocked = (reason: string): GoogleDocsSmokeResult => ({
+    work_id: target.workId,
+    outcome: null,
+    blocked_reason: reason,
+    work_closed: false,
+  });
+
+  const accounts = await listAuthorizedGoogleAccounts(env);
+  if (!accounts.includes(target.accountIdentifier)) {
+    return blocked(
+      `account "${target.accountIdentifier}" is not one of the ${accounts.length} account(s) this Worker is authorized for -- the smoke may only run under an account of the Worker's own authorized set.`,
+    );
+  }
+
+  const input = googleDocsSmokeInput(target.workId, target.folderId, target.accountIdentifier);
   let outcome: ToolInvocationOutcome | undefined;
-  await runner.runWithWorkPersistence(workId, async (state) => {
-    if (state.workId !== workId) {
-      throw new Error(`smoke Work mismatch: the runner presented Work ${state.workId} for smoke ${workId} -- refusing to judge the invocation under another Work's Action.`);
+  await runner.runWithWorkPersistence(target.workId, async (state) => {
+    if (state.workId !== target.workId) {
+      throw new Error(`smoke Work mismatch: the runner presented Work ${state.workId} for smoke ${target.workId} -- refusing to judge the invocation under another Work's Action.`);
     }
     outcome = await invokeTool(
       env,
@@ -186,8 +242,8 @@ export async function runGoogleDocsSmoke(
   // contract requires.
   let workClosed = false;
   if (outcome.state === "succeeded" || outcome.state === "denied") {
-    await runner.closeGovernedWork(workId);
+    await runner.closeGovernedWork(target.workId);
     workClosed = true;
   }
-  return { work_id: workId, outcome, work_closed: workClosed };
+  return { work_id: target.workId, outcome, work_closed: workClosed };
 }

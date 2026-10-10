@@ -883,6 +883,25 @@ export interface WorkState {
   pendingGoogleAction?: import("./googleOAuth").PendingGoogleAction;
 
   /**
+   * The target Martin selected but has NOT yet confirmed in the interactive
+   * Google Docs Tool Registry SMOKE flow (src/googleDocsSmokeFlow.ts): the
+   * authorized account and the disposable Drive folder, held until he presses
+   * the explicit smoke confirmation. This is a smoke-flow discriminator
+   * carried in Work state alongside the same `smoke: true` flag on every
+   * staged opaque option, so smoke selections structurally cannot fall into
+   * the normal document-creation path -- `pendingGoogleAction` is never set
+   * on the smoke path, and `handleGoogleActionApproval` reads only that
+   * field. Cleared when the confirmation is consumed (run, cancelled, or
+   * refused) so the same confirmation can never be replayed.
+   */
+  pendingSmokeSelection?: {
+    accountIdentifier: string;
+    folderId: string;
+    folderName: string;
+    createdAt: string;
+  };
+
+  /**
    * An evidence-backed opportunity finding (from either scheduled or
    * on-demand Lead Generation Specialist discovery), awaiting Martin's
    * explicit approval before it becomes a Lead -- per the governance

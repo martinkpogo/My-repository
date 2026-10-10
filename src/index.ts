@@ -19,6 +19,7 @@ import {
   maybeAutoContinueCheckHandoffs,
   runCheckHandoffs,
 } from "./checkHandoffs";
+import { startGoogleDocsSmokeFlow } from "./googleDocsSmokeFlow";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
 import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
@@ -676,6 +677,18 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       // Hat triggers right after successfully queuing a Handoff (see e.g.
       // salesExecutive.ts's handleInterventionText).
       await runCheckHandoffs(env, chatId, threadId);
+      return;
+    }
+    if (text === "/googledocssmoke") {
+      // Interactive Tool Registry smoke (LOG-1069 live verification): stages
+      // the authorized-account picker on a fresh governed smoke Work, then
+      // the disposable-folder picker, then an explicit confirmation -- and
+      // only then runs EXACTLY one registered google_docs.create_and_verify
+      // through the shared Tool Registry (src/googleDocsSmokeFlow.ts).
+      // Martin-only upstream (handleUpdate gates every message/callback on
+      // MARTIN_TELEGRAM_USER_ID); the Registry, Access and the smoke harness
+      // decide everything else. No pre-configured folder key is required.
+      await startGoogleDocsSmokeFlow(env, chatId, threadId);
       return;
     }
     if (text.startsWith("/")) {

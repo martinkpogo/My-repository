@@ -14,6 +14,7 @@ import {
   GOOGLE_DOCS_SMOKE_WORK,
   type GoogleDocsSmokeResult,
 } from "./runtime/tools/googleDocsSmoke";
+import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
@@ -380,6 +381,35 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * The interactive Telegram smoke confirmation (src/googleDocsSmokeFlow.ts):
+   * validates the pending smoke Work and its selected disposable target, then
+   * runs the SAME shared invocation core the admin entry uses. Runs outside
+   * the generic handleCallback execute because the invocation installs its
+   * own durable operation persistence through this session's execute cycle;
+   * every state change here goes through one explicit execute at a time.
+   */
+  async runGoogleDocsSmokeConfirmation(value: string): Promise<WorkState> {
+    const state = await this.require();
+    return confirmGoogleDocsSmoke(this.env, state, value, {
+      runExclusive: async (workId: string, fn: (s: WorkState) => Promise<WorkState>) => {
+        const current = await this.require();
+        if (current.workId !== workId) {
+          throw new Error(`smoke confirmation Work mismatch: this session holds ${current.workId} but the flow asked for ${workId} -- refusing to continue.`);
+        }
+        return this.execute(fn);
+      },
+      markComplete: async (workId: string) => {
+        await this.execute(async (s) => {
+          if (s.workId !== workId) return s;
+          s.stage = "complete";
+          s.pendingSmokeSelection = undefined;
+          return s;
+        });
+      },
+    });
+  }
+
+  /**
    * Presents an evidence-backed opportunity finding to Martin for explicit
    * approval before it may become a Lead -- invoked on a freshly created
    * WorkSession with no live chat behind it. Currently has no caller:
@@ -498,6 +528,14 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async handleCallback(action: string, value: string): Promise<WorkState> {
+    // The interactive Tool Registry smoke confirmation is handled OUTSIDE
+    // the generic execute below: its invocation installs its own durable
+    // operation persistence through this session's execute cycle, and
+    // nesting the two would clobber the installed adapter. No other prefix
+    // changes behaviour here.
+    if (action === "googlesmokeconfirm") {
+      return this.runGoogleDocsSmokeConfirmation(value);
+    }
     return this.execute((state) => {
       switch (action) {
         // The four business prefixes that used to live here -- entity,
