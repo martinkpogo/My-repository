@@ -151,6 +151,40 @@ export default {
       }
     }
 
+    // GOVERNED GOOGLE DOCS SMOKE (LOG-1069 live verification; Martin-approved
+    // option (b)): runs EXACTLY one registered google_docs.create_and_verify
+    // through the shared Tool Registry on a genuine smoke Work, against the
+    // DISPOSABLE folder configured in runtime state
+    // (google_smoke_test_folder:<account>) -- never the production proposal
+    // folder. Gated on the admin key like every other admin endpoint, and
+    // fail-closed inside the smoke itself: a missing folder configuration,
+    // an unresolvable account set (the proposal flow's exactly-one rule) or
+    // a Work that cannot be established all refuse BEFORE any Google
+    // request. The Work id is generated fresh per call, so every run is its
+    // own governed Work with its own durable operation records; the JSON
+    // response carries the Registry outcome (state, reason, document id/url
+    // when one exists) and no credentials.
+    if (url.pathname === "/admin/smoke-google-docs" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const workId = `smoke-googledocs-${crypto.randomUUID()}`;
+      try {
+        const stub = getSessionStub(env, workId);
+        const result = await stub.runGoogleDocsSmoke(workId);
+        return new Response(JSON.stringify({ ok: true, ...result }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        console.error("Unhandled error in /admin/smoke-google-docs", err);
+        return new Response(JSON.stringify({ ok: false, error: "internal error, logged" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    }
+
     // One-time setup helper: registers this Worker's own /telegram/webhook URL
     // with Telegram, using the bot token already stored as a Cloudflare
     // secret. Never requires the bot token to leave Cloudflare. Gated on the

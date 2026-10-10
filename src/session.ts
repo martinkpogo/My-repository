@@ -8,6 +8,12 @@ import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
 import { installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
+import {
+  runGoogleDocsSmoke as runGoogleDocsSmokeOperation,
+  GOOGLE_DOCS_SMOKE_CHAT_ID,
+  GOOGLE_DOCS_SMOKE_WORK,
+  type GoogleDocsSmokeResult,
+} from "./runtime/tools/googleDocsSmoke";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
@@ -324,6 +330,53 @@ export class WorkSession extends DurableObject<Env> {
         this.runUnderRecordedSkills(adopted, (skills) => sales.handleCallNotesHandoffPickup(this.env, adopted, skills)),
       ),
     );
+  }
+
+  /**
+   * GOVERNED GOOGLE DOCS SMOKE (LOG-1069 live verification; Martin-approved
+   * option (b), 2026-10-10). Runs EXACTLY one registered
+   * `google_docs.create_and_verify` through the shared Tool Registry on a
+   * genuine smoke Work created through this Durable Object's own `init` --
+   * the smoke's recorded Action is validated against the Unit Manifest by
+   * `recordWorkAction` like any other Work, Access judges the Work's own
+   * recorded Action, and durable operation persistence is installed by
+   * `execute` exactly as for any handler. The target is the DISPOSABLE
+   * folder configured in runtime state (`google_smoke_test_folder:<account>`,
+   * see src/runtime/tools/googleDocsSmoke.ts); the production proposal
+   * folder is never read or written, and missing configuration refuses
+   * before any Work exists or any Google request is made. Invoked only by
+   * the admin-key-gated `/admin/smoke-google-docs` route in src/index.ts,
+   * never by dispatch, a Handoff, or any chat. The smoke Work belongs to no
+   * chat (chatId 0 is never a real recipient and this path sends nothing),
+   * and is closed through the governed lifecycle only after a clean
+   * terminal end (succeeded/denied) -- an uncertain effect keeps it open
+   * with its durable records intact for reconciliation.
+   */
+  async runGoogleDocsSmoke(workId: string): Promise<GoogleDocsSmokeResult> {
+    return runGoogleDocsSmokeOperation(this.env, workId, {
+      ensureGovernedWork: async (id: string) => {
+        if (await this.getState()) {
+          return {
+            ok: false,
+            reason: `Work ${id} already exists in this session -- the smoke never re-initializes an existing Work or overwrites its durable operation records; run a fresh invocation instead.`,
+          };
+        }
+        await this.init(id, GOOGLE_DOCS_SMOKE_CHAT_ID, GOOGLE_DOCS_SMOKE_WORK.unit, GOOGLE_DOCS_SMOKE_WORK.hat, undefined, {
+          actionName: GOOGLE_DOCS_SMOKE_WORK.actionName,
+        });
+        return { ok: true };
+      },
+      runWithWorkPersistence: async (id: string, fn: (state: WorkState) => Promise<WorkState>) => {
+        const state = await this.require();
+        if (state.workId !== id) {
+          throw new Error(`smoke Work mismatch: this session holds ${state.workId} but the smoke asked for ${id} -- refusing to run the invocation against another Work.`);
+        }
+        return this.execute(fn);
+      },
+      closeGovernedWork: async () => {
+        await this.cancel();
+      },
+    });
   }
 
   /**
