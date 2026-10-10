@@ -1,5 +1,5 @@
 import type { Env, SessionSummary } from "./types";
-import { kvGet, kvPut } from "./kvStore";
+import { kvGet } from "./kvStore";
 
 // sessions_index bounded-pool sizes. Pending approvals get a much larger
 // reserved allowance than general work items, since losing visibility into
@@ -87,15 +87,19 @@ export function sanitizeSessionsIndex(index: SessionSummary[]): SessionSummary[]
  * returns bytes of either provenance): every entry is re-derived by
  * sanitizeSessionsIndex before any caller sees it, so legacy free-text
  * labels written before this contract cannot reach a display or any other
- * consumer. When the stored value still differs from its sanitized form,
- * the sanitized array is rewritten once through the same kvPut seam
- * (bounded migration: after one successful rewrite the next read finds no
- * difference and writes nothing). The migration is best-effort and
- * fail-closed about the truth: a failed write is logged as exactly what it
- * is -- the values served here are sanitized in memory, but the persisted
- * value still holds the legacy labels until a later read or Work save
- * rewrites it. An unparseable stored value is served as empty with NO
- * migration write: corrupt bytes are not permission to overwrite evidence.
+ * consumer.
+ *
+ * This path NEVER writes. Persisting the sanitized array is the sanctioned
+ * writer's job (session.ts updateRegistry rewrites the WHOLE index on every
+ * Work save, which is what actually migrates legacy bytes), because a
+ * read-then-write "migration" here has no way to be concurrency-safe: the
+ * KV seam has no conditional/CAS write, so between this read and such a
+ * write a concurrent updateRegistry could register a newer Work and the
+ * stale sanitized snapshot would erase it. Serving an in-memory-sanitized
+ * (possibly stale) snapshot is the correct read semantics; only the writer
+ * may decide what is persisted. An unparseable or non-array stored value
+ * is served as empty -- unreadable bytes are not permission to guess, and
+ * (per the same rule) not permission to overwrite.
  */
 export async function loadSessionsIndexForRead(env: Env): Promise<SessionSummary[]> {
   const raw = await kvGet(env, "sessions_index");
@@ -104,22 +108,14 @@ export async function loadSessionsIndexForRead(env: Env): Promise<SessionSummary
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    console.error("sessionsIndex: stored sessions_index could not be parsed -- serving it as empty, with no migration write", err);
+    console.error("sessionsIndex: stored sessions_index could not be parsed -- serving it as empty", err);
     return [];
   }
   if (!Array.isArray(parsed)) {
-    console.error("sessionsIndex: stored sessions_index is not an array -- serving it as empty, with no migration write");
+    console.error("sessionsIndex: stored sessions_index is not an array -- serving it as empty");
     return [];
   }
-  const sanitized = sanitizeSessionsIndex(parsed as SessionSummary[]);
-  if (JSON.stringify(parsed) !== JSON.stringify(sanitized)) {
-    try {
-      await kvPut(env, "sessions_index", JSON.stringify(sanitized));
-    } catch (err) {
-      console.error("sessionsIndex: sanitized sessions_index rewrite failed -- the values served here are sanitized, but the persisted value still holds the legacy labels", err);
-    }
-  }
-  return sanitized;
+  return sanitizeSessionsIndex(parsed as SessionSummary[]);
 }
 
 // Mirrors the existing WATCHDOG_ALERT_MIN_INTERVAL_MS pattern in index.ts --

@@ -711,10 +711,12 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
 
 async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
   // The stored index is untrusted: loadSessionsIndexForRead sanitizes every
-  // entry (legacy free-text labels never reach a Telegram message -- not
-  // even when the bytes came from Turso through kvGet) and rewrites a
-  // still-legacy stored value once through the same kvPut seam. Terminal
-  // works drop out of the listing below, exactly as before.
+  // entry before it reaches this function (legacy free-text labels never
+  // reach a Telegram message -- not even when the bytes came from Turso
+  // through kvGet). The read path never writes: persisted migration of
+  // legacy bytes happens only through updateRegistry on Work saves, so a
+  // /sessions read can never race a concurrent save's newer snapshot.
+  // Terminal works drop out of the listing below, exactly as before.
   const index = await loadSessionsIndexForRead(env);
   const open = index.filter((s) => s.stage !== "complete" && s.stage !== "closed_not_qualified");
   if (open.length === 0) {
