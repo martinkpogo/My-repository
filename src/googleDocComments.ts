@@ -8,6 +8,7 @@ import {
 import { generate } from "./ai";
 import { logActivity } from "./log";
 import { getSessionStub } from "./sessionRouting";
+import { kvGet, kvPut, maybeSweepKvFallback } from "./kvStore";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
@@ -93,7 +94,7 @@ export class CommentMarkerPersistenceError extends Error {
 
 async function markProcessed(env: Env, commentId: string): Promise<void> {
   try {
-    await env.STATE_KV.put(`google_comment_processed:${commentId}`, "1", {
+    await kvPut(env, `google_comment_processed:${commentId}`, "1", {
       expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
     });
   } catch (err) {
@@ -119,7 +120,7 @@ function clarificationKey(commentId: string): string {
 
 export async function markProposalDocClarificationRequested(env: Env, commentId: string): Promise<void> {
   try {
-    await env.STATE_KV.put(clarificationKey(commentId), "1", { expirationTtl: COMMENT_PROCESSED_TTL_SECONDS });
+    await kvPut(env, clarificationKey(commentId), "1", { expirationTtl: COMMENT_PROCESSED_TTL_SECONDS });
   } catch (err) {
     throw new CommentMarkerPersistenceError(commentId, err);
   }
@@ -132,7 +133,7 @@ export async function markProposalDocClarificationRequested(env: Env, commentId:
  * asking the same question again on every pass.
  */
 export async function isProposalDocClarificationPending(env: Env, commentId: string): Promise<boolean> {
-  return Boolean(await env.STATE_KV.get(clarificationKey(commentId)));
+  return Boolean(await kvGet(env, clarificationKey(commentId)));
 }
 
 export type CommentOutcome =
@@ -329,7 +330,7 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
  * is never re-attempted on every poll.
  */
 async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
-  const alreadyProcessed = await env.STATE_KV.get(`google_comment_processed:${comment.id}`);
+  const alreadyProcessed = await kvGet(env, `google_comment_processed:${comment.id}`);
   if (alreadyProcessed) return { handled: false, outcome: "already_processed" };
 
   if (comment.resolved) {
@@ -473,9 +474,17 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
   // endpoint's traffic apart from any other route's). Diagnostics ONLY:
   // best-effort, so a failed write (e.g. the per-day KV write quota) is
   // logged and never blocks the poll itself from starting.
-  await env.STATE_KV.put("last_google_doc_comment_poll_run", new Date().toISOString()).catch((err) =>
+  await kvPut(env, "last_google_doc_comment_poll_run", new Date().toISOString()).catch((err) =>
     console.error("pollGoogleDocComments: could not record the diagnostics timestamp (polling continues)", err),
   );
+
+  // Section 5B reconciliation heartbeat: this poll is the runtime's most
+  // reliable de-facto schedule (cron-job.org hits it every few minutes; the
+  // native Cron Trigger has never actually fired on this account), so it is
+  // where fallback rows accumulated during a KV quota window get swept back
+  // into KV once it has quota again. Throttled internally (a no-op for most
+  // calls) and never allowed to block or fail the poll itself.
+  await maybeSweepKvFallback(env).catch((err) => console.error("pollGoogleDocComments: fallback sweep failed (polling continues)", err));
 
   const docs = await listWatchedGoogleDocs(env);
   let commentsProcessed = 0;

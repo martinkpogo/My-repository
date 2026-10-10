@@ -3,6 +3,7 @@ import { queryDataSource, uniqueId } from "./notion";
 import { workSessionReadContext } from "./access";
 import { getSessionStub, setActiveWorkId } from "./sessionRouting";
 import { continueExistingWork } from "./workContinuation";
+import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 /**
  * Matter-based continuation -- the runtime's derived Business Object ->
@@ -105,7 +106,7 @@ export type MatterContinuationResult =
   | { ok: false; reason: string };
 
 async function readSessionsIndex(env: Env): Promise<SessionSummary[]> {
-  const raw = await env.STATE_KV.get("sessions_index");
+  const raw = await kvGet(env, "sessions_index");
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
@@ -208,7 +209,7 @@ export async function syncMatterContinuationPointer(env: Env, state: WorkState, 
  */
 async function establishMatterCurrentWork(env: Env, state: WorkState, matterId: string): Promise<void> {
   const key = matterCurrentWorkKey(matterId);
-  const existing = await env.STATE_KV.get(key);
+  const existing = await kvGet(env, key);
   if (existing === state.workId) return;
   if (existing) {
     const holder = (await readSessionsIndex(env)).find((s) => s.workId === existing);
@@ -221,7 +222,7 @@ async function establishMatterCurrentWork(env: Env, state: WorkState, matterId: 
     }
     // Rule 4: the holder is gone or terminal -- advance deterministically.
   }
-  await env.STATE_KV.put(key, state.workId);
+  await kvPut(env, key, state.workId);
 }
 
 /**
@@ -234,13 +235,13 @@ async function establishMatterCurrentWork(env: Env, state: WorkState, matterId: 
  */
 async function advanceMatterPointerOnTerminal(env: Env, state: WorkState, matterId: string): Promise<void> {
   const key = matterCurrentWorkKey(matterId);
-  if ((await env.STATE_KV.get(key)) !== state.workId) return; // the pointer already names another Work
+  if ((await kvGet(env, key)) !== state.workId) return; // the pointer already names another Work
   const candidates = resumableCandidates(await readSessionsIndex(env), matterId);
   if (candidates.length === 1) {
-    await env.STATE_KV.put(key, candidates[0].workId);
+    await kvPut(env, key, candidates[0].workId);
     return;
   }
-  await env.STATE_KV.delete(key);
+  await kvDelete(env, key);
   if (candidates.length > 1) {
     console.error(
       `matterContinuation: Matter ${matterId} has ${candidates.length} resumable Works after Work ${state.workId} terminated -- pointer removed rather than guessing which is current`,
@@ -268,12 +269,12 @@ export async function resolveMatterCurrentWork(env: Env, matterId: string): Prom
   const id = matterId.trim();
   if (!id) return { ok: false, reason: "no Matter identity was supplied" };
   const key = matterCurrentWorkKey(id);
-  const pointer = await env.STATE_KV.get(key);
+  const pointer = await kvGet(env, key);
   if (pointer) return { ok: true, workId: pointer };
 
   const candidates = resumableCandidates(await readSessionsIndex(env), id);
   if (candidates.length === 1) {
-    await env.STATE_KV.put(key, candidates[0].workId);
+    await kvPut(env, key, candidates[0].workId);
     return { ok: true, workId: candidates[0].workId };
   }
   if (candidates.length === 0) {

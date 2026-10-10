@@ -1,4 +1,5 @@
 import type { Env, Unit } from "./types";
+import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 /**
  * Foundational WorkSession/routing primitives with no dependency on the
@@ -50,11 +51,11 @@ export function newWorkId(): string {
 }
 
 export async function getActiveWorkId(env: Env, chatId: number, threadId?: number): Promise<string | null> {
-  return env.STATE_KV.get(`active:${chatId}:${threadId ?? "dm"}`);
+  return kvGet(env, `active:${chatId}:${threadId ?? "dm"}`);
 }
 
 export async function setActiveWorkId(env: Env, chatId: number, threadId: number | undefined, workId: string): Promise<void> {
-  await env.STATE_KV.put(`active:${chatId}:${threadId ?? "dm"}`, workId);
+  await kvPut(env, `active:${chatId}:${threadId ?? "dm"}`, workId);
 }
 
 /**
@@ -65,15 +66,15 @@ export async function setActiveWorkId(env: Env, chatId: number, threadId: number
  */
 export async function clearActiveWorkIdIfMatches(env: Env, chatId: number, threadId: number | undefined, workId: string): Promise<void> {
   const key = `active:${chatId}:${threadId ?? "dm"}`;
-  if ((await env.STATE_KV.get(key)) === workId) await env.STATE_KV.delete(key);
+  if ((await kvGet(env, key)) === workId) await kvDelete(env, key);
 }
 
 export async function setReplyMessageWorkId(env: Env, messageId: number, workId: string): Promise<void> {
-  await env.STATE_KV.put(`reply_msg:${messageId}`, workId, { expirationTtl: 60 * 60 * 24 * 7 });
+  await kvPut(env, `reply_msg:${messageId}`, workId, { expirationTtl: 60 * 60 * 24 * 7 });
 }
 
 export async function getReplyMessageWorkId(env: Env, messageId: number): Promise<string | null> {
-  return env.STATE_KV.get(`reply_msg:${messageId}`);
+  return kvGet(env, `reply_msg:${messageId}`);
 }
 
 /**
@@ -88,7 +89,7 @@ export type WorkspaceMode = "chat" | "cowork";
 
 export async function getWorkspaceMode(env: Env, chatId: number, threadId: number | undefined): Promise<WorkspaceMode> {
   try {
-    const raw = await env.STATE_KV.get(`mode:${chatId}:${threadId ?? "dm"}`);
+    const raw = await kvGet(env, `mode:${chatId}:${threadId ?? "dm"}`);
     return raw === "cowork" ? "cowork" : "chat";
   } catch (err) {
     console.error(`getWorkspaceMode: KV read failed for chat ${chatId} thread ${threadId} -- defaulting to chat`, err);
@@ -97,7 +98,7 @@ export async function getWorkspaceMode(env: Env, chatId: number, threadId: numbe
 }
 
 export async function setWorkspaceMode(env: Env, chatId: number, threadId: number | undefined, mode: WorkspaceMode): Promise<void> {
-  await env.STATE_KV.put(`mode:${chatId}:${threadId ?? "dm"}`, mode);
+  await kvPut(env, `mode:${chatId}:${threadId ?? "dm"}`, mode);
 }
 
 /**
@@ -114,7 +115,7 @@ export async function setWorkspaceMode(env: Env, chatId: number, threadId: numbe
  */
 export async function isCoworkClarificationPending(env: Env, chatId: number, threadId: number | undefined): Promise<boolean> {
   try {
-    return (await env.STATE_KV.get(`cowork_pending:${chatId}:${threadId ?? "dm"}`)) === "1";
+    return (await kvGet(env, `cowork_pending:${chatId}:${threadId ?? "dm"}`)) === "1";
   } catch (err) {
     console.error(`isCoworkClarificationPending: KV read failed for chat ${chatId} thread ${threadId} -- defaulting to not pending`, err);
     return false;
@@ -124,9 +125,9 @@ export async function isCoworkClarificationPending(env: Env, chatId: number, thr
 export async function setCoworkClarificationPending(env: Env, chatId: number, threadId: number | undefined, pending: boolean): Promise<void> {
   const key = `cowork_pending:${chatId}:${threadId ?? "dm"}`;
   if (pending) {
-    await env.STATE_KV.put(key, "1");
+    await kvPut(env, key, "1");
   } else {
-    await env.STATE_KV.delete(key);
+    await kvDelete(env, key);
   }
 }
 

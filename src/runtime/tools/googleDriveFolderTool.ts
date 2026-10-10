@@ -24,6 +24,7 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { ensureGoogleFolder, getValidGoogleAccessToken, listAuthorizedGoogleAccounts } from "../../googleOAuth";
+import { kvDelete, kvPut } from "./../../kvStore";
 
 export const GOOGLE_DRIVE_TOOL_ID = "google_drive";
 export const GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID = "google_drive.ensure_folder";
@@ -173,7 +174,7 @@ async function reconcileFolderEnsure(env: Env, input: unknown): Promise<{ outcom
     const folderId = files[0].id!;
     // Memoize into ENIG's own cache (the same key ensureGoogleFolder uses),
     // so the next ensure reuses the folder this reconciliation recovered.
-    await env.STATE_KV.put(`${parsed.kv_key}:${parsed.account_identifier}`, folderId);
+    await kvPut(env, `${parsed.kv_key}:${parsed.account_identifier}`, folderId);
     return {
       outcome: {
         ...BASE,
@@ -262,7 +263,7 @@ export const googleDriveEnsureFolderToolOperation: ToolOperationDefinition = {
       }
       // The cached/just-created id does not exist (stale cache): clear the
       // memo and create the folder for real, once.
-      await env.STATE_KV.delete(`${parsed.kv_key}:${parsed.account_identifier}`);
+      await kvDelete(env, `${parsed.kv_key}:${parsed.account_identifier}`);
       const retry = await ensureGoogleFolder(env, parsed.account_identifier, parsed.folder_name, parsed.kv_key);
       if (!retry.ok) return mapEnsureResult(retry);
       const retried = await readDriveFile(env, parsed.account_identifier, retry.folderId);

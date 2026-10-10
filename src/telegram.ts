@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { logActivity } from "./log";
+import { kvPut } from "./kvStore";
 
 const API = "https://api.telegram.org/bot";
 
@@ -244,7 +245,7 @@ function withHatLabel(target: HatMessageTarget, text: string): string {
 export async function sendHatMessage(env: Env, target: HatMessageTarget, text: string, buttons?: InlineButton[][]): Promise<number | undefined> {
   const msgId = await sendMessage(env, target.chatId, withHatLabel(target, text), buttons, target.threadId);
   if (msgId && target.workId && env?.STATE_KV) {
-    await env.STATE_KV.put(`reply_msg:${msgId}`, target.workId, { expirationTtl: 60 * 60 * 24 * 7 }).catch((err) =>
+    await kvPut(env, `reply_msg:${msgId}`, target.workId, { expirationTtl: 60 * 60 * 24 * 7 }).catch((err) =>
       console.error("sendHatMessage: failed to put reply_msg in KV", err),
     );
   }

@@ -38,6 +38,7 @@ import { claimPendingHandoff } from "../../handoffLifecycle";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { retrieveAndConsumeCallNotes } from "./callNotesRecord";
 import { serializeCommercialValueEvidenceBlock } from "./commercialValueEvidence";
+import { kvPut } from "./../../kvStore";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
@@ -1636,7 +1637,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   // discoverPendingStrategyHandoffs run in index.ts) rather than being
   // invoked in-process from this call. This mapping is how that later,
   // separate invocation finds its way back to this work item.
-  await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
+  await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);
   await logActivity(env, {
     entry: `Handoff to Strategy created: ${state.matterName}`,
     type: "Activity",
