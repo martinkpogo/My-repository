@@ -213,9 +213,18 @@ async function tursoRequest(cfg: TursoConfig, requests: unknown[]): Promise<Arra
       authorization: `Bearer ${cfg.token}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ requests }),
+    // /v2/pipeline supports exactly two request types -- `execute` and `close`
+    // (SELECTs are executed, not "queried"; the legacy libsql `query` request
+    // type is rejected with HTTP 400). Connections are left open until they
+    // time out unless closed, so every pipeline ends with `close`.
+    body: JSON.stringify({ requests: [...requests, { type: "close" }] }),
   });
-  if (!res.ok) throw new Error(`Turso HTTP ${res.status}`);
+  if (!res.ok) {
+    // Include the response body: without it a 400 is undiagnosable from logs
+    // (exactly what happened on the first live §5B traffic).
+    const bodyText = await res.text().catch(() => "");
+    throw new Error(`Turso HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 300)}` : ""}`);
+  }
   const body = (await res.json()) as { results?: Array<Record<string, any>> };
   const results = body.results ?? [];
   for (const result of results) {
@@ -225,6 +234,17 @@ async function tursoRequest(cfg: TursoConfig, requests: unknown[]): Promise<Arra
     }
   }
   return results;
+}
+
+/**
+ * The row set of the pipeline's first `execute` result. Turso returns rows
+ * as arrays of typed cells (`{type, value}` or null for NULL), one array
+ * per row, with the column list in `result.cols`.
+ */
+type TursoCell = { type: string; value: string | number } | null;
+function execRows(results: Array<Record<string, any>>): TursoCell[][] {
+  const executed = results.find((r) => r.type === "ok" && r.response?.type === "execute");
+  return ((executed?.response?.result?.rows ?? []) as TursoCell[][]) ?? [];
 }
 
 async function ensureSchema(cfg: TursoConfig): Promise<void> {
@@ -280,13 +300,13 @@ async function tursoGet(cfg: TursoConfig, key: string): Promise<TursoRow | null>
   await ensureSchema(cfg);
   const results = await tursoRequest(cfg, [
     {
-      type: "query",
+      type: "execute",
       stmt: { sql: `SELECT "value", "expires_at" FROM ${TURSO_TABLE} WHERE "key" = ?`, args: [textArg(key)] },
     },
   ]);
-  const rows = results[0]?.response?.rows as Array<{ columns: unknown[] }> | undefined;
-  if (!rows || rows.length === 0) return null;
-  return { key, value: decodeText(rows[0].columns[0]), expiresAt: decodeInteger(rows[0].columns[1]) };
+  const rows = execRows(results);
+  if (rows.length === 0) return null;
+  return { key, value: decodeText(rows[0][0]), expiresAt: decodeInteger(rows[0][1]) };
 }
 
 async function tursoDelete(cfg: TursoConfig, key: string): Promise<void> {
@@ -303,33 +323,31 @@ async function tursoListKeys(cfg: TursoConfig, prefix: string, limit = 1000): Pr
   await ensureSchema(cfg);
   const results = await tursoRequest(cfg, [
     {
-      type: "query",
+      type: "execute",
       stmt: {
         sql: `SELECT "key" FROM ${TURSO_TABLE} WHERE substr("key", 1, length(?)) = ? LIMIT ${limit}`,
         args: [textArg(prefix), textArg(prefix)],
       },
     },
   ]);
-  const rows = results[0]?.response?.rows as Array<{ columns: unknown[] }> | undefined;
-  return (rows ?? []).map((row) => decodeText(row.columns[0]));
+  return execRows(results).map((row) => decodeText(row[0]));
 }
 
 async function tursoSelectForSweep(cfg: TursoConfig, limit: number): Promise<TursoRow[]> {
   await ensureSchema(cfg);
   const results = await tursoRequest(cfg, [
     {
-      type: "query",
+      type: "execute",
       stmt: {
         sql: `SELECT "key", "value", "expires_at" FROM ${TURSO_TABLE} ORDER BY "updated_at" LIMIT ${limit}`,
         args: [],
       },
     },
   ]);
-  const rows = results[0]?.response?.rows as Array<{ columns: unknown[] }> | undefined;
-  return (rows ?? []).map((row) => ({
-    key: decodeText(row.columns[0]),
-    value: decodeText(row.columns[1]),
-    expiresAt: decodeInteger(row.columns[2]),
+  return execRows(results).map((row) => ({
+    key: decodeText(row[0]),
+    value: decodeText(row[1]),
+    expiresAt: decodeInteger(row[2]),
   }));
 }
 
@@ -337,10 +355,10 @@ async function tursoCount(cfg: TursoConfig): Promise<number | null> {
   try {
     await ensureSchema(cfg);
     const results = await tursoRequest(cfg, [
-      { type: "query", stmt: { sql: `SELECT COUNT(*) FROM ${TURSO_TABLE}`, args: [] } },
+      { type: "execute", stmt: { sql: `SELECT COUNT(*) FROM ${TURSO_TABLE}`, args: [] } },
     ]);
-    const rows = results[0]?.response?.rows as Array<{ columns: unknown[] }> | undefined;
-    return rows && rows.length ? decodeInteger(rows[0].columns[0]) : 0;
+    const rows = execRows(results);
+    return rows.length ? decodeInteger(rows[0][0]) : 0;
   } catch (err) {
     console.error("kvStore: Turso row count failed", err);
     return null;
