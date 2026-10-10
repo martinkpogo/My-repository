@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { systemContext } from "./access";
 import { getPageContent } from "./notion";
+import { kvGet, kvPut } from "./kvStore";
 
 // Kernel document, applies automatically to every Hat in every Unit — one
 // canonical page ID shared across all Hats, not restated per Hat.
@@ -69,7 +70,7 @@ export function stripObjectNameField(content: string): string {
 export async function getGovernance(env: Env, pageId: string, label: string): Promise<string | null> {
   const cacheKey = `governance:${pageId}`;
   try {
-    const cached = await env.STATE_KV.get(cacheKey);
+    const cached = await kvGet(env, cacheKey);
     if (cached) return wrapGovernanceContent(stripObjectNameField(cached));
   } catch (err) {
     console.error(`Governance cache read failed for ${label} (${pageId})`, err);
@@ -77,7 +78,7 @@ export async function getGovernance(env: Env, pageId: string, label: string): Pr
   try {
     const content = await getPageContent(env, pageId, systemContext());
     if (!content.trim()) throw new Error("retrieved page content was empty");
-    env.STATE_KV.put(cacheKey, content, { expirationTtl: GOVERNANCE_CACHE_TTL_SECONDS }).catch((err) => {
+    kvPut(env, cacheKey, content, { expirationTtl: GOVERNANCE_CACHE_TTL_SECONDS }).catch((err) => {
       console.error(`Governance cache write failed for ${label} (${pageId})`, err);
     });
     return wrapGovernanceContent(stripObjectNameField(content));

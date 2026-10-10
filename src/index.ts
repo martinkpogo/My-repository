@@ -37,6 +37,7 @@ import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
+import { kvDelete, kvGet, kvList, kvPut, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 
 export { WorkSession } from "./session";
 
@@ -181,7 +182,7 @@ export default {
       // (e.g. if this key's write rate is briefly exceeded, now that it's
       // written by GitHub Actions every 5 min, cron-job.org, the native
       // Cron Trigger, and /checkhandoffs, all landing on the same key).
-      await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
+      await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
         console.error("Failed to record last_cron_run", err),
       );
       try {
@@ -307,7 +308,7 @@ export default {
       if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
-      const lastRun = await env.STATE_KV.get("last_cron_run");
+      const lastRun = await kvGet(env, "last_cron_run");
       return new Response(JSON.stringify({ last_cron_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
         headers: { "content-type": "application/json" },
       });
@@ -323,8 +324,25 @@ export default {
       if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
-      const lastRun = await env.STATE_KV.get("last_google_doc_comment_poll_run");
+      const lastRun = await kvGet(env, "last_google_doc_comment_poll_run");
       return new Response(JSON.stringify({ last_google_doc_comment_poll_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Section 5B KV/Turso fallback status: whether the Turso binding is
+    // configured, the write circuit's state, how many rows are waiting in
+    // the fallback, and when reconciliation last ran. `?sweep=1` drains the
+    // fallback into KV on demand (the automatic sweep runs throttled from
+    // the comment poll and scheduled()). Never exposes the auth token.
+    if (url.pathname === "/admin/turso-fallback" && request.method === "GET") {
+      const key = url.searchParams.get("key");
+      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+        return new Response("forbidden", { status: 403 });
+      }
+      const sweep = url.searchParams.get("sweep") === "1" ? await sweepKvFallback(env) : null;
+      const status = await kvFallbackStatus(env);
+      return new Response(JSON.stringify({ ...status, sweep, checked_at: new Date().toISOString() }), {
         headers: { "content-type": "application/json" },
       });
     }
@@ -360,7 +378,7 @@ export default {
       if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
-      const lastRun = await env.STATE_KV.get("last_google_sheet_comment_poll_run");
+      const lastRun = await kvGet(env, "last_google_sheet_comment_poll_run");
       return new Response(JSON.stringify({ last_google_sheet_comment_poll_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
         headers: { "content-type": "application/json" },
       });
@@ -392,12 +410,12 @@ export default {
       if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
         return new Response("forbidden", { status: 403 });
       }
-      const lastRun = await env.STATE_KV.get("last_cron_run");
+      const lastRun = await kvGet(env, "last_cron_run");
       const staleMs = lastRun ? Date.now() - new Date(lastRun).getTime() : Infinity;
       const isStale = staleMs > WATCHDOG_STALE_THRESHOLD_MS;
       if (isStale) {
         const lastAlertKey = "watchdog_alert_last_sent";
-        const lastAlert = await env.STATE_KV.get(lastAlertKey);
+        const lastAlert = await kvGet(env, lastAlertKey);
         if (!lastAlert || Date.now() - Number(lastAlert) > WATCHDOG_ALERT_MIN_INTERVAL_MS) {
           const minutesSince = lastRun ? Math.round(staleMs / 60000) : null;
           await sendMessage(
@@ -407,7 +425,7 @@ export default {
               ? `*Watchdog alert*: Finance-Handoff discovery has never run - /admin/run-finance-discovery may not be scheduled. Nothing will surface Pending Handoffs until it runs.`
               : `*Watchdog alert*: Finance-Handoff discovery hasn't run in ${minutesSince} minute(s). Check that its external scheduler (cron-job.org) is still active - until it runs, Pending Handoffs won't be picked up or reported.`,
           );
-          await env.STATE_KV.put(lastAlertKey, String(Date.now()));
+          await kvPut(env, lastAlertKey, String(Date.now()));
         }
       }
       return new Response(JSON.stringify({ ok: true, stale: isStale, last_cron_run: lastRun ?? null }), {
@@ -419,9 +437,13 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
+    await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
       console.error("Failed to record last_cron_run", err),
     );
+    // Section 5B reconciliation heartbeat (throttled internally; a no-op when
+    // Turso is unconfigured). Runs here as well as in the comment poll so the
+    // sweep does not depend on any single entry point staying scheduled.
+    await maybeSweepKvFallback(env).catch((err) => console.error("scheduled: fallback sweep failed", err));
     try {
       await discoverPendingFinanceHandoffs(env);
       await discoverPendingSalesHandoffs(env);
@@ -577,7 +599,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
         );
         return;
       }
-      await Promise.all(keys.map((key) => env.STATE_KV.delete(key)));
+      await Promise.all(keys.map((key) => kvDelete(env, key)));
       await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
       return;
     }
@@ -690,7 +712,7 @@ function humanizeStage(stage: string): string {
 }
 
 async function listSessions(env: Env, chatId: number, threadId?: number): Promise<void> {
-  const raw = await env.STATE_KV.get("sessions_index");
+  const raw = await kvGet(env, "sessions_index");
   const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
   const open = index.filter((s) => s.stage !== "complete" && s.stage !== "closed_not_qualified");
   if (open.length === 0) {
@@ -720,12 +742,12 @@ async function listSessionKvKeys(env: Env): Promise<string[]> {
   for (const prefix of ["active:", "chat_history:", "handoff_workitem:", MATTER_CURRENT_WORK_PREFIX]) {
     let cursor: string | undefined;
     do {
-      const page = await env.STATE_KV.list({ prefix, cursor });
+      const page = await kvList(env, { prefix, cursor });
       keys.push(...page.keys.map((k) => k.name));
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
   }
-  if (await env.STATE_KV.get("sessions_index")) keys.push("sessions_index");
+  if (await kvGet(env, "sessions_index")) keys.push("sessions_index");
   return keys;
 }
 

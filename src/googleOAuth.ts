@@ -4,6 +4,7 @@ import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from "./telegram";
 import { generate } from "./ai";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
+import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -130,7 +131,7 @@ export async function loadGoogleTokens(
   accountIdentifier = "default",
 ): Promise<StoredGoogleTokens | null> {
   const key = getGoogleTokensKvKey(accountIdentifier);
-  const raw = await env.STATE_KV.get(key);
+  const raw = await kvGet(env, key);
   return raw ? (JSON.parse(raw) as StoredGoogleTokens) : null;
 }
 
@@ -156,7 +157,7 @@ export async function persistGoogleTokens(
   };
 
   const key = getGoogleTokensKvKey(accountIdentifier);
-  await env.STATE_KV.put(key, JSON.stringify(stored));
+  await kvPut(env, key, JSON.stringify(stored));
 }
 
 export async function getValidGoogleAccessToken(
@@ -232,7 +233,7 @@ export async function handleGoogleOAuthStart(request: Request, env: Env): Promis
   const state = generateState();
   const verifier = generateCodeVerifier();
   const challenge = await codeChallengeFromVerifier(verifier);
-  await env.STATE_KV.put(`google_oauth_state:${state}`, verifier, { expirationTtl: 1800 });
+  await kvPut(env, `google_oauth_state:${state}`, verifier, { expirationTtl: 1800 });
   const redirectUri = `${url.origin}/oauth/google/callback`;
   const promptParam = url.searchParams.get("prompt") ?? undefined;
   const authorizeUrl = buildGoogleAuthorizeUrl(env, redirectUri, state, challenge, promptParam);
@@ -280,7 +281,7 @@ export async function handleGoogleOAuthCallback(request: Request, env: Env): Pro
   }
 
   const stateKey = `google_oauth_state:${state}`;
-  const verifier = await env.STATE_KV.get(stateKey);
+  const verifier = await kvGet(env, stateKey);
   if (!verifier) {
     await logActivity(env, {
       entry: "Google OAuth callback failed: invalid/expired/reused state",
@@ -293,7 +294,7 @@ export async function handleGoogleOAuthCallback(request: Request, env: Env): Pro
     return new Response("Unknown or expired state — restart at /oauth/google/start", { status: 400 });
   }
 
-  await env.STATE_KV.delete(stateKey);
+  await kvDelete(env, stateKey);
   const redirectUri = `${url.origin}/oauth/google/callback`;
 
   try {
@@ -978,7 +979,7 @@ export async function listAuthorizedGoogleAccounts(env: Env): Promise<string[]> 
   const accounts: string[] = [];
   let cursor: string | undefined;
   do {
-    const page = await env.STATE_KV.list({ prefix: "google_oauth_tokens:", cursor });
+    const page = await kvList(env, { prefix: "google_oauth_tokens:", cursor });
     for (const key of page.keys) {
       const accountIdentifier = key.name.replace(/^google_oauth_tokens:/, "");
       if (accountIdentifier && (await loadGoogleTokens(env, accountIdentifier))) {
@@ -1033,7 +1034,7 @@ export async function ensureGoogleFolder(
   kvKey: string,
 ): Promise<{ ok: true; folderId: string } | { ok: false; error: string }> {
   const key = `${kvKey}:${accountIdentifier}`;
-  const known = await env.STATE_KV.get(key);
+  const known = await kvGet(env, key);
   if (known) return { ok: true, folderId: known };
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
@@ -1050,7 +1051,7 @@ export async function ensureGoogleFolder(
   if (!res.ok) return { ok: false, error: `Google Drive folder creation failed (HTTP ${res.status})` };
   const data = (await res.json().catch(() => ({}))) as { id?: string };
   if (!data.id) return { ok: false, error: "Google Drive folder creation returned no id" };
-  await env.STATE_KV.put(key, data.id);
+  await kvPut(env, key, data.id);
   return { ok: true, folderId: data.id };
 }
 
@@ -1237,16 +1238,16 @@ export async function readGoogleDocStyling(
 }
 
 export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc): Promise<void> {
-  await env.STATE_KV.put(`google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
+  await kvPut(env, `google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
 }
 
 export async function listWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[]> {
   const docs: WatchedGoogleDoc[] = [];
   let cursor: string | undefined;
   do {
-    const page = await env.STATE_KV.list({ prefix: "google_doc_watch:", cursor });
+    const page = await kvList(env, { prefix: "google_doc_watch:", cursor });
     for (const key of page.keys) {
-      const raw = await env.STATE_KV.get(key.name);
+      const raw = await kvGet(env, key.name);
       if (raw) {
         try {
           docs.push(JSON.parse(raw) as WatchedGoogleDoc);
@@ -1276,16 +1277,16 @@ export interface WatchedGoogleSheet {
  * watched, never arbitrary pre-existing files.
  */
 export async function registerWatchedGoogleSheet(env: Env, sheet: WatchedGoogleSheet): Promise<void> {
-  await env.STATE_KV.put(`google_sheet_watch:${sheet.spreadsheetId}`, JSON.stringify(sheet));
+  await kvPut(env, `google_sheet_watch:${sheet.spreadsheetId}`, JSON.stringify(sheet));
 }
 
 export async function listWatchedGoogleSheets(env: Env): Promise<WatchedGoogleSheet[]> {
   const sheets: WatchedGoogleSheet[] = [];
   let cursor: string | undefined;
   do {
-    const page = await env.STATE_KV.list({ prefix: "google_sheet_watch:", cursor });
+    const page = await kvList(env, { prefix: "google_sheet_watch:", cursor });
     for (const key of page.keys) {
-      const raw = await env.STATE_KV.get(key.name);
+      const raw = await kvGet(env, key.name);
       if (raw) {
         try {
           sheets.push(JSON.parse(raw) as WatchedGoogleSheet);
@@ -1339,7 +1340,7 @@ export async function cleanupDefaultGoogleAccount(env: Env): Promise<CleanupDefa
     }
   }
 
-  await env.STATE_KV.delete(getGoogleTokensKvKey("default"));
+  await kvDelete(env, getGoogleTokensKvKey("default"));
 
   return { tokenDeleted: true, docsRepointedTo: target, docsRepointed, docsOrphaned };
 }
@@ -1352,7 +1353,7 @@ export async function saveOpaqueOption(
 ): Promise<string> {
   const opaqueId = crypto.randomUUID().slice(0, 8);
   const key = `google_option:${workId}:${opaqueId}`;
-  await env.STATE_KV.put(key, JSON.stringify(optionData), { expirationTtl: ttl });
+  await kvPut(env, key, JSON.stringify(optionData), { expirationTtl: ttl });
   return opaqueId;
 }
 
@@ -1362,9 +1363,9 @@ export async function consumeOpaqueOption(
   opaqueId: string,
 ): Promise<Record<string, any> | null> {
   const key = `google_option:${workId}:${opaqueId}`;
-  const raw = await env.STATE_KV.get(key);
+  const raw = await kvGet(env, key);
   if (!raw) return null;
-  await env.STATE_KV.delete(key);
+  await kvDelete(env, key);
   try {
     return JSON.parse(raw);
   } catch {

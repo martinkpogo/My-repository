@@ -116,6 +116,16 @@ export interface Env {
   GEMINI_API_KEY?: string;
   /** SambaNova Cloud -- same fallback tier as the other OpenAI-compatible providers above. */
   SAMBANOVA_API_KEY?: string;
+
+  /**
+   * Turso fallback database for the KV-primary/Turso-secondary
+   * coordination-state store (src/kvStore.ts, Section 5B). Optional: unset
+   * means every kvStore operation is an exact passthrough to STATE_KV.
+   * TURSO_AUTH_TOKEN is a Cloudflare Secret (never committed, see
+   * wrangler.toml's secrets comment block).
+   */
+  TURSO_DATABASE_URL?: string;
+  TURSO_AUTH_TOKEN?: string;
 }
 
 export type Unit =

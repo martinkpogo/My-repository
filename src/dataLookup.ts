@@ -3,6 +3,7 @@ import { queryDataSource, plainText, uniqueId } from "./notion";
 import { generate } from "./ai";
 import type { ChatTurn } from "./ai";
 import { userLookupContext } from "./access";
+import { kvGet, kvPut } from "./kvStore";
 
 /**
  * A read-only "what's in this database" capability across every data
@@ -248,7 +249,7 @@ function lookupHistoryKey(chatId: number, threadId: number | undefined, source: 
 }
 
 async function getLookupHistory(env: Env, chatId: number, threadId: number | undefined, source: LookupSource): Promise<ChatTurn[]> {
-  const raw = await env.STATE_KV.get(lookupHistoryKey(chatId, threadId, source));
+  const raw = await kvGet(env, lookupHistoryKey(chatId, threadId, source));
   return raw ? JSON.parse(raw) : [];
 }
 
@@ -261,7 +262,7 @@ async function appendLookupHistory(
 ): Promise<void> {
   const existing = await getLookupHistory(env, chatId, threadId, source);
   const updated = [...existing, ...turns].slice(-MAX_LOOKUP_HISTORY_TURNS);
-  await env.STATE_KV.put(lookupHistoryKey(chatId, threadId, source), JSON.stringify(updated));
+  await kvPut(env, lookupHistoryKey(chatId, threadId, source), JSON.stringify(updated));
 }
 
 /**

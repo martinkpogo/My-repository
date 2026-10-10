@@ -30,6 +30,7 @@ import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
 import { recordWorkAction } from "./units/dispatch";
 import { workSessionContext } from "./access";
+import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 export class WorkSession extends DurableObject<Env> {
   /**
@@ -604,7 +605,7 @@ export class WorkSession extends DurableObject<Env> {
       matterId: state.matterId,
     };
     const key = "sessions_index";
-    const raw = await this.env.STATE_KV.get(key);
+    const raw = await kvGet(this.env, key);
     const index: SessionSummary[] = raw ? JSON.parse(raw) : [];
     const withoutSelf = index.filter((s) => s.workId !== state.workId);
     const isTerminal = isTerminalWorkStage(state.stage);
@@ -612,7 +613,7 @@ export class WorkSession extends DurableObject<Env> {
     const combined = isTerminal ? withoutSelf : [...withoutSelf, summary];
 
     const kept = trimSessionsIndex(combined);
-    await this.env.STATE_KV.put(key, JSON.stringify(kept));
+    await kvPut(this.env, key, JSON.stringify(kept));
 
     // Matter continuation (src/matterContinuation.ts): the derived
     // matter_current_work pointer is established/advanced from the index
@@ -628,12 +629,12 @@ export class WorkSession extends DurableObject<Env> {
 
     if (isTerminal) {
       const activeKey = `active:${state.chatId}:${state.threadId ?? "dm"}`;
-      const active = await this.env.STATE_KV.get(activeKey);
-      if (active === state.workId) await this.env.STATE_KV.delete(activeKey);
+      const active = await kvGet(this.env, activeKey);
+      if (active === state.workId) await kvDelete(this.env, activeKey);
       if (state.financeThreadId !== undefined && state.financeThreadId !== state.threadId) {
         const financeActiveKey = `active:${state.chatId}:${state.financeThreadId}`;
-        const financeActive = await this.env.STATE_KV.get(financeActiveKey);
-        if (financeActive === state.workId) await this.env.STATE_KV.delete(financeActiveKey);
+        const financeActive = await kvGet(this.env, financeActiveKey);
+        if (financeActive === state.workId) await kvDelete(this.env, financeActiveKey);
       }
     }
   }
@@ -648,13 +649,13 @@ export class WorkSession extends DurableObject<Env> {
    */
   private async alertPendingApprovalBacklog(count: number): Promise<void> {
     const key = "pending_approval_backlog_last_alert";
-    const lastAlert = await this.env.STATE_KV.get(key);
+    const lastAlert = await kvGet(this.env, key);
     if (!shouldAlertPendingApprovalBacklog(count, lastAlert, Date.now())) return;
     await sendOperationsMessage(
       this.env,
       `⚠️ ${count} pending approvals now at or above the /sessions index's visible limit (${SESSIONS_INDEX_PENDING_CAP}) -- the oldest may no longer be listed there, though nothing has been deleted. Please work through the backlog via /sessions.`,
     ).catch((err) => console.error("Failed to send pending-approval backlog alert", err));
-    await this.env.STATE_KV.put(key, String(Date.now())).catch((err) =>
+    await kvPut(this.env, key, String(Date.now())).catch((err) =>
       console.error("Failed to record pending-approval backlog alert timestamp", err),
     );
   }

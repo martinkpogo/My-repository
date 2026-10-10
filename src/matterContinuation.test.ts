@@ -768,7 +768,17 @@ test("wiring: one shared Work resume path, Matter contributing only resolution, 
   // `matter_current_work:<matterId>` are prose and are not matched).
   const rawKey = /[`'"]matter_current_work:(?:\$\{|[`'"])/;
   const offenders = sources
-    .filter((s) => s.full !== path.join(import.meta.dirname, "matterContinuation.ts") && rawKey.test(s.text))
+    .filter(
+      (s) =>
+        s.full !== path.join(import.meta.dirname, "matterContinuation.ts") &&
+        // The §5B KV-classification registry (kvStore.ts) names every
+        // fallback-eligible key prefix in its allowlist by design --
+        // including this pointer's prefix. It never constructs, reads or
+        // writes a specific pointer key: it classifies strings by prefix
+        // generically, like every other key class in that list.
+        s.full !== path.join(import.meta.dirname, "kvStore.ts") &&
+        rawKey.test(s.text),
+    )
     .map((s) => s.full);
   assert.deepStrictEqual(offenders, [], "the pointer key is constructed only by matterCurrentWorkKey");
 });

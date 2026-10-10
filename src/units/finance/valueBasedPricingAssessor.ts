@@ -17,6 +17,7 @@ import { resolveMatterFromText } from "../../identityResolution";
 import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import type { ApprovalProof } from "../../types";
+import { kvPut } from "./../../kvStore";
 
 /** Opens Finance's own commercial-judgment block within the Finance -> Sales Handoff's combined "Verified Facts & Sources" text -- see handleQuoteApproval. */
 export const FINANCE_JUDGMENT_START = "=== FINANCE COMMERCIAL JUDGMENT ===";
@@ -1043,7 +1044,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     ),
   );
   state.handoffId = followUp.id;
-  await env.STATE_KV.put(`handoff_workitem:${followUp.id}`, state.workId);
+  await kvPut(env, `handoff_workitem:${followUp.id}`, state.workId);
 
   await logActivity(env, {
     entry: `Quote approved — routed to Sales for Draft Proposal: ${state.matterToken}`,

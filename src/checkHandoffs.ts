@@ -8,6 +8,7 @@ import { resolveOrganization } from "./runtime/organization";
 import { resolveActionExecution } from "./runtime/actionResolution";
 import { workContractForRequest, type WorkRequest } from "./runtime/workContract";
 import { resolveMatterIdFromToken } from "./matterContinuation";
+import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 /**
  * Handoff discovery -- the single implementation behind the /checkhandoffs
@@ -209,7 +210,7 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
 
   let scheduled = 0;
   for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
     if (!workId) {
       // No live Telegram session behind this Handoff -- e.g. created
       // directly in Notion by the isolated Sales Executive project, which
@@ -248,7 +249,7 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
           matterId: matter.matterId,
           matterToken: matter.matterToken,
         });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
         console.error(`Failed to create a work item for externally-created Finance Handoff ${handoff.id}`, err);
@@ -281,12 +282,12 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
  */
 async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matterToken: string): Promise<void> {
   const notifiedKey = `sales_handoff_notified:${handoff.id}`;
-  if (await env.STATE_KV.get(notifiedKey)) return;
+  if (await kvGet(env, notifiedKey)) return;
   await sendOperationsMessage(
     env,
     `*SALES HANDOFF READY*\nMatter: ${matterToken}\nHandoff: ${handoff.id}\nTo: Sales Executive\nStatus: Pending\n\nAction required: open the Sales Executive workspace (the isolated Sales Claude Project) and check the pending Handoff.`,
   );
-  await env.STATE_KV.put(notifiedKey, "1", { expirationTtl: 60 * 60 * 24 * 30 }).catch((err) =>
+  await kvPut(env, notifiedKey, "1", { expirationTtl: 60 * 60 * 24 * 30 }).catch((err) =>
     console.error(`Failed to record sales_handoff_notified for ${handoff.id}`, err),
   );
 }
@@ -359,7 +360,7 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
 
   let scheduled = 0;
   for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
     if (!workId) {
       // No live Telegram session behind this Handoff -- e.g. created
       // directly in Notion by the isolated Sales Executive project. Register
@@ -394,7 +395,7 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
           matterId: matter.matterId,
           matterToken: matter.matterToken,
         });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Sales Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
         console.error(`Failed to create a work item for externally-created Sales Handoff ${handoff.id}`, err);
@@ -457,7 +458,7 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
 
   let scheduled = 0;
   for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
     if (!workId) {
       // Marketing owns several Hats, so the destination `To Hat` fact
       // decides which one owns this Work ("Marketing Strategist" is no
@@ -481,7 +482,7 @@ export async function discoverPendingMarketingHandoffs(env: Env): Promise<number
           matterId: matter.matterId,
           matterToken: matter.matterToken,
         });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Marketing Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
         console.error(`Failed to create a work item for externally-created Marketing Handoff ${handoff.id}`, err);
@@ -518,7 +519,7 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
 
   let scheduled = 0;
   for (const handoff of pending) {
-    let workId = await env.STATE_KV.get(`handoff_workitem:${handoff.id}`);
+    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
     if (!workId) {
       // Destination facts resolve the Organization (single-Hat Unit) and
       // the `diagnose` Action declared applicable to a handoff pickup --
@@ -541,7 +542,7 @@ export async function discoverPendingStrategyHandoffs(env: Env): Promise<number>
           matterId: matter.matterId,
           matterToken: matter.matterToken,
         });
-        await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, workId);
+        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
         console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
         console.error(`Failed to create a work item for externally-created Strategy Handoff ${handoff.id}`, err);
@@ -604,8 +605,8 @@ export async function checkStaleHandoffs(env: Env): Promise<void> {
     .join(",");
 
   const [lastSent, lastFingerprint] = await Promise.all([
-    env.STATE_KV.get(lastSentKey),
-    env.STATE_KV.get(lastFingerprintKey),
+    kvGet(env, lastSentKey),
+    kvGet(env, lastFingerprintKey),
   ]);
 
   const changed = fingerprint !== lastFingerprint;
@@ -622,8 +623,8 @@ export async function checkStaleHandoffs(env: Env): Promise<void> {
     env,
     `*Handoff check-in* — ${results.length} item(s) not Closed:\n\n${lines.join("\n")}`,
   );
-  await env.STATE_KV.put(lastSentKey, String(Date.now()));
-  await env.STATE_KV.put(lastFingerprintKey, fingerprint);
+  await kvPut(env, lastSentKey, String(Date.now()));
+  await kvPut(env, lastFingerprintKey, fingerprint);
 }
 
 // Guards runCheckHandoffs's non-manual invocations ("runtime_auto" and
@@ -707,12 +708,12 @@ export async function runCheckHandoffs(
   const guarded = source === "runtime_auto" || source === "notion_webhook";
 
   if (guarded) {
-    const inflight = await env.STATE_KV.get(AUTO_CHECKHANDOFFS_GUARD_KEY);
+    const inflight = await kvGet(env, AUTO_CHECKHANDOFFS_GUARD_KEY);
     if (inflight) {
       console.log(`Background /checkhandoffs continuation (${source}) skipped -- already in flight (recursion guard)`);
       return;
     }
-    await env.STATE_KV.put(AUTO_CHECKHANDOFFS_GUARD_KEY, "1", { expirationTtl: AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS });
+    await kvPut(env, AUTO_CHECKHANDOFFS_GUARD_KEY, "1", { expirationTtl: AUTO_CHECKHANDOFFS_GUARD_TTL_SECONDS });
   }
 
   try {
@@ -720,7 +721,7 @@ export async function runCheckHandoffs(
     // GitHub Actions cron already run -- exposed as a command (and now
     // also as an automatic continuation and a webhook-triggered run) so it
     // can run immediately rather than waiting for the next scheduled cycle.
-    await env.STATE_KV.put("last_cron_run", new Date().toISOString()).catch((err) =>
+    await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
       console.error("Failed to record last_cron_run", err),
     );
     const unitHere = resolveUnitForThread(env, threadId);
@@ -812,7 +813,7 @@ export async function runCheckHandoffs(
     }
   } finally {
     if (guarded) {
-      await env.STATE_KV.delete(AUTO_CHECKHANDOFFS_GUARD_KEY).catch((err) =>
+      await kvDelete(env, AUTO_CHECKHANDOFFS_GUARD_KEY).catch((err) =>
         console.error("Failed to clear the /checkhandoffs background-continuation recursion guard", err),
       );
     }

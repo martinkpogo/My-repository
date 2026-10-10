@@ -5,6 +5,7 @@ import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
 import { marketingHatSummaryList } from "./hats/registry";
 import { systemContext } from "./access";
+import { kvGet, kvPut } from "./kvStore";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -138,14 +139,14 @@ function historyKey(chatId: number, threadId?: number): string {
 }
 
 export async function getChatHistory(env: Env, chatId: number, threadId?: number): Promise<ChatTurn[]> {
-  const raw = await env.STATE_KV.get(historyKey(chatId, threadId));
+  const raw = await kvGet(env, historyKey(chatId, threadId));
   return raw ? JSON.parse(raw) : [];
 }
 
 async function appendChatHistory(env: Env, chatId: number, threadId: number | undefined, turns: ChatTurn[]): Promise<void> {
   const existing = await getChatHistory(env, chatId, threadId);
   const updated = [...existing, ...turns].slice(-MAX_HISTORY_TURNS);
-  await env.STATE_KV.put(historyKey(chatId, threadId), JSON.stringify(updated));
+  await kvPut(env, historyKey(chatId, threadId), JSON.stringify(updated));
 }
 
 async function runChatTurn(

@@ -20,6 +20,7 @@ import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
 import { parseCommercialValueEvidenceBlock } from "../sales/commercialValueEvidence";
+import { kvPut } from "./../../kvStore";
 
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
@@ -1446,7 +1447,7 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
     );
     state.pendingStrategyHandoff = undefined;
     state.pendingActionSummary = undefined;
-    await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
+    await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);
     await logActivity(env, {
       entry: `Strategy diagnosis handed off to ${pending.hat}`,
       type: "Activity",
@@ -2408,7 +2409,7 @@ export async function handleInterventionApproval(
       }, strategyAnalystAccess(state)).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
     }
 
-    await env.STATE_KV.put(`handoff_workitem:${handoff.id}`, state.workId);
+    await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);
     state.handoffId = handoff.id;
     state.pendingStrategyApproval = undefined;
     state.pendingActionSummary = undefined;

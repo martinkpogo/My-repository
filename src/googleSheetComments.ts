@@ -7,6 +7,7 @@ import {
 } from "./googleOAuth";
 import { generate } from "./ai";
 import { logActivity } from "./log";
+import { kvGet, kvPut } from "./kvStore";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 const VALUES_RANGE = "A1:ZZ10000";
@@ -64,7 +65,7 @@ async function fetchSheetValues(token: string, spreadsheetId: string): Promise<s
 }
 
 async function markProcessed(env: Env, commentId: string): Promise<void> {
-  await env.STATE_KV.put(`google_comment_processed:${commentId}`, "1", {
+  await kvPut(env, `google_comment_processed:${commentId}`, "1", {
     expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
   });
 }
@@ -109,7 +110,7 @@ async function processSheetComment(
   comment: DriveComment,
   token: string,
 ): Promise<ProcessSheetCommentResult> {
-  const alreadyProcessed = await env.STATE_KV.get(`google_comment_processed:${comment.id}`);
+  const alreadyProcessed = await kvGet(env, `google_comment_processed:${comment.id}`);
   if (alreadyProcessed) return { handled: false, outcome: "already_processed" };
 
   if (comment.resolved) {
@@ -252,7 +253,7 @@ export async function pollGoogleSheetComments(env: Env): Promise<PollGoogleSheet
   // /admin/last-google-sheet-comment-poll. Diagnostics ONLY: best-effort,
   // so a failed write (e.g. the per-day KV write quota) is logged and never
   // blocks the poll itself from starting.
-  await env.STATE_KV.put("last_google_sheet_comment_poll_run", new Date().toISOString()).catch((err) =>
+  await kvPut(env, "last_google_sheet_comment_poll_run", new Date().toISOString()).catch((err) =>
     console.error("pollGoogleSheetComments: could not record the diagnostics timestamp (polling continues)", err),
   );
 
