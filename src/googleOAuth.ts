@@ -1051,7 +1051,22 @@ export async function ensureGoogleFolder(
   if (!res.ok) return { ok: false, error: `Google Drive folder creation failed (HTTP ${res.status})` };
   const data = (await res.json().catch(() => ({}))) as { id?: string };
   if (!data.id) return { ok: false, error: "Google Drive folder creation returned no id" };
-  await kvPut(env, key, data.id);
+  try {
+    await kvPut(env, key, data.id);
+  } catch (err) {
+    // Truthful post-effect failure: the folder EXISTS (the provider-side
+    // write already succeeded), so the id is still returned and the
+    // operation stays a success. The cache write is a cache -- its failure
+    // is logged, not allowed to turn a created folder into a reported
+    // failure, and NOT absorbed by a Turso fallback (this key class is
+    // Cloudflare-only: its key embeds the account email). Consequence while
+    // the cache stays unwritable: a later ensure misses and may re-create
+    // the folder -- logged here so that outcome is traceable.
+    console.error(
+      `ensureGoogleFolder: folder "${folderName}" was created (id ${data.id}) but its folder-id cache write failed -- the id is returned; a later ensure may re-create this folder while the cache is unwritable`,
+      err,
+    );
+  }
   return { ok: true, folderId: data.id };
 }
 
@@ -1425,15 +1440,29 @@ Return JSON: {"isGoogleDocRequest": true | false, "title": "...", "content": "..
     await stub.init(workId, chatId, undefined, undefined, threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
 
+    // Option staging is Cloudflare-only (google_option: carries the Doc
+    // body + account email), so a storage refusal here is surfaced
+    // explicitly: no buttons are sent, nothing pretends the selection
+    // state was persisted, and the user is told to retry.
     const buttons = [];
-    for (const account of authorizedAccounts) {
-      const opaqueId = await saveOpaqueOption(env, workId, {
-        kind: "account",
-        accountIdentifier: account,
-        title,
-        content,
-      });
-      buttons.push([{ text: `👤 ${account}`, callback_data: `googleaccount:${workId}:${opaqueId}` }]);
+    try {
+      for (const account of authorizedAccounts) {
+        const opaqueId = await saveOpaqueOption(env, workId, {
+          kind: "account",
+          accountIdentifier: account,
+          title,
+          content,
+        });
+        buttons.push([{ text: `👤 ${account}`, callback_data: `googleaccount:${workId}:${opaqueId}` }]);
+      }
+    } catch (err) {
+      console.error(`Google Doc intake: option staging failed for work ${workId} -- no selection buttons were sent`, err);
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        "⚠️ Could not persist the account-selection options (storage write refused -- likely the daily KV quota), so no approval buttons were sent and nothing was staged. Please retry after the quota window resets.",
+      );
+      return true;
     }
 
     const messageText = `*Google Workspace Action*: Create Google Doc\n\n*Title*: ${title}\n\nSelect the authorized Google account to use:`;
@@ -1511,16 +1540,29 @@ Return JSON: {"isGoogleSheetRequest": true | false, "title": "...", "rows": [["D
     await stub.init(workId, chatId, undefined, undefined, threadId);
     await setActiveWorkId(env, chatId, threadId, workId);
 
+    // Same explicit-failure rule as the Doc intake: google_option: is
+    // Cloudflare-only, so a refused write stops the flow with an honest
+    // message instead of pretending the selection state was persisted.
     const buttons = [];
-    for (const account of authorizedAccounts) {
-      const opaqueId = await saveOpaqueOption(env, workId, {
-        kind: "account",
-        docType: "sheet",
-        accountIdentifier: account,
-        title,
-        rows,
-      });
-      buttons.push([{ text: `👤 ${account}`, callback_data: `googleaccount:${workId}:${opaqueId}` }]);
+    try {
+      for (const account of authorizedAccounts) {
+        const opaqueId = await saveOpaqueOption(env, workId, {
+          kind: "account",
+          docType: "sheet",
+          accountIdentifier: account,
+          title,
+          rows,
+        });
+        buttons.push([{ text: `👤 ${account}`, callback_data: `googleaccount:${workId}:${opaqueId}` }]);
+      }
+    } catch (err) {
+      console.error(`Google Sheet intake: option staging failed for work ${workId} -- no selection buttons were sent`, err);
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        "⚠️ Could not persist the account-selection options (storage write refused -- likely the daily KV quota), so no approval buttons were sent and nothing was staged. Please retry after the quota window resets.",
+      );
+      return true;
     }
 
     const messageText = `*Google Workspace Action*: Create Google Sheet\n\n*Title*: ${title}\n\nSelect the authorized Google account to use:`;
@@ -1623,19 +1665,32 @@ export async function handleGoogleAccountSelection(
     return state;
   }
 
+  // Folder-option staging is Cloudflare-only too: a refused write is
+  // surfaced explicitly (no picker sent, nothing pretended persisted)
+  // instead of throwing after the flow has already shown partial state.
   const buttons = [];
-  for (const folder of folders) {
-    const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
-      kind: "folder",
-      docType,
-      accountIdentifier,
-      title,
-      content,
-      rows,
-      folderId: folder.id,
-      folderName: folder.name,
-    });
-    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
+  try {
+    for (const folder of folders) {
+      const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
+        kind: "folder",
+        docType,
+        accountIdentifier,
+        title,
+        content,
+        rows,
+        folderId: folder.id,
+        folderName: folder.name,
+      });
+      buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
+    }
+  } catch (err) {
+    console.error(`Google folder picker: option staging failed for work ${state.workId} -- no picker was sent`, err);
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ Could not persist the folder-selection options (storage write refused -- likely the daily KV quota), so no folder picker was sent and nothing was staged. Please retry after the quota window resets.",
+    );
+    return state;
   }
 
   const actionLabel = docType === "sheet" ? "Create Google Sheet" : "Create Google Doc";
@@ -1801,21 +1856,37 @@ export async function handleGoogleActionApproval(
       return state;
     }
 
+    // Truthful failure AFTER the provider-side effect: the Sheet exists
+    // regardless of what storage does. A refused watch write (watch
+    // registries are Cloudflare-only) must not turn a created Sheet into
+    // a reported failure, and must not be swallowed either -- the
+    // success message states plainly that comment polling will not cover
+    // this Sheet until a watch is registered.
+    let watchWarning = "";
     if (result.spreadsheetId) {
-      await registerWatchedGoogleSheet(env, {
-        spreadsheetId: result.spreadsheetId,
-        accountIdentifier: action.accountIdentifier,
-        title: action.title,
-        chatId: state.chatId,
-        threadId: state.threadId,
-        createdAt: new Date().toISOString(),
-      });
+      try {
+        await registerWatchedGoogleSheet(env, {
+          spreadsheetId: result.spreadsheetId,
+          accountIdentifier: action.accountIdentifier,
+          title: action.title,
+          chatId: state.chatId,
+          threadId: state.threadId,
+          createdAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error(
+          `handlePendingGoogleAction: the Sheet ${result.spreadsheetId} was created but its watch registration was refused -- comments on it will NOT be polled until a watch is registered`,
+          err,
+        );
+        watchWarning =
+          "\n\n⚠️ *Watch registration failed* (storage write refused -- likely the daily KV quota): comments on this Sheet will **not** be polled until a watch is registered. Re-register the watch after the quota window resets.";
+      }
     }
 
     await sendWorkspaceHatMessage(
       env,
       target,
-      `✅ Google Sheet created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.spreadsheetUrl}\n\nTip: select a cell, leave a comment describing the change, and it'll be applied automatically within about a minute.`,
+      `✅ Google Sheet created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.spreadsheetUrl}\n\nTip: select a cell, leave a comment describing the change, and it'll be applied automatically within about a minute.${watchWarning}`,
     );
 
     return state;
@@ -1832,21 +1903,35 @@ export async function handleGoogleActionApproval(
     return state;
   }
 
+  // Truthful failure AFTER the provider-side effect, same as the Sheet
+  // path: the Doc exists regardless of what storage does, so a refused
+  // watch write (watch registries are Cloudflare-only) must neither fail
+  // the creation nor be swallowed silently.
+  let watchWarning = "";
   if (result.documentId) {
-    await registerWatchedGoogleDoc(env, {
-      documentId: result.documentId,
-      accountIdentifier: action.accountIdentifier,
-      title: action.title,
-      chatId: state.chatId,
-      threadId: state.threadId,
-      createdAt: new Date().toISOString(),
-    });
+    try {
+      await registerWatchedGoogleDoc(env, {
+        documentId: result.documentId,
+        accountIdentifier: action.accountIdentifier,
+        title: action.title,
+        chatId: state.chatId,
+        threadId: state.threadId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(
+        `handlePendingGoogleAction: the Doc ${result.documentId} was created but its watch registration was refused -- comments on it will NOT be polled until a watch is registered`,
+        err,
+      );
+      watchWarning =
+        "\n\n⚠️ *Watch registration failed* (storage write refused -- likely the daily KV quota): comments on this Doc will **not** be polled until a watch is registered. Re-register the watch after the quota window resets.";
+    }
   }
 
   await sendWorkspaceHatMessage(
     env,
     target,
-    `✅ Google Doc created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.documentUrl}\n\nTip: select text in the doc, leave a comment describing the change, and it'll be applied automatically within about a minute.`,
+    `✅ Google Doc created and verified successfully!\n\n*Title*: ${action.title}\n*URL*: ${result.documentUrl}\n\nTip: select text in the doc, leave a comment describing the change, and it'll be applied automatically within about a minute.${watchWarning}`,
   );
 
   return state;
