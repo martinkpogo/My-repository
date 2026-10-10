@@ -4,6 +4,7 @@ import { workSessionReadContext } from "./access";
 import { getSessionStub, setActiveWorkId } from "./sessionRouting";
 import { continueExistingWork } from "./workContinuation";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
+import { sanitizeSessionsIndex } from "./sessionsIndex";
 
 /**
  * Matter-based continuation -- the runtime's derived Business Object ->
@@ -110,7 +111,14 @@ async function readSessionsIndex(env: Env): Promise<SessionSummary[]> {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    // Entries are consumed UNTRUSTED: every one is sanitized before any of
+    // its fields is read here, so a legacy free-text label (or a poisoned
+    // token field) can never be inherited by any caller of this path --
+    // labels are not read here today, and none may ever start to be. This
+    // path deliberately does NOT rewrite the stored value: the sanctioned
+    // writer of this key is session.ts's updateRegistry, and a read-path
+    // rewrite would race its read-modify-write.
+    return Array.isArray(parsed) ? sanitizeSessionsIndex(parsed) : [];
   } catch (err) {
     // An unreadable index is not permission to guess which Work is open.
     console.error("matterContinuation: sessions_index could not be parsed -- treating it as empty", err);
