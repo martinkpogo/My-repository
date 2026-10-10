@@ -1635,6 +1635,13 @@ export async function handleGoogleAccountSelection(
 
   const { accountIdentifier, title, content, rows } = option;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
+  // Tool Registry SMOKE flow discriminator (src/googleDocsSmokeFlow.ts): the
+  // account option was staged by the /googledocssmoke flow carrying
+  // `smoke: true`. Smoke selection reuses this picker exactly -- same
+  // consumption, same token gate, same Drive listing -- but stages only
+  // further smoke-flagged options; the normal creation path below (title,
+  // content, docType) is untouched when the flag is absent.
+  const smoke = option.smoke === true;
 
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) {
@@ -1703,16 +1710,28 @@ export async function handleGoogleAccountSelection(
   const buttons = [];
   try {
     for (const folder of folders) {
-      const opaqueFolderId = await saveOpaqueOption(env, state.workId, {
-        kind: "folder",
-        docType,
-        accountIdentifier,
-        title,
-        content,
-        rows,
-        folderId: folder.id,
-        folderName: folder.name,
-      });
+      const opaqueFolderId = await saveOpaqueOption(
+        env,
+        state.workId,
+        smoke
+          ? {
+              kind: "folder",
+              smoke: true,
+              accountIdentifier,
+              folderId: folder.id,
+              folderName: folder.name,
+            }
+          : {
+              kind: "folder",
+              docType,
+              accountIdentifier,
+              title,
+              content,
+              rows,
+              folderId: folder.id,
+              folderName: folder.name,
+            },
+      );
       buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
     }
   } catch (err) {
@@ -1722,6 +1741,23 @@ export async function handleGoogleAccountSelection(
       target,
       "⚠️ Could not persist the folder-selection options (storage write refused -- likely the daily KV quota), so no folder picker was sent and nothing was staged. Please retry after the quota window resets.",
     );
+    return state;
+  }
+
+  if (smoke) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`,
+      buttons,
+    );
+    await logActivity(env, {
+      entry: "Google Docs Registry smoke: folder picker presented",
+      type: "Activity",
+      activity: `Registry smoke Drive folder picker presented for account '${accountIdentifier}'`,
+      outcome: "Active",
+      workId: state.workId,
+    });
     return state;
   }
 
@@ -1763,6 +1799,66 @@ export async function handleGoogleFolderSelection(
 
   const { accountIdentifier, title, content, rows, folderId, folderName } = option;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
+
+  // Tool Registry SMOKE flow (src/googleDocsSmokeFlow.ts): the folder option
+  // was staged carrying `smoke: true`. Instead of the normal creation
+  // approval (pendingGoogleAction + googleaction: buttons -- which this
+  // branch never touches, so the legacy document-creation path cannot be
+  // reached from here), record the selected target on the Work and stage an
+  // explicit smoke confirmation bound to this exact Work + account + folder.
+  if (option.smoke === true) {
+    let confirmOpaqueId: string;
+    try {
+      confirmOpaqueId = await saveOpaqueOption(env, state.workId, {
+        kind: "smoke_confirm",
+        smoke: true,
+        accountIdentifier,
+        folderId,
+        folderName,
+      });
+    } catch (err) {
+      console.error(`Google Docs smoke confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        "⚠️ Could not persist the smoke confirmation (storage write refused -- likely the daily KV quota). Nothing was created -- retry the folder step or start a fresh /googledocssmoke flow.",
+      );
+      return state;
+    }
+
+    state.pendingSmokeSelection = {
+      accountIdentifier,
+      folderId,
+      folderName,
+      createdAt: new Date().toISOString(),
+    };
+
+    const confirmButtons = [
+      [
+        { text: "🧪 Confirm Registry smoke test", callback_data: `googlesmokeconfirm:${state.workId}:${confirmOpaqueId}` },
+        { text: "❌ Cancel", callback_data: `googlesmokeconfirm:${state.workId}:cancel` },
+      ],
+    ];
+
+    const messageText =
+      "🧪 *GOVERNED TOOL REGISTRY SMOKE* -- Confirmation\n\n" +
+      `*Account*: ${accountIdentifier}\n` +
+      `*Folder*: ${folderName} (\`${folderId}\`)\n\n` +
+      "Confirming will create exactly ONE disposable Google Doc through the shared Tool Registry " +
+      "(`google_docs.create_and_verify`), with read-back verification and durable operation records. " +
+      "Nothing has been created yet, and the production proposal folder is never touched.\n\nConfirm?";
+    await sendWorkspaceHatMessage(env, target, messageText, confirmButtons);
+
+    await logActivity(env, {
+      entry: "Google Docs Registry smoke: confirmation presented",
+      type: "Activity",
+      activity: `Registry smoke target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
+      outcome: "Active",
+      workId: state.workId,
+    });
+
+    return state;
+  }
 
   const buttons = [
     [
