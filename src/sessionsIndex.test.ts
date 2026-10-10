@@ -14,7 +14,7 @@ import {
   humanizeStage,
   sessionRowText,
 } from "./sessionsIndex";
-import { __resetKvStoreStateForTests, __setTursoFetchForTests } from "./kvStore";
+import { kvPut, __resetKvStoreStateForTests, __setTursoFetchForTests } from "./kvStore";
 import type { Env, SessionSummary } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -67,15 +67,21 @@ function hostileIndexBytes(): string {
   ]);
 }
 
-function makeKvEnv(): { env: Env; store: Map<string, string>; putCalls: string[]; failPut: () => void } {
+function makeKvEnv(): { env: Env; store: Map<string, string>; putCalls: string[]; setOnGet: (fn: (() => Promise<void>) | null) => void } {
   const store = new Map<string, string>();
   const putCalls: string[] = [];
-  let failPut = false;
+  let onGet: (() => Promise<void>) | null = null;
   const env = {
     STATE_KV: {
-      get: async (key: string) => (store.has(key) ? store.get(key)! : null),
+      get: async (key: string) => {
+        const value = store.has(key) ? store.get(key)! : null;
+        // The hook runs AFTER this read captured its value but BEFORE it is
+        // returned -- the deterministic stand-in for a concurrent writer
+        // landing in a read-then-write window.
+        if (onGet) await onGet();
+        return value;
+      },
       put: async (key: string, value: string) => {
-        if (failPut) throw new Error("kv put boom");
         putCalls.push(key);
         store.set(key, value);
       },
@@ -85,7 +91,7 @@ function makeKvEnv(): { env: Env; store: Map<string, string>; putCalls: string[]
       list: async () => ({ keys: [], list_complete: true }),
     },
   } as unknown as Env;
-  return { env, store, putCalls, failPut: () => (failPut = true) };
+  return { env, store, putCalls, setOnGet: (fn) => (onGet = fn) };
 }
 
 /** Minimal in-process fake of Turso's /v2/pipeline API (the full one lives in kvStore.test.ts). */
@@ -149,7 +155,7 @@ function captureConsoleErrors(): { messages: string[]; restore: () => void } {
   };
 }
 
-test("loadSessionsIndexForRead: a hostile legacy value at the KV seam is served sanitized AND rewritten once (bounded)", async () => {
+test("loadSessionsIndexForRead: a hostile legacy value at the KV seam is served sanitized while the persisted value is left untouched (reads never write)", async () => {
   const { env, store, putCalls } = makeKvEnv();
   store.set("sessions_index", hostileIndexBytes());
 
@@ -168,39 +174,44 @@ test("loadSessionsIndexForRead: a hostile legacy value at the KV seam is served 
   assert.equal(served[1].matterToken, undefined);
   assert.equal(served[2].label, "ENT-9 · MAT-3", "a still-valid token pair keeps its safe reference");
 
-  // Bounded migration: exactly one rewrite, and the stored bytes are the
-  // sanitized array (nothing lost, nothing added).
-  assert.deepEqual(putCalls, ["sessions_index"]);
-  const stored = store.get("sessions_index")!;
-  for (const leak of LEGACY_LEAKS) {
-    assert.equal(stored.includes(leak), false, `the persisted rewrite must never carry: ${leak}`);
-  }
-  assert.equal(JSON.parse(stored).length, 3, "the rewrite must not drop entries");
-
-  // Second read: stored == sanitized now, so the loader stops writing.
-  await loadSessionsIndexForRead(env);
-  assert.deepEqual(putCalls, ["sessions_index"], "the migration is bounded -- once clean, reads never write again");
+  // The read path writes NOTHING: persistence of the sanitized array is
+  // the sanctioned writer's job (updateRegistry, on every Work save), so
+  // the stored legacy bytes stay exactly as they are.
+  assert.deepEqual(putCalls, [], "a read must never write sessions_index");
+  assert.equal(store.get("sessions_index"), hostileIndexBytes(), "the persisted value is the writer's contract, not the reader's");
 });
 
-test("loadSessionsIndexForRead: a failed rewrite still serves sanitized values and truthfully leaves the persisted legacy value in place", async () => {
-  const { env, store, failPut } = makeKvEnv();
+test("REGRESSION: a /sessions read of a legacy snapshot must not erase a Work registered concurrently (the read path never writes)", async () => {
+  const { env, store, putCalls, setOnGet } = makeKvEnv();
   store.set("sessions_index", hostileIndexBytes());
-  failPut();
 
-  const capture = captureConsoleErrors();
-  try {
-    const served = await loadSessionsIndexForRead(env);
-    // Display-side truth: what callers consume IS sanitized (in memory).
-    for (const leak of LEGACY_LEAKS) {
-      assert.equal(JSON.stringify(served).includes(leak), false, `served values must be sanitized even when the rewrite fails`);
-    }
-    // Persistence-side truth: the stored bytes are untouched -- nothing
-    // anywhere claims the persisted value was sanitized.
-    assert.equal(store.get("sessions_index"), hostileIndexBytes(), "a failed rewrite must leave the persisted value exactly as it was");
-    assert.ok(capture.messages.some((m) => m.includes("still holds the legacy labels")), "the failure must be logged truthfully");
-  } finally {
-    capture.restore();
-  }
+  // The concurrent writer -- a WorkSession save performing updateRegistry's
+  // exact write shape, through the real seam -- lands AFTER the read
+  // captured its (legacy) snapshot and BEFORE the read path would finish:
+  // it registers a NEW Work on top of the legacy bytes.
+  setOnGet(async () => {
+    const current = JSON.parse(store.get("sessions_index")!) as SessionSummary[];
+    const newer = [
+      ...current,
+      { workId: "w-concurrent", unit: "Sales", hat: "Sales Executive", stage: "new", label: "w-concurrent", updatedAt: "2026-10-10T09:00:00.000Z" },
+    ];
+    await kvPut(env, "sessions_index", JSON.stringify(newer));
+  });
+
+  const served = await loadSessionsIndexForRead(env);
+
+  // The read legitimately reflects its own (stale) moment...
+  assert.equal(served.some((s) => s.workId === "w-concurrent"), false, "the snapshot the read served predates the concurrent write");
+  // ...but it must have written NOTHING: the concurrently registered Work
+  // survives in persisted state. (With the removed read-path migration,
+  // this read would have written its stale sanitized snapshot back and
+  // erased w-concurrent from the index.)
+  const persisted = JSON.parse(store.get("sessions_index")!) as SessionSummary[];
+  assert.ok(
+    persisted.some((s) => s.workId === "w-concurrent"),
+    "the completed read must not erase the concurrently registered Work from persisted state",
+  );
+  assert.deepEqual(putCalls, ["sessions_index"], "the ONLY write in this window is the concurrent writer's own");
 });
 
 test("loadSessionsIndexForRead: an unparseable or non-array stored value is served empty with NO migration write", async () => {
@@ -222,8 +233,8 @@ test("loadSessionsIndexForRead: an unparseable or non-array stored value is serv
   }
 });
 
-test("loadSessionsIndexForRead: a hostile legacy value served from Turso through kvGet is sanitized, and both stores converge to the sanitized value", async () => {
-  const { env, store } = makeKvEnv();
+test("loadSessionsIndexForRead: a hostile legacy value served from Turso through kvGet is sanitized, and the read path writes nothing", async () => {
+  const { env, store, putCalls } = makeKvEnv();
   const turso = makeSlimTurso();
   (env as unknown as Record<string, unknown>).TURSO_DATABASE_URL = "libsql://enig-fallback-test.turso.io";
   (env as unknown as Record<string, unknown>).TURSO_AUTH_TOKEN = "test-turso-token";
@@ -237,15 +248,14 @@ test("loadSessionsIndexForRead: a hostile legacy value served from Turso through
     for (const leak of LEGACY_LEAKS) {
       assert.equal(JSON.stringify(served).includes(leak), false, `a Turso-served value must be sanitized before any caller sees it: ${leak}`);
     }
-    // The seam repaired KV (envelope-wrapped), then the bounded rewrite
-    // re-sanitized it -- the live KV copy holds the sanitized array.
-    const kvValue = unwrapEnvelope(store.get("sessions_index"));
-    for (const leak of LEGACY_LEAKS) {
-      assert.equal(kvValue.includes(leak), false, `the repaired KV copy must converge to the sanitized value: ${leak}`);
-    }
-    assert.equal(JSON.parse(kvValue).length, 3, "no entry is lost through the Turso path");
-    // The shadow row is gone: nothing left that could resurrect the bytes.
-    assert.equal(turso.rows.size, 0, "the legacy fallback row must be cleared, not left as a resurrection candidate");
+    // The seam's OWN sanctioned repair (kvGet, unchanged §5B contract) is
+    // the only write in this flow: the raw legacy value, envelope-wrapped,
+    // restored into KV and the shadow row cleared. The loader itself never
+    // writes -- persistence keeps the legacy bytes until the next Work save
+    // rewrites them through updateRegistry, and every reader sanitizes.
+    assert.deepEqual(putCalls, ["sessions_index"], "the only write is kvGet's own row repair");
+    assert.equal(unwrapEnvelope(store.get("sessions_index")), hostileIndexBytes(), "the repaired KV copy keeps the raw value -- migration belongs to the writer, not the reader");
+    assert.equal(turso.rows.size, 0, "the shadow row is cleared by the repair, not left as a resurrection candidate");
   } finally {
     __setTursoFetchForTests(undefined);
     __resetKvStoreStateForTests();
@@ -480,11 +490,17 @@ test("wiring contract: session.ts derives and sanitizes EVERY sessions_index sav
 test("wiring contract: index.ts /sessions reads through the sanctioned sanitizing loader and the tested row template (source scan)", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "index.ts"), "utf8");
   const listSessions = source.slice(source.indexOf("async function listSessions"), source.indexOf("async function listSessionKvKeys"));
-  assert.match(listSessions, /loadSessionsIndexForRead\(env\)/, "listSessions must read through loadSessionsIndexForRead (sanitize + bounded migration)");
+  assert.match(listSessions, /loadSessionsIndexForRead\(env\)/, "listSessions must read through loadSessionsIndexForRead (sanitize on read)");
   assert.match(listSessions, /sessionRowText\(s, activeId\)/, "the emitted row text must be sessionRowText -- the exact template under test");
   assert.equal(/JSON\.parse\(raw\)/.test(listSessions), false, "listSessions must never parse the stored index itself");
   assert.equal(/s\.label/.test(listSessions), false, "listSessions must never interpolate a stored label directly");
   assert.match(listSessions, /s\.stage !== "complete" && s\.stage !== "closed_not_qualified"/, "the terminal-Work filtering stays exactly as it was");
+});
+
+test("wiring contract: the sessions_index read module never writes -- migration belongs to the sanctioned writer (source scan)", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "sessionsIndex.ts"), "utf8");
+  assert.equal(/kvPut|kvDelete|kvList/.test(source), false, "sessionsIndex.ts must not import any writing seam -- a read-then-write migration races updateRegistry with no CAS to stop it");
+  assert.equal(/STATE_KV\.(put|delete)/.test(source), false, "the read path must never touch the store directly either");
 });
 
 test("wiring contract: matterContinuation sanitizes the index before consuming it (source scan)", () => {
