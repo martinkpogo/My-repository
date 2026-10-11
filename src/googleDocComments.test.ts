@@ -970,3 +970,36 @@ test("a RESOLVED substantive comment on a Proposal Doc is still processed -- res
   assert.ok(reply.content.includes("PROP-6 v2"), reply?.content);
   assert.strictEqual(cycleSyncCalls[0].observations[0].resolved, true, "the resolution is observed alongside the applied change");
 });
+
+test("a poll that COMPLETES the approval cycle reports that completion as its own diagnostic -- observed resolution is the signal, with no attribution gate in the poller", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const cycleSyncCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+    cycleSyncCalls,
+    // What the DO reports when the cycle was satisfied and completed.
+    cycleSyncResult: { kind: "approved", approvedVersion: 2 },
+  });
+  await fakeEnv.STATE_KV.put("google_comment_processed:c-sync", "1");
+  await fakeEnv.STATE_KV.put("google_comment_processed:c-other", "1");
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [
+      { id: "c-sync", content: "Shorten the scope", resolved: true, modifiedTime: "2026-10-11T09:30:00.000Z", author: { me: true } },
+      { id: "c-other", content: "Unrelated", resolved: false, modifiedTime: "2026-10-11T09:00:00.000Z", author: { me: true } },
+    ],
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(calls.length, 0, "a completion needs no further comment processing");
+  assert.strictEqual(cycleSyncCalls.length, 1, "the cycle is synced exactly once per poll");
+  assert.ok(
+    result.diagnostics.some((d) => d.outcome === "approval_cycle_synced" && d.detail === "approved"),
+    `completion reported as a diagnostic: ${JSON.stringify(result.diagnostics.map((d) => d.detail))}`,
+  );
+});

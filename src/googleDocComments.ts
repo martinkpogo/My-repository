@@ -28,11 +28,13 @@ interface DriveCommentReply {
   id: string;
   // Google records a "resolve" action as a replies[] entry carrying
   // action:"resolve" with its own author (confirmed live 2026-10-11). This is
-  // the ONLY resolver-bearing signal the Comments API exposes -- the comment's
-  // own `author` is its commenter, never its resolver -- but because the
+  // the only resolver-bearing signal the Comments API exposes -- the comment's
+  // own `author` is its commenter, never its resolver -- and because the
   // Runtime reads comments with the same authorized account token Martin's
   // account uses, that reply's author identifies the ACCOUNT, not the human
-  // user. See RESOLUTION_ATTRIBUTION_LIMITATION in tokenSafeProposal.ts.
+  // user. It is therefore recorded as evidence only; observed `resolved` is
+  // the approval signal (Martin's explicit choice) and no resolver identity
+  // is required.
   action?: string;
   author?: DriveCommentAuthor;
   createdTime?: string;
@@ -42,10 +44,11 @@ interface DriveCommentReply {
 interface DriveComment {
   id: string;
   content: string;
+  // The approval signal Martin chose: observed resolution, without requiring
+  // proof of which human clicked Resolve.
   resolved?: boolean;
   // When the comment was last modified -- including a transition to
-  // resolved=true. Recorded as resolution EVIDENCE only; it is not, on its
-  // own, proof of who resolved it.
+  // resolved=true. Recorded as resolution evidence/timing only.
   modifiedTime?: string;
   author?: DriveCommentAuthor;
   quotedFileContent?: { value?: string };
