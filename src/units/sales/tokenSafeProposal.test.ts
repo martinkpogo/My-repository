@@ -14,6 +14,12 @@ import {
   applyProposalDocFormatting,
   requestProposalDocClarification,
   handleProposalDocClarificationText,
+  reopenProposalApprovalCycle,
+  recordProposalCycleItemOutcome,
+  evaluateProposalApprovalCycle,
+  verifyProposalDocShowsVersion,
+  unsatisfiedCycleItems,
+  RESOLUTION_ATTRIBUTION_LIMITATION,
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import { installStatePersistence } from "../../runtime/workPersistence";
@@ -341,9 +347,24 @@ function approvalRequests(world: World) {
   return world.telegram.filter((m) => m.text.includes("Proposal approval request"));
 }
 
-async function createV1(t: any, stateOverrides: Partial<WorkState> = {}, worldOpts: Parameters<typeof installWorld>[1] = {}) {
+async function createV1(
+  t: any,
+  stateOverrides: Partial<WorkState> = {},
+  worldOpts: Parameters<typeof installWorld>[1] = {},
+  opts: { googleDoc?: boolean } = {},
+) {
   const world = installWorld(t, worldOpts);
-  const env = fakeEnv();
+  // By default the fixture has no authorized Google account, so the canonical
+  // Doc cannot be written or verified -- which under the new lifecycle is the
+  // FAIL-CLOSED path: the Proposal is created but stays Pending Approval and is
+  // never approved. Tests that want the normal lifecycle (Doc written+verified
+  // -> auto-approved) pass `googleDoc: true`.
+  let env = fakeEnv();
+  if (opts.googleDoc) {
+    const google = withGoogleFake(t);
+    env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
+    (world as any).googleCalls = google;
+  }
   const state = await handleProposalHandoffPickup(env, fakeState(stateOverrides), NO_ACTION_SKILLS);
   return { world, env, state };
 }
@@ -363,7 +384,8 @@ test("1. HO-64 produces exactly one canonical Proposal linked to HO-64", async (
 
 test("1b. A Handoff picked up with no continuing WorkSession (only handoffId in state, as checkHandoffs.ts's init() produces for an externally-created Handoff) still produces a Proposal -- LOG-874 regression: entityName/matterName in state are never required", async (t) => {
   const world = installWorld(t);
-  const env = fakeEnv();
+  withGoogleFake(t);
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
   const freshState: WorkState = {
     workId: "11111111-2222-3333-4444-555555555555",
     chatId: 9999,
@@ -390,8 +412,9 @@ test("1b. A Handoff picked up with no continuing WorkSession (only handoffId in 
 });
 
 test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, same content", async (t) => {
-  const { world, env, state } = await createV1(t);
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
   const contentBefore = text(proposals(world)[0].properties["Proposal Content"]);
+  assert.strictEqual(state.salesProposal?.approvalStatus, "Approved", "the Doc verified, so the initial Version is already Approved");
 
   // Same WorkSession reprocesses (e.g. HO-64 set back to Pending by hand).
   world.pages.get(HO64_ID)!.properties.Status = { select: { name: "Pending" } };
@@ -404,10 +427,10 @@ test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, s
   assert.strictEqual(text(rec.properties.Version), "v1");
   assert.strictEqual(text(rec.properties["Proposal Content"]), contentBefore);
   assert.strictEqual(again.salesProposal?.currentVersion, 1);
+  assert.strictEqual(again.salesProposal?.approvalStatus, "Approved", "an already-Approved Proposal is not re-approved or downgraded");
   assert.strictEqual(fresh.salesProposal?.proposalId, "PROP-7");
   assert.strictEqual(world.versionPages.length, 1, "no additional version page on reprocess");
-  assert.strictEqual(approvalRequests(world).length, 3, "reprocessing re-presents the same pending Version");
-  assert.ok(approvalRequests(world).every((m) => m.text.includes("Proposal: PROP-7 · Version: v1")));
+  assert.strictEqual(approvalRequests(world).length, 0, "an auto-approved initial Version is never re-presented as an approval request");
 });
 
 test("2b. A Proposal for the same Matter not linked to HO-64 is ambiguous -- fails closed, no new record", async (t) => {
@@ -572,7 +595,7 @@ test("7. The Finance rationale is preserved verbatim, with no added financial ju
 });
 
 test("8. The GHS 30,000–60,000 planning range is kept out of Proposal Content, shown to Martin as internal review material, and never replaces GHS 420,000", async (t) => {
-  const { world } = await createV1(t);
+  const { world } = await createV1(t, {}, {}, { googleDoc: true });
   const rec = proposals(world)[0].properties;
   const content = text(rec["Proposal Content"]);
   assert.strictEqual(rec["Quoted Price"].number, 420000);
@@ -619,7 +642,7 @@ test("8b. Proposal Content holds commercial substance only; the approved hash co
 });
 
 test("8c. The review material stays available to Martin: open items, sources and the rationale conflict", async (t) => {
-  const { world } = await createV1(t);
+  const { world } = await createV1(t, {}, {}, { googleDoc: true });
   const msg = world.telegram.map((m) => m.text).join("");
   const [proposalPart, review] = msg.split("=== INTERNAL REVIEW MATERIAL");
   assert.ok(!proposalPart.includes("(the content being approved)"), "the Proposal text is not written into Telegram");
@@ -645,16 +668,26 @@ test("9. A newly generated Proposal is Pending Approval, Approved Version blank,
 // ---------------------------------------------------------------------------
 
 test("10. The approval request presents the complete Proposal and identifies the exact Proposal ID and Version", async (t) => {
-  const { world, state } = await createV1(t);
+  // The initial Version is auto-approved (no approval request), so the
+  // approval-request shape -- exact Proposal ID + Version, no Proposal text in
+  // Telegram, Approve bound to that exact pair -- is exercised on a REVISED
+  // Version, which is the one that still awaits Martin's tap.
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  assert.strictEqual(approvalRequests(world).length, 0, "the auto-approved initial Version presents no approval request");
+
+  await handleSalesProposalDecision(env, state, 7, 1, "revise");
+  await handleSalesProposalRevisionText(env, state, "State payment terms as 50% on signature, 50% on completion.");
+  assert.strictEqual(state.salesProposal?.currentVersion, 2);
+
   const reqs = approvalRequests(world);
   assert.strictEqual(reqs.length, 1);
   const full = world.telegram.map((m) => m.text).join("");
-  assert.match(reqs[0].text, /Proposal: PROP-7 · Version: v1/);
-  assert.ok(!full.includes(state.salesProposal!.versions[0].content.slice(-200)), "the Proposal text is not written into Telegram -- it is read in the Doc");
+  assert.match(reqs[0].text, /Proposal: PROP-7 · Version: v2/);
+  assert.ok(!full.includes(state.salesProposal!.versions[1].content.slice(-200)), "the Proposal text is not written into Telegram -- it is read in the Doc");
   const buttons = world.telegram.at(-1)!.buttons.flat();
   assert.deepStrictEqual(
     buttons.map((b: any) => b.callback_data),
-    [`${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.a`, `${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.r`, `${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.1.g`],
+    [`${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.2.a`, `${PROPOSAL_CALLBACK_ACTION}:${state.workId}:7.2.r`],
   );
   assert.ok(buttons.every((b: any) => Buffer.byteLength(b.callback_data) <= 64), "Telegram callback_data 64-byte limit");
 });
@@ -965,7 +998,7 @@ test("S8. The attestation Strategy really produces for a Handoff-originated prop
     sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "contactName"] },
     proposalContent: { checked: true, identityFieldsChecked: [] },
   };
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: asProduced });
+  const { world, state } = await createV1(t, { strategyProposalTokenSafety: asProduced }, {}, { googleDoc: true });
   assert.strictEqual(state.blockedReason, undefined);
   assert.strictEqual(proposals(world).length, 1, "the Proposal is produced");
 });
@@ -1002,6 +1035,13 @@ test("S4. Reprocessing an existing Proposal without verification does not re-hyd
 
 test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh Sales Work consumes into a token-safe Proposal", async (t) => {
   const world = installWorld(t);
+  withGoogleFake(t);
+  // The Sales pickup runs on a DIFFERENT Work id than the default one
+  // withGoogleFake installs persistence for, and the Tool Registry refuses any
+  // external effect (the Doc write) without that Work's own durable
+  // persistence adapter. Install it so the Doc step can run here too.
+  const salesPersistence = installStatePersistence("99999999-8888-7777-6666-55555555bbbb");
+  t.after(salesPersistence.release);
 
   // --- Phase 0: the Strategy -> Finance Handoff, as Strategy would write it ---
   const SRC = "handoff-strategy-src";
@@ -1025,7 +1065,10 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   });
 
   // --- Phase 1: Finance's REAL quote approval ---
-  const env = fakeEnv();
+  // The Google KV account is present so the Sales pickup in Phase 2 can write
+  // and verify the canonical token-safe Doc, which is what the initial
+  // auto-approval now binds to.
+  const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
   const rationale = "Priced from the documented value at stake and the approved commercial scope for the engagement.";
   const financeState: WorkState = {
     workId: "11111111-2222-3333-4444-55555555aaaa",
@@ -1102,9 +1145,14 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   assert.match(content, /\nInvestment: GHS 420,000\n/, "Investment section carries the exact amount");
   assert.strictEqual(section(content, "BASIS FOR THE INVESTMENT"), rationale, "rationale verbatim, no added justification");
 
-  // Draft / Pending Approval -- not approved, no client artifact, no real identity
-  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval", "presented for approval, never auto-approved");
-  assert.ok(!world.fetches.some((f) => /googleapis|drive|gmail/i.test(f.url)), "no client artifact is created");
+  // Auto-approved once its content + canonical token-safe Doc were written and
+  // verified -- this Doc is the Runtime's token-safe copy, never a client-facing
+  // artifact (Isolated Sales owns that, and no real identity reaches it).
+  assert.strictEqual(text(rec["Approval Status"]), "Approved", "the Doc verified, so the initial Version is auto-approved under the canonical rule");
+  assert.strictEqual(text(rec["Approved Version"]), "v1");
+  assert.strictEqual(text(rec["Artifact Status"]), "Pending Identity Resolution");
+  assert.ok(!world.fetches.some((f) => /gmail/i.test(f.url)), "no outbound email is ever sent");
+  assert.ok(!world.fetches.some((f) => /googleapis\.com\/drive\/v3\/files\b/.test(f.url) && f.method === "POST" && !/folder/.test(JSON.stringify(f.body ?? {})) && /@|Acme/.test(JSON.stringify(f.body ?? {}))), "no client artifact carrying identity is created");
   assert.ok(!/Acme|@client\.com|Acme Foods/i.test(JSON.stringify(rec)), "no real identity in the Proposal record");
 
   // The Handoff is consumed
@@ -1172,7 +1220,7 @@ test("Ifc. Integration: a marked but malformed Finance block fails closed on its
 const salesStatus = (world: World) => world.telegram.filter((m) => m.text.startsWith("Hat: Sales Executive.\n\n🧭")).map((m) => m.text);
 
 test("Status: a produced Proposal shows the pickup's real steps and ends on the version awaiting approval", async (t) => {
-  const { world } = await createV1(t);
+  const { world } = await createV1(t, {}, {}, { googleDoc: true });
   const final = salesStatus(world).at(-1)!;
   let at = -1;
   for (const step of [
@@ -1183,7 +1231,7 @@ test("Status: a produced Proposal shows the pickup's real steps and ends on the 
     "✓ Resolving the Proposal facts from the approved Strategy Proposal and the Finance quote",
     "✓ Checking the composed Proposal is token-safe",
     "✓ Creating the Proposal record and writing v1 to Notion",
-    "✅ PROP-7 v1 ready below -- awaiting your approval.",
+    "✅ PROP-7 v1 created, Doc verified, and approved.",
   ]) {
     const next = final.indexOf(step);
     assert.ok(next > at, `"${step}" in order, in:\n${final}`);
@@ -1207,7 +1255,7 @@ test("Status: a fail-closed Proposal marks the step it stopped on, ends on the b
 // ---------------------------------------------------------------------------
 
 test("Version pages 1. v1 is a child page of the Proposal record, and the record's Current Version Link and the approval request point at it", async (t) => {
-  const { world, state } = await createV1(t);
+  const { world, state } = await createV1(t, {}, {}, { googleDoc: true });
   const rec = proposals(world)[0];
 
   assert.strictEqual(world.versionPages.length, 1);
@@ -1215,9 +1263,14 @@ test("Version pages 1. v1 is a child page of the Proposal record, and the record
   assert.strictEqual(page.parentId, rec.id, "a child of the Proposal record's page");
   assert.strictEqual(page.title, "PROP-7 v1");
   assert.strictEqual(rec.properties["Current Version Link"].url, page.url);
-  assert.strictEqual(rec.properties["Approved Version Link"], undefined, "nothing is approved yet");
+  // v1 is auto-approved once its Doc verifies, so the Approved Version Link is
+  // set to exactly that version's page.
+  assert.strictEqual(rec.properties["Approved Version Link"].url, page.url, "the auto-approved version's page is the Approved Version Link");
   assert.strictEqual(state.salesProposal!.versions[0].pageUrl, page.url);
-  assert.ok(approvalRequests(world)[0].text.includes(`Read this version in Notion instead: ${page.url}`), "with no Google Doc, Martin gets the Notion link to read the version");
+  assert.ok(
+    world.telegram.map((m) => m.text).join("").includes("https://docs.google.com/document/d/doc-1/edit"),
+    "with a verified Google Doc, Martin reads the version in the Doc",
+  );
   assert.strictEqual(
     page.children.map((b: any) => b.paragraph.rich_text[0].text.content).join(""),
     text(rec.properties["Proposal Content"]),
@@ -1363,7 +1416,7 @@ test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the curre
   assert.strictEqual(sp.approvalStatus, "Pending Approval");
 });
 
-test("Google Doc 0. The approval request carries the Doc link and none of the Proposal text; the Doc is made when the version is presented", async (t) => {
+test("Google Doc 0. The approved message carries the Doc link and none of the Proposal text; the Doc is written and verified during pickup", async (t) => {
   const world = installWorld(t);
   const calls = withGoogleFake(t);
   const { kv, store } = kvWithGoogleAccount();
@@ -1372,13 +1425,16 @@ test("Google Doc 0. The approval request carries the Doc link and none of the Pr
   const state = await handleProposalHandoffPickup(env, fakeState(), NO_ACTION_SKILLS);
 
   const content = state.salesProposal!.versions[0].content;
-  const req = approvalRequests(world)[0].text;
-  assert.ok(req.includes("https://docs.google.com/document/d/doc-1/edit"), "the Doc link is in the approval request");
-  assert.ok(!world.telegram.map((m) => m.text).join("").includes(content.slice(-200)), "no Proposal text in Telegram");
+  const approved = world.telegram.map((m) => m.text).join("");
+  assert.ok(approved.includes("https://docs.google.com/document/d/doc-1/edit"), "the Doc link is in the approved message");
+  assert.ok(!approved.includes(content.slice(-200)), "no Proposal text in Telegram");
   assert.strictEqual(calls.filter((c) => c.method === "POST" && c.url.endsWith("/drive/v3/files")).length, 2, "folder then Doc");
   assert.ok(store.has("google_doc_watch:doc-1"), "the Doc is watched, bound to the version");
+  assert.strictEqual(state.salesProposal?.approvalStatus, "Approved", "the Doc verified, so the initial Version is auto-approved");
   const buttons = world.telegram.at(-1)!.buttons.flat().map((b: any) => b.callback_data);
   assert.ok(!buttons.some((d: string) => d.endsWith(".g")), "no Create button once the Doc exists");
+  assert.ok(!buttons.some((d: string) => d.endsWith(".a")), "no Approve button -- the initial Version is already approved");
+  assert.strictEqual(approvalRequests(world).length, 0, "no approval request for the auto-approved initial Version");
 });
 
 test("Google Doc 2. A second tap returns the existing Doc and creates nothing", async (t) => {
@@ -1883,4 +1939,309 @@ test("Doc clarification 9. A stale continuation whose marker write fails is neve
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "still nothing routed for a superseded Version");
   assert.match(world.telegram.at(-1)!.text, /Not applied/);
   assert.match(world.telegram.at(-1)!.text, /now at v2/);
+});
+
+// ---------------------------------------------------------------------------
+// The Proposal approval lifecycle: initial auto-approval is verification-
+// driven, a substantive comment reopens the cycle before any revised Version
+// can be released, resolution is a SEPARATE (never auto-performed) signal,
+// and nothing reaches Approved until every actionable comment in the cycle
+// is applied AND verified AND observed resolved with the Doc matching the
+// exact current Version.
+// ---------------------------------------------------------------------------
+
+/** Opens the cycle on an Approved v1 with one substantive comment. */
+async function openCycleOnV1(env: Env, state: WorkState, commentId: string, requestedChange = "Shorten the scope section.") {
+  const sp = state.salesProposal!;
+  return reopenProposalApprovalCycle(env, state, sp, {
+    documentId: sp.doc!.documentId,
+    commentId,
+    commentedVersion: 1,
+    requestedChange,
+  });
+}
+
+test("Lifecycle 1. The initial Version becomes Approved only after the canonical Doc is written and verified -- and the live record carries that exact binding", async (t) => {
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+
+  assert.strictEqual(sp.approvalStatus, "Approved");
+  assert.strictEqual(sp.approvedVersion, 1, "the Approved Version is the verified initial Version");
+  assert.strictEqual(sp.doc?.version, 1, "the Doc is bound to exactly the approved Version");
+  assert.strictEqual(sp.artifactStatus, "Pending Identity Resolution");
+
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(text(rec["Approval Status"]), "Approved", "the live record agrees");
+  assert.strictEqual(text(rec["Approved Version"]), "v1");
+  assert.ok(rec["Approved Version Link"], "the readable page of the approved Version is linked");
+
+  // The binding is re-checkable from the Doc itself, not just asserted.
+  assert.deepStrictEqual(await verifyProposalDocShowsVersion(env, sp), { ok: true });
+});
+
+test("Lifecycle 2. If the canonical Doc cannot be written and verified, the initial Version is NEVER approved: Pending, no Approved Version, no Approve tap", async (t) => {
+  const { world, state } = await createV1(t); // no authorized Google account -> Doc cannot verify
+
+  const sp = state.salesProposal!;
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+  assert.strictEqual(sp.approvedVersion, undefined, "approval is never claimed before the Doc verifies");
+
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval");
+  assert.strictEqual(text(rec["Approved Version"]), "");
+  assert.strictEqual(rec["Approved Version Link"], undefined, "no Approved Version Link can exist before verification");
+  assert.ok(state.blockedReason, "the Work is blocked, not silently presented as done");
+  assert.match(state.blockedReason!, /never claimed before the Doc verifies/);
+
+  const buttons = world.telegram.flatMap((m) => m.buttons ?? []).flat().map((b) => b.callback_data);
+  assert.ok(!buttons.some((d: string) => d.endsWith(".a")), "no Approve button is offered for an unverified Version");
+  assert.ok(!buttons.some((d: string) => d.endsWith(".g")), "nor is an unverified Version presented as readable");
+});
+
+test("Lifecycle 3. A substantive comment on an Approved Version reopens the cycle IMMEDIATELY: Pending Approval, Approved Version cleared, artifact Held, item registered", async (t) => {
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  assert.strictEqual(sp.approvalStatus, "Approved");
+
+  const reopened = await openCycleOnV1(env, state, "c-cycle-1");
+
+  assert.deepStrictEqual(reopened, { ok: true });
+  assert.strictEqual(sp.approvalStatus, "Pending Approval", "in memory the Approval is withdrawn at once");
+  assert.strictEqual(sp.approvedVersion, undefined, "the Approved Version binding is cleared");
+  assert.strictEqual(sp.artifactStatus, "Held", "a released artifact is Held the instant approval is withdrawn");
+
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval", "and on the LIVE record, before any change is applied");
+  assert.strictEqual(text(rec["Approved Version"]), "", "so nothing stale stays releasable even if the change then fails");
+  assert.strictEqual(text(rec["Artifact Status"]), "Held");
+
+  const cycle = state.proposalApprovalCycle!;
+  assert.strictEqual(cycle.proposalNumber, 7);
+  assert.strictEqual(cycle.documentId, sp.doc!.documentId);
+  assert.strictEqual(cycle.items["c-cycle-1"].outcome, "awaiting_application");
+  assert.strictEqual(cycle.items["c-cycle-1"].observedResolved, false);
+  assert.strictEqual(cycle.items["c-cycle-1"].intent, "substantive");
+});
+
+test("Lifecycle 4. Resolution observed BEFORE the change is applied can never complete the cycle", async (t) => {
+  const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  await openCycleOnV1(env, state, "c-resolve-first");
+
+  // Martin resolves the comment while the change is still unapplied.
+  const out = await evaluateProposalApprovalCycle(env, state, [
+    { commentId: "c-resolve-first", resolved: true, modifiedTime: "2026-10-11T10:00:00.000Z" },
+  ]);
+
+  assert.strictEqual(out.kind, "held_unsatisfied");
+  assert.ok(out.reasons!.some((r) => r.includes("c-resolve-first") && r.includes("not been applied")), out.reasons!.join("; "));
+  assert.strictEqual(sp.approvalStatus, "Pending Approval", "resolving first never approves");
+  assert.strictEqual(state.proposalApprovalCycle!.items["c-resolve-first"].observedResolved, true, "the resolution itself is still recorded honestly");
+});
+
+test("Lifecycle 5. One unresolved comment blocks approval even when every other comment in the cycle is applied and resolved", async (t) => {
+  const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  await openCycleOnV1(env, state, "c-done");
+  await openCycleOnV1(env, state, "c-open");
+  recordProposalCycleItemOutcome(state, "c-done", "applied", 2);
+  recordProposalCycleItemOutcome(state, "c-open", "applied", 2);
+
+  const out = await evaluateProposalApprovalCycle(env, state, [
+    { commentId: "c-done", resolved: true, modifiedTime: "2026-10-11T10:00:00.000Z" },
+    { commentId: "c-open", resolved: false },
+  ]);
+
+  assert.strictEqual(out.kind, "held_unsatisfied");
+  assert.strictEqual(out.reasons!.length, 1, "exactly the one outstanding comment is named");
+  assert.ok(out.reasons![0].includes("c-open") && out.reasons![0].includes("not yet observed resolved"), out.reasons![0]);
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+});
+
+test("Lifecycle 6. A refused (unffillable) change keeps the cycle closed forever -- a resolution over it still cannot approve", async (t) => {
+  const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  await openCycleOnV1(env, state, "c-refused", "Put the client's real company name in the Proposal.");
+  recordProposalCycleItemOutcome(state, "c-refused", "refused");
+
+  const out = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-refused", resolved: true }]);
+
+  assert.strictEqual(out.kind, "held_unsatisfied");
+  assert.ok(out.reasons!.some((r) => r.includes("c-refused") && r.includes("refused")), out.reasons!.join("; "));
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+});
+
+test("Lifecycle 7. A satisfied cycle (applied + verified + resolved, Doc matching the current Version) is HELD for resolution attribution -- never silently Approved -- and Martin's explicit approval is what completes it", async (t) => {
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  await openCycleOnV1(env, state, "c-final");
+  recordProposalCycleItemOutcome(state, "c-final", "applied", 1);
+
+  const out = await evaluateProposalApprovalCycle(env, state, [
+    { commentId: "c-final", resolved: true, modifiedTime: "2026-10-11T11:00:00.000Z" },
+  ]);
+
+  assert.strictEqual(out.kind, "held_for_attribution", "the cycle is satisfied but held, not approved");
+  assert.ok(out.reasons!.join(" ").includes("cannot be attributed"), out.reasons!.join(" "));
+  assert.ok(out.reasons!.join(" ").includes("authorized user"), out.reasons!.join(" "));
+  assert.strictEqual(state.proposalApprovalCycle!.heldForResolutionAttribution, true, "the hold is recorded once, for the Architect");
+  assert.strictEqual(sp.approvalStatus, "Pending Approval", "satisfaction alone never writes Approved");
+  assert.strictEqual(text(proposals(world)[0].properties["Approval Status"]), "Pending Approval");
+  assert.strictEqual(sp.approvedVersion, undefined);
+
+  // Idempotent: a second observation of the same satisfied cycle does not
+  // re-log or flip the state.
+  const again = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-final", resolved: true }]);
+  assert.strictEqual(again.kind, "held_for_attribution");
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+
+  // Martin's explicit approval -- the sanctioned completion path -- now works,
+  // because nothing in the cycle is outstanding.
+  await handleSalesProposalDecision(env, state, 7, 1, "approve");
+  assert.strictEqual(sp.approvalStatus, "Approved");
+  assert.strictEqual(sp.approvedVersion, 1);
+  assert.strictEqual(text(proposals(world)[0].properties["Approval Status"]), "Approved");
+  assert.ok(RESOLUTION_ATTRIBUTION_LIMITATION.includes("Comments API"), "the limitation itself is documented as evidence");
+});
+
+test("Lifecycle 8. The approve route refuses while any actionable comment is outstanding: a bare tap never overrides an open cycle", async (t) => {
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  await openCycleOnV1(env, state, "c-still-open");
+
+  await handleSalesProposalDecision(env, state, 7, 1, "approve");
+
+  assert.strictEqual(sp.approvalStatus, "Pending Approval", "the tap cannot wave the outstanding request away");
+  assert.strictEqual(text(proposals(world)[0].properties["Approval Status"]), "Pending Approval");
+  assert.match(world.telegram.at(-1)!.text, /Cannot approve PROP-7/);
+  assert.match(world.telegram.at(-1)!.text, /c-still-open/);
+});
+
+test("Lifecycle 9. A comment on a foreign Doc or a stale Version is refused and opens no cycle, leaving the approval untouched", async (t) => {
+  const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  const actionBefore = state.actionName;
+
+  const wrongDoc = await reopenProposalApprovalCycle(env, state, sp, {
+    documentId: "some-other-doc",
+    commentId: "c-x",
+    commentedVersion: 1,
+    requestedChange: "x",
+  });
+  assert.ok("reason" in wrongDoc && wrongDoc.reason.includes("canonical Doc"), JSON.stringify(wrongDoc));
+
+  const staleVersion = await reopenProposalApprovalCycle(env, state, sp, {
+    documentId: sp.doc!.documentId,
+    commentId: "c-y",
+    commentedVersion: 0,
+    requestedChange: "y",
+  });
+  assert.ok("reason" in staleVersion && staleVersion.reason.includes("not the current"), JSON.stringify(staleVersion));
+
+  assert.strictEqual(state.proposalApprovalCycle, undefined, "a refused comment never opens a cycle");
+  assert.strictEqual(sp.approvalStatus, "Approved", "the approval is not disturbed by a refused comment");
+  assert.strictEqual(sp.approvedVersion, 1);
+  assert.strictEqual(state.actionName, actionBefore, "a refused comment does not advance the Work's Action either");
+});
+
+test("Lifecycle 10. A resolution observed for a comment OUTSIDE the current cycle never advances that cycle", async (t) => {
+  const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  await openCycleOnV1(env, state, "c-mine");
+  recordProposalCycleItemOutcome(state, "c-mine", "applied", 1);
+
+  const out = await evaluateProposalApprovalCycle(env, state, [
+    { commentId: "c-mine", resolved: false },
+    { commentId: "c-someone-elses", resolved: true, modifiedTime: "2026-10-11T12:00:00.000Z" },
+  ]);
+
+  assert.strictEqual(out.kind, "held_unsatisfied", "an unrelated comment's resolution is ignored");
+  assert.ok(out.reasons!.some((r) => r.includes("c-mine") && r.includes("not yet observed resolved")), out.reasons!.join("; "));
+  assert.strictEqual(state.proposalApprovalCycle!.items["c-mine"].observedResolved, false);
+  assert.strictEqual(state.proposalApprovalCycle!.items["c-someone-elses"], undefined, "a foreign comment is never absorbed into the cycle");
+});
+
+test("Lifecycle 11. A cycle whose Doc no longer matches the current Version stays held -- stale document evidence never approves", async (t) => {
+  const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  await openCycleOnV1(env, state, "c-doc-drift");
+  recordProposalCycleItemOutcome(state, "c-doc-drift", "applied", 1);
+
+  // Sanity: while the Doc is in sync, it reads back as the current Version.
+  assert.deepStrictEqual(await verifyProposalDocShowsVersion(env, sp), { ok: true });
+
+  // The Doc falls behind the Version it is supposed to show.
+  sp.doc!.version = 0;
+  const drifted = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-doc-drift", resolved: true }]);
+  assert.strictEqual(drifted.kind, "held_unsatisfied", "stale document evidence never approves");
+  assert.ok(drifted.reasons!.some((r) => r.includes("bound to v0")), drifted.reasons!.join("; "));
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+});
+
+test("Lifecycle 12. END TO END: auto-approve on verification -> a Doc comment reopens the cycle and applies the change -> satisfied but held for attribution -> explicit approval completes", async (t) => {
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  const v1Content = sp.versions[0].content;
+
+  // 1. Initial Version is approved purely because its Doc verified.
+  assert.strictEqual(sp.approvalStatus, "Approved");
+  assert.strictEqual(sp.approvedVersion, 1);
+  assert.deepStrictEqual(await verifyProposalDocShowsVersion(env, sp), { ok: true });
+
+  // 2. A substantive comment on the Doc: reopen FIRST, then apply the change.
+  const applied = await applyProposalDocComment(env, state, {
+    proposalNumber: 7,
+    version: 1,
+    text: 'Regarding "training": Add a second session for the retail team.',
+    commentId: "c-e2e",
+    documentId: sp.doc!.documentId,
+  });
+  assert.deepStrictEqual(applied.result, { kind: "revised", newVersion: 2 });
+
+  const rec = proposals(world)[0].properties;
+  assert.strictEqual(text(rec["Approval Status"]), "Pending Approval", "the revised Version is Pending, not Approved");
+  assert.strictEqual(text(rec["Approved Version"]), "", "v1's approval does not leak onto v2");
+  assert.strictEqual(sp.currentVersion, 2);
+  assert.strictEqual(sp.approvedVersion, undefined);
+  assert.strictEqual(state.proposalApprovalCycle!.items["c-e2e"].outcome, "applied", "the change was applied AND the Doc verified at v2");
+  assert.strictEqual(state.proposalApprovalCycle!.items["c-e2e"].appliedVersion, 2);
+  assert.ok(sp.versions[0].content === v1Content, "v1 is untouched");
+
+  // 3. Resolution arrives: applied + resolved + Doc matches -> satisfied, HELD.
+  const held = await evaluateProposalApprovalCycle(env, state, [
+    { commentId: "c-e2e", resolved: true, modifiedTime: "2026-10-11T13:00:00.000Z" },
+  ]);
+  assert.strictEqual(held.kind, "held_for_attribution");
+  assert.strictEqual(sp.approvalStatus, "Pending Approval", "resolution does not, by itself, approve");
+
+  // 4. Martin's explicit approval is the sanctioned completion.
+  await handleSalesProposalDecision(env, state, 7, 2, "approve");
+  assert.strictEqual(sp.approvalStatus, "Approved");
+  assert.strictEqual(sp.approvedVersion, 2);
+  assert.strictEqual(text(rec["Approval Status"]), "Approved");
+  assert.strictEqual(text(rec["Approved Version"]), "v2");
+});
+
+test("Lifecycle 13. A substantive comment whose change is REFUSED still leaves the Proposal pending and unreleasable", async (t) => {
+  const { world, env, state } = await createV1(t, { entityName: "Acme Foods Ghana Ltd" }, {}, { googleDoc: true });
+  const sp = state.salesProposal!;
+  assert.strictEqual(sp.approvalStatus, "Approved");
+
+  const { result } = await applyProposalDocComment(env, state, {
+    proposalNumber: 7,
+    version: 1,
+    text: "Mention Acme Foods Ghana Ltd by name.",
+    commentId: "c-identity",
+    documentId: sp.doc!.documentId,
+  });
+
+  assert.strictEqual(result.kind, "refused");
+  assert.strictEqual(sp.currentVersion, 1, "no Version was created");
+  const cycle = state.proposalApprovalCycle!;
+  assert.strictEqual(cycle.items["c-identity"].outcome, "refused", "the refusal is recorded as the item's outcome");
+  assert.ok(unsatisfiedCycleItems(cycle).some((i) => i.commentId === "c-identity" && i.reason.includes("refused")));
+
+  const out = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-identity", resolved: true }]);
+  assert.strictEqual(out.kind, "held_unsatisfied", "a refused change can never be satisfied, even resolved");
+  assert.strictEqual(sp.approvalStatus, "Pending Approval");
+  assert.strictEqual(text(proposals(world)[0].properties["Approval Status"]), "Pending Approval");
 });

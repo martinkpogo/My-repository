@@ -450,7 +450,15 @@ async function setUpProposalDoc(
   fakeEnv: Env,
   calls: any[],
   result: any,
-  opts: { intentResponse?: string; formattingCalls?: any[]; formattingResult?: any; clarificationCalls?: any[]; clarificationResult?: any } = {},
+  opts: {
+    intentResponse?: string;
+    formattingCalls?: any[];
+    formattingResult?: any;
+    clarificationCalls?: any[];
+    clarificationResult?: any;
+    cycleSyncCalls?: any[];
+    cycleSyncResult?: any;
+  } = {},
 ) {
   await persistGoogleTokens(fakeEnv, { access_token: "tok-1", refresh_token: "refresh-1", expires_in: 3600 }, OWNER_EMAIL);
   await registerWatchedGoogleDoc(fakeEnv, {
@@ -481,6 +489,14 @@ async function setUpProposalDoc(
         opts.clarificationCalls?.push(req);
         return opts.clarificationResult ?? { ok: true };
       },
+      // The approval-cycle sync runs on every poll of a Proposal Doc,
+      // independently of whether any comment needed processing -- resolution
+      // is observed on its own so a Martin resolve between polls can complete
+      // a cycle. Default: no open cycle (nothing to approve).
+      syncProposalDocApprovalCycle: async (req: any) => {
+        opts.cycleSyncCalls?.push(req);
+        return opts.cycleSyncResult ?? { kind: "no_cycle" };
+      },
     }),
   };
   // The classifier runs BEFORE either handler: its persona carries
@@ -497,7 +513,7 @@ async function setUpProposalDoc(
   } as unknown as Ai;
 }
 
-test("a comment on a proposal-bound Doc requests a change for its version, replies, resolves, and never edits the Doc", async (t) => {
+test("a comment on a proposal-bound Doc requests a change for its version, replies, is deliberately LEFT UNRESOLVED, and never edits the Doc", async (t) => {
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
   await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
@@ -517,9 +533,14 @@ test("a comment on a proposal-bound Doc requests a change for its version, repli
 
   await pollGoogleDocComments(fakeEnv);
 
-  assert.deepStrictEqual(calls, [{ proposalNumber: 6, version: 1, text: 'Regarding "Scope section": Make the scope shorter' }]);
+  // The comment's identity travels with the request so the approval cycle can
+  // register it as an actionable item the moment it is classified substantive.
+  assert.deepStrictEqual(calls, [
+    { proposalNumber: 6, version: 1, text: 'Regarding "Scope section": Make the scope shorter', commentId: "c-p1", documentId: DOC_ID },
+  ]);
   assert.ok(reply.content.includes("PROP-6 v2") && reply.content.includes("unchanged"));
-  assert.strictEqual(resolved, "c-p1");
+  assert.ok(reply.content.includes("leaving this comment OPEN"), "the reply tells Martin his own resolve completes the cycle");
+  assert.strictEqual(resolved, null, "a substantive comment is NEVER auto-resolved -- resolution is Martin's own signal");
   assert.strictEqual(edited, false);
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-p1"), "1");
 });
@@ -595,7 +616,7 @@ test("a presentation-only comment runs the formatting-only path: no revision, no
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-f1"), "1");
   assert.deepStrictEqual(
     result.diagnostics.map((d: any) => d.outcome),
-    ["comments_fetched", "formatting_applied"],
+    ["comments_fetched", "formatting_applied", "approval_cycle_synced"],
   );
 });
 
@@ -718,7 +739,10 @@ test("a formatting request the Work refuses is answered 'Not applied' and the co
   assert.strictEqual(formattingCalls.length, 1);
   assert.ok(reply.content.startsWith("Not applied -- this Doc is a copy of v1"), reply.content);
   assert.strictEqual(resolved, false);
-  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "formatting_not_applied");
+  assert.ok(
+    result.diagnostics.some((d: any) => d.commentId === "c-r1" && d.outcome === "formatting_not_applied"),
+    `the comment's own outcome is recorded, in: ${JSON.stringify(result.diagnostics.map((d: any) => d.outcome))}`,
+  );
 });
 
 test("a clarification that can never be recorded is answered honestly and closed off, while one deferred behind another stays unprocessed and is retried", async () => {
@@ -871,4 +895,78 @@ test("when the clarification marker cannot be persisted, the Doc thread is not t
   assert.strictEqual(calls.length, 0, "and no handler is routed from an ambiguous comment");
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-q2"), null, "the comment stays unprocessed, so nothing is lost");
   assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-q2")?.outcome, "persistence_unavailable");
+});
+
+// ---------------------------------------------------------------------------
+// Resolution is a SEPARATE signal from comment processing: it is observed on
+// every poll of a Proposal Doc and fed back into the Work's approval cycle,
+// whether or not there was anything new to apply. Resolving never skips a
+// change that was not applied, and the Runtime never resolves a substantive
+// comment itself.
+// ---------------------------------------------------------------------------
+
+test("every poll of a Proposal Doc feeds the observed resolution state into the approval cycle, even when nothing needs processing", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const cycleSyncCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { cycleSyncCalls });
+  await fakeEnv.STATE_KV.put("google_comment_processed:c-sync", "1"); // already handled earlier
+  await fakeEnv.STATE_KV.put("google_comment_processed:c-other", "1"); // and so was this one
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [
+      { id: "c-sync", content: "Shorten the scope", resolved: true, modifiedTime: "2026-10-11T09:30:00.000Z", author: { me: true } },
+      { id: "c-other", content: "Unrelated", resolved: false, modifiedTime: "2026-10-11T09:00:00.000Z", author: { me: true } },
+    ],
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(calls.length, 0, "the already-handled comment is not re-run");
+  assert.deepStrictEqual(
+    cycleSyncCalls,
+    [
+      {
+        documentId: DOC_ID,
+        observations: [
+          { commentId: "c-sync", resolved: true, modifiedTime: "2026-10-11T09:30:00.000Z" },
+          { commentId: "c-other", resolved: false, modifiedTime: "2026-10-11T09:00:00.000Z" },
+        ],
+      },
+    ],
+    "resolution is observed on its own, independently of processing",
+  );
+  assert.ok(
+    result.diagnostics.some((d) => d.outcome === "approval_cycle_synced" && d.detail === "no_cycle"),
+    `cycle sync diagnostic recorded: ${JSON.stringify(result.diagnostics.map((d) => d.outcome))}`,
+  );
+});
+
+test("a RESOLVED substantive comment on a Proposal Doc is still processed -- resolution never lets an unapplied change count as fulfilled", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  const calls: any[] = [];
+  const cycleSyncCalls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { cycleSyncCalls });
+  let reply: any = null;
+  let resolved: string | null = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-pre", content: "Make the scope shorter", resolved: true, modifiedTime: "2026-10-11T09:45:00.000Z", author: { me: true }, quotedFileContent: { value: "Scope section" } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: (id) => (resolved = id),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(calls.length, 1, "the change is still applied even though the comment was already resolved");
+  assert.strictEqual(resolved, null, "and the Runtime still never resolves it itself");
+  assert.ok(reply.content.includes("PROP-6 v2"), reply?.content);
+  assert.strictEqual(cycleSyncCalls[0].observations[0].resolved, true, "the resolution is observed alongside the applied change");
 });

@@ -480,7 +480,7 @@ export class WorkSession extends DurableObject<Env> {
    * comment. A thrown failure inside the Work is reported by execute() as
    * usual and surfaces here as a refusal.
    */
-  async handleProposalDocComment(input: { proposalNumber: number; version: number; text: string }): Promise<salesProposal.ProposalDocCommentResult> {
+  async handleProposalDocComment(input: { proposalNumber: number; version: number; text: string; commentId?: string; documentId?: string }): Promise<salesProposal.ProposalDocCommentResult> {
     let result: salesProposal.ProposalDocCommentResult | undefined;
     await this.execute(async (state) => {
       const applied = await salesProposal.applyProposalDocComment(this.env, state, input);
@@ -488,6 +488,24 @@ export class WorkSession extends DurableObject<Env> {
       return applied.state;
     });
     return result ?? { kind: "refused", detail: "the change could not be applied; Martin was notified." };
+  }
+
+  /**
+   * Feeds the resolution state observed on this Proposal's Doc back into the
+   * Work's approval cycle and evaluates whether that cycle may complete
+   * (see evaluateProposalApprovalCycle). Resolution is a SEPARATE signal from
+   * comment processing: it is observed here, on its own, so a resolved
+   * comment is never confused with an applied one. Runs inside `execute`, so
+   * the recorded resolution observations land in the same durable write as
+   * the rest of the Work.
+   */
+  async syncProposalDocApprovalCycle(input: { documentId: string; observations: { commentId: string; resolved: boolean; modifiedTime?: string }[] }): Promise<{ kind: string; reasons?: string[] }> {
+    let out: { kind: string; reasons?: string[] } = { kind: "no_cycle" };
+    await this.execute(async (state) => {
+      out = await salesProposal.evaluateProposalApprovalCycle(this.env, state, input.observations);
+      return state;
+    });
+    return out;
   }
 
   /**

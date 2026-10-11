@@ -762,6 +762,21 @@ export interface WorkState {
    */
   pendingProposalDocClarification?: { commentId: string; documentId: string; proposalNumber: number; version: number; text: string };
   /**
+   * The open approval cycle a substantive comment on the Proposal's canonical
+   * Google Doc starts (see units/sales/tokenSafeProposal.ts). It lives on the
+   * Work (Durable Object storage), never on the Proposal database -- that
+   * schema is frozen, so the cycle's own bookkeeping (which comments are
+   * actionable, each one's outcome, and the last observed resolution state)
+   * belongs to the Work that owns the Proposal.
+   *
+   * A new actionable comment OPENS or REOPENS it (clearing any prior Approved
+   * Version binding immediately, before any revised Version can be released);
+   * it is satisfied only when every actionable comment in it is applied AND
+   * verified AND every one of them is observed resolved AND the canonical Doc
+   * matches the exact current Version. Resolution alone never approves.
+   */
+  proposalApprovalCycle?: import("./units/sales/tokenSafeProposal").ProposalApprovalCycle;
+  /**
    * The result of the Sales-side source-boundary check performed when the
    * Sales -> Strategy Handoff was created (createHandoff already runs
    * assertTokensPresent + findViolation against the authoritative identity

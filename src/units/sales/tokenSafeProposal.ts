@@ -26,7 +26,7 @@ import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../.
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
-import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc } from "../../googleOAuth";
+import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc, getValidGoogleAccessToken, extractDocText } from "../../googleOAuth";
 import { classifyProposalCommentIntent, markProposalDocCommentProcessed, CommentMarkerPersistenceError } from "../../googleDocComments";
 import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
@@ -164,6 +164,62 @@ export interface RuntimeSalesProposal {
    * every revision -- never one Doc per version.
    */
   doc?: { documentId: string; url: string; accountIdentifier: string; version: number };
+}
+
+/**
+ * One actionable (substantive) comment inside the Proposal's current approval
+ * cycle, and how it ended. `commentId` is the Google Drive comment id, so the
+ * same comment is tracked exactly once across polling cycles.
+ */
+export interface ProposalCycleItem {
+  /** The Drive comment id this item tracks. */
+  commentId: string;
+  /** Only substantive comments open a cycle; formatting-only and ambiguous ones never do. */
+  intent: "substantive";
+  /** The comment's own text, verbatim, as the requested change. */
+  requestedChange: string;
+  /** The Version the comment was left against (the Doc's bound version at that moment). */
+  commentedVersion: number;
+  /**
+   * `awaiting_application` while the requested change has not been applied
+   * through the governed path; `applied` only once the revision exists AND the
+   * canonical Doc was brought to it and verified; `refused` when the request
+   * could not be honoured (stale, identity-bearing, Work no longer Sales'...).
+   * A `refused` item is never "fulfilled" and never satisfies the cycle.
+   */
+  outcome: "awaiting_application" | "applied" | "refused";
+  /** The Version the change landed in, once `outcome` is `applied`. */
+  appliedVersion?: number;
+  /** Last observed Drive `resolved` state for this comment (resolution is a SEPARATE signal from processing). */
+  observedResolved: boolean;
+  /** The Drive `modifiedTime` observed when `observedResolved` last became true. */
+  observedResolvedAt?: string;
+}
+
+/**
+ * The open approval cycle for the Proposal bound to a canonical Google Doc.
+ * Opened (or reopened) the moment a substantive comment is classified -- with
+ * the record's Approved Version binding cleared in the same breath, so a
+ * revised Version can never be released under a stale approval.
+ */
+export interface ProposalApprovalCycle {
+  proposalNumber: number;
+  /** The canonical Doc this cycle's comments live on. */
+  documentId: string;
+  /** The Version the cycle opened from. */
+  baseVersion: number;
+  openedAt: string;
+  /** Every actionable comment in this cycle, keyed by its Drive comment id. */
+  items: Record<string, ProposalCycleItem>;
+  /**
+   * Set when the cycle is fully satisfied (every item applied AND verified,
+   * every item observed resolved, Doc matches the exact current Version) but
+   * the approval write is HELD rather than applied, because the Google Drive
+   * API cannot attribute a resolution to the authorized user -- see
+   * RESOLUTION_ATTRIBUTION_LIMITATION. Cleared only when an Architect decision
+   * supplies a sanctioned resolution-identity signal.
+   */
+  heldForResolutionAttribution?: boolean;
 }
 
 export function versionLabel(version: number): string {
@@ -943,7 +999,22 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
       state.stage = "sales_proposal_approved";
       return state;
     }
-    return presentForApproval(env, state, sp);
+    // Still Pending Approval: a prior run may have stopped at the Doc step.
+    // Resume the same Doc-then-approve sequence (idempotent) rather than
+    // re-presenting an explicit approval request the rule no longer needs.
+    const resumed = await ensureDocThenAutoApprove(env, state, sp, `${sp.proposalId} ${versionLabel(sp.currentVersion)}`);
+    if (resumed.ok) {
+      await finishWorkStatus(env, state, `✅ ${sp.proposalId} ${versionLabel(sp.currentVersion)} reprocessed: Doc verified and approved.`, "succeeded");
+      await sendWorkspaceHatMessage(env, { ...state, hat: HAT }, `${sp.proposalId} ${versionLabel(sp.currentVersion)} was reprocessed: its Doc verified and it is now Approved (Artifact Status: ${sp.artifactStatus}).`);
+      state.stage = "sales_proposal_approved";
+      return resumed.state;
+    }
+    return failClosed(
+      env,
+      state,
+      `${sp.proposalId} ${versionLabel(sp.currentVersion)} is still Pending Approval because its canonical Doc could not be verified (${resumed.error}); reprocess this Handoff once the Doc step succeeds. Approval is never claimed before the Doc verifies.`,
+      { holdHandoffId: handoffId, tokens },
+    );
   }
 
   if (status !== "Pending" && status !== "Picked-up") {
@@ -1057,10 +1128,36 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   state.pendingSalesProposalRevision = undefined;
   state.blockedReason = undefined;
 
+  // The canonical Doc must exist and read back as this exact Version before
+  // any Approved state is exposed or any artifact release is possible.
+  const outcome = await ensureDocThenAutoApprove(env, state, sp, `${proposalId} ${versionLabel(1)}`);
+  if (!outcome.ok) {
+    await logActivity(env, {
+      entry: `Runtime Sales Proposal created but NOT approved: ${proposalId} ${versionLabel(1)} — ${matterToken}`,
+      type: "Activity",
+      area: "Sales",
+      activity: `From Handoff ${facts.handoffRef}. Content SHA-256 ${contentHash}. The canonical Google Doc could not be written and verified: ${outcome.error}.`,
+      nextActions: `Reprocess this Handoff to retry the Doc step; ${proposalId} ${versionLabel(1)} stays Pending Approval and is not releasable until the Doc verifies.`,
+      outcome: "Blocked",
+    });
+    await updateHandoff(
+      env,
+      handoffId,
+      { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${proposalId} ${versionLabel(1)} content written, but its canonical Doc failed to verify; not approved.`) },
+      workSessionContext(state),
+      tokens,
+    );
+    return failClosed(
+      env,
+      state,
+      `the initial Proposal content was written but its canonical Google Doc could not be written and verified (${outcome.error}); ${proposalId} ${versionLabel(1)} is left Pending Approval and is NOT approved. Reprocess this Handoff once the Doc step succeeds -- approval is never claimed before the Doc verifies.`,
+    );
+  }
+
   await updateHandoff(
     env,
     handoffId,
-    { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${proposalId} ${versionLabel(1)} created (Pending Approval) and presented to Martin.`) },
+    { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${proposalId} ${versionLabel(1)} created, Doc verified, and auto-approved.`) },
     workSessionContext(state),
     tokens,
   );
@@ -1068,11 +1165,83 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     entry: `Runtime Sales Proposal created: ${proposalId} ${versionLabel(1)} — ${matterToken}`,
     type: "Activity",
     area: "Sales",
-    activity: `From Handoff ${facts.handoffRef}. Quote ${formatMoney(facts.quote.currency, facts.quote.price)} preserved. Content SHA-256 ${contentHash}.`,
-    nextActions: `Martin to review and authorize ${proposalId} ${versionLabel(1)}.`,
+    activity: `From Handoff ${facts.handoffRef}. Quote ${formatMoney(facts.quote.currency, facts.quote.price)} preserved. Content SHA-256 ${contentHash}. Doc verified: ${outcome.url}`,
+    nextActions: `Approved by the initial-creation rule. Comment on the Doc to request a change.`,
     outcome: "Active",
   });
-  return presentForApproval(env, state, sp);
+  return presentApprovedProposal(env, outcome.state, sp, outcome.url);
+}
+
+/**
+ * The Doc-write-then-auto-approve sequence shared by initial creation and the
+ * idempotent reprocess path: bring the canonical Doc to the current Version
+ * (verified read-back) and only then apply the approval write. On any Doc
+ * failure it returns `{ok:false}` and the caller reports; nothing here
+ * claims approval before the Doc verifies.
+ */
+async function ensureDocThenAutoApprove(
+  env: Env,
+  state: WorkState,
+  sp: RuntimeSalesProposal,
+  label: string,
+): Promise<{ ok: true; url: string; state: WorkState } | { ok: false; error: string }> {
+  recordWorkAction(state, PROPOSAL_SUBMIT_ACTION);
+  const doc = await ensureProposalDoc(env, state, sp);
+  if (!doc.ok) return { ok: false, error: doc.error };
+
+  // Approved by the canonical Proposal rule itself -- "Approved once its
+  // content and canonical Google Doc have been successfully written and
+  // verified" -- NOT by a Telegram tap. The Work's Action advances to
+  // proposal_approve and the approval write runs through the same shared
+  // implementation as Martin's explicit decision.
+  recordWorkAction(state, PROPOSAL_APPROVE_ACTION);
+  const approvedVersionLink = plainText((await getPage(env, sp.pageId, workSessionReadContext(state.workId))).properties["Current Version Link"]).trim();
+  const approved = await applyProposalApprovalWrite(env, state, sp, sp.currentVersion, {
+    approvedVersionLink,
+    decisions: `${label} auto-approved by the initial-creation rule (content + canonical Doc written and verified). Entity ${sp.entityToken}, Matter ${sp.matterToken}.`,
+    rationalePrefix: `Initial version auto-approved under the canonical Proposal governance rule; Doc written and verified at ${doc.url}.`,
+    summaryHeading: `✅ Approved: *${label}*.`,
+  });
+  return { ok: true, url: doc.url, state: approved };
+}
+
+/**
+ * Presents an auto-approved (initial-creation) Proposal: no approval tap is
+ * requested, because approval already happened under the governance rule.
+ * Only the "Request changes" affordance and the Doc link are offered.
+ */
+async function presentApprovedProposal(env: Env, state: WorkState, sp: RuntimeSalesProposal, docUrl: string): Promise<WorkState> {
+  // The internal review material still reaches Martin even though no approval
+  // tap is requested: it is his context for deciding whether to comment a
+  // change, and dropping it would hide the open items / rationale conflict.
+  const notes = sp.facts
+    ? buildReviewNotes(sp.facts, { proposalId: sp.proposalId, version: sp.currentVersion, amendments: sp.amendments })
+    : "Unavailable: the upstream facts this Proposal was built from are not on this work item.";
+  const buttons = withWorkId(decisionButtons(sp, sp.currentVersion, false), state.workId);
+  await finishWorkStatus(
+    env,
+    state,
+    `✅ ${sp.proposalId} ${versionLabel(sp.currentVersion)} created, Doc verified, and approved.`,
+    "succeeded",
+  );
+  const message = [
+    [
+      `*${sp.proposalId} ${versionLabel(sp.currentVersion)} is approved.*`,
+      `Proposal: ${sp.proposalId} · Version: ${versionLabel(sp.currentVersion)}`,
+      `Entity: ${sp.entityToken} · Matter: ${sp.matterToken} · Source Handoff: ${sp.handoffRef}`,
+      `Approval Status: ${sp.approvalStatus} · Approved Version: ${versionLabel(sp.approvedVersion ?? sp.currentVersion)} · Artifact Status: ${sp.artifactStatus}`,
+      `Record: ${sp.pageUrl}`,
+      `Read it here (comment on the Doc to request a change): ${docUrl}`,
+    ].join("\n"),
+    "=== INTERNAL REVIEW MATERIAL — not part of the Proposal, not stored in Proposal Content, not approved with it ===",
+    notes,
+    `No approval tap is needed for the initial Version: it is approved by the canonical Proposal rule once its content and Doc are written and verified. To change it, comment on the Doc (or use Request changes below) -- a substantive request reopens approval for a new Version.`,
+  ].join("\n\n");
+  await sendWorkspaceHatMessage(env, { ...state, hat: HAT }, message, buttons);
+  state.pendingActionSummary = undefined;
+  state.stage = "sales_proposal_approved";
+  state.awaiting = undefined;
+  return state;
 }
 
 async function staleDecision(env: Env, state: WorkState, detail: string): Promise<WorkState> {
@@ -1134,6 +1303,26 @@ export async function handleSalesProposalDecision(
   if (sp.approvalStatus !== "Pending Approval" || version !== sp.currentVersion) {
     return staleDecision(env, state, `approval for ${sp.proposalId} ${versionLabel(version)} is stale (current: ${versionLabel(sp.currentVersion)}, ${sp.approvalStatus}).`);
   }
+
+  // An open comment-approval cycle outranks a bare approve tap: while any
+  // actionable comment in the current cycle is unapplied, unverified or
+  // unresolved, this Version may not be approved. The tap cannot wave the
+  // outstanding request away -- the cycle must close on its own terms (see
+  // evaluateProposalApprovalCycle). This is what makes "no approve while a
+  // requested change is outstanding" hold for the Telegram route too.
+  const openCycle = state.proposalApprovalCycle;
+  if (openCycle && openCycle.proposalNumber === proposalNumber) {
+    const unsatisfied = unsatisfiedCycleItems(openCycle);
+    if (unsatisfied.length > 0) {
+      await sendWorkspaceHatMessage(
+        env,
+        { ...state, hat: HAT },
+        `Cannot approve ${sp.proposalId} ${versionLabel(version)}: ${unsatisfied.length} actionable comment(s) in the current approval cycle are not yet applied, verified and resolved.\n${unsatisfied.map((i) => `· ${i.commentId}: ${i.reason}`).join("\n")}\nResolve every comment on the Doc after its change is applied and verified, then approval can complete.`,
+      );
+      return state;
+    }
+  }
+
   const shown = sp.versions.find((v) => v.version === version);
   if (!shown) return staleDecision(env, state, `no record of the ${versionLabel(version)} content Martin was shown.`);
 
@@ -1167,8 +1356,51 @@ export async function handleSalesProposalDecision(
   // Bound to the Work's own recorded action, which was just advanced to
   // PROPOSAL_APPROVE_ACTION above -- so the proof and the resolved Action cannot
   // be two different names for this write.
-  const approvalProof = mintApprovalProofForWork(state, env.PROPOSALS_DATA_SOURCE_ID);
   const approvedVersionLink = plainText(live.properties["Current Version Link"]).trim();
+  return applyProposalApprovalWrite(env, state, sp, version, {
+    approvedVersionLink,
+    decisions: `Martin approved ${sp.proposalId} ${versionLabel(version)} (Entity ${sp.entityToken}, Matter ${sp.matterToken}).`,
+    rationalePrefix: `Approval bound to Proposal ID ${sp.proposalId} + Version ${versionLabel(version)}; content SHA-256 ${shown.contentHash}. Artifact Status set to Pending Identity Resolution.`,
+    summaryHeading: `✅ Approved: *${sp.proposalId} ${versionLabel(version)}*.`,
+  });
+}
+
+/**
+ * The ONE approval write. Both approval routes converge here -- Martin's
+ * explicit Telegram decision (handleSalesProposalDecision) and the
+ * initial-creation auto-approval (finalizeInitialApprovalApproval) -- so
+ * there is exactly one implementation of "move this Proposal to Approved",
+ * of its ApprovalProof binding, of its Matter-status consequence, and of its
+ * Activity & Decision Log entry. A second mechanism would let the two drift,
+ * and the drift would be exactly the thing the release gate depends on.
+ *
+ * The CALLER has already verified every precondition against the live record
+ * (it is the right Proposal, still Pending Approval, at this exact Version,
+ * with unchanged tokens and a content hash matching what is being approved,
+ * and -- for an auto- or comment-driven approval -- that the canonical Doc was
+ * written/updated and read back as this exact Version). This function only
+ * performs the write and its consequences; it never re-decides whether the
+ * approval is warranted.
+ */
+async function applyProposalApprovalWrite(
+  env: Env,
+  state: WorkState,
+  sp: RuntimeSalesProposal,
+  version: number,
+  opts: {
+    /** The already-read "Current Version Link", copied onto "Approved Version Link". */
+    approvedVersionLink: string;
+    decisions: string;
+    rationalePrefix: string;
+    summaryHeading: string;
+  },
+): Promise<WorkState> {
+  // The Work's Action must already be proposal_approve when this runs (both
+  // callers advance it immediately before), and the proof is bound to that
+  // recorded action. Access independently re-resolves proposal_approve from
+  // the Work, confirms it requires approval, and checks the proof against
+  // this exact Work, this exact action and this exact Proposals data source.
+  const approvalProof = mintApprovalProofForWork(state, env.PROPOSALS_DATA_SOURCE_ID);
 
   await updatePage(
     env,
@@ -1180,7 +1412,7 @@ export async function handleSalesProposalDecision(
       // The readable page of exactly the version approved (read from the
       // record just verified as at this version and content hash). Left
       // untouched for a version that predates version pages.
-      ...(approvedVersionLink ? { "Approved Version Link": url(approvedVersionLink) } : {}),
+      ...(opts.approvedVersionLink ? { "Approved Version Link": url(opts.approvedVersionLink) } : {}),
     },
     workSessionContext(state, approvalProof, PROPOSAL_APPROVE_ACTION),
   );
@@ -1230,8 +1462,8 @@ export async function handleSalesProposalDecision(
     entry: `Proposal approved: ${sp.proposalId} ${versionLabel(version)} — ${sp.matterToken}`,
     type: "Decision",
     area: "Sales",
-    decisions: `Martin approved ${sp.proposalId} ${versionLabel(version)} (Entity ${sp.entityToken}, Matter ${sp.matterToken}).`,
-    decisionRationale: `Approval bound to Proposal ID ${sp.proposalId} + Version ${versionLabel(version)}; content SHA-256 ${shown.contentHash}. Artifact Status set to Pending Identity Resolution. ${matterStatusNote}`,
+    decisions: opts.decisions,
+    decisionRationale: `${opts.rationalePrefix} ${matterStatusNote}`,
     nextActions: "Identity & Artifact environment to resolve identity and produce the client-facing artifact from this approved Version.",
     outcome: "Complete",
   });
@@ -1239,12 +1471,246 @@ export async function handleSalesProposalDecision(
   await sendWorkspaceHatMessage(
     env,
     { ...state, hat: HAT },
-    `✅ Approved: *${sp.proposalId} ${versionLabel(version)}*.\nApproved Version: ${versionLabel(version)} · Artifact Status: Pending Identity Resolution.\n${matterStatusNote}\n\nThe approved Version is now available to the Identity & Artifact environment for the client-facing artifact. The runtime has not created any client-facing artifact or file.`,
+    `${opts.summaryHeading}\nApproved Version: ${versionLabel(version)} · Artifact Status: Pending Identity Resolution.\n${matterStatusNote}\n\nThe approved Version is now available to the Identity & Artifact environment for the client-facing artifact. The runtime has not created any client-facing artifact or file.`,
     buttons,
   );
   state.stage = "sales_proposal_approved";
   state.awaiting = undefined;
   return state;
+}
+
+// ---------------------------------------------------------------------------
+// Google Doc comment-approval cycle: initial auto-approval, immediate reopen,
+// separate resolution tracking, and the fail-closed approval gate.
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a resolution observed on a Proposal's Doc CANNOT currently be treated as
+ * "the authorized user resolved it" -- the precise, evidence-backed limitation
+ * behind holding a satisfied cycle rather than writing Approved. This is the
+ * record the Architect decision needs; it is logged, not assumed away.
+ *
+ * Live probe (Drive Comments API, fields=comments(*), 2026-10-11):
+ * a comment's own resource has NO resolver identity and NO resolution
+ * timestamp. Its fields are exactly {id, content, htmlContent, quotedFileContent,
+ * anchor, author, createdTime, modifiedTime, deleted, resolved, replies}.
+ * `resolved` is a bare boolean. The `author` is the COMMENT's author, not the
+ * resolver, so it must never be read as one.
+ *
+ * The only resolver-bearing signal the API exposes is a `replies[]` entry
+ * carrying `action: "resolve"` (with its own author and createdTime). But the
+ * Worker fetches comments with the SAME Google account token Martin's own
+ * account uses (single authorized account per Doc), so that reply's author is
+ * `me:true` whether the resolve was Martin's UI click or a Runtime API call.
+ * In other words: the API can attribute a resolution to the ACCOUNT, but it
+ * cannot distinguish "the human user resolved it" from "the Runtime resolved
+ * it with that account's token" -- so it cannot, on its own, establish that
+ * THE AUTHORIZED USER resolved it. Treating it as sufficient would be exactly
+ * the unsupported substitution requirement 4 forbids.
+ */
+export const RESOLUTION_ATTRIBUTION_LIMITATION =
+  "Google Drive's Comments API exposes resolution only as a boolean `resolved` flag with no resolver identity and no resolution timestamp (verified live 2026-10-11). The sole resolver-bearing signal is a replies[] entry with action:\"resolve\", but because the Runtime reads comments with the same authorized account token Martin's account uses, that signal identifies the ACCOUNT, not the human user, and cannot distinguish Martin's resolve from a Runtime-made resolve. So a resolution cannot be attributed to the authorized user from available API evidence.";
+
+/**
+ * Reads the canonical Doc back through the governed read path and confirms it
+ * shows EXACTLY this Proposal's current Version: the Doc is bound to the
+ * current Version, and its text reads back byte-identical (modulo trailing
+ * whitespace) to the canonical layout of the current Version's content. This
+ * is the "the current document matches the exact current Version and content"
+ * condition an approval must never skip.
+ */
+export async function verifyProposalDocShowsVersion(env: Env, sp: RuntimeSalesProposal): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!sp.doc) return { ok: false, reason: "no canonical Google Doc is bound to this Proposal" };
+  if (sp.doc.version !== sp.currentVersion) {
+    return { ok: false, reason: `the Doc is bound to ${versionLabel(sp.doc.version)} but the current Version is ${versionLabel(sp.currentVersion)}` };
+  }
+  const token = await getValidGoogleAccessToken(env, sp.doc.accountIdentifier);
+  if (!token) return { ok: false, reason: "the authorized Google account could not be used to read the Doc back (no valid access token)" };
+  const res = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(sp.doc.documentId)}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return { ok: false, reason: `the Doc could not be read back for verification (HTTP ${res.status})` };
+  const expected = currentDocLayout(sp).text.trimEnd();
+  const actual = extractDocText(await res.json()).trimEnd();
+  if (actual !== expected) return { ok: false, reason: "the Doc's text does not match the current Version's canonical content" };
+  return { ok: true };
+}
+
+/**
+ * Names every actionable comment in the cycle that is not yet a satisfied
+ * request: its change must be APPLIED through the governed path, VERIFIED by
+ * the Doc read-back, AND observed resolved by the authorized user. Any one
+ * shortfall keeps the Proposal out of Approved. Used both by the comment
+ * gate and by Martin's explicit approve tap (which cannot override it).
+ */
+export function unsatisfiedCycleItems(cycle: ProposalApprovalCycle): { commentId: string; reason: string }[] {
+  const out: { commentId: string; reason: string }[] = [];
+  for (const [commentId, item] of Object.entries(cycle.items)) {
+    if (item.outcome === "refused") {
+      out.push({ commentId, reason: "the requested change was refused and could not be fulfilled" });
+      continue;
+    }
+    if (item.outcome !== "applied") {
+      out.push({ commentId, reason: "the requested change has not been applied through the governed path and verified" });
+      continue;
+    }
+    if (!item.observedResolved) {
+      out.push({ commentId, reason: "the comment is not yet observed resolved on the Doc" });
+    }
+  }
+  return out;
+}
+
+/**
+ * Opens (or reopens) the Proposal's approval cycle the moment a substantive
+ * comment is classified -- BEFORE any revised Version can be produced or
+ * released. It immediately sets Approval Status to Pending Approval and
+ * clears the previous Approved Version binding (in memory and on the live
+ * record), and records the comment as the cycle's first actionable item.
+ *
+ * This is the "a substantive comment reopens the approval cycle" invariant:
+ * if the subsequent change fails to apply, the Proposal has ALREADY left the
+ * Approved state, so nothing stale can be released.
+ */
+export async function reopenProposalApprovalCycle(
+  env: Env,
+  state: WorkState,
+  sp: RuntimeSalesProposal,
+  input: { documentId: string; commentId: string; commentedVersion: number; requestedChange: string },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // The Doc the comment lives on must be this Proposal's canonical Doc, and
+  // the comment must be against the version that Doc currently shows -- a
+  // comment on a stale binding is refused rather than silently absorbed.
+  // Both guards run BEFORE any state is touched, so a refused comment neither
+  // reopens the cycle nor advances this Work's recorded Action.
+  if (!sp.doc || sp.doc.documentId !== input.documentId) {
+    return { ok: false, reason: "the comment is not on this Proposal's canonical Doc" };
+  }
+  if (input.commentedVersion !== sp.currentVersion) {
+    return { ok: false, reason: `the comment is against ${versionLabel(input.commentedVersion)}, not the current ${versionLabel(sp.currentVersion)}` };
+  }
+
+  recordWorkAction(state, PROPOSAL_REVISION_ACTION);
+  const access = workSessionContext(state, undefined, PROPOSAL_REVISION_ACTION);
+  const wasApproved = sp.approvalStatus === "Approved";
+  // Clear the approval binding first, on the live record, so the reopen is
+  // durable even if the rest of this call fails.
+  await updatePage(
+    env,
+    sp.pageId,
+    {
+      "Approval Status": select("Pending Approval"),
+      "Approved Version": richText(""),
+      // A previously released artifact is Held the instant its approval is
+      // withdrawn -- the same guard the ordinary revision path applies.
+      ...(sp.artifactStatus !== "Not Requested" ? { "Artifact Status": select("Held") } : {}),
+    },
+    access,
+  );
+  sp.approvalStatus = "Pending Approval";
+  sp.approvedVersion = undefined;
+  if (sp.artifactStatus !== "Not Requested") sp.artifactStatus = "Held";
+
+  const now = new Date().toISOString();
+  const existing = state.proposalApprovalCycle;
+  const cycle: ProposalApprovalCycle =
+    existing && existing.proposalNumber === sp.proposalNumber && existing.documentId === input.documentId
+      ? existing
+      : { proposalNumber: sp.proposalNumber, documentId: input.documentId, baseVersion: sp.currentVersion, openedAt: now, items: {} };
+  cycle.items[input.commentId] = {
+    commentId: input.commentId,
+    intent: "substantive",
+    requestedChange: input.requestedChange,
+    commentedVersion: input.commentedVersion,
+    outcome: "awaiting_application",
+    observedResolved: false,
+  };
+  cycle.heldForResolutionAttribution = undefined;
+  state.proposalApprovalCycle = cycle;
+
+  if (wasApproved) {
+    await logActivity(env, {
+      entry: `Approval cycle reopened: ${sp.proposalId} — ${sp.matterToken}`,
+      type: "Decision",
+      area: "Sales",
+      decisions: `A substantive comment (${input.commentId}) reopened ${sp.proposalId}'s approval cycle, withdrawing the Approved Version binding before any revised Version could be released.`,
+      decisionRationale: RESOLUTION_ATTRIBUTION_LIMITATION,
+      nextActions: "Apply the requested change through the governed revision path; the Proposal returns to Approved only after every actionable comment in the cycle is applied, verified and resolved.",
+      outcome: "Active",
+    });
+  }
+  return { ok: true };
+}
+
+/**
+ * Records how a cycle item ended, after the governed path ran. `applied` is
+ * only honest when the revision was created AND the Doc was brought to it and
+ * verified; anything else is `refused` and never satisfies the cycle.
+ */
+export function recordProposalCycleItemOutcome(state: WorkState, commentId: string, outcome: "applied" | "refused" | "awaiting_application", appliedVersion?: number): void {
+  const cycle = state.proposalApprovalCycle;
+  if (!cycle) return;
+  const item = cycle.items[commentId];
+  if (!item) return;
+  item.outcome = outcome;
+  item.appliedVersion = appliedVersion;
+}
+
+/**
+ * The approval gate. Fed the resolution state observed on the Doc this poll,
+ * it first records each cycle item's resolution, then decides:
+ *  - every actionable comment applied AND verified, AND
+ *  - every actionable comment observed resolved, AND
+ *  - the canonical Doc reads back as the exact current Version -- only then
+ *    is the cycle SATISFIED. Because resolution cannot be attributed to the
+ *  authorized user (RESOLUTION_ATTRIBUTION_LIMITATION), a satisfied cycle is
+ *   HELD (logged, Proposal stays Pending Approval) rather than auto-approved.
+ *
+ * A resolution that arrives before its change is applied can never approve,
+ * because the item is still not `applied`.
+ */
+export async function evaluateProposalApprovalCycle(
+  env: Env,
+  state: WorkState,
+  observations: { commentId: string; resolved: boolean; modifiedTime?: string }[],
+): Promise<{ kind: "no_cycle" | "held_unsatisfied" | "held_for_attribution" | "already_approved"; reasons?: string[] }> {
+  const sp = state.salesProposal;
+  const cycle = state.proposalApprovalCycle;
+  if (!sp || !cycle) return { kind: "no_cycle" };
+  if (cycle.proposalNumber !== sp.proposalNumber) return { kind: "no_cycle" };
+  if (sp.approvalStatus === "Approved") return { kind: "already_approved" };
+
+  for (const o of observations) {
+    const item = cycle.items[o.commentId];
+    if (!item) continue; // a comment outside the current cycle never advances it
+    item.observedResolved = o.resolved;
+    if (o.resolved && o.modifiedTime) item.observedResolvedAt = o.modifiedTime;
+  }
+
+  const unsatisfied = unsatisfiedCycleItems(cycle);
+  if (unsatisfied.length > 0) {
+    return { kind: "held_unsatisfied", reasons: unsatisfied.map((u) => `${u.commentId}: ${u.reason}`) };
+  }
+
+  const docCheck = await verifyProposalDocShowsVersion(env, sp);
+  if (!docCheck.ok) {
+    return { kind: "held_unsatisfied", reasons: [docCheck.reason] };
+  }
+
+  // Every actionable comment is applied, verified and resolved, and the Doc
+  // matches the current Version -- yet resolution is not attributable to the
+  // authorized user. Fail closed and escalate; never silently approve.
+  if (!cycle.heldForResolutionAttribution) {
+    cycle.heldForResolutionAttribution = true;
+    await logActivity(env, {
+      entry: `Approval cycle satisfied but HELD: ${sp.proposalId} ${versionLabel(sp.currentVersion)} — ${sp.matterToken}`,
+      type: "Decision",
+      area: "Sales",
+      decisions: `Every actionable comment in the current cycle is applied and verified, and all are observed resolved, but the Proposal is NOT approved because resolution cannot be attributed to the authorized user.`,
+      decisionRationale: RESOLUTION_ATTRIBUTION_LIMITATION,
+      nextActions: "Architect decision required: supply a sanctioned resolution-identity signal (for example a Telegram confirmation of resolution) before resolution may complete approval. Until then the Proposal stays Pending Approval and is not releasable.",
+      outcome: "Blocked",
+    }).catch((err) => console.error("Failed to log satisfied-but-held cycle", err));
+  }
+  return { kind: "held_for_attribution", reasons: [RESOLUTION_ATTRIBUTION_LIMITATION] };
 }
 
 /**
@@ -1461,7 +1927,7 @@ export type ProposalDocCommentResult =
 export async function applyProposalDocComment(
   env: Env,
   state: WorkState,
-  input: { proposalNumber: number; version: number; text: string },
+  input: { proposalNumber: number; version: number; text: string; commentId?: string; documentId?: string },
 ): Promise<{ state: WorkState; result: ProposalDocCommentResult }> {
   const sp = state.salesProposal;
   if (!sp || sp.proposalNumber !== input.proposalNumber) {
@@ -1477,12 +1943,47 @@ export async function applyProposalDocComment(
     };
   }
   state.blockedReason = undefined;
+
+  // IMMEDIATE REOPEN, before any revision is applied: the moment this comment
+  // is treated as substantive, the Proposal leaves Approved and the Approved
+  // Version binding is cleared on the live record. So even if the change then
+  // fails to apply, nothing stale stays releasable -- this is the invariant
+  // "a substantive comment reopens the approval cycle before any revised
+  // Version can be released", and it is why the reopen is not folded into the
+  // revision's own Pending write (which happens only if the change succeeds).
+  let cycleItemRegistered = false;
+  if (input.commentId && input.documentId) {
+    const reopened = await reopenProposalApprovalCycle(env, state, sp, {
+      documentId: input.documentId,
+      commentId: input.commentId,
+      commentedVersion: input.version,
+      requestedChange: input.text,
+    });
+    if (!reopened.ok) {
+      return { state, result: { kind: "refused", detail: `this comment could not join the Proposal's approval cycle (${reopened.reason}); the change was not applied.` } };
+    }
+    cycleItemRegistered = true;
+  }
+
   state.pendingSalesProposalRevision = { proposalNumber: sp.proposalNumber, fromVersion: input.version };
   await handleSalesProposalRevisionText(env, state, input.text);
   const after = state.salesProposal!;
   if (after.currentVersion === input.version + 1) {
+    if (cycleItemRegistered && input.commentId) {
+      // A new Version exists, but the cycle item is only `applied` once the
+      // canonical Doc was brought to that Version AND verified to match it.
+      // If the Doc update failed, the item stays unapplied and the cycle
+      // cannot complete, so the Proposal stays out of Approved.
+      const docCheck = await verifyProposalDocShowsVersion(env, after);
+      if (docCheck.ok) {
+        recordProposalCycleItemOutcome(state, input.commentId, "applied", after.currentVersion);
+      } else {
+        console.warn(`Proposal cycle item ${input.commentId} on ${after.proposalId}: new Version ${versionLabel(after.currentVersion)} exists but the Doc did not verify (${docCheck.reason}); item left unapplied.`);
+      }
+    }
     return { state, result: { kind: "revised", newVersion: after.currentVersion } };
   }
+  if (cycleItemRegistered && input.commentId) recordProposalCycleItemOutcome(state, input.commentId, "refused");
   state.pendingSalesProposalRevision = undefined;
   return { state, result: { kind: "refused", detail: state.blockedReason ?? "the change was not applied." } };
 }
@@ -1733,7 +2234,13 @@ export async function handleProposalDocClarificationText(env: Env, state: WorkSt
     return applied.state;
   }
 
-  const revised = await applyProposalDocComment(env, state, { proposalNumber: pending.proposalNumber, version: pending.version, text: pending.text });
+  const revised = await applyProposalDocComment(env, state, {
+    proposalNumber: pending.proposalNumber,
+    version: pending.version,
+    text: pending.text,
+    commentId: pending.commentId,
+    documentId: pending.documentId,
+  });
   if (revised.result.kind === "revised") {
     await sendWorkspaceHatMessage(
       env,
