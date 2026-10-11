@@ -1845,8 +1845,11 @@ export async function handleGoogleFolderSelection(
       `*Account*: ${accountIdentifier}\n` +
       `*Folder*: ${folderName} (\`${folderId}\`)\n\n` +
       "Confirming will create exactly ONE disposable Google Doc through the shared Tool Registry " +
-      "(`google_docs.create_and_verify`), with read-back verification and durable operation records. " +
-      "Nothing has been created yet, and the production proposal folder is never touched.\n\nConfirm?";
+      "(`google_docs.create_and_verify`, proved by read-back) and then REWRITE that same disposable " +
+      "Doc's content through the registered `google_docs.update_and_verify` operation (also proved by " +
+      "read-back) -- each as its own governed invocation with its own durable operation records, both " +
+      "judged by this Work's recorded Action. Nothing has been created yet; the rewrite can only ever " +
+      "target the Doc this same run creates, and the production proposal folder is never touched.\n\nConfirm?";
     await sendWorkspaceHatMessage(env, target, messageText, confirmButtons);
 
     await logActivity(env, {

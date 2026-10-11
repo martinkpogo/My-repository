@@ -23,6 +23,7 @@ import type { Env, WorkState } from "./types";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendWorkspaceHatMessageWithOutcome } from "./telegram";
 import { logActivity, type LogEntryInput } from "./log";
 import { getSessionStub, setActiveWorkId } from "./router";
+import type { ToolInvocationOutcome } from "./runtime/toolRegistry";
 import { consumeOpaqueOption, listAuthorizedGoogleAccounts, saveOpaqueOption } from "./googleOAuth";
 import {
   GOOGLE_DOCS_SMOKE_WORK,
@@ -114,7 +115,9 @@ export async function startGoogleDocsSmokeFlow(
     env,
     { ...target, workId },
     "🧪 *GOVERNED TOOL REGISTRY SMOKE* (LOG-1069)\n\n" +
-      "This runs EXACTLY one `google_docs.create_and_verify` through the shared Tool Registry against a *disposable* Drive folder you choose. " +
+      "This runs EXACTLY one `google_docs.create_and_verify` -- and, after that creation is proved, " +
+      "EXACTLY one `google_docs.update_and_verify` rewrite of that same disposable Doc -- through the " +
+      "shared Tool Registry against a *disposable* Drive folder you choose. " +
       "Nothing is created until you explicitly confirm, and the production proposal folder is never touched.\n\n" +
       "Select the authorized Google account to use:",
     buttons,
@@ -195,6 +198,47 @@ function smokeWorkDefect(state: WorkState): string | null {
   return null;
 }
 
+/**
+ * Precise, non-overclaiming reporting for the governed REWRITE step: it
+ * only ever runs after a creation that was already proved, so each branch
+ * states exactly what the rewrite's own outcome proved (or failed to
+ * prove). No branch is worded so that a failed/unverified rewrite could be
+ * read as a full success.
+ */
+function rewriteOutcomeMessage(rewrite: ToolInvocationOutcome): string {
+  switch (rewrite.state) {
+    case "succeeded":
+      return (
+        "🔁 *Rewrite verified* -- `google_docs.update_and_verify` rewrote the disposable Doc's content " +
+        "and its read-back matched the requested rewrite."
+      );
+    case "denied":
+      return (
+        `🛑 *Rewrite DENIED by the governance boundary* -- ${rewrite.reason ?? "no detail reported"}\n\n` +
+        "No rewrite request was made; the Doc keeps its creation content."
+      );
+    case "failed":
+      return (
+        `🛑 *Rewrite FAILED* -- ${rewrite.reason ?? "no detail reported"}\n\n` +
+        "The provider definitely rejected this attempt; no rewrite was applied and nothing is retried automatically."
+      );
+    case "partially_completed":
+      return (
+        `⚠️ *Rewrite PARTIALLY COMPLETED* -- ${rewrite.reason ?? "no detail reported"}\n\n` +
+        "The Doc may now hold partial rewrite state; it must be reconciled by reading it back before " +
+        "anything else is attempted (never blindly re-rewritten)."
+      );
+    case "unverified":
+      return (
+        `⚠️ *Rewrite outcome UNVERIFIED* -- ${rewrite.reason ?? "no detail reported"}\n\n` +
+        "The remote state after the rewrite could not be confirmed. The Doc must be reconciled by " +
+        "reading it back before anything else is attempted; no automatic retry was made."
+      );
+    default:
+      return `⚠️ *Rewrite ended with unexpected state '${(rewrite as { state: string }).state}'* -- no assumption was made; inspect the smoke Work's durable operation records.`;
+  }
+}
+
 function smokeOutcomeMessage(result: GoogleDocsSmokeResult): string {
   if (result.blocked_reason) {
     return `⚠️ *Registry smoke blocked* -- ${result.blocked_reason}\n\nNothing was created.`;
@@ -203,6 +247,30 @@ function smokeOutcomeMessage(result: GoogleDocsSmokeResult): string {
   if (!outcome) {
     return "⚠️ *Registry smoke returned no outcome* -- nothing can be asserted about the remote state. No retry was attempted.";
   }
+  const rewrite = result.rewrite_outcome;
+
+  // The full two-step run: the creation was proved, so a rewrite exists.
+  // The headline reflects BOTH truths -- it claims success only when both
+  // governed invocations verified, and otherwise states plainly that the
+  // run did not complete.
+  if (outcome.state === "succeeded" && rewrite) {
+    const url = outcome.remote_resource?.url ? `\nDoc: ${outcome.remote_resource.url}` : "";
+    if (rewrite.state === "succeeded") {
+      return (
+        "✅ *Registry smoke SUCCEEDED* -- `google_docs.create_and_verify` created the disposable document " +
+        `and read-back verified it, then \`google_docs.update_and_verify\` REWROTE that same disposable Doc ` +
+        `and read-back verified the rewritten content.${url}\n` +
+        `Operation evidence for both governed invocations is kept on smoke Work \`${result.work_id}\`.`
+      );
+    }
+    return (
+      `⚠️ *Registry smoke PARTIALLY COMPLETED* -- creation succeeded and was verified${url}, but the ` +
+      `rewrite step did NOT complete cleanly (\`${rewrite.state}\`).\n\n${rewriteOutcomeMessage(rewrite)}\n\n` +
+      `The smoke Work \`${result.work_id}\` stays OPEN with its durable operation records for ` +
+      "reconciliation; no retry was attempted."
+    );
+  }
+
   switch (outcome.state) {
     case "succeeded": {
       const url = outcome.remote_resource?.url ? `\nDoc: ${outcome.remote_resource.url}` : "";
