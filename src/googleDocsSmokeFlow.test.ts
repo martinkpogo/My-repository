@@ -25,7 +25,11 @@ import { GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX } from "./runtime/tools/googleDocsSmok
  *    fail closed with ZERO Google requests;
  *  - cancel and every refusal create nothing; an uncertain outcome keeps
  *    the Work open with its durable records and clears the confirmation so
- *    it can never be blindly replayed.
+ *    it can never be blindly replayed;
+ *  - every `callback_data` the flow can stage or emit obeys Telegram's
+ *    64-UTF-8-byte inline-keyboard limit, which the bounded smoke Work id
+ *    exists to guarantee (a full UUID overflowed it and both live picker
+ *    sends were refused with HTTP 400 BUTTON_DATA_INVALID).
  *
  * Every Google interaction is a scripted fetch fake with call counters --
  * no real Google document is ever created -- and every refusal asserts
@@ -570,4 +574,107 @@ test("a stale creation-approval button on a smoke Work cannot create anything", 
   assert.match(telegramTexts(telegram), /No valid pending Google action found/);
   assert.equal(driveCreates(calls).length, 0);
   assert.equal(next.pendingSmokeSelection?.folderId, FOLDER_ID, "the smoke state is not disturbed by the stale approval attempt");
+});
+
+// ---------------------------------------------------------------------------
+// Telegram callback_data byte-length invariant: the bounded smoke Work id
+// keeps EVERY callback shape the smoke flow can stage or emit within
+// Telegram's inline-keyboard limit (1-64 UTF-8 bytes). The pre-fix full
+// UUID embedded in these callbacks measured 76 bytes for the account picker
+// and both live sends were refused with HTTP 400 BUTTON_DATA_INVALID
+// (2026-10-10). Bytes are always measured with TextEncoder -- JavaScript
+// string length would silently miss multi-byte content.
+// ---------------------------------------------------------------------------
+
+const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+const utf8Bytes = (value: string): number => new TextEncoder().encode(value).length;
+
+function assertWithinTelegramLimit(shape: string, data: string): void {
+  assert.ok(
+    utf8Bytes(data) <= TELEGRAM_CALLBACK_DATA_MAX_BYTES,
+    `${shape} callback_data is ${utf8Bytes(data)} UTF-8 bytes -- Telegram refuses anything over ` +
+      `${TELEGRAM_CALLBACK_DATA_MAX_BYTES} bytes with BUTTON_DATA_INVALID: ${data}`,
+  );
+}
+
+test("the generated smoke Work id keeps the required prefix with an exact bounded 16-hex-char suffix, and its account-picker callbacks fit Telegram's 64-byte limit", async (t: any) => {
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT), ...googleAccountSeed(SECOND_ACCOUNT) });
+  const { calls, telegram } = installFake(t, () => json({}));
+
+  await startGoogleDocsSmokeFlow(env, 111, 222);
+
+  // The id the flow actually generated this run: prefix preserved for
+  // routing/validation, exactly 16 hex chars after it -- never a full UUID.
+  const workId = String(inits(env)[0][0]);
+  assert.ok(workId.startsWith(GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX), "routing, isGoogleDocsSmokeWorkId, and the admin gate key off this prefix");
+  assert.match(workId, /^smoke-googledocs-[0-9a-f]{16}$/, "the suffix must be exactly 16 lowercase hex characters");
+  assert.equal(workId.length, GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX.length + 16);
+
+  // Both authorized accounts are offered, every account-picker callback
+  // carries the generated id, and every one is within the byte limit.
+  const datas = callbackDatas(telegram);
+  assert.ok(datas.length >= 2, "both authorized accounts must be offered");
+  for (const data of datas) {
+    assert.ok(data.startsWith(`googleaccount:${workId}:`), `unexpected account-picker callback: ${data}`);
+    assertWithinTelegramLimit("googleaccount (account picker)", data);
+  }
+
+  assert.equal(calls.length, 0, "the shorter id costs nothing: initiation still makes no Google request");
+});
+
+test("every callback_data shape the smoke flow can stage or emit -- account, folder, confirm, cancel, and the sessions switch row -- stays within Telegram's 64-byte limit", async (t: any) => {
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  const { telegram } = installFake(t, (call) => {
+    if (call.url.includes("/drive/v3/files")) return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME }] });
+    return json({});
+  });
+
+  const measured: { shape: string; data: string }[] = [];
+  const capture = (shape: string) => {
+    for (const data of callbackDatas(telegram)) measured.push({ shape, data });
+    telegram.length = 0; // isolate each stage's own sends
+  };
+
+  // Stage 1 -- account picker (startGoogleDocsSmokeFlow):
+  // googleaccount:<workId>:<opaqueId>
+  await startGoogleDocsSmokeFlow(env, 111, 222);
+  const workId = String(inits(env)[0][0]);
+  capture("googleaccount");
+
+  // Stage 2 -- folder picker (shared handleGoogleAccountSelection, smoke
+  // branch): googlefolder:<workId>:<opaqueId>
+  const state = smokeState(workId);
+  const accountOptionId = await stageOption(env, workId, { kind: "account", smoke: true, accountIdentifier: ACCOUNT });
+  await handleGoogleAccountSelection(env, state, accountOptionId);
+  capture("googlefolder");
+
+  // Stage 3 -- confirmation (shared handleGoogleFolderSelection, smoke
+  // branch): googlesmokeconfirm:<workId>:<opaqueId> + ...:<workId>:cancel
+  const folderOptionKey = optionKeys(env, workId).find((k) => JSON.parse(store(env).get(k) as string).kind === "folder");
+  assert.ok(folderOptionKey, "the folder option must have been staged");
+  const folderOptionId = String(folderOptionKey.split(":").pop());
+  await handleGoogleFolderSelection(env, state, folderOptionId);
+  capture("googlesmokeconfirm");
+
+  // Stage 4 -- the /sessions row for this still-open smoke Work, built in
+  // index.ts's listSessions as `switch:${s.workId}:` (index.ts loads the
+  // Workers runtime and cannot be imported here -- this is that exact
+  // template literal, exercised against the generated id).
+  measured.push({ shape: "switch", data: `switch:${workId}:` });
+
+  // Every shape the smoke Work can reach is present...
+  assert.ok(measured.some((m) => m.shape === "googleaccount" && m.data.startsWith(`googleaccount:${workId}:`)));
+  assert.ok(measured.some((m) => m.shape === "googlefolder" && m.data.startsWith(`googlefolder:${workId}:`)));
+  assert.ok(
+    measured.some((m) => m.shape === "googlesmokeconfirm" && m.data.startsWith(`googlesmokeconfirm:${workId}:`) && !m.data.endsWith(":cancel")),
+    "the confirm button must be staged",
+  );
+  assert.ok(measured.some((m) => m.shape === "googlesmokeconfirm" && m.data === `googlesmokeconfirm:${workId}:cancel`), "the cancel button must be staged");
+  assert.ok(measured.some((m) => m.shape === "switch" && m.data === `switch:${workId}:`));
+  assert.equal(measured.some((m) => m.data.startsWith("googleaction:")), false, "the smoke flow never stages legacy creation-approval callbacks");
+
+  // ...and every single value is within Telegram's hard byte limit.
+  for (const { shape, data } of measured) {
+    assertWithinTelegramLimit(shape, data);
+  }
 });
