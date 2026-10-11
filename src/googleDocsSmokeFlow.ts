@@ -20,8 +20,8 @@
  * `pendingGoogleAction` and never runs on this flow.
  */
 import type { Env, WorkState } from "./types";
-import { HatMessageTarget, sendWorkspaceHatMessage } from "./telegram";
-import { logActivity } from "./log";
+import { HatMessageTarget, sendWorkspaceHatMessage, sendWorkspaceHatMessageWithOutcome } from "./telegram";
+import { logActivity, type LogEntryInput } from "./log";
 import { getSessionStub, setActiveWorkId } from "./router";
 import { consumeOpaqueOption, listAuthorizedGoogleAccounts, saveOpaqueOption } from "./googleOAuth";
 import {
@@ -33,13 +33,39 @@ import {
 } from "./runtime/tools/googleDocsSmoke";
 
 /**
+ * Injectable seams for `startGoogleDocsSmokeFlow`, mirroring
+ * `GoogleDocsSmokeConfirmSeams`: production callers pass nothing and get the
+ * real Activity & Decision Log append; tests inject a recorder so the
+ * "picker was presented" vs "picker was NOT delivered" record can be
+ * asserted directly instead of through a Notion round-trip.
+ */
+export interface GoogleDocsSmokeInitiationSeams {
+  logActivity(input: LogEntryInput): Promise<void>;
+}
+
+/**
  * Stages the smoke flow's first step: the authorized-account picker, on a
  * freshly created governed smoke Work (Sales / Sales Executive /
  * proposal_draft, recorded at creation like any other governed Work).
  * Creates no Google document, makes no Drive request, and needs no folder
  * configuration -- the target is chosen interactively, never pre-configured.
+ *
+ * The initiation record is delivery-aware: "smoke initiated (picker
+ * presented)" is written ONLY when Telegram confirmed the picker send (the
+ * plain-text retry counting as delivery). A total delivery failure is
+ * recorded as a Blocker with the redacted per-attempt diagnostics instead
+ * -- the Work stays open but inert (no options staged for selection,
+ * nothing created, no invented lifecycle transition), and the failure
+ * notice sent in-chat carries no buttons so it cannot itself be rejected
+ * for button data.
  */
-export async function startGoogleDocsSmokeFlow(env: Env, chatId: number, threadId?: number): Promise<void> {
+export async function startGoogleDocsSmokeFlow(
+  env: Env,
+  chatId: number,
+  threadId?: number,
+  seams?: GoogleDocsSmokeInitiationSeams,
+): Promise<void> {
+  const record = seams?.logActivity ?? ((input: LogEntryInput) => logActivity(env, input));
   const target: HatMessageTarget = { chatId, threadId };
 
   const authorizedAccounts = await listAuthorizedGoogleAccounts(env);
@@ -84,7 +110,7 @@ export async function startGoogleDocsSmokeFlow(env: Env, chatId: number, threadI
     return;
   }
 
-  await sendWorkspaceHatMessage(
+  const delivery = await sendWorkspaceHatMessageWithOutcome(
     env,
     { ...target, workId },
     "🧪 *GOVERNED TOOL REGISTRY SMOKE* (LOG-1069)\n\n" +
@@ -93,7 +119,43 @@ export async function startGoogleDocsSmokeFlow(env: Env, chatId: number, threadI
       "Select the authorized Google account to use:",
     buttons,
   );
-  await logActivity(env, {
+
+  if (!delivery.delivered) {
+    // Telegram refused the picker (both the Markdown attempt and the
+    // plain-text retry). Recording "picker presented" here would be a lie
+    // -- exactly the LOG-1071/LOG-1072 defect. Evidence stays redacted and
+    // bounded (the attempt errors were bounded at capture time in
+    // telegram.ts), so the Blocker is diagnosable without echoing tokens,
+    // message content, or identity.
+    const evidence =
+      delivery.attempts
+        .map((a, i) => `attempt ${i + 1} (${a.parseMode}): HTTP ${a.httpStatus ?? "no status"}${a.error ? ` -- ${a.error}` : ""}`)
+        .join("; ") || (delivery.unconfiguredStream ? "workspace stream unconfigured -- no attempt was made" : "no attempt recorded");
+    console.error(`startGoogleDocsSmokeFlow: smoke picker NOT delivered for work ${workId} -- ${evidence}`);
+    // Best-effort, button-less notice: tells Martin in-chat that nothing was
+    // staged, and carries no reply_markup so it cannot repeat the picker's
+    // rejection. Its own failure is irrelevant (logged by the send path).
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ The smoke picker could NOT be delivered to this chat, so no account selection is possible. " +
+        "The smoke Work exists but nothing was staged and nothing was created -- retry /googledocssmoke once delivery is healthy.",
+    );
+    await record({
+      entry: `Google Docs Registry smoke picker NOT delivered [${workId}]`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale:
+        `Telegram refused the account-picker send: ${evidence}. The governed smoke Work was created, but NO picker was presented, ` +
+        "no options were staged for selection, and nothing was created. The Work stays open but inert and fail-closed -- no lifecycle " +
+        "transition was invented for an undelivered picker.",
+      outcome: "Blocked",
+      workId,
+    });
+    return;
+  }
+
+  await record({
     entry: `Google Docs Registry smoke initiated [${workId}]`,
     type: "Activity",
     activity: "Interactive Registry smoke picker started: authorized-account selection presented for a governed smoke Work (proposal_draft).",

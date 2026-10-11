@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { editHatMessage, editMessageText, editWorkspaceHatMessage, sendHatMessage, sendMessage, sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "./telegram";
+import { editHatMessage, editMessageText, editWorkspaceHatMessage, redactTelegramProviderError, sendHatMessage, sendMessage, sendMessageWithOutcome, sendWorkspaceHatMessage, sendWorkspaceHatMessageWithOutcome, withWorkspaceTypingIndicator } from "./telegram";
 import type { Env } from "./types";
 
 const fakeEnv = { TELEGRAM_BOT_TOKEN: "test-token" } as Env;
@@ -209,4 +209,171 @@ test("withWorkspaceTypingIndicator sends ONE typing action however long the work
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Structured delivery outcome (LOG-1071/LOG-1072 reporting defect): the send
+// path must distinguish confirmed delivery from total failure, per attempt,
+// with safely bounded/redacted provider detail -- without changing the
+// message-id contract any current caller relies on.
+// ---------------------------------------------------------------------------
+
+const TELEGRAM_TOKEN_LIKE = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1h7Q";
+const telegramReject = (description: string, status = 400) =>
+  new Response(JSON.stringify({ ok: false, error_code: status, description }), { status });
+const telegramAccept = (messageId = 77) =>
+  new Response(JSON.stringify({ ok: true, result: { message_id: messageId } }), { status: 200 });
+
+test("total delivery failure: both the Markdown attempt and the plain-text retry are recorded as failed, redacted, and bounded -- delivered is false", async () => {
+  const originalFetch = globalThis.fetch;
+  // The live rejection shape, plus a token-bearing URL stuffed into the
+  // description to prove credentials can never ride along in diagnostics.
+  const verbose = `Bad Request: BUTTON_DATA_INVALID (see https://api.telegram.org/bot${TELEGRAM_TOKEN_LIKE}/sendMessage) ${"x".repeat(500)}`;
+  globalThis.fetch = (async () => telegramReject(verbose)) as typeof fetch;
+
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    const result = await sendMessageWithOutcome(fakeEnv, 1, "Secret picker payload for马丁", undefined, 10);
+
+    assert.strictEqual(result.delivered, false, "total rejection must be reported as failure, never as delivery");
+    assert.strictEqual(result.messageId, undefined);
+    assert.strictEqual(result.attempts.length, 2, "exactly one Markdown attempt and one plain-text retry");
+    assert.deepStrictEqual(
+      result.attempts.map((a) => ({ parseMode: a.parseMode, ok: a.ok, httpStatus: a.httpStatus, chunk: a.chunk })),
+      [
+        { parseMode: "Markdown", ok: false, httpStatus: 400, chunk: 0 },
+        { parseMode: "plain", ok: false, httpStatus: 400, chunk: 0 },
+      ],
+    );
+    for (const attempt of result.attempts) {
+      assert.ok(attempt.error, "each failed attempt must carry its provider detail");
+      assert.ok(attempt.error.includes("BUTTON_DATA_INVALID"), "the actionable provider detail must survive redaction");
+      assert.ok(!attempt.error.includes(TELEGRAM_TOKEN_LIKE), "the bot token must never survive into diagnostics");
+      assert.ok(attempt.error.includes("bot[redacted]"), "the token position must be visibly redacted, not silently truncated");
+      assert.ok(attempt.error.length <= 201, `diagnostics must be bounded (got ${attempt.error.length} chars)`);
+      assert.ok(!attempt.error.includes("Secret picker payload"), "provider diagnostics must never echo message content");
+    }
+    assert.strictEqual(errors.length, 1, "one failure log per fully failed chunk");
+    assert.ok(errors[0].includes("telegram sendMessage failed"), "the established log marker is preserved");
+    assert.ok(!errors.some((e) => e.includes(TELEGRAM_TOKEN_LIKE)), "even the log line must be redacted");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+});
+
+test("a failed Markdown attempt rescued by the plain-text retry IS delivery: delivered true, the retry's id, and no failure logged", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_url: string, init: any) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if (body.parse_mode === "Markdown") {
+      return telegramReject("Bad Request: can't parse entities: Can't find end of the entity");
+    }
+    return telegramAccept(77);
+  }) as typeof fetch;
+
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    const result = await sendMessageWithOutcome(fakeEnv, 1, "hello", undefined, 10);
+
+    assert.strictEqual(result.delivered, true, "a successful retry is delivery, not failure");
+    assert.strictEqual(result.messageId, 77);
+    assert.deepStrictEqual(
+      result.attempts.map((a) => ({ parseMode: a.parseMode, ok: a.ok, httpStatus: a.httpStatus })),
+      [
+        { parseMode: "Markdown", ok: false, httpStatus: 400 },
+        { parseMode: "plain", ok: true, httpStatus: 200 },
+      ],
+    );
+    assert.strictEqual(bodies.length, 2, "one Markdown attempt, then one plain retry");
+    assert.strictEqual(bodies[1].parse_mode, undefined, "the retry carries no parse_mode");
+    assert.deepStrictEqual(errors, [], "a rescued delivery must not log a failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+  }
+});
+
+test("an immediately accepted Markdown send makes NO retry and reports single-attempt delivery", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return telegramAccept(4242);
+  }) as typeof fetch;
+
+  try {
+    const result = await sendMessageWithOutcome(fakeEnv, 1, "hello", undefined, 10);
+    assert.strictEqual(result.delivered, true);
+    assert.strictEqual(result.messageId, 4242);
+    assert.strictEqual(calls, 1, "no unnecessary plain-text retry");
+    assert.deepStrictEqual(
+      result.attempts.map((a) => ({ parseMode: a.parseMode, ok: a.ok, httpStatus: a.httpStatus })),
+      [{ parseMode: "Markdown", ok: true, httpStatus: 200 }],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the message-id contract parity: sendWorkspaceHatMessage still returns the delivered id through the same send path the outcome form uses", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    const body = JSON.parse(init.body);
+    if (body.parse_mode === "Markdown") return telegramReject("Bad Request: can't parse entities");
+    return telegramAccept(99);
+  }) as typeof fetch;
+
+  try {
+    const msgId = await sendWorkspaceHatMessage(fakeWorkspaceEnv, { chatId: 999999, hat: "Sales Executive" }, "picker");
+    assert.strictEqual(msgId, 99, "existing callers keep the plain message-id return");
+
+    const outcome = await sendWorkspaceHatMessageWithOutcome(fakeWorkspaceEnv, { chatId: 999999, hat: "Sales Executive" }, "picker");
+    assert.strictEqual(outcome.delivered, true, "the structured form agrees with the message-id form");
+    assert.strictEqual(outcome.messageId, 99);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unconfigured Workspace stream reports an explicit unconfigured failure in the outcome form and keeps returning undefined in the message-id form", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = (async () => {
+    fetched = true;
+    return telegramAccept();
+  }) as typeof fetch;
+
+  try {
+    const outcome = await sendWorkspaceHatMessageWithOutcome(fakeEnv, { chatId: 1, hat: "Sales Executive" }, "picker");
+    assert.strictEqual(outcome.delivered, false);
+    assert.strictEqual(outcome.unconfiguredStream, true, "the caller can tell 'never attempted' apart from 'rejected'");
+    assert.deepStrictEqual(outcome.attempts, []);
+
+    const msgId = await sendWorkspaceHatMessage(fakeEnv, { chatId: 1, hat: "Sales Executive" }, "picker");
+    assert.strictEqual(msgId, undefined, "the established fail-closed contract is unchanged");
+    assert.strictEqual(fetched, false, "no request may be attempted with no resolved target");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("redactTelegramProviderError strips token and authorization material and bounds the text", () => {
+  const tokenish = `fetch failed: Post "https://api.telegram.org/bot${TELEGRAM_TOKEN_LIKE}/sendMessage": dial tcp`;
+  const redacted = redactTelegramProviderError(tokenish);
+  assert.ok(!redacted.includes(TELEGRAM_TOKEN_LIKE));
+  assert.ok(redacted.includes("bot[redacted]"));
+
+  assert.ok(!redactTelegramProviderError("authorization: Bearer abc123def456ghi789").includes("abc123def456ghi789"));
+  assert.ok(!redactTelegramProviderError("headers: {\"Authorization\":\"Bearer abc123def456ghi789\"}").includes("abc123def456ghi789"));
+
+  const bounded = redactTelegramProviderError("y".repeat(1000));
+  assert.strictEqual(bounded.length, 201, "200 chars plus the truncation marker");
+  assert.ok(bounded.endsWith("…"));
 });

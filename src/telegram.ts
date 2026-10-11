@@ -128,6 +128,23 @@ export async function sendWorkspaceHatMessage(
   text: string,
   buttons?: InlineButton[][],
 ): Promise<number | undefined> {
+  return (await sendWorkspaceHatMessageWithOutcome(env, target, text, buttons)).messageId;
+}
+
+/**
+ * Structured-outcome form of sendWorkspaceHatMessage for callers that must
+ * distinguish confirmed delivery from total failure (the Registry smoke
+ * picker records whether the picker was actually presented). Same target
+ * override, same Hat label, same reply_msg bookkeeping, same retry
+ * semantics -- only the return shape differs; the message-id contract of
+ * sendWorkspaceHatMessage is untouched.
+ */
+export async function sendWorkspaceHatMessageWithOutcome(
+  env: Env,
+  target: HatMessageTarget,
+  text: string,
+  buttons?: InlineButton[][],
+): Promise<TelegramSendResult> {
   const workspaceTarget = getWorkspaceTarget(env);
   if (!workspaceTarget) {
     console.error(`sendWorkspaceHatMessage: Workspace stream unconfigured${target.hat ? ` for ${target.hat}` : ""}`);
@@ -138,9 +155,9 @@ export async function sendWorkspaceHatMessage(
       decisionRationale: "TELEGRAM_GROUP_CHAT_ID or WORKSPACE_TOPIC_ID missing from environment bindings. Refusing to send workspace message.",
       outcome: "Blocked",
     }).catch(() => {});
-    return undefined;
+    return { delivered: false, attempts: [], unconfiguredStream: true };
   }
-  return sendHatMessage(
+  return sendHatMessageCore(
     env,
     { ...target, chatId: workspaceTarget.chatId, threadId: workspaceTarget.threadId },
     text,
@@ -158,6 +175,122 @@ function call(env: Env, method: string, payload: Record<string, unknown>) {
 
 const TELEGRAM_MAX_LEN = 4000;
 
+/** Longest provider-error detail kept anywhere (logging or structured results) -- diagnostics, never an echo channel. */
+const TELEGRAM_ERROR_MAX_CHARS = 200;
+
+/** One HTTP attempt made for a single chunk of a send. */
+export interface TelegramSendAttempt {
+  /** Which parse mode this attempt carried: the first attempt, or the plain-text retry after it failed. */
+  parseMode: "Markdown" | "plain";
+  ok: boolean;
+  httpStatus?: number;
+  /** Redacted, bounded provider error detail; present only when ok is false. */
+  error?: string;
+  /** 0-based index of the text chunk this attempt belongs to. */
+  chunk: number;
+}
+
+/** Structured outcome of a send: what Telegram actually accepted, per attempt. */
+export interface TelegramSendResult {
+  /**
+   * True only when EVERY chunk was accepted by Telegram (the button-bearing
+   * last chunk included) -- i.e. the message is fully usable as composed.
+   * A failed Markdown attempt rescued by the plain-text retry IS delivered;
+   * only total rejection of a chunk is a delivery failure.
+   */
+  delivered: boolean;
+  /** Message id of the last delivered chunk, when any chunk was delivered. */
+  messageId?: number;
+  /** Every attempt, in send order. */
+  attempts: TelegramSendAttempt[];
+  /** True when no attempt was made because the stream target could not be resolved. */
+  unconfiguredStream?: boolean;
+}
+
+/**
+ * Bounds and redacts provider error text before it is logged or persisted.
+ * Telegram error bodies do not echo our message content, but a rejected
+ * fetch (or an unusually verbose proxy error) can carry the bot-token URL --
+ * so bot-token and Authorization-shaped material is stripped, and the text
+ * is capped so diagnostics can never become an echo channel.
+ */
+export function redactTelegramProviderError(text: string): string {
+  const redacted = text
+    .replace(/bot\d{5,}:[A-Za-z0-9_-]{10,}/g, "bot[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{10,}/g, "Bearer [redacted]")
+    .replace(/authorization["']?\s*[:=]\s*["']?[^\s"',;]+/gi, "authorization: [redacted]");
+  return redacted.length > TELEGRAM_ERROR_MAX_CHARS ? `${redacted.slice(0, TELEGRAM_ERROR_MAX_CHARS)}…` : redacted;
+}
+
+async function attemptOf(res: Response, parseMode: TelegramSendAttempt["parseMode"], chunk: number): Promise<TelegramSendAttempt> {
+  if (res.ok) return { parseMode, ok: true, httpStatus: res.status, chunk };
+  return { parseMode, ok: false, httpStatus: res.status, error: redactTelegramProviderError(await res.text()), chunk };
+}
+
+/**
+ * The single send implementation: chunks the text, tries each chunk with
+ * Markdown then (still) retries it plain text, and records every attempt's
+ * outcome. Both `sendMessage` (message-id contract, every current caller)
+ * and the structured-outcome callers go through exactly this path -- there
+ * is no second send implementation. Fetch rejections propagate exactly as
+ * before; provider rejections are recorded, never thrown.
+ */
+async function sendMessageCore(
+  env: Env,
+  chatId: number,
+  text: string,
+  buttons?: InlineButton[][],
+  threadId?: number,
+): Promise<TelegramSendResult> {
+  const chunks = splitText(text);
+  const attempts: TelegramSendAttempt[] = [];
+  let lastMessageId: number | undefined;
+  let delivered = true;
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const payload: Record<string, unknown> = {
+      chat_id: chatId,
+      text: chunks[i],
+      parse_mode: "Markdown",
+    };
+    if (threadId !== undefined) payload.message_thread_id = threadId;
+    if (isLast && buttons) {
+      payload.reply_markup = { inline_keyboard: buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.callback_data }))) };
+    }
+    let res = await call(env, "sendMessage", payload);
+    attempts.push(await attemptOf(res, "Markdown", i));
+    if (!res.ok) {
+      res = await call(env, "sendMessage", { ...payload, parse_mode: undefined });
+      const retry = await attemptOf(res, "plain", i);
+      attempts.push(retry);
+      if (!res.ok) {
+        console.error("telegram sendMessage failed", `${retry.httpStatus ?? "no status"} ${retry.error ?? ""}`.trim());
+        delivered = false;
+        continue;
+      }
+    }
+    lastMessageId = await extractMessageId(res);
+  }
+  return { delivered, messageId: lastMessageId, attempts };
+}
+
+/**
+ * Structured-outcome form of sendMessage for callers that must distinguish
+ * confirmed delivery from total failure (e.g. the Registry smoke picker,
+ * whose "picker presented" record would otherwise be a lie when Telegram
+ * rejects the send). Same attempts, same order, same retry semantics as
+ * sendMessage -- only the return shape differs.
+ */
+export async function sendMessageWithOutcome(
+  env: Env,
+  chatId: number,
+  text: string,
+  buttons?: InlineButton[][],
+  threadId?: number,
+): Promise<TelegramSendResult> {
+  return sendMessageCore(env, chatId, text, buttons, threadId);
+}
+
 /**
  * Returns the sent message's message_id (of the last chunk, if the text
  * was split) so a caller can later edit it in place via editMessageText
@@ -173,30 +306,7 @@ export async function sendMessage(
   buttons?: InlineButton[][],
   threadId?: number,
 ): Promise<number | undefined> {
-  const chunks = splitText(text);
-  let lastMessageId: number | undefined;
-  for (let i = 0; i < chunks.length; i++) {
-    const isLast = i === chunks.length - 1;
-    const payload: Record<string, unknown> = {
-      chat_id: chatId,
-      text: chunks[i],
-      parse_mode: "Markdown",
-    };
-    if (threadId !== undefined) payload.message_thread_id = threadId;
-    if (isLast && buttons) {
-      payload.reply_markup = { inline_keyboard: buttons.map((row) => row.map((b) => ({ text: b.text, callback_data: b.callback_data }))) };
-    }
-    let res = await call(env, "sendMessage", payload);
-    if (!res.ok) {
-      res = await call(env, "sendMessage", { ...payload, parse_mode: undefined });
-      if (!res.ok) {
-        console.error("telegram sendMessage failed", await res.text());
-        continue;
-      }
-    }
-    lastMessageId = await extractMessageId(res);
-  }
-  return lastMessageId;
+  return (await sendMessageCore(env, chatId, text, buttons, threadId)).messageId;
 }
 
 /**
@@ -243,13 +353,23 @@ function withHatLabel(target: HatMessageTarget, text: string): string {
  * originating from Hat logic.
  */
 export async function sendHatMessage(env: Env, target: HatMessageTarget, text: string, buttons?: InlineButton[][]): Promise<number | undefined> {
-  const msgId = await sendMessage(env, target.chatId, withHatLabel(target, text), buttons, target.threadId);
-  if (msgId && target.workId && env?.STATE_KV) {
-    await kvPut(env, `reply_msg:${msgId}`, target.workId, { expirationTtl: 60 * 60 * 24 * 7 }).catch((err) =>
+  return (await sendHatMessageCore(env, target, text, buttons)).messageId;
+}
+
+/** The single Hat-labelled send path: label, send, reply_msg bookkeeping. Both the message-id and structured-outcome forms go through exactly this. */
+async function sendHatMessageCore(
+  env: Env,
+  target: HatMessageTarget,
+  text: string,
+  buttons?: InlineButton[][],
+): Promise<TelegramSendResult> {
+  const result = await sendMessageCore(env, target.chatId, withHatLabel(target, text), buttons, target.threadId);
+  if (result.messageId && target.workId && env?.STATE_KV) {
+    await kvPut(env, `reply_msg:${result.messageId}`, target.workId, { expirationTtl: 60 * 60 * 24 * 7 }).catch((err) =>
       console.error("sendHatMessage: failed to put reply_msg in KV", err),
     );
   }
-  return msgId;
+  return result;
 }
 
 /**
