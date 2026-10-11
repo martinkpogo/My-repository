@@ -24,18 +24,38 @@ interface DriveCommentAuthor {
   me?: boolean;
 }
 
+interface DriveCommentReply {
+  id: string;
+  // Google records a "resolve" action as a replies[] entry carrying
+  // action:"resolve" with its own author (confirmed live 2026-10-11). This is
+  // the ONLY resolver-bearing signal the Comments API exposes -- the comment's
+  // own `author` is its commenter, never its resolver -- but because the
+  // Runtime reads comments with the same authorized account token Martin's
+  // account uses, that reply's author identifies the ACCOUNT, not the human
+  // user. See RESOLUTION_ATTRIBUTION_LIMITATION in tokenSafeProposal.ts.
+  action?: string;
+  author?: DriveCommentAuthor;
+  createdTime?: string;
+  deleted?: boolean;
+}
+
 interface DriveComment {
   id: string;
   content: string;
   resolved?: boolean;
+  // When the comment was last modified -- including a transition to
+  // resolved=true. Recorded as resolution EVIDENCE only; it is not, on its
+  // own, proof of who resolved it.
+  modifiedTime?: string;
   author?: DriveCommentAuthor;
   quotedFileContent?: { value?: string };
+  replies?: DriveCommentReply[];
 }
 
 async function fetchComments(token: string, documentId: string): Promise<DriveComment[]> {
   const url =
     `https://www.googleapis.com/drive/v3/files/${documentId}/comments` +
-    `?fields=comments(id,content,resolved,author(displayName,me),quotedFileContent(value))` +
+    `?fields=comments(id,content,resolved,modifiedTime,author(displayName,me),quotedFileContent(value),replies(id,action,author(displayName,me),createdTime,deleted))` +
     `&pageSize=100&includeDeleted=false`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
@@ -298,16 +318,22 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
     proposalNumber: binding.proposalNumber,
     version: binding.version,
     text,
+    commentId: comment.id,
+    documentId: doc.documentId,
   });
 
   if (result.kind === "revised") {
+    // The Runtime NEVER resolves a substantive comment: resolution is
+    // Martin's own signal that the change is accepted, and the approval cycle
+    // completes only when he resolves it. Auto-resolving here would both
+    // forge that signal and, under the new lifecycle, silently close the
+    // cycle the comment just opened.
     await replyToComment(
       token,
       doc.documentId,
       comment.id,
-      `Change requested -- ${binding.proposalId} v${result.newVersion} was created with it and sent to Martin for approval. This Doc (v${binding.version}) is unchanged.`,
+      `Change recorded -- ${binding.proposalId} v${result.newVersion} was created from this comment. This Doc (v${binding.version}) is unchanged. I am deliberately leaving this comment OPEN: resolve it yourself once you are happy with the change, because your resolve is what completes the approval cycle for ${binding.proposalId}.`,
     );
-    await resolveComment(token, doc.documentId, comment.id);
     return { handled: true, outcome: "change_requested", detail: `change request -> ${binding.proposalId} v${result.newVersion}` };
   }
   await replyToComment(token, doc.documentId, comment.id, `Not applied -- ${result.detail}`);
@@ -333,7 +359,13 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   const alreadyProcessed = await kvGet(env, `google_comment_processed:${comment.id}`);
   if (alreadyProcessed) return { handled: false, outcome: "already_processed" };
 
-  if (comment.resolved) {
+  // Resolution is now a SEPARATE signal from processing. On a Proposal Doc a
+  // resolved comment is still processed if its change was never applied
+  // (resolving before the change lands must never let an unapplied request
+  // count as fulfilled), and its resolution is observed by the cycle
+  // afterwards. Only the legacy in-place-edit docs (no Proposal binding) keep
+  // the old "resolved means done, skip it" short-circuit.
+  if (comment.resolved && !doc.proposal) {
     await markProcessed(env, comment.id);
     return { handled: false, outcome: "resolved_skip" };
   }
@@ -448,7 +480,7 @@ export interface PollGoogleDocCommentsResult {
   diagnostics: {
     documentId: string;
     commentId: string | null;
-    outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception";
+    outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception" | "approval_cycle_synced";
     detail?: string;
   }[];
 }
@@ -540,6 +572,42 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
           commentId: comment.id,
           outcome: "unhandled_exception",
           detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // A Proposal Doc's approval cycle is driven by the resolution state
+    // observed here, fed back into the Work so the cycle can be evaluated
+    // (evaluateProposalApprovalCycle). This runs on EVERY poll of a Proposal
+    // Doc -- including ones where no comment needed processing -- because a
+    // Martin resolve that happened between polls is exactly the event that
+    // can complete a cycle, and it may arrive with nothing new to apply.
+    // Resolution is observed independently of processing, so a resolved
+    // comment is never mistaken for an applied one.
+    if (doc.proposal) {
+      try {
+        const observations = comments.map((c) => ({
+          commentId: c.id,
+          resolved: c.resolved === true,
+          modifiedTime: c.modifiedTime,
+        }));
+        const sync = await getSessionStub(env, doc.proposal.workId).syncProposalDocApprovalCycle({
+          documentId: doc.documentId,
+          observations,
+        });
+        diagnostics.push({
+          documentId: doc.documentId,
+          commentId: null,
+          outcome: "approval_cycle_synced",
+          detail: sync.reasons?.length ? `${sync.kind}: ${sync.reasons.join("; ")}` : sync.kind,
+        });
+      } catch (err) {
+        console.error(`pollGoogleDocComments: approval-cycle sync failed for ${doc.documentId}`, err);
+        diagnostics.push({
+          documentId: doc.documentId,
+          commentId: null,
+          outcome: "unhandled_exception",
+          detail: `approval-cycle sync: ${err instanceof Error ? err.message : String(err)}`,
         });
       }
     }
