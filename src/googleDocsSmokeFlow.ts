@@ -52,7 +52,16 @@ export async function startGoogleDocsSmokeFlow(env: Env, chatId: number, threadI
     return;
   }
 
-  const workId = `${GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX}${crypto.randomUUID()}`;
+  // Bounded 16-hex-char suffix instead of a full UUID: every callback_data
+  // this Work can carry embeds this id (`googleaccount:` in the picker below,
+  // `googlefolder:` and `googlesmokeconfirm:` in the shared selection stages,
+  // and `switch:<id>:` when the open Work shows in /sessions), and Telegram
+  // refuses inline-keyboard callback_data longer than 64 UTF-8 bytes with
+  // HTTP 400 BUTTON_DATA_INVALID. The full UUID made the account picker's
+  // data 76 bytes, so both live picker sends were rejected (2026-10-10).
+  // The prefix is unchanged: routing, isGoogleDocsSmokeWorkId, and the admin
+  // gate all discriminate on it alone.
+  const workId = `${GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX}${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const stub = getSessionStub(env, workId);
   await stub.init(workId, chatId, GOOGLE_DOCS_SMOKE_WORK.unit, GOOGLE_DOCS_SMOKE_WORK.hat, threadId, {
     actionName: GOOGLE_DOCS_SMOKE_WORK.actionName,
