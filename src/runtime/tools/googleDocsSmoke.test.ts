@@ -8,10 +8,12 @@ import {
   GOOGLE_DOCS_SMOKE_FOLDER_KEY_PREFIX,
   GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX,
   googleDocsSmokeInput,
+  googleDocsSmokeRewriteInput,
   runGoogleDocsSmoke,
   type GoogleDocsSmokeResult,
   type GoogleDocsSmokeWorkRunner,
 } from "./googleDocsSmoke";
+import { buildProposalDocLayout } from "../../proposalRedline";
 
 /**
  * The governed Google Docs smoke contract (LOG-1069), proven at its own
@@ -23,6 +25,15 @@ import {
  * effect; the five canonical outcomes and the reconciliation paths surface
  * exactly as the Registry produces them; and the smoke Work is closed only
  * on a clean terminal end.
+ *
+ * The same contract is proven for the governed REWRITE step: its target is
+ * bound to THE Doc the creation proved (never caller input, never another
+ * document), it carries PR #269's corrected batchUpdate shapes, its durable
+ * intent lands before its effect and its terminal outcome after, a
+ * definite rejection/uncertain write/read-back mismatch are never reported
+ * as success, an interrupted attempt is settled by a read before any retry
+ * (an existing effect never triggers a duplicate rewrite), and a creation
+ * that was never proved never leads to any rewrite request.
  *
  * Every Google interaction here is a scripted fetch fake with call counters
  * -- no real Google document is ever created -- and every denial/blocked
@@ -193,11 +204,20 @@ function docServer(initial?: { title?: string; text?: string; folder?: string })
         return json({ files: found });
       }
       if (url.includes(":batchUpdate")) {
-        text = body.requests?.[0]?.insertText?.text ?? "";
+        // Apply the INSERT wherever it sits in the list: the creation's
+        // batchUpdate opens with insertText, the rewrite's opens with
+        // deleteContentRange and only then inserts -- applying requests[0]
+        // blindly would blank the Doc on every rewrite. "Delete all, then
+        // insert" is exactly what Google does with the rewrite's list.
+        const insert = (body.requests ?? []).find((r: any) => r.insertText);
+        if (insert) text = insert.insertText.text;
         return json({});
       }
       if (url.includes("/documents/doc-smoke-1") && method === "GET") {
-        return json({ title, body: { content: [{ paragraph: { elements: [{ textRun: { content: text } }] } }] } });
+        // Realistic `endIndex` (a real Docs GET always carries it): without
+        // it readGoogleDocBody reports endIndex 1 and the rewrite would
+        // wrongly skip its deleteContentRange, diverging from production.
+        return json({ title, body: { content: [{ endIndex: text ? text.length + 1 : 1, paragraph: { elements: [{ textRun: { content: text } }] } }] } });
       }
       throw new Error(`Unexpected Google call: ${method} ${url}`);
     },
@@ -315,6 +335,7 @@ test("an Action that does not declare the operation is denied with ZERO Drive mu
   assert.equal(result.outcome?.state, "denied");
   assert.match(result.outcome?.reason ?? "", /does not declare Tool operation google_docs\.create_and_verify/);
   assert.equal(driveCreates(calls).length, 0);
+  assert.equal(result.rewrite_outcome, null, "no Doc was ever proved, so no rewrite may exist");
   assert.deepEqual(harness.closes, [WORK_ID], "a denial proved no remote effect, so the smoke Work closes cleanly");
   assert.equal(result.work_closed, true);
 });
@@ -350,6 +371,15 @@ test("create-and-verify succeeds through the Registry against the disposable fol
   assert.equal(harness.flushes.length >= 2, true, "intent and outcome must each be flushed durably");
   assert.equal(harness.flushes[0][recordKey]?.status, "in_progress");
   assert.equal(harness.flushes[harness.flushes.length - 1][recordKey]?.status, "succeeded");
+
+  // The governed rewrite ran after the proved creation, over THE created
+  // Doc, and carries its own durable intent and terminal outcome records.
+  assert.equal(result.rewrite_outcome?.state, "succeeded", "a proved creation is followed by the governed rewrite of that Doc");
+  assert.equal(result.rewrite_outcome?.verified, true);
+  assert.equal(result.rewrite_outcome?.remote_resource?.document_id, "doc-smoke-1");
+  const rewriteKey = operationRecordKey("google_docs.update_and_verify", `gdrive:document:doc-smoke-1`, googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT));
+  assert.ok(harness.flushes.some((f) => f[rewriteKey]?.status === "in_progress"), "the rewrite intent must land durably");
+  assert.equal(harness.flushes[harness.flushes.length - 1][rewriteKey]?.status, "succeeded");
 });
 
 test("the production proposal folder is never read from runtime state during a successful smoke", async (t: any) => {
@@ -383,6 +413,7 @@ test("a definite creation failure (Google rejected the request) is reported fail
 
   assert.equal(result.outcome?.state, "failed");
   assert.match(result.outcome?.reason ?? "", /HTTP 500/);
+  assert.equal(result.rewrite_outcome, null, "an unproved creation must never lead to a rewrite request");
   assert.equal(result.work_closed, false);
   assert.deepEqual(harness.closes, []);
 });
@@ -399,6 +430,7 @@ test("an uncertain creation outcome (network error after the request may have le
 
   assert.equal(result.outcome?.state, "unverified");
   assert.equal(result.outcome?.reconciliation_required, true);
+  assert.equal(result.rewrite_outcome, null, "an unproved creation must never lead to a rewrite request");
   assert.equal(result.work_closed, false);
   assert.deepEqual(harness.closes, []);
 });
@@ -415,6 +447,7 @@ test("a creation answered without a usable document id is reported partially_com
 
   assert.equal(result.outcome?.state, "partially_completed");
   assert.equal(result.outcome?.reconciliation_required, true);
+  assert.equal(result.rewrite_outcome, null, "without a usable document id there is nothing the rewrite could target");
   assert.equal(result.work_closed, false);
 });
 
@@ -483,4 +516,233 @@ test("reconciliation uncertainty (the search itself fails) is held unverified an
   assert.equal(result.outcome?.reconciliation_required, true);
   assert.equal(driveCreates(calls).length, 0, "an unreadable remote state must never trigger a blind retry");
   assert.equal(result.work_closed, false);
+});
+
+// ---------------------------------------------------------------------------
+// The governed REWRITE step: target binding to THE created Doc, PR #269's
+// corrected batchUpdate request shapes, durable records around the effect,
+// honest failure states, and reconciliation before any retry. Every call is
+// scripted -- nothing here reaches Google.
+// ---------------------------------------------------------------------------
+
+const isRewriteBatch = (c: GoogleCall) =>
+  c.url.includes(":batchUpdate") && (c.body?.requests ?? []).some((r: any) => r.deleteContentRange);
+
+test("a runner presenting ANOTHER Work's state is refused before any invocation -- zero Google requests", async (t: any) => {
+  const env = configuredEnv();
+  // The runner hands back a DIFFERENT Work: the core must refuse outright
+  // rather than judge an invocation under another Work's Action.
+  const harness = smokeRunner(smokeState("smoke-googledocs-other-0000000000000000"));
+  const { calls } = installGoogleFake(t, () => json({}));
+
+  await assert.rejects(() => runGoogleDocsSmoke(env, WORK_ID, harness.runner), /smoke Work mismatch/);
+  assert.equal(calls.length, 0, "a Work mismatch must be refused before any Google request");
+  assert.equal(harness.closes.length, 0);
+});
+
+test("the rewrite reaches google_docs.update_and_verify over the created Doc with PR #269's corrected request shapes", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState());
+  const server = docServer();
+  const { calls } = installGoogleFake(t, (call) => server.handle(call));
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.verified, true);
+
+  // Target binding: every Docs write goes to THE Doc the creation proved,
+  // and the production proposal folder appears nowhere in the traffic.
+  const docWrites = calls.filter((c) => c.url.includes(":batchUpdate"));
+  assert.equal(docWrites.length, 2, "one creation insert and exactly one governed rewrite");
+  for (const c of docWrites) {
+    assert.equal(c.url, "https://docs.googleapis.com/v1/documents/doc-smoke-1:batchUpdate");
+  }
+  assert.equal(result.rewrite_outcome?.remote_resource?.document_id, "doc-smoke-1");
+  assert.ok(!JSON.stringify(calls).includes(PRODUCTION_FOLDER), "the production proposal folder must appear nowhere in the traffic");
+
+  const rewrite = docWrites.find(isRewriteBatch);
+  assert.ok(rewrite, "the content rewrite must be a real delete + insert batchUpdate");
+  const reqs: any[] = rewrite!.body.requests;
+  const deleteAt = reqs.findIndex((r) => r.deleteContentRange);
+  const insertAt = reqs.findIndex((r) => r.insertText);
+  assert.ok(deleteAt >= 0 && insertAt > deleteAt, "the old body is deleted before the new content is inserted");
+  // A REAL rewrite: the inserted content differs from what creation wrote.
+  assert.notEqual(reqs[insertAt].insertText.text, googleDocsSmokeInput(WORK_ID, SMOKE_FOLDER, ACCOUNT).content);
+  assert.match(reqs[insertAt].insertText.text, /REWRITE pass/);
+
+  // PR #269 correction 1: updateParagraphStyle carries `paragraphStyle`
+  // (the pre-fix code sent `textStyle`, which Docs rejects with HTTP 400).
+  const paraReqs = reqs.filter((r) => r.updateParagraphStyle);
+  assert.ok(paraReqs.length >= 1, "the canonical layout must style its paragraphs");
+  for (const p of paraReqs) {
+    assert.ok(p.updateParagraphStyle.paragraphStyle, "updateParagraphStyle must carry paragraphStyle");
+    assert.equal(p.updateParagraphStyle.textStyle, undefined, "the invalid textStyle must never appear on updateParagraphStyle");
+    assert.match(p.updateParagraphStyle.fields, /^namedStyleType,spaceAbove,spaceBelow(,indentStart)?$/);
+  }
+
+  // PR #269 correction 2: the bullet preset enum Docs actually accepts.
+  const bulletReqs = reqs.filter((r) => r.createParagraphBullets);
+  assert.ok(bulletReqs.length >= 1, "the smoke rewrite content carries a bullet line so the preset is exercised");
+  for (const b of bulletReqs) {
+    assert.equal(b.createParagraphBullets.bulletPreset, "BULLET_DISC_CIRCLE_SQUARE");
+  }
+});
+
+test("the rewrite records durable intent BEFORE its effect and its terminal outcome afterward", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState());
+  const server = docServer();
+  const rewriteKey = operationRecordKey("google_docs.update_and_verify", "gdrive:document:doc-smoke-1", googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT));
+  let intentFlushedBeforeWrite = false;
+  installGoogleFake(t, (call) => {
+    if (isRewriteBatch(call)) {
+      intentFlushedBeforeWrite = harness.flushes.some((f) => f[rewriteKey]?.status === "in_progress");
+    }
+    return server.handle(call);
+  });
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.rewrite_outcome?.state, "succeeded");
+  assert.equal(intentFlushedBeforeWrite, true, "a durable in_progress record must be flushed before the rewrite request is issued");
+  assert.equal(harness.flushes[harness.flushes.length - 1][rewriteKey]?.status, "succeeded", "the terminal outcome lands durably after the effect");
+});
+
+test("a definite rewrite rejection is reported failed beside the proved creation -- never success -- and keeps the Work open", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState());
+  const server = docServer();
+  let rewriteAttempts = 0;
+  const { calls } = installGoogleFake(t, (call) => {
+    if (isRewriteBatch(call)) {
+      rewriteAttempts += 1;
+      return json({ error: { code: 400, message: "invalid updateParagraphStyle request" } }, 400);
+    }
+    return server.handle(call);
+  });
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.outcome?.state, "succeeded", "the creation itself was proved");
+  assert.equal(result.rewrite_outcome?.state, "failed");
+  assert.match(result.rewrite_outcome?.reason ?? "", /HTTP 400/);
+  assert.equal(result.rewrite_outcome?.reconciliation_required ?? false, false, "a definite rejection needs no reconciliation");
+  assert.equal(rewriteAttempts, 1, "a definite rejection is never retried");
+  assert.equal(driveCreates(calls).length, 1, "the Doc is never created twice");
+  assert.equal(result.work_closed, false, "the failed rewrite keeps the Work open with its durable records");
+  assert.deepEqual(harness.closes, []);
+});
+
+test("a rewrite whose read-back does not match is partially_completed -- never success -- and keeps the Work open", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState());
+  const server = docServer();
+  let rewriteWrites = 0;
+  installGoogleFake(t, (call) => {
+    if (isRewriteBatch(call)) {
+      // Google ACCEPTS the request but the content never lands (the fake
+      // answers 200 without applying anything): the read-back must catch it.
+      rewriteWrites += 1;
+      return json({});
+    }
+    return server.handle(call);
+  });
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.state, "partially_completed");
+  assert.match(result.rewrite_outcome?.reason ?? "", /did not read back/);
+  assert.equal(result.rewrite_outcome?.reconciliation_required, true);
+  assert.equal(rewriteWrites, 1, "the uncertain write is never blindly repeated");
+  assert.equal(result.work_closed, false);
+  assert.deepEqual(harness.closes, []);
+});
+
+test("an uncertain rewrite (network error, the effect may have left) is unverified -- never failure or success -- and keeps the Work open", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState());
+  const server = docServer();
+  installGoogleFake(t, (call) => {
+    if (isRewriteBatch(call)) throw new Error("socket hang up");
+    return server.handle(call);
+  });
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.state, "unverified");
+  assert.equal(result.rewrite_outcome?.reconciliation_required, true);
+  assert.equal(result.work_closed, false);
+  assert.deepEqual(harness.closes, []);
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation for the REWRITE: an interrupted attempt is settled by
+// reading THE document back before any retry, so an effect that already
+// exists can never trigger an unsafe duplicate rewrite.
+// ---------------------------------------------------------------------------
+
+function inProgressRewriteSeed(): Record<string, ExternalToolOperationRecord> {
+  const rewriteInput = googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT);
+  return {
+    [operationRecordKey("google_docs.update_and_verify", "gdrive:document:doc-smoke-1", rewriteInput)]: {
+      work_id: WORK_ID,
+      tool_id: "google_docs",
+      operation_id: "google_docs.update_and_verify",
+      version: "1.0",
+      target_resource_id: "gdrive:document:doc-smoke-1",
+      status: "in_progress",
+      updatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+test("an interrupted rewrite whose effect ALREADY landed is settled by a read and never rewritten again", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState(), inProgressRewriteSeed());
+  const rewriteInput = googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT);
+  const desired = buildProposalDocLayout(rewriteInput.proposal_id, rewriteInput.versions).text;
+  const server = docServer();
+  let documentReads = 0;
+  const { calls } = installGoogleFake(t, (call) => {
+    // The first Docs read is the fresh creation's own verification; every
+    // later read is the rewrite's reconciliation, scripted to show that the
+    // earlier uncertain rewrite attempt actually landed remotely.
+    if (call.url.includes("/documents/doc-smoke-1") && call.method === "GET") {
+      documentReads += 1;
+      if (documentReads > 1) {
+        return json({ title: rewriteInput.proposal_id, body: { content: [{ endIndex: desired.length + 1, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
+      }
+    }
+    return server.handle(call);
+  });
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.state, "succeeded");
+  assert.match(result.rewrite_outcome?.reason ?? "", /reconciled/);
+  assert.equal(calls.filter(isRewriteBatch).length, 0, "an effect that already exists must never trigger a duplicate rewrite");
+  assert.equal(result.work_closed, true);
+});
+
+test("an interrupted rewrite whose effect is ABSENT is settled by reads first, then exactly ONE fresh rewrite runs", async (t: any) => {
+  const env = configuredEnv();
+  const harness = smokeRunner(smokeState(), inProgressRewriteSeed());
+  const server = docServer();
+  const { calls } = installGoogleFake(t, (call) => server.handle(call));
+
+  const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
+
+  assert.equal(result.outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.state, "succeeded");
+  const rewriteWrites = calls.filter(isRewriteBatch);
+  assert.equal(rewriteWrites.length, 1, "exactly one fresh rewrite -- never a duplicate blind retry");
+  const firstRewriteAt = calls.findIndex(isRewriteBatch);
+  const readsBefore = calls.slice(0, firstRewriteAt).filter((c) => c.url.includes("/documents/doc-smoke-1") && c.method === "GET").length;
+  assert.equal(readsBefore, 3, "creation verification + reconciliation read + the rewrite's own pre-read all precede the write");
+  assert.equal(result.work_closed, true);
 });

@@ -20,9 +20,11 @@ import { GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX } from "./runtime/tools/googleDocsSmok
  *    untouched when the flag is absent;
  *  - the confirmation is a separate `googlesmokeconfirm:` callback that
  *    validates Work identity, pending selection, and staged option against
- *    each other before running EXACTLY ONE registered invocation through
- *    the shared smoke core -- stale, mismatched, and wrong-kind inputs all
- *    fail closed with ZERO Google requests;
+ *    each other before running the governed creation -- and, only once that
+ *    creation is proved by read-back, its rewrite of THE created Doc -- as
+ *    registered invocations through the shared smoke core; stale,
+ *    mismatched, and wrong-kind inputs all fail closed with ZERO Google
+ *    requests;
  *  - cancel and every refusal create nothing; an uncertain outcome keeps
  *    the Work open with its durable records and clears the confirmation so
  *    it can never be blindly replayed;
@@ -169,11 +171,16 @@ function docServer() {
         return json({ files: found });
       }
       if (url.includes(":batchUpdate")) {
-        text = body.requests?.[0]?.insertText?.text ?? "";
+        // Apply the INSERT wherever it sits: the rewrite's batchUpdate opens
+        // with deleteContentRange (a real Docs GET returns endIndex > 2), so
+        // requests[0] is not the insert there -- applying requests[0] blindly
+        // would blank the Doc on every rewrite.
+        const insert = (body.requests ?? []).find((r: any) => r.insertText);
+        if (insert) text = insert.insertText.text;
         return json({});
       }
       if (url.includes("/documents/doc-smoke-1") && method === "GET") {
-        return json({ title, body: { content: [{ paragraph: { elements: [{ textRun: { content: text } }] } }] } });
+        return json({ title, body: { content: [{ endIndex: text ? text.length + 1 : 1, paragraph: { elements: [{ textRun: { content: text } }] } }] } });
       }
       throw new Error(`Unexpected Google call: ${method} ${url}`);
     },
@@ -396,7 +403,8 @@ test("normal folder selection regression: without the smoke flag the approval pa
 });
 
 // ---------------------------------------------------------------------------
-// Confirmation: Work/target/option agreement gates ONE registered invocation.
+// Confirmation: Work/target/option agreement gates the governed creation
+// and its rewrite of THE created Doc.
 // ---------------------------------------------------------------------------
 
 function pendingFixture() {
@@ -408,31 +416,98 @@ function pendingFixture() {
   };
 }
 
-test("confirmation executes exactly one registered invocation against the confirmed account and folder, then closes the Work", async (t: any) => {
+test("confirmation runs the governed creation AND its rewrite against the confirmed account and folder, then closes the Work", async (t: any) => {
   const workId = `${GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX}w3`;
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
   const state = smokeState(workId, { pendingSmokeSelection: pendingFixture() });
   const server = docServer();
-  const { calls } = installFake(t, (call) => server.handle(call));
+  const { calls, telegram } = installFake(t, (call) => server.handle(call));
   const { seams, completes, records } = fakeSeams(state);
 
   const opaqueId = await stageOption(env, workId, { kind: "smoke_confirm", smoke: true, accountIdentifier: ACCOUNT, folderId: FOLDER_ID, folderName: FOLDER_NAME });
   const next = await confirmGoogleDocsSmoke(env, state, opaqueId, seams);
 
-  // The Registry ran exactly once, through the shared core, against the
-  // confirmed disposable folder -- no pre-configured key was involved.
+  // The Registry ran exactly once per registered operation, through the
+  // shared core, against the confirmed disposable folder -- no
+  // pre-configured key was involved.
   assert.equal(driveCreates(calls).length, 1);
   assert.equal(server.created.folder, FOLDER_ID);
+  const rewriteWrites = calls.filter(
+    (c: GoogleCall) => c.url.includes(":batchUpdate") && (c.body?.requests ?? []).some((r: any) => r.deleteContentRange),
+  );
+  assert.equal(rewriteWrites.length, 1, "exactly ONE governed rewrite over the created Doc");
+  assert.match(rewriteWrites[0].url, /\/documents\/doc-smoke-1:batchUpdate$/, "the rewrite targets the Doc this run created");
   assert.deepEqual(completes, [workId], "a clean success closes the confirmed Work");
   assert.equal(next.stage, "complete");
   assert.equal(next.pendingSmokeSelection, undefined);
 
-  // The durable operation record landed through the Work's persistence.
-  assert.ok(Object.keys(records).length > 0, "the invocation must leave its durable operation record");
+  // The durable operation records landed through the Work's persistence.
+  assert.ok(Object.keys(records).length > 0, "the invocations must leave their durable operation records");
   assert.ok(
     Object.values(records).some((r: any) => r.status === "succeeded" && r.operation_id === "google_docs.create_and_verify"),
-    "the terminal outcome must be recorded on the Work",
+    "the creation's terminal outcome must be recorded on the Work",
   );
+  assert.ok(
+    Object.values(records).some((r: any) => r.status === "succeeded" && r.operation_id === "google_docs.update_and_verify"),
+    "the rewrite's terminal outcome must be recorded on the Work",
+  );
+
+  // The report claims success only because BOTH governed invocations
+  // verified by read-back.
+  assert.match(telegramTexts(telegram), /Registry smoke SUCCEEDED/);
+  assert.match(telegramTexts(telegram), /REWROTE/);
+});
+
+test("creation proved but the rewrite REJECTED: the report never claims success and the Work stays open", async (t: any) => {
+  const workId = `${GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX}w7`;
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  const state = smokeState(workId, { pendingSmokeSelection: pendingFixture() });
+  const server = docServer();
+  const { calls, telegram } = installFake(t, (call) => {
+    if (call.url.includes(":batchUpdate") && (call.body?.requests ?? []).some((r: any) => r.deleteContentRange)) {
+      return json({ error: { code: 400, message: "invalid updateParagraphStyle request" } }, 400);
+    }
+    return server.handle(call);
+  });
+  const { seams, completes, records } = fakeSeams(state);
+
+  const opaqueId = await stageOption(env, workId, { kind: "smoke_confirm", smoke: true, accountIdentifier: ACCOUNT, folderId: FOLDER_ID, folderName: FOLDER_NAME });
+  const next = await confirmGoogleDocsSmoke(env, state, opaqueId, seams);
+
+  const messages = telegramTexts(telegram);
+  assert.match(messages, /PARTIALLY COMPLETED/, "the headline must reflect the incomplete run");
+  assert.match(messages, /Rewrite FAILED/, "the rewrite's own truth must be reported");
+  assert.match(messages, /HTTP 400/, "the provider's rejection must be diagnosable");
+  assert.ok(!/Registry smoke SUCCEEDED/.test(messages), "a rejected rewrite must never be reported as a success");
+  assert.deepEqual(completes, [], "a non-clean terminal end must not close the Work");
+  assert.equal(next.stage !== "complete", true, "the Work must stay open for its durable records");
+  assert.ok(Object.values(records).some((r: any) => r.status === "succeeded" && r.operation_id === "google_docs.create_and_verify"), "the proved creation keeps its record");
+  assert.ok(Object.values(records).some((r: any) => r.status === "failed" && r.operation_id === "google_docs.update_and_verify"), "the rejected rewrite keeps its record");
+  assert.equal(driveCreates(calls).length, 1, "the Doc is never created twice");
+});
+
+test("creation proved but the rewrite UNCERTAIN (network): the report says unverified and the Work stays open", async (t: any) => {
+  const workId = `${GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX}w8`;
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  const state = smokeState(workId, { pendingSmokeSelection: pendingFixture() });
+  const server = docServer();
+  const { telegram } = installFake(t, (call) => {
+    if (call.url.includes(":batchUpdate") && (call.body?.requests ?? []).some((r: any) => r.deleteContentRange)) {
+      throw new Error("socket hang up");
+    }
+    return server.handle(call);
+  });
+  const { seams, completes } = fakeSeams(state);
+
+  const opaqueId = await stageOption(env, workId, { kind: "smoke_confirm", smoke: true, accountIdentifier: ACCOUNT, folderId: FOLDER_ID, folderName: FOLDER_NAME });
+  const next = await confirmGoogleDocsSmoke(env, state, opaqueId, seams);
+
+  const messages = telegramTexts(telegram);
+  assert.match(messages, /Rewrite outcome UNVERIFIED/, "an uncertain rewrite must be reported as unverified");
+  assert.match(messages, /reconcil/i, "the report must point at reconciliation, not a retry");
+  assert.ok(!/Registry smoke SUCCEEDED/.test(messages), "an unverified rewrite must never be reported as a success");
+  assert.deepEqual(completes, [], "an uncertain rewrite must not close the Work");
+  assert.equal(next.stage !== "complete", true, "the Work must stay open");
 });
 
 test("confirmation under an account outside the Worker's authorized set is blocked with zero Drive requests", async (t: any) => {

@@ -11,6 +11,20 @@
  * `google_smoke_test_folder:<account>` (src/kvStore.ts, the same convention
  * as `google_proposal_docs_folder:<account>`).
  *
+ * After a creation that its OWN read-back verification proved, the same
+ * confirmed run performs one more governed invocation: exactly one
+ * `google_docs.update_and_verify` -- the actual content-rewrite operation
+ * (delete + insert + canonical styling in one batchUpdate, carrying PR
+ * #269's corrected request shapes) -- whose target is taken from the
+ * verified creation outcome itself, never from caller input or any
+ * selection. That binding makes the rewrite structurally incapable of
+ * pointing at any other document: it can only rewrite THE disposable Doc
+ * this same run created and proved. Both invocations are judged by the
+ * same Work's own recorded Action (`proposal_draft` declares both
+ * operations, src/units/sales/salesManifest.ts), run under the same
+ * durable persistence, and each keeps its own durable intent/outcome
+ * records and canonical five outcomes.
+ *
  * This module owns the smoke's OWN policy (which governed Action the smoke
  * Work records, which runtime key holds the disposable target, when the
  * Work is closed) and its orchestration; it deliberately owns no mechanism
@@ -44,6 +58,7 @@ import { listAuthorizedGoogleAccounts } from "../../googleOAuth";
 import { kvGet } from "../../kvStore";
 import { invokeTool, type ToolInvocationOutcome } from "../toolRegistry";
 import { GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, GOOGLE_DOCS_TOOL_ID } from "./googleDocsTool";
+import { GOOGLE_DOCS_UPDATE_OPERATION_ID } from "./googleDocsUpdateTool";
 
 /** Runtime-state key holding the disposable folder id, suffixed with the authorized account. */
 export const GOOGLE_DOCS_SMOKE_FOLDER_KEY_PREFIX = "google_smoke_test_folder";
@@ -75,8 +90,16 @@ export const GOOGLE_DOCS_SMOKE_CHAT_ID = 0;
 /** What one smoke run reports back: the Registry outcome, or why a pre-flight gate refused. */
 export interface GoogleDocsSmokeResult {
   work_id: string;
-  /** The Registry outcome for the governed invocation, or null when a pre-flight gate refused before any Work existed or any request was made. */
+  /** The Registry outcome for the governed CREATE invocation, or null when a pre-flight gate refused before any Work existed or any request was made. */
   outcome: ToolInvocationOutcome | null;
+  /**
+   * The Registry outcome of the governed REWRITE invocation
+   * (`google_docs.update_and_verify`) over THE disposable Doc this run
+   * created, or null when no rewrite could exist (any pre-flight refusal,
+   * and any creation outcome other than a verified success -- a Doc that
+   * was never provably created is never rewritten).
+   */
+  rewrite_outcome: ToolInvocationOutcome | null;
   /** Why a pre-flight gate refused; never set together with an outcome. */
   blocked_reason?: string;
   /** Whether the smoke Work was closed through the governed lifecycle after a clean terminal end. */
@@ -94,6 +117,13 @@ export interface GoogleDocsSmokeWorkRunner {
   closeGovernedWork(workId: string): Promise<void>;
 }
 
+/** The8-char display suffix a smoke Work id contributes to its Doc title and Proposal id (identical derivation for every smoke input). */
+function smokeSuffix(workId: string): string {
+  return workId.startsWith(GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX)
+    ? workId.slice(GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX.length, GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX.length + 8).toUpperCase()
+    : workId.slice(0, 8).toUpperCase();
+}
+
 /**
  * The exact invocation input for one smoke run. Title and content are
  * token-free by construction (a smoke marker, the Work id and the operation
@@ -101,11 +131,8 @@ export interface GoogleDocsSmokeWorkRunner {
  * run's reconciliation-by-title search exact.
  */
 export function googleDocsSmokeInput(workId: string, folderId: string, accountIdentifier: string) {
-  const suffix = workId.startsWith(GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX)
-    ? workId.slice(GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX.length, GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX.length + 8).toUpperCase()
-    : workId.slice(0, 8).toUpperCase();
   return {
-    title: `ENIG-REGISTRY-SMOKE-${suffix}`,
+    title: `ENIG-REGISTRY-SMOKE-${smokeSuffix(workId)}`,
     content: `ENIG Tool Registry live smoke test.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID}\nDisposable verification content. No client data.\n`,
     folder_id: folderId,
     account_identifier: accountIdentifier,
@@ -113,13 +140,42 @@ export function googleDocsSmokeInput(workId: string, folderId: string, accountId
 }
 
 /**
- * Runs the ONE governed smoke invocation. Every gate is evaluated in the
- * order that keeps the blast radius smallest: id shape, then trusted
- * account set, then the configured disposable target, then the governed
- * Work, and only then the Registry -- whose own boundary (input validation,
- * trusted target resolution, Access on the Work's recorded Action, durable
- * records, read-back verification, reconciliation) is what actually judges
- * and performs the operation.
+ * The governed rewrite invocation's exact input: THE disposable Doc this
+ * run just created and verified (its id comes from the create outcome, is
+ * passed in here by the invocation core, and is re-validated by the
+ * operation's own opaque-id contract), and a rewrite content that is
+ * deliberately DIFFERENT from the creation content so the batchUpdate is a
+ * real rewrite (delete + insert + styling) whose read-back proves the new
+ * text -- not a no-op restatement of what the Doc already holds. Proposal
+ * id and content are token-free by construction.
+ */
+export function googleDocsSmokeRewriteInput(workId: string, documentId: string, accountIdentifier: string) {
+  return {
+    document_id: documentId,
+    account_identifier: accountIdentifier,
+    proposal_id: `REGISTRY-SMOKE-${smokeSuffix(workId)}`,
+    versions: [
+      {
+        version: 1,
+        // The `- ` line maps to a `bullet` block (currentZoneBlockKind), so
+        // the rewrite exercises the corrected #269 `createParagraphBullets`
+        // preset as well as the corrected `updateParagraphStyle` shapes.
+        content: `ENIG Tool Registry live smoke REWRITE pass.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_UPDATE_OPERATION_ID}\n- Governed rewrite bullet marker.\nDisposable verification content. No client data.\n`,
+      },
+    ],
+  };
+}
+
+/**
+ * Runs the governed smoke's registered invocations in order: the creation
+ * of THE disposable Doc, and -- only after that creation was proved by its
+ * own read-back -- the content rewrite of that same Doc. Every gate is
+ * evaluated in the order that keeps the blast radius smallest: id shape,
+ * then trusted account set, then the configured disposable target, then the
+ * governed Work, and only then the Registry -- whose own boundary (input
+ * validation, trusted target resolution, Access on the Work's recorded
+ * Action, durable records, read-back verification, reconciliation) is what
+ * actually judges and performs each operation.
  */
 export async function runGoogleDocsSmoke(
   env: Env,
@@ -129,6 +185,7 @@ export async function runGoogleDocsSmoke(
   const blocked = (reason: string): GoogleDocsSmokeResult => ({
     work_id: String(workId),
     outcome: null,
+    rewrite_outcome: null,
     blocked_reason: reason,
     work_closed: false,
   });
@@ -191,13 +248,25 @@ export interface GoogleDocsSmokeInvocationRunner {
 /**
  * THE shared smoke invocation core: validates the chosen account against
  * the Worker's OWN authorized set (a confirmed selection alone is never
- * authority), invokes EXACTLY one registered `google_docs.create_and_verify`
- * through `invokeTool` judged by the Work's own recorded Action, under the
- * durable persistence the runner's execute cycle installs, and applies the
- * terminal-only close rule -- succeeded/denied closes the Work; a
- * failed/partially_completed/unverified effect keeps it open with its
- * durable records intact for reconciliation. Entries add their own target
- * gates around this; this core never chooses an account or folder itself.
+ * authority), then runs TWO registered operations through `invokeTool`,
+ * each judged by the Work's own recorded Action under the durable
+ * persistence the runner's execute cycle installs:
+ *
+ *   1. exactly one `google_docs.create_and_verify` (the disposable Doc), and
+ *   2. only after that creation returned a VERIFIED success, exactly one
+ *      `google_docs.update_and_verify` -- the content rewrite -- whose
+ *      document id is taken from the creation outcome's own verified
+ *      `remote_resource.document_id`, never from caller input. A creation
+ *      that failed, was denied, or is unverified/partial leaves nothing to
+ *      rewrite, so no rewrite request is ever attempted in those cases.
+ *
+ * The terminal-only close rule then applies to the run as a whole: the
+ * Work closes only when every attempted operation ended cleanly
+ * (`succeeded` proved the effect, `denied` proved there was none); any
+ * `failed`/`partially_completed`/`unverified` outcome -- from either step
+ * -- keeps the Work open with its durable records intact for
+ * reconciliation. Entries add their own target gates around this; this
+ * core never chooses an account, folder, or rewrite target itself.
  */
 export async function runGoogleDocsSmokeInvocation(
   env: Env,
@@ -207,6 +276,7 @@ export async function runGoogleDocsSmokeInvocation(
   const blocked = (reason: string): GoogleDocsSmokeResult => ({
     work_id: target.workId,
     outcome: null,
+    rewrite_outcome: null,
     blocked_reason: reason,
     work_closed: false,
   });
@@ -220,6 +290,7 @@ export async function runGoogleDocsSmokeInvocation(
 
   const input = googleDocsSmokeInput(target.workId, target.folderId, target.accountIdentifier);
   let outcome: ToolInvocationOutcome | undefined;
+  let rewriteOutcome: ToolInvocationOutcome | null = null;
   await runner.runWithWorkPersistence(target.workId, async (state) => {
     if (state.workId !== target.workId) {
       throw new Error(`smoke Work mismatch: the runner presented Work ${state.workId} for smoke ${target.workId} -- refusing to judge the invocation under another Work's Action.`);
@@ -229,21 +300,46 @@ export async function runGoogleDocsSmokeInvocation(
       { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input },
       workSessionContext(state),
     );
+    // The governed rewrite, only over THE Doc this same invocation just
+    // created and its own read-back verified: the target id comes out of
+    // the verified create outcome, so it cannot point anywhere else. Same
+    // Work, same recorded Action, same persistence cycle -- the rewrite is
+    // a full Registry invocation with its own durable intent/outcome
+    // records, Access judgment, verification, and reconciliation contract.
+    const createdDocumentId =
+      outcome !== undefined && outcome.state === "succeeded"
+        ? outcome.remote_resource?.document_id
+        : undefined;
+    if (typeof createdDocumentId === "string" && createdDocumentId.length > 0) {
+      rewriteOutcome = await invokeTool(
+        env,
+        {
+          tool_id: GOOGLE_DOCS_TOOL_ID,
+          operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID,
+          input: googleDocsSmokeRewriteInput(target.workId, createdDocumentId, target.accountIdentifier),
+        },
+        workSessionContext(state),
+      );
+    }
     return state;
   });
   if (outcome === undefined) {
     return blocked("the smoke Work never reached the invocation (the runner returned without running it) -- no request was made.");
   }
 
-  // Governed close, only on a clean terminal end: `succeeded` proved the
-  // effect, `denied` proved there was none. A `failed`/`partially_completed`/
-  // `unverified` effect keeps the smoke Work OPEN -- its durable operation
-  // records stay discoverable for reconciliation, exactly as the recovery
-  // contract requires.
+  // Governed close, only on a clean terminal end for EVERY attempted
+  // operation: `succeeded` proved the effect, `denied` proved there was
+  // none. A `failed`/`partially_completed`/`unverified` effect from either
+  // step keeps the smoke Work OPEN -- its durable operation records stay
+  // discoverable for reconciliation, exactly as the recovery contract
+  // requires (an uncertain rewrite is never silently discarded by closing
+  // the Work around it).
+  const cleanly = (o: ToolInvocationOutcome | null): boolean =>
+    o === null || o.state === "succeeded" || o.state === "denied";
   let workClosed = false;
-  if (outcome.state === "succeeded" || outcome.state === "denied") {
+  if (cleanly(outcome) && cleanly(rewriteOutcome)) {
     await runner.closeGovernedWork(target.workId);
     workClosed = true;
   }
-  return { work_id: target.workId, outcome, work_closed: workClosed };
+  return { work_id: target.workId, outcome, rewrite_outcome: rewriteOutcome, work_closed: workClosed };
 }
