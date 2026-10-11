@@ -111,8 +111,8 @@ interface GoogleCall {
 
 const REAL_FETCH = globalThis.fetch;
 
-/** Scripts googleapis.com endpoints, captures Telegram sends for text/button assertions, and swallows everything else. */
-function installFake(t: any, handler: (call: GoogleCall) => Response | Promise<Response>) {
+/** Scripts googleapis.com endpoints, captures Telegram sends for text/button assertions, and swallows everything else. `telegramHandler` overrides the default Telegram accept-everything response. */
+function installFake(t: any, handler: (call: GoogleCall) => Response | Promise<Response>, telegramHandler?: (call: GoogleCall) => Response) {
   const calls: GoogleCall[] = [];
   const telegram: GoogleCall[] = [];
   globalThis.fetch = (async (url: any, init?: any) => {
@@ -127,8 +127,9 @@ function installFake(t: any, handler: (call: GoogleCall) => Response | Promise<R
     if (u.includes("api.telegram.org")) {
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-      telegram.push({ url: u, method, body });
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+      const call = { url: u, method, body };
+      telegram.push(call);
+      return telegramHandler ? telegramHandler(call) : new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
     }
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
@@ -677,4 +678,108 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
   for (const { shape, data } of measured) {
     assertWithinTelegramLimit(shape, data);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Delivery-aware initiation record (LOG-1071/LOG-1072 reporting defect): the
+// "picker presented" Activity may only be written when Telegram confirmed
+// the picker send. Total delivery failure must be recorded as a Blocker
+// with safe per-attempt evidence -- never as a successfully presented
+// picker. All Telegram responses here are mocked; nothing is sent live.
+// ---------------------------------------------------------------------------
+
+type RecordedActivity = import("./log").LogEntryInput;
+
+function activityRecorder() {
+  const activities: RecordedActivity[] = [];
+  return { activities, seams: { logActivity: async (input: RecordedActivity) => void activities.push(input) } };
+}
+
+const telegramRejectButtons = () =>
+  new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: BUTTON_DATA_INVALID" }), { status: 400 });
+const telegramAccept = () => new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+
+test("a totally undelivered picker records a Blocker with safe per-attempt evidence instead of a presented picker, and a button-less failure notice is attempted", async (t: any) => {
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  // The live LOG-1071/LOG-1072 shape: Telegram rejects ANY message carrying
+  // the inline keyboard, but accepts a plain (button-less) message.
+  const { telegram } = installFake(
+    t,
+    () => json({}),
+    (call) => (call.body?.reply_markup ? telegramRejectButtons() : telegramAccept()),
+  );
+  const { activities, seams } = activityRecorder();
+
+  await startGoogleDocsSmokeFlow(env, 111, 222, seams);
+
+  // The governed Work was still created -- and only that: no invented
+  // lifecycle transition for an undelivered picker (it stays open, inert).
+  assert.equal(inits(env).length, 1);
+  const workId = String(inits(env)[0][0]);
+
+  // No successful-initiation claim exists anywhere in the records.
+  assert.ok(
+    !activities.some((a) => /smoke initiated/.test(a.entry)),
+    "a total delivery failure must never be recorded as a presented picker (the LOG-1071/LOG-1072 defect)",
+  );
+  const blocker = activities.find((a) => a.type === "Blocker");
+  assert.ok(blocker, "the delivery failure must be recorded as a Blocker");
+  assert.equal(blocker.outcome, "Blocked");
+  assert.match(blocker.entry, /NOT delivered/);
+  assert.equal(blocker.workId, workId, "the Blocker must sit on the smoke Work it concerns");
+
+  // Safe evidence: both attempts, their HTTP statuses, the actionable
+  // provider detail -- bounded at capture time, no credentials, no content.
+  assert.match(blocker.decisionRationale ?? "", /attempt 1 \(Markdown\): HTTP 400/);
+  assert.match(blocker.decisionRationale ?? "", /attempt 2 \(plain\): HTTP 400/);
+  assert.match(blocker.decisionRationale ?? "", /BUTTON_DATA_INVALID/);
+  assert.ok(!/test-token/.test(blocker.decisionRationale ?? ""), "no credential may leak into the record");
+
+  // The picker was attempted with its keyboard (Markdown + plain retry);
+  // the in-chat failure notice went out button-less and was delivered.
+  const withKeyboard = telegram.filter((c) => c.body?.reply_markup);
+  assert.equal(withKeyboard.length, 2, "Markdown attempt + plain-text retry, both carrying the keyboard");
+  const notice = telegram[telegram.length - 1];
+  assert.equal(notice.body.reply_markup, undefined, "the failure notice must carry no buttons");
+  assert.match(notice.body.text, /could NOT be delivered/);
+});
+
+test("a picker rescued by the plain-text retry counts as DELIVERED: the existing successful initiation record is preserved", async (t: any) => {
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  const { telegram } = installFake(
+    t,
+    () => json({}),
+    (call) => (call.body?.parse_mode === "Markdown" ? new Response(JSON.stringify({ ok: false, error_code: 400, description: "Bad Request: can't parse entities" }), { status: 400 }) : telegramAccept()),
+  );
+  const { activities, seams } = activityRecorder();
+
+  await startGoogleDocsSmokeFlow(env, 111, 222, seams);
+
+  // A failed first attempt rescued by the retry is delivery, not failure.
+  assert.equal(activities.length, 1, "exactly one record, and it is the initiation");
+  assert.match(activities[0].entry, /smoke initiated/);
+  assert.equal(activities[0].type, "Activity");
+  assert.equal(activities[0].outcome, "Active");
+  assert.equal(activities[0].workId, String(inits(env)[0][0]));
+  assert.ok(!activities.some((a) => a.type === "Blocker"), "a rescued delivery must not be reported as a Blocker");
+
+  const keyboardSends = telegram.filter((c) => c.body?.reply_markup);
+  assert.equal(keyboardSends.length, 2, "the keyboard went out on the Markdown attempt and its plain retry");
+  assert.equal(keyboardSends[1].body.parse_mode, undefined, "the second send is the plain-text retry");
+  assert.equal(telegram.length, 2, "no button-less failure notice on a rescued delivery");
+});
+
+test("an immediately delivered picker records the successful initiation exactly as before, with a single attempt", async (t: any) => {
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  const { telegram } = installFake(t, () => json({}));
+  const { activities, seams } = activityRecorder();
+
+  await startGoogleDocsSmokeFlow(env, 111, 222, seams);
+
+  assert.equal(telegram.length, 1, "no unnecessary retry on immediate success");
+  assert.equal(activities.length, 1);
+  assert.match(activities[0].entry, /smoke initiated/);
+  assert.equal(activities[0].type, "Activity");
+  assert.equal(activities[0].outcome, "Active");
+  assert.match(activities[0].activity ?? "", /authorized-account selection presented/);
 });
