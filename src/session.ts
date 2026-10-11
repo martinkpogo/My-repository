@@ -495,12 +495,14 @@ export class WorkSession extends DurableObject<Env> {
    * Work's approval cycle and evaluates whether that cycle may complete
    * (see evaluateProposalApprovalCycle). Resolution is a SEPARATE signal from
    * comment processing: it is observed here, on its own, so a resolved
-   * comment is never confused with an applied one. Runs inside `execute`, so
-   * the recorded resolution observations land in the same durable write as
-   * the rest of the Work.
+   * comment is never confused with an applied one -- and only when BOTH are
+   * satisfied (plus the Doc read back as the exact current Version) does the
+   * cycle complete and approve through the shared approval write. Runs inside
+   * `execute`, so the recorded resolution observations, and any completion,
+   * land in the same durable write as the rest of the Work.
    */
-  async syncProposalDocApprovalCycle(input: { documentId: string; observations: { commentId: string; resolved: boolean; modifiedTime?: string }[] }): Promise<{ kind: string; reasons?: string[] }> {
-    let out: { kind: string; reasons?: string[] } = { kind: "no_cycle" };
+  async syncProposalDocApprovalCycle(input: { documentId: string; observations: { commentId: string; resolved: boolean; modifiedTime?: string }[] }): Promise<{ kind: string; approvedVersion?: number; reasons?: string[] }> {
+    let out: { kind: string; approvedVersion?: number; reasons?: string[] } = { kind: "no_cycle" };
     await this.execute(async (state) => {
       out = await salesProposal.evaluateProposalApprovalCycle(this.env, state, input.observations);
       return state;
