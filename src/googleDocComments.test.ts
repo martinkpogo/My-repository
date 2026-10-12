@@ -82,9 +82,27 @@ function driveCommentsUrl(docId: string) {
   return `https://www.googleapis.com/drive/v3/files/${docId}/comments`;
 }
 
+/** One page of a paginated `comments.list` response, as a test would script it. */
+export interface ScriptedCommentsPage {
+  comments?: any[];
+  /** The token the NEXT request must send to continue, if any. */
+  nextPageToken?: string;
+  /** Non-200 status, to script a page that fails. */
+  status?: number;
+}
+
 function mockFetchWith(handlers: {
   docText?: string;
   comments?: any[];
+  /**
+   * Scripts a paginated `comments.list`, keyed by the `pageToken` the caller
+   * sent (`undefined` is the first request). When present this replaces the
+   * single-page `comments` handler, so existing tests keep their exact
+   * behaviour unless they opt into pagination.
+   */
+  commentPages?: (pageToken: string | undefined) => ScriptedCommentsPage;
+  /** Records every `comments.list` request, so a test can assert on the exact URL/params actually sent. */
+  onCommentsList?: (pageToken: string | undefined, url: string) => void;
   onReply?: (commentId: string, body: any) => void;
   onResolve?: (commentId: string) => void;
   onBatchUpdate?: (body: any) => boolean;
@@ -105,6 +123,15 @@ function mockFetchWith(handlers: {
     }
 
     if (urlStr.startsWith(driveCommentsUrl(DOC_ID)) && (!init || init.method === undefined || (init?.method ?? "GET") === "GET")) {
+      const pageToken = new URL(urlStr).searchParams.get("pageToken") ?? undefined;
+      handlers.onCommentsList?.(pageToken, urlStr);
+      if (handlers.commentPages) {
+        const page = handlers.commentPages(pageToken);
+        return new Response(JSON.stringify({ comments: page.comments ?? [], ...(page.nextPageToken ? { nextPageToken: page.nextPageToken } : {}) }), {
+          status: page.status ?? 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({ comments: handlers.comments ?? [] }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -1002,4 +1029,287 @@ test("a poll that COMPLETES the approval cycle reports that completion as its ow
     result.diagnostics.some((d) => d.outcome === "approval_cycle_synced" && d.detail === "approved"),
     `completion reported as a diagnostic: ${JSON.stringify(result.diagnostics.map((d) => d.detail))}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Pagination: comments.list returns at most pageSize (100) comments per call,
+// so the fetcher must follow nextPageToken and accumulate. Before this fix a
+// single request silently discarded every comment after the first 100 -- which,
+// since a Proposal Doc's approval cycle is driven by the resolution state
+// observed here, could hide an actionable comment entirely.
+// ---------------------------------------------------------------------------
+
+/** A live (unresolved, authorized, uniquely anchored) Doc comment. */
+function liveDocComment(id: string, quoted = "Friday") {
+  return { id, content: 'change to "Monday"', resolved: false, author: { me: true, displayName: "Owner" }, quotedFileContent: { value: quoted } };
+}
+
+test("pagination 1. a single-page Doc response is unchanged: one request, no pageToken ever sent, all comments returned", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  const requested: (string | undefined)[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    docText: "The quarterly report is due Friday.",
+    comments: [liveDocComment("c-single-1"), liveDocComment("c-single-2")],
+    onCommentsList: (pageToken) => requested.push(pageToken),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.deepStrictEqual(requested, [undefined], "exactly one request, and it carries no pageToken");
+  assert.strictEqual(result.commentsProcessed, 2, "both comments are processed");
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "2 comment(s) found");
+});
+
+test("pagination 2. at least 150 comments on a Doc, spread over multiple pages, are ALL retrieved and processed", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  // 150 comments across pages of 100 + 50. All but the last are already
+  // resolved, so they exercise the existing cheap rule (plain Doc -> skip +
+  // mark processed); the last is live and must be genuinely processed, which
+  // is what proves a comment on the FINAL page is not dropped.
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `c-${i}`, content: "x", resolved: true, author: { me: true } }));
+  const page2Resolved = Array.from({ length: 49 }, (_, i) => ({ id: `c-${100 + i}`, content: "x", resolved: true, author: { me: true } }));
+  const live = liveDocComment("c-149");
+
+  const requested: (string | undefined)[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    docText: "The quarterly report is due Friday.",
+    commentPages: (pageToken) => {
+      requested.push(pageToken);
+      if (pageToken === undefined) return { comments: page1, nextPageToken: "tok-page-2" };
+      if (pageToken === "tok-page-2") return { comments: [...page2Resolved, live] };
+      throw new Error(`unexpected pageToken ${pageToken}`);
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.deepStrictEqual(requested, [undefined, "tok-page-2"], "the returned token is followed exactly once");
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "150 comment(s) found", "all 150, not the first 100");
+  assert.strictEqual(result.diagnostics.filter((d) => d.outcome === "resolved_skip").length, 149, "every resolved comment on every page is processed by the existing rule");
+  assert.ok(
+    result.diagnostics.some((d) => d.commentId === "c-149" && d.outcome === "edit_not_authorized"),
+    "the live comment on the LAST page is genuinely processed",
+  );
+  assert.strictEqual(result.commentsProcessed, 1);
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-149"), "1", "its dedup marker proves it really ran");
+});
+
+test("pagination 3. the Doc follow-up request sends the returned pageToken and preserves fields, pageSize and includeDeleted", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  const urls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [],
+    commentPages: (pageToken) =>
+      pageToken === undefined
+        ? { comments: [{ id: "c-a", content: "x", resolved: true, author: { me: true } }], nextPageToken: "tok/with+specials=&?" }
+        : { comments: [{ id: "c-b", content: "x", resolved: true, author: { me: true } }] },
+    onCommentsList: (_pageToken, url) => urls.push(url),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(urls.length, 2, "two requests: the first page, then the continuation");
+  const [first, second] = urls.map((u) => new URL(u));
+
+  for (const u of [first, second]) {
+    assert.strictEqual(u.searchParams.get("pageSize"), "100", "pageSize=100 preserved on every request");
+    assert.strictEqual(u.searchParams.get("includeDeleted"), "false", "includeDeleted=false preserved on every request");
+    assert.strictEqual(
+      u.searchParams.get("fields"),
+      "comments(id,content,resolved,modifiedTime,author(displayName,me),quotedFileContent(value),replies(id,action,author(displayName,me),createdTime,deleted))",
+      "the Doc fields projection (incl. modifiedTime and replies) is preserved verbatim",
+    );
+  }
+  assert.strictEqual(first.searchParams.get("pageToken"), null, "the first request carries no pageToken");
+  assert.strictEqual(second.searchParams.get("pageToken"), "tok/with+specials=&?", "the returned token is sent back, correctly URL-encoded");
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "2 comment(s) found", "both pages accumulated");
+});
+
+test("pagination 4. an empty Doc result and an absent nextPageToken both terminate normally", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [],
+    commentPages: () => {
+      calls++;
+      return {}; // no comments at all, and no nextPageToken
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(calls, 1, "no nextPageToken means done -- never a second request");
+  assert.strictEqual(result.commentsProcessed, 0);
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "0 comment(s) found");
+  assert.ok(!result.diagnostics.some((d) => d.outcome === "comments_list_failed"), "a genuinely empty result is not a failure");
+});
+
+test("pagination 5. a failure on a LATER Doc page rejects the whole fetch -- earlier-page comments are never processed as if the result were complete", async (t) => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  let replies = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    docText: "The quarterly report is due Friday.",
+    commentPages: (pageToken) => {
+      if (pageToken === undefined) {
+        return { comments: [liveDocComment("c-page1-a"), liveDocComment("c-page1-b")], nextPageToken: "tok-page-2" };
+      }
+      return { status: 500, comments: [] }; // the continuation blows up
+    },
+    onReply: () => {
+      replies++;
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  const failed = result.diagnostics.find((d) => d.outcome === "comments_list_failed");
+  assert.ok(failed, `a later-page failure is reported: ${JSON.stringify(result.diagnostics.map((d) => d.outcome))}`);
+  assert.match(failed!.detail ?? "", /HTTP 500/);
+  assert.strictEqual(result.commentsProcessed, 0, "nothing was processed");
+  assert.strictEqual(replies, 0, "no reply was sent for comments from the completed first page");
+  assert.strictEqual(result.diagnostics.filter((d) => d.commentId !== null).length, 0, "no per-comment diagnostic at all");
+  const markerKeys = [...mockKv._rawStore.keys()].filter((k) => k.startsWith("google_comment_processed:"));
+  assert.deepStrictEqual(markerKeys, [], "and no dedup marker was written, so a later poll retries the whole document safely");
+});
+
+test("pagination 6. a repeated Doc page token terminates safely instead of looping forever", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  let requests = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    commentPages: () => {
+      requests++;
+      // The API keeps handing back the SAME token -- a buggy server.
+      return { comments: [{ id: `c-loop-${requests}`, content: "x", resolved: true, author: { me: true } }], nextPageToken: "tok-same" };
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.ok(requests <= 3, `pagination terminates promptly rather than looping (made ${requests} requests)`);
+  assert.ok(result.diagnostics.some((d) => d.outcome === "comments_list_failed"), "the ambiguous fetch is refused, not treated as complete");
+  assert.strictEqual(result.commentsProcessed, 0);
+});
+
+test("pagination 7. an INVALID Doc continuation token (HTTP 400) is a failure, and dedup markers from earlier polls stay intact", async (t) => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+  // An unrelated, pre-existing marker from an earlier poll must survive.
+  await fakeEnv.STATE_KV.put("google_comment_processed:c-earlier-poll", "1");
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    commentPages: (pageToken) =>
+      pageToken === undefined
+        ? { comments: [liveDocComment("c-bad")], nextPageToken: "not-a-real-token" }
+        : { status: 400, comments: [] },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.ok(result.diagnostics.some((d) => d.outcome === "comments_list_failed"), "an invalid token fails the fetch");
+  assert.match(result.diagnostics.find((d) => d.outcome === "comments_list_failed")!.detail ?? "", /HTTP 400/);
+  assert.strictEqual(result.commentsProcessed, 0);
+  assert.strictEqual([...mockKv._rawStore.keys()].filter((k) => k.startsWith("google_comment_processed:")).length, 1, "no new marker was written for a rejected fetch");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-earlier-poll"), "1", "and the pre-existing marker is untouched");
+});
+
+test("pagination 8. a Proposal Doc's approval cycle observes comments from EVERY page, not just the first 100", async (t) => {
+  // The regression that matters most: since observed resolution is the
+  // Proposal approval signal, a comment beyond page 1 must still reach the
+  // cycle sync, or it could hold (or complete) a cycle invisibly.
+  const { fakeEnv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "tok-1", refresh_token: "refresh-1", expires_in: 3600 }, OWNER_EMAIL);
+  await registerWatchedGoogleDoc(fakeEnv, {
+    documentId: DOC_ID,
+    accountIdentifier: OWNER_EMAIL,
+    title: "PROP-6 v1",
+    chatId: 123456789,
+    threadId: 604,
+    createdAt: new Date().toISOString(),
+    proposal: { workId: "work-1", proposalNumber: 6, proposalId: "PROP-6", version: 1 },
+  });
+
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `c-${i}`, content: "x", resolved: true, modifiedTime: "2026-10-11T09:00:00.000Z", author: { me: true } }));
+  const page2 = [
+    { id: "c-deep-resolved", content: "x", resolved: true, modifiedTime: "2026-10-11T09:30:00.000Z", author: { me: true } },
+    { id: "c-deep-open", content: "x", resolved: false, modifiedTime: "2026-10-11T09:00:00.000Z", author: { me: true } },
+  ];
+
+  const syncCalls: any[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [],
+    commentPages: (pageToken) => (pageToken === undefined ? { comments: page1, nextPageToken: "tok-page-2" } : { comments: page2 }),
+  });
+  (fakeEnv as any).WORK_SESSION = {
+    idFromName: (name: string) => name,
+    get: () => ({
+      handleProposalDocComment: async () => ({ kind: "revised", newVersion: 2 }),
+      handleProposalDocFormatting: async () => ({ kind: "formatted" }),
+      requestProposalDocClarification: async () => ({ ok: true }),
+      syncProposalDocApprovalCycle: async (req: any) => {
+        syncCalls.push(req);
+        return { kind: "held_unsatisfied" };
+      },
+    }),
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(syncCalls.length, 1, "the cycle is synced once, from the COMPLETE comment set");
+  const observations = syncCalls[0].observations;
+  assert.strictEqual(observations.length, 102, "all 102 comments across both pages are observed, not just the first 100");
+  assert.deepStrictEqual(
+    observations.find((o: any) => o.commentId === "c-deep-resolved"),
+    { commentId: "c-deep-resolved", resolved: true, modifiedTime: "2026-10-11T09:30:00.000Z" },
+    "a RESOLVED comment on page 2 reaches the approval cycle -- it can no longer be invisible to it",
+  );
+  assert.deepStrictEqual(
+    observations.find((o: any) => o.commentId === "c-deep-open"),
+    { commentId: "c-deep-open", resolved: false, modifiedTime: "2026-10-11T09:00:00.000Z" },
+    "and an unresolved page-2 comment still blocks, exactly as on page 1",
+  );
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "approval_cycle_synced")?.detail, "held_unsatisfied");
 });
