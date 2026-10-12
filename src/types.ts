@@ -662,8 +662,6 @@ export interface WorkState {
    * Skill needed" apart from "we don't actually know, the cycle itself
    * couldn't run."
    */
-  /** Research (the declared research_signal Skill) has already run once for this diagnosis -- it never repeats on the same Work. */
-  strategyResearchAttempted?: boolean;
   strategySkillCycleUnavailable?: boolean;
   /**
    * WHY strategySkillCycleUnavailable is `true` -- the AI-call cause code
