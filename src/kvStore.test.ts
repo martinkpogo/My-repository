@@ -246,6 +246,7 @@ test("classification: coordination keys eligible, content/identity/OAuth/content
     "stale_handoff_digest_last_fingerprint",
     "checkhandoffs_auto_inflight",
     "last_cron_run",
+    "last_native_cron_run",
     "last_google_doc_comment_poll_run",
     "last_google_sheet_comment_poll_run",
     "watchdog_alert_last_sent",

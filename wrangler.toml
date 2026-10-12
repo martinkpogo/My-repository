@@ -50,15 +50,18 @@ binding = "STATE_KV"
 id = "9c01e73f957949d796de688c1c37cbf0"
 
 [triggers]
-# Every 15 minutes for Finance-Handoff discovery. The separate
-# stale-handoff Telegram digest throttles itself to at most once per 15
-# min regardless of how often this fires — see
-# STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS in src/index.ts. This native
-# trigger has never actually fired on this account (see
-# /admin/last-cron-run) — the real schedule is the external cron-job.org
-# job hitting /admin/run-finance-discovery, which must be updated to
-# match separately.
-crons = ["*/15 * * * *"]
+# The ONE scheduler for Handoff discovery (Finance, Sales, Marketing and
+# Strategy pickups) plus the stale-handoff digest. Cloudflare's analytics
+# show this trigger firing and succeeding on schedule, so it is the
+# canonical driver; the GitHub Actions workflow that used to duplicate it
+# every 5 minutes was removed (2026-10-12). Every 5 minutes keeps the
+# pickup latency that workflow provided. The stale-handoff Telegram digest
+# throttles itself to at most once per 15 min regardless of how often this
+# fires — see STALE_HANDOFF_DIGEST_MIN_INTERVAL_MS in src/index.ts.
+# /admin/run-finance-discovery stays as a manual/diagnostic entry point
+# for the same discovery; nothing should schedule it as well. Scheduler
+# diagnostics: /admin/last-cron-run (native vs any-source timestamps).
+crons = ["*/5 * * * *"]
 
 [vars]
 NOTION_VERSION = "2025-09-03"
