@@ -82,9 +82,27 @@ function driveCommentsUrl(sheetId: string) {
   return `https://www.googleapis.com/drive/v3/files/${sheetId}/comments`;
 }
 
+/** One page of a paginated `comments.list` response, as a test would script it. */
+export interface ScriptedCommentsPage {
+  comments?: any[];
+  /** The token the NEXT request must send to continue, if any. */
+  nextPageToken?: string;
+  /** Non-200 status, to script a page that fails. */
+  status?: number;
+}
+
 function mockFetchWith(handlers: {
   values?: string[][];
   comments?: any[];
+  /**
+   * Scripts a paginated `comments.list`, keyed by the `pageToken` the caller
+   * sent (`undefined` is the first request). When present this replaces the
+   * single-page `comments` handler, so existing tests keep their exact
+   * behaviour unless they opt into pagination.
+   */
+  commentPages?: (pageToken: string | undefined) => ScriptedCommentsPage;
+  /** Records every `comments.list` request, so a test can assert on the exact URL/params actually sent. */
+  onCommentsList?: (pageToken: string | undefined, url: string) => void;
   onReply?: (commentId: string, body: any) => void;
   onResolve?: (commentId: string) => void;
   onCellUpdate?: (range: string, body: any) => boolean;
@@ -100,6 +118,15 @@ function mockFetchWith(handlers: {
     }
 
     if (urlStr.startsWith(driveCommentsUrl(SHEET_ID)) && (!init || init.method === undefined || (init?.method ?? "GET") === "GET")) {
+      const pageToken = new URL(urlStr).searchParams.get("pageToken") ?? undefined;
+      handlers.onCommentsList?.(pageToken, urlStr);
+      if (handlers.commentPages) {
+        const page = handlers.commentPages(pageToken);
+        return new Response(JSON.stringify({ comments: page.comments ?? [], ...(page.nextPageToken ? { nextPageToken: page.nextPageToken } : {}) }), {
+          status: page.status ?? 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({ comments: handlers.comments ?? [] }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -434,4 +461,228 @@ test("a comment already marked processed is never re-executed on a later poll", 
 
   assert.strictEqual(updated, false);
   assert.strictEqual(result.commentsProcessed, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Pagination: comments.list returns at most pageSize (100) comments per call,
+// so the fetcher must follow nextPageToken and accumulate. Before this fix a
+// single request silently discarded every comment after the first 100.
+// ---------------------------------------------------------------------------
+
+/** A live (unresolved, authorized, unique-anchor) sheet comment requesting a cell change. */
+function liveComment(id: string, quoted = "Planned") {
+  return { id, content: 'change to "Published"', resolved: false, author: { me: true }, quotedFileContent: { value: quoted } };
+}
+
+test("pagination 1. a single-page response is unchanged: one request, no pageToken ever sent, all comments returned", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+
+  const requested: (string | undefined)[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    values: [["Status"], ["Planned"]],
+    comments: [liveComment("c-single-1"), liveComment("c-single-2")],
+    onCommentsList: (pageToken) => requested.push(pageToken),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  assert.deepStrictEqual(requested, [undefined], "exactly one request, and it carries no pageToken");
+  assert.strictEqual(result.commentsProcessed, 2, "both comments are processed");
+  const fetched = result.diagnostics.find((d) => d.outcome === "comments_fetched");
+  assert.strictEqual(fetched?.detail, "2 comment(s) found");
+});
+
+test("pagination 2. at least 150 comments spread over multiple pages are ALL retrieved and processed", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+
+  // 150 comments across 3 pages: 100 + 50, the final page carrying no token.
+  // All but the very last are already resolved, so they exercise the cheap
+  // existing rule (resolved -> skip + mark processed) rather than 149 AI
+  // calls; the last is a live request and must be genuinely processed.
+  const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `c-${i}`, content: "x", resolved: true, author: { me: true } }));
+  const page2 = Array.from({ length: 50 }, (_, i) => ({ id: `c-${100 + i}`, content: "x", resolved: i < 49, author: { me: true } }));
+  const live = liveComment("c-149");
+
+  const requested: (string | undefined)[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    values: [["Status"], ["Planned"]],
+    commentPages: (pageToken) => {
+      requested.push(pageToken);
+      if (pageToken === undefined) return { comments: page1, nextPageToken: "tok-page-2" };
+      if (pageToken === "tok-page-2") return { comments: [...page2.slice(0, 49), live] };
+      throw new Error(`unexpected pageToken ${pageToken}`);
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  assert.deepStrictEqual(requested, [undefined, "tok-page-2"], "the returned token is followed exactly once");
+  assert.strictEqual(result.commentsProcessed, 1, "only the one live comment is a handled request");
+  assert.strictEqual(result.diagnostics.filter((d) => d.outcome === "comments_fetched").length, 1);
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "150 comment(s) found", "all 150 comments, not the first 100");
+  // Every one of the 149 resolved comments was processed under the existing
+  // rule (skipped AND marked), and the live one was refused as usual.
+  assert.strictEqual(result.diagnostics.filter((d) => d.outcome === "resolved_skip").length, 149);
+  assert.strictEqual(result.diagnostics.filter((d) => d.outcome === "edit_not_authorized").length, 1);
+  assert.ok(result.diagnostics.some((d) => d.commentId === "c-149" && d.outcome === "edit_not_authorized"), "a comment on the LAST page is genuinely processed");
+  // The marker written by that deep-page comment proves it really ran.
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-149"), "1");
+});
+
+test("pagination 3. the follow-up request sends the returned pageToken and preserves fields, pageSize and includeDeleted", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+
+  const urls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [],
+    commentPages: (pageToken) =>
+      pageToken === undefined
+        ? { comments: [{ id: "c-a", content: "x", resolved: true, author: { me: true } }], nextPageToken: "tok/with+specials=&?" }
+        : { comments: [{ id: "c-b", content: "x", resolved: true, author: { me: true } }] },
+    onCommentsList: (_pageToken, url) => urls.push(url),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  assert.strictEqual(urls.length, 2, "two requests: the first page, then the continuation");
+  const [first, second] = urls.map((u) => new URL(u));
+
+  for (const u of [first, second]) {
+    assert.strictEqual(u.searchParams.get("pageSize"), "100", "pageSize=100 preserved on every request");
+    assert.strictEqual(u.searchParams.get("includeDeleted"), "false", "includeDeleted=false preserved on every request");
+    assert.ok(
+      u.searchParams.get("fields") === "comments(id,content,resolved,author(displayName,me),quotedFileContent(value))",
+      `the Sheets fields projection is preserved verbatim: ${u.searchParams.get("fields")}`,
+    );
+  }
+  assert.strictEqual(first.searchParams.get("pageToken"), null, "the first request carries no pageToken");
+  assert.strictEqual(second.searchParams.get("pageToken"), "tok/with+specials=&?", "the returned token is sent back, correctly URL-encoded");
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "2 comment(s) found", "both pages accumulated");
+});
+
+test("pagination 4. an empty result and an absent nextPageToken both terminate normally", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [],
+    commentPages: () => {
+      calls++;
+      return {}; // no comments at all, and no nextPageToken
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  assert.strictEqual(calls, 1, "no nextPageToken means done -- never a second request");
+  assert.strictEqual(result.commentsProcessed, 0);
+  assert.strictEqual(result.diagnostics.find((d) => d.outcome === "comments_fetched")?.detail, "0 comment(s) found");
+  assert.ok(!result.diagnostics.some((d) => d.outcome === "comments_list_failed"), "a genuinely empty result is not a failure");
+});
+
+test("pagination 5. a failure on a LATER page rejects the whole fetch -- earlier-page comments are never processed as if the result were complete", async (t) => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+
+  let replies = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    values: [["Status"], ["Planned"]],
+    commentPages: (pageToken) => {
+      if (pageToken === undefined) {
+        return {
+          comments: [liveComment("c-page1-a"), liveComment("c-page1-b")],
+          nextPageToken: "tok-page-2",
+        };
+      }
+      return { status: 500, comments: [] }; // the continuation blows up
+    },
+    onReply: () => {
+      replies++;
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  const failed = result.diagnostics.find((d) => d.outcome === "comments_list_failed");
+  assert.ok(failed, `a later-page failure is reported: ${JSON.stringify(result.diagnostics.map((d) => d.outcome))}`);
+  assert.match(failed!.detail ?? "", /HTTP 500/);
+  assert.strictEqual(result.commentsProcessed, 0, "nothing was processed");
+  assert.strictEqual(replies, 0, "no reply was sent for the comments from the completed first page");
+  assert.strictEqual(result.diagnostics.filter((d) => d.commentId !== null).length, 0, "no per-comment diagnostic at all");
+  const markerKeys = [...mockKv._rawStore.keys()].filter((k) => k.startsWith("google_comment_processed:"));
+  assert.deepStrictEqual(markerKeys, [], "and no dedup marker was written, so a later poll retries the whole document safely");
+});
+
+test("pagination 6. a repeated page token terminates safely instead of looping forever", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+
+  let requests = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    commentPages: () => {
+      requests++;
+      // The API keeps handing back the SAME token -- a buggy server.
+      return { comments: [{ id: `c-loop-${requests}`, content: "x", resolved: true, author: { me: true } }], nextPageToken: "tok-same" };
+    },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  assert.ok(requests <= 3, `pagination terminates promptly rather than looping (made ${requests} requests)`);
+  assert.ok(result.diagnostics.some((d) => d.outcome === "comments_list_failed"), "the ambiguous fetch is refused, not treated as complete");
+  assert.strictEqual(result.commentsProcessed, 0);
+});
+
+test("pagination 7. an INVALID continuation token (HTTP 400) is a failure, and the dedup markers from earlier polls stay intact", async (t) => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await setUpWatchedSheet(fakeEnv);
+  // An unrelated, pre-existing marker from an earlier poll must survive.
+  await fakeEnv.STATE_KV.put("google_comment_processed:c-earlier-poll", "1");
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    commentPages: (pageToken) =>
+      pageToken === undefined
+        ? { comments: [liveComment("c-bad")], nextPageToken: "not-a-real-token" }
+        : { status: 400, comments: [] },
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleSheetComments(fakeEnv);
+
+  assert.ok(result.diagnostics.some((d) => d.outcome === "comments_list_failed"), "an invalid token fails the fetch");
+  assert.match(result.diagnostics.find((d) => d.outcome === "comments_list_failed")!.detail ?? "", /HTTP 400/);
+  assert.strictEqual(result.commentsProcessed, 0);
+  assert.strictEqual([...mockKv._rawStore.keys()].filter((k) => k.startsWith("google_comment_processed:")).length, 1, "no new marker was written for a rejected fetch");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-earlier-poll"), "1", "and the pre-existing marker is untouched");
 });

@@ -29,17 +29,68 @@ interface DriveComment {
   quotedFileContent?: { value?: string };
 }
 
+/**
+ * The maximum number of comment pages fetched for one spreadsheet. A page
+ * holds up to `pageSize=100` comments, so this caps a single fetch at 10,000
+ * comments and exists only so an API that kept minting fresh tokens could
+ * never make this loop forever. Reaching it throws, so the fetch fails
+ * closed rather than returning a list that may be incomplete.
+ */
+const MAX_COMMENT_PAGES = 100;
+
+/**
+ * Lists EVERY comment on a watched spreadsheet. `comments.list` is paginated
+ * at `pageSize=100`, so a single request silently drops every comment after
+ * the first 100. Each response's `nextPageToken` is therefore followed as the
+ * next request's `pageToken`, and the comments are accumulated across pages.
+ *
+ * Every request keeps the same required parameters -- the same `fields`
+ * projection, `pageSize=100` and `includeDeleted=false` -- plus the bearer
+ * token header; only `pageToken` is added, and only when the API supplied one.
+ *
+ * Failure semantics are unchanged and deliberately WHOLE-FETCH: if any page
+ * request fails, this throws rather than returning the pages collected so
+ * far, because a partial list must never be processed as though it were
+ * complete. The poller already catches that throw, records
+ * `comments_list_failed` for the spreadsheet and moves to the next one, so
+ * nothing is half-processed and a later poll retries it from its first page.
+ * An absent or empty `nextPageToken` is normal completion, and a token the
+ * API has already handed back is refused rather than looped on.
+ */
 async function fetchComments(token: string, spreadsheetId: string): Promise<DriveComment[]> {
-  const url =
+  const base =
     `https://www.googleapis.com/drive/v3/files/${spreadsheetId}/comments` +
     `?fields=comments(id,content,resolved,author(displayName,me),quotedFileContent(value))` +
     `&pageSize=100&includeDeleted=false`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) {
-    throw new Error(`Drive comments.list failed (HTTP ${res.status})`);
+
+  const all: DriveComment[] = [];
+  const seenTokens = new Set<string>();
+  let pageToken: string | undefined;
+
+  for (let page = 0; ; page++) {
+    if (page >= MAX_COMMENT_PAGES) {
+      throw new Error(
+        `Drive comments.list exceeded ${MAX_COMMENT_PAGES} pages for ${spreadsheetId}; refusing to keep paginating or to return a possibly-incomplete list.`,
+      );
+    }
+    const url = pageToken ? `${base}&pageToken=${encodeURIComponent(pageToken)}` : base;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      throw new Error(`Drive comments.list failed (HTTP ${res.status})`);
+    }
+    const data = (await res.json()) as { comments?: DriveComment[]; nextPageToken?: string };
+    all.push(...(data.comments ?? []));
+
+    const next = data.nextPageToken;
+    if (!next) return all; // absent or empty == normal completion
+    if (seenTokens.has(next)) {
+      throw new Error(
+        `Drive comments.list returned a repeated page token for ${spreadsheetId}; refusing to loop or to return a possibly-incomplete list.`,
+      );
+    }
+    seenTokens.add(next);
+    pageToken = next;
   }
-  const data = (await res.json()) as { comments?: DriveComment[] };
-  return data.comments ?? [];
 }
 
 async function replyToComment(token: string, spreadsheetId: string, commentId: string, content: string): Promise<void> {
