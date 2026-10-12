@@ -7,6 +7,8 @@ import {
 } from "./googleOAuth";
 import { generate } from "./ai";
 import { logActivity } from "./log";
+import { sendOperationsMessage } from "./telegram";
+import { CommentMarkerPersistenceError } from "./googleDocComments";
 import { kvGet, kvPut } from "./kvStore";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
@@ -93,14 +95,6 @@ async function fetchComments(token: string, spreadsheetId: string): Promise<Driv
   }
 }
 
-async function replyToComment(token: string, spreadsheetId: string, commentId: string, content: string): Promise<void> {
-  await fetch(`https://www.googleapis.com/drive/v3/files/${spreadsheetId}/comments/${commentId}/replies?fields=id`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-  });
-}
-
 async function fetchSheetValues(token: string, spreadsheetId: string): Promise<string[][] | null> {
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${VALUES_RANGE}`,
@@ -115,10 +109,79 @@ async function fetchSheetValues(token: string, spreadsheetId: string): Promise<s
   }
 }
 
+/**
+ * Writes the sheet comment's dedup marker, typed on failure exactly as
+ * googleDocComments.ts's does: because the marker is written BEFORE the reply
+ * it guards, a typed failure here means the reply never ran, the comment
+ * stays unprocessed, and a later poll may retry it. The error class itself is
+ * imported from googleDocComments.ts rather than redefined, so the two
+ * pollers' `instanceof` checks agree on one type.
+ */
 async function markProcessed(env: Env, commentId: string): Promise<void> {
-  await kvPut(env, `google_comment_processed:${commentId}`, "1", {
-    expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
-  });
+  try {
+    await kvPut(env, `google_comment_processed:${commentId}`, "1", {
+      expirationTtl: COMMENT_PROCESSED_TTL_SECONDS,
+    });
+  } catch (err) {
+    throw new CommentMarkerPersistenceError(commentId, err);
+  }
+}
+
+/**
+ * Sends a reply and REPORTS whether the provider actually accepted it --
+ * the plain `replyToComment` above ignores the response entirely, which
+ * silently claims success for a rejected reply.
+ *
+ * A failure is reported to Operations and never thrown back into the poll
+ * loop: the caller has already written its processed marker before replying,
+ * so the comment is durably done and a retry is not safe (it could duplicate
+ * a reply after an uncertain provider outcome). The marker is not cleared and
+ * the reply is not retried -- the failure is made visible and the flow stops.
+ */
+async function replyToCommentChecked(
+  env: Env,
+  token: string,
+  spreadsheetId: string,
+  commentId: string,
+  content: string,
+  operation: string,
+): Promise<{ ok: boolean; status: number }> {
+  let res: Response;
+  try {
+    res = await fetch(`https://www.googleapis.com/drive/v3/files/${spreadsheetId}/comments/${commentId}/replies?fields=id`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+  } catch (err) {
+    await reportReplyFailure(env, operation, spreadsheetId, commentId, `request failed: ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, status: 0 };
+  }
+  if (!res.ok) {
+    await reportReplyFailure(env, operation, spreadsheetId, commentId, `HTTP ${res.status}`);
+    return { ok: false, status: res.status };
+  }
+  return { ok: true, status: res.status };
+}
+
+/**
+ * The one place a failed sheet-comment reply is made operationally visible.
+ * Deliberately carries ONLY identifiers and the failure category -- never the
+ * comment's text, never the reply text, never the anchored cell content.
+ * Best-effort and never thrown: a failure to REPORT must not itself fail a
+ * comment that is already durably marked.
+ */
+async function reportReplyFailure(
+  env: Env,
+  operation: string,
+  spreadsheetId: string,
+  commentId: string,
+  reason: string,
+): Promise<void> {
+  await sendOperationsMessage(
+    env,
+    `⚠️ Google Sheet comment reply not delivered\nOperation: ${operation}\nSpreadsheet: ${spreadsheetId}\nComment: ${commentId}\nReason: ${reason}\n\nThe comment is already marked processed, so this reply is not retried automatically (a retry could duplicate it after an uncertain outcome). No comment content is included in this message.`,
+  ).catch((err) => console.error("reportReplyFailure: could not send the Operations alert", err));
 }
 
 export type SheetCommentOutcome =
@@ -183,13 +246,19 @@ async function processSheetComment(
 
   const quoted = comment.quotedFileContent?.value?.trim();
   if (!quoted) {
-    await replyToComment(
+    // MARKER BEFORE REPLY (same contract as googleDocComments.ts's non-Proposal
+    // branches): the reply is best-effort, so the comment must be durably
+    // marked before it is attempted -- a reply that fails must never leave the
+    // comment unmarked, or the next poll would reply to the human again.
+    await markProcessed(env, comment.id);
+    await replyToCommentChecked(
+      env,
       token,
       sheet.spreadsheetId,
       comment.id,
       "I can only execute edits anchored to a specific cell right now — please select the cell you want changed, then comment on it.",
+      "no_anchor",
     );
-    await markProcessed(env, comment.id);
     return { handled: true, outcome: "no_anchor" };
   }
 
@@ -211,15 +280,18 @@ async function processSheetComment(
   }
 
   if (matches.length !== 1) {
-    await replyToComment(
+    // Marker FIRST -- the reply is best-effort and never retried.
+    await markProcessed(env, comment.id);
+    await replyToCommentChecked(
+      env,
       token,
       sheet.spreadsheetId,
       comment.id,
       matches.length === 0
         ? "I couldn't find the exact cell content you selected anymore — it may have already changed. Please re-select the cell and comment again."
         : `The selected value appears in ${matches.length} cells, so I can't safely target just this one — please make sure the cell's content is unique before commenting again.`,
+      "anchor_not_unique",
     );
-    await markProcessed(env, comment.id);
     return { handled: true, outcome: "anchor_not_unique", detail: `quoted="${quoted}" occurrences=${matches.length}` };
   }
 
@@ -237,13 +309,16 @@ async function processSheetComment(
   });
 
   if (!instruction || !instruction.understood || !instruction.replacementText?.trim()) {
-    await replyToComment(
+    // Marker FIRST -- same contract as the other branches in this family.
+    await markProcessed(env, comment.id);
+    await replyToCommentChecked(
+      env,
       token,
       sheet.spreadsheetId,
       comment.id,
       "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what this cell should become?",
+      "ai_not_understood",
     );
-    await markProcessed(env, comment.id);
     return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "generate() returned null" };
   }
 
@@ -258,13 +333,25 @@ async function processSheetComment(
   // comment is a new request), and the missing authorization decision is
   // reported rather than silently resolved. See docs/enig-operating-model.md
   // (Governance: reserved flows).
-  await replyToComment(
+  //
+  // MARKER BEFORE REPLY. Every branch in this family writes its processed
+  // marker first and treats the reply as best-effort: a reply that fails must
+  // never leave the comment unmarked, because an unmarked comment is
+  // re-processed from scratch on the next poll and would be replied to again
+  // -- and a duplicate reply to a human is worse than a missing one. If the
+  // reply is then rejected, that is reported to Operations (identifiers and
+  // failure category only -- never the comment's or the reply's text) and
+  // deliberately NOT retried: the provider's outcome is uncertain, so a retry
+  // could duplicate the reply. See replyToCommentChecked.
+  await markProcessed(env, comment.id);
+  await replyToCommentChecked(
+    env,
     token,
     sheet.spreadsheetId,
     comment.id,
     `I can't apply this edit: comment-triggered cell edits are not an authorized operation in the governed external-effect boundary, so nothing in this spreadsheet was changed. This is reported to Martin as a missing authorization decision, not carried out.`,
+    "edit_not_authorized",
   );
-  await markProcessed(env, comment.id);
 
   await logActivity(env, {
     entry: "Google Sheet comment-triggered edit refused",
@@ -283,7 +370,7 @@ export interface PollGoogleSheetCommentsResult {
   diagnostics: {
     spreadsheetId: string;
     commentId: string | null;
-    outcome: SheetCommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "unhandled_exception";
+    outcome: SheetCommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception";
     detail?: string;
   }[];
 }
@@ -341,6 +428,22 @@ export async function pollGoogleSheetComments(env: Env): Promise<PollGoogleSheet
         diagnostics.push({ spreadsheetId: sheet.spreadsheetId, commentId: comment.id, outcome: result.outcome, detail: result.detail });
         if (result.handled) commentsProcessed++;
       } catch (err) {
+        if (err instanceof CommentMarkerPersistenceError) {
+          // The marker this comment needed could not be written. Because the
+          // marker is written BEFORE the reply it guards (see markProcessed),
+          // nothing was sent and nothing was claimed; the comment stays
+          // unprocessed and a later poll retries it. Recorded as its own
+          // truthful outcome instead of a generic handler failure -- the same
+          // contract googleDocComments.ts's poller applies.
+          console.error(`pollGoogleSheetComments: persistence unavailable for comment ${comment.id} on ${sheet.spreadsheetId}`, err);
+          diagnostics.push({
+            spreadsheetId: sheet.spreadsheetId,
+            commentId: comment.id,
+            outcome: "persistence_unavailable",
+            detail: err.message,
+          });
+          continue;
+        }
         console.error(`pollGoogleSheetComments: error processing comment ${comment.id} on ${sheet.spreadsheetId}`, err);
         diagnostics.push({
           spreadsheetId: sheet.spreadsheetId,
