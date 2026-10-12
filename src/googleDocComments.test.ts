@@ -104,6 +104,8 @@ function mockFetchWith(handlers: {
   /** Records every `comments.list` request, so a test can assert on the exact URL/params actually sent. */
   onCommentsList?: (pageToken: string | undefined, url: string) => void;
   onReply?: (commentId: string, body: any) => void;
+  /** Scripts a REJECTED reply (non-2xx), so a test can prove the failure is reported and the marker kept. Defaults to 200. */
+  replyStatus?: number;
   onResolve?: (commentId: string) => void;
   onBatchUpdate?: (body: any) => boolean;
   onTelegram?: (body: any) => void;
@@ -141,7 +143,7 @@ function mockFetchWith(handlers: {
     if (urlStr.includes(`/comments/`) && urlStr.includes("/replies") && init?.method === "POST") {
       const commentId = urlStr.split("/comments/")[1].split("/replies")[0];
       handlers.onReply?.(commentId, JSON.parse(String(init.body)));
-      return new Response(JSON.stringify({ id: "reply-1" }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ id: "reply-1" }), { status: handlers.replyStatus ?? 200, headers: { "content-type": "application/json" } });
     }
 
     if (urlStr.includes(`/comments/`) && init?.method === "PATCH") {
@@ -1312,4 +1314,125 @@ test("pagination 8. a Proposal Doc's approval cycle observes comments from EVERY
     "and an unresolved page-2 comment still blocks, exactly as on page 1",
   );
   assert.strictEqual(result.diagnostics.find((d) => d.outcome === "approval_cycle_synced")?.detail, "held_unsatisfied");
+});
+
+// ---------------------------------------------------------------------------
+// Marker ordering on the NON-Proposal doc branches: the processed marker is
+// persisted BEFORE the reply is attempted, so a reply that fails can never
+// leave the comment unmarked (which would re-reply on the next poll). A
+// rejected reply keeps the marker and is reported to Operations with NO
+// comment content. The Proposal path is deliberately untouched by these rules
+// (it replies through replyToComment and manages its own markers).
+// ---------------------------------------------------------------------------
+
+test("marker 1. a non-Proposal Doc persists the processed marker BEFORE calling the reply endpoint", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+
+  const order: string[] = [];
+  const kv = fakeEnv.STATE_KV as any;
+  const originalPut = kv.put.bind(kv);
+  kv.put = async (key: string, value: string, options?: any) => {
+    if (key.startsWith("google_comment_processed:")) order.push(`marker:${key}`);
+    return originalPut(key, value, options);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    // no quotedFileContent -> the no_anchor branch replies.
+    comments: [{ id: "c-order-1", content: "fix the date", resolved: false, author: { me: true } }],
+    onReply: (_id, _body) => order.push("reply"),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.deepStrictEqual(order, ["marker:google_comment_processed:c-order-1", "reply"], "the marker is durably written before the reply endpoint is called");
+});
+
+test("marker 2. when a non-Proposal Doc's marker cannot be persisted, the reply is never attempted and the comment stays unprocessed", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+  failKvWritesFor(fakeEnv, "google_comment_processed:");
+
+  let replies = 0;
+  let telegramSent = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-order-2", content: "fix the date", resolved: false, author: { me: true } }],
+    onReply: () => (replies += 1),
+    onTelegram: () => (telegramSent += 1),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(replies, 0, "no reply is attempted when the marker that guards it did not persist");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-order-2"), null, "the comment stays unprocessed, so nothing is lost");
+  assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-order-2")?.outcome, "persistence_unavailable", "recorded as its own truthful outcome");
+});
+
+test("marker 3. a REJECTED reply on a non-Proposal Doc keeps the marker, is reported to Operations, and never claims success", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+  // Enable the Operations stream so sendOperationsMessage actually dispatches
+  // (getOperationsTarget needs both TELEGRAM_GROUP_CHAT_ID and OPERATIONS_TOPIC_ID).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
+
+  let replyBody: any = null;
+  const operationsAlerts: any[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    // no quotedFileContent -> the no_anchor branch replies.
+    comments: [{ id: "c-reject-1", content: "SECRET-COMMENT-WORD please fix the date", resolved: false, author: { me: true } }],
+    replyStatus: 403, // provider rejects the reply
+    onReply: (_id, body) => (replyBody = body),
+    onTelegram: (body) => operationsAlerts.push(body),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.ok(replyBody, "the reply WAS attempted");
+  assert.strictEqual(replyBody.content.toLowerCase().includes("select"), true, "the intended reply text was what we tried to send");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-reject-1"), "1", "the marker is kept even though the reply failed -- it is never cleared");
+  assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-reject-1")?.outcome, "no_anchor", "the comment is still recorded as processed");
+
+  assert.ok(operationsAlerts.length >= 1, "the rejected reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes(DOC_ID), "the alert names the affected document");
+  assert.ok(alert.includes("c-reject-1"), "the alert names the affected comment");
+  assert.ok(/HTTP\s+403/.test(alert), "the alert carries the failure category (HTTP 403)");
+});
+
+test("marker 4. the Operations alert for a rejected reply contains NO comment or reply content", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpWatchedDoc(fakeEnv);
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
+
+  const operationsAlerts: any[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    // Distinctive strings that must NEVER appear in the Operations alert.
+    comments: [{ id: "c-noleak-1", content: "TOPSECRET-COMMENT-PAYLOAD change the figure", resolved: false, author: { me: true } }],
+    replyStatus: 500,
+    onTelegram: (body) => operationsAlerts.push(body),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await pollGoogleDocComments(fakeEnv);
+
+  assert.ok(operationsAlerts.length >= 1, "an alert was sent");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(!alert.includes("TOPSECRET-COMMENT-PAYLOAD"), "the comment's text never reaches the Operations stream");
+  assert.ok(!alert.includes("select the text"), "the reply's text never reaches the Operations stream either");
+  assert.ok(!alert.toLowerCase().includes("figure"), "nor any other fragment of the comment");
 });

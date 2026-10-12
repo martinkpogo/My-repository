@@ -8,6 +8,7 @@ import {
 import { generate } from "./ai";
 import { logActivity } from "./log";
 import { getSessionStub } from "./sessionRouting";
+import { sendOperationsMessage } from "./telegram";
 import { kvGet, kvPut, maybeSweepKvFallback } from "./kvStore";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
@@ -130,6 +131,69 @@ async function replyToComment(token: string, documentId: string, commentId: stri
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
+}
+
+/**
+ * Sends a reply and REPORTS whether the provider actually accepted it --
+ * `replyToComment` above ignores the response entirely, which silently
+ * claims success for a rejected reply. This variant (used only by the
+ * NON-Proposal branches; the Proposal path is deliberately untouched) reads
+ * the status and returns a failure rather than pretending.
+ *
+ * A failure is reported to Operations as its own signal, never swallowed and
+ * never thrown back into the poll loop: the caller has already written its
+ * processed marker before replying, so the comment is durably done and a
+ * retry is not safe (it could duplicate a reply after an uncertain provider
+ * outcome). The alert therefore reports and stops; it does not clear the
+ * marker and does not retry.
+ */
+async function replyToCommentChecked(
+  env: Env,
+  token: string,
+  documentId: string,
+  commentId: string,
+  content: string,
+  operation: string,
+): Promise<{ ok: boolean; status: number }> {
+  let res: Response;
+  try {
+    res = await fetch(`https://www.googleapis.com/drive/v3/files/${documentId}/comments/${commentId}/replies?fields=id`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+  } catch (err) {
+    await reportReplyFailure(env, operation, documentId, commentId, `request failed: ${err instanceof Error ? err.message : String(err)}`);
+    return { ok: false, status: 0 };
+  }
+  if (!res.ok) {
+    await reportReplyFailure(env, operation, documentId, commentId, `HTTP ${res.status}`);
+    return { ok: false, status: res.status };
+  }
+  return { ok: true, status: res.status };
+}
+
+/**
+ * The one place a failed reply is made operationally visible. Deliberately
+ * carries ONLY identifiers and the failure category -- never the comment's
+ * text, never the reply text, never the anchored selection. Comment content
+ * stays out of the Operations stream (and out of Telegram, which is not a
+ * governed data boundary); what goes is enough to find and diagnose the
+ * failure: which operation, on which document, on which comment, and how it
+ * failed. Best-effort and never thrown: a failure to REPORT must not itself
+ * fail the comment, which is already durably marked.
+ */
+async function reportReplyFailure(
+  env: Env,
+  operation: string,
+  documentId: string,
+  commentId: string,
+  reason: string,
+): Promise<void> {
+  await sendOperationsMessage(
+    env,
+    `⚠️ Google comment reply not delivered\nOperation: ${operation}\nDocument: ${documentId}\nComment: ${commentId}\nReason: ${reason}\n\nThe comment is already marked processed, so this reply is not retried automatically (a retry could duplicate it after an uncertain outcome). No comment content is included in this message.`,
+  ).catch((err) => console.error("reportReplyFailure: could not send the Operations alert", err));
 }
 
 async function resolveComment(token: string, documentId: string, commentId: string): Promise<void> {
@@ -451,13 +515,18 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
 
   const quoted = comment.quotedFileContent?.value?.trim();
   if (!quoted) {
-    await replyToComment(
+    // Marker FIRST (see this branch family's comment below): the reply is
+    // best-effort, so a failed reply must never leave the comment to be
+    // re-processed on every poll.
+    await markProcessed(env, comment.id);
+    await replyToCommentChecked(
+      env,
       token,
       doc.documentId,
       comment.id,
       "I can only execute edits anchored to specific selected text right now — please select the text you want changed, then comment on that selection.",
+      "no_anchor",
     );
-    await markProcessed(env, comment.id);
     return { handled: true, outcome: "no_anchor" };
   }
 
@@ -470,15 +539,19 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
 
   const occurrences = fullText.split(quoted).length - 1;
   if (occurrences !== 1) {
-    await replyToComment(
+    // Marker FIRST: the reply is best-effort and is never retried, so the
+    // comment must be durably done before it is attempted.
+    await markProcessed(env, comment.id);
+    await replyToCommentChecked(
+      env,
       token,
       doc.documentId,
       comment.id,
       occurrences === 0
         ? "I couldn't find the exact text you selected anymore — it may have already changed. Please re-select and comment again."
         : `The selected text appears ${occurrences} times in the document, so I can't safely target just this one — please select a longer, unique snippet and comment again.`,
+      "anchor_not_unique",
     );
-    await markProcessed(env, comment.id);
     return { handled: true, outcome: "anchor_not_unique", detail: `quoted="${quoted}" occurrences=${occurrences}` };
   }
 
@@ -493,13 +566,16 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   });
 
   if (!instruction || !instruction.understood || !instruction.replacementText?.trim()) {
-    await replyToComment(
+    // Marker FIRST -- same contract as the other branches in this family.
+    await markProcessed(env, comment.id);
+    await replyToCommentChecked(
+      env,
       token,
       doc.documentId,
       comment.id,
       "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what the selected text should become?",
+      "ai_not_understood",
     );
-    await markProcessed(env, comment.id);
     return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "generate() returned null" };
   }
 
@@ -514,13 +590,25 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   // different comment is a new request), and the missing authorization
   // decision is reported rather than silently resolved. See
   // docs/enig-operating-model.md (Governance: reserved flows).
-  await replyToComment(
+  //
+  // MARKER BEFORE REPLY. Every branch in this non-Proposal family writes its
+  // processed marker first and treats the reply as best-effort: a reply that
+  // fails must never leave the comment unmarked, because an unmarked comment
+  // is re-processed from scratch on the next poll and would be replied to
+  // again -- and a duplicate reply to a human is worse than a missing one.
+  // If the reply is then rejected, that is reported to Operations (identifiers
+  // and failure category only -- never the comment's or the reply's text) and
+  // deliberately NOT retried: the provider's outcome is uncertain, so a retry
+  // could duplicate the reply. See replyToCommentChecked.
+  await markProcessed(env, comment.id);
+  await replyToCommentChecked(
+    env,
     token,
     doc.documentId,
     comment.id,
     `I can't apply this edit: comment-triggered in-place edits are not an authorized operation in the governed external-effect boundary, so nothing in this document was changed. This is reported to Martin as a missing authorization decision, not carried out.`,
+    "edit_not_authorized",
   );
-  await markProcessed(env, comment.id);
 
   await logActivity(env, {
     entry: "Google Doc comment-triggered edit refused",
