@@ -42,8 +42,8 @@ interface Resolution {
 
 const RESOLUTIONS: Resolution[] = [
   // --- Sales (formerly five switch cases) ---
-  { label: "Sales/call_notes", state: { unit: "Sales", hat: SALES_HAT, awaiting: "call_notes" }, handler: sales.handleCallNotes, arity: 3 },
-  { label: "Sales/intervention", state: { unit: "Sales", hat: SALES_HAT, awaiting: "intervention" }, handler: sales.handleInterventionText, arity: 3 },
+  { label: "Sales/call_notes", state: { unit: "Sales", hat: SALES_HAT, awaiting: "call_notes" }, handler: sales.retiredCallNotesReply, arity: 3 }, // LOG-987
+  { label: "Sales/intervention", state: { unit: "Sales", hat: SALES_HAT, awaiting: "intervention" }, handler: sales.retiredInterventionReply, arity: 3 }, // LOG-987
   { label: "Sales/matter_redo_reason", state: { unit: "Sales", hat: SALES_HAT, awaiting: "matter_redo_reason" }, handler: sales.handleMatterRedoReason, arity: 3 },
   { label: "Sales/entity_redo_reason", state: { unit: "Sales", hat: SALES_HAT, awaiting: "entity_redo_reason" }, handler: sales.handleEntityRedoReason, arity: 3 },
   { label: "Sales/sales_proposal_revision", state: { unit: "Sales", hat: SALES_HAT, awaiting: "sales_proposal_revision" }, handler: salesProposal.handleSalesProposalRevisionText, arity: 3 },

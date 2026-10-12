@@ -1752,3 +1752,63 @@ export {
   buildMeasurementBaseline,
   formatCommercialEvidenceForHandoff,
 };
+
+// ---------------------------------------------------------------------------
+// LOG-987 (2026-10-05, Martin-approved; supersedes LOG-986): Isolated Sales
+// owns fit assessment and progression -- Entity Lead -> Prospect and Matter
+// Open -> Qualified as one approved event -- and then creates the Sales ->
+// Strategy Work Handoff. "Runtime Sales does not perform qualification or
+// either progression transition." Runtime Sales keeps the token-safe Proposal
+// (LOG-808, tokenSafeProposal.ts) and nothing upstream of it.
+//
+// Every entry that used to reach Runtime qualification/progression is
+// therefore wired to this refusal instead: the call-notes Handoff pickup,
+// the `qualify` approval callback, and the `call_notes` / `intervention`
+// awaiting replies (salesManifest.ts, session.ts, checkHandoffs.ts). It
+// writes nothing to Notion, closes the Work, logs the refusal, and points
+// Martin at the Isolated Sales step that owns it. The former handlers
+// (handleCallNotes, handleCallNotesHandoffPickup, handleLeadToProspectApproval,
+// handleInterventionText) are no longer reachable from production entry
+// points; removing them is a separate cleanup.
+// ---------------------------------------------------------------------------
+
+export type RetiredSalesStep = "call-notes qualification" | "Lead→Prospect progression" | "Sales → Strategy Handoff";
+
+export const RETIRED_SALES_STEP_MESSAGE =
+  "Runtime Sales no longer qualifies or progresses Leads (LOG-987). Do this in Isolated Sales: run *sales-fit-assessment*, then *sales-progression* for this Matter -- it moves Lead → Prospect and Open → Qualified and creates the Sales → Strategy Handoff. Nothing was changed here.";
+
+export async function refuseRetiredSalesStep(env: Env, state: WorkState, step: RetiredSalesStep): Promise<WorkState> {
+  state.awaiting = undefined;
+  state.pendingActionSummary = undefined;
+  state.stage = "cancelled";
+  await logActivity(env, {
+    entry: `Runtime Sales step refused (LOG-987): ${step}`,
+    type: "Activity",
+    area: "Sales",
+    activity: `Work ${state.workId}${state.matterToken ? ` (${state.matterToken})` : ""} reached the retired Runtime ${step}. Nothing was written; the Work is closed.`,
+    decisionRationale: "LOG-987: Isolated Sales owns fit assessment, Lead→Prospect / Open→Qualified progression and the Sales → Strategy Handoff. Runtime Sales does not perform qualification or either progression transition.",
+    nextActions: "Run sales-fit-assessment, then sales-progression, in Isolated Sales.",
+    outcome: "Complete",
+  }).catch((err) => console.error("refuseRetiredSalesStep: could not log the refusal", err));
+  await sendWorkspaceHatMessage(
+    env,
+    { ...state, hat: "Sales Executive" },
+    `⛔ ${step}: ${RETIRED_SALES_STEP_MESSAGE}`,
+  );
+  return state;
+}
+
+/** The `qualify` approval callback, retired by LOG-987. Same shape as the handler it replaces. */
+export async function retiredQualifyCallback(env: Env, state: WorkState, _approved: boolean): Promise<WorkState> {
+  return refuseRetiredSalesStep(env, state, "Lead→Prospect progression");
+}
+
+/** The `call_notes` awaiting reply, retired by LOG-987. */
+export async function retiredCallNotesReply(env: Env, state: WorkState, _text: string): Promise<WorkState> {
+  return refuseRetiredSalesStep(env, state, "call-notes qualification");
+}
+
+/** The `intervention` awaiting reply (which created the Sales → Strategy Handoff), retired by LOG-987. */
+export async function retiredInterventionReply(env: Env, state: WorkState, _text: string): Promise<WorkState> {
+  return refuseRetiredSalesStep(env, state, "Sales → Strategy Handoff");
+}

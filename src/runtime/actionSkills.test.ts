@@ -293,7 +293,9 @@ test("Pickup wiring: every production pickup executor is invoked only through Wo
   const fs = await import("node:fs");
   const path = await import("node:path");
   const session = fs.readFileSync(path.join(import.meta.dirname, "..", "session.ts"), "utf8");
-  const pickups = ["finance.handlePickup", "strategy.handlePickup", "marketing.handleHandoffPickup", "salesProposal.handleProposalHandoffPickup", "sales.handleCallNotesHandoffPickup"];
+  // sales.handleCallNotesHandoffPickup is no longer a pickup: LOG-987 retired
+  // Runtime call-notes qualification (asserted at the end of this test).
+  const pickups = ["finance.handlePickup", "strategy.handlePickup", "marketing.handleHandoffPickup", "salesProposal.handleProposalHandoffPickup"];
   for (const call of pickups) {
     // The bound state variable is the one the ownership adoption handed to
     // the handler (`adopted`), not necessarily the name `state`.
@@ -306,7 +308,7 @@ test("Pickup wiring: every production pickup executor is invoked only through Wo
   // for -- the receiving Unit owns the interaction from there on.
   assert.strictEqual(
     session.split("runWithAdoptedOwnership(this.env, state,").length - 1,
-    5,
+    4,
     "every pickup must adopt the Handoff destination before its handler runs",
   );
   for (const unit of ["Finance", "Strategy", "Marketing"]) {
@@ -314,9 +316,13 @@ test("Pickup wiring: every production pickup executor is invoked only through Wo
   }
   assert.strictEqual(
     session.split('runWithAdoptedOwnership(this.env, state, "Sales"').length - 1,
-    2,
-    "both Sales pickups (proposal and call notes) must name Sales as their destination",
+    1,
+    "the one Sales pickup (the token-safe Proposal) must name Sales as its destination",
   );
+  // LOG-987: the retired call-notes runner refuses -- it claims nothing,
+  // adopts no ownership and never reaches the old qualification handler.
+  assert.ok(session.includes('sales.refuseRetiredSalesStep(this.env, state, "call-notes qualification")'), "runCallNotesPickup answers with the LOG-987 refusal");
+  assert.ok(!session.includes("sales.handleCallNotesHandoffPickup("), "the retired qualification pickup has no production call site");
   // Pickup discovery still only resolves + records; it adds no Skill logic of its own.
   const discovery = fs.readFileSync(path.join(import.meta.dirname, "..", "checkHandoffs.ts"), "utf8");
   assert.ok(!/resolveRecordedActionSkills|runWithRecordedActionSkills|bindExecutionSkills|resolveSkill/.test(discovery));
