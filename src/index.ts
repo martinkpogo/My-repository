@@ -219,12 +219,12 @@ export default {
       return new Response(body, { status: res.status, headers: { "content-type": "application/json" } });
     }
 
-    // Runs everything the native Cloudflare Cron Trigger was supposed to
-    // (confirmed correctly configured but never actually firing - see
-    // /admin/last-cron-run) - Finance-Handoff discovery and the
-    // stale-handoff digest. Called on a schedule by a GitHub Actions
-    // workflow (.github/workflows/finance-discovery-cron.yml) as a
-    // workaround. Gated the same as every other admin endpoint.
+    // Runs the same Handoff discovery and stale-handoff digest as the native
+    // Cron Trigger (scheduled() below) -- the canonical scheduler, which
+    // Cloudflare's analytics show firing every 5 minutes. This endpoint is a
+    // manual/diagnostic entry point; nothing should ALSO schedule it, or
+    // discovery runs twice per cycle (the GitHub Actions workflow that did
+    // was removed 2026-10-12). Gated the same as every other admin endpoint.
     if (url.pathname === "/admin/run-finance-discovery" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
@@ -232,9 +232,9 @@ export default {
       }
       // Best-effort diagnostic timestamp for /admin/last-cron-run and the
       // watchdog -- must never take down the actual discovery run below it
-      // (e.g. if this key's write rate is briefly exceeded, now that it's
-      // written by GitHub Actions every 5 min, cron-job.org, the native
-      // Cron Trigger, and /checkhandoffs, all landing on the same key).
+      // (e.g. if this key's write rate is briefly exceeded). This key records
+      // ANY discovery run, whatever started it; the native Cron Trigger also
+      // writes its own `last_native_cron_run` so the two can be told apart.
       await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
         console.error("Failed to record last_cron_run", err),
       );
@@ -270,10 +270,9 @@ export default {
 
     // Autonomous Lead Generation Specialist discovery -- same
     // external-cron-hits-an-admin-endpoint pattern as
-    // /admin/run-finance-discovery above (the native Cloudflare Cron
-    // Trigger has never reliably fired on this account). Meant to be hit
-    // three times a day by an external scheduler (cron-job.org), not by
-    // the native trigger. Independent of SALES_DIRECT_ENTRY_PAUSED -- Lead
+    // /admin/run-finance-discovery above. Meant to be hit three times a
+    // day by an external scheduler (cron-job.org), not by the native
+    // trigger. Independent of SALES_DIRECT_ENTRY_PAUSED -- Lead
     // Generation Specialist runs in this shared Worker regardless of
     // whether Sales Executive's isolated pipeline is paused, same as the
     // /lead command.
@@ -392,7 +391,8 @@ export default {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await kvGet(env, "last_cron_run");
-      return new Response(JSON.stringify({ last_cron_run: lastRun ?? null, checked_at: new Date().toISOString() }), {
+      const lastNativeRun = await kvGet(env, "last_native_cron_run");
+      return new Response(JSON.stringify({ last_cron_run: lastRun ?? null, last_native_cron_run: lastNativeRun ?? null, checked_at: new Date().toISOString() }), {
         headers: { "content-type": "application/json" },
       });
     }
@@ -520,9 +520,11 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
-      console.error("Failed to record last_cron_run", err),
-    );
+    const ranAt = new Date().toISOString();
+    await kvPut(env, "last_cron_run", ranAt).catch((err) => console.error("Failed to record last_cron_run", err));
+    // Native-only timestamp, so /admin/last-cron-run can tell this trigger
+    // apart from an external caller of /admin/run-finance-discovery.
+    await kvPut(env, "last_native_cron_run", ranAt).catch((err) => console.error("Failed to record last_native_cron_run", err));
     // Section 5B reconciliation heartbeat (throttled internally; a no-op when
     // Turso is unconfigured). Runs here as well as in the comment poll so the
     // sweep does not depend on any single entry point staying scheduled.
@@ -716,7 +718,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     }
     if (text === "/checkhandoffs") {
       // Same discovery logic /admin/run-finance-discovery and the 5-minute
-      // GitHub Actions cron already run -- exposed as a command so it's
+      // native Cron Trigger already run -- exposed as a command so it's
       // triggerable directly from Telegram, without the admin URL/secret,
       // and entirely outside the AI-gated routeIncomingText path (a plain
       // command, never routed through generalChatReply). The full
@@ -850,9 +852,9 @@ async function listSessionKvKeys(env: Env): Promise<string[]> {
   return keys;
 }
 
-// Discovery now runs every 15 min (see wrangler.toml / cron-job.org), so a
-// legitimate gap between runs can be nearly that long — the threshold has
-// to clear one full cycle plus buffer, or every check would false-alarm.
+// Discovery runs every 5 min on the native Cron Trigger (see wrangler.toml).
+// The threshold stays at 20 min -- several missed cycles -- so a single slow
+// or skipped run does not false-alarm.
 const WATCHDOG_STALE_THRESHOLD_MS = 20 * 60 * 1000;
 const WATCHDOG_ALERT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 

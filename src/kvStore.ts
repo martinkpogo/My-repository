@@ -145,6 +145,7 @@ const FALLBACK_ELIGIBLE_PREFIXES: readonly string[] = [
   // operational diagnostics timestamps (index.ts, comment pollers)
   // (values: ISO-8601 / epoch-ms strings)
   "last_cron_run",
+  "last_native_cron_run",
   "last_google_doc_comment_poll_run",
   "last_google_sheet_comment_poll_run",
   "watchdog_alert_last_sent",

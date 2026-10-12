@@ -840,8 +840,8 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
   );
 
   // Section 5B reconciliation heartbeat: this poll is the runtime's most
-  // reliable de-facto schedule (cron-job.org hits it every few minutes; the
-  // native Cron Trigger has never actually fired on this account), so it is
+  // reliable de-facto schedule (cron-job.org hits it every few minutes, and
+  // the native Cron Trigger also runs the sweep from scheduled()), so it is
   // where fallback rows accumulated during a KV quota window get swept back
   // into KV once it has quota again. Throttled internally (a no-op for most
   // calls) and never allowed to block or fail the poll itself.
