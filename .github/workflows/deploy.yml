@@ -28,13 +28,32 @@ jobs:
   verify:
     name: Verify Cloudflare Deployment
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       # Cloudflare Workers Builds deploys asynchronously on its own push
-      # trigger, not synchronously with this workflow -- give it a window
-      # to land before checking, rather than racing it.
-      - name: Wait for Cloudflare's deployment to land
-        run: sleep 45
+      # trigger, not synchronously with this workflow. A fixed sleep cannot
+      # know when that lands: observed builds take 51-104s, so the former
+      # 45s sleep made every health check below hit the PREVIOUS version.
+      # With a Cloudflare token, wait for the build of this exact commit
+      # (github.sha, the default-branch tip this run was triggered for) and
+      # fail if it fails or never appears. Without one, fall back to a wait
+      # longer than any observed build -- and say plainly that the deployed
+      # version was NOT verified, rather than implying it was.
+      - name: Wait for Cloudflare's deployment of this commit to land
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "Commit: ${{ github.sha }}"
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            ./scripts/wait-for-cloudflare-build.sh "${{ github.sha }}"
+          else
+            echo "::warning title=Deployment version not verified::CLOUDFLARE_API_TOKEN secret is not set, so this run cannot confirm Cloudflare deployed ${{ github.sha }}. Falling back to a fixed 180s wait; the health check below proves the Worker is up, not which version it runs."
+            sleep 180
+          fi
 
       - name: Verify post-deployment health endpoint
         run: |
