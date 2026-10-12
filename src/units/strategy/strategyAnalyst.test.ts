@@ -23,7 +23,7 @@ import {
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { extractLabeledBlock } from "../../labeledBlock";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
-import { buildRecordApprovalMarker } from "../sales/callNotesMarker";
+import { buildRecordApprovalMarker } from "../../records/callNotes/callNotesMarker";
 import {
   serializeCommercialValueEvidenceBlock,
   parseCommercialValueEvidenceBlock,

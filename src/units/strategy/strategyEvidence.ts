@@ -2,9 +2,9 @@ import type { Env } from "../../types";
 import { getPageContent, plainText, queryDataSource, relationIds } from "../../notion";
 import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
-import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../sales/callNotesRecord";
+import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../../records/callNotes/callNotesRecord";
 import { stripCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
-import { parseRecordApprovalMarker } from "../sales/callNotesMarker";
+import { parseRecordApprovalMarker } from "../../records/callNotes/callNotesMarker";
 
 /**
  * Strategy's evidence-retrieval order (ENIG Core Structure v3.0) and its

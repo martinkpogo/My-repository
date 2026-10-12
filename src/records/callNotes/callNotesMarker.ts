@@ -40,7 +40,7 @@
  */
 
 import { buildMarker, markerDuplicateKeys, markerFieldEntries, markerPattern, type MarkerEvidence } from "../../markerChannel";
-import { hashContent } from "./tokenSafeProposal";
+import { hashContent } from "../../contentHash";
 
 /** The marker type name within the shared channel. */
 export const RECORD_APPROVAL_MARKER_NAME = "record_approval";
@@ -150,7 +150,7 @@ export function canonicalCallNotesApprovalText(record: CallNotesApprovalRecord):
 }
 
 /**
- * The `fields_hash` of a Call Notes record, via `hashContent` (`src/units/sales/tokenSafeProposal.ts`)
+ * The `fields_hash` of a Call Notes record, via `hashContent` (`src/contentHash.ts`)
  * -- the repository's one SHA-256 primitive for content binding. No second
  * hashing implementation exists here by design.
  */

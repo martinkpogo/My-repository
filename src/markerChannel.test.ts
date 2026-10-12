@@ -3,7 +3,7 @@
  *
  * The grammar here is what both typed readers are built on -- the Handoff
  * `source_boundary_check` marker (`src/handoffWriter.ts`) and the Call Notes
- * `record_approval` marker (`src/units/sales/callNotesMarker.ts`) -- so these
+ * `record_approval` marker (`src/records/callNotes/callNotesMarker.ts`) -- so these
  * pin the properties both of them depend on: a named marker matches only its
  * own bracket group, field order survives a read, a value cannot smuggle a
  * second result past a reader that checks for repeated keys, and a marker

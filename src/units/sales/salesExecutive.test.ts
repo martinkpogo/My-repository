@@ -10,7 +10,7 @@ import {
   presentQualifiedCallNotesForApproval,
 } from "./salesExecutive";
 import { SOURCE_BOUNDARY_CHECKS } from "../../handoffWriter";
-import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "./callNotesMarker";
+import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
 import type { WorkState, Env } from "../../types";
 
 function fakeEnv(): Env {

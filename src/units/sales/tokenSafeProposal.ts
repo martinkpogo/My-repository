@@ -3,6 +3,7 @@ import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import type { StrategyProposal, StrategyBoundaryRepresentation } from "../../handoffContracts/strategyBoundary";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
 import { extractLabeledBlock } from "../../labeledBlock";
+import { hashContent } from "../../contentHash";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
 import {
   createPage,
@@ -230,13 +231,6 @@ export function versionLabel(version: number): string {
 function parseVersionLabel(label: string): number | null {
   const m = label.trim().match(/^v(\d+)$/);
   return m ? Number(m[1]) : null;
-}
-
-export async function hashContent(content: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 export function formatMoney(currency: string, amount: number): string {
