@@ -1,9 +1,10 @@
 import type { Env, Unit, WorkState } from "./types";
 import { plainText, queryDataSource } from "./notion";
 import { sendMessage, sendOperationsMessage } from "./telegram";
-import { getSessionStub, newWorkId, resolveUnitForThread, SALES_EXECUTIVE_PAUSED } from "./sessionRouting";
+import { getSessionStub, newWorkId, resolveUnitForThread } from "./sessionRouting";
 import { discoveryCronContext } from "./access";
-import { findUnitManifest } from "./units/registry";
+import { findUnitManifest, getUnitManifests } from "./units/registry";
+import type { HandoffPickupDeclaration, UnitManifest } from "./units/unitManifest";
 import { resolveOrganization } from "./runtime/organization";
 import { resolveActionExecution } from "./runtime/actionResolution";
 import { workContractForRequest, type WorkRequest } from "./runtime/workContract";
@@ -193,42 +194,66 @@ async function resolveHandoffMatterIdentity(
 }
 
 /**
- * The Finance side of the Sales -> Finance execution boundary. Sales's Hat
- * code only ever creates the Handoff (Status: Pending) and records the
- * handoff_workitem mapping, then returns - it never calls into Finance
- * directly. This runs on its own schedule and discovers that Handoff
- * independently, the same way a separate Finance AI Workspace would.
+ * The ONE Handoff discovery loop. For a Unit that declares
+ * `handoffPickup` in its manifest, finds its Pending Work Handoffs,
+ * registers a Work for each that has none, and schedules that Unit's pickup
+ * on the Work's own WorkSession alarm. It names no Unit: everything
+ * Unit-specific (the handler, an intake screen, a hold) is the Unit's own
+ * declaration (UnitManifest.handoffPickup).
+ *
+ * The creating Unit's Hat code only ever creates the Handoff (Status:
+ * Pending) and records the handoff_workitem mapping, then returns -- it never
+ * calls into the receiving Unit directly. This runs on its own schedule (and
+ * on the Notion webhook / `/checkhandoffs`) and discovers the Handoff
+ * independently, the same way a separate AI Workspace would.
+ *
+ * Returns how many Handoffs were scheduled for pickup. A Unit that declares
+ * no pickup schedules nothing (its Pending Handoffs are only counted, see
+ * countPendingHandoffsForUnit).
+ *
+ * `declaration` defaults to the Unit's manifest and exists so a Unit's
+ * variant (e.g. Sales while paused) can be exercised in tests; production
+ * callers never pass it.
  */
-export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
+export async function discoverPendingHandoffsForUnit(
+  env: Env,
+  unit: Unit,
+  declaration: HandoffPickupDeclaration | undefined = findUnitManifest(unit)?.handoffPickup,
+): Promise<number> {
+  if (!declaration) return 0;
+  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(), {
     and: [
       { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Finance" } },
+      { property: "To Unit", select: { equals: unit } },
       { property: "Type", select: { equals: "Work" } },
     ],
   });
 
   let scheduled = 0;
   for (const handoff of pending) {
+    // The Unit's own intake screen runs BEFORE anything is registered: a
+    // skipped Handoff gets no Work and no claim and is left exactly as found.
+    if (declaration.screen && (await declaration.screen(env, handoff)) === "skip") continue;
+
     let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
     if (!workId) {
       // No live Telegram session behind this Handoff -- e.g. created
       // directly in Notion by the isolated Sales Executive project, which
-      // has no WorkState of its own in this Worker. Create a fresh
-      // session instead of skipping it, so Finance can still pick it up.
+      // has no WorkState of its own in this Worker. Create a fresh session
+      // instead of skipping it, so the receiving Unit can still pick it up.
       // Defaults to Martin's DM, his preferred front door for every
       // Unit/Hat's work, since there's no originating chat to inherit.
       //
-      // The destination facts resolve the Organization and the Action
-      // BEFORE the Work exists (single-Hat Unit, `price` declared
-      // applicable to a handoff pickup) -- a failure stops here rather
-      // than registering Work under a guessed Hat/Action.
-      const entry = await resolveHandoffEntry(env, handoff, "Finance");
+      // The destination facts (To Unit / To Hat) resolve the Organization and
+      // the Action BEFORE the Work exists -- a failure, or an ambiguous
+      // multi-Hat destination, stops here rather than registering Work under
+      // a guessed Hat/Action.
+      const entry = await resolveHandoffEntry(env, handoff, unit);
       if (!entry) continue;
-      // Matter identity is resolved BEFORE the Work exists (the Handoff's
-      // own Matter_Token fact -> canonical page id), so the new Work is
-      // created already carrying it. A token that does not resolve stops
-      // here: no Work, no handoff_workitem mapping, Handoff stays Pending.
+      // Matter identity is resolved BEFORE the Work exists (the Handoff's own
+      // Matter_Token fact -> canonical page id), so the new Work is created
+      // already carrying it. A token that does not resolve stops here: no
+      // Work, no handoff_workitem mapping, Handoff stays Pending.
       const matter = await resolveHandoffMatterIdentity(env, handoff);
       if (!matter) continue;
       try {
@@ -236,11 +261,11 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
         const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
         const threadId = undefined;
         const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Finance", entry.hat, threadId, {
+        await stub.init(workId, chatId, unit, entry.hat, threadId, {
           handoffId: handoff.id,
-          // The RESOLVED pickup Action (`price`) is recorded at creation,
-          // so Work.actionName is the authority Access reads from the
-          // moment this Work exists.
+          // The RESOLVED pickup Action is recorded at creation, so
+          // Work.actionName is the authority Access reads from the moment
+          // this Work exists.
           actionName: entry.actionName,
           // Canonical Matter identity, resolved above: WorkSession.save
           // persists both, sessions_index then carries matterId, and the
@@ -250,16 +275,21 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
           matterToken: matter.matterToken,
         });
         await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Finance Handoff ${handoff.id} (no prior session)`);
+        console.log(`Created work item ${workId} for externally-created ${unit} Handoff ${handoff.id} (no prior session)`);
       } catch (err) {
-        console.error(`Failed to create a work item for externally-created Finance Handoff ${handoff.id}`, err);
+        console.error(`Failed to create a work item for externally-created ${unit} Handoff ${handoff.id}`, err);
         await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
         continue;
       }
     }
+
+    // Detected and registered -- a hold means that is the whole job this
+    // cycle: execution waits for a deliberate human step, not this loop.
+    if (declaration.hold && (await declaration.hold(env, handoff))) continue;
+
     const stub = getSessionStub(env, workId);
     try {
-      await stub.schedulePickup("finance");
+      await stub.schedulePickup(unit);
       scheduled++;
     } catch (err) {
       await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
@@ -268,312 +298,24 @@ export async function discoverPendingFinanceHandoffs(env: Env): Promise<number> 
   return scheduled;
 }
 
-/**
- * Sends the Operations-topic "a Sales Handoff needs a human to activate
- * the Sales Claude Project" notification -- fired the first time a given
- * Pending Sales Handoff is detected while Sales Executive's own automated
- * pickup stays paused (see SALES_EXECUTIVE_PAUSED). Deliberately carries
- * only opaque identifiers (Matter_Token, the Handoff's own Notion page id)
- * -- never a real Entity/company name, matching the Operations security
- * contract every other cross-Unit summary in this file already follows.
- * Deduped per-Handoff via a plain KV flag: this is a notification-noise
- * optimization only, never the authority for whether the Handoff itself
- * may be processed (that remains its live Status, per claimPendingHandoff).
- */
-async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matterToken: string): Promise<void> {
-  const notifiedKey = `sales_handoff_notified:${handoff.id}`;
-  if (await kvGet(env, notifiedKey)) return;
-  await sendOperationsMessage(
-    env,
-    `*SALES HANDOFF READY*\nMatter: ${matterToken}\nHandoff: ${handoff.id}\nTo: Sales Executive\nStatus: Pending\n\nAction required: open the Sales Executive workspace (the isolated Sales Claude Project) and check the pending Handoff.`,
-  );
-  await kvPut(env, notifiedKey, "1", { expirationTtl: 60 * 60 * 24 * 30 }).catch((err) =>
-    console.error(`Failed to record sales_handoff_notified for ${handoff.id}`, err),
-  );
+/** Every Unit whose manifest declares a Handoff pickup, in registry order. */
+export function unitsWithHandoffPickup(): Unit[] {
+  return (Object.entries(getUnitManifests()) as [Unit, UnitManifest | undefined][]).filter(([, manifest]) => manifest?.handoffPickup).map(([unit]) => unit);
 }
 
 /**
- * Identifies a call-notes Handoff created by the isolated Sales Executive
- * Claude project (per its Project Instructions' Section 6A) rather than by
- * this Worker's own Finance/Strategy code. Detected by a case-insensitive
- * match on "requiredCategory: call_notes" anywhere in Reason OR the
- * Handoff title -- not a strict opening-phrase prefix, and not a single
- * fixed field -- since both are free text a Claude session composes
- * itself and neither their exact wording nor which field carries the
- * marker is reliably reproducible run to run (confirmed live: HO-69
- * carried it in Reason, "requiredCategory: call_notes."; HO-73 carried it
- * only in the Handoff title, "...for qualification review
- * [requiredCategory: call_notes]", with Reason containing no such text at
- * all -- checking Reason alone silently misrouted HO-73 into
- * runProposalDrafting, which then failed trying to parse a Finance quote
- * out of call notes). requiredCategory is the field name
- * HandoffContextContract already uses for this exact purpose, so this is
- * the same category marker the isolated project's own instructions ask it
- * to record, not a second convention. A Notion schema property was
- * deliberately not added for this, since the marker already uniquely
- * identifies the Handoff without a live database change.
+ * Runs the one discovery loop for every Unit that declares a Handoff pickup,
+ * in registry order. Units run in sequence; an error that escapes one Unit's
+ * discovery (a failed Notion query) propagates to the caller, which reports
+ * it -- exactly as the former four separate calls did. Returns the scheduled
+ * count per Unit.
  */
-/**
- * One Operations notice per call-notes Handoff that reaches Runtime Sales
- * after LOG-987, so it is never silently ignored -- and never re-sent every
- * discovery cycle (KV key per Handoff, kept 30 days).
- */
-async function notifyRetiredCallNotesHandoff(env: Env, handoff: { id: string; properties?: Record<string, any> }): Promise<void> {
-  const key = `sales_callnotes_retired_notice:${handoff.id}`;
-  if (await kvGet(env, key)) return;
-  const matterToken = plainText(handoff.properties?.Matter_Token) || "(unknown)";
-  await sendOperationsMessage(
-    env,
-    `⛔ Call-notes Handoff for ${matterToken} was not picked up by Runtime Sales.\n\nRuntime Sales no longer qualifies or progresses Leads (LOG-987). Run *sales-fit-assessment*, then *sales-progression*, in Isolated Sales for this Matter. The Handoff was left as it is.`,
-  );
-  await kvPut(env, key, new Date().toISOString(), { expirationTtl: 30 * 24 * 60 * 60 });
-}
-
-function isCallNotesHandoff(handoff: { properties?: Record<string, any> }): boolean {
-  const marker = /requiredCategory:\s*call_notes\b/i;
-  return marker.test(plainText(handoff.properties?.Reason)) || marker.test(plainText(handoff.properties?.Handoff));
-}
-
-/**
- * The Sales side of the Finance -> Sales execution boundary — the return
- * leg of the same Handoff-queue pattern as discoverPendingFinanceHandoffs.
- * Also the entry point for a Handoff addressed to Sales that was created
- * directly in Notion by an authorized external writer (today, the isolated
- * Sales Claude Project) rather than by this Worker's own Finance code.
- *
- * Detection/registration (finding the Pending Handoff, creating its
- * WorkSession and handoff_workitem mapping if one doesn't exist yet, and
- * notifying Operations) always happens, regardless of
- * SALES_EXECUTIVE_PAUSED -- a human must still be able to discover a
- * pending Sales Handoff without having to notice it manually in Notion.
- *
- * Execution stays gated behind SALES_EXECUTIVE_PAUSED for every Sales
- * Handoff, a Finance -> Sales quote Handoff included: while paused, the
- * Handoff is registered, Operations is notified, and it stays Pending --
- * this function performs no Sales work on its own, however it was invoked.
- * The governed work happens only once Martin opens the Sales Claude Project
- * and says "Check Handoff" -- a deliberate human activation boundary this
- * function does not and must not cross.
- *
- * When not paused: every non-call-notes Sales Handoff -- a Finance -> Sales
- * quote Handoff included -- runs the Runtime Sales Executive's token-safe
- * Proposal flow (runTokenSafeProposal, see units/sales/tokenSafeProposal.ts).
- * The older runProposalDrafting/handleQuoteReceived path this replaced,
- * which required a continuing WorkSession's in-memory entityName/matterName
- * and produced LOG-874 when picked up without one, has been retired.
- *
- * `paused` defaults to SALES_EXECUTIVE_PAUSED and exists so the unpaused
- * path can be tested; production callers never pass it.
- */
-export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = SALES_EXECUTIVE_PAUSED): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Sales" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let scheduled = 0;
-  for (const handoff of pending) {
-    // LOG-987: Runtime Sales does not qualify. A call-notes Handoff to Sales
-    // is not picked up, registered or claimed here -- fit assessment and
-    // progression belong to Isolated Sales. Martin is told once per Handoff
-    // and the record is left exactly as found.
-    if (isCallNotesHandoff(handoff)) {
-      await notifyRetiredCallNotesHandoff(env, handoff).catch((err) =>
-        console.error(`Failed to send the LOG-987 notice for call-notes Handoff ${handoff.id}`, err),
-      );
-      continue;
-    }
-
-    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      // No live Telegram session behind this Handoff -- e.g. created
-      // directly in Notion by the isolated Sales Executive project. Register
-      // it (mirrors every other Unit's own no-mapping branch above) so it
-      // is discoverable and its context is ready -- but registering is not
-      // executing: nothing here calls into Sales Executive's own AI work.
-      //
-      // Sales owns two Hats, so the destination `To Hat` fact decides
-      // which one this Work belongs to -- "Sales Executive" is no longer
-      // hardcoded here. A Handoff that names no Hat for this multi-Hat
-      // Unit fails closed instead (Registration + Operations notification
-      // never fabricate ownership).
-      const entry = await resolveHandoffEntry(env, handoff, "Sales");
-      if (!entry) continue;
-      // Same new-Work boundary as the other Units: the Handoff's Matter_Token
-      // fact is resolved to the canonical Matter page id first, so the Work
-      // starts associated with the real Matter (fail closed: no token or no
-      // resolution means no Work at all).
-      const matter = await resolveHandoffMatterIdentity(env, handoff);
-      if (!matter) continue;
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Sales", entry.hat, undefined, {
-          handoffId: handoff.id,
-          // The RESOLVED pickup Action (`proposal_draft` -- declared
-          // applicable to a handoff pickup) is recorded at creation; the
-          // flow advances it to later Proposal-lifecycle Actions when its
-          // own governed transitions run (see tokenSafeProposal.ts).
-          actionName: entry.actionName,
-          matterId: matter.matterId,
-          matterToken: matter.matterToken,
-        });
-        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Sales Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Sales Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-
-    if (paused) {
-      // Detected and registered -- that's the whole job while paused.
-      // Execution stays behind the deliberate human "Check Handoff"
-      // activation in the isolated Sales Claude Project, not this loop.
-      const matterToken = plainText(handoff.properties?.Matter_Token) || "(unknown)";
-      await notifySalesHandoffReady(env, handoff, matterToken).catch((err) =>
-        console.error(`Failed to send Sales Handoff ready notification for ${handoff.id}`, err),
-      );
-      continue;
-    }
-
-    // Not paused: every Sales Handoff that reaches here (Finance-quote and
-    // generic proposal Handoffs; call-notes ones were turned away above) goes
-    // to the Runtime Sales Executive's token-safe Proposal flow (LOG-808).
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.schedulePickup("sales_proposal");
-      scheduled++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
+export async function discoverPendingHandoffsAllUnits(env: Env): Promise<Partial<Record<Unit, number>>> {
+  const counts: Partial<Record<Unit, number>> = {};
+  for (const unit of unitsWithHandoffPickup()) {
+    counts[unit] = await discoverPendingHandoffsForUnit(env, unit);
   }
-  return scheduled;
-}
-
-/**
- * The Marketing side of a <Unit> -> Marketing execution boundary,
- * mirroring discoverPendingFinanceHandoffs. Discovers Pending Handoffs
- * addressed to Marketing (e.g. a Strategy diagnosis Martin approved
- * routing to Marketing Strategist).
- */
-export async function discoverPendingMarketingHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Marketing" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let scheduled = 0;
-  for (const handoff of pending) {
-    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      // Marketing owns several Hats, so the destination `To Hat` fact
-      // decides which one owns this Work ("Marketing Strategist" is no
-      // longer hardcoded here -- the creating Unit writes it); a Hat-less
-      // destination for this multi-Hat Unit fails closed.
-      const entry = await resolveHandoffEntry(env, handoff, "Marketing");
-      if (!entry) continue;
-      // Canonical Matter identity resolved before the Work exists -- see
-      // resolveHandoffMatterIdentity: no token/no resolution, no Work.
-      const matter = await resolveHandoffMatterIdentity(env, handoff);
-      if (!matter) continue;
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Marketing", entry.hat, threadId, {
-          handoffId: handoff.id,
-          // The RESOLVED pickup Action (`handle_request`) is recorded at creation.
-          actionName: entry.actionName,
-          matterId: matter.matterId,
-          matterToken: matter.matterToken,
-        });
-        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Marketing Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Marketing Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.schedulePickup("marketing");
-      scheduled++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return scheduled;
-}
-
-/**
- * The Strategy side of a <Unit> -> Strategy execution boundary, mirroring
- * discoverPendingFinanceHandoffs/discoverPendingMarketingHandoffs exactly
- * -- the creating Unit's Hat code only ever creates the Handoff (Status:
- * Pending) and returns; this runs on its own schedule and discovers it
- * independently.
- */
-export async function discoverPendingStrategyHandoffs(env: Env): Promise<number> {
-  const pending = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, discoveryCronContext(),  {
-    and: [
-      { property: "Status", select: { equals: "Pending" } },
-      { property: "To Unit", select: { equals: "Strategy" } },
-      { property: "Type", select: { equals: "Work" } },
-    ],
-  });
-
-  let scheduled = 0;
-  for (const handoff of pending) {
-    let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
-    if (!workId) {
-      // Destination facts resolve the Organization (single-Hat Unit) and
-      // the `diagnose` Action declared applicable to a handoff pickup --
-      // `commit_diagnosis` is lifecycle-only and cannot resolve here.
-      const entry = await resolveHandoffEntry(env, handoff, "Strategy");
-      if (!entry) continue;
-      // Canonical Matter identity resolved before the Work exists -- see
-      // resolveHandoffMatterIdentity: no token/no resolution, no Work.
-      const matter = await resolveHandoffMatterIdentity(env, handoff);
-      if (!matter) continue;
-      try {
-        workId = newWorkId();
-        const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
-        const threadId = undefined;
-        const stub = getSessionStub(env, workId);
-        await stub.init(workId, chatId, "Strategy", entry.hat, threadId, {
-          handoffId: handoff.id,
-          // The RESOLVED pickup Action (`diagnose`) is recorded at creation.
-          actionName: entry.actionName,
-          matterId: matter.matterId,
-          matterToken: matter.matterToken,
-        });
-        await kvPut(env, `handoff_workitem:${handoff.id}`, workId);
-        console.log(`Created work item ${workId} for externally-created Strategy Handoff ${handoff.id} (no prior session)`);
-      } catch (err) {
-        console.error(`Failed to create a work item for externally-created Strategy Handoff ${handoff.id}`, err);
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-        continue;
-      }
-    }
-    const stub = getSessionStub(env, workId);
-    try {
-      await stub.schedulePickup("strategy");
-      scheduled++;
-    } catch (err) {
-      await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-    }
-  }
-  return scheduled;
+  return counts;
 }
 
 /**
@@ -741,37 +483,25 @@ export async function runCheckHandoffs(
     );
     const unitHere = resolveUnitForThread(env, threadId);
     try {
-      if (unitHere === "Finance" || unitHere === "Sales" || unitHere === "Marketing" || unitHere === "Strategy") {
-        // These four are the only Units with real pickup logic (Marketing's
-        // is Handoff-only -- see discoverPendingMarketingHandoffs -- chat-
-        // originated Marketing work still goes through handleMarketingIntake
-        // directly, never this discovery path). Discovery only counts a
-        // Handoff as scheduled for pickup if it has a handoff_workitem KV
-        // mapping (tied to a live Telegram session); a Handoff created
-        // directly in Notion -- e.g. by the isolated Sales Executive
-        // project -- has no such mapping, so discovery finds it but
-        // silently skips it, and financeScheduled stays 0 even though it's
-        // genuinely Pending. Query Notion directly too, so the reply can
-        // tell "nothing pending" apart from "pending but stuck for lack of
-        // a work-item mapping" instead of reporting both as the same
-        // "No Handoffs pending" message.
-        const financeScheduled = await discoverPendingFinanceHandoffs(env);
-        const salesScheduled = await discoverPendingSalesHandoffs(env);
-        const marketingScheduled = await discoverPendingMarketingHandoffs(env);
-        const strategyScheduled = await discoverPendingStrategyHandoffs(env);
+      if (unitHere !== "dm" && unitHere !== "unmapped" && unitsWithHandoffPickup().includes(unitHere)) {
+        // Every Unit that declares a Handoff pickup (Marketing's is
+        // Handoff-only -- chat-originated Marketing work still goes through
+        // handleMarketingIntake directly, never this discovery path).
+        // Discovery only counts a Handoff as scheduled for pickup if it has
+        // (or can register) a work item; a Handoff created directly in
+        // Notion -- e.g. by the isolated Sales Executive project -- has no
+        // handoff_workitem mapping until discovery registers one, and a
+        // Handoff that cannot be registered stays Pending though genuinely
+        // there. Query Notion directly too, so the reply can tell "nothing
+        // pending" apart from "pending but stuck" instead of reporting both
+        // as the same "No Handoffs pending" message.
+        const scheduledByUnit = await discoverPendingHandoffsAllUnits(env);
         await checkStaleHandoffs(env);
         // notion_webhook always passes threadId undefined (Martin's DM),
         // so resolveUnitForThread never resolves to a specific Unit here --
         // this branch only ever runs for "manual"/"runtime_auto".
         const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
-        const scheduledForThisUnit =
-          unitHere === "Finance"
-            ? financeScheduled
-            : unitHere === "Sales"
-              ? salesScheduled
-              : unitHere === "Marketing"
-                ? marketingScheduled
-                : strategyScheduled;
+        const scheduledForThisUnit = scheduledByUnit[unitHere] ?? 0;
         let reply: string;
         if (pendingCount === 0) {
           reply = `No Handoffs pending for ${unitHere}.`;
@@ -784,10 +514,7 @@ export async function runCheckHandoffs(
       } else if (unitHere === "dm" || unitHere === "unmapped") {
         // No specific Unit to scope to -- fall back to the combined
         // summary across all real pickup directions.
-        const financeScheduled = await discoverPendingFinanceHandoffs(env);
-        const salesScheduled = await discoverPendingSalesHandoffs(env);
-        const marketingScheduled = await discoverPendingMarketingHandoffs(env);
-        const strategyScheduled = await discoverPendingStrategyHandoffs(env);
+        const scheduledByUnit = await discoverPendingHandoffsAllUnits(env);
         await checkStaleHandoffs(env);
         if (source === "notion_webhook") {
           // Background/event-driven: no Telegram user is waiting on a
@@ -806,13 +533,14 @@ export async function runCheckHandoffs(
         // since that IS about the specific work item(s) in that topic.
         await sendOperationsMessage(
           env,
-          `Checked Handoffs: pickup scheduled for ${financeScheduled} Finance Handoff(s), ${salesScheduled} Sales Handoff(s), ${marketingScheduled} Marketing Handoff(s), ${strategyScheduled} Strategy Handoff(s).`,
+          `Checked Handoffs: pickup scheduled for ${Object.entries(scheduledByUnit)
+            .map(([unit, count]) => `${count} ${unit} Handoff(s)`)
+            .join(", ")}.`,
         );
       } else {
-        // Business Development, Strategy, Creative & Design, and
-        // Operations -- no pickup logic exists for any of these, so just
-        // report whether anything is queued for this Unit rather than
-        // attempting a pickup that doesn't exist.
+        // A Unit that declares no Handoff pickup (Business Development,
+        // Creative & Design, Operations) -- just report whether anything is
+        // queued for it rather than attempting a pickup that doesn't exist.
         const pendingCount = await countPendingHandoffsForUnit(env, unitHere);
         const reply =
           pendingCount > 0

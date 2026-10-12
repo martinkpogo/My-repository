@@ -14,6 +14,7 @@ import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader 
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { richText, select } from "../../notion";
 import { updateHandoff } from "../../handoffWriter";
+import { handleHandoffPickup } from "../../hats/executionEngine";
 
 /**
  * Marketing's Unit Registry manifest (ENIG Operating Model design doc,
@@ -618,6 +619,9 @@ export const marketingManifest: UnitManifest = {
   intakeClassificationTaskId: "marketing.intake_classification",
   intakeIntroLine: "You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit.",
   actionClassificationTaskId: "marketing.hat_action_decision",
+  // Marketing takes in Handoffs addressed to any of its Hats; the Handoff's
+  // destination facts decide which Hat owns the Work (resolved by discovery).
+  handoffPickup: { handler: (env, state, skills) => handleHandoffPickup(env, state, skills) },
 };
 
 /**

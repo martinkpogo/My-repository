@@ -37,8 +37,8 @@ import { kvDelete, kvGet, kvPut } from "./kvStore";
 export const SALES_DIRECT_ENTRY_PAUSED = true;
 
 // Gates the Sales Handoff PICKUP mechanism only (checkHandoffs.ts's
-// discoverPendingSalesHandoffs -- runTokenSafeProposal; call-notes Handoffs
-// are turned away regardless of this flag, LOG-987).
+// Sales's handoffPickup.hold, units/sales/handoffIntake.ts; call-notes
+// Handoffs are turned away regardless of this flag, LOG-987).
 // Unlike SALES_DIRECT_ENTRY_PAUSED above, this never
 // touches real client identity -- it only ever processes what's already
 // de-identified on a Handoff record (Entity_Token/Matter_Token, sanitized
@@ -158,10 +158,12 @@ export function getSessionStub(env: Env, workId: string) {
 // not resolvable under the node test runner.
 // ---------------------------------------------------------------------------
 
-/** Which existing WorkSession pickup runner a discovery loop scheduled. */
-export type PickupKind = "strategy" | "finance" | "sales_call_notes" | "sales_proposal" | "marketing";
-
-const PICKUP_KINDS: readonly string[] = ["strategy", "finance", "sales_call_notes", "sales_proposal", "marketing"];
+/**
+ * Which Unit's Handoff pickup a discovery loop scheduled. The kind IS the
+ * receiving Unit: its manifest's `handoffPickup` declares what runs, so this
+ * module (and the Worker around it) names no Unit.
+ */
+export type PickupKind = Unit;
 
 /** Storage key on the WorkSession DO's own storage -- never the "state" key. */
 export const PENDING_PICKUP_KIND_KEY = "pending_pickup_kind";
@@ -191,14 +193,14 @@ export async function schedulePickupAlarm(storage: PickupAlarmStorage, kind: Pic
  * Reads and CLEARS the pending pickup kind. Clearing before the pickup runs
  * is what makes an alarm single-shot: a duplicate or re-fired alarm can
  * never run the same scheduled pickup twice (a genuinely new schedule
- * writes the key again). Returns undefined when nothing is pending; an
- * unrecognized stored value is discarded fail-closed rather than dispatched.
+ * writes the key again). Returns undefined when nothing is pending; a
+ * kind with no runner is discarded fail-closed by dispatchScheduledPickup rather than dispatched.
  */
 export async function takePendingPickupKind(storage: PickupAlarmStorage): Promise<PickupKind | undefined> {
   const raw = await storage.get<string>(PENDING_PICKUP_KIND_KEY);
   if (raw === undefined || raw === null) return undefined;
   await storage.delete(PENDING_PICKUP_KIND_KEY);
-  return PICKUP_KINDS.includes(raw) ? (raw as PickupKind) : undefined;
+  return typeof raw === "string" && raw.length > 0 ? (raw as PickupKind) : undefined;
 }
 
 /**
@@ -213,11 +215,15 @@ export async function takePendingPickupKind(storage: PickupAlarmStorage): Promis
  */
 export async function dispatchScheduledPickup(
   storage: PickupAlarmStorage,
-  runners: Record<PickupKind, () => Promise<unknown>>,
+  runners: Partial<Record<PickupKind, () => Promise<unknown>>>,
 ): Promise<PickupKind | undefined> {
   const kind = await takePendingPickupKind(storage);
   if (!kind) return undefined;
-  await runners[kind]();
+  const run = runners[kind];
+  // A kind with no runner (a Unit that declares no pickup, or a stale value)
+  // is discarded fail-closed rather than dispatched.
+  if (!run) return undefined;
+  await run();
   return kind;
 }
 

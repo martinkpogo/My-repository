@@ -406,7 +406,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * it.
  * sales.proposal_drafting now runs exclusively through
  * tokenSafeProposal.ts's handleProposalHandoffPickup (see
- * checkHandoffs.ts's discoverPendingSalesHandoffs -> runTokenSafeProposal),
+ * checkHandoffs.ts's generic discovery -> Sales's declared handoffPickup),
  * which reads Entity_Token/Matter_Token straight off the Handoff record and
  * never touches real identity, with or without a continuing WorkSession --
  * the older salesExecutive.ts handleQuoteReceived path this replaced (which

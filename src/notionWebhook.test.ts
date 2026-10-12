@@ -515,7 +515,7 @@ test("Webhook handler returns without awaiting any Unit pickup -- the background
 
   await flush();
 
-  assert.deepStrictEqual(scheduled, ["strategy"], "the background discovery schedules exactly the pending Strategy pickup afterwards");
+  assert.deepStrictEqual(scheduled, ["Strategy"], "the background discovery schedules exactly the pending Strategy pickup afterwards");
   assert.deepStrictEqual(runnerCalls, [], "no Unit pickup runner is ever awaited on the webhook path -- only the WorkSession alarm runs those");
 });
 

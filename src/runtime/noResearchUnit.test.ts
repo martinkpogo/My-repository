@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert";
 import { ALL_HATS } from "../hats/registry";
 import { findUnitManifest, getUnitManifests } from "../units/registry";
+import { unitsWithHandoffPickup } from "../checkHandoffs";
 
 /**
  * Regression coverage for the retirement of Research & Intelligence as an
@@ -88,7 +89,9 @@ test("no Handoff discovery loop targets the retired Unit, and no Telegram topic 
   const path = await import("node:path");
   const checkHandoffs = fs.readFileSync(path.join(import.meta.dirname, "..", "checkHandoffs.ts"), "utf8");
   assert.ok(!/To Unit[^\n]*Research/.test(checkHandoffs), "checkHandoffs must not query Handoffs addressed to the retired Unit");
-  assert.ok(!/discoverPending(?!Finance|Sales|Marketing|Strategy)[A-Za-z]*Handoffs/.test(checkHandoffs), "only discovery loops for real current Units exist");
+  // One generic loop, driven by the Units that declare a pickup: the retired Unit declares none.
+  assert.ok(!/discoverPending(?!HandoffsForUnit|HandoffsAllUnits)[A-Za-z]*Handoffs/.test(checkHandoffs), "no Unit-specific discovery loop exists -- only the one generic loop");
+  assert.ok(!unitsWithHandoffPickup().includes(RETIRED_UNIT as any), "the retired Unit declares no Handoff pickup");
 
   const wrangler = fs.readFileSync(path.join(import.meta.dirname, "..", "..", "wrangler.toml"), "utf8");
   assert.ok(!wrangler.includes(RETIRED_UNIT), "wrangler.toml must not carry a topic for the retired Unit");

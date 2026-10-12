@@ -1,10 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
-import * as sales from "./units/sales/salesExecutive";
-import * as finance from "./units/finance/valueBasedPricingAssessor";
-import * as marketing from "./hats/executionEngine";
+import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { handleMarketingIntake } from "./units/marketing/marketingManifest";
-import * as strategy from "./units/strategy/strategyAnalyst";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
 import { installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
@@ -16,9 +13,8 @@ import {
 } from "./runtime/tools/googleDocsSmoke";
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
-import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { sendMessage, sendOperationsMessage } from "./telegram";
-import { notifyMartinOfDiscoveryFailure } from "./checkHandoffs";
+import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
@@ -237,13 +233,10 @@ export class WorkSession extends DurableObject<Env> {
    */
   async alarm(): Promise<void> {
     try {
-      await dispatchScheduledPickup(this.ctx.storage, {
-        strategy: () => this.runStrategyPickup(),
-        finance: () => this.runFinancePickup(),
-        sales_call_notes: () => this.runCallNotesPickup(),
-        sales_proposal: () => this.runTokenSafeProposal(),
-        marketing: () => this.runMarketingHandoffPickup(),
-      });
+      // One runner per Unit that declares a Handoff pickup in its manifest.
+      const runners: Partial<Record<PickupKind, () => Promise<unknown>>> = {};
+      for (const unit of unitsWithHandoffPickup()) runners[unit] = () => this.runHandoffPickup(unit);
+      await dispatchScheduledPickup(this.ctx.storage, runners);
     } catch (err) {
       const state = await this.getState().catch(() => undefined);
       await notifyMartinOfDiscoveryFailure(this.env, state?.handoffId ?? "(unknown)", err);
@@ -251,82 +244,33 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
-   * Every scheduled pickup below runs through runWithAdoptedOwnership
-   * first: the Handoff's own destination facts (To Unit / To Hat) become
-   * this Work's recorded Unit/Hat/Action before its handler runs, so the
-   * receiving Unit owns the interaction from here on (buttons, awaiting
-   * replies, declared Skills, Access authority, the sessions index). See
+   * Every scheduled pickup runs through runWithAdoptedOwnership first: the
+   * Handoff's own destination facts (To Unit / To Hat) become this Work's
+   * recorded Unit/Hat/Action before its handler runs, so the receiving Unit
+   * owns the interaction from here on (buttons, awaiting replies, declared
+   * Skills, Access authority, the sessions index). See
    * src/handoffOwnership.ts for why, and docs/enig-operating-model.md's
    * "Handoff is a Business Object". It is a no-op when the Work already
    * records that destination -- the external path, which inits the session
    * with it -- so those pickups are unchanged.
    *
-   * Invoked independently by index.ts's scheduled Finance-Handoff discovery
-   * (never by Sales directly) once a Pending Handoff addressed to Finance is
-   * found. This is the actual cross-Unit execution boundary: Sales's own
-   * call already returned before this ever runs.
+   * ONE runner for every Unit: the handler is whatever the receiving Unit's
+   * manifest declares as its `handoffPickup` (UnitManifest.handoffPickup), so
+   * this class names no Unit. Invoked only from alarm(), after Handoff
+   * discovery (checkHandoffs.ts) scheduled it for this Work. It is the actual
+   * cross-Unit execution boundary: the sending Unit's own call already
+   * returned before this ever runs. Fails closed (throws, so nothing is
+   * claimed or persisted and the Handoff stays Pending) for a Unit that
+   * declares no pickup.
    */
-  async runFinancePickup(): Promise<WorkState> {
+  async runHandoffPickup(unit: Unit): Promise<WorkState> {
+    const declaration = findUnitManifest(unit)?.handoffPickup;
+    if (!declaration) throw new Error(`${unit} declares no Handoff pickup -- nothing to run`);
     return this.execute((state) =>
-      runWithAdoptedOwnership(this.env, state, "Finance", (adopted) =>
-        this.runUnderRecordedSkills(adopted, (skills) => finance.handlePickup(this.env, adopted, skills)),
+      runWithAdoptedOwnership(this.env, state, unit, (adopted) =>
+        this.runUnderRecordedSkills(adopted, (skills) => declaration.handler(this.env, adopted, skills)),
       ),
     );
-  }
-
-  /**
-   * Invoked independently by index.ts's scheduled Strategy-Handoff
-   * discovery once a Pending Handoff addressed to Strategy is found --
-   * mirrors runFinancePickup exactly (ownership adopted the same way).
-   */
-  async runStrategyPickup(): Promise<WorkState> {
-    return this.execute((state) =>
-      runWithAdoptedOwnership(this.env, state, "Strategy", (adopted) =>
-        this.runUnderRecordedSkills(adopted, (skills) => strategy.handlePickup(this.env, adopted, skills)),
-      ),
-    );
-  }
-
-  /**
-   * The Marketing side of a <Unit> -> Marketing execution boundary,
-   * invoked independently by index.ts's scheduled Marketing-Handoff
-   * discovery once a Pending Handoff addressed to Marketing is found —
-   * mirrors runFinancePickup (including the ownership adoption).
-   */
-  async runMarketingHandoffPickup(): Promise<WorkState> {
-    return this.execute((state) =>
-      runWithAdoptedOwnership(this.env, state, "Marketing", (adopted) =>
-        this.runUnderRecordedSkills(adopted, (skills) => marketing.handleHandoffPickup(this.env, adopted, skills)),
-      ),
-    );
-  }
-
-  /**
-   * Runtime Sales Executive pickup of a Finance -> Sales Handoff: produces
-   * the one canonical token-safe Proposal and asks Martin to authorize its
-   * exact Version (see units/sales/tokenSafeProposal.ts). Invoked only by
-   * checkHandoffs.ts's Sales discovery, never by Finance directly. The
-   * Finance -> Sales leg is the second hop of a Strategy -> Finance -> Sales
-   * chain on the same session, so this is where ownership moves to Sales.
-   */
-  async runTokenSafeProposal(): Promise<WorkState> {
-    return this.execute((state) =>
-      runWithAdoptedOwnership(this.env, state, "Sales", (adopted) =>
-        this.runUnderRecordedSkills(adopted, (skills) => salesProposal.handleProposalHandoffPickup(this.env, adopted, skills)),
-      ),
-    );
-  }
-
-  /**
-   * Retired by LOG-987: Runtime Sales no longer qualifies call notes --
-   * Isolated Sales owns fit assessment and progression. Kept as a pickup kind
-   * only so an alarm armed before the change is answered honestly.
-   */
-  async runCallNotesPickup(): Promise<WorkState> {
-    // LOG-987: Runtime Sales no longer qualifies call notes. Discovery stops
-    // scheduling this pickup; an alarm already armed before that change is
-    // answered here without claiming the Handoff or touching any record.
-    return this.execute((state) => sales.refuseRetiredSalesStep(this.env, state, "call-notes qualification"));
   }
 
 

@@ -1076,7 +1076,7 @@ test("4b. An alarm-scheduled pickup for an already-claimed Handoff does no picku
   // The WorkSession's own storage, pre-loaded with the pending kind exactly
   // as schedulePickupAlarm would leave it.
   const store = new Map<string, string>();
-  store.set(PENDING_PICKUP_KIND_KEY, "strategy");
+  store.set(PENDING_PICKUP_KIND_KEY, "Strategy");
   const storage: PickupAlarmStorage = {
     get: async <T = unknown>(key: string): Promise<T | undefined> => (store.has(key) ? (store.get(key) as unknown as T) : undefined),
     put: async (key: string, value: unknown) => {
@@ -1089,24 +1089,15 @@ test("4b. An alarm-scheduled pickup for an already-claimed Handoff does no picku
   };
 
   const ran = await dispatchScheduledPickup(storage, {
-    strategy: async () => {
+    Strategy: async () => {
       await handlePickup(env, state, STRATEGY_SKILLS);
     },
-    finance: async () => {
-      throw new Error("only the scheduled runner may run");
-    },
-    sales_call_notes: async () => {
-      throw new Error("only the scheduled runner may run");
-    },
-    sales_proposal: async () => {
-      throw new Error("only the scheduled runner may run");
-    },
-    marketing: async () => {
+    Finance: async () => {
       throw new Error("only the scheduled runner may run");
     },
   });
 
-  assert.strictEqual(ran, "strategy", "the alarm consumed the scheduled kind");
+  assert.strictEqual(ran, "Strategy", "the alarm consumed the scheduled kind");
   assert.strictEqual(store.has(PENDING_PICKUP_KIND_KEY), false, "the pending kind is cleared");
   assert.strictEqual(aiCalls, 0, "zero AI calls -- refused before any diagnosis");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no pickup work happened (no Notion write at all)");

@@ -2181,7 +2181,7 @@ export async function handleInterventionApproval(
 
     // Strategy's execution on this Handoff ends here -- Finance discovers
     // and picks up the new Handoff independently (see
-    // discoverPendingFinanceHandoffs in index.ts), the same cross-Unit
+    // discoverPendingHandoffsForUnit), the same cross-Unit
     // execution-boundary pattern every other Handoff in this Worker uses.
     state.stage = "awaiting_finance";
     state.awaiting = undefined;

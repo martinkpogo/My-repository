@@ -131,6 +131,9 @@ export const financeManifest: UnitManifest = {
   intakeClassificationTaskId: "finance.quote_judgment",
   intakeIntroLine: "You route incoming Finance requests for ENIG, to its Value-Based Pricing Assessor Hat.",
   actionClassificationTaskId: "finance.quote_judgment",
+  // Handoff-originated Work is taken in through handlePickup -- a separate
+  // declaration, NOT the entryHandler (see this file's doc comment).
+  handoffPickup: { handler: (env, state, skills) => finance.handlePickup(env, state, skills) },
 };
 
 /**
