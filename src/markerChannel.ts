@@ -17,7 +17,7 @@
  *
  *   - `source_boundary_check` (`src/handoffWriter.ts`) -- the recorded
  *     source-boundary result of a Sales -> Strategy Handoff.
- *   - `record_approval` (`src/units/sales/callNotesMarker.ts`) -- the
+ *   - `record_approval` (`src/records/callNotes/callNotesMarker.ts`) -- the
  *     recorded approval attestation of a Call Notes record.
  *
  * This module owns the **shared grammar only**: how a marker is shaped, built,

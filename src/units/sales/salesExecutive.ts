@@ -36,7 +36,7 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
-import { retrieveAndConsumeCallNotes } from "./callNotesRecord";
+import { retrieveAndConsumeCallNotes } from "../../records/callNotes/callNotesRecord";
 import { serializeCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
 

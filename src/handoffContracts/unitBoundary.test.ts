@@ -9,14 +9,12 @@ import { join, relative } from "node:path";
 // test fails if a production file under src/units/<A>/ imports from
 // src/units/<B>/.
 //
-// ONE documented exception remains: Strategy reads the approved Call Notes
-// record through Sales's reader (callNotesRecord / callNotesMarker). Call
-// Notes is a governed Business Object, not a Handoff format, and that reader
-// depends on Sales internals (callNotesLifecycle, tokenSafeProposal's hash),
-// so moving it is a separate, larger step. Listed here so it cannot widen.
+// There is no exception: Strategy reads the approved Call Notes record through
+// src/records/callNotes (a governed Business Object that no single Unit owns --
+// Isolated Sales creates it; Runtime reads it), not through Sales's code.
 
 const UNITS_DIR = join(__dirname, "..", "units");
-const ALLOWED = new Set(["strategy/strategyEvidence.ts -> sales"]);
+const ALLOWED = new Set<string>();
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -40,8 +38,7 @@ test("No Unit's production code imports another Unit's code (Handoff formats liv
   }
   const unexpected = [...found].filter((f) => !ALLOWED.has(f));
   assert.deepStrictEqual(unexpected, [], `cross-Unit imports (move the shared format to src/handoffContracts): ${unexpected.join("; ")}`);
-  assert.deepStrictEqual([...found].sort(), [...ALLOWED].sort(), "the documented exception must still exist -- remove it from ALLOWED when it is gone");
-});
+  });
 
 test("The neutral contracts module imports no Unit", () => {
   for (const file of walk(join(__dirname))) {
@@ -55,5 +52,12 @@ test("The generic Worker's Handoff discovery and pickup scheduling name no Unit"
     const text = readFileSync(join(SRC, file), "utf8");
     assert.ok(!/from\s+["']\.\/units\/(sales|strategy|finance|marketing|businessDevelopment)\//.test(text), `${file} must not import a Unit's code -- Unit specifics are declared on its manifest (handoffPickup)`);
     assert.ok(!/["'](sales_proposal|sales_call_notes)["']/.test(text), `${file} must not carry Unit-specific pickup kinds`);
+  }
+});
+
+test("The Call Notes record module imports no Unit", () => {
+  const dir = join(__dirname, "..", "records");
+  for (const file of walk(dir)) {
+    assert.ok(!/from\s+["'][^"']*\/units\//.test(readFileSync(file, "utf8")), `${file} must not import a Unit`);
   }
 });
