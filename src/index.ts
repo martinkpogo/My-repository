@@ -221,7 +221,7 @@ export default {
 
     // Runs the same Handoff discovery and stale-handoff digest as the native
     // Cron Trigger (scheduled() below) -- the canonical scheduler, which
-    // Cloudflare's analytics show firing every 5 minutes. This endpoint is a
+    // Cloudflare's analytics show firing (every 30 minutes, as a safety net behind the Notion webhook). This endpoint is a
     // manual/diagnostic entry point; nothing should ALSO schedule it, or
     // discovery runs twice per cycle (the GitHub Actions workflow that did
     // was removed 2026-10-12). Gated the same as every other admin endpoint.
@@ -717,7 +717,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       return;
     }
     if (text === "/checkhandoffs") {
-      // Same discovery logic /admin/run-finance-discovery and the 5-minute
+      // Same discovery logic /admin/run-finance-discovery and the 30-minute
       // native Cron Trigger already run -- exposed as a command so it's
       // triggerable directly from Telegram, without the admin URL/secret,
       // and entirely outside the AI-gated routeIncomingText path (a plain
@@ -852,9 +852,9 @@ async function listSessionKvKeys(env: Env): Promise<string[]> {
   return keys;
 }
 
-// Discovery runs every 5 min on the native Cron Trigger (see wrangler.toml).
-// The threshold stays at 20 min -- several missed cycles -- so a single slow
-// or skipped run does not false-alarm.
-const WATCHDOG_STALE_THRESHOLD_MS = 20 * 60 * 1000;
+// The safety-net discovery runs every 30 min on the native Cron Trigger (see
+// wrangler.toml). The threshold is two full cycles plus buffer, so a single
+// slow or skipped run does not false-alarm.
+const WATCHDOG_STALE_THRESHOLD_MS = 75 * 60 * 1000;
 const WATCHDOG_ALERT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
