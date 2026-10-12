@@ -9,7 +9,9 @@ import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegra
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
-import { discoveryCronContext, workSessionContext, type AccessContext } from "../../access";
+import { discoveryCronContext, mintApprovalProofForWork, workSessionContext, type AccessContext } from "../../access";
+import { kvDelete, kvGet, kvPut } from "../../kvStore";
+import { getSessionStub, newWorkId } from "../../sessionRouting";
 
 /**
  * Autonomous counterpart to the Martin-supplied /lead command in
@@ -142,21 +144,23 @@ export async function evaluateCandidates(env: Env, results: SearchResult[], skil
 interface DiscoveryRunSummary {
   evaluated: number;
   /**
-   * Candidates that passed screening and are not duplicates, but were
-   * HELD: the evidence-validation step that used to follow screening
-   * (a Handoff to the retired Research & Intelligence Unit) no longer
-   * exists, and no owning Action for it has been designed yet. A held
-   * candidate is neither routed anywhere nor turned into a Lead.
-   */
-  heldNoResearchPath: number;
-  /**
-   * Evidence-backed opportunity findings presented to Martin for approval
-   * this run -- never Leads created. No discovery source (scheduled or
-   * on-demand) may create a Lead without Martin's explicit approval; see
-   * proposeLeadOpportunity/handleLeadOpportunityApproval below. Nothing
-   * currently feeds that gate (see heldNoResearchPath).
+   * Screened candidates sent to Martin as Telegram approval cards this run
+   * -- never Leads created. No discovery source (scheduled or on-demand)
+   * may create a Lead without Martin's explicit approval of that specific
+   * candidate (Martin's decision, 2026-10-12); see presentScreenedCandidate
+   * and handleLeadOpportunityApproval below.
    */
   pendingApproval: number;
+  /**
+   * Candidates that passed screening but were NOT presented because this
+   * run already sent MAX_APPROVAL_CARDS_PER_RUN cards. Nothing is
+   * remembered for them, so a later run can still present them.
+   */
+  heldOverCap: number;
+  /** Candidates skipped because Martin already has a card for them pending, or rejected them recently. */
+  skippedAlreadyPresented: number;
+  /** Candidates whose approval card could not be created or sent (logged as a Blocker each). */
+  presentationFailed: number;
   screenedOut: number;
   skippedAsDuplicate: number;
   skippedAsInsufficient: number;
@@ -173,8 +177,10 @@ interface DiscoveryRunSummary {
 function emptyDiscoveryRunSummary(): DiscoveryRunSummary {
   return {
     evaluated: 0,
-    heldNoResearchPath: 0,
     pendingApproval: 0,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     screenedOut: 0,
     skippedAsDuplicate: 0,
     skippedAsInsufficient: 0,
@@ -189,7 +195,29 @@ export interface PendingLeadOpportunity {
   reason: string;
   category?: string;
   sourceUrl: string;
-  handoffId: string;
+  /** Legacy: the retired research Handoff a finding came from. Screened discovery candidates carry none. */
+  handoffId?: string;
+}
+
+/** At most this many approval cards are sent per discovery run, so a run never floods the Workspace topic. */
+export const MAX_APPROVAL_CARDS_PER_RUN = 5;
+/** How long a rejected candidate is remembered (never re-proposed in this window). */
+const REJECTED_CANDIDATE_TTL_SECONDS = 180 * 24 * 60 * 60;
+/** How long a presented-but-undecided candidate is remembered, so later runs do not send a second card for it. */
+const PENDING_CANDIDATE_TTL_SECONDS = 14 * 24 * 60 * 60;
+
+/** One KV key per organisation, normalized so trivial spelling/punctuation variants share it. */
+export function leadCandidateMemoryKey(organisation: string): string {
+  const lower = organisation.toLowerCase();
+  const normalized = lower.replace(/[^a-z0-9]+/g, " ").trim();
+  // A name with no Latin letters or digits must not collapse to one shared key.
+  return `lead_candidate:${normalized || lower.replace(/\s+/g, " ").trim()}`;
+}
+
+/** Where a run's approval cards are attached (the Work's chat). Cards themselves are always delivered to the Workspace topic. */
+export interface CandidatePresentationTarget {
+  chatId: number;
+  threadId?: number;
 }
 
 /**
@@ -206,6 +234,7 @@ export async function proposeLeadOpportunity(
   opportunity: PendingLeadOpportunity,
 ): Promise<WorkState> {
   state.pendingLeadOpportunity = opportunity;
+  state.stage = "awaiting_lead_approval";
 
   const target: HatMessageTarget = { chatId: state.chatId, threadId: state.threadId, hat: HAT_TARGET_NAME, workId: state.workId };
   const buttons = [
@@ -223,7 +252,7 @@ export async function proposeLeadOpportunity(
     `Why this looks worth pursuing: ${opportunity.reason}`,
     `Source: ${opportunity.sourceUrl || "N/A"}`,
     "",
-    "This is a candidate opportunity only -- no Lead has been created. Approve to record it as a Lead for Sales Executive follow-up, or reject to discard it.",
+    "Screened by Lead Generation against the Acquisition Criteria. No Lead has been created. Approve to record it as a Lead (Status: New), or reject to discard it -- a rejected organisation is not proposed again for 180 days.",
   ].join("\n");
 
   state.pendingActionSummary = {
@@ -256,6 +285,9 @@ export async function proposeLeadOpportunity(
  */
 export async function handleLeadOpportunityApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const opportunity = state.pendingLeadOpportunity;
+  const stagedSummary = state.pendingActionSummary;
+  // The staged approval is consumed BEFORE anything else runs, so a second
+  // tap on the same card (a replay) finds nothing and is a no-op.
   state.pendingLeadOpportunity = undefined;
   state.pendingActionSummary = undefined;
 
@@ -266,7 +298,25 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
     return state;
   }
 
+  // A failed write did not happen, so the candidate is put back exactly as
+  // it was staged: the same card's Approve button then works again, and a
+  // Lead still exists only after Martin's own fresh tap.
+  const restageForRetry = () => {
+    state.pendingLeadOpportunity = opportunity;
+    state.pendingActionSummary = stagedSummary;
+  };
+
   if (!approved) {
+    state.stage = "complete";
+    // Remembered so later discovery runs do not propose the same
+    // organisation again. Best-effort: a failed write only means it may be
+    // proposed again later, never that anything is created.
+    await kvPut(
+      env,
+      leadCandidateMemoryKey(opportunity.organisation),
+      JSON.stringify({ status: "rejected", workId: state.workId, at: new Date().toISOString() }),
+      { expirationTtl: REJECTED_CANDIDATE_TTL_SECONDS },
+    ).catch((err) => console.error(`Lead Opportunity Approval: could not remember the rejection of ${opportunity.organisation}`, err));
     await logActivity(env, {
       entry: `Opportunity finding rejected: ${opportunity.organisation}`,
       type: "Discovery",
@@ -274,7 +324,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
       decisionRationale: "Rejected by Martin.",
       outcome: "Complete",
     });
-    await sendWorkspaceHatMessage(env, target, `Opportunity rejected for *${opportunity.organisation}*. No Lead was created.`);
+    await sendWorkspaceHatMessage(env, target, `Opportunity rejected for *${opportunity.organisation}*. No Lead was created, and it won't be proposed again for 180 days.`);
     return state;
   }
 
@@ -283,14 +333,16 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
     duplicates = await findDuplicateLeads(env, opportunity.organisation, "");
   } catch (err) {
     console.error(`Lead Opportunity Approval: duplicate check failed for ${opportunity.organisation}`, err);
+    restageForRetry();
     await sendWorkspaceHatMessage(
       env,
       target,
-      `⚠️ Couldn't verify this isn't a duplicate before creating the Lead for *${opportunity.organisation}* -- the Leads database check failed. Not created. Please try approving again.`,
+      `⚠️ Couldn't verify this isn't a duplicate before creating the Lead for *${opportunity.organisation}* -- the Leads database check failed. Not created. Tap Approve on the card again to retry.`,
     );
     return state;
   }
   if (duplicates.length > 0) {
+    state.stage = "complete";
     await logActivity(env, {
       entry: `Opportunity approval blocked -- possible duplicate: ${opportunity.organisation}`,
       type: "Discovery",
@@ -307,13 +359,12 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
   }
 
   try {
-    // Authorized as a governed write, judged against the Action this Work
-    // records. That Action is discover_leads -- a READ action -- because
-    // searching for and screening opportunities is exactly what it is, and
-    // a read Action must never authorize a write (see access.ts's
-    // consequencePermits). Access refuses this create for that reason, by
-    // design: committing a Lead record is a different operation from finding
-    // candidates, and the registry declares no Action for it yet.
+    // Martin's approval of THIS candidate, bound to this Work, its recorded
+    // record_lead Action and the Leads data source. Access verifies all three
+    // before the create; a Work recording any other Action (e.g. a legacy
+    // card from before record_lead existed) cannot mint a usable proof and
+    // the create is refused.
+    const proof = mintApprovalProofForWork(state, env.LEADS_DATA_SOURCE_ID);
     const page = await createPage(env, env.LEADS_DATA_SOURCE_ID, {
       Lead: title(opportunity.organisation),
       Organisation: richText(opportunity.organisation),
@@ -322,13 +373,16 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
       Source: richText(opportunity.sourceUrl || ""),
       "Discovery Evidence": richText(opportunity.evidence),
       Status: select("New"),
-    }, workSessionContext(state));
+    }, workSessionContext(state, proof));
+
+    state.stage = "complete";
+    await kvDelete(env, leadCandidateMemoryKey(opportunity.organisation)).catch(() => {});
 
     await logActivity(env, {
       entry: `Lead recorded (Martin-approved opportunity): ${opportunity.organisation}`,
       type: "Discovery",
       area: "Sales",
-      activity: "Source and evidence presented for approval. Approved by Martin.",
+      activity: "Screened candidate presented for approval in Telegram. Approved by Martin.",
       decisionRationale: opportunity.reason,
       nextActions: "Prepared for Sales Executive follow-up.",
       outcome: "Complete",
@@ -341,8 +395,9 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
     );
   } catch (err) {
     console.error(`Lead Opportunity Approval: Leads DB write failed for ${opportunity.organisation}`, err);
+    restageForRetry();
     await logActivity(env, {
-      entry: `Opportunity approval blocked -- Leads database unavailable: ${opportunity.organisation}`,
+      entry: `Opportunity approval blocked -- Lead not created: ${opportunity.organisation}`,
       type: "Blocker",
       area: "Sales",
       decisionRationale: `Notion call against LEADS_DATA_SOURCE_ID failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -351,11 +406,43 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
     await sendWorkspaceHatMessage(
       env,
       target,
-      `⚠️ Couldn't record this Lead for *${opportunity.organisation}* -- the Leads database call failed. Not created. Please try approving again once resolved.`,
+      `⚠️ Couldn't record this Lead for *${opportunity.organisation}* -- the Leads database call failed. Not created. Tap Approve on the card again to retry once resolved.`,
     );
   }
 
   return state;
+}
+
+/**
+ * Presents ONE screened candidate to Martin: its own Work, recording the
+ * approval-gated record_lead Action from creation, then the approval card.
+ * Nothing is written to the Leads database here. The candidate is remembered
+ * as pending so a later run does not send a second card for it.
+ */
+async function presentScreenedCandidate(env: Env, presentTo: CandidatePresentationTarget, opportunity: PendingLeadOpportunity): Promise<boolean> {
+  try {
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, presentTo.chatId, "Sales", HAT_TARGET_NAME, presentTo.threadId, { actionName: "record_lead" });
+    await stub.proposeLeadOpportunity(opportunity);
+    await kvPut(
+      env,
+      leadCandidateMemoryKey(opportunity.organisation),
+      JSON.stringify({ status: "pending", workId, at: new Date().toISOString() }),
+      { expirationTtl: PENDING_CANDIDATE_TTL_SECONDS },
+    ).catch((err) => console.error(`Lead Discovery: could not remember the pending card for ${opportunity.organisation}`, err));
+    return true;
+  } catch (err) {
+    console.error(`Lead Discovery: could not present ${opportunity.organisation} for approval`, err);
+    await logActivity(env, {
+      entry: `Lead discovery blocked -- approval card not sent: ${opportunity.organisation}`,
+      type: "Blocker",
+      area: "Sales",
+      decisionRationale: `Could not create the candidate's Work or send its approval card: ${err instanceof Error ? err.message : String(err)}`,
+      outcome: "Blocked",
+    }).catch(() => {});
+    return false;
+  }
 }
 
 /**
@@ -364,15 +451,20 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
  * an on-demand request's AI-generated queries.
  *
  * A candidate that survives screening and the duplicate-Lead check is
- * HELD, not routed: the step that used to follow (a Handoff to the retired
- * research Unit, later consumed to evaluate the Acquisition Criteria)
- * belonged to a retired organizational structure, and no owning
- * Action for evidence-backed validation of a discovery candidate has been
- * designed. This function therefore creates no Handoff and no Lead, and
- * records nothing about the candidate beyond the run summary -- a later
- * owning Action will take it from here.
+ * presented to Martin as a Telegram approval card on its own record_lead
+ * Work (Martin's decision, 2026-10-12: screening is the bar for a card; his
+ * approval is the bar for a Lead). This function creates no Handoff and no
+ * Lead. A candidate already pending or recently rejected is skipped, and at
+ * most MAX_APPROVAL_CARDS_PER_RUN cards are sent per run.
  */
-async function searchAndScreenForQuery(env: Env, query: string, summary: DiscoveryRunSummary, access: AccessContext, skills: ResolvedActionSkillSet): Promise<void> {
+async function searchAndScreenForQuery(
+  env: Env,
+  query: string,
+  summary: DiscoveryRunSummary,
+  access: AccessContext,
+  skills: ResolvedActionSkillSet,
+  presentTo: CandidatePresentationTarget,
+): Promise<void> {
   // Defense in depth at the search edge, same as the research path: the
   // queries are already generated from prompt-redacted inputs and the fixed
   // DISCOVERY_QUERIES carry no identity, but an outbound disclosure re-check
@@ -431,16 +523,43 @@ async function searchAndScreenForQuery(env: Env, query: string, summary: Discove
       continue;
     }
 
-    summary.heldNoResearchPath++;
+    // Already carded and undecided, or rejected recently: never a second card.
+    // A failed read is treated as "not seen" -- the worst case is a repeat
+    // card Martin can reject, never a Lead.
+    const remembered = await kvGet(env, leadCandidateMemoryKey(evaluation.organisation)).catch(() => null);
+    if (remembered) {
+      summary.skippedAlreadyPresented++;
+      continue;
+    }
+
+    if (summary.pendingApproval >= MAX_APPROVAL_CARDS_PER_RUN) {
+      summary.heldOverCap++;
+      continue;
+    }
+
+    const presented = await presentScreenedCandidate(env, presentTo, {
+      organisation: evaluation.organisation.trim(),
+      evidence: evaluation.evidence.trim(),
+      reason: evaluation.reason,
+      category: evaluation.category,
+      sourceUrl: result.url,
+    });
+    if (presented) summary.pendingApproval++;
+    else summary.presentationFailed++;
   }
 }
 
 /**
  * Runs one autonomous discovery cycle: search and lightweight screening
- * against the Acquisition Criteria. Candidates that pass are held (see
- * searchAndScreenForQuery); no Handoff or Lead is created.
+ * against the Acquisition Criteria. Each candidate that passes becomes a
+ * Telegram approval card (see searchAndScreenForQuery); no Handoff or Lead
+ * is created by the run itself. Cards attach to Martin's DM Work by default.
  */
-export async function runAutonomousLeadDiscovery(env: Env, skills: ResolvedActionSkillSet): Promise<DiscoveryRunSummary> {
+export async function runAutonomousLeadDiscovery(
+  env: Env,
+  skills: ResolvedActionSkillSet,
+  presentTo: CandidatePresentationTarget = { chatId: Number(env.MARTIN_TELEGRAM_USER_ID) },
+): Promise<DiscoveryRunSummary> {
   const summary = emptyDiscoveryRunSummary();
 
   if (!isWebSearchConfigured(env)) {
@@ -455,7 +574,7 @@ export async function runAutonomousLeadDiscovery(env: Env, skills: ResolvedActio
   // outbound search is authorized as a Kernel-owned read rather than under any
   // registered Action -- see evaluateExternalEgress.
   for (const query of DISCOVERY_QUERIES) {
-    await searchAndScreenForQuery(env, query, summary, discoveryCronContext(), skills);
+    await searchAndScreenForQuery(env, query, summary, discoveryCronContext(), skills, presentTo);
   }
 
   return summary;
@@ -584,7 +703,7 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
     await sendWorkspaceHatMessage(
       env,
       target,
-      `🔍 Searching for organisations showing evidence of${focus ? ` ${focus}` : " a positioning, communication, or growth problem worth investigating"} (up to ${requestedCount}). Candidates that pass screening are held -- evidence-backed validation of a discovery candidate has no owning step yet, so nothing is routed onward and no Lead is created.`,
+      `🔍 Searching for organisations showing evidence of${focus ? ` ${focus}` : " a positioning, communication, or growth problem worth investigating"} (up to ${requestedCount}). Each candidate that passes screening comes to you as an approval card (at most ${MAX_APPROVAL_CARDS_PER_RUN}); no Lead is created unless you approve it.`,
     );
 
     const runSummary = emptyDiscoveryRunSummary();
@@ -592,16 +711,16 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
       // Same Kernel-owned read as the scheduled loop above: an on-demand
       // discovery request runs the same discovery capability, so it is
       // authorized the same way.
-      await searchAndScreenForQuery(env, query, runSummary, discoveryCronContext(), skills);
+      await searchAndScreenForQuery(env, query, runSummary, discoveryCronContext(), skills, { chatId, threadId });
     }
 
     await logActivity(env, {
-      entry: `On-demand discovery request processed: ${runSummary.evaluated} candidate(s) evaluated, ${runSummary.heldNoResearchPath} held (no research path)`,
+      entry: `On-demand discovery request processed: ${runSummary.evaluated} candidate(s) evaluated, ${runSummary.pendingApproval} sent for approval`,
       type: "Discovery",
       area: "Sales",
       activity: `Requested by Martin${focus ? ` -- focus: "${focus}"` : ""}. Queries: ${queries.map((q) => `"${q}"`).join(", ")}.`,
-      decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.${runSummary.searchUnavailable + runSummary.searchFailed > 0 ? ` Search did not complete for ${runSummary.searchUnavailable + runSummary.searchFailed} quer${runSummary.searchUnavailable + runSummary.searchFailed === 1 ? "y" : "ies"} (${runSummary.searchUnavailable} unavailable, ${runSummary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.` : ""}`,
-      nextActions: runSummary.heldNoResearchPath > 0 ? "Candidates held: no owning Action exists yet for evidence-backed validation. No Lead is created without Martin's approval." : "No promising signal found this run.",
+      decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAlreadyPresented} already presented or recently rejected, ${runSummary.heldOverCap} held over the ${MAX_APPROVAL_CARDS_PER_RUN}-card cap, ${runSummary.presentationFailed} card(s) failed, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.${runSummary.searchUnavailable + runSummary.searchFailed > 0 ? ` Search did not complete for ${runSummary.searchUnavailable + runSummary.searchFailed} quer${runSummary.searchUnavailable + runSummary.searchFailed === 1 ? "y" : "ies"} (${runSummary.searchUnavailable} unavailable, ${runSummary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.` : ""}`,
+      nextActions: runSummary.pendingApproval > 0 ? "Awaiting Martin's approval of each card. No Lead is created without it." : "No new candidate to present this run.",
       outcome: "Active",
     });
 
@@ -668,7 +787,7 @@ export async function notifyDiscoveryRunSummary(env: Env, chatId: number, thread
         ? ` Search did not complete for ${summary.searchUnavailable + summary.searchFailed} quer${summary.searchUnavailable + summary.searchFailed === 1 ? "y" : "ies"} (${summary.searchUnavailable} unavailable, ${summary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.`
         : "";
     const lines = [
-      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.heldNoResearchPath} held with no research path, ${summary.pendingApproval} opportunity finding(s) sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAsInsufficient} skipped for insufficient evidence.${searchNote}`,
+      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.pendingApproval} sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAlreadyPresented} already presented or recently rejected, ${summary.heldOverCap} held over the ${MAX_APPROVAL_CARDS_PER_RUN}-card cap, ${summary.skippedAsInsufficient} skipped for insufficient evidence.${summary.presentationFailed > 0 ? ` ${summary.presentationFailed} approval card(s) could not be sent (see Blockers).` : ""}${searchNote}`,
     ];
     if (summary.pendingApproval > 0) {
       lines.push("", "No Lead is created until you approve each finding in the Workspace topic.");

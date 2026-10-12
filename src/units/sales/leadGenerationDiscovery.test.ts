@@ -3,6 +3,8 @@ import assert from "node:assert";
 import {
   DISCOVERY_QUERIES,
   LeadOpportunityDiscoveryCapability,
+  MAX_APPROVAL_CARDS_PER_RUN,
+  leadCandidateMemoryKey,
   handleLeadOpportunityApproval,
   notifyDiscoveryRunSummary,
   proposeLeadOpportunity,
@@ -35,8 +37,9 @@ function createMockWorkSession() {
 }
 
 function fakeEnv(overrides: Partial<Env> = {}): Env {
-  const { workSession } = createMockWorkSession();
-  return {
+  const { workSession, calls } = createMockWorkSession();
+  const kv = new Map<string, string>();
+  const env = {
     LEADS_DATA_SOURCE_ID: "leads-ds",
     ENTITY_DATA_SOURCE_ID: "entity-ds",
     MATTERS_DATA_SOURCE_ID: "matters-ds",
@@ -57,11 +60,20 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
     MARTIN_TELEGRAM_USER_ID: "9999",
     WORK_SESSION: workSession as any,
     STATE_KV: {
-      get: async () => null,
-      put: async () => {},
+      get: async (k: string) => kv.get(k) ?? null,
+      put: async (k: string, v: string) => {
+        kv.set(k, v);
+      },
+      delete: async (k: string) => {
+        kv.delete(k);
+      },
     } as any,
     ...overrides,
   } as Env;
+  // Test-only handles: the per-candidate Work sessions a run created, and the KV it wrote.
+  (env as any).__sessions = calls;
+  (env as any).__kv = kv;
+  return env;
 }
 
 const PASS_EVALUATION = JSON.stringify({
@@ -100,7 +112,9 @@ test("runAutonomousLeadDiscovery does nothing when web search isn't configured -
   const summary = await runAutonomousLeadDiscovery(fakeEnv(), await lgsSkills());
   assert.deepStrictEqual(summary, {
     evaluated: 0,
-    heldNoResearchPath: 0,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 0,
     screenedOut: 0,
     skippedAsDuplicate: 0,
@@ -156,7 +170,9 @@ test("notifyDiscoveryRunSummary distinguishes 'searches completed, nothing found
   const env = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" });
   const emptySummary = {
     evaluated: 0,
-    heldNoResearchPath: 0,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 0,
     screenedOut: 0,
     skippedAsDuplicate: 0,
@@ -190,7 +206,9 @@ test("notifyDiscoveryRunSummary appends the search-failure note to a digest that
 
   await notifyDiscoveryRunSummary(fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" }), 1, undefined, {
     evaluated: 12,
-    heldNoResearchPath: 1,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 0,
     screenedOut: 11,
     skippedAsDuplicate: 0,
@@ -203,7 +221,7 @@ test("notifyDiscoveryRunSummary appends the search-failure note to a digest that
   assert.ok(sentTexts[0].includes("absence of results from those is not evidence"), sentTexts[0]);
 });
 
-test("Test A: Candidate signal passes lightweight screening -> held; no Handoff and no Lead is created", async (t) => {
+test("Test A: Candidate signal passes lightweight screening -> one approval card on a record_lead Work; no Handoff and no Lead is created", async (t) => {
   const originalFetch = globalThis.fetch;
   let handoffsCreatedCount = 0;
   let leadsCreatedCount = 0;
@@ -243,14 +261,24 @@ test("Test A: Candidate signal passes lightweight screening -> held; no Handoff 
     globalThis.fetch = originalFetch;
   });
 
-  const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
+  const env = fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+  const sessions = (env as any).__sessions;
 
-  // The step that used to follow screening (a Handoff to the retired
-  // Research & Intelligence Unit) no longer exists and no replacement has
-  // been designed, so a passing candidate is HELD: counted, never routed.
-  assert.strictEqual(leadsCreatedCount, 0, "no Lead may be created immediately upon lightweight screening alone");
+  // Martin's decision (2026-10-12): screening is the bar for a CARD, his
+  // approval is the bar for a Lead. Every query surfaces the same Acme Corp,
+  // so exactly one card is sent and the repeats are recognised.
+  assert.strictEqual(leadsCreatedCount, 0, "no Lead may be created upon screening alone -- only Martin's approval creates one");
   assert.strictEqual(handoffsCreatedCount, 0, "no Handoff is created for a screened candidate");
-  assert.ok(summary.evaluated > 0 && summary.heldNoResearchPath === summary.evaluated, "every candidate that passed screening is held");
+  assert.strictEqual(summary.pendingApproval, 1, "the screened candidate is presented once");
+  assert.strictEqual(summary.skippedAlreadyPresented, summary.evaluated - 1, "the same organisation from later queries gets no second card");
+  assert.strictEqual(sessions.init.length, 1, "one Work per presented candidate");
+  assert.strictEqual(sessions.init[0][2], "Sales");
+  assert.strictEqual(sessions.init[0][3], "Lead Generation Specialist");
+  assert.deepStrictEqual(sessions.init[0][5], { actionName: "record_lead" }, "the candidate's Work records the approval-gated record_lead Action from creation");
+  assert.strictEqual(sessions.proposeLeadOpportunity.length, 1);
+  assert.strictEqual(sessions.proposeLeadOpportunity[0][0].organisation, "Acme Corp");
+  assert.strictEqual(sessions.proposeLeadOpportunity[0][0].sourceUrl, "https://example.com/acme");
 });
 
 const UNSUPPORTED_EVALUATION = JSON.stringify({
@@ -323,7 +351,7 @@ function installDiscoveryRun(t: any, evaluation: string) {
   return { created, createBodies, activityEntries };
 }
 
-test("LGS: a candidate passing lightweight screening is HELD -- no Handoff, no Lead, and no Blocker (nothing was refused; there is simply no research path to route to)", async (t) => {
+test("LGS: a candidate passing lightweight screening is PRESENTED for approval -- no Handoff, no Lead, and no Blocker", async (t) => {
   const { created, activityEntries } = installDiscoveryRun(t, PASS_EVALUATION);
 
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
@@ -331,12 +359,12 @@ test("LGS: a candidate passing lightweight screening is HELD -- no Handoff, no L
   assert.strictEqual(created.handoffs, 0, "no Handoff may be created: Research & Intelligence is not a destination and no replacement exists");
   assert.strictEqual(created.leads, 0, "and certainly no Lead -- lightweight screening alone never creates one");
   assert.ok(summary.evaluated > 0, "the candidate really was evaluated");
-  assert.strictEqual(summary.heldNoResearchPath, summary.evaluated, "every candidate that passed screening is held, and the summary says so");
-  assert.strictEqual(summary.pendingApproval, 0, "nothing is presented to Martin: no evidence-backed validation step exists to produce a finding");
+  assert.strictEqual(summary.pendingApproval + summary.skippedAlreadyPresented, summary.evaluated, "every candidate that passed screening is presented once, and the summary says so");
+  assert.strictEqual(summary.pendingApproval, 1);
   assert.strictEqual(
     activityEntries.filter((p) => p?.Type?.select?.name === "Blocker").length,
     0,
-    "holding a candidate is not a refused governed write, so it must not be logged as a Blocker",
+    "presenting a candidate is not a refused governed write, so it must not be logged as a Blocker",
   );
 });
 
@@ -349,7 +377,7 @@ test("LGS: an unsupported diagnosis is screened out before any governed write --
   assert.strictEqual(summary.screenedOut, summary.evaluated, "an unsupported diagnosis is screened out, not escalated");
   assert.strictEqual(created.handoffs, 0, "no Handoff for a candidate whose diagnosis is only a hypothesis");
   assert.strictEqual(created.leads, 0, "and no Lead");
-  assert.strictEqual(summary.heldNoResearchPath, 0);
+  assert.strictEqual(summary.pendingApproval, 0, "a screened-out candidate is never presented");
 
   // With no Handoff created, the identity boundary is asserted where it can
   // be checked end-to-end: on the wire. Nothing this run wrote anywhere in Notion may
@@ -377,7 +405,7 @@ test("LGS: an unsupported diagnosis is screened out before any governed write --
   );
 });
 
-test("Test D & G: A passing candidate is held with no Handoff written -- its unvalidated diagnosis is never asserted as a fact", async (t) => {
+test("Test D & G: A passing candidate is presented with no Handoff written -- its unvalidated diagnosis is never asserted as a fact", async (t) => {
   const originalFetch = globalThis.fetch;
   let createdHandoffBody: any;
 
@@ -414,8 +442,8 @@ test("Test D & G: A passing candidate is held with no Handoff written -- its unv
   const summary = await runAutonomousLeadDiscovery(fakeEnv({ HANDOFFS_DATA_SOURCE_ID: "handoffs-ds", TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
 
   // Screening still runs and still passes; nothing is routed onward.
-  assert.strictEqual(createdHandoffBody, undefined, "no Handoff is written for a held candidate");
-  assert.ok(summary.heldNoResearchPath >= 1, "the candidate is held, not dropped silently");
+  assert.strictEqual(createdHandoffBody, undefined, "no Handoff is written for a presented candidate");
+  assert.ok(summary.pendingApproval >= 1, "the candidate is presented for approval, not dropped silently");
 });
 
 test("runAutonomousLeadDiscovery never creates a Lead from an inconsistent AI 'pass' with no organisation/evidence -- fails closed on the evidence-threshold gate itself", async (t) => {
@@ -496,7 +524,9 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
   const env = fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" });
   const success = await notifyDiscoveryRunSummary(env, 1, undefined, {
     evaluated: 12,
-    heldNoResearchPath: 1,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 1,
     screenedOut: 9,
     skippedAsDuplicate: 1,
@@ -509,7 +539,7 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
   assert.strictEqual(sentTexts.length, 1, "exactly one digest message per run, never one per Lead");
   assert.ok(sentTexts[0].startsWith("Hat: Lead Generation Specialist."));
   assert.ok(sentTexts[0].includes("12 candidate(s) evaluated"));
-  assert.ok(sentTexts[0].includes("1 opportunity finding(s) sent to the Workspace topic for your approval"));
+  assert.ok(sentTexts[0].includes("1 sent to the Workspace topic for your approval"));
   assert.ok(sentTexts[0].includes("No Lead is created until you approve"));
 });
 
@@ -524,7 +554,9 @@ test("notifyDiscoveryRunSummary catches Telegram errors gracefully without throw
 
   const success = await notifyDiscoveryRunSummary(fakeEnv(), 12345, undefined, {
     evaluated: 5,
-    heldNoResearchPath: 1,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 0,
     screenedOut: 4,
     skippedAsDuplicate: 0,
@@ -564,7 +596,9 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
 
   const success1 = await notifyDiscoveryRunSummary(fakeEnv(), NaN, undefined, {
     evaluated: 1,
-    heldNoResearchPath: 0,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 0,
     screenedOut: 1,
     skippedAsDuplicate: 0,
@@ -576,7 +610,9 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
 
   const success2 = await notifyDiscoveryRunSummary(fakeEnv(), 0, undefined, {
     evaluated: 1,
-    heldNoResearchPath: 0,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
     pendingApproval: 0,
     screenedOut: 1,
     skippedAsDuplicate: 0,
@@ -728,7 +764,8 @@ test("proposeLeadOpportunity sets pendingLeadOpportunity and presents evidence-b
   assert.deepStrictEqual(updated.pendingLeadOpportunity, SAMPLE_OPPORTUNITY);
   assert.ok(sentText.includes("Zenith Co"));
   assert.ok(sentText.includes(SAMPLE_OPPORTUNITY.evidence));
-  assert.ok(sentText.includes("no Lead has been created"));
+  assert.ok(sentText.includes("No Lead has been created"));
+  assert.strictEqual(updated.stage, "awaiting_lead_approval");
   assert.strictEqual(sentButtons[0][0].callback_data, "leadopportunity:work-opp-1:approve");
   assert.strictEqual(sentButtons[0][1].callback_data, "leadopportunity:work-opp-1:reject");
   assert.strictEqual(leadCreated, false, "presenting an opportunity must never itself create a Lead");
@@ -781,23 +818,19 @@ test("handleLeadOpportunityApproval clears pendingActionSummary alongside pendin
     globalThis.fetch = originalFetch;
   });
 
-  const state = fakeOpportunityState();
+  const state = fakeOpportunityState({ actionName: "record_lead" });
   const proposed = await proposeLeadOpportunity(fakeEnv(), state, SAMPLE_OPPORTUNITY);
   assert.ok(proposed.pendingActionSummary);
 
   const resolved = await handleLeadOpportunityApproval(fakeEnv(), proposed, true);
   assert.strictEqual(resolved.pendingActionSummary, undefined, "resolving the approval must clear pendingActionSummary");
-  // PENDING ARCHITECT DECISION: the Lead create is refused, because no
-  // registered Action authorizes it under `discover_leads` (a read Action).
-  // The approval-gate behaviour under test here -- the staged opportunity is
-  // consumed exactly once -- is still asserted by the stale-tap half below.
-  assert.strictEqual(leadCreateCount, 0, "the Lead create is refused while no Action authorizes it");
+  assert.strictEqual(leadCreateCount, 1, "Martin's approval of this candidate creates exactly one Lead");
 
   // Simulate a resurfaced (stale) tap on the same, already-resolved item --
   // e.g. Martin taps an old /sessions-resurfaced button after already
   // approving via the original message. Must not create a second Lead.
   const staleTapResult = await handleLeadOpportunityApproval(fakeEnv(), resolved, true);
-  assert.strictEqual(leadCreateCount, 0, "a stale approval tap must not execute the action a second time");
+  assert.strictEqual(leadCreateCount, 1, "a stale approval tap must not execute the action a second time");
   assert.ok(lastSentText.includes("No valid pending opportunity"), "a stale tap must reply that there's nothing pending");
   assert.strictEqual(staleTapResult.pendingActionSummary, undefined);
 });
@@ -844,19 +877,18 @@ test("handleLeadOpportunityApproval creates a Lead only on explicit approval", a
     globalThis.fetch = originalFetch;
   });
 
-  const state = fakeOpportunityState({ pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+  const state = fakeOpportunityState({ actionName: "record_lead", pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
   const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
 
   assert.strictEqual(updated.pendingLeadOpportunity, undefined, "pending state must be cleared once decided");
-  // PENDING ARCHITECT DECISION, as in Test A: Martin's approval is required and
-  // present, and the Lead create is still refused, because `discover_leads` is a
-  // read Action and no registered Action authorizes committing a Lead. The
-  // approval requirement itself is therefore currently untestable end-to-end --
-  // it is the ONLY thing standing between a screened candidate and a client
-  // record, and it is not being exercised. That is the risk this decision
-  // carries, stated rather than assumed away.
-  assert.strictEqual(leadProps, null, "the Lead create is refused while no Action authorizes it");
-  assert.ok(!sentText.includes("Lead recorded"), "no success message may be sent for a write that did not happen");
+  // Martin's decision (2026-10-12): his approval of THIS candidate, on a Work
+  // recording record_lead, authorizes exactly this Lead create (Access checks
+  // the proof bound to Work + record_lead + the Leads data source).
+  assert.ok(leadProps, "the approved candidate is recorded as a Lead");
+  assert.strictEqual(leadProps.Lead.title[0].text.content, "Zenith Co");
+  assert.strictEqual(leadProps.Status.select.name, "New");
+  assert.ok(sentText.includes("Lead recorded"));
+  assert.strictEqual(updated.stage, "complete", "a decided candidate's Work is closed");
 });
 
 test("handleLeadOpportunityApproval creates no Lead on rejection", async (t) => {
@@ -1186,4 +1218,171 @@ test("LeadOpportunityDiscoveryCapability fails closed when web search isn't conf
 
   assert.strictEqual(handled, true);
   assert.ok(sentText.includes("no web search provider is configured"));
+});
+
+// ===========================================================================
+// Martin's decision (2026-10-12): screened candidates come to him as Telegram
+// approval cards (at most MAX_APPROVAL_CARDS_PER_RUN per run); a Lead exists
+// only after he approves that specific candidate; rejected ones are not
+// proposed again.
+// ===========================================================================
+
+/** A discovery run where every query surfaces three NEW organisations, so the per-run card cap is what limits presentation. */
+function installDistinctCandidateRun(t: any) {
+  const originalFetch = globalThis.fetch;
+  let aiCalls = 0;
+  let leadsCreated = 0;
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (url.includes("api.tavily.com")) {
+      return new Response(
+        JSON.stringify({ results: [0, 1, 2].map((i) => ({ title: `Result ${i}`, url: `https://example.com/r${i}`, content: "Expansion news." })) }),
+        { status: 200 },
+      );
+    }
+    if (url.includes("/blocks/")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
+    }
+    if (url.includes("leads-ds") && method === "POST" && url.endsWith("/query")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (url.includes("/pages") && method === "POST") {
+      if (JSON.parse(init.body).parent?.data_source_id === "leads-ds") leadsCreated++;
+      return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
+    }
+    aiCalls++;
+    const base = aiCalls * 10;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                candidates: [0, 1, 2].map((i) => ({
+                  pass: true,
+                  organisation: `Org ${base + i}`,
+                  evidence: "Expanded into a new market but positioning still emphasises its original offering.",
+                  decisionMakerOrRole: "",
+                  category: "positioning",
+                  reason: "Expansion without a positioning update.",
+                })),
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return { leadsCreated: () => leadsCreated };
+}
+
+test("LGS approval cards: a run sends at most MAX_APPROVAL_CARDS_PER_RUN cards; the rest are held without being remembered", async (t) => {
+  const run = installDistinctCandidateRun(t);
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+  const sessions = (env as any).__sessions;
+  const kv: Map<string, string> = (env as any).__kv;
+
+  assert.strictEqual(summary.pendingApproval, MAX_APPROVAL_CARDS_PER_RUN, "exactly the cap is presented");
+  assert.strictEqual(sessions.proposeLeadOpportunity.length, MAX_APPROVAL_CARDS_PER_RUN);
+  assert.ok(summary.heldOverCap > 0, "candidates beyond the cap are counted as held");
+  assert.strictEqual(summary.pendingApproval + summary.heldOverCap, summary.evaluated);
+  assert.strictEqual(run.leadsCreated(), 0, "no run ever creates a Lead");
+  // Only presented candidates are remembered; held ones stay eligible for a later run.
+  const remembered = [...kv.keys()].filter((k) => k.startsWith("lead_candidate:"));
+  assert.strictEqual(remembered.length, MAX_APPROVAL_CARDS_PER_RUN);
+  for (const key of remembered) assert.strictEqual(JSON.parse(kv.get(key)!).status, "pending");
+});
+
+test("LGS approval cards: an organisation Martin rejected (or already has a card for) is never proposed again", async (t) => {
+  installDiscoveryRun(t, PASS_EVALUATION);
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+  (env as any).__kv.set(leadCandidateMemoryKey("Acme Corp"), JSON.stringify({ status: "rejected" }));
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+
+  assert.strictEqual(summary.pendingApproval, 0, "a remembered organisation gets no card");
+  assert.strictEqual(summary.skippedAlreadyPresented, summary.evaluated);
+  assert.strictEqual((env as any).__sessions.init.length, 0, "and no Work is created for it");
+});
+
+test("LGS approval cards: leadCandidateMemoryKey treats trivial spelling variants of one organisation as the same", () => {
+  assert.strictEqual(leadCandidateMemoryKey("Acme Corp."), leadCandidateMemoryKey("  ACME   corp "));
+  assert.notStrictEqual(leadCandidateMemoryKey("Acme Corp"), leadCandidateMemoryKey("Acme Group"));
+  assert.notStrictEqual(leadCandidateMemoryKey("株式会社サクラ"), leadCandidateMemoryKey("株式会社モミジ"), "non-Latin names never share one key");
+});
+
+/** Telegram + Notion mock for handleLeadOpportunityApproval; `leadsWrite` scripts the Leads create response. */
+function installApprovalMock(t: any, leadsWrite: "ok" | "fail" = "ok") {
+  const originalFetch = globalThis.fetch;
+  const sent: string[] = [];
+  let leadCreates = 0;
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (String(url).includes("api.telegram.org")) {
+      sent.push(JSON.parse(init.body).text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (String(url).includes("leads-ds") && method === "POST" && String(url).endsWith("/query")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (String(url).includes("/pages") && method === "POST") {
+      const body = JSON.parse(init.body ?? "{}");
+      if (body.parent?.data_source_id === "leads-ds") {
+        leadCreates++;
+        if (leadsWrite === "fail") return new Response(JSON.stringify({ message: "boom" }), { status: 500 });
+        return new Response(JSON.stringify({ id: "lead-1", url: "https://notion.so/lead-1", properties: {} }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return { sent, leadCreates: () => leadCreates };
+}
+
+test("handleLeadOpportunityApproval: rejecting remembers the organisation for 180 days and closes the Work", async (t) => {
+  installApprovalMock(t);
+  const env = fakeEnv();
+  const state = fakeOpportunityState({ actionName: "record_lead", pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+
+  const updated = await handleLeadOpportunityApproval(env, state, false);
+
+  const memory = (env as any).__kv.get(leadCandidateMemoryKey(SAMPLE_OPPORTUNITY.organisation));
+  assert.ok(memory, "the rejection is remembered");
+  assert.strictEqual(JSON.parse(memory).status, "rejected");
+  assert.strictEqual(updated.stage, "complete");
+});
+
+test("handleLeadOpportunityApproval: a card whose Work does not record record_lead can never create a Lead (fails closed, nothing written)", async (t) => {
+  const mock = installApprovalMock(t);
+  // A legacy card from before record_lead existed: its Work records no Action
+  // (or a read one), so Martin's approval cannot be bound to an approval-gated
+  // write and Access refuses the create.
+  for (const actionName of [undefined, "discover_leads"]) {
+    const state = fakeOpportunityState({ ...(actionName ? { actionName } : {}), pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+    const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
+    assert.ok(!mock.sent.some((m) => m.includes("Lead recorded")), `no success may be reported (actionName=${actionName})`);
+    assert.deepStrictEqual(updated.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate stays staged rather than being silently dropped");
+  }
+  assert.strictEqual(mock.leadCreates(), 0, "the Leads database is never written");
+});
+
+test("handleLeadOpportunityApproval: a failed Leads write re-stages the candidate so the SAME card's Approve works again", async (t) => {
+  const mock = installApprovalMock(t, "fail");
+  const state = fakeOpportunityState({ actionName: "record_lead", pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+
+  const afterFailure = await handleLeadOpportunityApproval(fakeEnv(), state, true);
+
+  assert.strictEqual(mock.leadCreates(), 1, "the write was attempted once");
+  assert.deepStrictEqual(afterFailure.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate is staged again for a retry");
+  assert.notStrictEqual(afterFailure.stage, "complete", "a failed write does not close the Work");
+  assert.ok(mock.sent.some((m) => m.includes("Tap Approve on the card again")));
 });
