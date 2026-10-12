@@ -37,7 +37,7 @@ import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataB
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { retrieveAndConsumeCallNotes } from "./callNotesRecord";
-import { serializeCommercialValueEvidenceBlock } from "./commercialValueEvidence";
+import { serializeCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
 
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not

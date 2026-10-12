@@ -1,5 +1,5 @@
-import { extractLabeledBlock } from "../../labeledBlock";
-import type { CommercialEvidence, QualificationAssessment, ValueAtStake } from "../../types";
+import { extractLabeledBlock } from "../labeledBlock";
+import type { CommercialEvidence, QualificationAssessment, ValueAtStake } from "../types";
 
 /**
  * The labelled structured block Sales writes into the Sales -> Strategy

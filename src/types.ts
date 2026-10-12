@@ -698,9 +698,9 @@ export interface WorkState {
    * every Refine; the prior version is pushed onto strategyProposalHistory
    * rather than discarded, so it remains available as historical context.
    */
-  strategyProposal?: import("./units/strategy/strategyAnalyst").StrategyProposal;
+  strategyProposal?: import("./handoffContracts/strategyBoundary").StrategyProposal;
   /** Every superseded proposal version for this work item, oldest first -- see strategyProposal's doc comment. */
-  strategyProposalHistory?: import("./units/strategy/strategyAnalyst").StrategyProposal[];
+  strategyProposalHistory?: import("./handoffContracts/strategyBoundary").StrategyProposal[];
 
   /** Business Development's in-flight opportunity state -- see BDOpportunityState's doc comment. Execution state (persisted for pause/resume across a qualify_* hold), not governed business state. */
   bdOpportunity?: import("./units/businessDevelopment/types").BDOpportunityState;
@@ -837,7 +837,7 @@ export interface WorkState {
    * The upstream Commercial Value Evidence block exactly as it is written in
    * the Sales -> Strategy Handoff's "Verified Facts & Sources" (markers
    * included), read and structurally parsed at pickup -- see
-   * units/sales/commercialValueEvidence.ts. This is PROVENANCE, not a new
+   * handoffContracts/commercialValueEvidence.ts. This is PROVENANCE, not a new
    * evidence model: the determination inside it was produced upstream by
    * Sales's deterministic `evaluateCommercialValueEvidence`, and Strategy
    * copies this block byte-for-byte into the Strategy -> Finance Handoff so

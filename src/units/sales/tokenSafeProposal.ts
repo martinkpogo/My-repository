@@ -1,8 +1,9 @@
 import type { Env, WorkState } from "../../types";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
-import type { StrategyProposal, StrategyBoundaryRepresentation } from "../strategy/strategyAnalyst";
-import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
-import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../finance/valueBasedPricingAssessor";
+import type { StrategyProposal, StrategyBoundaryRepresentation } from "../../handoffContracts/strategyBoundary";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
+import { extractLabeledBlock } from "../../labeledBlock";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
 import {
   createPage,
   createVersionPage,

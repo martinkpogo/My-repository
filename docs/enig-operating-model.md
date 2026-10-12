@@ -741,6 +741,7 @@ What survives is two separate things, kept apart on purpose:
 **Module boundaries.** The repository makes the ownership distinction structural:
 
 * `src/units/*` -- organizational ownership: Unit manifests, Hats, declared Actions.
+* `src/handoffContracts/*` -- the neutral cross-Unit Handoff formats (Strategy's proposal and boundary representation, Finance's commercial-judgment markers, Sales's commercial-value-evidence block). Units depend on these contracts, never on each other's code (2026-10-12): `src/handoffContracts/unitBoundary.test.ts` fails if a Unit's production code imports another Unit. One documented exception remains -- Strategy reads the approved Call Notes record through Sales's reader (`callNotesRecord`/`callNotesMarker`), because that reader depends on Sales internals; moving it is a later step of the Worker decoupling.
 * `src/platform/skillRegistry.ts` -- exact Skill resolution and the registered Skill methodology.
 * `src/runtime/*` -- generic runtime composition (Work contract, Organization resolution, Action resolution) **and** non-organizational execution infrastructure.
 * `src/dataBoundary/*` -- Data/AI boundary enforcement.

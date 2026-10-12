@@ -17,13 +17,11 @@ import {
   UNPROVEN_CAUSE_MARKER,
   evaluateProposalCompleteness,
   formatDiagnosisForHandoff,
-  STRATEGY_BOUNDARY_START,
-  STRATEGY_BOUNDARY_END,
-  extractLabeledBlock,
   checkStrategyProposalForKnownIdentity,
   type StrategyDiagnosisResult,
-  type StrategyProposal,
 } from "./strategyAnalyst";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
+import { extractLabeledBlock } from "../../labeledBlock";
 import { STRATEGY_ANALYST, ALL_HATS } from "../../hats/registry";
 import { buildRecordApprovalMarker } from "../sales/callNotesMarker";
 import {
@@ -31,7 +29,7 @@ import {
   parseCommercialValueEvidenceBlock,
   COMMERCIAL_VALUE_EVIDENCE_START,
   COMMERCIAL_VALUE_EVIDENCE_END,
-} from "../sales/commercialValueEvidence";
+} from "../../handoffContracts/commercialValueEvidence";
 import { hasSubstantiveEvidence } from "./strategyEvidence";
 import { SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker } from "../../handoffWriter";
 import type { WorkState, Env } from "../../types";

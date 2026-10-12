@@ -459,7 +459,7 @@ import {
   buildMeasurementBaseline,
   formatCommercialEvidenceForHandoff,
 } from "./salesExecutive";
-import { COMMERCIAL_VALUE_EVIDENCE_START, COMMERCIAL_VALUE_EVIDENCE_END, parseCommercialValueEvidenceBlock } from "./commercialValueEvidence";
+import { COMMERCIAL_VALUE_EVIDENCE_START, COMMERCIAL_VALUE_EVIDENCE_END, parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 
 test("A. Sufficient commercial evidence (numerical affected opportunity/value, source, period, desired outcome) -> commercial_value_evidence can be Satisfied", () => {
   const evidence = normalizeCommercialEvidence({
