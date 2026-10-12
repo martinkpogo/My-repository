@@ -111,6 +111,43 @@ interface RelevanceResult {
   relevance?: string;
 }
 
+/**
+ * The four AI task ids one research run uses. The data boundary (provider
+ * eligibility, payload class, Outbound Data Gate exemptions) is decided per
+ * task id, so a profile is exactly a data-boundary choice -- never a caller
+ * flag. Two profiles exist, each reachable only through its own export:
+ *
+ *  - STANDARD (executeResearch): research.* -- token-safe. The gate's
+ *    company-name detector applies, so a real client name can never reach a
+ *    provider. Every Action uses this, Strategy included.
+ *  - PUBLIC PROSPECT (executeProspectResearch): lead.candidate_research_* --
+ *    researching a PUBLIC organisation ENIG has not engaged, found by Lead
+ *    Generation's own web search. Exempt from the company-name detector ONLY
+ *    (email/phone/person/address detectors still apply), the same narrow
+ *    exemption lead.discovery_signal_evaluation has (Martin's decision,
+ *    2026-10-12). Only Lead Generation may import it (asserted by test).
+ */
+interface ResearchTaskProfile {
+  relevance: "research.context_relevance" | "lead.candidate_research_relevance";
+  selection: "research.protocol_selection" | "lead.candidate_research_protocol_selection";
+  plan: "research.plan_generation" | "lead.candidate_research_plan";
+  synthesis: "research.synthesis" | "lead.candidate_research_synthesis";
+}
+
+const STANDARD_RESEARCH_PROFILE: ResearchTaskProfile = {
+  relevance: "research.context_relevance",
+  selection: "research.protocol_selection",
+  plan: "research.plan_generation",
+  synthesis: "research.synthesis",
+};
+
+const PUBLIC_PROSPECT_RESEARCH_PROFILE: ResearchTaskProfile = {
+  relevance: "lead.candidate_research_relevance",
+  selection: "lead.candidate_research_protocol_selection",
+  plan: "lead.candidate_research_plan",
+  synthesis: "lead.candidate_research_synthesis",
+};
+
 function blocked(code: ResearchBlockCode, reason: string): ResearchOutcome & { status: "blocked" } {
   console.error(`Research execution blocked [${code}]: ${reason}`);
   return { status: "blocked", code, reason };
@@ -140,9 +177,9 @@ async function requireSafeContext(env: Env): Promise<string | null> {
  * selection is what fixes the earlier failure mode where losing business
  * meaning caused selection to default to the wrong protocol.
  */
-async function deriveResearchRelevance(env: Env, categorySummary: string, question: string): Promise<string | null> {
+async function deriveResearchRelevance(env: Env, categorySummary: string, question: string, taskId: ResearchTaskProfile["relevance"]): Promise<string | null> {
   const result = await generate<RelevanceResult>(env, {
-    taskId: "research.context_relevance",
+    taskId,
     mode: "json",
     parts: {
       persona: `Below is the ONLY authorized description of the consultancy this research concerns -- an abstracted category, not the consultancy's real identity. Never assume, infer, or introduce any specific company name, person name, proprietary detail, or information beyond what's written here.
@@ -183,9 +220,10 @@ async function selectProtocols(
   categorySummary: string,
   relevance: string,
   question: string,
+  taskId: ResearchTaskProfile["selection"],
 ): Promise<{ protocols: ResearchProtocolId[] } | { stop: ResearchOutcome }> {
   const stage1 = await generate<ProtocolSelectionResult>(env, {
-    taskId: "research.protocol_selection",
+    taskId,
     mode: "json",
     parts: {
       persona: `You select research protocol(s) for a strategy-led consultancy's research needs. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:
@@ -246,6 +284,20 @@ Return JSON:
  * outcome, never a lower-confidence result.
  */
 export async function executeResearch(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+  return runResearch(env, input, access, STANDARD_RESEARCH_PROFILE);
+}
+
+/**
+ * The same pipeline for researching a PUBLIC prospect organisation by name
+ * (Lead Generation only -- see PUBLIC_PROSPECT_RESEARCH_PROFILE). Never use
+ * it for anything concerning an engaged client: client identity stays
+ * token-only through executeResearch.
+ */
+export async function executeProspectResearch(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+  return runResearch(env, input, access, PUBLIC_PROSPECT_RESEARCH_PROFILE);
+}
+
+async function runResearch(env: Env, input: ResearchExecutionInput, access: AccessContext, profile: ResearchTaskProfile): Promise<ResearchOutcome> {
   const progress = async (text: string): Promise<void> => {
     try {
       await input.onProgress?.(text);
@@ -265,12 +317,12 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
   }
   const categorySummary = extractAuthorizedContextSummary(safeContext);
 
-  const relevance = await deriveResearchRelevance(env, categorySummary, question);
+  const relevance = await deriveResearchRelevance(env, categorySummary, question, profile.relevance);
   if (!relevance) {
     return blocked("RELEVANCE_DERIVATION_FAILED", "Couldn't interpret what this research question means for the authorized consultancy category — classification failed.");
   }
 
-  const selection = await selectProtocols(env, categorySummary, relevance, question);
+  const selection = await selectProtocols(env, categorySummary, relevance, question, profile.selection);
   if ("stop" in selection) return selection.stop;
   const protocols = selection.protocols;
 
@@ -290,7 +342,7 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
   // protocol's own registered method/evidenceRequirements. Load-bearing --
   // without it there's nothing to search beyond the bare question, so a
   // failure here fails the whole request closed.
-  const plan = await generateResearchPlan(env, categorySummary, relevance, question, protocols);
+  const plan = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan);
   if (!plan || plan.length === 0) {
     return blocked("PLAN_GENERATION_FAILED", "Couldn't generate a research plan for the selected protocol(s) — planning failed.");
   }
@@ -328,7 +380,7 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
   const synthesis = await generate<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
-    taskId: "research.synthesis",
+    taskId: profile.synthesis,
     mode: "json",
     parts: {
       ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, protocols, webResultCount > 0, input.skillContent),

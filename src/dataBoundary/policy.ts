@@ -125,6 +125,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // Same rationale as lead.discovery_classification -- the search results
   // this evaluates are all attributed to a real, public source URL.
   "lead.discovery_signal_evaluation": "public_sourced",
+  // Lead Generation's research of one screened public prospect -- the same
+  // public-web subject matter as lead.discovery_signal_evaluation.
+  "lead.candidate_research_relevance": "public_sourced",
+  "lead.candidate_research_protocol_selection": "public_sourced",
+  "lead.candidate_research_plan": "public_sourced",
+  "lead.candidate_research_synthesis": "public_sourced",
   "action.google_doc_intake": "business_sensitive",
   "action.google_doc_comment_edit": "business_sensitive",
   // Same payload category as action.google_doc_comment_edit directly above:
@@ -434,6 +440,15 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * address/person-name detectors still apply in full -- a discovered
  * person's direct contact detail is never let through.
  *
+ * lead.candidate_research_relevance / _protocol_selection / _plan /
+ * _synthesis: the research runtime run by Lead Generation over ONE
+ * screened, publicly-discovered prospect organisation (Martin's decision,
+ * 2026-10-12). Same exemption and same rationale as
+ * lead.discovery_signal_evaluation: the subject is a public organisation
+ * ENIG has not engaged, so naming it is not a client-identity leak.
+ * Person/email/phone/address detectors still apply in full. Engaged-client
+ * research stays on research.* (token-only, no exemption).
+ *
  * lead.discovery_ondemand_intake / lead.discovery_ondemand_query_generation:
  * operate only on Martin's own request text -- per their own registry
  * descriptions, never a company name, decision-maker, or contact.
@@ -596,6 +611,10 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "strategy.specialist_synthesis": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_classification": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_signal_evaluation": "TOKEN_SAFE_RUNTIME",
+  "lead.candidate_research_relevance": "TOKEN_SAFE_RUNTIME",
+  "lead.candidate_research_protocol_selection": "TOKEN_SAFE_RUNTIME",
+  "lead.candidate_research_plan": "TOKEN_SAFE_RUNTIME",
+  "lead.candidate_research_synthesis": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_intake": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_query_generation": "TOKEN_SAFE_RUNTIME",
   "action.google_doc_intake": "TOKEN_SAFE_RUNTIME",
@@ -621,6 +640,12 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
  */
 export const OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS: ReadonlySet<SemanticTaskId> = new Set<SemanticTaskId>([
   "lead.discovery_signal_evaluation",
+  // Lead Generation's prospect research -- the
+  // same public-organisation subject matter, Martin's decision 2026-10-12.
+  "lead.candidate_research_relevance",
+  "lead.candidate_research_protocol_selection",
+  "lead.candidate_research_plan",
+  "lead.candidate_research_synthesis",
 ]);
 
 export interface DataBoundaryEvaluatorOptions {

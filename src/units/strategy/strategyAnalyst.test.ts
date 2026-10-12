@@ -1,4 +1,5 @@
 import test from "node:test";
+import { STRATEGY_DOMAIN_SKILL_IDS } from "./strategySkillCycle";
 import { strategyManifest } from "./strategyManifest";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { createResolvedActionSkillSet, resolveSkill } from "../../platform/skillRegistry";
@@ -2891,13 +2892,13 @@ const BUSINESS_AND_BRAND: PlanEntry[] = [
   { skillId: "brand_strategy", question: "is positioning implicated in the perception symptom?" },
 ];
 
-test("Skills: Strategy's diagnose Action resolves exactly its declared Strategy Skill set through the generic Registry -- research_signal is not declared", async () => {
+test("Skills: Strategy's diagnose Action resolves exactly its declared Strategy Skill set through the generic Registry -- research_signal is declared for its own research step", async () => {
   assert.deepStrictEqual(
     STRATEGY_SKILLS.declared,
-    ["strategy_analysis", "brand_strategy", "business_strategy", "communication_strategy"],
-    "the multi-Skill Responsibility declares the planning/synthesis Skill and the three bounded domain Skills -- no Skill is duplicated and none is mandatory",
+    ["strategy_analysis", "brand_strategy", "business_strategy", "communication_strategy", "research_signal"],
+    "the Responsibility declares the planning/synthesis Skill, the three bounded domain Skills, and research_signal for the Action's own research step",
   );
-  assert.ok(!STRATEGY_SKILLS.declared.includes("research_signal"), "research_signal can only re-judge supplied evidence; it is not offered to diagnose until research has an owning Action");
+  assert.ok(!STRATEGY_DOMAIN_SKILL_IDS.includes("research_signal" as never), "research_signal is never a planner-selectable domain Skill: the plan cannot name it");
   // Resolved content is the Registry's own verified package, not something
   // the handler built -- the same call production makes at the execution
   // boundary.

@@ -175,7 +175,7 @@ test("Non-exempted TOKEN_SAFE_RUNTIME task still blocks a company-suffix name", 
 
 test("Every registered SemanticTaskId either has a resolved outbound policy or is deliberately absent (blocked)", () => {
   const allTaskIds = Object.keys(SEMANTIC_TASK_REGISTRY) as SemanticTaskId[];
-  assert.strictEqual(allTaskIds.length, 58);
+  assert.strictEqual(allTaskIds.length, 62);
   for (const id of allTaskIds) {
     const policy = PRODUCTION_OUTBOUND_POLICY[id];
     assert.ok(
@@ -209,17 +209,32 @@ test("Strategy tasks, Finance quote judgment, and ordinary Sales proposal drafti
   }
 });
 
-test("Lead Discovery public-source tasks are TOKEN_SAFE_RUNTIME, and only the signal-evaluation task is company-suffix-exempt", () => {
+test("Lead Discovery public-source tasks are TOKEN_SAFE_RUNTIME, and only the signal-evaluation and prospect-research tasks are company-suffix-exempt", () => {
   for (const id of [
     "lead.discovery_classification",
     "lead.discovery_signal_evaluation",
     "lead.discovery_ondemand_intake",
     "lead.discovery_ondemand_query_generation",
+    "lead.candidate_research_relevance",
+    "lead.candidate_research_protocol_selection",
+    "lead.candidate_research_plan",
+    "lead.candidate_research_synthesis",
   ] as SemanticTaskId[]) {
     assert.strictEqual(PRODUCTION_OUTBOUND_POLICY[id], "TOKEN_SAFE_RUNTIME", id);
   }
   assert.ok(OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.has("lead.discovery_signal_evaluation"));
-  assert.strictEqual(OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.size, 1, "the exemption is narrow, not blanket");
+  assert.deepStrictEqual(
+    [...OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS].sort(),
+    [
+      "lead.candidate_research_plan",
+      "lead.candidate_research_protocol_selection",
+      "lead.candidate_research_relevance",
+      "lead.candidate_research_synthesis",
+      "lead.discovery_signal_evaluation",
+    ],
+    "the exemption is narrow, not blanket: public-prospect discovery and research only, never research.* (engaged-client research stays token-only)",
+  );
+  assert.ok(!OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.has("research.synthesis" as SemanticTaskId));
 });
 
 test("All 18 Business Development tasks (Stage 1/2 classification and all three Hats) are TOKEN_SAFE_RUNTIME", () => {

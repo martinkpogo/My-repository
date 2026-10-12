@@ -12,6 +12,7 @@ import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { discoveryCronContext, mintApprovalProofForWork, workSessionContext, type AccessContext } from "../../access";
 import { kvDelete, kvGet, kvPut } from "../../kvStore";
 import { getSessionStub, newWorkId } from "../../sessionRouting";
+import { runProspectResearch, summarizeResearchSynthesis } from "../../runtime/actionResearch";
 
 /**
  * Autonomous counterpart to the Martin-supplied /lead command in
@@ -195,6 +196,8 @@ export interface PendingLeadOpportunity {
   reason: string;
   category?: string;
   sourceUrl: string;
+  /** Digest of the automatic research on this prospect (findings with sources, and limitations), or the reason it could not be done. Shown on the card; never decides anything. */
+  research?: string;
   /** Legacy: the retired research Handoff a finding came from. Screened discovery candidates carry none. */
   handoffId?: string;
 }
@@ -252,6 +255,7 @@ export async function proposeLeadOpportunity(
     `Why this looks worth pursuing: ${opportunity.reason}`,
     `Source: ${opportunity.sourceUrl || "N/A"}`,
     "",
+    opportunity.research ? `*Research*\n${opportunity.research}\n` : "",
     "Screened by Lead Generation against the Acquisition Criteria. No Lead has been created. Approve to record it as a Lead (Status: New), or reject to discard it -- a rejected organisation is not proposed again for 180 days.",
   ].join("\n");
 
@@ -414,12 +418,45 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
 }
 
 /**
+ * Researches ONE screened candidate before its card is sent (Martin's decision,
+ * 2026-10-12: research runs automatically as this Hat's step, and he sees the
+ * result and approves). The prospect is a PUBLIC organisation ENIG has not
+ * engaged, so the research uses the prospect task profile. A failure never
+ * suppresses the card -- it is sent marked unresearched, with the reason.
+ */
+async function researchCandidate(env: Env, opportunity: PendingLeadOpportunity, access: AccessContext, skills: ResolvedActionSkillSet): Promise<string> {
+  try {
+    const outcome = await runProspectResearch(
+      env,
+      skills,
+      {
+        question: `What is publicly known about ${opportunity.organisation}'s current positioning, market situation and any strategic or brand change that would show whether it has a real positioning or growth problem worth a consultancy conversation?`,
+        context: `Why it was screened: ${opportunity.reason}\nEvidence found: ${opportunity.evidence}\nSource: ${opportunity.sourceUrl}`,
+      },
+      access,
+    );
+    if (outcome.status === "completed") return summarizeResearchSynthesis(outcome.synthesis, 1200);
+    return `Not researched -- ${outcome.reason}`.slice(0, 600);
+  } catch (err) {
+    console.error(`Lead Discovery: research failed for ${opportunity.organisation}`, err);
+    return "Not researched -- the research step failed unexpectedly.";
+  }
+}
+
+/**
  * Presents ONE screened candidate to Martin: its own Work, recording the
  * approval-gated record_lead Action from creation, then the approval card.
  * Nothing is written to the Leads database here. The candidate is remembered
  * as pending so a later run does not send a second card for it.
  */
-async function presentScreenedCandidate(env: Env, presentTo: CandidatePresentationTarget, opportunity: PendingLeadOpportunity): Promise<boolean> {
+async function presentScreenedCandidate(
+  env: Env,
+  presentTo: CandidatePresentationTarget,
+  opportunity: PendingLeadOpportunity,
+  access: AccessContext,
+  skills: ResolvedActionSkillSet,
+): Promise<boolean> {
+  opportunity = { ...opportunity, research: await researchCandidate(env, opportunity, access, skills) };
   try {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
@@ -543,7 +580,7 @@ async function searchAndScreenForQuery(
       reason: evaluation.reason,
       category: evaluation.category,
       sourceUrl: result.url,
-    });
+    }, access, skills);
     if (presented) summary.pendingApproval++;
     else summary.presentationFailed++;
   }
