@@ -81,13 +81,13 @@ import * as salesProposal from "./tokenSafeProposal";
  * first non-BD prefix migrated, proving the mechanism generalizes beyond
  * the Unit it was built against.
  *
- * discover_leads is "read": it never creates a WorkSession (confirmed by
- * workspaceRouter.test.ts's own assertion that this dispatch must never go
- * through newWorkId/stub.init) and has no hold/resume `awaiting` state --
- * exactly matching the existing capability's behavior, which this manifest
- * reuses unchanged (see discoverLeadsReadHandler's own doc comment).
+ * discover_leads is "read": dispatching it creates no Work for the request
+ * itself (workspaceRouter.test.ts asserts the dispatch never goes through
+ * newWorkId/stub.init) and has no hold/resume `awaiting` state. Each screened
+ * candidate the run presents gets its OWN Work recording record_lead -- the
+ * approval-gated write Martin's tap authorizes (decision 2026-10-12).
  */
-type LeadGenerationSpecialistAction = "discover_leads";
+type LeadGenerationSpecialistAction = "discover_leads" | "record_lead";
 
 /**
  * Sales Executive's declared Actions.
@@ -161,24 +161,33 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     },
     // Declared `read` because that is exactly what this Action is: it searches,
     // screens, and reports. A read Action can never authorize a governed write
-    // (see consequencePermits in access.ts), which means the three governed
-    // writes this capability performed (or was meant to perform) -- a Lead
-    // create on a Martin-approved opportunity, a research-Handoff create
-    // (since removed with the retired Research & Intelligence Unit), and the
-    // /lead command's Lead create -- FAIL CLOSED rather than proceeding under
-    // an Action the caller chose.
-    //
-    // That is deliberate, and it is a known gap rather than an oversight
-    // (see docs/enig-operating-model.md, "Known gaps and drift"). Each of
-    // those writes creates a record another Unit acts on, which is the same
-    // shape of effect as Strategy's gated commit_diagnosis -- but whether a
-    // Pending internal research Handoff or a Lead-on-approval is a *privileged*
-    // effect or ordinary operational bookkeeping is a governance question
-    // reserved to the Architect, and it is not answered here by inventing an
-    // Action. The refusal is logged at each site with that reasoning inline.
+    // (see consequencePermits in access.ts). Committing a Lead for a candidate
+    // Martin approved is the separate, approval-gated record_lead Action below
+    // (Martin's decision, 2026-10-12). The /lead command's direct Lead create
+    // is not covered by that decision and still FAILS CLOSED -- see
+    // docs/enig-operating-model.md, "Known gaps and drift".
     requiresApproval: false,
     skill_requirements: [{ skill_id: "research_signal" }],
-    description: "Proactively search for organisations showing evidence of a problem worth investigating, and screen promising signals against the Acquisition Criteria. Candidates that pass are held; no Handoff or Lead is created.",
+    description: "Proactively search for organisations showing evidence of a problem worth investigating, and screen promising signals against the Acquisition Criteria. Each candidate that passes is presented to Martin for approval on its own record_lead Work; this Action itself creates no Handoff and no Lead.",
+  },
+  {
+    // Martin's decision (2026-10-12): Lead Generation screens, and each
+    // candidate that passes is presented to him in Telegram; a Lead is
+    // created ONLY when he approves that specific candidate. Committing the
+    // Lead is therefore its own approval-gated write, separate from the read
+    // discover_leads search -- the same split create_entity/create_matter use.
+    // Recorded on a per-candidate Work at creation (leadGenerationDiscovery.ts
+    // presentScreenedCandidate), never resolved as an entry Action.
+    name: "record_lead",
+    responsibility: "acquire_new_leads",
+    consequence: "write",
+    requiresApproval: true,
+    applicability: {
+      mode: "all",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }],
+    },
+    description:
+      "Create the Lead record for one screened discovery candidate Martin approved in Telegram. The Lead exists only because he approved that specific candidate, so committing it is his approved governed effect.",
   },
 ];
 
@@ -186,9 +195,9 @@ async function leadGenerationSpecialistReadHandler(env: Env, _actionName: LeadGe
   return discoverLeadsReadHandler(env, text, skills);
 }
 
-/** No internal/write actions are declared on this Hat today -- reaching either of these would mean dispatchAction resolved a consequence this manifest never declared. Fails closed rather than silently no-opping. */
+/** No Lead Generation Specialist Action is ever ENTERED as internal/write work: discover_leads is "read", and record_lead is recorded on a per-candidate Work at creation and committed only through the leadopportunity approval callback. Reaching this would mean dispatch resolved an entry this manifest never declares -- fails closed rather than silently no-opping. */
 async function leadGenerationSpecialistEntryHandler(_env: Env, _state: WorkState, actionName: LeadGenerationSpecialistAction): Promise<WorkState> {
-  throw new Error(`${actionName}: not an internal/write action on Lead Generation Specialist -- only discover_leads ("read") is declared.`);
+  throw new Error(`${actionName}: not an entry action on Lead Generation Specialist -- discover_leads is "read" and record_lead runs only through Martin's leadopportunity approval.`);
 }
 
 // The callback_data prefix proposeLeadOpportunity's own buttons are built

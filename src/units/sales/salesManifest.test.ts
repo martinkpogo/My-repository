@@ -67,12 +67,20 @@ test("salesManifest: declares Sales's own two Hats -- Lead Generation Specialist
   assert.deepStrictEqual(new Set(Object.keys(salesManifest.hats)), new Set(["Lead Generation Specialist", "Sales Executive"]));
 });
 
-test("salesManifest: Lead Generation Specialist declares exactly one action, discover_leads, as 'read'", () => {
+test("salesManifest: Lead Generation Specialist declares discover_leads ('read') and record_lead (approval-gated 'write')", () => {
   const hat = salesManifest.hats["Lead Generation Specialist"];
-  assert.strictEqual(hat.actions.length, 1);
-  assert.strictEqual(hat.actions[0].name, "discover_leads");
-  assert.strictEqual(hat.actions[0].consequence, "read");
-  assert.ok(hat.actions[0].description.trim().length > 0);
+  assert.deepStrictEqual(hat.actions.map((a) => a.name), ["discover_leads", "record_lead"]);
+  const discover = hat.actions[0];
+  assert.strictEqual(discover.consequence, "read");
+  assert.strictEqual(discover.requiresApproval, false);
+  assert.ok(discover.description.trim().length > 0);
+  // Martin's decision (2026-10-12): a Lead is created only on his approval of
+  // that specific screened candidate -- a write that is ALWAYS approval-gated,
+  // and never an entry Action (only a lifecycle transition records it).
+  const record = hat.actions[1];
+  assert.strictEqual(record.consequence, "write");
+  assert.strictEqual(record.requiresApproval, true);
+  assert.deepStrictEqual(record.applicability.conditions, [{ source: "work", field: "origin", operator: "equals", value: "lifecycle_transition" }]);
 });
 
 test("salesManifest: Lead Generation Specialist's responsibility statement is a real, non-empty description", () => {
@@ -116,12 +124,14 @@ test("salesManifest: readHandler delegates discover_leads to discoverLeadsReadHa
   assert.match(reply, /didn't look like a discovery request to Lead Generation Specialist/);
 });
 
-test("salesManifest: entryHandler fails closed -- no internal/write action is declared on Lead Generation Specialist", async () => {
+test("salesManifest: entryHandler fails closed -- neither Lead Generation Specialist Action is ever entered as internal/write work", async () => {
   const hat = salesManifest.hats["Lead Generation Specialist"];
-  await assert.rejects(
-    () => hat.entryHandler(fakeEnv(), fakeWorkState(), "discover_leads", "text", NO_ACTION_SKILLS),
-    /not an internal\/write action on Lead Generation Specialist/,
-  );
+  for (const action of ["discover_leads", "record_lead"] as const) {
+    await assert.rejects(
+      () => hat.entryHandler(fakeEnv(), fakeWorkState(), action, "text", NO_ACTION_SKILLS),
+      /not an entry action on Lead Generation Specialist/,
+    );
+  }
 });
 
 test("salesManifest: awaitingHandlers is empty -- Lead Generation Specialist has no multi-turn hold/resume flow", () => {
