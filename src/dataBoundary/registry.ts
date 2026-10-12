@@ -146,6 +146,26 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     description:
       "Evaluates web-search results found by scheduled proactive discovery against the canonical Acquisition Criteria (operating business, problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, evidence threshold). Operates only on public, source-attributed search result content -- never fabricates a decision-maker, contact, or fact not present in that content.",
   },
+  "lead.candidate_research_relevance": {
+    id: "lead.candidate_research_relevance",
+    name: "Lead Candidate Research Relevance",
+    description: "Research-runtime relevance step for researching ONE screened, publicly-discovered prospect organisation ENIG has not engaged. Same role as research.context_relevance; separate id so only this public-prospect path carries the company-name exemption.",
+  },
+  "lead.candidate_research_protocol_selection": {
+    id: "lead.candidate_research_protocol_selection",
+    name: "Lead Candidate Research Protocol Selection",
+    description: "Protocol selection for researching a public prospect organisation (Lead Generation only). Same role as research.protocol_selection.",
+  },
+  "lead.candidate_research_plan": {
+    id: "lead.candidate_research_plan",
+    name: "Lead Candidate Research Plan",
+    description: "Bounded research sub-questions for a public prospect organisation (Lead Generation only). Same role as research.plan_generation.",
+  },
+  "lead.candidate_research_synthesis": {
+    id: "lead.candidate_research_synthesis",
+    name: "Lead Candidate Research Synthesis",
+    description: "Synthesizes source-linked public evidence about a prospect organisation into Evidence/Finding/Implication/Limitation output (Lead Generation only). Never fabricates a decision-maker, contact, or fact not present in the sources.",
+  },
   "action.google_doc_intake": {
     id: "action.google_doc_intake",
     name: "Google Doc Intake Classification & Parameter Extraction",

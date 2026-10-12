@@ -1,5 +1,6 @@
 import type { Env, Unit, WorkState } from "../../types";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
+import { runActionResearch, summarizeResearchSynthesis } from "../../runtime/actionResearch";
 import { getPage, plainText, richText, richTextLong, select, title, updatePage } from "../../notion";
 import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
@@ -1051,7 +1052,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     state.strategySkillCycleUnavailableCause = cycle.cause;
     state.strategySkillFindings = cycle.findings;
     await advanceWorkStatus(env, state, `Skill planning was unavailable (${cycle.cause ?? "no usable plan"}) -- continuing with the core diagnosis alone`);
-    return runCoreDiagnosis(env, state);
+    return runCoreDiagnosis(env, state, skills);
   }
 
   // A plan ran (or Strategy Analysis genuinely determined no Skill was
@@ -1075,7 +1076,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     );
     state.strategySkillCycleUnavailable = false;
     await advanceWorkStatus(env, state, "Strategy Analysis judged that no Strategy Skill is needed");
-    return runCoreDiagnosis(env, state);
+    return runCoreDiagnosis(env, state, skills);
   }
 
   // Metadata-only observability (Skill ids/counts/status labels, never
@@ -1090,10 +1091,10 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
 
   state.strategyContext = `${strategyContext}\n\nStrategy Analysis synthesis:\n${cycle.synthesizedContext ?? ""}`;
   console.log(`Strategy runDiagnosis: Skill cycle synthesis for work ${state.workId} sufficient -- folding into strategyContext before core diagnosis.`);
-  return runCoreDiagnosis(env, state);
+  return runCoreDiagnosis(env, state, skills);
 }
 
-async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> {
+async function runCoreDiagnosis(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
   const governance = await getStrategyGovernance(env);
   if (!governance) {
     console.error(`Strategy runCoreDiagnosis: governance retrieval failed for work ${state.workId}`);
@@ -1132,6 +1133,20 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
   }
   const result = outcome.json;
 
+  // Research is a Skill this Action declares and runs as its own step when
+  // the diagnosis is held for want of evidence (Martin's decision,
+  // 2026-10-12). Once per Work, then the diagnosis re-runs; whatever it then
+  // produces still goes to Martin's approval. The findings are external
+  // evidence, never proof of the client's own cause (LOG-976).
+  if (result.sufficient !== true && result.blockedCategory === "insufficient_evidence" && !state.strategyResearchAttempted && skills.declared.includes("research_signal")) {
+    state.strategyResearchAttempted = true;
+    const researched = await researchMissingEvidence(env, state, skills, result.blockedReason);
+    if (researched) {
+      state.strategyContext = `${state.strategyContext ?? ""}\n\n${researched}`;
+      return runCoreDiagnosis(env, state, skills);
+    }
+  }
+
   const causationCheck = evaluateCausationDiscipline(result);
   if (result.sufficient !== true || !causationCheck.valid) {
     const reason = result.sufficient !== true ? (result.blockedReason ?? "Insufficient evidence to complete a defensible diagnosis.") : (causationCheck as { valid: false; reason: string }).reason;
@@ -1143,6 +1158,37 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
   const disciplined = applyUnprovenCauseDiscipline(result);
   state.strategyDiagnosis = disciplined;
   return deliverDiagnosis(env, state, disciplined);
+}
+
+/**
+ * Runs the declared research Skill once for the specific fact the diagnosis
+ * said was missing. Returns labelled external evidence to add to the context,
+ * or null when research could not produce a defensible result (the diagnosis
+ * is then held exactly as before, with the original reason).
+ */
+async function researchMissingEvidence(env: Env, state: WorkState, skills: ResolvedActionSkillSet, missing: string | undefined): Promise<string | null> {
+  if (!missing?.trim()) return null;
+  try {
+    await advanceWorkStatus(env, state, "Evidence is missing -- researching it before deciding...");
+    const outcome = await runActionResearch(
+      env,
+      skills,
+      { question: `Find public, source-linked evidence for this missing fact: ${missing.slice(0, 600)}`, context: "" },
+      workSessionContext(state),
+    );
+    if (outcome.status !== "completed") {
+      console.warn(`Strategy: research for work ${state.workId} did not complete [${outcome.code}]`);
+      return null;
+    }
+    return [
+      "=== EXTERNAL RESEARCH EVIDENCE (public sources gathered automatically for the missing fact above) ===",
+      "This is external evidence about the market or category. It is NOT proof of this client's own situation or cause; treat it only as context and as support for what it directly cites.",
+      summarizeResearchSynthesis(outcome.synthesis, 2000),
+    ].join("\n");
+  } catch (err) {
+    console.error(`Strategy: research step failed for work ${state.workId}`, err);
+    return null;
+  }
 }
 
 /**

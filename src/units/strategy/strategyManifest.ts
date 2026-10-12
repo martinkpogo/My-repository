@@ -126,15 +126,17 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     // single plan may name. Declaring a Skill here only makes it AVAILABLE to
     // this Action -- the plan chooses which (if any) to follow, from the
     // evidence. It never names all of them by default, and it may not name one
-    // this Action did not declare. `research_signal` is deliberately not
-    // declared: it can only re-judge the evidence already supplied, and in
-    // live use the planner kept choosing it as if it could fetch new evidence.
-    // Research needs an owning Action first (LOG-975).
+    // this Action did not declare. `research_signal` is declared as the
+    // methodology for the research this Action runs ITSELF, once, when the
+    // diagnosis is held for missing evidence (Martin's decision, 2026-10-12;
+    // resolves LOG-975). It is not one of the planner's domain Skills, so the
+    // plan still cannot name it (STRATEGY_DOMAIN_SKILL_IDS).
     skill_requirements: [
       { skill_id: "strategy_analysis" },
       { skill_id: "brand_strategy" },
       { skill_id: "business_strategy" },
       { skill_id: "communication_strategy" },
+      { skill_id: "research_signal" },
     ],
   },
   {

@@ -114,9 +114,10 @@ async function generateProtocolPlan(
   relevance: string,
   question: string,
   protocol: ResearchProtocolId,
+  planTaskId: "research.plan_generation" | "lead.candidate_research_plan",
 ): Promise<ResearchPlanDimension[]> {
   const result = await generate<PlanResult>(env, {
-    taskId: "research.plan_generation",
+    taskId: planTaskId,
     mode: "json",
     parts: { ...buildResearchPlanPromptParts(categorySummary, relevance, [protocol]), situation: question },
     maxTokens: 1536,
@@ -154,9 +155,10 @@ export async function generateResearchPlan(
   relevance: string,
   question: string,
   protocols: ResearchProtocolId[],
+  planTaskId: "research.plan_generation" | "lead.candidate_research_plan" = "research.plan_generation",
 ): Promise<ResearchPlanDimension[] | null> {
   const perProtocol = await Promise.all(
-    protocols.map((protocol) => generateProtocolPlan(env, categorySummary, relevance, question, protocol)),
+    protocols.map((protocol) => generateProtocolPlan(env, categorySummary, relevance, question, protocol, planTaskId)),
   );
   const mapped = perProtocol.flat();
 

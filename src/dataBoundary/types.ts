@@ -27,6 +27,13 @@ export type SemanticTaskId =
   | "strategy.proposal_discussion"
   | "lead.discovery_classification"
   | "lead.discovery_signal_evaluation"
+  // Lead Generation's research of ONE screened, PUBLIC prospect organisation
+  //. Same pipeline as research.*, own task ids so
+  // the narrow company-name exemption applies only here (Martin, 2026-10-12).
+  | "lead.candidate_research_relevance"
+  | "lead.candidate_research_protocol_selection"
+  | "lead.candidate_research_plan"
+  | "lead.candidate_research_synthesis"
   | "action.google_doc_intake"
   | "action.google_doc_comment_edit"
   | "action.google_doc_comment_intent"
