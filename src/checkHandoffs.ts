@@ -732,7 +732,7 @@ export async function runCheckHandoffs(
   }
 
   try {
-    // Same discovery logic /admin/run-finance-discovery and the 5-minute
+    // Same discovery logic /admin/run-finance-discovery and the 30-minute
     // native Cron Trigger already run -- exposed as a command (and now
     // also as an automatic continuation and a webhook-triggered run) so it
     // can run immediately rather than waiting for the next scheduled cycle.
