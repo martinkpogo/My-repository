@@ -3,6 +3,7 @@ import { getWatchedGoogleDoc, getValidGoogleAccessToken, type WatchedGoogleDoc }
 import { processGoogleDocComments } from "./googleDocComments";
 import { sendOperationsMessage } from "./telegram";
 import { kvGet, kvPut, kvList } from "./kvStore";
+import { DRIVE_DOC_LOCK_TTL_MS, DRIVE_DOC_COOLDOWN_MS, driveDocLockStub } from "./driveDocLockState";
 
 /**
  * Google Drive `files.watch` push notifications for watched Proposal Docs.
@@ -160,6 +161,7 @@ export type DriveNotifyRejection =
   | "unknown_channel"
   | "invalid_token"
   | "channel_not_active"
+  | "channel_expired"
   | "document_not_registered";
 
 export interface DriveNotifyDecision {
@@ -178,7 +180,7 @@ export interface DriveNotifyDecision {
  * Every rejection path is a hard stop: no document is resolved and no pass is
  * started.
  */
-export async function authenticateDriveNotification(env: Env, channelId: string, channelToken: string): Promise<DriveNotifyDecision> {
+export async function authenticateDriveNotification(env: Env, channelId: string, channelToken: string, nowMs: number = Date.now()): Promise<DriveNotifyDecision> {
   if (!channelId) return { accepted: false, rejection: "missing_channel_id" };
 
   const channel = await getChannel(env, channelId);
@@ -191,6 +193,13 @@ export async function authenticateDriveNotification(env: Env, channelId: string,
   }
 
   if (channel.status !== "active") return { accepted: false, rejection: "channel_not_active", channel };
+
+  // A channel past Drive's own recorded expiration is stale: Drive no longer
+  // delivers for it, so anything still presenting it is not a live channel.
+  // Refused rather than trusted; renewal (which treats it as due) is what
+  // brings the document back under a live channel.
+  const exp = expirationMs(channel);
+  if (exp !== null && exp <= nowMs) return { accepted: false, rejection: "channel_expired", channel };
 
   // The document is resolved from the trusted record, not the request. If it
   // is no longer a registered watched doc, there is nothing this runtime is
@@ -205,30 +214,11 @@ export async function authenticateDriveNotification(env: Env, channelId: string,
 // The per-Doc pass, run in the background under a lock
 // ---------------------------------------------------------------------------
 
-/**
- * How long one document's pass may hold its lock before the lock is treated as
- * abandoned. This is the bound that keeps a crashed or hung execution from
- * permanently blocking future processing of that doc: a pass that never
- * releases simply expires, and the next notification or poll proceeds. Chosen
- * generously above any realistic pass duration so a live pass is never stolen
- * out from under itself.
- */
-export const DRIVE_DOC_LOCK_TTL_MS = 5 * 60 * 1000;
-
-/** The minimum spacing between two accepted passes for the same doc, so a burst of duplicates collapses into one run plus one catch-up. */
-export const DRIVE_DOC_COOLDOWN_MS = 3 * 1000;
-
-/**
- * Returns the lock stub for one document, or null when the namespace is not
- * bound. The cast matches the existing getSessionStub convention in
- * sessionRouting.ts: the RPC surface is defined by the DriveDocLock class, and
- * TypeScript's cross-module DO typing cannot see it from here.
- */
-function lockStub(env: Env, documentId: string): any | null {
-  const ns = env.DRIVE_DOC_LOCK;
-  if (!ns) return null;
-  return ns.get(ns.idFromName(documentId)) as any;
-}
+// The lock constants and stub live in driveDocLockState.ts so the polling
+// safety net (googleDocComments.ts) can take the SAME per-Doc lock without a
+// circular import. Re-exported here for existing callers.
+export { DRIVE_DOC_LOCK_TTL_MS, DRIVE_DOC_COOLDOWN_MS };
+const lockStub = driveDocLockStub;
 
 /**
  * Runs one document's complete comment pass under the per-Doc lock.
@@ -458,8 +448,19 @@ function newChannelSecret(): string {
 }
 
 export type RegisterWatchResult =
-  | { ok: true; channel: DriveWatchChannel }
+  | { ok: true; channel: DriveWatchChannel; alreadyRegistered?: boolean }
   | { ok: false; error: string; uncertain?: boolean };
+
+/** The live (active, not past its stored expiration) channel for a document, if one exists -- the latest-expiring one when a partial failure left more than one. */
+async function findLiveChannelForDocument(env: Env, documentId: string, nowMs: number): Promise<DriveWatchChannel | null> {
+  const live = (await listChannels(env)).filter((c) => {
+    if (c.documentId !== documentId || c.status !== "active") return false;
+    const exp = expirationMs(c);
+    return exp === null || exp > nowMs;
+  });
+  live.sort((a, b) => (expirationMs(b) ?? 0) - (expirationMs(a) ?? 0));
+  return live[0] ?? null;
+}
 
 /**
  * Registers a `files.watch` channel for exactly one document.
@@ -478,14 +479,28 @@ export type RegisterWatchResult =
  * transport failure (outcomeUncertain) also persists nothing, because there is
  * nothing truthful to persist -- but the caller is told the outcome is unknown
  * so it can be surfaced rather than assumed.
+ *
+ * IDEMPOTENCY: unless `replace` is set (renewal), a document that already has a
+ * live channel gets that channel back (`alreadyRegistered`) and Drive is not
+ * called, so repeating an admin registration -- e.g. after a response was lost
+ * -- never stacks a second live channel on the same document.
  */
-export async function registerWatchForDocument(env: Env, documentId: string): Promise<RegisterWatchResult> {
+export async function registerWatchForDocument(
+  env: Env,
+  documentId: string,
+  options: { replace?: boolean; nowMs?: number } = {},
+): Promise<RegisterWatchResult> {
   const address = driveNotifyAddress(env);
   if (!address) return { ok: false, error: "WORKER_PUBLIC_BASE_URL is not configured -- cannot determine where Drive should push notifications" };
 
   const doc = await getWatchedGoogleDoc(env, documentId);
   if (!doc) return { ok: false, error: "document is not a registered watched Google Doc" };
   if (!doc.proposal) return { ok: false, error: "document is not bound to a Proposal -- watch registration is Proposal-only" };
+
+  if (!options.replace) {
+    const existing = await findLiveChannelForDocument(env, documentId, options.nowMs ?? Date.now());
+    if (existing) return { ok: true, channel: existing, alreadyRegistered: true };
+  }
 
   const accessToken = await getValidGoogleAccessToken(env, doc.accountIdentifier);
   if (!accessToken) return { ok: false, error: "no valid Google access token for this document's account (re-authorization needed)" };
@@ -570,60 +585,122 @@ export async function renewDriveWatchChannels(env: Env, nowMs: number = Date.now
   let renewed = 0;
   let failed = 0;
 
-  for (const channel of active) {
-    const exp = expirationMs(channel);
+  // Renewal works per DOCUMENT, not per channel. Normally each document has one
+  // active channel; more than one means an earlier renewal registered a
+  // replacement but failed to supersede the old record. Renewing each of those
+  // separately would multiply channels every day, so the group converges back
+  // to exactly one: the latest-expiring channel is the current one, the rest
+  // are superseded by it (or all by a fresh replacement when it is due).
+  const byDocument = new Map<string, DriveWatchChannel[]>();
+  for (const c of active) {
+    const group = byDocument.get(c.documentId) ?? [];
+    group.push(c);
+    byDocument.set(c.documentId, group);
+  }
+
+  for (const [documentId, group] of byDocument) {
+    group.sort((a, b) => (expirationMs(b) ?? 0) - (expirationMs(a) ?? 0));
+    const current = group[0];
+    const exp = expirationMs(current);
     // A channel with NO recorded expiration is treated as due: we cannot prove
     // it is still alive, and Drive's own lifetime cap means it may already be
     // dead. Re-registering is the safe direction.
-    if (exp !== null && exp - nowMs > RENEW_WINDOW_MS) {
-      outcomes.push({ channelId: channel.channelId, documentId: channel.documentId, status: "skipped_not_due", detail: `expires ${channel.expiration}` });
-      continue;
+    const due = exp === null || exp - nowMs <= RENEW_WINDOW_MS;
+
+    // Each document is isolated: an exception for one (a KV write failing
+    // after Drive accepted the replacement, say) is reported for that document
+    // and never aborts renewal of the others.
+    try {
+      let replacement: DriveWatchChannel;
+      let toSupersede: DriveWatchChannel[];
+      if (due) {
+        const result = await registerWatchForDocument(env, documentId, { replace: true, nowMs });
+        if (!result.ok) {
+          for (const channel of group) {
+            failed++;
+            outcomes.push({
+              channelId: channel.channelId,
+              documentId,
+              status: "failed",
+              detail: `${result.error}${result.uncertain ? " (outcome uncertain -- old channel left in place)" : ""}`,
+            });
+          }
+          continue;
+        }
+        replacement = result.channel;
+        toSupersede = group;
+      } else {
+        outcomes.push({ channelId: current.channelId, documentId, status: "skipped_not_due", detail: `expires ${current.expiration}` });
+        replacement = current;
+        toSupersede = group.slice(1);
+      }
+
+      for (const channel of toSupersede) {
+        try {
+          await supersedeChannel(env, channel, replacement.channelId);
+        } catch (err) {
+          // The replacement is live and persisted; only the old record's
+          // status write failed. The next renewal sees two active channels for
+          // this document and collapses them -- reported, never claimed.
+          console.error(`renewDriveWatchChannels: could not supersede ${channel.channelId} for ${documentId}`, err);
+          failed++;
+          outcomes.push({
+            channelId: channel.channelId,
+            documentId,
+            status: "failed",
+            detail: `replacement ${replacement.channelId} is active, but marking this channel superseded failed; the next renewal collapses it`,
+          });
+          continue;
+        }
+        renewed++;
+        outcomes.push({
+          channelId: channel.channelId,
+          documentId,
+          status: "renewed",
+          detail: `replaced by ${replacement.channelId}; new expiration ${replacement.expiration ?? "unset"}`,
+        });
+      }
+    } catch (err) {
+      console.error(`renewDriveWatchChannels: renewal threw for ${documentId}`, err);
+      for (const channel of group) {
+        failed++;
+        outcomes.push({
+          channelId: channel.channelId,
+          documentId,
+          status: "failed",
+          detail: `renewal threw (${err instanceof Error ? err.message : String(err)}); existing channel records left in place`,
+        });
+      }
     }
+  }
 
-    const result = await registerWatchForDocument(env, channel.documentId);
-    if (!result.ok) {
-      failed++;
-      outcomes.push({
-        channelId: channel.channelId,
-        documentId: channel.documentId,
-        status: "failed",
-        detail: `${result.error}${result.uncertain ? " (outcome uncertain -- old channel left in place)" : ""}`,
-      });
-      continue;
-    }
+  return { considered: active.length, renewed, failed, outcomes };
+}
 
-    // The replacement is live and persisted. NOW the old channel is superseded
-    // -- kept, not deleted, so its resourceId stays available and an in-flight
-    // notification for it can still be recognized and refused.
-    const old: DriveWatchChannel = {
-      ...channel,
-      status: "superseded",
-      supersededBy: result.channel.channelId,
-    };
-    await putChannel(env, old);
+/**
+ * Marks one channel superseded by its replacement, then best-effort stops it on
+ * Drive's side. The record is kept, not deleted, so its resourceId stays
+ * available and an in-flight notification for it can still be recognized and
+ * refused. Only ever called AFTER the replacement is live and persisted.
+ */
+async function supersedeChannel(env: Env, channel: DriveWatchChannel, replacementChannelId: string): Promise<void> {
+  await putChannel(env, { ...channel, status: "superseded", supersededBy: replacementChannelId });
 
-    // Best-effort cleanup of the old Drive-side channel. Its resourceId is what
-    // Drive actually keys on. A channel registered without a resourceId has
-    // nothing to stop, and a failed stop is not a renewal failure -- the old
-    // channel simply ages out on its own within Drive's 24h cap.
-    if (channel.resourceId) {
+  // Best-effort cleanup of the old Drive-side channel. Its resourceId is what
+  // Drive actually keys on. A channel registered without a resourceId has
+  // nothing to stop, and a failed stop is not a renewal failure -- the old
+  // channel simply ages out on its own within Drive's 24h cap.
+  if (channel.resourceId) {
+    try {
       const doc = await getWatchedGoogleDoc(env, channel.documentId);
       if (doc) {
         const token = await getValidGoogleAccessToken(env, doc.accountIdentifier);
         if (token) await callFilesStop(token, channel.documentId, channel.resourceId, channel.channelId);
       }
+    } catch (err) {
+      console.error(`supersedeChannel: best-effort stop failed for ${channel.channelId}`, err);
     }
-
-    renewed++;
-    outcomes.push({
-      channelId: channel.channelId,
-      documentId: channel.documentId,
-      status: "renewed",
-      detail: `replaced by ${result.channel.channelId}; new expiration ${result.channel.expiration ?? "unset"}`,
-    });
   }
-
-  return { considered: active.length, renewed, failed, outcomes };
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +785,7 @@ export async function handleRegisterDriveWatchRequest(request: Request, env: Env
     // Drive, nowhere else. Everything needed to identify and later stop this
     // channel is returned.
     const { secret: _withheld, ...safeChannel } = result.channel;
-    return adminJson(200, { ok: true, channel: safeChannel, notifyAddress: driveNotifyAddress(env) });
+    return adminJson(200, { ok: true, alreadyRegistered: result.alreadyRegistered === true, channel: safeChannel, notifyAddress: driveNotifyAddress(env) });
   } catch (err) {
     console.error("Unhandled error in /admin/register-drive-watch", err);
     return adminJson(500, { ok: false, error: "internal error, logged" });
