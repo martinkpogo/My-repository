@@ -621,15 +621,144 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   return { handled: true, outcome: "edit_not_authorized", detail: `comment ${comment.id} requested a replacement of "${quoted}" with "${replacementText}" -- refused (no authorization path)` };
 }
 
+export type DocCommentDiagnostic = {
+  documentId: string;
+  commentId: string | null;
+  outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception" | "approval_cycle_synced";
+  detail?: string;
+};
+
 export interface PollGoogleDocCommentsResult {
   docsChecked: number;
   commentsProcessed: number;
-  diagnostics: {
-    documentId: string;
-    commentId: string | null;
-    outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception" | "approval_cycle_synced";
-    detail?: string;
-  }[];
+  diagnostics: DocCommentDiagnostic[];
+}
+
+/** The outcome of ONE document's complete comment pass -- see processGoogleDocComments. */
+export interface ProcessDocCommentsResult {
+  documentId: string;
+  commentsProcessed: number;
+  diagnostics: DocCommentDiagnostic[];
+}
+
+/**
+ * Runs the COMPLETE comment pass for exactly ONE watched document: acquire the
+ * doc's own account token, list every comment (following every nextPageToken --
+ * a partial list must never be processed as though it were complete), process
+ * each comment through processComment, and -- for a Proposal Doc -- feed the
+ * observed resolution state into the approval cycle.
+ *
+ * This is the single pass both entry points share: the polling safety net
+ * (pollGoogleDocComments, which loops it over every watched doc) and the
+ * Drive notification receiver (googleDriveWatch.ts, which runs it for the one
+ * doc a channel names). Both MUST run the same pass, because
+ * syncProposalDocApprovalCycle depends on observing a Proposal Doc's FULL
+ * resolved state -- a notification names only that a change happened, never
+ * which comments it touched, so it is only ever a signal to re-read everything.
+ *
+ * Semantics are exactly the poller's per-doc body: a token failure or a
+ * comments-list failure is recorded and the doc is skipped (a later run
+ * retries it); each comment's own failure is recorded per comment and never
+ * aborts the rest; a marker-persistence failure is its own truthful outcome
+ * and leaves the comment unprocessed. Nothing here is notification-specific
+ * and nothing here inspects how it was triggered.
+ */
+export async function processGoogleDocComments(env: Env, doc: WatchedGoogleDoc): Promise<ProcessDocCommentsResult> {
+  const diagnostics: DocCommentDiagnostic[] = [];
+  let commentsProcessed = 0;
+
+  const token = await getValidGoogleAccessToken(env, doc.accountIdentifier);
+  if (!token) {
+    diagnostics.push({ documentId: doc.documentId, commentId: null, outcome: "token_unavailable" });
+    return { documentId: doc.documentId, commentsProcessed, diagnostics };
+  }
+
+  let comments: DriveComment[];
+  try {
+    comments = await fetchComments(token, doc.documentId);
+  } catch (err) {
+    console.error(`processGoogleDocComments: failed to list comments for ${doc.documentId}`, err);
+    diagnostics.push({
+      documentId: doc.documentId,
+      commentId: null,
+      outcome: "comments_list_failed",
+      detail: err instanceof Error ? err.message : String(err),
+    });
+    return { documentId: doc.documentId, commentsProcessed, diagnostics };
+  }
+
+  diagnostics.push({ documentId: doc.documentId, commentId: null, outcome: "comments_fetched", detail: `${comments.length} comment(s) found` });
+
+  for (const comment of comments) {
+    try {
+      const result = await processComment(env, doc, comment, token);
+      diagnostics.push({ documentId: doc.documentId, commentId: comment.id, outcome: result.outcome, detail: result.detail });
+      if (result.handled) commentsProcessed++;
+    } catch (err) {
+      if (err instanceof CommentMarkerPersistenceError) {
+        // The marker this comment needed could not be written. Because
+        // every marker is written BEFORE the effect it guards, nothing
+        // was executed and nothing was claimed; the comment stays
+        // unprocessed and a later run retries it. Recorded as its own
+        // truthful outcome instead of a generic handler failure.
+        console.error(`processGoogleDocComments: persistence unavailable for comment ${comment.id} on ${doc.documentId}`, err);
+        diagnostics.push({
+          documentId: doc.documentId,
+          commentId: comment.id,
+          outcome: "persistence_unavailable",
+          detail: err.message,
+        });
+        continue;
+      }
+      console.error(`processGoogleDocComments: error processing comment ${comment.id} on ${doc.documentId}`, err);
+      diagnostics.push({
+        documentId: doc.documentId,
+        commentId: comment.id,
+        outcome: "unhandled_exception",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // A Proposal Doc's approval cycle is driven by the resolution state
+  // observed here, fed back into the Work so the cycle can be evaluated
+  // (evaluateProposalApprovalCycle). This runs on EVERY pass over a Proposal
+  // Doc -- including ones where no comment needed processing -- because a
+  // Martin resolve that happened between passes is exactly the event that
+  // can complete a cycle, and it may arrive with nothing new to apply.
+  // Resolution is observed independently of processing, so a resolved
+  // comment is never mistaken for an applied one. This is why the notification
+  // path re-reads the COMPLETE comment list rather than trusting the
+  // notification for detail: the cycle's input is the full observed state.
+  if (doc.proposal) {
+    try {
+      const observations = comments.map((c) => ({
+        commentId: c.id,
+        resolved: c.resolved === true,
+        modifiedTime: c.modifiedTime,
+      }));
+      const sync = await getSessionStub(env, doc.proposal.workId).syncProposalDocApprovalCycle({
+        documentId: doc.documentId,
+        observations,
+      });
+      diagnostics.push({
+        documentId: doc.documentId,
+        commentId: null,
+        outcome: "approval_cycle_synced",
+        detail: sync.reasons?.length ? `${sync.kind}: ${sync.reasons.join("; ")}` : sync.kind,
+      });
+    } catch (err) {
+      console.error(`processGoogleDocComments: approval-cycle sync failed for ${doc.documentId}`, err);
+      diagnostics.push({
+        documentId: doc.documentId,
+        commentId: null,
+        outcome: "unhandled_exception",
+        detail: `approval-cycle sync: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  return { documentId: doc.documentId, commentsProcessed, diagnostics };
 }
 
 /**
@@ -638,11 +767,16 @@ export interface PollGoogleDocCommentsResult {
  * applies any that resolve to a specific, unambiguous text replacement.
  * Meant to be hit every 30-60s by an external scheduler (cron-job.org),
  * same pattern as /admin/run-finance-discovery and
- * /admin/run-lead-discovery -- Google Drive has no push notification for
- * comment events (verified against Drive API docs: the X-Goog-Changed
- * header's tracked change types are content/properties/parents/children/
- * permissions, comments are not among them), so polling is the only
- * option, not a fallback for a push mechanism that doesn't exist.
+ * /admin/run-lead-discovery.
+ *
+ * This is the SAFETY NET, deliberately kept enabled alongside the Drive
+ * files.watch notification path (googleDriveWatch.ts): notifications are a
+ * promptness optimization, never the authority. They can be lost, delayed,
+ * duplicated, or arrive without useful detail, so polling remains what
+ * guarantees a doc is eventually fully processed. Each doc is processed by
+ * the SAME single-document pass the notification handler runs --
+ * processGoogleDocComments -- so the two paths cannot drift in what a pass
+ * means.
  */
 export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocCommentsResult> {
   // Records that the external scheduler actually fired, independent of
@@ -667,97 +801,13 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
 
   const docs = await listWatchedGoogleDocs(env);
   let commentsProcessed = 0;
-  const diagnostics: PollGoogleDocCommentsResult["diagnostics"] = [];
+  const diagnostics: DocCommentDiagnostic[] = [];
 
   for (const doc of docs) {
-    const token = await getValidGoogleAccessToken(env, doc.accountIdentifier);
-    if (!token) {
-      diagnostics.push({ documentId: doc.documentId, commentId: null, outcome: "token_unavailable" });
-      continue; // re-authorization needed -- surfaced elsewhere via existing OAuth failure paths
-    }
-
-    let comments: DriveComment[];
-    try {
-      comments = await fetchComments(token, doc.documentId);
-    } catch (err) {
-      console.error(`pollGoogleDocComments: failed to list comments for ${doc.documentId}`, err);
-      diagnostics.push({
-        documentId: doc.documentId,
-        commentId: null,
-        outcome: "comments_list_failed",
-        detail: err instanceof Error ? err.message : String(err),
-      });
-      continue;
-    }
-
-    diagnostics.push({ documentId: doc.documentId, commentId: null, outcome: "comments_fetched", detail: `${comments.length} comment(s) found` });
-
-    for (const comment of comments) {
-      try {
-        const result = await processComment(env, doc, comment, token);
-        diagnostics.push({ documentId: doc.documentId, commentId: comment.id, outcome: result.outcome, detail: result.detail });
-        if (result.handled) commentsProcessed++;
-      } catch (err) {
-        if (err instanceof CommentMarkerPersistenceError) {
-          // The marker this comment needed could not be written. Because
-          // every marker is written BEFORE the effect it guards, nothing
-          // was executed and nothing was claimed; the comment stays
-          // unprocessed and a later poll retries it. Recorded as its own
-          // truthful outcome instead of a generic handler failure.
-          console.error(`pollGoogleDocComments: persistence unavailable for comment ${comment.id} on ${doc.documentId}`, err);
-          diagnostics.push({
-            documentId: doc.documentId,
-            commentId: comment.id,
-            outcome: "persistence_unavailable",
-            detail: err.message,
-          });
-          continue;
-        }
-        console.error(`pollGoogleDocComments: error processing comment ${comment.id} on ${doc.documentId}`, err);
-        diagnostics.push({
-          documentId: doc.documentId,
-          commentId: comment.id,
-          outcome: "unhandled_exception",
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // A Proposal Doc's approval cycle is driven by the resolution state
-    // observed here, fed back into the Work so the cycle can be evaluated
-    // (evaluateProposalApprovalCycle). This runs on EVERY poll of a Proposal
-    // Doc -- including ones where no comment needed processing -- because a
-    // Martin resolve that happened between polls is exactly the event that
-    // can complete a cycle, and it may arrive with nothing new to apply.
-    // Resolution is observed independently of processing, so a resolved
-    // comment is never mistaken for an applied one.
-    if (doc.proposal) {
-      try {
-        const observations = comments.map((c) => ({
-          commentId: c.id,
-          resolved: c.resolved === true,
-          modifiedTime: c.modifiedTime,
-        }));
-        const sync = await getSessionStub(env, doc.proposal.workId).syncProposalDocApprovalCycle({
-          documentId: doc.documentId,
-          observations,
-        });
-        diagnostics.push({
-          documentId: doc.documentId,
-          commentId: null,
-          outcome: "approval_cycle_synced",
-          detail: sync.reasons?.length ? `${sync.kind}: ${sync.reasons.join("; ")}` : sync.kind,
-        });
-      } catch (err) {
-        console.error(`pollGoogleDocComments: approval-cycle sync failed for ${doc.documentId}`, err);
-        diagnostics.push({
-          documentId: doc.documentId,
-          commentId: null,
-          outcome: "unhandled_exception",
-          detail: `approval-cycle sync: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    }
+    // The same single-document pass the Drive notification handler runs.
+    const result = await processGoogleDocComments(env, doc);
+    commentsProcessed += result.commentsProcessed;
+    diagnostics.push(...result.diagnostics);
   }
 
   return { docsChecked: docs.length, commentsProcessed, diagnostics };

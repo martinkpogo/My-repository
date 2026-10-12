@@ -39,8 +39,14 @@ import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinua
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { kvDelete, kvGet, kvList, kvPut, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
+import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 
 export { WorkSession } from "./session";
+// The per-Doc lock for the Drive notification path. Exported from the Worker
+// entry point because that is where Cloudflare resolves a DO class_name to its
+// implementation -- without this export the DRIVE_DOC_LOCK binding fails to
+// load at boot.
+export { DriveDocLock } from "./driveDocLock";
 
 // WP8: assemble (and thereby validate) the Unit Registry at module load,
 // before any request is ever served: every Hat of every Unit manifest is
@@ -67,6 +73,18 @@ export default {
     // authentication/filtering contract; this route only wires it up.
     if (url.pathname === "/notion/webhook" && request.method === "POST") {
       return handleNotionWebhookRequest(request, env, ctx);
+    }
+
+    // Google Drive files.watch push notifications. Unlike the webhooks above,
+    // this one is NOT authenticated by a shared request secret -- Drive has no
+    // signature to verify. Instead each registered channel carries its own
+    // secret, minted at registration and sent back by Drive as
+    // X-Goog-Channel-Token, so the receiver authenticates the CHANNEL and reads
+    // the affected document from that channel's trusted record. See
+    // googleDriveWatch.ts for the full trust boundary; this route only wires it
+    // up and passes the background-execution context through.
+    if (url.pathname === "/google/drive/notify" && request.method === "POST") {
+      return handleDriveNotifyRequest(request, env, ctx);
     }
 
     if (url.pathname === "/telegram/webhook" && request.method === "POST") {
@@ -311,12 +329,16 @@ export default {
     // Comment-triggered Google Doc editing -- same external-cron-hits-an-
     // admin-endpoint pattern as /admin/run-finance-discovery and
     // /admin/run-lead-discovery above. Meant to be hit every 30-60s by an
-    // external scheduler (cron-job.org): Google Drive has no push
-    // notification for comment events (the X-Goog-Changed header's
-    // tracked change types are content/properties/parents/children/
-    // permissions -- comments are not among them, verified against
-    // Drive's own API docs), so polling is the only option here, not a
-    // fallback for a push mechanism that doesn't exist.
+    // external scheduler (cron-job.org).
+    //
+    // This is the SAFETY NET, deliberately kept enabled alongside the Drive
+    // files.watch notification path (/google/drive/notify). files.watch does
+    // exist and does push when a watched file changes, but a notification is
+    // only ever a promptness signal -- it can be lost, delayed, duplicated, or
+    // arrive with no useful detail, and it names no comment. Polling remains
+    // what guarantees each doc is eventually fully processed. Both paths run
+    // the SAME single-document pass (processGoogleDocComments), so they cannot
+    // drift in what a pass means.
     if (url.pathname === "/admin/poll-google-doc-comments" && request.method === "GET") {
       const key = url.searchParams.get("key");
       if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
@@ -334,6 +356,32 @@ export default {
           headers: { "content-type": "application/json" },
         });
       }
+    }
+
+    // Admin: register a Drive files.watch channel for EXACTLY ONE explicitly
+    // named Proposal Doc. Deliberately opt-in and one-at-a-time, validated
+    // against this system's own watched-doc registry, Proposal-only. See
+    // googleDriveWatch.ts handleRegisterDriveWatchRequest for the full
+    // contract. Registering does NOT enable automatic registration and does
+    // NOT touch the polling safety net. IMPLEMENTING this endpoint is not
+    // permission to call it against a live Proposal Doc.
+    if (url.pathname === "/admin/register-drive-watch" && request.method === "GET") {
+      return handleRegisterDriveWatchRequest(request, env);
+    }
+
+    // Admin: renew every Drive watch channel that is due, for cron-job.org to
+    // call DAILY (Drive watch channels expire within at most 24h). Each due
+    // channel is replaced by a NEW channel, and the old one is only superseded
+    // AFTER the replacement is registered and persisted. See
+    // googleDriveWatch.ts handleRenewDriveWatchesRequest.
+    if (url.pathname === "/admin/renew-drive-watches" && request.method === "GET") {
+      return handleRenewDriveWatchesRequest(request, env);
+    }
+
+    // Diagnostic: the current state of the Drive watch surface -- every channel
+    // record WITHOUT secrets, plus whether automatic registration is on.
+    if (url.pathname === "/admin/drive-watch-status" && request.method === "GET") {
+      return handleDriveWatchStatusRequest(request, env);
     }
 
     // Diagnostic: when did the cron trigger last actually run, per the

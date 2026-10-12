@@ -26,9 +26,24 @@ binding = "AI"
 name = "WORK_SESSION"
 class_name = "WorkSession"
 
+# The per-Doc lock for the Drive comment-notification path (driveDocLock.ts).
+# Instances are addressed by document id, so duplicate notifications for the
+# SAME document serialize while separate documents never contend. One class,
+# one concern: it records a bounded claim and hands back a token; the actual
+# comment pass runs in the calling Worker's background, never inside the DO.
+[[durable_objects.bindings]]
+name = "DRIVE_DOC_LOCK"
+class_name = "DriveDocLock"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["WorkSession"]
+
+# Additive migration for the DriveDocLock class. Deliberately separate from v1
+# so the existing WorkSession data is untouched by this change.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["DriveDocLock"]
 
 [[kv_namespaces]]
 binding = "STATE_KV"
@@ -91,6 +106,14 @@ OPERATIONS_TOPIC_ID = "588"
 # wiping the dashboard-only value on every push once Workers Builds
 # started deploying on every merge.
 GOOGLE_OAUTH_CLIENT_ID = "495614288300-5k7fd812fk86jutgamtbhs5s1kbjvved.apps.googleusercontent.com"
+# This Worker's own public base URL -- where Drive is told to push files.watch
+# notifications (see googleDriveWatch.ts driveNotifyAddress). Plain var, not a
+# secret: it is the Worker's own address, already public in every request.
+# Declared here rather than dashboard-only, for the same reason as
+# GOOGLE_OAUTH_CLIENT_ID above: `wrangler deploy` treats [vars] as the
+# complete set of plain-text environment variables and deletes any
+# dashboard-added var not declared here on every deploy.
+WORKER_PUBLIC_BASE_URL = "https://enig-agent.martnkpogo.workers.dev"
 # Turso fallback database URL -- the secondary persistence store behind the
 # KV-primary design (KV remains primary; Turso takes over only classified
 # KV write failures such as the per-day write quota). Plain var, not a
