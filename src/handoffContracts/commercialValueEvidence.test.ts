@@ -7,8 +7,8 @@ import {
   parseCommercialValueEvidenceBlock,
   stripCommercialValueEvidenceBlock,
 } from "./commercialValueEvidence";
-import { extractLabeledBlock } from "../../labeledBlock";
-import type { CommercialEvidence } from "../../types";
+import { extractLabeledBlock } from "../labeledBlock";
+import type { CommercialEvidence } from "../types";
 
 const EVIDENCE: CommercialEvidence = {
   financialConsequence: "Late deliveries erode the wholesale channel.",

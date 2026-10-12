@@ -3,7 +3,7 @@ import { getPageContent, plainText, queryDataSource, relationIds } from "../../n
 import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../sales/callNotesRecord";
-import { stripCommercialValueEvidenceBlock } from "../sales/commercialValueEvidence";
+import { stripCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { parseRecordApprovalMarker } from "../sales/callNotesMarker";
 
 /**

@@ -15,7 +15,7 @@ import { strategyManifest, interventionApprovalCallback } from "./strategy/strat
 import * as sales from "./sales/salesExecutive";
 import * as strategy from "./strategy/strategyAnalyst";
 import * as salesProposal from "./sales/tokenSafeProposal";
-import type { StrategyProposal } from "./strategy/strategyAnalyst";
+import type { StrategyProposal } from "../handoffContracts/strategyBoundary";
 import type { Env, WorkState } from "../types";
 
 /**

@@ -22,9 +22,10 @@ import {
 } from "./tokenSafeProposal";
 import type { Env, WorkState } from "../../types";
 import { installStatePersistence } from "../../runtime/workPersistence";
-import type { StrategyProposal } from "../strategy/strategyAnalyst";
-import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../strategy/strategyAnalyst";
-import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END, handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
+import type { StrategyProposal } from "../../handoffContracts/strategyBoundary";
+import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
+import { handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
 
 // ---------------------------------------------------------------------------
 // Fixtures: the live MAT-20 slice (HO-64, E-20/MAT-20, GHS 420,000).

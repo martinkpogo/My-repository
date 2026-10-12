@@ -11,18 +11,16 @@ import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
-import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
-import { parseCommercialValueEvidenceBlock, type CommercialValueEvidenceRecord } from "../sales/commercialValueEvidence";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
+import { extractLabeledBlock } from "../../labeledBlock";
+import { parseCommercialValueEvidenceBlock, type CommercialValueEvidenceRecord } from "../../handoffContracts/commercialValueEvidence";
 import { resolveMatterFromText } from "../../identityResolution";
 import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import type { ApprovalProof } from "../../types";
 import { kvPut } from "./../../kvStore";
 
-/** Opens Finance's own commercial-judgment block within the Finance -> Sales Handoff's combined "Verified Facts & Sources" text -- see handleQuoteApproval. */
-export const FINANCE_JUDGMENT_START = "=== FINANCE COMMERCIAL JUDGMENT ===";
-/** Closes Finance's commercial-judgment block -- see FINANCE_JUDGMENT_START. */
-export const FINANCE_JUDGMENT_END = "=== END FINANCE COMMERCIAL JUDGMENT ===";
 
 interface RawValueAtStakeJudgement {
   value?: number;

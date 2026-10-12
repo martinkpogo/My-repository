@@ -9,15 +9,15 @@ import {
   handleDirectRequestContext,
   handleValueContextClarification,
   validateFinanceJudgement,
-  FINANCE_JUDGMENT_START,
-  FINANCE_JUDGMENT_END,
 } from "./valueBasedPricingAssessor";
-import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END, extractLabeledBlock } from "../strategy/strategyAnalyst";
+import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
+import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
+import { extractLabeledBlock } from "../../labeledBlock";
 import {
   serializeCommercialValueEvidenceBlock,
   COMMERCIAL_VALUE_EVIDENCE_START,
   COMMERCIAL_VALUE_EVIDENCE_END,
-} from "../sales/commercialValueEvidence";
+} from "../../handoffContracts/commercialValueEvidence";
 // The Finance -> Sales quote contract is only meaningful END TO END: Finance
 // writes the labeled block, Sales parses it. Importing Sales's real parser here
 // is what stops the two halves drifting apart -- see the "writer-to-parser
