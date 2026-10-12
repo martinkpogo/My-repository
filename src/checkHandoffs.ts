@@ -313,6 +313,22 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
  * deliberately not added for this, since the marker already uniquely
  * identifies the Handoff without a live database change.
  */
+/**
+ * One Operations notice per call-notes Handoff that reaches Runtime Sales
+ * after LOG-987, so it is never silently ignored -- and never re-sent every
+ * discovery cycle (KV key per Handoff, kept 30 days).
+ */
+async function notifyRetiredCallNotesHandoff(env: Env, handoff: { id: string; properties?: Record<string, any> }): Promise<void> {
+  const key = `sales_callnotes_retired_notice:${handoff.id}`;
+  if (await kvGet(env, key)) return;
+  const matterToken = plainText(handoff.properties?.Matter_Token) || "(unknown)";
+  await sendOperationsMessage(
+    env,
+    `⛔ Call-notes Handoff for ${matterToken} was not picked up by Runtime Sales.\n\nRuntime Sales no longer qualifies or progresses Leads (LOG-987). Run *sales-fit-assessment*, then *sales-progression*, in Isolated Sales for this Matter. The Handoff was left as it is.`,
+  );
+  await kvPut(env, key, new Date().toISOString(), { expirationTtl: 30 * 24 * 60 * 60 });
+}
+
 function isCallNotesHandoff(handoff: { properties?: Record<string, any> }): boolean {
   const marker = /requiredCategory:\s*call_notes\b/i;
   return marker.test(plainText(handoff.properties?.Reason)) || marker.test(plainText(handoff.properties?.Handoff));
@@ -360,6 +376,17 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
 
   let scheduled = 0;
   for (const handoff of pending) {
+    // LOG-987: Runtime Sales does not qualify. A call-notes Handoff to Sales
+    // is not picked up, registered or claimed here -- fit assessment and
+    // progression belong to Isolated Sales. Martin is told once per Handoff
+    // and the record is left exactly as found.
+    if (isCallNotesHandoff(handoff)) {
+      await notifyRetiredCallNotesHandoff(env, handoff).catch((err) =>
+        console.error(`Failed to send the LOG-987 notice for call-notes Handoff ${handoff.id}`, err),
+      );
+      continue;
+    }
+
     let workId = await kvGet(env, `handoff_workitem:${handoff.id}`);
     if (!workId) {
       // No live Telegram session behind this Handoff -- e.g. created
@@ -415,21 +442,9 @@ export async function discoverPendingSalesHandoffs(env: Env, paused: boolean = S
       continue;
     }
 
-    // Not paused: a call-notes Handoff from the isolated Sales Executive
-    // project goes to the token-safe qualification pickup. Every other Sales
-    // Handoff (including Finance-quote and generic proposal Handoffs) goes to
-    // the Runtime Sales Executive's token-safe Proposal flow.
-    if (isCallNotesHandoff(handoff)) {
-      const stub = getSessionStub(env, workId);
-      try {
-        await stub.schedulePickup("sales_call_notes");
-        scheduled++;
-      } catch (err) {
-        await notifyMartinOfDiscoveryFailure(env, handoff.id, err);
-      }
-      continue;
-    }
-
+    // Not paused: every Sales Handoff that reaches here (Finance-quote and
+    // generic proposal Handoffs; call-notes ones were turned away above) goes
+    // to the Runtime Sales Executive's token-safe Proposal flow (LOG-808).
     const stub = getSessionStub(env, workId);
     try {
       await stub.schedulePickup("sales_proposal");

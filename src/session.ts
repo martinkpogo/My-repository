@@ -318,20 +318,17 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
-   * Runtime Sales Executive pickup of a call-notes Handoff created by the
-   * isolated Sales Executive Claude project (Section 6A of its Project
-   * Instructions) -- runs the commercial-value-evidence-extraction and
-   * qualification reasoning against the Handoff's already de-identified
-   * content. Invoked only by checkHandoffs.ts's Sales discovery, never
-   * directly. Mirrors runFinancePickup/runTokenSafeProposal exactly.
+   * Retired by LOG-987: Runtime Sales no longer qualifies call notes --
+   * Isolated Sales owns fit assessment and progression. Kept as a pickup kind
+   * only so an alarm armed before the change is answered honestly.
    */
   async runCallNotesPickup(): Promise<WorkState> {
-    return this.execute((state) =>
-      runWithAdoptedOwnership(this.env, state, "Sales", (adopted) =>
-        this.runUnderRecordedSkills(adopted, (skills) => sales.handleCallNotesHandoffPickup(this.env, adopted, skills)),
-      ),
-    );
+    // LOG-987: Runtime Sales no longer qualifies call notes. Discovery stops
+    // scheduling this pickup; an alarm already armed before that change is
+    // answered here without claiming the Handoff or touching any record.
+    return this.execute((state) => sales.refuseRetiredSalesStep(this.env, state, "call-notes qualification"));
   }
+
 
   /**
    * GOVERNED GOOGLE DOCS SMOKE (LOG-1069 live verification; Martin-approved

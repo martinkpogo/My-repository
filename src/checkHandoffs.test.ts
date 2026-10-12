@@ -615,11 +615,11 @@ test("A non-Finance Sales Handoff keeps the existing paused behaviour (detect + 
 // any particular surrounding wording, so this doesn't silently regress
 // again.
 
-test("Not paused: a call-notes Handoff (requiredCategory: call_notes) runs the call-notes pickup flow, not the old drafting path", async (t) => {
+test("LOG-987: a call-notes Handoff (requiredCategory: call_notes) is NOT picked up by Runtime Sales -- no Work, no pickup, one Isolated Sales notice", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
-  mockSalesHandoffFetch(t, {
+  const { operationsMessages } = mockSalesHandoffFetch(t, {
     Reason: {
       rich_text: [{ plain_text: "Call Notes (Matter: MAT-20). requiredCategory: call_notes. De-identified call notes bundle prepared per Section 6A." }],
     },
@@ -627,17 +627,27 @@ test("Not paused: a call-notes Handoff (requiredCategory: call_notes) runs the c
 
   const scheduled = await discoverPendingSalesHandoffs(env, false);
 
-  assert.deepStrictEqual(calls.schedulePickup, ["sales_call_notes"], "discovery must schedule the call-notes pickup, not run it inline");
-  assert.strictEqual(calls.runCallNotesPickup, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
-  assert.strictEqual(calls.runTokenSafeProposal, 0);
-  assert.strictEqual(scheduled, 1);
+  assert.deepStrictEqual(calls.schedulePickup, [], "Runtime Sales no longer schedules call-notes qualification");
+  assert.strictEqual(calls.init.length, 0, "no Work is created for it");
+  assert.strictEqual(calls.runCallNotesPickup, 0);
+  assert.strictEqual(calls.runTokenSafeProposal, 0, "and it is never sent to the Proposal flow instead");
+  assert.strictEqual(scheduled, 0);
+  const notices = operationsMessages.filter((m) => m.includes("LOG-987"));
+  assert.strictEqual(notices.length, 1, "Martin is told once");
+  assert.match(notices[0], /sales-fit-assessment/);
+  assert.match(notices[0], /MAT-20/);
+  assert.strictEqual(await env.STATE_KV.get("handoff_workitem:handoff-sales-1"), null, "no handoff_workitem mapping is recorded");
+
+  // The next discovery cycle does not notify again.
+  await discoverPendingSalesHandoffs(env, false);
+  assert.strictEqual(operationsMessages.filter((m) => m.includes("LOG-987")).length, 1, "the notice is sent once per Handoff, not every cycle");
 });
 
-test("Detection matches on free-text Reason wording, not just the literal opening phrase -- regression test for HO-69's actual wording", async (t) => {
+test("Detection matches on free-text Reason wording, not just the literal opening phrase -- regression test for HO-69's actual wording (still recognised, so it is turned away under LOG-987)", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
-  mockSalesHandoffFetch(t, {
+  const { operationsMessages } = mockSalesHandoffFetch(t, {
     Reason: {
       rich_text: [
         {
@@ -650,15 +660,15 @@ test("Detection matches on free-text Reason wording, not just the literal openin
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.deepStrictEqual(calls.schedulePickup, ["sales_call_notes"], "must still schedule call-notes pickup even without the literal 'Call Notes (Matter:' opening phrase");
-  assert.strictEqual(calls.runCallNotesPickup, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
+  assert.deepStrictEqual(calls.schedulePickup, [], "recognised as call notes even without the literal opening phrase -- and therefore not picked up");
+  assert.ok(operationsMessages.some((m) => m.includes("LOG-987")));
 });
 
-test("Detection matches the marker in the Handoff title when Reason doesn't carry it -- regression test for HO-73's actual shape (marker only in the title, Reason free of it entirely)", async (t) => {
+test("Detection matches the marker in the Handoff title when Reason doesn't carry it -- regression test for HO-73's actual shape (still recognised, so it is turned away under LOG-987)", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
-  mockSalesHandoffFetch(t, {
+  const { operationsMessages } = mockSalesHandoffFetch(t, {
     Handoff: { title: [{ plain_text: "Call notes: ENT-21 / MAT-21 for qualification review [requiredCategory: call_notes]" }] },
     Reason: {
       rich_text: [
@@ -669,11 +679,12 @@ test("Detection matches the marker in the Handoff title when Reason doesn't carr
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.deepStrictEqual(calls.schedulePickup, ["sales_call_notes"], "must schedule call-notes pickup when the marker is only in the title, not Reason");
-  assert.strictEqual(calls.runCallNotesPickup, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
+  assert.deepStrictEqual(calls.schedulePickup, [], "recognised by the title marker -- and therefore not picked up, never mistaken for a Proposal Handoff");
+  assert.strictEqual(calls.runTokenSafeProposal, 0);
+  assert.ok(operationsMessages.some((m) => m.includes("LOG-987")));
 });
 
-test("Paused: a call-notes Handoff follows the existing paused behaviour (detect + notify only, no pickup)", async (t) => {
+test("Paused: a call-notes Handoff is turned away exactly as when unpaused (LOG-987 notice, no Work, no pickup)", async (t) => {
   const { workSession, calls } = createMockWorkSession();
   const env = fakeEnv();
   (env as any).WORK_SESSION = workSession;
@@ -683,10 +694,11 @@ test("Paused: a call-notes Handoff follows the existing paused behaviour (detect
 
   const scheduled = await discoverPendingSalesHandoffs(env, true);
 
-  assert.deepStrictEqual(calls.schedulePickup, [], "no call-notes pickup may be scheduled automatically while Sales is paused");
-  assert.strictEqual(calls.runCallNotesPickup, 0, "call-notes pickup must not run automatically while Sales is paused");
+  assert.deepStrictEqual(calls.schedulePickup, []);
+  assert.strictEqual(calls.init.length, 0);
   assert.strictEqual(scheduled, 0);
-  assert.ok(operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
+  assert.ok(operationsMessages.some((m) => m.includes("LOG-987")));
+  assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")), "it is not presented as a Sales Handoff ready for Runtime work");
 });
 
 // --- Alarm-scheduled pickup -------------------------------------------------

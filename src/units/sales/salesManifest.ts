@@ -508,7 +508,9 @@ export const salesProposalDecisionCallback: ApprovalCallbackHandler = (env, stat
 const salesExecutiveCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [ENTITY_NEW_CALLBACK_PREFIX]: sales.handleEntityCreationApproval,
   [MATTER_NEW_CALLBACK_PREFIX]: sales.handleMatterCreationApproval,
-  [QUALIFY_CALLBACK_PREFIX]: sales.handleLeadToProspectApproval,
+  // LOG-987: Runtime Sales no longer performs Lead -> Prospect progression;
+  // a stale qualify button is answered with the Isolated Sales pointer.
+  [QUALIFY_CALLBACK_PREFIX]: sales.retiredQualifyCallback,
   [ENTITY_CHOICE_CALLBACK_PREFIX]: entityChoiceCallback,
   [MATTER_CHOICE_CALLBACK_PREFIX]: matterChoiceCallback,
   // salesProposal.PROPOSAL_CALLBACK_ACTION ("salesprop"), spelled as the
@@ -537,8 +539,11 @@ const salesExecutiveHat: HatManifest<SalesExecutiveAction> = {
   // Lead Generation Specialist keeps an empty set: it has no multi-turn
   // hold/resume flow.
   awaitingHandlers: {
-    call_notes: sales.handleCallNotes,
-    intervention: sales.handleInterventionText,
+    // LOG-987: call-notes qualification and the Sales -> Strategy Handoff
+    // (the `intervention` reply) belong to Isolated Sales. Both replies are
+    // kept as keys so a Work already waiting on them is answered honestly.
+    call_notes: sales.retiredCallNotesReply,
+    intervention: sales.retiredInterventionReply,
     matter_redo_reason: sales.handleMatterRedoReason,
     entity_redo_reason: sales.handleEntityRedoReason,
     sales_proposal_revision: salesProposal.handleSalesProposalRevisionText,

@@ -253,8 +253,9 @@ test("salesManifest: Sales Executive's awaitingHandlers resumes the same six con
   );
   // Identity assertions: the manifest entry IS the same function the old
   // handleTextReply switch case called -- same body, same arguments.
-  assert.strictEqual(hat.awaitingHandlers.call_notes, sales.handleCallNotes);
-  assert.strictEqual(hat.awaitingHandlers.intervention, sales.handleInterventionText);
+  // LOG-987: these two replies now answer with the Isolated Sales pointer.
+  assert.strictEqual(hat.awaitingHandlers.call_notes, sales.retiredCallNotesReply);
+  assert.strictEqual(hat.awaitingHandlers.intervention, sales.retiredInterventionReply);
   assert.strictEqual(hat.awaitingHandlers.matter_redo_reason, sales.handleMatterRedoReason);
   assert.strictEqual(hat.awaitingHandlers.entity_redo_reason, sales.handleEntityRedoReason);
   assert.strictEqual(hat.awaitingHandlers.sales_proposal_revision, salesProposal.handleSalesProposalRevisionText);
@@ -400,34 +401,59 @@ test("findCallbackHandler resolves matternew on Sales Executive and genuinely de
   assert.strictEqual(result.awaiting, "matter_redo_reason");
 });
 
-test("findCallbackHandler resolves qualify on Sales Executive and genuinely delegates to handleLeadToProspectApproval -- rejecting a pending qualification holds on call_notes, proving real delegation", async (t) => {
-  mockTelegramFetch(t);
-  const hat = salesManifest.hats["Sales Executive"];
-  const handler = findCallbackHandler(QUALIFY_CALLBACK_PREFIX, hat);
-  assert.ok(handler, "qualify must resolve on Sales Executive's own manifest entry");
 
-  const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_qualification_approval", entityName: "Acme Co" });
-  const result = await handler(fakeEnv(), state, false);
-
-  assert.strictEqual(result.stage, "qualification_hold");
-  assert.strictEqual(result.awaiting, "call_notes");
-});
-
-test("findCallbackHandler resolves qualify on Sales Executive and genuinely delegates -- rejecting a pending qualification holds on call_notes, proving real delegation", async (t) => {
-  mockTelegramFetch(t);
-  const hat = salesManifest.hats["Sales Executive"];
-  const handler = findCallbackHandler(QUALIFY_CALLBACK_PREFIX, hat);
-  assert.ok(handler, "qualify must resolve on Sales Executive's own manifest entry");
-
-  const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_qualification_approval", entityName: "Acme Co" });
-  const result = await handler(fakeEnv(), state, false);
-
-  assert.strictEqual(result.stage, "qualification_hold");
-  assert.strictEqual(result.awaiting, "call_notes");
-});
 
 test("salesManifest: registers Stage 1/2 SemanticTaskIds required by UnitManifest's shape", () => {
   assert.strictEqual(salesManifest.intakeClassificationTaskId, "sales.intake_classification");
   assert.strictEqual(salesManifest.actionClassificationTaskId, "sales.hat_action_decision");
   assert.ok(salesManifest.intakeIntroLine.trim().length > 0);
+});
+
+test("findCallbackHandler resolves qualify on Sales Executive to the LOG-987 refusal -- a stale qualification card closes the Work and writes nothing", async (t) => {
+  mockTelegramFetch(t);
+  const hat = salesManifest.hats["Sales Executive"];
+  const handler = findCallbackHandler(QUALIFY_CALLBACK_PREFIX, hat);
+  assert.ok(handler, "qualify must still resolve on Sales Executive, so an old button is answered rather than ignored");
+  assert.strictEqual(handler, sales.retiredQualifyCallback);
+
+  for (const approved of [true, false]) {
+    const state = fakeWorkState({ hat: "Sales Executive", stage: "awaiting_qualification_approval", awaiting: "call_notes", entityName: "Acme Co" });
+    const result = await handler(fakeEnv(), state, approved);
+    assert.strictEqual(result.stage, "cancelled", `approve=${approved}: Runtime performs no progression; the Work is closed`);
+    assert.strictEqual(result.awaiting, undefined);
+  }
+});
+
+test("LOG-987: the retired qualify / call_notes / intervention entry points never write an Entity, Matter or Handoff -- even on Approve", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const notionWrites: { method: string; url: string; parent?: string }[] = [];
+  const telegramTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    if (u.includes("api.telegram.org")) {
+      telegramTexts.push(JSON.parse(init.body).text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (u.includes("api.notion.com") && method !== "GET") {
+      const body = init?.body ? JSON.parse(init.body) : {};
+      notionWrites.push({ method, url: u, parent: body.parent?.data_source_id });
+      return new Response(JSON.stringify({ id: "log-page", url: "https://notion.so/x", properties: {} }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const hat = salesManifest.hats["Sales Executive"];
+  const base = { hat: "Sales Executive", entityId: "entity-page", matterId: "matter-page", entityName: "Acme Co", matterToken: "MAT-20" };
+  await hat.callbackHandlers!.qualify(fakeEnv(), fakeWorkState({ ...base, stage: "awaiting_qualification_approval" }), true);
+  await hat.awaitingHandlers.call_notes(fakeEnv(), fakeWorkState({ ...base, awaiting: "call_notes" }), "notes text", NO_ACTION_SKILLS);
+  await hat.awaitingHandlers.intervention(fakeEnv(), fakeWorkState({ ...base, awaiting: "intervention" }), "situation text", NO_ACTION_SKILLS);
+
+  // The only Notion writes allowed are Activity Log entries (the refusal record).
+  const governedWrites = notionWrites.filter((w) => w.method === "PATCH" || (w.parent && w.parent !== "activity-log-ds"));
+  assert.deepStrictEqual(governedWrites, [], "no Entity/Matter status change and no Handoff create");
+  assert.strictEqual(telegramTexts.filter((m) => m.includes("LOG-987") && m.includes("sales-fit-assessment")).length, 3, "each refusal points Martin to Isolated Sales");
 });

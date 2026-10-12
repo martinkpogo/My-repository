@@ -37,7 +37,8 @@ import { kvDelete, kvGet, kvPut } from "./kvStore";
 export const SALES_DIRECT_ENTRY_PAUSED = true;
 
 // Gates the Sales Handoff PICKUP mechanism only (checkHandoffs.ts's
-// discoverPendingSalesHandoffs -- runTokenSafeProposal/runCallNotesPickup).
+// discoverPendingSalesHandoffs -- runTokenSafeProposal; call-notes Handoffs
+// are turned away regardless of this flag, LOG-987).
 // Unlike SALES_DIRECT_ENTRY_PAUSED above, this never
 // touches real client identity -- it only ever processes what's already
 // de-identified on a Handoff record (Entity_Token/Matter_Token, sanitized
