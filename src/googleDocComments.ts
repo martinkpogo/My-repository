@@ -10,6 +10,7 @@ import { logActivity } from "./log";
 import { getSessionStub } from "./sessionRouting";
 import { sendOperationsMessage } from "./telegram";
 import { kvGet, kvPut, maybeSweepKvFallback } from "./kvStore";
+import { DRIVE_DOC_LOCK_TTL_MS, driveDocLockStub } from "./driveDocLockState";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
@@ -624,7 +625,7 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
 export type DocCommentDiagnostic = {
   documentId: string;
   commentId: string | null;
-  outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception" | "approval_cycle_synced";
+  outcome: CommentOutcome | "token_unavailable" | "comments_list_failed" | "comments_fetched" | "persistence_unavailable" | "unhandled_exception" | "approval_cycle_synced" | "skipped_concurrent_pass";
   detail?: string;
 };
 
@@ -762,6 +763,53 @@ export async function processGoogleDocComments(env: Env, doc: WatchedGoogleDoc):
 }
 
 /**
+ * The poller's per-doc step: processGoogleDocComments under the SAME per-Doc
+ * lock (DriveDocLock) the notification receiver takes, so the two entry points
+ * can never run overlapping passes on one document.
+ *
+ * Deliberate differences from the notification path, both in service of the
+ * poller being the safety net:
+ *  - No cooldown (0). A poll skips a doc ONLY while another pass on it is
+ *    genuinely in flight -- that pass is re-reading the complete comment list
+ *    anyway, and the next poll covers anything it missed. A recent-but-finished
+ *    pass never causes a poll to skip.
+ *  - An unbound or unreachable lock does NOT stop the poll. The notification
+ *    path refuses to run without the lock, so when the lock is unavailable no
+ *    notification pass can be holding it; refusing here too would silently
+ *    disable the safety net exactly when the newer path is impaired.
+ *
+ * The claim is released in `finally` with its own token, and every claim also
+ * expires on DRIVE_DOC_LOCK_TTL_MS, so a failed or hung poll pass can never
+ * leave a permanent lock.
+ */
+export async function processGoogleDocCommentsForPoll(env: Env, doc: WatchedGoogleDoc): Promise<ProcessDocCommentsResult> {
+  const stub = driveDocLockStub(env, doc.documentId);
+  if (!stub) return processGoogleDocComments(env, doc);
+
+  let claim: { token: string } | null;
+  try {
+    claim = await stub.tryAcquire(DRIVE_DOC_LOCK_TTL_MS, 0);
+  } catch (err) {
+    console.error(`pollGoogleDocComments: per-Doc lock unavailable for ${doc.documentId}; polling proceeds (safety net)`, err);
+    return processGoogleDocComments(env, doc);
+  }
+
+  if (!claim) {
+    return {
+      documentId: doc.documentId,
+      commentsProcessed: 0,
+      diagnostics: [{ documentId: doc.documentId, commentId: null, outcome: "skipped_concurrent_pass", detail: "another pass on this document is in flight; the next poll re-checks it" }],
+    };
+  }
+
+  try {
+    return await processGoogleDocComments(env, doc);
+  } finally {
+    await stub.release(claim.token).catch((err: unknown) => console.error(`pollGoogleDocComments: could not release the per-Doc lock for ${doc.documentId}`, err));
+  }
+}
+
+/**
  * Polls every doc this system has created (see registerWatchedGoogleDoc)
  * for new, unresolved comments from the doc's own authorized account, and
  * applies any that resolve to a specific, unambiguous text replacement.
@@ -804,8 +852,10 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
   const diagnostics: DocCommentDiagnostic[] = [];
 
   for (const doc of docs) {
-    // The same single-document pass the Drive notification handler runs.
-    const result = await processGoogleDocComments(env, doc);
+    // The same single-document pass the Drive notification handler runs,
+    // under the same per-Doc lock, so a notification pass and a poll pass can
+    // never overlap on one document.
+    const result = await processGoogleDocCommentsForPoll(env, doc);
     commentsProcessed += result.commentsProcessed;
     diagnostics.push(...result.diagnostics);
   }

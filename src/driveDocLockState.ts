@@ -35,6 +35,36 @@
  * it exists to beat.
  */
 
+import type { Env } from "./types";
+
+/**
+ * How long one document's pass may hold its lock before the lock is treated as
+ * abandoned. This is the bound that keeps a crashed or hung execution from
+ * permanently blocking future processing of that doc: a pass that never
+ * releases simply expires, and the next notification or poll proceeds. Chosen
+ * generously above any realistic pass duration so a live pass is never stolen
+ * out from under itself.
+ */
+export const DRIVE_DOC_LOCK_TTL_MS = 5 * 60 * 1000;
+
+/** The minimum spacing between two accepted NOTIFICATION passes for the same doc, so a burst of duplicates collapses into one run plus one catch-up. The poller does not apply it (see pollGoogleDocComments). */
+export const DRIVE_DOC_COOLDOWN_MS = 3 * 1000;
+
+/**
+ * Returns the lock stub for one document, or null when the namespace is not
+ * bound. Shared by BOTH entry points that run a document's comment pass -- the
+ * Drive notification receiver and the polling safety net -- so they contend on
+ * the same per-Doc instance. The cast matches the existing getSessionStub
+ * convention in sessionRouting.ts: the RPC surface is defined by the
+ * DriveDocLock class, and TypeScript's cross-module DO typing cannot see it
+ * from here.
+ */
+export function driveDocLockStub(env: Env, documentId: string): any | null {
+  const ns = env.DRIVE_DOC_LOCK;
+  if (!ns) return null;
+  return ns.get(ns.idFromName(documentId)) as any;
+}
+
 /** The minimal storage surface the lock needs -- DurableObjectStorage satisfies it, and so does a test's Map-backed fake. */
 export interface DriveDocLockStorage {
   get<T>(key: string): Promise<T | undefined>;

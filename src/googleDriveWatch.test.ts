@@ -1044,3 +1044,291 @@ test("trust 3. a non-POST to the notification route is refused", async () => {
   const res = await handleDriveNotifyRequest(notifyRequest({}, "GET"), fakeEnv, { waitUntil() {} } as any);
   assert.strictEqual(res.status, 405);
 });
+
+// ===========================================================================
+// 11. Notification / poller contention (shared per-Doc lock)
+// ===========================================================================
+
+/** An expiration safely in the future regardless of when the suite runs (Drive returns epoch millis as a string). */
+const FUTURE_EXPIRATION_MS = "4102444800000"; // 2100-01-01
+
+test("contend 1. while a notification pass holds a doc's lock, the poller SKIPS that doc rather than running an overlapping pass", async (t) => {
+  const { fakeEnv, lock, syncCalls } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  const { pollGoogleDocComments } = await import("./googleDocComments");
+
+  let listCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [], onCommentsList: () => listCalls++ });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // A notification pass is mid-flight on DOC_A.
+  const held = await (lock as any).get(DOC_A).tryAcquire(DRIVE_DOC_LOCK_TTL_MS, DRIVE_DOC_COOLDOWN_MS);
+  assert.ok(held);
+
+  const skipped = await pollGoogleDocComments(fakeEnv);
+  assert.strictEqual(skipped.docsChecked, 1, "the poller still enumerates the doc");
+  assert.strictEqual(listCalls, 0, "no comment read happens while another pass holds the doc");
+  assert.strictEqual(syncCalls.length, 0, "no approval-cycle sync from an overlapping pass");
+  assert.ok(skipped.diagnostics.some((d: any) => d.outcome === "skipped_concurrent_pass"));
+
+  // Once the notification pass releases, the very next poll runs normally --
+  // the poller has NO cooldown, so a just-finished pass never makes it skip.
+  await (lock as any).get(DOC_A).release(held.token);
+  const ran = await pollGoogleDocComments(fakeEnv);
+  assert.strictEqual(listCalls, 1, "the poll runs as soon as the lock is free");
+  assert.ok(ran.diagnostics.some((d: any) => d.outcome === "approval_cycle_synced"));
+});
+
+test("contend 2. while a POLL pass holds a doc's lock, a notification for that doc does not start an overlapping pass", async (t) => {
+  const { fakeEnv, lock } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  await seedChannel(fakeEnv, { channelId: "chan-c2", documentId: DOC_A, expiration: new Date(Number(FUTURE_EXPIRATION_MS)).toISOString() });
+
+  let listCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [], onCommentsList: () => listCalls++ });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // The poller's claim (no cooldown) is live.
+  const pollClaim = await (lock as any).get(DOC_A).tryAcquire(DRIVE_DOC_LOCK_TTL_MS, 0);
+  assert.ok(pollClaim);
+
+  const { ctx, settle } = makeCtx();
+  const res = await handleDriveNotifyRequest(
+    notifyRequest({ "X-Goog-Channel-ID": "chan-c2", "X-Goog-Channel-Token": "secret-for-chan-c2", "X-Goog-Resource-State": "update" }),
+    fakeEnv,
+    ctx,
+  );
+  assert.strictEqual(res.status, 200, "Drive is still acknowledged");
+  await settle();
+  assert.strictEqual(listCalls, 0, "the notification pass did not run alongside the poll pass");
+});
+
+test("contend 3. the poller RELEASES the lock after a successful pass and after a pass that throws", async (t) => {
+  const { fakeEnv, lock } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  const { processGoogleDocCommentsForPoll } = await import("./googleDocComments");
+  const { getWatchedGoogleDoc } = await import("./googleOAuth");
+  const doc = (await getWatchedGoogleDoc(fakeEnv, DOC_A))!;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [] });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // Success path.
+  await processGoogleDocCommentsForPoll(fakeEnv, doc);
+  const afterSuccess = await (lock as any).get(DOC_A).tryAcquire(DRIVE_DOC_LOCK_TTL_MS, 0);
+  assert.ok(afterSuccess, "the lock is free after a successful poll pass");
+  await (lock as any).get(DOC_A).release(afterSuccess.token);
+
+  // Failure path: the pass throws out of processGoogleDocComments (state read failure).
+  const kv = fakeEnv.STATE_KV as any;
+  const realGet = kv.get.bind(kv);
+  kv.get = async () => {
+    throw new Error("KV unavailable");
+  };
+  await assert.rejects(() => processGoogleDocCommentsForPoll(fakeEnv, doc), /KV unavailable/, "a failed pass is surfaced, not swallowed");
+  kv.get = realGet;
+  const afterFailure = await (lock as any).get(DOC_A).tryAcquire(DRIVE_DOC_LOCK_TTL_MS, 0);
+  assert.ok(afterFailure, "a pass that threw still released its lock -- no permanent lock");
+});
+
+test("contend 4. the polling safety net still runs when the lock namespace is unbound or unreachable", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [] });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const { pollGoogleDocComments } = await import("./googleDocComments");
+
+  const unbound = createFakeEnv({ DRIVE_DOC_LOCK: undefined });
+  await setUpProposalDoc(unbound.fakeEnv, DOC_A);
+  await pollGoogleDocComments(unbound.fakeEnv);
+  assert.strictEqual(unbound.syncCalls.length, 1, "an unbound lock never disables polling");
+
+  const broken = createFakeEnv({
+    DRIVE_DOC_LOCK: {
+      idFromName: (n: string) => n,
+      get: () => ({
+        tryAcquire: async () => {
+          throw new Error("DO unreachable");
+        },
+        release: async () => {},
+      }),
+    },
+  });
+  await setUpProposalDoc(broken.fakeEnv, DOC_A);
+  await pollGoogleDocComments(broken.fakeEnv);
+  assert.strictEqual(broken.syncCalls.length, 1, "an unreachable lock never disables polling");
+});
+
+// ===========================================================================
+// 12. Stale channels, idempotent registration, renewal recovery
+// ===========================================================================
+
+test("stale 1. a channel past its STORED expiration is refused even with the right secret", async () => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  await seedChannel(fakeEnv, { channelId: "chan-expired", documentId: DOC_A, expiration: new Date(Date.now() - 60_000).toISOString() });
+
+  const decision = await authenticateDriveNotification(fakeEnv, "chan-expired", "secret-for-chan-expired");
+  assert.strictEqual(decision.accepted, false);
+  assert.strictEqual(decision.rejection, "channel_expired");
+
+  const bg = makeCtx();
+  const res = await handleDriveNotifyRequest(
+    notifyRequest({ "X-Goog-Channel-ID": "chan-expired", "X-Goog-Channel-Token": "secret-for-chan-expired", "X-Goog-Resource-State": "update" }),
+    fakeEnv,
+    bg.ctx,
+  );
+  assert.strictEqual(res.status, 403);
+  assert.strictEqual(bg.count, 0, "no background pass is dispatched for a stale channel");
+});
+
+test("reg 7. registration is IDEMPOTENT: a repeat call for a doc with a live channel returns it and does not call Drive again", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  let watchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ watch: { resourceId: "res-live", expiration: FUTURE_EXPIRATION_MS }, onWatch: () => watchCalls++ });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const first = await registerWatchForDocument(fakeEnv, DOC_A);
+  const second = await registerWatchForDocument(fakeEnv, DOC_A);
+  assert.ok(first.ok && second.ok);
+  if (!first.ok || !second.ok) return;
+  assert.strictEqual(watchCalls, 1, "Drive is called once");
+  assert.strictEqual(second.alreadyRegistered, true);
+  assert.strictEqual(second.channel.channelId, first.channel.channelId);
+  assert.strictEqual((await listChannels(fakeEnv)).filter((c) => c.status === "active").length, 1, "no second live channel is stacked on the doc");
+
+  // The admin endpoint reports it, still without the secret.
+  const res = await handleRegisterDriveWatchRequest(
+    new Request(`https://x/admin/register-drive-watch?key=test-admin-key-777&documentId=${DOC_A}`),
+    fakeEnv,
+  );
+  const body = (await res.json()) as any;
+  assert.strictEqual(body.alreadyRegistered, true);
+  assert.strictEqual(body.channel.secret, undefined);
+  assert.strictEqual(watchCalls, 1);
+});
+
+test("reg 8. an EXPIRED channel does not block re-registration -- recovery creates a fresh live channel", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  await seedChannel(fakeEnv, { channelId: "chan-dead", documentId: DOC_A, expiration: new Date(Date.now() - 1000).toISOString() });
+  let watchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ watch: { resourceId: "res-new", expiration: FUTURE_EXPIRATION_MS }, onWatch: () => watchCalls++ });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await registerWatchForDocument(fakeEnv, DOC_A);
+  assert.ok(result.ok && !result.alreadyRegistered);
+  assert.strictEqual(watchCalls, 1);
+});
+
+test("renew 5. a partial failure on ONE document is isolated: the others still renew, and the failed doc keeps its old channel", async (t) => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A, "work-a");
+  await setUpProposalDoc(fakeEnv, DOC_B, "work-b");
+  const soon = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  await seedChannel(fakeEnv, { channelId: "chan-a-old", documentId: DOC_A, expiration: soon });
+  await seedChannel(fakeEnv, { channelId: "chan-b-old", documentId: DOC_B, expiration: soon });
+
+  // Drive accepts both replacements, but persisting DOC_A's new channel record
+  // fails -- the partial-failure case after Drive has already said yes.
+  const realPut = mockKv.put.bind(mockKv);
+  (mockKv as any).put = async (key: string, value: string, opts?: any) => {
+    if (key.startsWith("google_drive_channel:") && key !== "google_drive_channel:chan-a-old") {
+      const rec = JSON.parse(value);
+      if (rec.documentId === DOC_A && rec.status === "active") throw new Error("KV write failed");
+    }
+    return realPut(key, value, opts);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ watch: { resourceId: "res-new", expiration: FUTURE_EXPIRATION_MS } });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const summary = await renewDriveWatchChannels(fakeEnv);
+  assert.strictEqual(summary.renewed, 1, "DOC_B still renewed");
+  assert.strictEqual(summary.failed, 1, "DOC_A's failure is counted, not absorbed");
+  assert.strictEqual(summary.outcomes.find((o) => o.documentId === DOC_A)?.status, "failed");
+  assert.strictEqual((await getChannel(fakeEnv, "chan-a-old"))?.status, "active", "DOC_A keeps its old working channel");
+  assert.strictEqual((await getChannel(fakeEnv, "chan-b-old"))?.status, "superseded");
+});
+
+test("renew 6. a failed SUPERSEDE write is recovered: the next renewal collapses the duplicate onto the live replacement without registering again", async (t) => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  await seedChannel(fakeEnv, { channelId: "chan-old", documentId: DOC_A, resourceId: "res-old", expiration: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
+
+  let watchCalls = 0;
+  const stopped: string[] = [];
+  const inner = mockDriveFetch({ watch: { resourceId: "res-new", expiration: FUTURE_EXPIRATION_MS }, onWatch: () => watchCalls++ });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("/stop")) stopped.push(JSON.parse(String(init?.body)).resourceId);
+    return inner(url, init);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // Run 1: the replacement registers and persists, but marking the old record superseded fails.
+  const realPut = mockKv.put.bind(mockKv);
+  (mockKv as any).put = async (key: string, value: string, opts?: any) => {
+    if (key === "google_drive_channel:chan-old" && JSON.parse(value).status === "superseded") throw new Error("KV write failed");
+    return realPut(key, value, opts);
+  };
+  const first = await renewDriveWatchChannels(fakeEnv);
+  assert.strictEqual(first.failed, 1, "the supersede failure is reported");
+  assert.strictEqual(watchCalls, 1);
+  assert.strictEqual((await listChannels(fakeEnv)).filter((c) => c.status === "active").length, 2, "temporarily two active records");
+
+  // Run 2 (KV healthy again): the duplicate collapses onto the live replacement; Drive is not asked for a third channel.
+  (mockKv as any).put = realPut;
+  const second = await renewDriveWatchChannels(fakeEnv);
+  assert.strictEqual(watchCalls, 1, "no extra registration -- the replacement is not due");
+  assert.strictEqual(second.failed, 0);
+  const active = (await listChannels(fakeEnv)).filter((c) => c.status === "active");
+  assert.strictEqual(active.length, 1, "converged back to exactly one live channel");
+  assert.strictEqual(active[0].resourceId, "res-new");
+  assert.strictEqual((await getChannel(fakeEnv, "chan-old"))?.supersededBy, active[0].channelId);
+  assert.ok(stopped.includes("res-old"), "the stale Drive-side channel is stopped");
+});
+
+test("auto 3. no request path registers a watch on its own: polling and notifications never call files.watch", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  await seedChannel(fakeEnv, { channelId: "chan-auto", documentId: DOC_A, expiration: new Date(Number(FUTURE_EXPIRATION_MS)).toISOString() });
+  let watchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [], onWatch: () => watchCalls++ });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const { pollGoogleDocComments } = await import("./googleDocComments");
+  await pollGoogleDocComments(fakeEnv);
+  const { ctx, settle } = makeCtx();
+  await handleDriveNotifyRequest(
+    notifyRequest({ "X-Goog-Channel-ID": "chan-auto", "X-Goog-Channel-Token": "secret-for-chan-auto", "X-Goog-Resource-State": "update" }),
+    fakeEnv,
+    ctx,
+  );
+  await settle();
+  assert.strictEqual(isAutoRegisterEnabled(fakeEnv), false);
+  assert.strictEqual(watchCalls, 0);
+});
