@@ -59,9 +59,10 @@ export interface Env {
    *
    * Optional in the type purely because a great many tests build a bare Env
    * literal that has nothing to do with this surface; the notification path
-   * treats a missing binding as a HARD STOP (runDriveDocPass refuses the run
-   * rather than proceeding unlocked), so optional here can never mean "skip the
-   * lock" -- it means "no notification pass runs at all".
+   * treats a missing binding as a HARD STOP (requestNotificationPass schedules
+   * nothing and the receiver answers 503 so Drive retries), so optional here
+   * can never mean "skip the lock" -- it means "no notification pass runs at
+   * all". The polling safety net still covers the document.
    */
   DRIVE_DOC_LOCK?: DurableObjectNamespace;
 

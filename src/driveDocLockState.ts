@@ -142,6 +142,92 @@ export async function releaseDriveDocLock(storage: DriveDocLockStorage, token: s
   await storage.delete(CLAIM_TOKEN_KEY);
 }
 
+// ---------------------------------------------------------------------------
+// Notification passes run from this Durable Object's ALARM, not from the
+// notifying request's ctx.waitUntil. Cloudflare stops waitUntil work ~30s
+// after the response; a pass killed there never reaches its `finally`, so its
+// claim stayed held until the TTL and the polling safety net (which honours
+// the same lock) skipped the document for up to DRIVE_DOC_LOCK_TTL_MS. An
+// alarm handler has a 15-minute limit, so a pass always completes and
+// releases. Same pattern as Handoff pickups (session.ts WorkSession.alarm).
+// ---------------------------------------------------------------------------
+
+/** The DO alarm surface the scheduler needs -- DurableObjectStorage satisfies it, and so does a test fake. */
+export interface DriveDocAlarmControl {
+  getAlarm(): Promise<number | null>;
+  setAlarm(scheduledTime: number): Promise<void>;
+}
+
+const PENDING_DOCUMENT_KEY = "pendingDocumentId";
+const RERUN_REQUESTED_KEY = "rerunRequested";
+
+/** How long the alarm waits before retrying when the poller holds the document's lock. */
+export const DRIVE_DOC_DEFER_MS = 15 * 1000;
+
+/**
+ * Records that this document needs a (re-)read and arms the alarm if none is
+ * pending. Duplicate and out-of-order notifications therefore collapse: while
+ * an alarm is pending or a pass is running, a notification only sets the
+ * "run again" flag, and the running pass re-arms the alarm once it ends so the
+ * change it may have missed is picked up by exactly one catch-up pass --
+ * never dropped, never run concurrently.
+ */
+export async function requestDriveDocPass(
+  storage: DriveDocLockStorage,
+  alarm: DriveDocAlarmControl,
+  documentId: string,
+  now: number = Date.now(),
+): Promise<"scheduled" | "coalesced"> {
+  await storage.put(PENDING_DOCUMENT_KEY, documentId);
+  await storage.put(RERUN_REQUESTED_KEY, true);
+  if ((await alarm.getAlarm()) !== null) return "coalesced";
+  await alarm.setAlarm(now);
+  return "scheduled";
+}
+
+/**
+ * The alarm body. Claims the document's lock (no cooldown: the "run again"
+ * flag is what collapses bursts), runs ONE complete pass, and always releases
+ * the claim in `finally`. If the poller currently holds the lock, the run is
+ * deferred rather than overlapped. `runPass` must not throw for an ordinary
+ * pass failure (it reports its own); if it does, the claim is still released
+ * and the "run again" flag is restored so Cloudflare's alarm retry re-runs it.
+ */
+export async function runDriveDocAlarm(
+  storage: DriveDocLockStorage,
+  alarm: DriveDocAlarmControl,
+  runPass: (documentId: string) => Promise<void>,
+  ttlMs: number,
+  cooldownMs: number,
+  now: () => number = Date.now,
+): Promise<"ran" | "deferred" | "idle"> {
+  const documentId = await storage.get<string>(PENDING_DOCUMENT_KEY);
+  const rerun = await storage.get<boolean>(RERUN_REQUESTED_KEY);
+  if (!documentId || !rerun) return "idle";
+
+  const claim = await tryAcquireDriveDocLock(storage, ttlMs, 0, now());
+  if (!claim) {
+    await alarm.setAlarm(now() + DRIVE_DOC_DEFER_MS);
+    return "deferred";
+  }
+
+  // Cleared BEFORE the pass reads anything, so a notification that lands
+  // while the pass runs sets it again and earns a catch-up pass.
+  await storage.put(RERUN_REQUESTED_KEY, false);
+  let completed = false;
+  try {
+    await runPass(documentId);
+    completed = true;
+  } finally {
+    if (!completed) await storage.put(RERUN_REQUESTED_KEY, true);
+    await releaseDriveDocLock(storage, claim.token);
+    if (completed && (await storage.get<boolean>(RERUN_REQUESTED_KEY))) {
+      await alarm.setAlarm(now() + cooldownMs);
+    }
+  }
+  return "ran";
+}
+
 /** Diagnostic: is this document's lock currently held, and until when? Never on a request path. */
 export async function inspectDriveDocLock(storage: DriveDocLockStorage, now: number = Date.now()): Promise<{ heldUntil: number | null; lastStartedAt: number | null }> {
   const heldUntil = (await storage.get<number>(HELD_UNTIL_KEY)) ?? null;

@@ -18,7 +18,8 @@ import {
   DRIVE_DOC_COOLDOWN_MS,
   type DriveWatchChannel,
 } from "./googleDriveWatch";
-import { tryAcquireDriveDocLock, releaseDriveDocLock } from "./driveDocLockState";
+import { tryAcquireDriveDocLock, releaseDriveDocLock, requestDriveDocPass, runDriveDocAlarm, DRIVE_DOC_DEFER_MS, DRIVE_DOC_LOCK_TTL_MS as STATE_TTL_MS, DRIVE_DOC_COOLDOWN_MS as STATE_COOLDOWN_MS } from "./driveDocLockState";
+import { runDriveDocPassBody } from "./googleDriveWatch";
 
 // ---------------------------------------------------------------------------
 // Shared fakes
@@ -71,8 +72,26 @@ function createMockLockNamespace() {
       },
     };
   };
-  const calls = { tryAcquire: 0, release: 0 };
-  return {
+  const calls = { tryAcquire: 0, release: 0, requestPass: 0 };
+  // One fake alarm per document instance, fired by hand (_fireAlarm) -- the
+  // production DriveDocLock.alarm() runs the same runDriveDocAlarm.
+  const alarms = new Map<string, number | null>();
+  const alarmFor = (name: string) => ({
+    async getAlarm() {
+      return alarms.get(name) ?? null;
+    },
+    async setAlarm(t: number) {
+      alarms.set(name, t);
+    },
+  });
+  const fireAlarm = async (name: string, env: Env) => {
+    if ((alarms.get(name) ?? null) === null) return "none" as const;
+    alarms.set(name, null); // a fired alarm is consumed, as in Workers
+    return runDriveDocAlarm(storageFor(name), alarmFor(name), async (id) => {
+      await runDriveDocPassBody(env, id);
+    }, STATE_TTL_MS, STATE_COOLDOWN_MS);
+  };
+  const ns = {
     idFromName: (name: string) => name,
     get: (name: string) => ({
       // Delegates to the production state machine, so these tests exercise the
@@ -85,12 +104,26 @@ function createMockLockNamespace() {
         calls.release++;
         return releaseDriveDocLock(storageFor(name), token);
       },
+      requestPass: async (documentId: string) => {
+        calls.requestPass++;
+        return requestDriveDocPass(storageFor(name), alarmFor(name), documentId);
+      },
       inspect: async () => ({ heldUntil: null, lastStartedAt: null }),
     }),
     _instances: instances,
     _calls: calls,
+    _alarms: alarms,
+    _fireAlarm: fireAlarm,
+    /** Fires every alarm pending right now, once each (a re-armed catch-up waits for the next call). */
+    _fireAll: async (env: Env) => {
+      for (const name of [...alarms.keys()]) await fireAlarm(name, env);
+    },
   };
+  return ns;
 }
+
+/** The fake lock namespace + Env the most recent createFakeEnv built, so makeCtx().settle() can fire their alarms. */
+let activeHarness: { lock: ReturnType<typeof createMockLockNamespace>; env: Env } | null = null;
 
 const OWNER_EMAIL = "owner@enig.com";
 const DOC_A = "proposal-doc-alpha";
@@ -142,6 +175,7 @@ function createFakeEnv(overrides: Partial<Record<string, unknown>> = {}) {
     MARTIN_TELEGRAM_USER_ID: "123456789",
     ...overrides,
   } as unknown as Env;
+  activeHarness = { lock, env: fakeEnv };
   return { fakeEnv, mockKv, lock, syncCalls };
 }
 
@@ -159,8 +193,10 @@ function makeCtx() {
         pending.push(p);
       },
     },
+    /** Awaits anything handed to waitUntil, then fires the Drive lock alarms -- where notification passes now run. */
     async settle() {
       await Promise.all(pending);
+      if (activeHarness) await activeHarness.lock._fireAll(activeHarness.env);
     },
     /** Await ONE specific background promise by index -- needed when a test deliberately holds one pass open. */
     promise(index: number): Promise<unknown> {
@@ -333,7 +369,7 @@ test("notify 2d. an authenticated channel whose DOCUMENT is no longer registered
   assert.strictEqual(decision.rejection, "document_not_registered");
 });
 
-test("notify 3. the receiver answers 200 PROMPTLY and runs the pass through ctx.waitUntil, not inline", async (t) => {
+test("notify 3. the receiver answers 200 PROMPTLY and only SCHEDULES the pass -- it runs from the DriveDocLock alarm, never on the request or in waitUntil", async (t) => {
   const { fakeEnv, mockKv, syncCalls } = createFakeEnv();
   await setUpProposalDoc(fakeEnv, DOC_A);
   const channel = await seedChannel(fakeEnv, { channelId: "chan-bg", documentId: DOC_A });
@@ -357,21 +393,26 @@ test("notify 3. the receiver answers 200 PROMPTLY and runs the pass through ctx.
     globalThis.fetch = originalFetch;
   });
 
+  const { lock } = activeHarness!;
   const c = makeCtx();
   const startedAt = Date.now();
   const res = await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-bg", "X-Goog-Channel-Token": channel.secret }), fakeEnv, c.ctx as any);
   const elapsed = Date.now() - startedAt;
 
   assert.strictEqual(res.status, 200, "an authenticated notification is acknowledged");
-  assert.strictEqual(c.count, 1, "exactly one background task is scheduled via waitUntil");
+  assert.strictEqual(c.count, 0, "nothing is handed to waitUntil -- Cloudflare stops that ~30s after the response");
+  assert.strictEqual(lock._calls.requestPass, 1, "the receiver asked the document's lock for exactly one pass");
+  assert.notStrictEqual(lock._alarms.get(DOC_A) ?? null, null, "the document's alarm is armed");
   assert.strictEqual(syncCalls.length, 0, "the pass has NOT run yet -- the response did not wait on it");
   assert.ok(elapsed < 1000, `the response returned before the comment fetch completed (took ${elapsed}ms)`);
 
-  // Now let the background pass finish and confirm it really ran the full pass.
+  // The alarm fires: the pass runs to completion under the claim and releases it.
+  const alarmRun = lock._fireAlarm(DOC_A, fakeEnv);
   releaseComments!();
-  await c.settle();
-  assert.strictEqual(syncCalls.length, 1, "the background pass ran the Proposal approval-cycle sync -- the SAME pass the poller uses");
+  assert.strictEqual(await alarmRun, "ran");
+  assert.strictEqual(syncCalls.length, 1, "the alarm ran the Proposal approval-cycle sync -- the SAME pass the poller uses");
   assert.strictEqual(syncCalls[0].documentId, DOC_A);
+  assert.ok(await (lock as any).get(DOC_A).tryAcquire(DRIVE_DOC_LOCK_TTL_MS, 0), "the claim was released when the pass ended");
   assert.ok(mockKv._rawStore.has("google_comment_processed:c-1") || true);
 });
 
@@ -548,13 +589,14 @@ test("lock 4. two DIFFERENT documents never contend -- each doc has its own inde
 
   const c = makeCtx();
   const resA = await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-a", "X-Goog-Channel-Token": chanA.secret }), fakeEnv, c.ctx as any);
-  const passA = c.promise(0);
   const resB = await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-b", "X-Goog-Channel-Token": chanB.secret }), fakeEnv, c.ctx as any);
-  const passB = c.promise(1);
 
   assert.strictEqual(resA.status, 200);
   assert.strictEqual(resB.status, 200);
-  assert.strictEqual(c.count, 2, "both documents schedule their own pass");
+  assert.strictEqual(lock._calls.requestPass, 2, "both documents schedule their own pass");
+  // Each document's alarm runs in its own lock instance.
+  const passA = lock._fireAlarm(DOC_A, fakeEnv);
+  const passB = lock._fireAlarm(DOC_B, fakeEnv);
 
   // Doc B completes while Doc A is still blocked -- proving no cross-doc contention.
   // Only B's promise is awaited here; A is deliberately still in flight.
@@ -1331,4 +1373,168 @@ test("auto 3. no request path registers a watch on its own: polling and notifica
   await settle();
   assert.strictEqual(isAutoRegisterEnabled(fakeEnv), false);
   assert.strictEqual(watchCalls, 0);
+});
+
+// ===========================================================================
+// 13. Notification passes run from the DriveDocLock alarm (fix for #280's
+//     30-second waitUntil limit: a killed pass held the claim until its TTL
+//     and the safety-net poller skipped the document meanwhile)
+// ===========================================================================
+
+/** A bare storage + alarm pair for driving the alarm state machine directly. */
+function bareLockStorage() {
+  const store = new Map<string, unknown>();
+  let alarmAt: number | null = null;
+  return {
+    storage: {
+      async get<T>(k: string) {
+        return store.get(k) as T | undefined;
+      },
+      async put(k: string, v: unknown) {
+        store.set(k, v);
+      },
+      async delete(k: string) {
+        return store.delete(k);
+      },
+    },
+    alarm: {
+      async getAlarm() {
+        return alarmAt;
+      },
+      async setAlarm(t: number) {
+        alarmAt = t;
+      },
+    },
+    get alarmAt() {
+      return alarmAt;
+    },
+    clearAlarm() {
+      alarmAt = null;
+    },
+    store,
+  };
+}
+
+test("alarm 1. a pass that THROWS still releases the claim (the #280 regression) and is re-requested for Cloudflare's alarm retry", async () => {
+  const b = bareLockStorage();
+  await requestDriveDocPass(b.storage, b.alarm, DOC_A);
+  b.clearAlarm();
+
+  await assert.rejects(
+    () =>
+      runDriveDocAlarm(b.storage, b.alarm, async () => {
+        throw new Error("boom mid-pass");
+      }, STATE_TTL_MS, STATE_COOLDOWN_MS),
+    /boom mid-pass/,
+  );
+
+  // The claim is free immediately -- the poller is NOT blocked for the TTL.
+  assert.ok(await tryAcquireDriveDocLock(b.storage, STATE_TTL_MS, 0), "the claim was released despite the failure");
+  assert.strictEqual(b.store.get("rerunRequested"), true, "the pass stays requested, so the retried alarm runs it");
+});
+
+test("alarm 2. a notification arriving MID-PASS earns exactly one catch-up pass -- it is no longer dropped", async () => {
+  const b = bareLockStorage();
+  await requestDriveDocPass(b.storage, b.alarm, DOC_A);
+  b.clearAlarm();
+
+  let passes = 0;
+  const runPass = async () => {
+    passes++;
+    // The second notification lands while the first pass is running.
+    if (passes === 1) await requestDriveDocPass(b.storage, b.alarm, DOC_A);
+  };
+  assert.strictEqual(await runDriveDocAlarm(b.storage, b.alarm, runPass, STATE_TTL_MS, STATE_COOLDOWN_MS), "ran");
+  assert.notStrictEqual(b.alarmAt, null, "the alarm is re-armed for a catch-up pass");
+
+  b.clearAlarm();
+  assert.strictEqual(await runDriveDocAlarm(b.storage, b.alarm, runPass, STATE_TTL_MS, STATE_COOLDOWN_MS), "ran");
+  assert.strictEqual(passes, 2, "exactly one catch-up pass ran");
+  assert.strictEqual(b.alarmAt, null, "and nothing further is scheduled");
+  assert.strictEqual(await runDriveDocAlarm(b.storage, b.alarm, runPass, STATE_TTL_MS, STATE_COOLDOWN_MS), "idle");
+});
+
+test("alarm 3. a burst of duplicate notifications before the alarm fires collapses into ONE pass", async (t) => {
+  const { fakeEnv, lock, syncCalls } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  const channel = await seedChannel(fakeEnv, { channelId: "chan-burst", documentId: DOC_A });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [] });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  for (let i = 0; i < 4; i++) {
+    const res = await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-burst", "X-Goog-Channel-Token": channel.secret }), fakeEnv);
+    assert.strictEqual(res.status, 200);
+  }
+  assert.strictEqual(lock._calls.requestPass, 4);
+  await lock._fireAll(fakeEnv);
+  await lock._fireAll(fakeEnv);
+  assert.strictEqual(syncCalls.length, 1, "four notifications, one complete pass");
+});
+
+test("alarm 4. while the POLLER holds the claim, the alarm DEFERS (re-armed) instead of overlapping, then runs once the poll releases", async () => {
+  const b = bareLockStorage();
+  const pollerClaim = await tryAcquireDriveDocLock(b.storage, STATE_TTL_MS, 0);
+  assert.ok(pollerClaim);
+  await requestDriveDocPass(b.storage, b.alarm, DOC_A);
+  b.clearAlarm();
+
+  let passes = 0;
+  const runPass = async () => {
+    passes++;
+  };
+  const before = Date.now();
+  assert.strictEqual(await runDriveDocAlarm(b.storage, b.alarm, runPass, STATE_TTL_MS, STATE_COOLDOWN_MS), "deferred");
+  assert.strictEqual(passes, 0, "no overlapping pass");
+  assert.ok(b.alarmAt !== null && b.alarmAt >= before + DRIVE_DOC_DEFER_MS, "re-armed to retry after the defer interval");
+
+  await releaseDriveDocLock(b.storage, pollerClaim.token);
+  b.clearAlarm();
+  assert.strictEqual(await runDriveDocAlarm(b.storage, b.alarm, runPass, STATE_TTL_MS, STATE_COOLDOWN_MS), "ran");
+  assert.strictEqual(passes, 1);
+});
+
+test("alarm 5. when the lock cannot be reached, the receiver answers 503 so Drive retries -- never a 200 for work nothing will do", async () => {
+  const { fakeEnv } = createFakeEnv({
+    DRIVE_DOC_LOCK: {
+      idFromName: (n: string) => n,
+      get: () => ({
+        requestPass: async () => {
+          throw new Error("DO unreachable");
+        },
+      }),
+    },
+  });
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  const channel = await seedChannel(fakeEnv, { channelId: "chan-down", documentId: DOC_A });
+  const res = await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-down", "X-Goog-Channel-Token": channel.secret }), fakeEnv);
+  assert.strictEqual(res.status, 503);
+
+  const unbound = createFakeEnv({ DRIVE_DOC_LOCK: undefined });
+  await setUpProposalDoc(unbound.fakeEnv, DOC_A);
+  const ch2 = await seedChannel(unbound.fakeEnv, { channelId: "chan-unbound", documentId: DOC_A });
+  const res2 = await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-unbound", "X-Goog-Channel-Token": ch2.secret }), unbound.fakeEnv);
+  assert.strictEqual(res2.status, 503);
+});
+
+test("alarm 6. after a notification pass the safety-net poller is NOT blocked -- it runs the document straight away", async (t) => {
+  const { fakeEnv, lock, syncCalls } = createFakeEnv();
+  await setUpProposalDoc(fakeEnv, DOC_A);
+  const channel = await seedChannel(fakeEnv, { channelId: "chan-then-poll", documentId: DOC_A });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockDriveFetch({ comments: [] });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await handleDriveNotifyRequest(notifyRequest({ "X-Goog-Channel-ID": "chan-then-poll", "X-Goog-Channel-Token": channel.secret }), fakeEnv);
+  await lock._fireAll(fakeEnv);
+  assert.strictEqual(syncCalls.length, 1);
+
+  const { pollGoogleDocComments } = await import("./googleDocComments");
+  const poll = await pollGoogleDocComments(fakeEnv);
+  assert.ok(!poll.diagnostics.some((d: any) => d.outcome === "skipped_concurrent_pass"), "the poll did not find a leftover claim");
+  assert.strictEqual(syncCalls.length, 2, "the poll ran its own pass");
 });

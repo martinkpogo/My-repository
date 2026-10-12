@@ -221,43 +221,16 @@ export { DRIVE_DOC_LOCK_TTL_MS, DRIVE_DOC_COOLDOWN_MS };
 const lockStub = driveDocLockStub;
 
 /**
- * Runs one document's complete comment pass under the per-Doc lock.
+ * One complete comment pass over `documentId` -- the body the DriveDocLock
+ * alarm runs while it already holds that document's claim (see
+ * driveDocLock.ts / runDriveDocAlarm). Takes no lock itself.
  *
- * Duplicate notifications are safe here for two independent reasons. First, the
- * lock refuses a second concurrent pass for the SAME document, so two near
- * -simultaneous notifications cannot run overlapping passes (and the marker
- * semantics from PR #278 make a repeat pass idempotent anyway). Second, the
- * cooldown collapses a burst into one run plus a single catch-up, rather than
- * one run per duplicate.
- *
- * The lock is ALWAYS released, success or failure, in a finally block -- and
- * even a release that never happens is bounded by the TTL above. A failure in
- * the pass itself is reported, never swallowed into a claim of success.
+ * Never throws for an ordinary failure: a stale binding is a no-op, and a
+ * pass that fails is reported to Operations (identifiers and the error only,
+ * never comment text) rather than claimed as success. The polling safety net
+ * retries the document either way.
  */
-export async function runDriveDocPass(env: Env, documentId: string): Promise<{ ran: boolean; reason?: string }> {
-  const stub = lockStub(env, documentId);
-  if (!stub) {
-    // No lock available means no pass. An unbound namespace must never be
-    // treated as "unlocked" -- that would let duplicate notifications overlap
-    // exactly when the control meant to prevent it is missing. The polling
-    // safety net does not take this lock and remains responsible for the doc.
-    console.error(`runDriveDocPass: DRIVE_DOC_LOCK is not bound; refusing to run an unlocked pass for ${documentId}`);
-    return { ran: false, reason: "lock_unavailable" };
-  }
-
-  let claim: { token: string } | null = null;
-  try {
-    claim = await stub.tryAcquire(DRIVE_DOC_LOCK_TTL_MS, DRIVE_DOC_COOLDOWN_MS);
-  } catch (err) {
-    // A lock that cannot be consulted must not be walked through: without it,
-    // duplicate notifications WOULD overlap. Refuse the run and let the poller
-    // (which does not take this lock) remain the safety net.
-    console.error(`runDriveDocPass: could not acquire the lock for ${documentId}`, err);
-    return { ran: false, reason: "lock_unavailable" };
-  }
-
-  if (!claim) return { ran: false, reason: "already_running_or_recently_ran" };
-
+export async function runDriveDocPassBody(env: Env, documentId: string): Promise<{ ran: boolean; reason?: string }> {
   try {
     const doc = await getWatchedGoogleDoc(env, documentId);
     if (!doc) {
@@ -268,19 +241,34 @@ export async function runDriveDocPass(env: Env, documentId: string): Promise<{ r
     const result = await processGoogleDocComments(env, doc);
     return { ran: true, reason: `${result.commentsProcessed} comment(s) processed` };
   } catch (err) {
-    console.error(`runDriveDocPass: pass failed for ${documentId}`, err);
-    // Reported, never claimed as success. The pass itself records per-comment
-    // outcomes; this is the outer guard for anything that escaped it.
+    console.error(`runDriveDocPassBody: pass failed for ${documentId}`, err);
     await sendOperationsMessage(
       env,
       `⚠️ Drive comment pass failed\nDocument: ${documentId}\nReason: ${err instanceof Error ? err.message : String(err)}\n\nThe polling safety net will retry this document on its next interval.`,
-    ).catch((notifyErr) => console.error("runDriveDocPass: could not send the failure alert", notifyErr));
+    ).catch((notifyErr) => console.error("runDriveDocPassBody: could not send the failure alert", notifyErr));
     return { ran: false, reason: "pass_failed" };
-  } finally {
-    // Release with the SAME token this pass was given. If the pass hung past
-    // the TTL and a successor has since claimed the lock, this token no longer
-    // matches and the release is a no-op -- it can never unlock a live pass.
-    await stub.release(claim.token).catch((err: unknown) => console.error(`runDriveDocPass: could not release the lock for ${documentId}`, err));
+  }
+}
+
+/**
+ * Asks the document's DriveDocLock to run a pass from its alarm. Resolves as
+ * soon as the request is recorded -- the pass itself never runs on the
+ * notifying request. Returns false when the lock cannot be reached, so the
+ * receiver can answer Drive with a retryable error instead of claiming it
+ * accepted work nothing will do.
+ */
+export async function requestNotificationPass(env: Env, documentId: string): Promise<boolean> {
+  const stub = lockStub(env, documentId);
+  if (!stub) {
+    console.error(`requestNotificationPass: DRIVE_DOC_LOCK is not bound; cannot schedule a pass for ${documentId}`);
+    return false;
+  }
+  try {
+    await stub.requestPass(documentId);
+    return true;
+  } catch (err) {
+    console.error(`requestNotificationPass: could not reach the lock for ${documentId}`, err);
+    return false;
   }
 }
 
@@ -862,18 +850,21 @@ export interface WaitUntilContext {
  *  1. Authenticate the channel id and channel token against trusted KV state.
  *     Unknown channel, wrong token, inactive channel, or an unregistered
  *     document are all hard refusals with NO processing.
- *  2. Acknowledge with HTTP 200 IMMEDIATELY, before any document work. Drive's
- *     delivery must not wait on a full comment pass, and Cloudflare's
- *     background window is what actually runs the pass.
- *  3. Start the pass in the background via ctx.waitUntil, under the per-Doc
- *     lock, so duplicate notifications cannot overlap.
+ *  2. Ask the document's DriveDocLock to run a pass (requestNotificationPass)
+ *     -- a quick Durable Object call that only records the request and arms
+ *     its alarm. The pass runs from that alarm under the per-Doc claim, never
+ *     on this request, so Drive is answered promptly and duplicate
+ *     notifications cannot overlap. (It no longer runs in ctx.waitUntil,
+ *     which Cloudflare stops ~30s after the response.)
+ *  3. Answer 200 once the request is recorded; answer 503 if the lock could
+ *     not be reached, so Drive retries rather than the change being lost.
  *
  * Drive's initial `sync` handshake notification (X-Goog-Resource-State: sync)
  * is acknowledged but deliberately does NOT start a pass: it confirms channel
  * delivery, carries no change information, and running a pass on it would be
  * exactly the mistake of treating a notification as an event record.
  */
-export async function handleDriveNotifyRequest(request: Request, env: Env, ctx: WaitUntilContext): Promise<Response> {
+export async function handleDriveNotifyRequest(request: Request, env: Env, _ctx?: WaitUntilContext): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
   }
@@ -890,7 +881,7 @@ export async function handleDriveNotifyRequest(request: Request, env: Env, ctx: 
     return new Response("forbidden", { status: 403 });
   }
 
-  // Authenticated. Acknowledge NOW; the pass runs in the background.
+  // Authenticated. The pass is scheduled below and never runs on this request.
   if (resourceState === "sync") {
     // Channel-registration handshake. Acknowledged, nothing to re-read.
     return new Response(JSON.stringify({ ok: true, synced: true }), {
@@ -900,15 +891,9 @@ export async function handleDriveNotifyRequest(request: Request, env: Env, ctx: 
   }
 
   const documentId = decision.doc.documentId;
-  ctx.waitUntil(
-    runDriveDocPass(env, documentId)
-      .then((r) => {
-        if (!r.ran && r.reason && r.reason !== "already_running_or_recently_ran") {
-          console.error(`Drive notify: pass did not run for ${documentId}: ${r.reason}`);
-        }
-      })
-      .catch((err) => console.error(`Drive notify: background pass threw for ${documentId}`, err)),
-  );
+  if (!(await requestNotificationPass(env, documentId))) {
+    return new Response("temporarily unavailable", { status: 503 });
+  }
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
