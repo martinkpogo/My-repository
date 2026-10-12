@@ -1288,6 +1288,29 @@ export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc):
   await kvPut(env, `google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
 }
 
+/**
+ * Reads ONE watched doc straight from the trusted server-side registration
+ * record (the same key registerWatchedGoogleDoc writes), by document id.
+ *
+ * This is the ONLY way the Drive notification path is allowed to turn a
+ * notification into a document: a channel record names a document id that was
+ * bound at registration time by an admin-authorized call, and the doc record
+ * it resolves to here is Runtime's own state -- never anything taken from an
+ * untrusted request body or header. Returns null when the document is not
+ * registered, which is a hard stop: the notification is refused rather than
+ * processed against a document the system does not know it owns.
+ */
+export async function getWatchedGoogleDoc(env: Env, documentId: string): Promise<WatchedGoogleDoc | null> {
+  if (!documentId) return null;
+  const raw = await kvGet(env, `google_doc_watch:${documentId}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WatchedGoogleDoc;
+  } catch {
+    return null;
+  }
+}
+
 export async function listWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[]> {
   const docs: WatchedGoogleDoc[] = [];
   let cursor: string | undefined;

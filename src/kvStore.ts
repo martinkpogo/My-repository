@@ -181,6 +181,13 @@ const NEVER_FALLBACK_EXACT_PREFIXES: readonly string[] = [
   // of absorbing it (never silently re-added to the allowlist -- see policy).
   "google_drive_default_folder:",
   "google_proposal_docs_folder:",
+  // Drive watch-channel records (googleDriveWatch.ts): the record carries the
+  // per-channel SECRET used to authenticate every incoming files.watch
+  // notification, so it is Cloudflare-only by the same rule as the OAuth
+  // token classes above. It is also the binding that maps a channel to the
+  // one document it may re-read -- there is no reduced schema that would
+  // still function, so a failed write stays explicit rather than falling back.
+  "google_drive_channel:",
 ];
 
 export function isFallbackEligible(key: string): boolean {

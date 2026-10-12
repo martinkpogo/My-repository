@@ -52,6 +52,38 @@ export interface Env {
   GOOGLE_OAUTH_CLIENT_SECRET?: string;
 
   /**
+   * The Durable Object namespace backing the per-Doc lock for the Drive
+   * comment-notification path (driveDocLock.ts). Instances are addressed by
+   * document id, so duplicate notifications for the SAME document serialize
+   * while different documents proceed entirely independently.
+   *
+   * Optional in the type purely because a great many tests build a bare Env
+   * literal that has nothing to do with this surface; the notification path
+   * treats a missing binding as a HARD STOP (runDriveDocPass refuses the run
+   * rather than proceeding unlocked), so optional here can never mean "skip the
+   * lock" -- it means "no notification pass runs at all".
+   */
+  DRIVE_DOC_LOCK?: DurableObjectNamespace;
+
+  /**
+   * This Worker's own public base URL -- the address Drive must be told to push
+   * `files.watch` notifications TO (googleDriveWatch.ts). Configured rather
+   * than hardcoded so a staging Worker or a future custom domain needs no code
+   * change. Unset means watch registration fails closed rather than pushing to
+   * a guessed address.
+   */
+  WORKER_PUBLIC_BASE_URL?: string;
+
+  /**
+   * Enables AUTOMATIC Drive watch registration. Defaults OFF (unset = off), and
+   * registration is deliberately opt-in: it creates real external state in a
+   * third party's system (a live Drive push channel bound to a production
+   * Proposal Doc), so it is only ever done by an explicit admin call unless
+   * this flag is deliberately turned on.
+   */
+  DRIVE_WATCH_AUTO_REGISTER?: string;
+
+  /**
    * JSON object mapping Unit name -> Telegram forum topic message_thread_id,
    * e.g. {"Sales": 2, "Finance": 4}. Optional — when unset, the bot behaves
    * as a plain 1:1 chat with no topic awareness (legacy/DM mode).
