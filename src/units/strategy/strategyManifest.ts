@@ -38,9 +38,9 @@ import * as strategy from "./strategyAnalyst";
  * tidiness. Architect-approved.
  *
  * Strategy's OTHER entry point, handlePickup (Handoff-originated, called
- * from checkHandoffs.ts's cron discovery via session.ts's
- * runStrategyPickup), is deliberately left OUTSIDE this manifest --
- * unlike Marketing's handleHandoffPickup, which already funneled through
+ * from the generic WorkSession.runHandoffPickup via this manifest's
+ * separate `handoffPickup` declaration), is deliberately left OUTSIDE the
+ * entry Actions -- unlike Marketing's handleHandoffPickup, which already funneled through
  * the exact same shared runMarketingHat that handleMarketingIntake used
  * (making the substitution trivial), Strategy's handlePickup calls
  * runDiagnosis directly with Handoff-specific context construction
@@ -245,6 +245,9 @@ export const strategyManifest: UnitManifest = {
   intakeClassificationTaskId: "strategy.diagnosis",
   intakeIntroLine: "You route incoming Strategy requests for ENIG, to its Strategy Analyst Hat.",
   actionClassificationTaskId: "strategy.diagnosis",
+  // Handoff-originated Work is taken in through handlePickup -- a separate
+  // declaration, NOT the entryHandler (see this file's doc comment).
+  handoffPickup: { handler: (env, state, skills) => strategy.handlePickup(env, state, skills) },
 };
 
 /**

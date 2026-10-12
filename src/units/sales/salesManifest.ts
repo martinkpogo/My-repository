@@ -6,6 +6,7 @@ import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unit
 import { discoverLeadsReadHandler, handleLeadOpportunityApproval } from "./leadGenerationDiscovery";
 import * as sales from "./salesExecutive";
 import * as salesProposal from "./tokenSafeProposal";
+import { salesHandoffPickup } from "./handoffIntake";
 
 /**
  * Sales's Unit Registry manifest (ENIG Operating Model design doc, "The
@@ -575,6 +576,10 @@ export const salesManifest: UnitManifest = {
   intakeClassificationTaskId: "sales.intake_classification",
   intakeIntroLine: "You route incoming Sales requests for ENIG, among its manifest-based Hats.",
   actionClassificationTaskId: "sales.hat_action_decision",
+  // Handoffs addressed to Sales run the token-safe Proposal flow; Sales's
+  // intake rules (call-notes turned away per LOG-987, pickup held while
+  // Sales Executive is paused) live in handoffIntake.ts.
+  handoffPickup: salesHandoffPickup(),
 };
 
 /**

@@ -48,3 +48,12 @@ test("The neutral contracts module imports no Unit", () => {
     assert.ok(!/from\s+["'][^"']*\/units\//.test(readFileSync(file, "utf8")), `${file} must not import a Unit`);
   }
 });
+
+test("The generic Worker's Handoff discovery and pickup scheduling name no Unit", () => {
+  const SRC = join(__dirname, "..");
+  for (const file of ["checkHandoffs.ts", "sessionRouting.ts"]) {
+    const text = readFileSync(join(SRC, file), "utf8");
+    assert.ok(!/from\s+["']\.\/units\/(sales|strategy|finance|marketing|businessDevelopment)\//.test(text), `${file} must not import a Unit's code -- Unit specifics are declared on its manifest (handoffPickup)`);
+    assert.ok(!/["'](sales_proposal|sales_call_notes)["']/.test(text), `${file} must not carry Unit-specific pickup kinds`);
+  }
+});

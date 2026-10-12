@@ -57,6 +57,36 @@ export type EntryHandler<A extends string = string> = (
  */
 export type PickupHandler = (env: Env, state: WorkState, skills: ResolvedActionSkillSet) => Promise<WorkState>;
 
+/**
+ * How a Unit takes in Handoffs addressed to it. Declared on the Unit's
+ * manifest so the generic Worker (checkHandoffs.ts discovery, WorkSession's
+ * pickup alarm) never names a Unit: it finds Pending Work Handoffs for each
+ * Unit that declares this, registers their Work, and runs this Unit's
+ * `handler` under the Action recorded from the Handoff's destination.
+ *
+ * Deliberately NOT an EntryHandler: a pickup reconstructs Handoff context
+ * first, which a free-text entry has no equivalent for (see each manifest's
+ * doc comment), so it stays a separate declaration rather than being folded
+ * into an entry Action.
+ */
+export interface HandoffPickupDeclaration {
+  /** Runs the pickup for Work whose Action was resolved and recorded from the Handoff's destination facts. */
+  handler: PickupHandler;
+  /**
+   * Optional intake screen, run on a Pending Handoff BEFORE any Work is
+   * registered for it. "skip" leaves the Handoff exactly as found (no Work,
+   * no claim) -- e.g. a Handoff this Unit no longer takes. Default "accept".
+   */
+  screen?: (env: Env, handoff: { id: string; properties?: Record<string, any> }) => Promise<"accept" | "skip">;
+  /**
+   * Optional hold, run AFTER the Work is registered. Returning true means
+   * the Handoff is registered and discoverable but is NOT scheduled for
+   * pickup this cycle (execution waits for a deliberate human step).
+   * Default false.
+   */
+  hold?: (env: Env, handoff: { id: string; properties?: Record<string, any> }) => Promise<boolean>;
+}
+
 /** Resumes a WorkSession left paused on one of this Hat's own `awaiting` states. */
 export type AwaitingStateHandler = (
   env: Env,
@@ -209,6 +239,13 @@ export interface UnitManifest {
    * across Units.
    */
   actionClassificationTaskId: SemanticTaskId;
+
+  /**
+   * How this Unit takes in Handoffs addressed to it -- see
+   * HandoffPickupDeclaration. Absent for a Unit with no automated pickup:
+   * its Pending Handoffs are counted and reported but never picked up.
+   */
+  handoffPickup?: HandoffPickupDeclaration;
 }
 
 export function findHatManifest(hatName: string | undefined, manifest: UnitManifest): HatManifest | undefined {

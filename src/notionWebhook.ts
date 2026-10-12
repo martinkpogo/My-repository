@@ -15,7 +15,7 @@ import { runCheckHandoffs } from "./checkHandoffs";
  * This module only detects and triggers the EXISTING discovery/pickup
  * engine (runCheckHandoffs) -- it never writes to Notion itself, never
  * invokes the Sales Claude Project, and never performs identity-sensitive
- * work. See checkHandoffs.ts's discoverPendingSalesHandoffs for how a
+ * work. See Sales's handoffPickup (units/sales/handoffIntake.ts) for how a
  * detected Sales Handoff specifically stays a detect-and-notify-only
  * operation rather than automatic execution.
  */
@@ -226,7 +226,7 @@ export async function handleNotionWebhookRequest(request: Request, env: Env, ctx
   // is the same default front door every other externally-created Handoff
   // (Finance/Marketing/Strategy, and now Sales) already registers
   // against when no live Telegram session exists yet (see
-  // discoverPendingFinanceHandoffs et al.). The engine re-queries Notion
+  // discoverPendingHandoffsForUnit). The engine re-queries Notion
   // and re-applies its own claim/pickup gates itself -- this handler's own
   // filter above is only a wake-up decision, never the authority.
   const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);

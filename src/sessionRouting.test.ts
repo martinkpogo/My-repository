@@ -280,22 +280,19 @@ function fakePickupStorage(initialKind?: string): PickupAlarmStorage & {
   };
 }
 
-function allRunners(runs: string[]): Record<PickupKind, () => Promise<unknown>> {
+function allRunners(runs: string[]): Partial<Record<PickupKind, () => Promise<unknown>>> {
   return {
-    strategy: async () => {
-      runs.push("strategy");
+    Strategy: async () => {
+      runs.push("Strategy");
     },
-    finance: async () => {
-      runs.push("finance");
+    Finance: async () => {
+      runs.push("Finance");
     },
-    sales_call_notes: async () => {
-      runs.push("sales_call_notes");
+    Sales: async () => {
+      runs.push("Sales");
     },
-    sales_proposal: async () => {
-      runs.push("sales_proposal");
-    },
-    marketing: async () => {
-      runs.push("marketing");
+    Marketing: async () => {
+      runs.push("Marketing");
     },
   };
 }
@@ -304,43 +301,43 @@ test("WP1. schedulePickupAlarm stores the pickup kind and arms exactly one immed
   const storage = fakePickupStorage();
   const before = Date.now();
 
-  await schedulePickupAlarm(storage, "strategy");
+  await schedulePickupAlarm(storage, "Strategy");
 
-  assert.strictEqual(storage.store.get(PENDING_PICKUP_KIND_KEY), "strategy", "the pending kind is recorded on the WorkSession's own storage");
+  assert.strictEqual(storage.store.get(PENDING_PICKUP_KIND_KEY), "Strategy", "the pending kind is recorded on the WorkSession's own storage");
   assert.strictEqual(storage.alarms.length, 1, "exactly one alarm per scheduled pickup");
   assert.ok(typeof storage.alarms[0] === "number" && (storage.alarms[0] as number) >= before, "the alarm is armed to fire immediately");
 });
 
-test("WP1. dispatchScheduledPickup runs exactly one runStrategyPickup for a scheduled 'strategy' kind and clears the pending kind", async () => {
-  const storage = fakePickupStorage("strategy");
+test("WP1. dispatchScheduledPickup runs exactly one runStrategyPickup for a scheduled 'Strategy' kind and clears the pending kind", async () => {
+  const storage = fakePickupStorage("Strategy");
   const runs: string[] = [];
 
   const ran = await dispatchScheduledPickup(storage, allRunners(runs));
 
-  assert.strictEqual(ran, "strategy");
-  assert.deepStrictEqual(runs, ["strategy"], "exactly the one scheduled runner, exactly once");
+  assert.strictEqual(ran, "Strategy");
+  assert.deepStrictEqual(runs, ["Strategy"], "exactly the one scheduled runner, exactly once");
   assert.strictEqual(storage.store.has(PENDING_PICKUP_KIND_KEY), false, "the pending kind is cleared before the pickup counts as consumed");
 
   const again = await dispatchScheduledPickup(storage, allRunners(runs));
   assert.strictEqual(again, undefined, "nothing pending");
-  assert.deepStrictEqual(runs, ["strategy"], "a re-fired or duplicate alarm cannot run the same pickup twice");
+  assert.deepStrictEqual(runs, ["Strategy"], "a re-fired or duplicate alarm cannot run the same pickup twice");
 });
 
 test("WP1. duplicate scheduling does not double-run a pickup -- the second schedule overwrites the same pending key", async () => {
   const storage = fakePickupStorage();
   const runs: string[] = [];
 
-  await schedulePickupAlarm(storage, "finance");
-  await schedulePickupAlarm(storage, "finance");
+  await schedulePickupAlarm(storage, "Finance");
+  await schedulePickupAlarm(storage, "Finance");
   assert.strictEqual(storage.alarms.length, 2, "each schedule arms the (single, overwritten) alarm slot");
 
   const ran = await dispatchScheduledPickup(storage, allRunners(runs));
-  assert.strictEqual(ran, "finance");
-  assert.deepStrictEqual(runs, ["finance"], "one key, one dispatch -- scheduling twice still runs the pickup once");
+  assert.strictEqual(ran, "Finance");
+  assert.deepStrictEqual(runs, ["Finance"], "one key, one dispatch -- scheduling twice still runs the pickup once");
 });
 
-test("WP1. every discovery-scheduled kind dispatches to its own runner -- all five run exactly once", async () => {
-  const kinds: PickupKind[] = ["strategy", "finance", "sales_call_notes", "sales_proposal", "marketing"];
+test("WP1. every discovery-scheduled kind dispatches to its own runner -- all four run exactly once", async () => {
+  const kinds: PickupKind[] = ["Strategy", "Finance", "Sales", "Marketing"];
   for (const kind of kinds) {
     const storage = fakePickupStorage(kind);
     const runs: string[] = [];
@@ -362,22 +359,13 @@ test("WP1. an unrecognized pending value is discarded fail-closed -- no runner i
 });
 
 test("WP1. a runner failure propagates out of dispatchScheduledPickup so alarm() can report it, and the pending kind is not re-armed by the alarm itself", async () => {
-  const storage = fakePickupStorage("strategy");
+  const storage = fakePickupStorage("Strategy");
   const boom = new Error("pickup runner failed");
-  const runners: Record<PickupKind, () => Promise<unknown>> = {
-    strategy: async () => {
+  const runners: Partial<Record<PickupKind, () => Promise<unknown>>> = {
+    Strategy: async () => {
       throw boom;
     },
-    finance: async () => {
-      throw new Error("must not run");
-    },
-    sales_call_notes: async () => {
-      throw new Error("must not run");
-    },
-    sales_proposal: async () => {
-      throw new Error("must not run");
-    },
-    marketing: async () => {
+    Finance: async () => {
       throw new Error("must not run");
     },
   };

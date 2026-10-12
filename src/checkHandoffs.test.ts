@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingSalesHandoffs, discoverPendingStrategyHandoffs } from "./checkHandoffs";
+import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingHandoffsForUnit } from "./checkHandoffs";
+import { salesHandoffPickup } from "./units/sales/handoffIntake";
+
+// Thin test conveniences over the ONE generic discovery loop: Sales with its
+// intake variant (paused / unpaused), Strategy as declared.
+const discoverPendingSalesHandoffs = (env: any, paused?: boolean) => discoverPendingHandoffsForUnit(env, "Sales", salesHandoffPickup(paused));
+const discoverPendingStrategyHandoffs = (env: any) => discoverPendingHandoffsForUnit(env, "Strategy");
 import { ensureMatterIdentity, isTerminalWorkStage, matterCurrentWorkKey, syncMatterContinuationPointer } from "./matterContinuation";
 import type { Env, WorkState } from "./types";
 
@@ -574,7 +580,7 @@ test("Not paused: a Finance -> Sales Handoff runs the token-safe Proposal flow i
 
   const scheduled = await discoverPendingSalesHandoffs(env, false);
 
-  assert.deepStrictEqual(calls.schedulePickup, ["sales_proposal"], "discovery must schedule the Proposal pickup, not run it inline");
+  assert.deepStrictEqual(calls.schedulePickup, ["Sales"], "discovery must schedule the Proposal pickup, not run it inline");
   assert.strictEqual(calls.runTokenSafeProposal, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
   assert.strictEqual(scheduled, 1);
   assert.ok(!operationsMessages.some((m) => m.includes("SALES HANDOFF READY")));
@@ -588,7 +594,7 @@ test("Not paused: a non-Finance Sales Handoff routes to the token-safe Proposal 
 
   await discoverPendingSalesHandoffs(env, false);
 
-  assert.deepStrictEqual(calls.schedulePickup, ["sales_proposal"]);
+  assert.deepStrictEqual(calls.schedulePickup, ["Sales"]);
   assert.strictEqual(calls.runTokenSafeProposal, 0, "the runner itself is invoked only by the DO alarm, never by discovery");
 });
 
@@ -725,7 +731,7 @@ test("discoverPendingStrategyHandoffs schedules pickup on the WorkSession alarm 
   // Matter_Token (MAT-30) is resolved to its canonical page id first.
   assert.strictEqual(calls.init[0][5]?.matterToken, "MAT-30");
   assert.strictEqual(calls.init[0][5]?.matterId, STRATEGY_MATTER_PAGE_ID, "the new Strategy Work is born with the canonical Matter identity");
-  assert.deepStrictEqual(calls.schedulePickup, ["strategy"], "discovery must record exactly one scheduled strategy pickup kind");
+  assert.deepStrictEqual(calls.schedulePickup, ["Strategy"], "discovery must record exactly one scheduled pickup, for the receiving Unit");
   assert.strictEqual(scheduled, 1, "a successfully scheduled pickup counts exactly as before -- once per Handoff");
   const mapped = await env.STATE_KV.get("handoff_workitem:handoff-strategy-1");
   assert.ok(mapped, "handoff_workitem mapping must be recorded before scheduling, exactly as before");
@@ -885,10 +891,11 @@ test("E. Work creation from any source other than a Handoff does not seed Matter
   const google = read("./googleOAuth.ts");
   assert.ok(!google.includes("matterId") && !google.includes("matterToken"), "the standalone Google Workspace control Work seeds no Matter identity");
 
-  // Only checkHandoffs' four new-Work sites seed, and all four of them do.
+  // Only checkHandoffs' ONE new-Work site (the generic discovery loop, shared
+  // by every Unit that declares a Handoff pickup) seeds, and it does.
   const check = read("./checkHandoffs.ts");
-  assert.strictEqual((check.match(/matterId: matter\.matterId/g) ?? []).length, 4, "Finance, Sales, Marketing and Strategy all seed the resolved Matter id");
-  assert.strictEqual((check.match(/await stub\.init\(/g) ?? []).length, 4, "…across exactly the four init call sites this file has");
+  assert.strictEqual((check.match(/matterId: matter\.matterId/g) ?? []).length, 1, "the one generic loop seeds the resolved Matter id for every Unit");
+  assert.strictEqual((check.match(/await stub\.init\(/g) ?? []).length, 1, "…across exactly the one init call site this file has");
 
   // The WorkSession side: it persists what it is handed and derives nothing.
   const session = read("./session.ts");
@@ -906,7 +913,7 @@ test("F. same-Work Handoff pickup is unchanged -- an existing handoff_workitem m
   const scheduled = await discoverPendingSalesHandoffs(env, false);
 
   assert.strictEqual(calls.init.length, 0, "the Work already exists -- no second Work is created");
-  assert.deepStrictEqual(calls.schedulePickup, ["sales_proposal"], "the pickup is scheduled exactly as before");
+  assert.deepStrictEqual(calls.schedulePickup, ["Sales"], "the pickup is scheduled exactly as before");
   assert.strictEqual(scheduled, 1);
   assert.strictEqual(await env.STATE_KV.get("handoff_workitem:handoff-sales-1"), "existing-work-9", "the Handoff association is untouched");
   assert.strictEqual(mattersQueries.length, 0, "Matter resolution is consulted only where a new Work would be created");

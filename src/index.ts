@@ -12,10 +12,7 @@ import {
 } from "./router";
 import {
   checkStaleHandoffs,
-  discoverPendingFinanceHandoffs,
-  discoverPendingMarketingHandoffs,
-  discoverPendingSalesHandoffs,
-  discoverPendingStrategyHandoffs,
+  discoverPendingHandoffsAllUnits,
   maybeAutoContinueCheckHandoffs,
   runCheckHandoffs,
 } from "./checkHandoffs";
@@ -239,18 +236,13 @@ export default {
         console.error("Failed to record last_cron_run", err),
       );
       try {
-        const picked = await discoverPendingFinanceHandoffs(env);
-        const pickedForSales = await discoverPendingSalesHandoffs(env);
-        const pickedForMarketing = await discoverPendingMarketingHandoffs(env);
-        const pickedForStrategy = await discoverPendingStrategyHandoffs(env);
+        const pickedUpByUnit = await discoverPendingHandoffsAllUnits(env);
         await checkStaleHandoffs(env);
         return new Response(
           JSON.stringify({
             ok: true,
-            handoffs_picked_up: picked,
-            sales_handoffs_picked_up: pickedForSales,
-            marketing_handoffs_picked_up: pickedForMarketing,
-            strategy_handoffs_picked_up: pickedForStrategy,
+            // Handoffs scheduled for pickup this run, per Unit that declares a pickup.
+            handoffs_picked_up_by_unit: pickedUpByUnit,
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -530,10 +522,7 @@ export default {
     // sweep does not depend on any single entry point staying scheduled.
     await maybeSweepKvFallback(env).catch((err) => console.error("scheduled: fallback sweep failed", err));
     try {
-      await discoverPendingFinanceHandoffs(env);
-      await discoverPendingSalesHandoffs(env);
-      await discoverPendingMarketingHandoffs(env);
-      await discoverPendingStrategyHandoffs(env);
+      await discoverPendingHandoffsAllUnits(env);
       await checkStaleHandoffs(env);
     } catch (err) {
       console.error("Unhandled error in scheduled discovery run", err);

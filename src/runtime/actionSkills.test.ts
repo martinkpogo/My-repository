@@ -289,39 +289,35 @@ test("Pickup: the runner selects no Action -- it only resolves Skills of the Act
   assert.deepStrictEqual(run, { kind: "ran", result: [] });
 });
 
-test("Pickup wiring: every production pickup executor is invoked only through WorkSession.runUnderRecordedSkills, and takes the Skill set", async () => {
+test("Pickup wiring: every Unit's declared pickup handler is invoked only through WorkSession.runUnderRecordedSkills, and takes the Skill set", async () => {
   const fs = await import("node:fs");
   const path = await import("node:path");
+  const { unitsWithHandoffPickup } = await import("../checkHandoffs");
+  const { findUnitManifest } = await import("../units/registry");
   const session = fs.readFileSync(path.join(import.meta.dirname, "..", "session.ts"), "utf8");
-  // sales.handleCallNotesHandoffPickup is no longer a pickup: LOG-987 retired
-  // Runtime call-notes qualification (asserted at the end of this test).
-  const pickups = ["finance.handlePickup", "strategy.handlePickup", "marketing.handleHandoffPickup", "salesProposal.handleProposalHandoffPickup"];
-  for (const call of pickups) {
-    // The bound state variable is the one the ownership adoption handed to
-    // the handler (`adopted`), not necessarily the name `state`.
-    const re = new RegExp(`this\\.runUnderRecordedSkills\\((\\w+), \\(skills\\) => ${call.replace(".", "\\.")}\\(this\\.env, \\1, skills\\)\\)`);
-    assert.ok(re.test(session), `${call} must run under the recorded Action's resolved Skills`);
-    assert.strictEqual(session.split(`${call}(`).length - 1, 1, `${call} must have exactly one production call site`);
+
+  // The four Units that take in Handoffs each DECLARE a handler on their manifest.
+  assert.deepStrictEqual([...unitsWithHandoffPickup()].sort(), ["Finance", "Marketing", "Sales", "Strategy"]);
+  for (const unit of unitsWithHandoffPickup()) {
+    assert.strictEqual(typeof findUnitManifest(unit)?.handoffPickup?.handler, "function", `${unit} must declare its pickup handler on its manifest`);
   }
-  // Each of those runners first adopts the Handoff's destination as the
-  // Work's ownership, once each, naming the destination Unit it picks up
-  // for -- the receiving Unit owns the interaction from there on.
+
+  // The Worker runs them through ONE runner: the declared handler runs under
+  // the recorded Action's resolved Skills, after the Handoff's destination
+  // has been adopted as the Work's ownership -- and names no Unit.
+  const re = /this\.runUnderRecordedSkills\((\w+), \(skills\) => declaration\.handler\(this\.env, \1, skills\)\)/;
+  assert.ok(re.test(session), "the declared handler must run under the recorded Action's resolved Skills");
+  assert.strictEqual(session.split("declaration.handler(").length - 1, 1, "exactly one production call site for any Unit's pickup handler");
   assert.strictEqual(
     session.split("runWithAdoptedOwnership(this.env, state,").length - 1,
-    4,
-    "every pickup must adopt the Handoff destination before its handler runs",
-  );
-  for (const unit of ["Finance", "Strategy", "Marketing"]) {
-    assert.ok(session.includes(`runWithAdoptedOwnership(this.env, state, "${unit}"`), `${unit}'s pickup must name its destination Unit`);
-  }
-  assert.strictEqual(
-    session.split('runWithAdoptedOwnership(this.env, state, "Sales"').length - 1,
     1,
-    "the one Sales pickup (the token-safe Proposal) must name Sales as its destination",
+    "the one pickup runner must adopt the Handoff destination before its handler runs",
   );
-  // LOG-987: the retired call-notes runner refuses -- it claims nothing,
-  // adopts no ownership and never reaches the old qualification handler.
-  assert.ok(session.includes('sales.refuseRetiredSalesStep(this.env, state, "call-notes qualification")'), "runCallNotesPickup answers with the LOG-987 refusal");
+  assert.ok(/runWithAdoptedOwnership\(this\.env, state, unit,/.test(session), "the destination Unit is the one being picked up for, never a literal");
+  for (const retired of ["runCallNotesPickup", "runFinancePickup", "runStrategyPickup", "runMarketingHandoffPickup", "runTokenSafeProposal"]) {
+    assert.ok(!session.includes(retired), `${retired} is replaced by the single manifest-driven runner`);
+  }
+  // LOG-987: the retired qualification pickup has no production call site.
   assert.ok(!session.includes("sales.handleCallNotesHandoffPickup("), "the retired qualification pickup has no production call site");
   // Pickup discovery still only resolves + records; it adds no Skill logic of its own.
   const discovery = fs.readFileSync(path.join(import.meta.dirname, "..", "checkHandoffs.ts"), "utf8");

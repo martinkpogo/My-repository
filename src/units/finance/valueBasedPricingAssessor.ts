@@ -398,7 +398,7 @@ export async function handleDirectRequestContext(env: Env, state: WorkState, tex
 
 export async function handlePickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   // Follows wherever this session's home chat/thread already is (Martin's
-  // DM by default -- see discoverPendingFinanceHandoffs) rather than
+  // DM by default -- see discoverPendingHandoffsForUnit) rather than
   // forcing Finance's own topic, so every Unit/Hat's work reaches him in
   // one place if that's where he's working from.
   const financeThreadId = state.threadId;
@@ -855,7 +855,7 @@ export async function handleValueContextClarification(env: Env, state: WorkState
  * in-process to Sales (that would repeat the same in-process cross-Unit
  * call the Sales -> Finance boundary was corrected away from): it creates a
  * new Handoff, Finance -> Sales, and returns. Sales's own independent
- * discovery (discoverPendingSalesHandoffs in index.ts) picks it up, the same
+ * discovery (discoverPendingHandoffsForUnit) picks it up, the same
  * way Finance discovers Handoffs addressed to it.
  */
 export async function handleQuoteApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {

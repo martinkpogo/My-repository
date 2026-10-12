@@ -1475,7 +1475,7 @@ function boundHumanReadableEvidence(text: string): string {
  * proposed intervention; Finance is reached only after Martin approves
  * that intervention (see strategyAnalyst.ts's handleInterventionApproval).
  * Sales's responsibility for this work session ends here; the runtime
- * waits for Strategy (via the existing discoverPendingStrategyHandoffs
+ * waits for Strategy (via the generic Handoff discovery loop, discoverPendingHandoffsForUnit,
  * discovery, never invoked in-process from this call).
  */
 export async function handleInterventionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
@@ -1634,7 +1634,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   state.handoffId = handoff.id;
   // Sales's execution ends here. Strategy is a separate Unit and must
   // discover and pick up this Handoff independently (see the scheduled
-  // discoverPendingStrategyHandoffs run in index.ts) rather than being
+  // Handoff discovery run in index.ts) rather than being
   // invoked in-process from this call. This mapping is how that later,
   // separate invocation finds its way back to this work item.
   await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);
