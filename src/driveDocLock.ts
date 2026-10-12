@@ -4,8 +4,13 @@ import {
   tryAcquireDriveDocLock,
   releaseDriveDocLock,
   inspectDriveDocLock,
+  requestDriveDocPass,
+  runDriveDocAlarm,
+  DRIVE_DOC_LOCK_TTL_MS,
+  DRIVE_DOC_COOLDOWN_MS,
   type DriveDocClaim,
 } from "./driveDocLockState";
+import { runDriveDocPassBody } from "./googleDriveWatch";
 
 /**
  * The per-Doc lock for the Drive comment-notification path.
@@ -16,10 +21,13 @@ import {
  * never contend at all -- which is exactly the required behaviour: duplicates
  * serialize, separate docs proceed independently.
  *
- * WHY THE PASS RUNS OUTSIDE THIS CLASS. This class records who holds the lock
- * and nothing more. The actual comment pass runs in the calling Worker's
- * background (ctx.waitUntil), so a slow pass never occupies a Durable Object
- * request. The DO's job is a bounded claim and an honest answer.
+ * TWO JOBS. (1) The bounded per-Doc claim the polling safety net takes
+ * (tryAcquire/release). (2) Running NOTIFICATION passes from this object's
+ * alarm (requestPass -> alarm), under that same claim. The notification
+ * receiver only asks for a pass and answers Drive at once; the pass itself
+ * runs here, where an alarm handler may run for up to 15 minutes -- unlike
+ * ctx.waitUntil, which Cloudflare stops ~30s after the response and which
+ * could leave a killed pass's claim held until its TTL.
  *
  * All decision logic lives in driveDocLockState.ts. That split is deliberate:
  * `cloudflare:workers` cannot be imported under the node test runner, so
@@ -43,6 +51,28 @@ export class DriveDocLock extends DurableObject<Env> {
   /** Releases this document's lock early. A stale or foreign token is a no-op. */
   async release(token: string): Promise<void> {
     return releaseDriveDocLock(this.ctx.storage, token);
+  }
+
+  /**
+   * Asks for one complete comment pass over `documentId`. Returns at once;
+   * the pass runs from alarm(). Duplicate requests collapse into the pending
+   * alarm or one catch-up pass (see requestDriveDocPass).
+   */
+  async requestPass(documentId: string): Promise<"scheduled" | "coalesced"> {
+    return requestDriveDocPass(this.ctx.storage, this.ctx.storage, documentId);
+  }
+
+  /** Runs the requested pass under this document's claim, always releasing it. See runDriveDocAlarm. */
+  async alarm(): Promise<void> {
+    await runDriveDocAlarm(
+      this.ctx.storage,
+      this.ctx.storage,
+      async (documentId) => {
+        await runDriveDocPassBody(this.env, documentId);
+      },
+      DRIVE_DOC_LOCK_TTL_MS,
+      DRIVE_DOC_COOLDOWN_MS,
+    );
   }
 
   /** Diagnostic only: is the lock held, and until when? */
