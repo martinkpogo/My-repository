@@ -9,7 +9,7 @@ import { generate } from "./ai";
 import { logActivity } from "./log";
 import { sendOperationsMessage } from "./telegram";
 import { CommentMarkerPersistenceError } from "./googleDocComments";
-import { kvGet, kvPut } from "./kvStore";
+import { kvGet, kvPut, kvPutHeartbeat, POLL_HEARTBEAT_MIN_INTERVAL_MS } from "./kvStore";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 const VALUES_RANGE = "A1:ZZ10000";
@@ -391,7 +391,7 @@ export async function pollGoogleSheetComments(env: Env): Promise<PollGoogleSheet
   // /admin/last-google-sheet-comment-poll. Diagnostics ONLY: best-effort,
   // so a failed write (e.g. the per-day KV write quota) is logged and never
   // blocks the poll itself from starting.
-  await kvPut(env, "last_google_sheet_comment_poll_run", new Date().toISOString()).catch((err) =>
+  await kvPutHeartbeat(env, "last_google_sheet_comment_poll_run", POLL_HEARTBEAT_MIN_INTERVAL_MS).catch((err) =>
     console.error("pollGoogleSheetComments: could not record the diagnostics timestamp (polling continues)", err),
   );
 

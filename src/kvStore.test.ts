@@ -8,6 +8,7 @@ import {
   kvGet,
   kvList,
   kvPut,
+  kvPutHeartbeat,
   maybeSweepKvFallback,
   sweepKvFallback,
   __resetKvStoreStateForTests,
@@ -857,4 +858,68 @@ test("value boundary: document content and account email under google_option:/wa
     assert.equal(body.includes("ACME Corp renewal proposal body"), false, "document content must never appear in Turso-bound bytes");
     assert.equal(body.includes("me@acme.example"), false, "account email must never appear in Turso-bound bytes");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Poller diagnostics heartbeat throttle (kvPutHeartbeat)
+// ---------------------------------------------------------------------------
+
+test("kvPutHeartbeat: first call writes, calls inside the window spend no KV write, a call after the window writes again", async () => {
+  reset();
+  const kv = makeKv();
+  const env = makeEnv(kv);
+  const interval = 15 * 60_000;
+  let clock = Date.parse("2026-10-13T05:00:00.000Z");
+  __setNowForTests(() => clock);
+  try {
+    await kvPutHeartbeat(env, "last_google_doc_comment_poll_run", interval);
+    assert.equal(kv.putCalls.length, 1, "no stored value yet: the heartbeat is written");
+    assert.equal(kv.store.get("last_google_doc_comment_poll_run"), "2026-10-13T05:00:00.000Z");
+
+    clock += 5 * 60_000;
+    await kvPutHeartbeat(env, "last_google_doc_comment_poll_run", interval);
+    clock += 9 * 60_000;
+    await kvPutHeartbeat(env, "last_google_doc_comment_poll_run", interval);
+    assert.equal(kv.putCalls.length, 1, "inside the window: no further KV write is spent");
+    assert.equal(kv.store.get("last_google_doc_comment_poll_run"), "2026-10-13T05:00:00.000Z", "value is unchanged inside the window");
+
+    clock += 2 * 60_000; // 16 minutes after the last write
+    await kvPutHeartbeat(env, "last_google_doc_comment_poll_run", interval);
+    assert.equal(kv.putCalls.length, 2, "past the window: written again");
+    assert.equal(kv.store.get("last_google_doc_comment_poll_run"), "2026-10-13T05:16:00.000Z");
+  } finally {
+    __setNowForTests(undefined);
+  }
+});
+
+test("kvPutHeartbeat: an unparseable, future-dated or unreadable stored value falls through to a normal write", async () => {
+  reset();
+  const kv = makeKv();
+  const env = makeEnv(kv);
+  const interval = 15 * 60_000;
+  __setNowForTests(() => Date.parse("2026-10-13T05:00:00.000Z"));
+  try {
+    kv.store.set("hb", "not-a-date");
+    await kvPutHeartbeat(env, "hb", interval);
+    assert.equal(kv.store.get("hb"), "2026-10-13T05:00:00.000Z", "garbage is overwritten");
+
+    kv.store.set("hb", "2026-10-13T09:00:00.000Z"); // clock skew: stored value is in the future
+    await kvPutHeartbeat(env, "hb", interval);
+    assert.equal(kv.store.get("hb"), "2026-10-13T05:00:00.000Z", "a future-dated value never suppresses writes");
+
+    kv.failGet = true;
+    const before = kv.putCalls.length;
+    await kvPutHeartbeat(env, "hb", interval);
+    assert.equal(kv.putCalls.length, before + 1, "a failed read falls through to the write attempt");
+  } finally {
+    __setNowForTests(undefined);
+  }
+});
+
+test("kvPutHeartbeat: a failed write surfaces to the caller exactly as kvPut did (callers keep their .catch)", async () => {
+  reset();
+  const kv = makeKv();
+  const env = makeEnv(kv);
+  kv.failPut = true;
+  await assert.rejects(() => kvPutHeartbeat(env, "last_google_sheet_comment_poll_run", 15 * 60_000), /kv put boom/);
 });

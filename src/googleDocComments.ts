@@ -9,7 +9,7 @@ import { generate } from "./ai";
 import { logActivity } from "./log";
 import { getSessionStub } from "./sessionRouting";
 import { sendOperationsMessage } from "./telegram";
-import { kvGet, kvPut, maybeSweepKvFallback } from "./kvStore";
+import { kvGet, kvPut, kvPutHeartbeat, maybeSweepKvFallback, POLL_HEARTBEAT_MIN_INTERVAL_MS } from "./kvStore";
 import { DRIVE_DOC_LOCK_TTL_MS, driveDocLockStub } from "./driveDocLockState";
 
 const COMMENT_PROCESSED_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
@@ -835,7 +835,7 @@ export async function pollGoogleDocComments(env: Env): Promise<PollGoogleDocComm
   // endpoint's traffic apart from any other route's). Diagnostics ONLY:
   // best-effort, so a failed write (e.g. the per-day KV write quota) is
   // logged and never blocks the poll itself from starting.
-  await kvPut(env, "last_google_doc_comment_poll_run", new Date().toISOString()).catch((err) =>
+  await kvPutHeartbeat(env, "last_google_doc_comment_poll_run", POLL_HEARTBEAT_MIN_INTERVAL_MS).catch((err) =>
     console.error("pollGoogleDocComments: could not record the diagnostics timestamp (polling continues)", err),
   );
 
