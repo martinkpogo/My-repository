@@ -293,10 +293,10 @@ test("L. Finance pricing -- sufficient evidence produces a quote and rationale w
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_quote_approval");
-  assert.ok(result.quote, "a quote must be attached to state");
-  assert.strictEqual(result.quote!.price, 15000);
-  assert.ok(result.quote!.rationale.length > 0);
-  assert.ok(!/budget|willingness[\s-]?to[\s-]?pay/i.test(result.quote!.rationale));
+  assert.ok(result.finance?.quote, "a quote must be attached to state");
+  assert.strictEqual(result.finance!.quote!.price, 15000);
+  assert.ok(result.finance!.quote!.rationale.length > 0);
+  assert.ok(!/budget|willingness[\s-]?to[\s-]?pay/i.test(result.finance!.quote!.rationale));
 });
 
 test("M. PPP protection -- rationale invoking a PPP multiplier is deterministically blocked despite sufficient: true", async (t) => {
@@ -376,7 +376,7 @@ test("P. Diagnosis-first pricing -- a defined diagnostic can be priced without a
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_quote_approval", "a diagnostic-only engagement must be priceable without a chosen downstream intervention");
-  assert.ok(result.quote);
+  assert.ok(result.finance?.quote);
 });
 
 test("Deterministic validation overrides sufficient: true when value-at-stake is assumption-only", async (t) => {
@@ -478,7 +478,7 @@ test("Finance pickup refuses a Handoff that is already Picked-up", async (t) => 
 
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
-  assert.strictEqual(result.quote, undefined, "must not process a Handoff that isn't genuinely Pending");
+  assert.strictEqual(result.finance?.quote, undefined, "must not process a Handoff that isn't genuinely Pending");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
 });
 
@@ -490,7 +490,7 @@ test("Finance pickup refuses an already-Closed Handoff", async (t) => {
 
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
-  assert.strictEqual(result.quote, undefined);
+  assert.strictEqual(result.finance?.quote, undefined);
   assert.strictEqual(log.handoffPatchBodies.length, 0);
 });
 
@@ -502,7 +502,7 @@ test("Finance pickup refuses a Held Handoff (no explicit retry to Pending)", asy
 
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
-  assert.strictEqual(result.quote, undefined);
+  assert.strictEqual(result.finance?.quote, undefined);
   assert.strictEqual(log.handoffPatchBodies.length, 0);
 });
 
@@ -513,7 +513,7 @@ test("handleQuoteApproval: retrieves the original Strategy Handoff (via the stil
     stage: "awaiting_quote_approval",
     entityToken: "E-47",
     matterToken: "M-12",
-    quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." },
+    finance: { quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." } },
   });
 
   const result = await handleQuoteApproval(env, state, true);
@@ -545,7 +545,7 @@ test("handleQuoteApproval: proceeds normally and creates the Finance -> Sales Ha
     stage: "awaiting_quote_approval",
     entityToken: "E-47",
     matterToken: "M-12",
-    quote: { price: 100000, rationale: "Value-based rationale." },
+    finance: { quote: { price: 100000, rationale: "Value-based rationale." } },
   });
 
   const result = await handleQuoteApproval(env, state, true);
@@ -563,7 +563,7 @@ test("19. Finance -> Sales creates a token-only Handoff -- the title and Reason 
     stage: "awaiting_quote_approval",
     entityToken: "E-47",
     matterToken: "M-12",
-    quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." },
+    finance: { quote: { price: 100000, currency: "GHS", rationale: "Value-based rationale." } },
   });
 
   const result = await handleQuoteApproval(env, state, true);
@@ -582,7 +582,7 @@ test("Finance -> Sales: quote approval blocked on a missing Matter_Token must no
     stage: "awaiting_quote_approval",
     entityToken: "E-20",
     matterToken: undefined,
-    quote: { price: 420000, rationale: "Value-based rationale." },
+    finance: { quote: { price: 420000, rationale: "Value-based rationale." } },
   });
   mockFetch(t, { matterToken: "" });
 
@@ -607,7 +607,7 @@ test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion 
     stage: "awaiting_quote_approval",
     entityToken: "E-20",
     matterToken: undefined,
-    quote: { price: 420000, rationale: "Value-based rationale." },
+    finance: { quote: { price: 420000, rationale: "Value-based rationale." } },
   });
 
   const result = await handleQuoteApproval(env, state, true);
@@ -624,7 +624,7 @@ test("handleQuoteApproval: stays blocked (not a silent failure) when Matter_Toke
     stage: "awaiting_quote_approval",
     entityToken: "E-20",
     matterToken: undefined,
-    quote: { price: 420000, rationale: "Value-based rationale." },
+    finance: { quote: { price: 420000, rationale: "Value-based rationale." } },
   });
 
   const result = await handleQuoteApproval(env, state, true);
@@ -751,7 +751,7 @@ test("handleDirectRequest resolves an explicit Matter token and produces a quote
   assert.strictEqual(result.matterToken, "MAT-20");
   assert.strictEqual(result.entityToken, "E-7");
   assert.strictEqual(result.stage, "awaiting_quote_approval");
-  assert.ok(result.quote, "a quote must be produced");
+  assert.ok(result.finance?.quote, "a quote must be produced");
   assert.ok(sentTexts.some((m) => m.includes("Approve this quote?") && !m.includes("Draft Proposal")), "a direct-entry quote must never promise routing to Sales");
 });
 
@@ -805,7 +805,7 @@ test("handleDirectRequest holds on insufficient evidence via finance_direct_requ
 
   assert.strictEqual(result.stage, "handoff_held");
   assert.strictEqual(result.awaiting, "finance_direct_request_context", "insufficient-evidence hold must route to the context continuation, not back through token resolution");
-  assert.ok(result.financeJudgmentContext, "the original context must be preserved for the follow-up to build on");
+  assert.ok(result.finance?.judgmentContext, "the original context must be preserved for the follow-up to build on");
 });
 
 test("handleDirectRequestContext augments the preserved context (not the Matter token) and re-runs the quote judgment", async (t) => {
@@ -817,14 +817,14 @@ test("handleDirectRequestContext augments the preserved context (not the Matter 
     awaiting: "finance_direct_request_context",
     entityToken: "E-7",
     matterToken: "MAT-20",
-    financeJudgmentContext: "Original: rough guess only, no real evidence.",
+    finance: { judgmentContext: "Original: rough guess only, no real evidence." },
   });
 
   const result = await handleDirectRequestContext(env, state, "Correction: GHS 8M-12M annual, client-estimated on the call.");
 
   assert.strictEqual(result.stage, "awaiting_quote_approval");
-  assert.match(result.financeJudgmentContext ?? "", /Correction: GHS 8M-12M annual/, "Martin's follow-up must be folded into the preserved context");
-  assert.match(result.financeJudgmentContext ?? "", /Original: rough guess only/, "the original context must not be discarded");
+  assert.match(result.finance?.judgmentContext ?? "", /Correction: GHS 8M-12M annual/, "Martin's follow-up must be folded into the preserved context");
+  assert.match(result.finance?.judgmentContext ?? "", /Original: rough guess only/, "the original context must not be discarded");
 });
 
 test("handleQuoteApproval: a direct-entry quote (no handoffId) completes standalone -- no Strategy boundary read, no Finance -> Sales Handoff created", async (t) => {
@@ -835,7 +835,7 @@ test("handleQuoteApproval: a direct-entry quote (no handoffId) completes standal
     handoffId: undefined,
     entityToken: "E-7",
     matterToken: "MAT-20",
-    quote: { price: 15000, currency: "USD", rationale: "Priced against the estimated opportunity." },
+    finance: { quote: { price: 15000, currency: "USD", rationale: "Priced against the estimated opportunity." } },
   });
 
   const result = await handleQuoteApproval(env, state, true);
@@ -853,7 +853,7 @@ test("handleQuoteApproval: Redo on a direct-entry quote fails closed with a clea
     handoffId: undefined,
     entityToken: "E-7",
     matterToken: "MAT-20",
-    quote: { price: 15000, currency: "USD", rationale: "Priced against the estimated opportunity." },
+    finance: { quote: { price: 15000, currency: "USD", rationale: "Priced against the estimated opportunity." } },
   });
 
   await handleQuoteApproval(env, state, false);
@@ -884,7 +884,7 @@ test("writer-to-parser contract: the real Finance writer's output is parseable b
     stage: "awaiting_quote_approval",
     entityToken: "E-47",
     matterToken: "MAT-20",
-    quote: { price: 420000, currency: "GHS", rationale },
+    finance: { quote: { price: 420000, currency: "GHS", rationale } },
   });
 
   await handleQuoteApproval(fakeEnv(), state, true);
@@ -931,7 +931,7 @@ test("writer-to-parser contract: absent, malformed, ambiguous and incomplete Fin
     stage: "awaiting_quote_approval",
     entityToken: "E-47",
     matterToken: "MAT-20",
-    quote: { price: 420000, currency: "GHS", rationale: "Value-based rationale." },
+    finance: { quote: { price: 420000, currency: "GHS", rationale: "Value-based rationale." } },
   });
   await handleQuoteApproval(fakeEnv(), state, true);
 
@@ -1068,7 +1068,7 @@ test("Valid non-assumption evidence stays priceable under the existing validator
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_quote_approval", "a Satisfied determination is not held by the structured pre-check");
-  assert.strictEqual(result.quote!.price, 15000);
+  assert.strictEqual(result.finance!.quote!.price, 15000);
   assert.strictEqual(lastHandoffPatch(log).properties.Status.select.name, "Closed");
 });
 
@@ -1128,7 +1128,7 @@ test("Finance clarification re-evaluates the governed evidence without creating 
     "GHS 9,000,000 annual cost of inaction, stated by the CFO on the 2026-09-20 call and derived from recorded churn cost.",
   );
 
-  assert.strictEqual(state.valueEvidenceFactSupplied, true, "the supplied fact is what lets the governed re-evaluation run at all");
+  assert.strictEqual(state.finance?.valueEvidenceFactSupplied, true, "the supplied fact is what lets the governed re-evaluation run at all");
   assert.ok(log.getCallCount >= 1, "the Handoff is re-read, not reconstructed from memory");
   const rewrites = log.handoffPatchBodies.filter((patch) => patch.properties?.["Verified Facts & Sources"] !== undefined);
   assert.strictEqual(rewrites.length, 0, "a clarification never overwrites Verified Facts & Sources -- the blocks survive untouched");
@@ -1176,7 +1176,7 @@ test("No forbidden pricing basis can enter through the structured value-evidence
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
   assert.strictEqual(result.stage, "handoff_held", "a Satisfied upstream determination never bypasses the existing pricing validation");
-  assert.strictEqual(result.quote, undefined);
+  assert.strictEqual(result.finance?.quote, undefined);
   assert.match(openQuestionsText(lastHandoffPatch(log)), /budget or willingness-to-pay used as the pricing basis/);
 });
 

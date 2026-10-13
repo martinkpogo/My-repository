@@ -22,6 +22,7 @@ import type { ApprovalProof } from "../../types";
 import { kvPut } from "./../../kvStore";
 
 
+import { financeOf } from "./financeState";
 interface RawValueAtStakeJudgement {
   value?: number;
   low?: number;
@@ -352,7 +353,7 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
   // evidence sufficiency, not Matter identity, so it must route to
   // handleDirectRequestContext, never back through token resolution.
   state.entryType = "direct_request";
-  state.financeJudgmentContext = evalResult.contract.sanitizedContext;
+  financeOf(state).judgmentContext = evalResult.contract.sanitizedContext;
 
   return judgeQuote(env, state, {
     entityToken: evalResult.contract.entityToken,
@@ -383,14 +384,14 @@ export async function handleDirectRequestClarification(env: Env, state: WorkStat
  * augmentation pattern for the Handoff-based path.
  */
 export async function handleDirectRequestContext(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const augmentedContext = `${state.financeJudgmentContext ?? ""}\n\nAdditional value context: ${text}`;
-  state.financeJudgmentContext = augmentedContext;
+  const augmentedContext = `${state.finance?.judgmentContext ?? ""}\n\nAdditional value context: ${text}`;
+  financeOf(state).judgmentContext = augmentedContext;
 
   return judgeQuote(env, state, {
     entityToken: state.entityToken ?? "",
     matterToken: state.matterToken ?? "",
     judgmentContext: augmentedContext,
-    financeThreadId: state.financeThreadId ?? state.threadId,
+    financeThreadId: state.finance?.threadId ?? state.threadId,
     awaitingOnInsufficient: "finance_direct_request_context",
     activityLabel: "resumed a directly-requested pricing assessment following Martin's additional context",
   });
@@ -598,7 +599,7 @@ async function judgeQuote(
   // supplied fact, gated by the unchanged validateFinanceJudgement. That is
   // how a hold closes without any new pricing authority being created.
   const structuredHoldReason =
-    valueEvidence.ok && !state.valueEvidenceFactSupplied ? commercialValueEvidenceHoldReason(valueEvidence.record) : null;
+    valueEvidence.ok && !state.finance?.valueEvidenceFactSupplied ? commercialValueEvidenceHoldReason(valueEvidence.record) : null;
   if (valueEvidence.ok) {
     console.log(
       `Finance judgeQuote: structured Commercial Value Evidence parsed for work ${state.workId} (determination: ${valueEvidence.record.determination})`,
@@ -655,7 +656,7 @@ async function judgeQuote(
     );
     state.stage = "handoff_held";
     state.awaiting = awaitingOnInsufficient;
-    state.financeThreadId = financeThreadId;
+    financeOf(state).threadId = financeThreadId;
     if (financeThreadId !== undefined) {
       await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
     }
@@ -692,10 +693,10 @@ async function judgeQuote(
   // The quote is a judgment call, not final authority (per the Finance Hat
   // Definition's authority_limits) — it goes to Martin for review before it
   // becomes the authoritative quote Sales is allowed to build a proposal on.
-  state.quote = { price, currency, rationale };
+  financeOf(state).quote = { price, currency, rationale };
   state.stage = "awaiting_quote_approval";
   state.awaiting = undefined;
-  state.financeThreadId = financeThreadId;
+  financeOf(state).threadId = financeThreadId;
   if (financeThreadId !== undefined) {
     await setActiveWorkId(env, state.chatId, financeThreadId, state.workId);
   }
@@ -737,7 +738,7 @@ async function judgeQuote(
  * survive a redo intact.
  */
 export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonText: string): Promise<WorkState> {
-  const financeThreadId = state.financeThreadId ?? state.threadId;
+  const financeThreadId = state.finance?.threadId ?? state.threadId;
 
   const evalResult = await resolveHandoffBusinessContext(env, state.handoffId!, financeAccess(state));
   if (!evalResult.success) {
@@ -795,7 +796,7 @@ export async function handleQuoteRedoReason(env: Env, state: WorkState, reasonTe
  * in-session, no new workflow mechanism, no requeue.
  */
 export async function handleValueContextClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const financeThreadId = state.financeThreadId ?? state.threadId;
+  const financeThreadId = state.finance?.threadId ?? state.threadId;
   const suppliedFact = text.trim();
 
   if (!suppliedFact) {
@@ -835,7 +836,7 @@ export async function handleValueContextClarification(env: Env, state: WorkState
   // deliberately NOT written here, so no clarification can destroy the
   // blocks Finance's judgment is grounded in.
   const augmentedContext = `${evalResult.contract.sanitizedContext}\n\nCommercial fact supplied by Martin in clarification: ${suppliedFact}`;
-  state.valueEvidenceFactSupplied = true;
+  financeOf(state).valueEvidenceFactSupplied = true;
 
   return judgeQuote(env, state, {
     entityToken: evalResult.contract.entityToken,
@@ -916,14 +917,14 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       entry: `Finance quote approved (direct request): ${state.matterToken ?? state.entityToken}`,
       type: "Decision",
       area: "Finance",
-      decisions: `Approved quote: ${state.quote?.currency ?? ""} ${state.quote?.price ?? ""}`,
-      decisionRationale: state.quote?.rationale ?? "",
+      decisions: `Approved quote: ${state.finance?.quote?.currency ?? ""} ${state.finance?.quote?.price ?? ""}`,
+      decisionRationale: state.finance?.quote?.rationale ?? "",
       outcome: "Complete",
     });
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `Quote approved: ${state.quote?.currency ?? ""} ${state.quote?.price ?? ""} for *${state.entityToken}*.`,
+      `Quote approved: ${state.finance?.quote?.currency ?? ""} ${state.finance?.quote?.price ?? ""} for *${state.entityToken}*.`,
     );
     state.stage = "quote_approved";
     state.awaiting = undefined;
@@ -1012,7 +1013,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
 
   const combinedVerifiedFactsAndSources = [
     `${STRATEGY_BOUNDARY_START}\n${strategyBoundaryBlock}\n${STRATEGY_BOUNDARY_END}`,
-    `${FINANCE_JUDGMENT_START}\nAuthoritative quote: ${state.quote?.currency ?? ""} ${state.quote?.price}\nRationale: ${state.quote?.rationale ?? ""}\n${FINANCE_JUDGMENT_END}`,
+    `${FINANCE_JUDGMENT_START}\nAuthoritative quote: ${state.finance?.quote?.currency ?? ""} ${state.finance?.quote?.price}\nRationale: ${state.finance?.quote?.rationale ?? ""}\n${FINANCE_JUDGMENT_END}`,
   ].join("\n\n");
 
   const { page: followUp } = await createHandoff(

@@ -12,6 +12,7 @@ import { logActivity } from "../../log";
 import { generate } from "../../ai";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 
+import { bdOf, migrateLegacyBusinessDevelopmentState } from "./businessDevelopmentState";
 /**
  * Business Development's Unit Manifest -- the first Unit built entirely
  * on the manifest/registry pattern (ENIG Operating Model design doc,
@@ -425,10 +426,10 @@ async function judgeOpportunityQualification(env: Env, opportunity: BDOpportunit
 }
 
 async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  const opportunity = state.bd?.opportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
   const result = await judgeOpportunityQualification(env, opportunity, skills);
 
-  state.bdOpportunity = {
+  bdOf(state).opportunity = {
     ...opportunity,
     qualification: result.qualification,
     qualificationRationale: result.rationale,
@@ -470,11 +471,11 @@ async function runQualifyOpportunity(env: Env, state: WorkState, hatName: string
  */
 async function proposeBDHandoff(env: Env, state: WorkState, targetUnit: Unit, targetHat: string, text: string): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
-  const opportunity = state.bdOpportunity;
+  const opportunity = state.bd?.opportunity;
   const opportunitySummary = (opportunity?.qualificationRationale ?? text).slice(0, 1900);
   const reason = `Business Development's ${fromHat} Hat judged this ready for ${targetHat}'s ownership.`;
 
-  state.pendingBDHandoff = {
+  bdOf(state).pendingHandoff = {
     unit: targetUnit,
     hat: targetHat,
     handoffTitle: `Business Development -> ${targetHat}: opportunity handoff`,
@@ -512,7 +513,7 @@ async function proposeBDHandoff(env: Env, state: WorkState, targetUnit: Unit, ta
  */
 export async function handleBDHandoffApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
-  const pending = state.pendingBDHandoff;
+  const pending = state.bd?.pendingHandoff;
   // The Work is about to perform the HANDOFF itself, which is a different
   // registered operation from the determine_next_move that proposed it. Both
   // are approval-gated, but they are gated for different reasons, and only
@@ -529,7 +530,7 @@ export async function handleBDHandoffApproval(env: Env, state: WorkState, approv
   }
 
   if (!approved) {
-    state.pendingBDHandoff = undefined;
+    bdOf(state).pendingHandoff = undefined;
     await logActivity(env, {
       entry: `Business Development handoff to ${pending.hat} declined by Martin`,
       type: "Decision",
@@ -568,7 +569,7 @@ export async function handleBDHandoffApproval(env: Env, state: WorkState, approv
     activity: `${fromHat} Hat's handoff to ${pending.hat} approved by Martin.`,
     outcome: "Active",
   });
-  state.pendingBDHandoff = undefined;
+  bdOf(state).pendingHandoff = undefined;
   await sendWorkspaceHatMessage(env, { ...state, hat: fromHat }, `Sent to *${pending.hat}*.`);
   return state;
 }
@@ -637,7 +638,7 @@ async function proposeBDDevelopment(
   draftFn: (env: Env, opportunity: BDOpportunityState, skills: ResolvedActionSkillSet) => Promise<DevelopmentDraft | null> = draftDevelopOpportunity,
 ): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
-  const opportunity = state.bdOpportunity ?? { hatFamily, signal: state.enquiryText ?? "", evidence: [] };
+  const opportunity = state.bd?.opportunity ?? { hatFamily, signal: state.enquiryText ?? "", evidence: [] };
   const draft = await draftFn(env, opportunity, skills);
 
   if (!draft) {
@@ -651,7 +652,7 @@ async function proposeBDDevelopment(
 
   const draftSummary = `Stakeholders: ${draft.stakeholders ?? "(not stated)"}\nValue hypothesis: ${draft.valueHypothesis ?? "(not stated)"}\nRoute: ${draft.route ?? "(not stated)"}\nDependencies: ${draft.dependencies ?? "(not stated)"}\nRisks: ${draft.risks ?? "(not stated)"}\nNext step: ${draft.nextStep ?? "(not stated)"}`;
 
-  state.pendingBDDevelop = { draftSummary };
+  bdOf(state).pendingDevelop = { draftSummary };
 
   await logActivity(env, {
     entry: "Business Development drafted a development plan -- pending approval",
@@ -681,7 +682,7 @@ async function proposeBDDevelopment(
  */
 export async function handleBDDevelopApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
-  const pending = state.pendingBDDevelop;
+  const pending = state.bd?.pendingDevelop;
 
   if (!pending) {
     await sendWorkspaceHatMessage(env, { ...state, hat: fromHat }, "There's no pending development draft to act on.");
@@ -689,7 +690,7 @@ export async function handleBDDevelopApproval(env: Env, state: WorkState, approv
   }
 
   if (!approved) {
-    state.pendingBDDevelop = undefined;
+    bdOf(state).pendingDevelop = undefined;
     await logActivity(env, {
       entry: "Business Development development draft declined by Martin",
       type: "Decision",
@@ -701,9 +702,9 @@ export async function handleBDDevelopApproval(env: Env, state: WorkState, approv
     return state;
   }
 
-  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
-  state.bdOpportunity = { ...opportunity, developedState: pending.draftSummary };
-  state.pendingBDDevelop = undefined;
+  const opportunity = state.bd?.opportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  bdOf(state).opportunity = { ...opportunity, developedState: pending.draftSummary };
+  bdOf(state).pendingDevelop = undefined;
 
   await logActivity(env, {
     entry: "Business Development development plan approved",
@@ -767,7 +768,7 @@ async function draftNextMove(env: Env, opportunity: BDOpportunityState, skills: 
  */
 async function proposeNextMove(env: Env, state: WorkState, hatFamily: BDOpportunityState["hatFamily"], skills: ResolvedActionSkillSet): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
-  const opportunity = state.bdOpportunity ?? { hatFamily, signal: state.enquiryText ?? "", evidence: [] };
+  const opportunity = state.bd?.opportunity ?? { hatFamily, signal: state.enquiryText ?? "", evidence: [] };
   const draft = await draftNextMove(env, opportunity, skills);
 
   if (!draft || !draft.nextMove) {
@@ -781,7 +782,7 @@ async function proposeNextMove(env: Env, state: WorkState, hatFamily: BDOpportun
 
   const nextMoveSummary = `Next move: ${draft.nextMove}\n\nRationale: ${draft.rationale ?? "(not stated)"}${draft.requiresHumanDecision ? `\n\nRequires your decision: ${draft.requiresHumanDecision}` : ""}`;
 
-  state.pendingBDNextMove = { nextMoveSummary };
+  bdOf(state).pendingNextMove = { nextMoveSummary };
 
   await logActivity(env, {
     entry: "Business Development recommended a next move -- pending approval",
@@ -810,7 +811,7 @@ async function proposeNextMove(env: Env, state: WorkState, hatFamily: BDOpportun
  */
 export async function handleBDNextMoveApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   const fromHat = state.hat ?? "Business Development";
-  const pending = state.pendingBDNextMove;
+  const pending = state.bd?.pendingNextMove;
 
   if (!pending) {
     await sendWorkspaceHatMessage(env, { ...state, hat: fromHat }, "There's no pending next-move recommendation to act on.");
@@ -818,7 +819,7 @@ export async function handleBDNextMoveApproval(env: Env, state: WorkState, appro
   }
 
   if (!approved) {
-    state.pendingBDNextMove = undefined;
+    bdOf(state).pendingNextMove = undefined;
     await logActivity(env, {
       entry: "Business Development next-move recommendation declined by Martin",
       type: "Decision",
@@ -830,9 +831,9 @@ export async function handleBDNextMoveApproval(env: Env, state: WorkState, appro
     return state;
   }
 
-  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
-  state.bdOpportunity = { ...opportunity, nextMove: pending.nextMoveSummary };
-  state.pendingBDNextMove = undefined;
+  const opportunity = state.bd?.opportunity ?? { hatFamily: "opportunity_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  bdOf(state).opportunity = { ...opportunity, nextMove: pending.nextMoveSummary };
+  bdOf(state).pendingNextMove = undefined;
 
   await logActivity(env, {
     entry: "Business Development next move approved",
@@ -911,8 +912,8 @@ async function opportunityDevelopmentEntryHandler(
  * implementation of the same rule.
  */
 async function resumeQualifyOpportunity(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const opportunity = state.bdOpportunity ?? { hatFamily: "opportunity_development" as const, signal: "", evidence: [] };
-  state.bdOpportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
+  const opportunity = state.bd?.opportunity ?? { hatFamily: "opportunity_development" as const, signal: "", evidence: [] };
+  bdOf(state).opportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
   return runQualifyOpportunity(env, state, OPPORTUNITY_DEVELOPMENT_HAT_NAME, skills);
 }
 
@@ -1138,10 +1139,10 @@ async function judgePartnershipQualification(env: Env, partnership: BDOpportunit
 }
 
 async function runQualifyPartnership(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const partnership = state.bdOpportunity ?? { hatFamily: "partnership_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  const partnership = state.bd?.opportunity ?? { hatFamily: "partnership_development" as const, signal: state.enquiryText ?? "", evidence: [] };
   const result = await judgePartnershipQualification(env, partnership, skills);
 
-  state.bdOpportunity = {
+  bdOf(state).opportunity = {
     ...partnership,
     qualification: result.qualification,
     qualificationRationale: result.rationale,
@@ -1169,8 +1170,8 @@ async function runQualifyPartnership(env: Env, state: WorkState, skills: Resolve
 }
 
 async function resumeQualifyPartnership(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const partnership = state.bdOpportunity ?? { hatFamily: "partnership_development" as const, signal: "", evidence: [] };
-  state.bdOpportunity = { ...partnership, evidence: [...partnership.evidence, text] };
+  const partnership = state.bd?.opportunity ?? { hatFamily: "partnership_development" as const, signal: "", evidence: [] };
+  bdOf(state).opportunity = { ...partnership, evidence: [...partnership.evidence, text] };
   return runQualifyPartnership(env, state, skills);
 }
 
@@ -1436,10 +1437,10 @@ async function judgeGrowthQualification(env: Env, opportunity: BDOpportunityStat
 }
 
 async function runQualifyGrowthOpportunity(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const opportunity = state.bdOpportunity ?? { hatFamily: "growth_market_development" as const, signal: state.enquiryText ?? "", evidence: [] };
+  const opportunity = state.bd?.opportunity ?? { hatFamily: "growth_market_development" as const, signal: state.enquiryText ?? "", evidence: [] };
   const result = await judgeGrowthQualification(env, opportunity, skills);
 
-  state.bdOpportunity = {
+  bdOf(state).opportunity = {
     ...opportunity,
     qualification: result.qualification,
     qualificationRationale: result.rationale,
@@ -1467,8 +1468,8 @@ async function runQualifyGrowthOpportunity(env: Env, state: WorkState, skills: R
 }
 
 async function resumeQualifyGrowthOpportunity(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const opportunity = state.bdOpportunity ?? { hatFamily: "growth_market_development" as const, signal: "", evidence: [] };
-  state.bdOpportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
+  const opportunity = state.bd?.opportunity ?? { hatFamily: "growth_market_development" as const, signal: "", evidence: [] };
+  bdOf(state).opportunity = { ...opportunity, evidence: [...opportunity.evidence, text] };
   return runQualifyGrowthOpportunity(env, state, skills);
 }
 
@@ -1562,4 +1563,6 @@ export const businessDevelopmentManifest: UnitManifest = {
   intakeClassificationTaskId: "business_development.intake_classification",
   intakeIntroLine: "You route incoming Business Development requests for ENIG, among its three parallel specialist Hats.",
   actionClassificationTaskId: "business_development.hat_action_decision",
+  // Business Development's state lives in WorkState.bd; a Work saved with the old loose fields is read into it on load.
+  migrateWorkState: migrateLegacyBusinessDevelopmentState,
 };

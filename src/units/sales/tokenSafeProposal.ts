@@ -35,6 +35,7 @@ import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader 
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 
+import { salesOf } from "./salesState";
 /**
  * Runtime Sales Proposal production for a Finance -> Sales Handoff.
  *
@@ -651,8 +652,8 @@ async function findExistingProposal(
   handoffId: string,
   matterToken: string,
 ): Promise<{ page?: NotionPage } | { error: string }> {
-  if (state.salesProposal?.handoffId === handoffId) {
-    return { page: await getPage(env, state.salesProposal.pageId, workSessionContext(state)) };
+  if (state.sales?.proposal?.handoffId === handoffId) {
+    return { page: await getPage(env, state.sales?.proposal.pageId, workSessionContext(state)) };
   }
   const linked = await queryDataSource(env, env.PROPOSALS_DATA_SOURCE_ID, workSessionReadContext(),  { property: "Handoff", relation: { contains: handoffId } });
   if (linked.length > 1) return { error: `${linked.length} Proposal records are linked to this Handoff; cannot determine the canonical one.` };
@@ -805,9 +806,9 @@ async function presentForApproval(env: Env, state: WorkState, sp: RuntimeSalesPr
  * Proposal (MAT-26, HO-86 -> HO-87).
  */
 export function verifyStrategyProposalTokenSafety(state: WorkState): string | null {
-  const proposal = state.strategyProposal;
+  const proposal = state.strategy?.proposal;
   if (!proposal) return null; // absence is reported by resolveFacts as a missing fact
-  const attestation = state.strategyProposalTokenSafety;
+  const attestation = state.strategy?.proposalTokenSafety;
   if (!attestation) {
     return `the approved Strategy Proposal (${proposal.proposalId} v${proposal.proposalVersion}) has no token-safety attestation on record -- it cannot be used as a Proposal source.`;
   }
@@ -959,7 +960,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     plainText(existing.page.properties["Approval Status"]) !== "Draft"
   ) {
     const sp = await proposalFromRecord(existing.page, {
-      ...(state.salesProposal ?? {}),
+      ...(state.sales?.proposal ?? {}),
       handoffId,
       handoffRef: uniqueId(hp["Handoff ID"]) || handoffId,
     });
@@ -971,7 +972,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
       const resolved = await resolveFacts(env, state, handoff, tokens, parsed.quote);
       if ("facts" in resolved) sp.facts = resolved.facts;
     }
-    state.salesProposal = sp;
+    salesOf(state).proposal = sp;
     if (status !== "Closed") {
       await updateHandoff(
         env,
@@ -1119,8 +1120,8 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     amendments: [],
     facts,
   };
-  state.salesProposal = sp;
-  state.pendingSalesProposalRevision = undefined;
+  salesOf(state).proposal = sp;
+  salesOf(state).pendingProposalRevision = undefined;
   state.blockedReason = undefined;
 
   // The canonical Doc must exist and read back as this exact Version before
@@ -1265,7 +1266,7 @@ export async function handleSalesProposalDecision(
   version: number,
   decision: "approve" | "revise" | "doc",
 ): Promise<WorkState> {
-  const sp = state.salesProposal;
+  const sp = state.sales?.proposal;
   if (!sp) return staleDecision(env, state, "there is no Runtime Proposal on this work item.");
   if (sp.proposalNumber !== proposalNumber) {
     return staleDecision(env, state, `this decision is for Proposal #${proposalNumber}, not ${sp.proposalId}.`);
@@ -1279,7 +1280,7 @@ export async function handleSalesProposalDecision(
     if (version !== sp.currentVersion) {
       return staleDecision(env, state, `${versionLabel(version)} is not the current Version of ${sp.proposalId} (current: ${versionLabel(sp.currentVersion)}).`);
     }
-    state.pendingSalesProposalRevision = { proposalNumber, fromVersion: version };
+    salesOf(state).pendingProposalRevision = { proposalNumber, fromVersion: version };
     state.pendingActionSummary = undefined;
     await sendWorkspaceHatMessage(
       env,
@@ -1305,7 +1306,7 @@ export async function handleSalesProposalDecision(
   // outstanding request away -- the cycle must close on its own terms (see
   // evaluateProposalApprovalCycle). This is what makes "no approve while a
   // requested change is outstanding" hold for the Telegram route too.
-  const openCycle = state.proposalApprovalCycle;
+  const openCycle = state.sales?.proposalApprovalCycle;
   if (openCycle && openCycle.proposalNumber === proposalNumber) {
     const unsatisfied = unsatisfiedCycleItems(openCycle);
     if (unsatisfied.length > 0) {
@@ -1605,7 +1606,7 @@ export async function reopenProposalApprovalCycle(
   if (sp.artifactStatus !== "Not Requested") sp.artifactStatus = "Held";
 
   const now = new Date().toISOString();
-  const existing = state.proposalApprovalCycle;
+  const existing = state.sales?.proposalApprovalCycle;
   const cycle: ProposalApprovalCycle =
     existing && existing.proposalNumber === sp.proposalNumber && existing.documentId === input.documentId
       ? existing
@@ -1618,7 +1619,7 @@ export async function reopenProposalApprovalCycle(
     outcome: "awaiting_application",
     observedResolved: false,
   };
-  state.proposalApprovalCycle = cycle;
+  salesOf(state).proposalApprovalCycle = cycle;
 
   if (wasApproved) {
     await logActivity(env, {
@@ -1640,7 +1641,7 @@ export async function reopenProposalApprovalCycle(
  * verified; anything else is `refused` and never satisfies the cycle.
  */
 export function recordProposalCycleItemOutcome(state: WorkState, commentId: string, outcome: "applied" | "refused" | "awaiting_application", appliedVersion?: number): void {
-  const cycle = state.proposalApprovalCycle;
+  const cycle = state.sales?.proposalApprovalCycle;
   if (!cycle) return;
   const item = cycle.items[commentId];
   if (!item) return;
@@ -1684,8 +1685,8 @@ export async function evaluateProposalApprovalCycle(
   state: WorkState,
   observations: { commentId: string; resolved: boolean; modifiedTime?: string }[],
 ): Promise<{ kind: "no_cycle" | "held_unsatisfied" | "approved" | "already_approved"; approvedVersion?: number; reasons?: string[] }> {
-  const sp = state.salesProposal;
-  const cycle = state.proposalApprovalCycle;
+  const sp = state.sales?.proposal;
+  const cycle = state.sales?.proposalApprovalCycle;
   if (!sp || !cycle) return { kind: "no_cycle" };
   if (cycle.proposalNumber !== sp.proposalNumber) return { kind: "no_cycle" };
   // Idempotency guard, checked before anything can be written.
@@ -1950,7 +1951,7 @@ export async function applyProposalDocComment(
   state: WorkState,
   input: { proposalNumber: number; version: number; text: string; commentId?: string; documentId?: string },
 ): Promise<{ state: WorkState; result: ProposalDocCommentResult }> {
-  const sp = state.salesProposal;
+  const sp = state.sales?.proposal;
   if (!sp || sp.proposalNumber !== input.proposalNumber) {
     return { state, result: { kind: "stale", detail: "this Doc does not belong to the Proposal on this work item." } };
   }
@@ -1986,9 +1987,9 @@ export async function applyProposalDocComment(
     cycleItemRegistered = true;
   }
 
-  state.pendingSalesProposalRevision = { proposalNumber: sp.proposalNumber, fromVersion: input.version };
+  salesOf(state).pendingProposalRevision = { proposalNumber: sp.proposalNumber, fromVersion: input.version };
   await handleSalesProposalRevisionText(env, state, input.text);
-  const after = state.salesProposal!;
+  const after = state.sales?.proposal!;
   if (after.currentVersion === input.version + 1) {
     if (cycleItemRegistered && input.commentId) {
       // A new Version exists, but the cycle item is only `applied` once the
@@ -2005,7 +2006,7 @@ export async function applyProposalDocComment(
     return { state, result: { kind: "revised", newVersion: after.currentVersion } };
   }
   if (cycleItemRegistered && input.commentId) recordProposalCycleItemOutcome(state, input.commentId, "refused");
-  state.pendingSalesProposalRevision = undefined;
+  salesOf(state).pendingProposalRevision = undefined;
   return { state, result: { kind: "refused", detail: state.blockedReason ?? "the change was not applied." } };
 }
 
@@ -2038,7 +2039,7 @@ export async function applyProposalDocFormatting(
   state: WorkState,
   input: { proposalNumber: number; version: number },
 ): Promise<{ state: WorkState; result: ProposalDocFormattingResult }> {
-  const sp = state.salesProposal;
+  const sp = state.sales?.proposal;
   if (!sp || sp.proposalNumber !== input.proposalNumber) {
     return { state, result: { kind: "stale", detail: "this Doc does not belong to the Proposal on this work item." } };
   }
@@ -2097,7 +2098,7 @@ export async function requestProposalDocClarification(
   state: WorkState,
   input: { proposalNumber: number; version: number; commentId: string; documentId: string; text: string },
 ): Promise<{ state: WorkState; result: ProposalDocClarificationResult }> {
-  const sp = state.salesProposal;
+  const sp = state.sales?.proposal;
   if (!sp || sp.proposalNumber !== input.proposalNumber) {
     return { state, result: { ok: false, detail: "this Doc does not belong to the Proposal on this work item.", retryable: false } };
   }
@@ -2113,7 +2114,7 @@ export async function requestProposalDocClarification(
       result: { ok: false, detail: `${versionLabel(input.version)} is no longer the current Version of ${sp.proposalId}, so no clarification was recorded.`, retryable: false },
     };
   }
-  if (state.pendingProposalDocClarification && state.pendingProposalDocClarification.commentId !== input.commentId) {
+  if (state.sales?.pendingProposalDocClarification && state.sales?.pendingProposalDocClarification.commentId !== input.commentId) {
     // One outstanding clarification per Work: a second ambiguous comment is
     // answered rather than silently replacing the request Martin is already
     // being asked about.
@@ -2122,7 +2123,7 @@ export async function requestProposalDocClarification(
       result: { ok: false, detail: `a clarification is already outstanding for another comment on ${sp.proposalId} ${versionLabel(input.version)}; resolve that one first.`, retryable: true },
     };
   }
-  state.pendingProposalDocClarification = {
+  salesOf(state).pendingProposalDocClarification = {
     commentId: input.commentId,
     documentId: input.documentId,
     proposalNumber: input.proposalNumber,
@@ -2159,8 +2160,8 @@ export async function requestProposalDocClarification(
  * fails it says so, exactly as the poller's own failure path does.
  */
 export async function handleProposalDocClarificationText(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const sp = state.salesProposal;
-  const pending = state.pendingProposalDocClarification;
+  const sp = state.sales?.proposal;
+  const pending = state.sales?.pendingProposalDocClarification;
 
   // A processed-marker that cannot be persisted (today: the per-day KV
   // write quota) settles NOTHING. Both marker writes below run BEFORE any
@@ -2194,7 +2195,7 @@ export async function handleProposalDocClarificationText(env: Env, state: WorkSt
         throw err;
       }
     }
-    state.pendingProposalDocClarification = undefined;
+    salesOf(state).pendingProposalDocClarification = undefined;
     state.awaiting = undefined;
     return staleDecision(env, state, detail);
   };
@@ -2239,7 +2240,7 @@ export async function handleProposalDocClarificationText(env: Env, state: WorkSt
     if (err instanceof CommentMarkerPersistenceError) return persistenceRefusal(pending.commentId, err);
     throw err;
   }
-  state.pendingProposalDocClarification = undefined;
+  salesOf(state).pendingProposalDocClarification = undefined;
   state.awaiting = undefined;
   state.stage = "proposal_doc_clarification_resolved";
 
@@ -2275,10 +2276,10 @@ export async function handleProposalDocClarificationText(env: Env, state: WorkSt
 }
 
 export async function handleSalesProposalRevisionText(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const sp = state.salesProposal;
-  const pending = state.pendingSalesProposalRevision;
+  const sp = state.sales?.proposal;
+  const pending = state.sales?.pendingProposalRevision;
   if (!sp || !pending || pending.proposalNumber !== sp.proposalNumber || pending.fromVersion !== sp.currentVersion) {
-    state.pendingSalesProposalRevision = undefined;
+    salesOf(state).pendingProposalRevision = undefined;
     state.awaiting = undefined;
     return staleDecision(env, state, "this change request no longer matches the current Proposal Version.");
   }
@@ -2341,7 +2342,7 @@ export async function handleSalesProposalRevisionText(env: Env, state: WorkState
   sp.approvalStatus = "Pending Approval";
   sp.approvedVersion = undefined;
   sp.artifactStatus = artifactStatus;
-  state.pendingSalesProposalRevision = undefined;
+  salesOf(state).pendingProposalRevision = undefined;
 
   // The revised Version is about to be presented for approval, so the Work's
   // Action advances to proposal_submit -- the same transition the original

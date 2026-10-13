@@ -60,7 +60,7 @@ export async function handleWorkSessionState(request: Request, env: Env): Promis
   // findings in the order the plan named the Skills (they run concurrently,
   // but Promise.all preserves order), so index + 1 is the invocation number.
   // Nothing here reorders or renumbers.
-  const strategySkillFindings = (state.strategySkillFindings ?? []).map((finding, index) => ({
+  const strategySkillFindings = (state.strategy?.skillFindings ?? []).map((finding, index) => ({
     invocation: index + 1,
     skillId: finding.skillId ?? null,
     status: finding.status ?? null,
@@ -73,7 +73,7 @@ export async function handleWorkSessionState(request: Request, env: Env): Promis
       stage: state.stage ?? null,
       updatedAt: state.updatedAt ?? null,
       strategySkillCycleUnavailable:
-        typeof state.strategySkillCycleUnavailable === "boolean" ? state.strategySkillCycleUnavailable : null,
+        typeof state.strategy?.skillCycleUnavailable === "boolean" ? state.strategy?.skillCycleUnavailable : null,
       strategySkillFindings,
     }),
     { headers: JSON_HEADERS },

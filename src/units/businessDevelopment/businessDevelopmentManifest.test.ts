@@ -81,7 +81,7 @@ function fakeWorkState(overrides: Record<string, unknown> = {}) {
     threadId: 777,
     hat: "Business Development Manager",
     unit: "Business Development",
-    bdOpportunity: { hatFamily: "opportunity_development" as const, signal: "A candidate signal", evidence: ["Some evidence"] },
+    bd: { opportunity: { hatFamily: "opportunity_development" as const, signal: "A candidate signal", evidence: ["Some evidence"] } },
     ...overrides,
   } as any;
 }
@@ -170,7 +170,7 @@ test("qualify_opportunity: assembles a prompt carrying the shared opportunity_qu
   assert.strictEqual(capturedSystems.length, 1);
   assert.match(capturedSystems[0], new RegExp(QUALIFICATION_GATE_DISTINCTIVE_LINE));
   assert.doesNotMatch(capturedSystems[0], new RegExp(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
-  assert.strictEqual(state.bdOpportunity.qualification, "Qualified");
+  assert.strictEqual(state.bd?.opportunity.qualification, "Qualified");
   assert.strictEqual(state.awaiting, undefined);
 });
 
@@ -182,7 +182,7 @@ test("qualify_opportunity: holds (pauses the WorkSession) rather than inferring 
   const state = fakeWorkState();
   await opportunityDevelopmentHat.entryHandler(env, state, "qualify_opportunity", "qualify this", await skillsFor(opportunityDevelopmentHat, "qualify_opportunity"));
 
-  assert.strictEqual(state.bdOpportunity.qualification, "Held");
+  assert.strictEqual(state.bd?.opportunity.qualification, "Held");
   assert.strictEqual(state.awaiting, "bd_opportunity_evidence_gap");
 });
 
@@ -197,15 +197,15 @@ test("develop_opportunity: assembles a prompt carrying the shared opportunity_fo
     },
   } as any;
 
-  const state = fakeWorkState({ bdOpportunity: { hatFamily: "opportunity_development", signal: "A signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" } });
+  const state = fakeWorkState({ bd: { opportunity: { hatFamily: "opportunity_development", signal: "A signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" } } });
   await opportunityDevelopmentHat.entryHandler(env, state, "develop_opportunity", "develop this", await skillsFor(opportunityDevelopmentHat, "develop_opportunity"));
 
   assert.strictEqual(capturedSystems.length, 1);
   assert.match(capturedSystems[0], new RegExp(FORWARD_PLANNING_DISTINCTIVE_LINE));
   assert.doesNotMatch(capturedSystems[0], new RegExp(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
   assert.doesNotMatch(capturedSystems[0], new RegExp(QUALIFICATION_GATE_DISTINCTIVE_LINE));
-  assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
-  assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
+  assert.ok(state.bd?.pendingDevelop, "should present a draft pending Martin's approval, never auto-commit");
+  assert.strictEqual(state.bd?.opportunity.developedState, undefined, "must not commit before approval");
 });
 
 /**
@@ -281,13 +281,13 @@ test("assess_partnership: resolves research_signal through its declared, resolve
 test("qualify_partnership: resolves opportunity_qualification_gate through its declared, resolved Skill set, distinct from research_signal", async (t) => {
   const { env, capturedSystems } = captureSkillPrompt(t, { qualification: "Qualified", rationale: "Strong evidence" });
 
-  const state = fakeWorkState({ hat: "Partnerships Manager", bdOpportunity: { hatFamily: "partnership_development", signal: "A partner signal", evidence: ["Evidence one"] } });
+  const state = fakeWorkState({ hat: "Partnerships Manager", bd: { opportunity: { hatFamily: "partnership_development", signal: "A partner signal", evidence: ["Evidence one"] } } });
   await partnershipDevelopmentHat.entryHandler(env, state, "qualify_partnership", "qualify this partnership", await skillsFor(partnershipDevelopmentHat, "qualify_partnership"));
 
   assert.strictEqual(capturedSystems.length, 1);
   assertCarriesSkillAndNotRetiredRule(capturedSystems[0], QUALIFICATION_GATE_DISTINCTIVE_LINE, QUALIFY_OLD_INLINE_RULE);
   assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE), "the threshold decision must not carry the evidence-interpretation Skill");
-  assert.strictEqual(state.bdOpportunity.qualification, "Qualified");
+  assert.strictEqual(state.bd?.opportunity.qualification, "Qualified");
 });
 
 test("develop_partnership: resolves opportunity_forward_planning through its declared, resolved Skill set instead of its retired inline grounding rule", async (t) => {
@@ -295,7 +295,7 @@ test("develop_partnership: resolves opportunity_forward_planning through its dec
 
   const state = fakeWorkState({
     hat: "Partnerships Manager",
-    bdOpportunity: { hatFamily: "partnership_development", signal: "A partner signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" },
+    bd: { opportunity: { hatFamily: "partnership_development", signal: "A partner signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" } },
   });
   await partnershipDevelopmentHat.entryHandler(env, state, "develop_partnership", "develop this partnership", await skillsFor(partnershipDevelopmentHat, "develop_partnership"));
 
@@ -303,8 +303,8 @@ test("develop_partnership: resolves opportunity_forward_planning through its dec
   assertCarriesSkillAndNotRetiredRule(capturedSystems[0], FORWARD_PLANNING_DISTINCTIVE_LINE, DEVELOP_OLD_INLINE_RULE);
   assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
   assert.ok(!capturedSystems[0].includes(QUALIFICATION_GATE_DISTINCTIVE_LINE));
-  assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
-  assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
+  assert.ok(state.bd?.pendingDevelop, "should present a draft pending Martin's approval, never auto-commit");
+  assert.strictEqual(state.bd?.opportunity.developedState, undefined, "must not commit before approval");
 });
 
 test("discover_growth_opportunity: resolves research_signal through its declared, resolved Skill set instead of its retired inline evidence rule", async (t) => {
@@ -341,13 +341,13 @@ test("assess_market_opportunity: resolves research_signal through its declared, 
 test("qualify_growth_opportunity: resolves opportunity_qualification_gate through its declared, resolved Skill set, distinct from research_signal", async (t) => {
   const { env, capturedSystems } = captureSkillPrompt(t, { qualification: "Qualified", rationale: "Strong evidence" });
 
-  const state = fakeWorkState({ hat: "Growth & Market Development Manager", bdOpportunity: { hatFamily: "growth_market_development", signal: "A growth signal", evidence: ["Evidence one"] } });
+  const state = fakeWorkState({ hat: "Growth & Market Development Manager", bd: { opportunity: { hatFamily: "growth_market_development", signal: "A growth signal", evidence: ["Evidence one"] } } });
   await growthMarketDevelopmentHat.entryHandler(env, state, "qualify_growth_opportunity", "qualify this growth opportunity", await skillsFor(growthMarketDevelopmentHat, "qualify_growth_opportunity"));
 
   assert.strictEqual(capturedSystems.length, 1);
   assertCarriesSkillAndNotRetiredRule(capturedSystems[0], QUALIFICATION_GATE_DISTINCTIVE_LINE, QUALIFY_OLD_INLINE_RULE);
   assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE), "the threshold decision must not carry the evidence-interpretation Skill");
-  assert.strictEqual(state.bdOpportunity.qualification, "Qualified");
+  assert.strictEqual(state.bd?.opportunity.qualification, "Qualified");
 });
 
 test("develop_growth_opportunity: resolves opportunity_forward_planning through its declared, resolved Skill set instead of its retired inline grounding rule", async (t) => {
@@ -355,7 +355,7 @@ test("develop_growth_opportunity: resolves opportunity_forward_planning through 
 
   const state = fakeWorkState({
     hat: "Growth & Market Development Manager",
-    bdOpportunity: { hatFamily: "growth_market_development", signal: "A growth signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" },
+    bd: { opportunity: { hatFamily: "growth_market_development", signal: "A growth signal", evidence: [], qualification: "Qualified", qualificationRationale: "Strong" } },
   });
   await growthMarketDevelopmentHat.entryHandler(env, state, "develop_growth_opportunity", "develop this growth opportunity", await skillsFor(growthMarketDevelopmentHat, "develop_growth_opportunity"));
 
@@ -363,8 +363,8 @@ test("develop_growth_opportunity: resolves opportunity_forward_planning through 
   assertCarriesSkillAndNotRetiredRule(capturedSystems[0], FORWARD_PLANNING_DISTINCTIVE_LINE, DEVELOP_OLD_INLINE_RULE);
   assert.ok(!capturedSystems[0].includes(RESEARCH_SIGNAL_DISTINCTIVE_LINE));
   assert.ok(!capturedSystems[0].includes(QUALIFICATION_GATE_DISTINCTIVE_LINE));
-  assert.ok(state.pendingBDDevelop, "should present a draft pending Martin's approval, never auto-commit");
-  assert.strictEqual(state.bdOpportunity.developedState, undefined, "must not commit before approval");
+  assert.ok(state.bd?.pendingDevelop, "should present a draft pending Martin's approval, never auto-commit");
+  assert.strictEqual(state.bd?.opportunity.developedState, undefined, "must not commit before approval");
 });
 
 test("determine_next_move on all three BD Hats: the shared draftNextMove resolves opportunity_forward_planning once, never its retired inline grounding rule", async (t) => {
@@ -379,14 +379,14 @@ test("determine_next_move on all three BD Hats: the shared draftNextMove resolve
 
     const state = fakeWorkState({
       hat: c.hatName,
-      bdOpportunity: { hatFamily: c.hatFamily, signal: "A signal", evidence: ["Evidence one"], qualification: "Qualified", qualificationRationale: "Strong", developedState: "Stakeholders: Martin" },
+      bd: { opportunity: { hatFamily: c.hatFamily, signal: "A signal", evidence: ["Evidence one"], qualification: "Qualified", qualificationRationale: "Strong", developedState: "Stakeholders: Martin" } },
     });
     await c.hat.entryHandler(env, state, "determine_next_move", "what's the next move?", await skillsFor(c.hat, "determine_next_move"));
 
     assert.strictEqual(capturedSystems.length, 1, `${c.hatName} must run exactly one drafting call`);
     assertCarriesSkillAndNotRetiredRule(capturedSystems[0], FORWARD_PLANNING_DISTINCTIVE_LINE, NEXT_MOVE_OLD_INLINE_RULE);
-    assert.ok(state.pendingBDNextMove, `${c.hatName} should present a recommendation pending Martin's approval, never auto-commit`);
-    assert.strictEqual(state.bdOpportunity.nextMove, undefined, "must not commit before approval");
+    assert.ok(state.bd?.pendingNextMove, `${c.hatName} should present a recommendation pending Martin's approval, never auto-commit`);
+    assert.strictEqual(state.bd?.opportunity.nextMove, undefined, "must not commit before approval");
   }
 });
 
@@ -413,7 +413,7 @@ test("findCallbackHandler resolves bdopportunityhandoff on Opportunity Developme
   mockTelegramFetch(t);
   const env = fakeEnv();
   const state = fakeWorkState({
-    pendingBDHandoff: { unit: "Sales", hat: "Sales Executive", handoffTitle: "Test handoff", reason: "Test reason", opportunitySummary: "Test summary" },
+    bd: { pendingHandoff: { unit: "Sales", hat: "Sales Executive", handoffTitle: "Test handoff", reason: "Test reason", opportunitySummary: "Test summary" } },
   });
 
   const handler = findCallbackHandler(BD_OPPORTUNITY_HANDOFF_CALLBACK_PREFIX, opportunityDevelopmentHat);
@@ -421,14 +421,14 @@ test("findCallbackHandler resolves bdopportunityhandoff on Opportunity Developme
 
   const result = await handler(env, state, false);
 
-  assert.strictEqual(result.pendingBDHandoff, undefined);
+  assert.strictEqual(result.bd?.pendingHandoff, undefined);
 });
 
 test("findCallbackHandler resolves bddevelop on Opportunity Development and genuinely delegates to handleBDDevelopApproval -- rejecting a pending draft discards it without committing developedState, proving real delegation", async (t) => {
   mockTelegramFetch(t);
   const env = fakeEnv();
   const state = fakeWorkState({
-    pendingBDDevelop: { draftSummary: "Test draft" },
+    bd: { pendingDevelop: { draftSummary: "Test draft" } },
   });
 
   const handler = findCallbackHandler(BD_DEVELOP_CALLBACK_PREFIX, opportunityDevelopmentHat);
@@ -436,15 +436,15 @@ test("findCallbackHandler resolves bddevelop on Opportunity Development and genu
 
   const result = await handler(env, state, false);
 
-  assert.strictEqual(result.pendingBDDevelop, undefined);
-  assert.strictEqual(result.bdOpportunity?.developedState, undefined, "must not commit before approval");
+  assert.strictEqual(result.bd?.pendingDevelop, undefined);
+  assert.strictEqual(result.bd?.opportunity?.developedState, undefined, "must not commit before approval");
 });
 
 test("findCallbackHandler resolves bdnextmove on Opportunity Development and genuinely delegates to handleBDNextMoveApproval -- rejecting a pending recommendation discards it without committing nextMove, proving real delegation", async (t) => {
   mockTelegramFetch(t);
   const env = fakeEnv();
   const state = fakeWorkState({
-    pendingBDNextMove: { nextMoveSummary: "Test next move" },
+    bd: { pendingNextMove: { nextMoveSummary: "Test next move" } },
   });
 
   const handler = findCallbackHandler(BD_NEXT_MOVE_CALLBACK_PREFIX, opportunityDevelopmentHat);
@@ -452,8 +452,8 @@ test("findCallbackHandler resolves bdnextmove on Opportunity Development and gen
 
   const result = await handler(env, state, false);
 
-  assert.strictEqual(result.pendingBDNextMove, undefined);
-  assert.strictEqual(result.bdOpportunity?.nextMove, undefined, "must not commit before approval");
+  assert.strictEqual(result.bd?.pendingNextMove, undefined);
+  assert.strictEqual(result.bd?.opportunity?.nextMove, undefined, "must not commit before approval");
 });
 
 // --- Skills are declared by the Action and supplied by the execution boundary ---
