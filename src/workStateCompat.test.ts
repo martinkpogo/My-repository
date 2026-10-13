@@ -24,30 +24,48 @@ import { migrateWorkState } from "./workStateMigration";
  * keep reading the old shape (and update this contract in the same change).
  */
 
-// Every field WorkState persists today. Removing or renaming one fails the
-// first test below; ADDING one is fine (append it here when you do).
+// Every top-level field WorkState persists today. Removing or renaming one
+// fails the first test below; ADDING one is fine (append it here when you do).
 //
-// Marketing's four fields (marketingTaskText, marketingDraft, pendingTransition,
-// pendingPaidMediaAction) moved into the `marketing` slice on 2026-10-13 --
-// a DELIBERATE migration, not a stranding: migrateLegacyMarketingState reads
-// a Work saved with the old loose fields into the slice on load (see the
-// "Legacy shape" test below), so this list tracks the CURRENT shape and the
-// migration function is what keeps the old one readable.
+// Unit-specific state lives in per-Unit slices (`marketing`, `strategy`, `bd`,
+// `finance`, `sales`): a DELIBERATE migration (Marketing 2026-10-13, then
+// Strategy, Business Development, Finance and Sales the same day), not a
+// stranding -- each Unit's migrateWorkState hook reads a Work saved with the
+// old loose fields into its slice on load (see LEGACY_FIELDS and the "Legacy
+// shape" tests below), so this list tracks the CURRENT shape and the hooks are
+// what keep every old shape readable. Sales's retired qualification-flow
+// fields (callNotes, qualification, proposedIntervention, enquiryText,
+// commercialEvidence, ...) stay loose until that retired path is removed.
 const PERSISTED_FIELDS = [
-  "actionName", "awaiting", "bdOpportunity", "blockedReason", "callNotes", "candidateEntities", "candidateMatters", "chatId",
-  "commercialEvidence", "commercialValueEvidenceBlock", "commercialValueEvidenceError", "createdAt", "enquiryText", "entityDraft",
-  "entityId", "entityName", "entityToken", "entryType", "externalOperations", "financeJudgmentContext", "financeThreadId", "handoffId",
-  "hat", "investmentToleranceContext", "marketing", "matterDraft", "matterId", "matterIdUnresolved",
-  "matterName", "matterToken", "measurementBaseline", "pendingActionSummary", "pendingApproval", "pendingBDDevelop", "pendingBDHandoff",
-  "pendingBDNextMove", "pendingGoogleAction", "pendingHandoffAutoCheck", "pendingLeadOpportunity",
-  "pendingProposalDocClarification", "pendingSalesProposalRevision", "pendingSmokeSelection", "pendingStrategyApproval",
-  "pendingStrategyHandoff", "pendingStrategyRefinement", "proposalApprovalCycle", "proposalDraft",
-  "proposalRevisionCount", "proposedIntervention", "qualification", "quote", "salesProposal", "stage", "strategyApprovalState",
-  "strategyContext", "strategyDiagnosis", "strategyDiscussion", "strategyProposal", "strategyProposalHistory",
-  "strategyProposalTokenSafety", "strategyQuestion", "strategySkillCycleUnavailable", "strategySkillCycleUnavailableCause",
-  "strategySkillFindings", "strategySourceBoundaryAttestation", "threadId", "unit", "updatedAt", "valueEvidenceFactSupplied", "workId",
-  "workStatus", "workStatusMessageId",
+  "actionName", "awaiting", "bd", "blockedReason", "callNotes", "candidateEntities", "candidateMatters", "chatId", "commercialEvidence",
+  "createdAt", "enquiryText", "entityDraft", "entityId", "entityName", "entityToken", "entryType", "externalOperations", "finance",
+  "handoffId", "hat", "investmentToleranceContext", "marketing", "matterDraft", "matterId", "matterIdUnresolved", "matterName",
+  "matterToken", "measurementBaseline", "pendingActionSummary", "pendingApproval", "pendingGoogleAction", "pendingHandoffAutoCheck",
+  "pendingSmokeSelection", "proposalDraft", "proposalRevisionCount", "proposedIntervention", "qualification", "sales", "stage",
+  "strategy", "threadId", "unit", "updatedAt", "workId", "workStatus", "workStatusMessageId",
 ];
+
+// Every loose field that USED to be persisted, and the slice field it is read
+// into now. A Work saved before the move still carries the old name; the
+// Unit's migration hook must keep turning it into the new one.
+const LEGACY_FIELDS: Record<string, string> = {
+  marketingTaskText: "marketing.taskText", marketingDraft: "marketing.draft", pendingTransition: "marketing.pendingTransition",
+  pendingPaidMediaAction: "marketing.pendingPaidMediaAction",
+  strategyQuestion: "strategy.question", strategyContext: "strategy.context", strategyDiagnosis: "strategy.diagnosis",
+  strategySkillFindings: "strategy.skillFindings", strategySkillCycleUnavailable: "strategy.skillCycleUnavailable",
+  strategySkillCycleUnavailableCause: "strategy.skillCycleUnavailableCause", pendingStrategyHandoff: "strategy.pendingHandoff",
+  strategyProposal: "strategy.proposal", strategyProposalHistory: "strategy.proposalHistory", strategyApprovalState: "strategy.approvalState",
+  pendingStrategyApproval: "strategy.pendingApproval", strategySourceBoundaryAttestation: "strategy.sourceBoundaryAttestation",
+  strategyProposalTokenSafety: "strategy.proposalTokenSafety", pendingStrategyRefinement: "strategy.pendingRefinement",
+  strategyDiscussion: "strategy.discussion", commercialValueEvidenceBlock: "strategy.commercialValueEvidenceBlock",
+  commercialValueEvidenceError: "strategy.commercialValueEvidenceError",
+  bdOpportunity: "bd.opportunity", pendingBDHandoff: "bd.pendingHandoff", pendingBDDevelop: "bd.pendingDevelop", pendingBDNextMove: "bd.pendingNextMove",
+  financeThreadId: "finance.threadId", financeJudgmentContext: "finance.judgmentContext",
+  valueEvidenceFactSupplied: "finance.valueEvidenceFactSupplied", quote: "finance.quote",
+  salesProposal: "sales.proposal", pendingSalesProposalRevision: "sales.pendingProposalRevision",
+  pendingProposalDocClarification: "sales.pendingProposalDocClarification", proposalApprovalCycle: "sales.proposalApprovalCycle",
+  pendingLeadOpportunity: "sales.pendingLeadOpportunity",
+};
 
 function currentWorkStateFields(): string[] {
   const text = readFileSync(join(__dirname, "types.ts"), "utf8");
@@ -127,9 +145,20 @@ test("Every approval button an in-flight Work can be waiting on still resolves t
 // fields are absent), shaped as each Unit writes it today.
 const SAVED: Record<string, Record<string, unknown>> = {
   "Strategy parked on feedback to a proposal": {
-    workId: "w-strategy-1", chatId: 1, unit: "Strategy", hat: "Strategy Analyst", actionName: "diagnose", stage: "strategy_proposal_review",
-    awaiting: "strategy_feedback", entityToken: "E-30", matterToken: "MAT-30", matterId: "m-30", handoffId: "h-1",
-    strategyQuestion: "q", strategyContext: "c", strategyApprovalState: "pending", createdAt: "2026-10-01T10:00:00.000Z", updatedAt: "2026-10-02T10:00:00.000Z",
+    workId: "w-strategy-1",
+    chatId: 1,
+    unit: "Strategy",
+    hat: "Strategy Analyst",
+    actionName: "diagnose",
+    stage: "strategy_proposal_review",
+    awaiting: "strategy_feedback",
+    entityToken: "E-30",
+    matterToken: "MAT-30",
+    matterId: "m-30",
+    handoffId: "h-1",
+    strategy: { question: "q", context: "c", approvalState: "pending" },
+    createdAt: "2026-10-01T10:00:00.000Z",
+    updatedAt: "2026-10-02T10:00:00.000Z",
   },
   "Finance parked on a quote redo reason": {
     workId: "w-fin-1", chatId: 1, unit: "Finance", hat: "Value-Based Pricing Assessor", actionName: "price", stage: "quote_pending_approval",
@@ -140,10 +169,16 @@ const SAVED: Record<string, Record<string, unknown>> = {
     awaiting: "proposal_doc_clarification", entityToken: "E-30", matterToken: "MAT-30", createdAt: "2026-10-04T10:00:00.000Z", updatedAt: "2026-10-04T11:00:00.000Z",
   },
   "Lead card waiting for a tap": {
-    workId: "w-lead-1", chatId: 1, unit: "Sales", hat: "Lead Generation Specialist", actionName: "record_lead", stage: "awaiting_lead_approval",
-    pendingLeadOpportunity: { organisation: "Acme", evidence: "e", reason: "r", sourceUrl: "https://example.com" },
+    workId: "w-lead-1",
+    chatId: 1,
+    unit: "Sales",
+    hat: "Lead Generation Specialist",
+    actionName: "record_lead",
+    stage: "awaiting_lead_approval",
+    sales: { pendingLeadOpportunity: { organisation: "Acme", evidence: "e", reason: "r", sourceUrl: "https://example.com" } },
     pendingActionSummary: { label: "Opportunity: Acme", message: "m", buttons: [], createdAt: "2026-10-12T10:00:00.000Z" },
-    createdAt: "2026-10-12T10:00:00.000Z", updatedAt: "2026-10-12T10:00:00.000Z",
+    createdAt: "2026-10-12T10:00:00.000Z",
+    updatedAt: "2026-10-12T10:00:00.000Z",
   },
   // Deliberately in the OLD (pre-2026-10-13) shape -- loose marketingTaskText/
   // marketingDraft, no `marketing` slice -- so this fixture also exercises
@@ -190,4 +225,36 @@ test("Legacy shape: a Marketing Work saved before the `marketing` slice existed 
   // Running it again (the next load of an already-migrated Work) changes nothing.
   const again = migrateWorkState(JSON.parse(JSON.stringify(migrated)));
   assert.deepStrictEqual(again, JSON.parse(JSON.stringify(migrated)), "migrating an already-current Work is a no-op");
+});
+
+test("Legacy shape: EVERY field that used to be a loose WorkState field is still read into its Unit's slice, and none is left loose", () => {
+  // A Work that carries every old loose field at once (a Handoff chain carries one Work across Units).
+  const saved: Record<string, unknown> = { workId: "w-all", chatId: 1, stage: "strategy_blocked", unit: "Strategy", hat: "Strategy Analyst" };
+  for (const oldName of Object.keys(LEGACY_FIELDS)) saved[oldName] = { sentinel: oldName };
+
+  const migrated = migrateWorkState(JSON.parse(JSON.stringify(saved))) as Record<string, unknown>;
+
+  for (const [oldName, target] of Object.entries(LEGACY_FIELDS)) {
+    const [slice, field] = target.split(".");
+    assert.strictEqual(oldName in migrated, false, `${oldName} must not stay loose after migration`);
+    assert.deepStrictEqual(
+      (migrated[slice] as Record<string, unknown> | undefined)?.[field],
+      { sentinel: oldName },
+      `${oldName} must be read into ${target} -- a Work saved with it would otherwise lose that state`,
+    );
+  }
+  // The generic fields are untouched.
+  assert.strictEqual(migrated.workId, "w-all");
+  assert.strictEqual(migrated.stage, "strategy_blocked");
+
+  // Idempotent: loading an already-migrated Work again changes nothing.
+  const again = migrateWorkState(JSON.parse(JSON.stringify(migrated)));
+  assert.deepStrictEqual(again, JSON.parse(JSON.stringify(migrated)));
+});
+
+test("Legacy shape: a value already in a slice is never overwritten by a stale loose field", () => {
+  const saved = { workId: "w-1", strategyContext: "stale loose value", strategy: { context: "current slice value" } };
+  const migrated = migrateWorkState(JSON.parse(JSON.stringify(saved))) as unknown as { strategy: { context: string }; strategyContext?: string };
+  assert.strictEqual(migrated.strategy.context, "current slice value");
+  assert.strictEqual("strategyContext" in migrated, false, "the stale loose copy is dropped, not left behind");
 });

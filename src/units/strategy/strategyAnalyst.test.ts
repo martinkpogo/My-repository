@@ -38,6 +38,7 @@ import { dispatchScheduledPickup, PENDING_PICKUP_KIND_KEY, type PickupAlarmStora
 import { routeIncomingText } from "../../router";
 import { resolveAwaitingHandler } from "../awaitingDispatch";
 
+import { strategyOf } from "./strategyState";
 /**
  * The Skill set Strategy's own `diagnose` Action declares, resolved from the
  * manifest's OWN `skill_requirements` -- so a change to that declaration is
@@ -131,14 +132,14 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     // proposal through the gate (see readSourceBoundaryEvidence).
     entityName: "Test Entity",
     matterName: "Test Matter",
-    strategySourceBoundaryAttestation: {
+    ...overrides,
+    strategy: { sourceBoundaryAttestation: {
       handoffId: "handoff-1",
       checked: true,
       result: "Passed",
       checks: [...SOURCE_BOUNDARY_CHECKS],
       identityFieldsChecked: ["entityName", "matterName"],
-    },
-    ...overrides,
+    }, ...overrides.strategy },
   };
 }
 
@@ -719,7 +720,7 @@ test("3. Strategy picks up a Pending Handoff", async (t) => {
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.ok(result.strategyQuestion, "the strategic question/context must be populated from the Handoff");
+  assert.ok(result.strategy?.question, "the strategic question/context must be populated from the Handoff");
   assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup must actually progress the work item");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Picked-up"), "the claim step must set Picked-up");
 });
@@ -754,7 +755,7 @@ test("WP4a. A Matter already at or beyond the transition makes NO Status write -
       !log.sentTexts.some((m) => m.includes("expected 'Qualified' -- not advanced.")),
       `the idempotent '${status}' case sends no not-advanced Operations notice`,
     );
-    assert.ok(result.strategyQuestion, `the diagnosis still runs after the no-op '${status}' pickup`);
+    assert.ok(result.strategy?.question, `the diagnosis still runs after the no-op '${status}' pickup`);
   }
 });
 
@@ -775,7 +776,7 @@ test("WP4b. A Matter at 'Open' makes NO write, reports the exact Operations noti
   );
   // Diagnosis is NOT blocked by a non-Qualified Matter (governance
   // question of refusing such Handoffs deliberately not implemented).
-  assert.ok(result.strategyQuestion, "the diagnosis still runs in the Open case");
+  assert.ok(result.strategy?.question, "the diagnosis still runs in the Open case");
   assert.notStrictEqual(result.stage, "strategy_blocked", "the notice must not block the diagnosis");
   assert.ok(
     !log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Held"),
@@ -869,7 +870,7 @@ test("3c. Handoff pickup BLOCKS when the Handoff's tokens don't resolve to a rea
 
   assert.strictEqual(result.stage, "strategy_blocked", "the defect stops the pickup via the existing handleBlocked path");
   assert.strictEqual(result.awaiting, "strategy_clarification");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
   assert.strictEqual(aiCalls, 0, "zero AI calls on the fail-fast path");
   const message = telegramMessages.join("\n");
   assert.match(message, /Matter_Token 'M-12' does not resolve to a related Matter/, "the reason names the exact defect, on its own line");
@@ -910,8 +911,8 @@ test("WP2a. An unusable source-boundary attestation stops the pickup before any 
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_clarification", "the existing handleBlocked stop -- no new hold mechanism");
   assert.strictEqual(calls(), 0, "ZERO AI calls on the fail-fast path");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
-  assert.strictEqual(result.strategyProposal, undefined, "no Proposal is ever staged");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.strategy?.proposal, undefined, "no Proposal is ever staged");
   const message = log.sentTexts.join("\n");
   assert.match(message, /source-boundary attestation is not usable: no source_boundary_check attestation marker is recorded on this Handoff/, "the reason names the defect in plain words");
   assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented -- the proposal gate's own attestation check remains as defence in depth");
@@ -929,8 +930,8 @@ test("WP2b. A missing Commercial Value Evidence block stops the pickup before an
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_clarification");
   assert.strictEqual(calls(), 0, "ZERO AI calls on the fail-fast path");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
-  assert.strictEqual(result.commercialValueEvidenceBlock, undefined);
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.strategy?.commercialValueEvidenceBlock, undefined);
   const message = log.sentTexts.join("\n");
   assert.match(message, /Commercial Value Evidence is not usable: the === COMMERCIAL VALUE EVIDENCE === block is absent/, "the reason names the defect in plain words");
   assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented -- the proposal gate's own provenance check remains as defence in depth");
@@ -970,7 +971,7 @@ test("WP2d. A direct_request with no Commercial Value Evidence block is NOT bloc
 
   assert.notStrictEqual(result.stage, "strategy_blocked", "direct_request is exempt from the Commercial Value Evidence check, mirroring both proposal-gate checks -- a direct request carries no Sales -> Strategy Handoff to read a block from");
   assert.notStrictEqual(result.stage, "awaiting_pickup", "pickup actually progressed");
-  assert.ok(result.strategyQuestion, "the diagnosis pipeline ran past the fail-fast check");
+  assert.ok(result.strategy?.question, "the diagnosis pipeline ran past the fail-fast check");
   assert.ok(!log.sentTexts.some((m) => /Strategy diagnosis held/i.test(m)), "no fail-fast hold message on the exempt path");
 });
 
@@ -999,9 +1000,9 @@ test("WP3. A gate-blocked diagnosis tells the caller the Outbound Data Gate refu
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_clarification");
   assert.strictEqual(aiCalls, 0, "the gate blocks before any provider executes -- ZERO AI calls");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis is produced");
-  assert.strictEqual(result.strategySkillCycleUnavailable, true, "the planning call degraded to core diagnosis, exactly as documented");
-  assert.strictEqual(result.strategySkillCycleUnavailableCause, "outbound_gate_blocked", "the CAUSE is recorded in WorkState");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
+  assert.strictEqual(result.strategy?.skillCycleUnavailable, true, "the planning call degraded to core diagnosis, exactly as documented");
+  assert.strictEqual(result.strategy?.skillCycleUnavailableCause, "outbound_gate_blocked", "the CAUSE is recorded in WorkState");
   const message = log.sentTexts.join("\n");
   assert.match(message, /The AI call was refused by the Outbound Data Gate \(COMPANY_SUFFIX_DETECTED\)/, "the hold reason states the gate refusal with its reason CODE");
   assert.ok(!message.includes("Insufficient evidence to complete a defensible diagnosis"), "a policy refusal is never phrased as an evidence judgement");
@@ -1029,7 +1030,7 @@ test("Required Next Action content is folded into the diagnosis context, not sil
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.match(result.strategyContext ?? "", /evidence-bounded framing/, "guidance written into Required Next Action must reach the diagnosis input");
+  assert.match(result.strategy?.context ?? "", /evidence-bounded framing/, "guidance written into Required Next Action must reach the diagnosis input");
 });
 
 test("4. Strategy refuses a Handoff already Picked-up", async (t) => {
@@ -1040,7 +1041,7 @@ test("4. Strategy refuses a Handoff already Picked-up", async (t) => {
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategyDiagnosis, undefined, "must not process a Handoff that isn't genuinely Pending");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "must not process a Handoff that isn't genuinely Pending");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no Notion write should occur -- refused before any processing");
 });
 
@@ -1101,7 +1102,7 @@ test("4b. An alarm-scheduled pickup for an already-claimed Handoff does no picku
   assert.strictEqual(store.has(PENDING_PICKUP_KIND_KEY), false, "the pending kind is cleared");
   assert.strictEqual(aiCalls, 0, "zero AI calls -- refused before any diagnosis");
   assert.strictEqual(log.handoffPatchBodies.length, 0, "no pickup work happened (no Notion write at all)");
-  assert.strictEqual(state.strategyDiagnosis, undefined, "no diagnosis was produced");
+  assert.strictEqual(state.strategy?.diagnosis, undefined, "no diagnosis was produced");
 });
 
 test("6. Strategy can place a blocked case on Held", async (t) => {
@@ -1282,7 +1283,7 @@ test("Pickup: supported cause + supported direction proceeds to a proposal for M
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
-  assert.strictEqual(result.strategyDiagnosis!.diagnosis!.cause, SUFFICIENT_DIAGNOSIS.diagnosis!.cause, "a supported cause is not relabelled");
+  assert.strictEqual(result.strategy!.diagnosis!.diagnosis!.cause, SUFFICIENT_DIAGNOSIS.diagnosis!.cause, "a supported cause is not relabelled");
 });
 
 test("Pickup: unsupported cause + independently supported direction proceeds, and the cause stays explicitly unproven", async (t) => {
@@ -1293,7 +1294,7 @@ test("Pickup: unsupported cause + independently supported direction proceeds, an
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval", "an independently supported direction proceeds although the cause is unresolved");
-  const diagnosis = result.strategyDiagnosis!;
+  const diagnosis = result.strategy?.diagnosis!;
   assert.strictEqual(diagnosis.diagnosis!.causationSupported, false, "causationSupported keeps its meaning");
   assert.ok(diagnosis.diagnosis!.cause!.startsWith(UNPROVEN_CAUSE_MARKER), "the unsupported cause is never presented as established fact");
   assert.match(diagnosis.unresolvedQuestions!, /is unproven/);
@@ -1309,7 +1310,7 @@ test("Pickup: unsupported cause + direction that materially depends on it is blo
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined);
   const held = lastHandoffPatch(log);
   assert.strictEqual(held.properties.Status.select.name, "Held");
   assert.match(held.properties["Open Questions"].rich_text[0].text.content, /materially depends on a diagnosed cause/);
@@ -1323,7 +1324,7 @@ test("Pickup: a direction with insufficient support is blocked -- it does not pr
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined);
   assert.match(lastHandoffPatch(log).properties["Open Questions"].rich_text[0].text.content, /direction itself is not sufficiently supported/);
 });
 
@@ -1333,13 +1334,13 @@ test("Pickup: with no recommendation, the existing no-recommendation path is unc
   env.AI = fakeAi(NO_RECOMMENDATION_DIAGNOSIS);
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
   assert.strictEqual(result.stage, "delivered");
-  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined);
 });
 
 test("7. Held case can explicitly return to Pending", async (t) => {
   const log = mockFetch(t, { initialStatus: "Held" });
   const env = fakeEnv();
-  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: "Original context." });
+  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategy: { context: "Original context." } });
 
   const result = await handleStrategyClarification(env, state, "The problem is specifically about delivery, not pricing.", STRATEGY_SKILLS);
 
@@ -1354,7 +1355,7 @@ test("7b. A clarification whose combined context exceeds 1,900 characters is sto
   const env = fakeEnv();
   const original = `Original context. ${"Established client facts. ".repeat(140)}`; // ~3,700 chars, well past the old 1,900 cut
   assert.ok(original.length > 3000);
-  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategyContext: original });
+  const state = fakeState({ stage: "strategy_blocked", awaiting: "strategy_clarification", strategy: { context: original } });
   const detail = "ADDED EVIDENCE: the delivery delays began after the warehouse consolidation in Q2, per the operations lead.";
 
   const result = await handleStrategyClarification(env, state, detail, STRATEGY_SKILLS);
@@ -1401,13 +1402,13 @@ test("9. A recommended diagnosis develops a full Strategic Intervention Proposal
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
-  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
-  assert.ok(result.strategyProposal, "a strategyProposal must be set");
-  assert.strictEqual(result.strategyProposal!.proposalVersion, 1);
-  assert.ok(result.pendingStrategyApproval, "a pendingStrategyApproval must be set");
-  assert.strictEqual(result.pendingStrategyApproval!.proposalId, result.strategyProposal!.proposalId);
-  assert.strictEqual(result.pendingStrategyApproval!.proposalVersion, 1);
-  assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
+  assert.strictEqual(result.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(result.strategy?.proposal, "a strategyProposal must be set");
+  assert.strictEqual(result.strategy!.proposal!.proposalVersion, 1);
+  assert.ok(result.strategy?.pendingApproval, "a pendingStrategyApproval must be set");
+  assert.strictEqual(result.strategy!.pendingApproval!.proposalId, result.strategy!.proposal!.proposalId);
+  assert.strictEqual(result.strategy!.pendingApproval!.proposalVersion, 1);
+  assert.deepStrictEqual(result.strategy!.pendingApproval!.decisionOptions, ["approve", "refine", "reject"]);
   assert.strictEqual(log.handoffCreateBody, null, "no Handoff of any kind may be created before Martin approves");
   // The originating Handoff must NOT be closed yet either -- it stays live
   // (Picked-up) until the intervention is actually approved.
@@ -1425,8 +1426,8 @@ test("A fresh Strategy Proposal that passes both checks receives a complete stra
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  const attestation = result.strategyProposalTokenSafety;
-  assert.strictEqual(attestation?.proposalId, result.strategyProposal!.proposalId);
+  const attestation = result.strategy?.proposalTokenSafety;
+  assert.strictEqual(attestation?.proposalId, result.strategy!.proposal!.proposalId);
   assert.strictEqual(attestation?.proposalVersion, 1);
   assert.strictEqual(attestation?.sourceBoundary.checked, true);
   assert.deepStrictEqual([...attestation!.sourceBoundary.identityFieldsChecked].sort(), ["entityName", "matterName"]);
@@ -1450,9 +1451,9 @@ test("Missing durable boundary evidence fails closed -- a Passed WorkState sessi
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "no usable durable evidence must leave the attestation unset");
-  assert.strictEqual(result.strategyProposal, undefined, "no Proposal is set when the source-boundary check is missing");
-  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation, undefined, "no usable durable evidence must leave the attestation unset");
+  assert.strictEqual(result.strategy?.proposal, undefined, "no Proposal is set when the source-boundary check is missing");
+  assert.strictEqual(result.strategy?.proposalTokenSafety, undefined);
   assert.strictEqual(result.stage, "strategy_blocked", "pickup fails fast -- before any AI call -- instead of diagnosis-then-gate");
   assert.strictEqual(result.awaiting, "strategy_clarification", "the existing handleBlocked stop, no new hold mechanism");
   const message = log.sentTexts.join("\n");
@@ -1471,8 +1472,8 @@ test("Failed durable boundary evidence fails closed -- the Proposal is never pre
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategySourceBoundaryAttestation, undefined, "a recorded Failed result must never be accepted as evidence");
-  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation, undefined, "a recorded Failed result must never be accepted as evidence");
+  assert.strictEqual(result.strategy?.proposal, undefined);
   assert.strictEqual(result.stage, "strategy_blocked", "pickup fails fast -- before any AI call -- instead of diagnosis-then-gate");
   const message = log.sentTexts.join("\n");
   assert.match(message, /Strategy diagnosis held/, "the defect stops the pickup through the existing handleBlocked path");
@@ -1488,8 +1489,8 @@ test("Missing operational Entity/Matter reference fails closed -- the Proposal i
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategyProposal, undefined);
-  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined);
+  assert.strictEqual(result.strategy?.proposalTokenSafety, undefined);
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.ok(log.sentTexts.some((t) => /no operational Entity\/Matter reference/.test(t)));
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
@@ -1502,17 +1503,17 @@ test("Fresh Strategy session consumes the durable attestation from the Handoff a
   // Fresh session: no shared Sales WorkState at all -- no attestation copy,
   // no entityName/matterName. Evidence comes only from the Handoff record;
   // operational context comes only from Entity_ID/Matter_ID.
-  const state = fakeState({ strategySourceBoundaryAttestation: undefined, entityName: undefined, matterName: undefined });
+  const state = fakeState({ strategy: { sourceBoundaryAttestation: undefined }, entityName: undefined, matterName: undefined });
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.ok(result.pendingStrategyApproval, "a fresh session must reach the proposal-approval stage");
-  assert.strictEqual(result.strategyProposal!.proposalVersion, 1);
+  assert.ok(result.strategy?.pendingApproval, "a fresh session must reach the proposal-approval stage");
+  assert.strictEqual(result.strategy!.proposal!.proposalVersion, 1);
   // The attestation was seeded from the durable marker, bound to this Handoff.
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.checked, true);
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.result, "Passed");
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.handoffId, "handoff-1");
-  assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.checked, true);
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.result, "Passed");
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.handoffId, "handoff-1");
+  assert.deepStrictEqual([...result.strategy!.sourceBoundaryAttestation!.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
   // Operational references only -- Strategy never resolves real-world identity.
   assert.strictEqual(result.entityToken, "E-47");
   assert.strictEqual(result.matterToken, "M-12");
@@ -1535,8 +1536,8 @@ test("A drafted Strategy Proposal containing a known identity value fails closed
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategyProposal, undefined, "the leaked proposal must never become the current Proposal");
-  assert.strictEqual(result.strategyProposalTokenSafety, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined, "the leaked proposal must never become the current Proposal");
+  assert.strictEqual(result.strategy?.proposalTokenSafety, undefined);
   assert.ok(log.sentTexts.some((t) => /known identity value \(matched field: email\)/.test(t)));
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)));
   // The violation detail is never echoed -- the actual matched value must never reach Telegram or the Handoff.
@@ -1550,7 +1551,7 @@ test("Proposal contains every required structural section", async (t) => {
   const state = fakeState();
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
-  const p = result.strategyProposal as StrategyProposal;
+  const p = result.strategy?.proposal as StrategyProposal;
 
   assert.ok(p.strategicObjective.objective, "must contain a strategic objective");
   assert.ok(p.recommendedDirection.direction, "must contain a recommended direction");
@@ -1682,8 +1683,8 @@ test("An incomplete AI-drafted proposal is held (not presented for approval) -- 
 
   assert.strictEqual(result.stage, "strategy_blocked", "an incomplete proposal must be held, not presented for approval");
   assert.strictEqual(result.awaiting, "strategy_clarification");
-  assert.strictEqual(result.strategyProposal, undefined, "no proposal should be adopted into state on a completeness failure");
-  assert.strictEqual(result.pendingStrategyApproval, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined, "no proposal should be adopted into state on a completeness failure");
+  assert.strictEqual(result.strategy?.pendingApproval, undefined);
   const heldPatch = lastHandoffPatch(log);
   assert.strictEqual(heldPatch.properties.Status.select.name, "Held");
   assert.match(heldPatch.properties["Open Questions"].rich_text[0].text.content, /missing required section/i);
@@ -1697,13 +1698,13 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
 
   const afterApproval = await handleInterventionApproval(env, afterPickup, proposalVersion, "approve");
 
   assert.strictEqual(afterApproval.stage, "awaiting_finance");
-  assert.strictEqual(afterApproval.strategyApprovalState, "APPROVED");
-  assert.strictEqual(afterApproval.pendingStrategyApproval, undefined);
+  assert.strictEqual(afterApproval.strategy?.approvalState, "APPROVED");
+  assert.strictEqual(afterApproval.strategy?.pendingApproval, undefined);
   const created = log.handoffCreateBody;
   assert.ok(created, "the Strategy -> Finance Handoff must be created");
   const props = created.properties;
@@ -1728,7 +1729,7 @@ test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matte
   assert.strictEqual(afterPickup.entityToken, "E-47");
   assert.strictEqual(afterPickup.matterToken, "M-12");
 
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
   assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
@@ -1742,7 +1743,7 @@ test("26-29. Strategy -> Finance carries the complete curated Strategy boundary 
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
   const factsText = items.map((i) => i.text.content).join("");
@@ -1780,7 +1781,7 @@ test("The Strategy boundary representation is not truncated at 1900 characters -
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
   assert.ok(items.length > 1, "content beyond a single 2,000-char rich-text item must be split, not truncated");
@@ -1814,9 +1815,9 @@ test("Provenance gate: a Sales -> Strategy Handoff with NO Commercial Value Evid
 
   assert.strictEqual(result.stage, "strategy_blocked", "missing provenance must fail closed -- now already at pickup, before any AI call");
   assert.strictEqual(result.awaiting, "strategy_clarification");
-  assert.strictEqual(result.strategyApprovalState, undefined, "no approval request is staged without provenance");
-  assert.strictEqual(result.strategyProposal, undefined, "the proposal is never adopted on a provenance failure");
-  assert.strictEqual(result.commercialValueEvidenceBlock, undefined);
+  assert.strictEqual(result.strategy?.approvalState, undefined, "no approval request is staged without provenance");
+  assert.strictEqual(result.strategy?.proposal, undefined, "the proposal is never adopted on a provenance failure");
+  assert.strictEqual(result.strategy?.commercialValueEvidenceBlock, undefined);
   assert.strictEqual(log.handoffCreateBody, null, "no Strategy -> Finance Handoff is ever created");
   const message = log.sentTexts.join("\n");
   assert.match(message, /Strategy diagnosis held/, "the defect stops the pickup through the existing handleBlocked path");
@@ -1837,8 +1838,8 @@ test("Provenance gate: a malformed Commercial Value Evidence block fails closed 
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.commercialValueEvidenceBlock, undefined, "an unparseable block is never carried as if it were valid");
-  assert.match(result.commercialValueEvidenceError ?? "", /not valid JSON/);
+  assert.strictEqual(result.strategy?.commercialValueEvidenceBlock, undefined, "an unparseable block is never carried as if it were valid");
+  assert.match(result.strategy?.commercialValueEvidenceError ?? "", /not valid JSON/);
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(log.handoffCreateBody, null);
   assert.match(log.sentTexts.join("\n"), /not valid JSON/, "the gate reports the exact parse failure");
@@ -1857,17 +1858,17 @@ test("An upstream `Insufficient Evidence` determination does NOT fail the Strate
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
 
   assert.strictEqual(afterPickup.stage, "awaiting_intervention_approval", "Strategy may be approved even when nothing is quantified upstream");
-  assert.ok(afterPickup.pendingStrategyApproval, "Approval Needed is reached as usual");
-  const carried = parseCommercialValueEvidenceBlock(afterPickup.commercialValueEvidenceBlock ?? "");
+  assert.ok(afterPickup.strategy?.pendingApproval, "Approval Needed is reached as usual");
+  const carried = parseCommercialValueEvidenceBlock(afterPickup.strategy?.commercialValueEvidenceBlock ?? "");
   assert.ok(carried.ok, carried.ok ? "" : carried.reason);
   assert.strictEqual(carried.record.determination, "Insufficient Evidence", "the determination is carried as-is, unchanged by Strategy");
 
   // Strategy does not add a numerical-value requirement of its own: proposal
   // completeness is unaffected by the determination.
-  assert.strictEqual(evaluateProposalCompleteness(afterPickup.strategyProposal!).valid, true);
+  assert.strictEqual(evaluateProposalCompleteness(afterPickup.strategy?.proposal!).valid, true);
 
   // And the approval still commits a Finance Handoff carrying both blocks.
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
   const factsText = (log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text as { text: { content: string } }[])
     .map((i) => i.text.content)
     .join("");
@@ -1881,9 +1882,9 @@ test("Strategy copies the upstream Commercial Value Evidence block byte-identica
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  assert.strictEqual(afterPickup.commercialValueEvidenceBlock, DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK, "pickup holds the sender's bytes");
+  assert.strictEqual(afterPickup.strategy?.commercialValueEvidenceBlock, DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK, "pickup holds the sender's bytes");
 
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
   const factsText = items.map((i) => i.text.content).join("");
@@ -1912,12 +1913,11 @@ test("A Strategy clarification preserves the upstream Commercial Value Evidence 
     handoffId: "handoff-1",
     stage: "strategy_clarification",
     awaiting: "strategy_clarification",
-    // Order-2 evidence base: the Handoff's own narrative carried only a
+    strategy: { // Order-2 evidence base: the Handoff's own narrative carried only a
     // reference, so `strategyContext` holds the retrieved Call Notes text
     // and does NOT contain the block -- exactly the shape whose rewrite used
     // to delete it.
-    strategyContext: "Fulfilment delays: recurring stockouts across the regional warehouse network.",
-    commercialValueEvidenceBlock: DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK,
+      context: "Fulfilment delays: recurring stockouts across the regional warehouse network.", commercialValueEvidenceBlock: DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK },
   });
 
   await handleStrategyClarification(env, state, "The board review is scheduled for the last week of the quarter.", STRATEGY_SKILLS);
@@ -1941,7 +1941,7 @@ test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as t
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  await handleInterventionApproval(env, afterPickup, afterPickup.pendingStrategyApproval!.proposalVersion, "approve");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
   assert.match(props["Required Next Action"].rich_text[0].text.content, /redesign/i);
@@ -1958,18 +1958,18 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
-  const originalProposalId = afterPickup.strategyProposal!.proposalId;
-  const v1Attestation = afterPickup.strategyProposalTokenSafety;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
+  const originalProposalId = afterPickup.strategy!.proposal!.proposalId;
+  const v1Attestation = afterPickup.strategy?.proposalTokenSafety;
   assert.strictEqual(v1Attestation?.proposalVersion, 1, "v1 must have its own attestation");
 
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   assert.strictEqual(afterRefine.stage, "strategy_refining");
   assert.strictEqual(afterRefine.awaiting, "strategy_refinement_reason");
-  assert.strictEqual(afterRefine.strategyApprovalState, "REFINEMENT_REQUESTED");
-  assert.strictEqual(afterRefine.pendingStrategyApproval, undefined, "the superseded approval identity must be cleared");
-  assert.deepStrictEqual(afterRefine.pendingStrategyRefinement, { proposalId: originalProposalId, proposalVersion }, "the refinement instruction must be bound to the exact proposal Martin was shown");
+  assert.strictEqual(afterRefine.strategy?.approvalState, "REFINEMENT_REQUESTED");
+  assert.strictEqual(afterRefine.strategy?.pendingApproval, undefined, "the superseded approval identity must be cleared");
+  assert.deepStrictEqual(afterRefine.strategy?.pendingRefinement, { proposalId: originalProposalId, proposalVersion }, "the refinement instruction must be bound to the exact proposal Martin was shown");
   assert.strictEqual(log.handoffCreateBody, null, "a refinement must never create a Finance Handoff");
   assert.ok(!log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Closed"), "refinement must not close the originating Handoff -- the work session is retained");
 
@@ -1981,18 +1981,18 @@ test("11/21/22. Refine does not create a Finance Handoff, and a new proposal ver
   // reference), so the prior proposalId must be captured before this call,
   // not read off afterPickup afterward.
   const afterRevision = await handleStrategyRefinement(env, afterRefine, "Consider a phased rollout instead.");
-  assert.strictEqual(afterRevision.strategyProposal!.proposalVersion, 2, "refinement must increment proposalVersion");
-  assert.strictEqual(afterRevision.strategyProposal!.proposalId, originalProposalId, "a revision keeps the same proposal lineage -- it is not a fresh proposal");
-  assert.strictEqual(afterRevision.strategyProposalHistory?.length, 1, "the prior version must be preserved as historical context");
-  assert.strictEqual(afterRevision.strategyProposalHistory![0].proposalId, originalProposalId, "the exact prior version must be what's preserved");
-  assert.strictEqual(afterRevision.strategyProposalHistory![0].proposalVersion, 1, "the prior version's own version number must be preserved");
-  assert.strictEqual(afterRevision.pendingStrategyRefinement, undefined, "the consumed refinement binding must be cleared");
-  assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "the revised proposal must re-enter the approval gate, never become approved by being generated");
-  assert.strictEqual(afterRevision.pendingStrategyApproval?.proposalVersion, 2, "the new approval request must be bound to the revised version");
+  assert.strictEqual(afterRevision.strategy!.proposal!.proposalVersion, 2, "refinement must increment proposalVersion");
+  assert.strictEqual(afterRevision.strategy!.proposal!.proposalId, originalProposalId, "a revision keeps the same proposal lineage -- it is not a fresh proposal");
+  assert.strictEqual(afterRevision.strategy?.proposalHistory?.length, 1, "the prior version must be preserved as historical context");
+  assert.strictEqual(afterRevision.strategy?.proposalHistory![0].proposalId, originalProposalId, "the exact prior version must be what's preserved");
+  assert.strictEqual(afterRevision.strategy?.proposalHistory![0].proposalVersion, 1, "the prior version's own version number must be preserved");
+  assert.strictEqual(afterRevision.strategy?.pendingRefinement, undefined, "the consumed refinement binding must be cleared");
+  assert.strictEqual(afterRevision.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL", "the revised proposal must re-enter the approval gate, never become approved by being generated");
+  assert.strictEqual(afterRevision.strategy?.pendingApproval?.proposalVersion, 2, "the new approval request must be bound to the revised version");
 
   // v2 gets its OWN independent attestation -- never inherited from v1's,
   // per the "v1 must not authorize v2" requirement.
-  const v2Attestation = afterRevision.strategyProposalTokenSafety;
+  const v2Attestation = afterRevision.strategy?.proposalTokenSafety;
   assert.strictEqual(v2Attestation?.proposalVersion, 2);
   assert.strictEqual(v2Attestation?.proposalId, originalProposalId);
   assert.notDeepStrictEqual(v2Attestation, v1Attestation, "v2's attestation must be its own, not a copy/reuse of v1's");
@@ -2011,14 +2011,14 @@ test("SR1. Refinement text is NOT appended to state.strategyContext", async (t) 
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const contextBefore = afterPickup.strategyContext;
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const contextBefore = afterPickup.strategy?.context;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   const afterRevision = await handleStrategyRefinement(env, afterRefine, "Consider a phased rollout instead, and emphasise the digital channel.");
 
-  assert.strictEqual(afterRevision.strategyContext, contextBefore, "state.strategyContext must be completely unchanged by a refinement");
-  assert.ok(!afterRevision.strategyContext?.includes("phased rollout"), "the refinement instruction text must never appear inside strategyContext");
+  assert.strictEqual(afterRevision.strategy?.context, contextBefore, "state.strategyContext must be completely unchanged by a refinement");
+  assert.ok(!afterRevision.strategy?.context?.includes("phased rollout"), "the refinement instruction text must never appear inside strategyContext");
 });
 
 test("SR2. A refinement request containing 'Meridian Foods Ghana Ltd' does not contaminate Strategy business context", async (t) => {
@@ -2028,15 +2028,15 @@ test("SR2. A refinement request containing 'Meridian Foods Ghana Ltd' does not c
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const contextBefore = afterPickup.strategyContext;
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const contextBefore = afterPickup.strategy?.context;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   const afterRevision = await handleStrategyRefinement(env, afterRefine, "Use the same direction, but make it more suitable for Meridian Foods Ghana Ltd.");
 
-  assert.strictEqual(afterRevision.strategyContext, contextBefore, "strategyContext must be byte-for-byte unchanged");
-  assert.ok(!afterRevision.strategyContext?.includes("Meridian"), "the real company name must never enter strategyContext");
-  assert.ok(!JSON.stringify(afterRevision.strategyProposalHistory ?? []).includes("Meridian"), "nor the preserved proposal history");
+  assert.strictEqual(afterRevision.strategy?.context, contextBefore, "strategyContext must be byte-for-byte unchanged");
+  assert.ok(!afterRevision.strategy?.context?.includes("Meridian"), "the real company name must never enter strategyContext");
+  assert.ok(!JSON.stringify(afterRevision.strategy?.proposalHistory ?? []).includes("Meridian"), "nor the preserved proposal history");
 });
 
 test("SR3. A refinement request containing 'Ama Mensah' does not contaminate Strategy business context", async (t) => {
@@ -2046,14 +2046,14 @@ test("SR3. A refinement request containing 'Ama Mensah' does not contaminate Str
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const contextBefore = afterPickup.strategyContext;
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const contextBefore = afterPickup.strategy?.context;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   const afterRevision = await handleStrategyRefinement(env, afterRefine, "Loop in Ama Mensah's feedback -- she thinks the timeline is too slow.");
 
-  assert.strictEqual(afterRevision.strategyContext, contextBefore, "strategyContext must be byte-for-byte unchanged");
-  assert.ok(!afterRevision.strategyContext?.includes("Ama Mensah"), "the real person name must never enter strategyContext");
+  assert.strictEqual(afterRevision.strategy?.context, contextBefore, "strategyContext must be byte-for-byte unchanged");
+  assert.ok(!afterRevision.strategy?.context?.includes("Ama Mensah"), "the real person name must never enter strategyContext");
 });
 
 test("SR4. The existing Strategy Proposal remains the revision source -- the system prompt is grounded in it, not in re-diagnosis", async (t) => {
@@ -2075,8 +2075,8 @@ test("SR4. The existing Strategy Proposal remains the revision source -- the sys
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const originalProposal = afterPickup.strategyProposal!;
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const originalProposal = afterPickup.strategy?.proposal!;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   await handleStrategyRefinement(env, afterRefine, "Tighten the timeline.");
@@ -2105,17 +2105,16 @@ test("SR5. A stale refinement request (proposal moved on since Refine was tapped
   } as any;
   const currentProposal = { ...RAW_PROPOSAL, proposalId: "current-proposal-id", proposalVersion: 3 } as any;
   const state = fakeState({
-    strategyProposal: currentProposal,
-    // Bound to a DIFFERENT (older) proposal than what's now current --
+    strategy: { proposal: currentProposal, // Bound to a DIFFERENT (older) proposal than what's now current --
     // simulates the proposal having moved on since Refine was tapped.
-    pendingStrategyRefinement: { proposalId: "current-proposal-id", proposalVersion: 1 },
+      pendingRefinement: { proposalId: "current-proposal-id", proposalVersion: 1 } },
   });
 
   const result = await handleStrategyRefinement(env, state, "Make it shorter.");
 
   assert.strictEqual(aiCalled, false, "a stale refinement request must never reach the AI");
-  assert.deepStrictEqual(result.strategyProposal, currentProposal, "the current proposal must be completely untouched");
-  assert.strictEqual(result.pendingStrategyRefinement, undefined, "the stale binding must be cleared");
+  assert.deepStrictEqual(result.strategy?.proposal, currentProposal, "the current proposal must be completely untouched");
+  assert.strictEqual(result.strategy?.pendingRefinement, undefined, "the stale binding must be cleared");
 });
 
 test("SR6. The revised proposal still requires Martin's Approve/Refine/Reject -- it is never approved merely by being generated", async (t) => {
@@ -2125,12 +2124,12 @@ test("SR6. The revised proposal still requires Martin's Approve/Refine/Reject --
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   const afterRevision = await handleStrategyRefinement(env, afterRefine, "Add a training workstream.");
 
-  assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.strictEqual(afterRevision.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
   assert.ok(afterRevision.pendingActionSummary, "a fresh approval prompt with buttons must be presented");
   assert.ok(afterRevision.pendingActionSummary!.buttons.flat().some((b: any) => b.text.includes("Approve")));
 });
@@ -2142,7 +2141,7 @@ test("SR7. Refinement does not write the raw instruction into Handoff Verified F
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
   const afterRefine = await handleInterventionApproval(env, afterPickup, proposalVersion, "refine");
 
   await handleStrategyRefinement(env, afterRefine, "Reprioritise the workstreams for Meridian Foods Ghana Ltd specifically.");
@@ -2163,13 +2162,13 @@ test("12/25. Reject records the rejection, closes the current attempt, and creat
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  const { proposalVersion } = afterPickup.pendingStrategyApproval!;
+  const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
 
   const afterReject = await handleInterventionApproval(env, afterPickup, proposalVersion, "reject");
 
   assert.strictEqual(afterReject.stage, "strategy_rejected");
-  assert.strictEqual(afterReject.strategyApprovalState, "REJECTED");
-  assert.strictEqual(afterReject.pendingStrategyApproval, undefined);
+  assert.strictEqual(afterReject.strategy?.approvalState, "REJECTED");
+  assert.strictEqual(afterReject.strategy?.pendingApproval, undefined);
   assert.strictEqual(log.handoffCreateBody, null, "rejection must never create a Finance Handoff");
   const closedPatch = log.handoffPatchBodies.find((p) => p.properties?.Status?.select?.name === "Closed");
   assert.ok(closedPatch, "the current strategic attempt (originating Handoff) must be closed on rejection");
@@ -2186,15 +2185,13 @@ test("23. Old approval callback (superseded proposal version) cannot approve a r
   };
   const state = fakeState({
     stage: "awaiting_intervention_approval",
-    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
-    strategyProposal: proposalV2,
-    pendingStrategyApproval: {
+    strategy: { approvalState: "AWAITING_INTERVENTION_APPROVAL", proposal: proposalV2, pendingApproval: {
       kind: "strategy_intervention",
       strategyWorkSessionId: "work_strat_1",
       proposalId: "current-proposal",
       proposalVersion: 2,
       decisionOptions: ["approve", "refine", "reject"],
-    },
+    } },
   });
 
   // A callback carrying an OLD version (1) -- simulating a stale button
@@ -2204,7 +2201,7 @@ test("23. Old approval callback (superseded proposal version) cannot approve a r
   const result = await handleInterventionApproval(env, state, 1, "approve");
 
   assert.strictEqual(log.handoffCreateBody, null, "a version-mismatched callback must never create the Finance Handoff");
-  assert.strictEqual(result.pendingStrategyApproval?.proposalVersion, 2, "the current pending approval must remain untouched");
+  assert.strictEqual(result.strategy?.pendingApproval?.proposalVersion, 2, "the current pending approval must remain untouched");
 });
 
 /** Titles of every Activity Log entry written so far. */
@@ -2228,24 +2225,22 @@ test("Lifecycle guard: a WorkSession awaiting intervention approval is never pic
   };
   const state = fakeState({
     stage: "awaiting_intervention_approval",
-    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
-    strategyProposal: proposalV1,
-    pendingStrategyApproval: pendingV1,
+    strategy: { approvalState: "AWAITING_INTERVENTION_APPROVAL", proposal: proposalV1, pendingApproval: pendingV1 },
   });
-  const proposalBefore = structuredClone(state.strategyProposal);
-  const pendingBefore = structuredClone(state.pendingStrategyApproval);
-  const historyBefore = structuredClone(state.strategyProposalHistory);
+  const proposalBefore = structuredClone(state.strategy?.proposal);
+  const pendingBefore = structuredClone(state.strategy?.pendingApproval);
+  const historyBefore = structuredClone(state.strategy?.proposalHistory);
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
   // forbiddenAi() throws on any AI call, so reaching here means none happened.
-  assert.deepStrictEqual(result.strategyProposal, proposalBefore, "Proposal v1 is untouched");
-  assert.strictEqual(result.strategyProposal?.proposalVersion, 1, "no version increment");
-  assert.deepStrictEqual(result.pendingStrategyApproval, pendingBefore, "the pending v1 approval is untouched");
-  assert.deepStrictEqual(result.strategyProposalHistory, historyBefore, "proposal history is untouched");
-  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "approval state unchanged");
+  assert.deepStrictEqual(result.strategy?.proposal, proposalBefore, "Proposal v1 is untouched");
+  assert.strictEqual(result.strategy?.proposal?.proposalVersion, 1, "no version increment");
+  assert.deepStrictEqual(result.strategy?.pendingApproval, pendingBefore, "the pending v1 approval is untouched");
+  assert.deepStrictEqual(result.strategy?.proposalHistory, historyBefore, "proposal history is untouched");
+  assert.strictEqual(result.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL", "approval state unchanged");
   assert.strictEqual(result.stage, "awaiting_intervention_approval", "stage unchanged");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis ran");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis ran");
   assert.deepStrictEqual(log.handoffPatchBodies, [], "no claim (Pending -> Picked-up) and no other Handoff write -- the Status is left exactly as found");
   assert.strictEqual(log.sentButtons.length, 0, "no new approval request is sent");
 
@@ -2267,21 +2262,21 @@ test("Lifecycle guard: REFINEMENT_REQUESTED also refuses re-pickup, and explicit
 
   // A real first pickup produces v1 and enters the approval gate.
   const afterPickup = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-  assert.strictEqual(afterPickup.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
-  const v1Id = afterPickup.strategyProposal!.proposalId;
+  assert.strictEqual(afterPickup.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
+  const v1Id = afterPickup.strategy!.proposal!.proposalId;
 
   // Martin taps Refine on v1.
   const afterRefine = await handleInterventionApproval(env, afterPickup, 1, "refine");
-  assert.strictEqual(afterRefine.strategyApprovalState, "REFINEMENT_REQUESTED");
-  const refinementBefore = structuredClone(afterRefine.pendingStrategyRefinement);
+  assert.strictEqual(afterRefine.strategy?.approvalState, "REFINEMENT_REQUESTED");
+  const refinementBefore = structuredClone(afterRefine.strategy?.pendingRefinement);
 
   // The Handoff is (still) served as Pending -- a re-pickup in this state is refused.
   env.AI = forbiddenAi();
   const patchesBefore = log.handoffPatchBodies.length;
   const afterRepickup = await handlePickup(env, afterRefine, STRATEGY_SKILLS);
-  assert.strictEqual(afterRepickup.strategyApprovalState, "REFINEMENT_REQUESTED", "refinement state unchanged");
-  assert.strictEqual(afterRepickup.strategyProposal?.proposalVersion, 1, "no version increment from a pickup");
-  assert.deepStrictEqual(afterRepickup.pendingStrategyRefinement, refinementBefore, "the Refine binding is untouched");
+  assert.strictEqual(afterRepickup.strategy?.approvalState, "REFINEMENT_REQUESTED", "refinement state unchanged");
+  assert.strictEqual(afterRepickup.strategy?.proposal?.proposalVersion, 1, "no version increment from a pickup");
+  assert.deepStrictEqual(afterRepickup.strategy?.pendingRefinement, refinementBefore, "the Refine binding is untouched");
   assert.strictEqual(afterRepickup.awaiting, "strategy_refinement_reason", "still waiting for Martin's refinement text");
   assert.strictEqual(log.handoffPatchBodies.length, patchesBefore, "no claim and no Handoff write");
   assert.ok(activityLogTitles(log).some((tt) => tt.startsWith("Strategy pickup refused — proposal already awaiting")), "the refusal is logged");
@@ -2289,18 +2284,18 @@ test("Lifecycle guard: REFINEMENT_REQUESTED also refuses re-pickup, and explicit
   // The governed Refine path still produces v2 and returns to the approval gate.
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const afterRevision = await handleStrategyRefinement(env, afterRepickup, "Consider a phased rollout instead.");
-  assert.strictEqual(afterRevision.strategyProposal!.proposalVersion, 2, "Refine increments the version");
-  assert.strictEqual(afterRevision.strategyProposal!.proposalId, v1Id, "same proposal lineage");
-  assert.strictEqual(afterRevision.strategyProposalHistory?.[0]?.proposalVersion, 1, "v1 preserved as history");
-  assert.strictEqual(afterRevision.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "v2 re-enters the approval gate");
-  assert.strictEqual(afterRevision.pendingStrategyApproval?.proposalVersion, 2);
+  assert.strictEqual(afterRevision.strategy!.proposal!.proposalVersion, 2, "Refine increments the version");
+  assert.strictEqual(afterRevision.strategy!.proposal!.proposalId, v1Id, "same proposal lineage");
+  assert.strictEqual(afterRevision.strategy?.proposalHistory?.[0]?.proposalVersion, 1, "v1 preserved as history");
+  assert.strictEqual(afterRevision.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL", "v2 re-enters the approval gate");
+  assert.strictEqual(afterRevision.strategy?.pendingApproval?.proposalVersion, 2);
   assert.ok(activityLogTitles(log).some((tt) => tt.startsWith("Strategy Proposal revised (v2)")), "v2 is logged as a revision, not a fresh proposal");
 });
 
 test("24. Stale approval callback (wrong stage) does not mutate current work", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
-  const state = fakeState({ stage: "delivered", strategyApprovalState: undefined, pendingStrategyApproval: undefined });
+  const state = fakeState({ stage: "delivered", strategy: { approvalState: undefined, pendingApproval: undefined } });
 
   const result = await handleInterventionApproval(env, state, 1, "approve");
 
@@ -2316,9 +2311,7 @@ test("17. A callback for a completed/superseded session (no matching pendingStra
   // are already cleared, so there is nothing for any version number to match.
   const state = fakeState({
     stage: "awaiting_finance",
-    strategyApprovalState: "APPROVED",
-    strategyProposal: undefined,
-    pendingStrategyApproval: undefined,
+    strategy: { approvalState: "APPROVED", proposal: undefined, pendingApproval: undefined },
   });
 
   const result = await handleInterventionApproval(env, state, 1, "approve");
@@ -2339,7 +2332,7 @@ test("Telegram callback_data byte-limit regression: every strategy-proposal butt
   const state = fakeState({ workId: "a1b2c3d4-e5f6-47a8-89ab-cdef01234567" });
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
-  assert.ok(result.pendingStrategyApproval, "a pendingStrategyApproval must be set for this test to be meaningful");
+  assert.ok(result.strategy?.pendingApproval, "a pendingStrategyApproval must be set for this test to be meaningful");
 
   const buttonRows = state.pendingActionSummary!.buttons;
   for (const row of buttonRows) {
@@ -2357,8 +2350,8 @@ test("Marketing-specific work is routed to Marketing when there is no recommenda
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.unit, "Marketing");
-  assert.strictEqual(afterPickup.pendingStrategyHandoff!.hat, "Marketing Strategist");
+  assert.strictEqual(afterPickup.strategy!.pendingHandoff!.unit, "Marketing");
+  assert.strictEqual(afterPickup.strategy!.pendingHandoff!.hat, "Marketing Strategist");
 
   const afterApproval = await handleStrategyHandoffApproval(env, afterPickup, true);
   const props = log.handoffCreateBody.properties;
@@ -2406,7 +2399,7 @@ test("Missing-evidence work is NOT routed anywhere: a 'research' target resolves
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(afterPickup.pendingStrategyHandoff, undefined, "no downstream Handoff may be proposed for a missing-evidence diagnosis");
+  assert.strictEqual(afterPickup.strategy?.pendingHandoff, undefined, "no downstream Handoff may be proposed for a missing-evidence diagnosis");
   assert.strictEqual(log.handoffCreateBody, null, "and none may be written");
 });
 
@@ -2420,7 +2413,7 @@ test("39. The generic downstream classifier can never route to Finance -- Financ
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.pendingStrategyHandoff, undefined);
+  assert.strictEqual(result.strategy?.pendingHandoff, undefined);
   assert.strictEqual(log.handoffCreateBody, null);
 });
 
@@ -2443,7 +2436,7 @@ test("36/37/38. Closed-context protections remain intact -- missing Entity_Token
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis should have been attempted");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis should have been attempted");
 });
 
 test("Missing Telegram stream configuration fails closed rather than throwing", async (t) => {
@@ -2694,7 +2687,7 @@ test("handleDirectRequest resolves an explicit Matter token, runs the shared dia
   assert.strictEqual(result.entryType, "direct_request");
   assert.strictEqual(result.matterToken, "MAT-20");
   assert.strictEqual(result.entityToken, "E-7");
-  assert.ok(result.strategyQuestion, "the strategic question must be populated from Martin's own text");
+  assert.ok(result.strategy?.question, "the strategic question must be populated from Martin's own text");
   assert.strictEqual(result.stage, "delivered", "a diagnosis with no recommendation must complete, not hold");
 });
 
@@ -2710,8 +2703,8 @@ test("handleDirectRequest: a diagnosis WITH a recommended direction reaches an a
   assert.strictEqual(result.matterToken, "MAT-20");
   assert.strictEqual(result.entityName, result.entityToken, "entityName is the token itself, never a real name");
   assert.strictEqual(result.matterName, result.matterToken, "matterName is the token itself, never a real name");
-  assert.ok(result.pendingStrategyApproval, "must reach the approval gate, not be held");
-  assert.strictEqual(result.pendingStrategyApproval?.decisionOptions.includes("approve"), true);
+  assert.ok(result.strategy?.pendingApproval, "must reach the approval gate, not be held");
+  assert.strictEqual(result.strategy?.pendingApproval?.decisionOptions.includes("approve"), true);
 });
 
 test("handleDirectRequest: a Proposal that genuinely mentions its own Matter token in its content is NOT false-positive-blocked -- regression test for the risk introduced by setting entityName/matterName to the token", async (t) => {
@@ -2726,7 +2719,7 @@ test("handleDirectRequest: a Proposal that genuinely mentions its own Matter tok
 
   const result = await handleDirectRequest(env, state, "Strategy, diagnose MAT-20: recurring delivery complaints for this account.", STRATEGY_SKILLS);
 
-  assert.ok(result.pendingStrategyApproval, "a Proposal mentioning its own token must still be presented, not blocked as a false identity leak");
+  assert.ok(result.strategy?.pendingApproval, "a Proposal mentioning its own token must still be presented, not blocked as a false identity leak");
 });
 
 test("handleDirectRequest fails closed with a clarifying message when no Matter token is present -- never guesses which Matter", async (t) => {
@@ -2944,10 +2937,10 @@ test("plan: one planned Strategy Skill runs and the diagnosis finishes", async (
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.strictEqual(result.strategySkillFindings?.length, 1);
-  assert.strictEqual(result.strategySkillFindings?.[0].skillId, "brand_strategy");
-  assert.strictEqual(result.strategySkillFindings?.[0].status, "completed");
-  assert.strictEqual(result.strategySkillCycleUnavailable, undefined, "a Skill genuinely ran -- this must never read as a no-Skill/unavailable state");
+  assert.strictEqual(result.strategy?.skillFindings?.length, 1);
+  assert.strictEqual(result.strategy?.skillFindings?.[0].skillId, "brand_strategy");
+  assert.strictEqual(result.strategy?.skillFindings?.[0].status, "completed");
+  assert.strictEqual(result.strategy?.skillCycleUnavailable, undefined, "a Skill genuinely ran -- this must never read as a no-Skill/unavailable state");
   assert.strictEqual(result.stage, "delivered", "synthesis folded into context, core diagnosis still completes normally");
   assert.deepStrictEqual(calls.filter((c) => c.kind === "skill").map((c) => c.skillId), ["brand_strategy"], "exactly one Skill was invoked");
 });
@@ -2969,7 +2962,7 @@ test("plan: Strategy Analysis plans exactly once; the planned Skills each run on
 
   assert.strictEqual(calls.filter((c) => c.kind === "plan").length, 1, "one planning decision -- no move-by-move loop");
   assert.deepStrictEqual(
-    result.strategySkillFindings?.map((f) => f.skillId),
+    result.strategy?.skillFindings?.map((f) => f.skillId),
     ["business_strategy", "brand_strategy", "communication_strategy"],
     "recorded in the plan's order",
   );
@@ -3000,7 +2993,7 @@ test("plan: a failed Skill is never re-run and Strategy Analysis is never asked 
 
   assert.strictEqual(calls.filter((c) => c.kind === "plan").length, 1);
   assert.strictEqual(calls.filter((c) => c.kind === "skill" && c.skillId === "business_strategy").length, 1, "the failed Skill ran once");
-  assert.deepStrictEqual(result.strategySkillFindings?.map((f) => f.status), ["failed", "completed"]);
+  assert.deepStrictEqual(result.strategy?.skillFindings?.map((f) => f.status), ["failed", "completed"]);
   assert.ok(calls.find((c) => c.kind === "synthesis")?.prompt.includes("UNAVAILABLE"), "synthesis is told the finding is missing -- never given it as if it were neutral");
   assert.strictEqual(result.stage, "delivered");
 });
@@ -3013,10 +3006,10 @@ test("plan: an empty plan skips every Skill -- a genuine no-Skill determination 
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.deepStrictEqual(result.strategySkillFindings, [], "no Skill was invoked");
+  assert.deepStrictEqual(result.strategy?.skillFindings, [], "no Skill was invoked");
   assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, "a skipped Skill is never invoked 'for completeness'");
   assert.strictEqual(calls.filter((c) => c.kind === "synthesis").length, 0, "nothing to reconcile");
-  assert.strictEqual(result.strategySkillCycleUnavailable, false, "Strategy Analysis genuinely ran and determined no Skill was needed -- never conflated with the plan not being obtainable");
+  assert.strictEqual(result.strategy?.skillCycleUnavailable, false, "Strategy Analysis genuinely ran and determined no Skill was needed -- never conflated with the plan not being obtainable");
   assert.strictEqual(result.stage, "delivered");
 });
 
@@ -3035,8 +3028,8 @@ test("plan: a planning call that fails degrades to the unchanged core diagnosis,
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.deepStrictEqual(result.strategySkillFindings, []);
-  assert.strictEqual(result.strategySkillCycleUnavailable, true, "a genuine provider failure on the plan must be recorded as unavailable, never conflated with no Skill being needed");
+  assert.deepStrictEqual(result.strategy?.skillFindings, []);
+  assert.strictEqual(result.strategy?.skillCycleUnavailable, true, "a genuine provider failure on the plan must be recorded as unavailable, never conflated with no Skill being needed");
   assert.strictEqual(result.stage, "delivered", "a composition failure must never block an otherwise-resolvable core diagnosis");
   assert.ok(warned.some((w) => w.includes("Skill cycle unavailable")), "the degradation is logged, never silently swallowed");
 });
@@ -3067,7 +3060,7 @@ test("plan: a malformed plan is unusable and degrades the same way -- nothing it
     const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
     assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, `${name}: nothing runs`);
-    assert.strictEqual(result.strategySkillCycleUnavailable, true, `${name}: recorded as unavailable`);
+    assert.strictEqual(result.strategy?.skillCycleUnavailable, true, `${name}: recorded as unavailable`);
     assert.strictEqual(result.stage, "delivered", `${name}: the core diagnosis still runs`);
   }
 });
@@ -3081,7 +3074,7 @@ test("plan: every planned Strategy Skill failing fails closed via the existing h
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "core diagnosis must never run when the only requested finding is unavailable");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "core diagnosis must never run when the only requested finding is unavailable");
   assert.strictEqual(calls.filter((c) => c.kind === "synthesis").length, 0, "nothing to reconcile");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.Status?.select?.name === "Held"));
   assert.ok(activityLogBlocker(log).includes("Every Strategy Skill invoked"));
@@ -3099,8 +3092,8 @@ test("plan: synthesis judged insufficient fails closed and never produces a prop
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "must never proceed to core diagnosis/proposal on an unreconciled conflict");
-  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "must never proceed to core diagnosis/proposal on an unreconciled conflict");
+  assert.strictEqual(result.strategy?.proposal, undefined);
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("conflict")));
 });
 
@@ -3150,7 +3143,7 @@ test("plan: a plan naming a Skill this Action did not declare is refused at the 
   const result = await handlePickup(env, fakeState(), twoSkills);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined);
+  assert.strictEqual(result.strategy?.diagnosis, undefined);
   assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0, "the plan is checked whole before any Skill runs");
   assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("did not declare")));
 });
@@ -3165,7 +3158,7 @@ test("plan: a plan naming something that is not a Strategy domain Skill (includi
     const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
     assert.strictEqual(result.stage, "strategy_blocked", `${id}: refused`);
-    assert.strictEqual(result.strategyDiagnosis, undefined);
+    assert.strictEqual(result.strategy?.diagnosis, undefined);
     assert.strictEqual(calls.filter((c) => c.kind === "skill").length, 0);
     assert.ok(log.handoffPatchBodies.some((p) => p.properties?.["Open Questions"]?.rich_text?.[0]?.text?.content?.includes("not a Strategy domain Skill")));
   }
@@ -3220,7 +3213,7 @@ test("composition never lets a Strategy Skill touch the canonical Strategy Propo
   // diagnosis) never reaches developStrategyProposal at all -- confirming
   // strategyProposal stays undefined throughout composition/diagnosis/
   // routing, exactly like every existing no-recommendation test above.
-  assert.strictEqual(result.strategyProposal, undefined);
+  assert.strictEqual(result.strategy?.proposal, undefined);
   assert.strictEqual(result.stage, "delivered");
 });
 
@@ -3237,10 +3230,10 @@ test("composition reaches the existing Strategy Approval Needed gate -- a recomm
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
-  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
-  assert.ok(result.strategyProposal, "the approval-gated proposal is built by the unchanged step, after the composition");
-  assert.ok(result.pendingStrategyApproval, "Approval Needed is reached: Martin's explicit Approve/Refine/Reject is still required");
-  assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
+  assert.strictEqual(result.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(result.strategy?.proposal, "the approval-gated proposal is built by the unchanged step, after the composition");
+  assert.ok(result.strategy?.pendingApproval, "Approval Needed is reached: Martin's explicit Approve/Refine/Reject is still required");
+  assert.deepStrictEqual(result.strategy!.pendingApproval!.decisionOptions, ["approve", "refine", "reject"]);
 });
 
 /**
@@ -3332,12 +3325,12 @@ test("Evidence order: a Superseded Call Notes record is refused -- there is no a
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "must never diagnose from a superseded record");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "must never diagnose from a superseded record");
   const message = log.sentTexts.join("\n");
   assert.match(message, /Clarification needed/);
   assert.match(message, /Status "Superseded"/, "the reason names the exact unresolved fact");
   assert.match(message, /materially affects the decision/);
-  assert.strictEqual(result.strategyApprovalState, undefined, "Clarification Needed is kept separate from Approval Needed");
+  assert.strictEqual(result.strategy?.approvalState, undefined, "Clarification Needed is kept separate from Approval Needed");
 });
 
 test("Evidence order: a record whose Approval Attestation does not match its own registry fields is refused, and the refusal names the mismatch", async (t) => {
@@ -3353,7 +3346,7 @@ test("Evidence order: a record whose Approval Attestation does not match its own
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "an unverifiable attestation is never treated as approved evidence");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "an unverifiable attestation is never treated as approved evidence");
   const message = log.sentTexts.join("\n");
   assert.match(message, /Clarification needed/);
   assert.match(message, /fields_hash does not match/, "the reason names the exact unresolved fact rather than a generic 'not enough context'");
@@ -3370,7 +3363,7 @@ test("Evidence order: with no governed reference anywhere on the Handoff, Clarif
   assert.strictEqual(log.callNotesQueryBodies.length, 0, "a reference is never inferred from Entity/Matter -- nothing is looked up without one");
   assert.strictEqual(result.stage, "strategy_blocked");
   assert.strictEqual(result.awaiting, "strategy_clarification", "Clarification Needed, kept separate from Approval Needed");
-  assert.strictEqual(result.strategyApprovalState, undefined, "clarification must never read as an approval request");
+  assert.strictEqual(result.strategy?.approvalState, undefined, "clarification must never read as an approval request");
   const message = log.sentTexts.join("\n");
   assert.match(message, /the business situation this diagnosis is about has not been established/);
   assert.match(message, /materially affects the decision/);
@@ -3386,7 +3379,7 @@ test("Evidence order: a bare Call Notes id as the whole Verified Facts (HO-86's 
 
   assert.strictEqual(result.stage, "strategy_blocked", "the diagnosis never runs on an id as if it were a business situation");
   assert.strictEqual(result.awaiting, "strategy_clarification", "Clarification Needed names the gap instead");
-  assert.strictEqual(result.strategyApprovalState, undefined);
+  assert.strictEqual(result.strategy?.approvalState, undefined);
   assert.match(log.sentTexts.join("\n"), /the business situation this diagnosis is about has not been established/);
 });
 
@@ -3438,10 +3431,10 @@ test("KoraGrid: the case progresses from an approved Call Notes Handoff all the 
     "the diagnosis ran on the retrieved evidence rather than on a bare reference",
   );
   assert.strictEqual(result.stage, "awaiting_intervention_approval");
-  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
-  assert.ok(result.strategyProposal, "the unchanged approval-gated proposal step ran on top of the retrieved evidence");
-  assert.ok(result.pendingStrategyApproval, "Approval Needed is reached -- Martin still decides; nothing auto-approves");
-  assert.deepStrictEqual(result.pendingStrategyApproval!.decisionOptions, ["approve", "refine", "reject"]);
+  assert.strictEqual(result.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.ok(result.strategy?.proposal, "the unchanged approval-gated proposal step ran on top of the retrieved evidence");
+  assert.ok(result.strategy?.pendingApproval, "Approval Needed is reached -- Martin still decides; nothing auto-approves");
+  assert.deepStrictEqual(result.strategy!.pendingApproval!.decisionOptions, ["approve", "refine", "reject"]);
 });
 
 /**
@@ -3484,8 +3477,8 @@ test("Evidence order: an approved Call Notes record with no page body never masq
 
   assert.ok(log.blockReads.includes("cn-page-1"), "the body was read -- the refusal comes from what it held, not from an earlier gate");
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "a metadata-only record is never the situation a diagnosis runs on");
-  assert.strictEqual(result.strategyApprovalState, undefined, "Clarification Needed stays separate from Approval Needed");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "a metadata-only record is never the situation a diagnosis runs on");
+  assert.strictEqual(result.strategy?.approvalState, undefined, "Clarification Needed stays separate from Approval Needed");
   const message = log.sentTexts.join("\n");
   assert.match(message, /Clarification needed/);
   assert.match(message, /carries no page body/);
@@ -3510,7 +3503,7 @@ test("Evidence order: a Call Notes body that only points at evidence is refused 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined);
+  assert.strictEqual(result.strategy?.diagnosis, undefined);
   const message = log.sentTexts.join("\n");
   assert.match(message, /carries a page body but nothing substantive in it/);
   assert.match(message, /only points at evidence/);
@@ -3563,7 +3556,7 @@ test("Evidence order: every gate ahead of the body read fails closed WITHOUT rea
       const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
       assert.strictEqual(result.stage, "strategy_blocked", "the gate refuses rather than proceeding");
-      assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis runs on an unproven record");
+      assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis runs on an unproven record");
       assert.ok(!log.blockReads.includes("cn-page-1"), "the page body was never read -- the refusal came first, and nothing was fetched for it");
       assert.strictEqual(log.callNotesQueryBodies.length, 1, "exactly one exact lookup, as before");
       const message = log.sentTexts.join("\n");
@@ -3650,7 +3643,7 @@ test("Evidence order: a body read that fails is a named gap on the structured re
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked", "the failure is converted into the existing structured refusal, so the flow stays fail-closed");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "no diagnosis runs on a record whose evidence could not be read");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis runs on a record whose evidence could not be read");
   assert.ok(log.blockReads.includes("cn-page-1"), "the read was attempted -- after attestation -- and it is that read which failed");
   const message = log.sentTexts.join("\n");
   assert.match(message, /Clarification needed/);
@@ -3685,7 +3678,7 @@ test("failure observability: a held diagnosis records which Skills ran -- plan o
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.strategyDiagnosis, undefined, "the hold fails closed -- core diagnosis never runs on it");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "the hold fails closed -- core diagnosis never runs on it");
   const blocker = activityLogBlocker(log);
   assert.ok(blocker.includes(insufficiency), "the original hold reason is preserved verbatim");
   const expected = ["1. business_strategy:completed", "2. brand_strategy:completed", "3. communication_strategy:completed"];
@@ -3730,7 +3723,7 @@ test("failure observability: failed Skills keep their status metadata on the all
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.ok(result.strategySkillFindings?.every((f) => f.status === "failed"));
+  assert.ok(result.strategy?.skillFindings?.every((f) => f.status === "failed"));
   const blocker = activityLogBlocker(log);
   assert.ok(blocker.includes("Every Strategy Skill invoked"));
   let cursor = -1;
@@ -3858,7 +3851,7 @@ async function presentedProposal(t: any, answer: (n: number) => string = (n) => 
   const { ai, calls } = discussionAi(answer);
   env.AI = ai;
   const state = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
-  assert.strictEqual(state.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "fixture: a proposal is awaiting Martin's decision");
+  assert.strictEqual(state.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL", "fixture: a proposal is awaiting Martin's decision");
   return { log, env, state, store, calls };
 }
 
@@ -3879,7 +3872,7 @@ test("Discuss 1. The proposal offers Approve, Discuss, Refine and Reject, each b
 
 test("Discuss 2. Opening a discussion makes no AI call and no Notion write, leaves the approval exactly as staged, and claims the Workspace reply pointer", async (t) => {
   const { log, env, state, store, calls } = await presentedProposal(t);
-  const pendingBefore = structuredClone(state.pendingStrategyApproval);
+  const pendingBefore = structuredClone(state.strategy?.pendingApproval);
   const requestsBefore = log.requests.length;
 
   const result = await handleInterventionApproval(env, state, 1, "discuss");
@@ -3888,9 +3881,9 @@ test("Discuss 2. Opening a discussion makes no AI call and no Notion write, leav
   assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "opening a discussion writes nothing to Notion");
   assert.strictEqual(result.awaiting, "strategy_discussion");
   assert.strictEqual(result.stage, "strategy_discussing");
-  assert.strictEqual(result.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "Discuss is not a decision");
-  assert.deepStrictEqual(result.pendingStrategyApproval, pendingBefore, "the staged approval is untouched, so Approve/Refine/Reject keep working");
-  assert.deepStrictEqual(result.strategyDiscussion, { proposalId: state.strategyProposal!.proposalId, proposalVersion: 1, turns: [] });
+  assert.strictEqual(result.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL", "Discuss is not a decision");
+  assert.deepStrictEqual(result.strategy?.pendingApproval, pendingBefore, "the staged approval is untouched, so Approve/Refine/Reject keep working");
+  assert.deepStrictEqual(result.strategy?.discussion, { proposalId: state.strategy!.proposal!.proposalId, proposalVersion: 1, turns: [] });
   assert.strictEqual(store.get(WORKSPACE_POINTER), state.workId, "plain Workspace messages now reach this Work");
   assert.deepStrictEqual(
     log.sentButtons.at(-1)!.flat().map((b: any) => b.callback_data),
@@ -3902,9 +3895,9 @@ test("Discuss 2. Opening a discussion makes no AI call and no Notion write, leav
 test("Discuss 3. Several questions are answered from the Work's evidence, findings, diagnosis, proposal and governance -- and nothing they touch changes", async (t) => {
   const { log, env, state, calls } = await presentedProposal(t);
   await handleInterventionApproval(env, state, 1, "discuss");
-  const proposalBefore = structuredClone(state.strategyProposal);
-  const contextBefore = state.strategyContext;
-  const diagnosisBefore = structuredClone(state.strategyDiagnosis);
+  const proposalBefore = structuredClone(state.strategy?.proposal);
+  const contextBefore = state.strategy?.context;
+  const diagnosisBefore = structuredClone(state.strategy?.diagnosis);
   const requestsBefore = log.requests.length;
 
   await handleStrategyDiscussion(env, state, "What did the client actually tell us about delivery?");
@@ -3921,13 +3914,13 @@ test("Discuss 3. Several questions are answered from the Work's evidence, findin
   assert.match(first.system, /=== UPSTREAM COMMERCIAL VALUE EVIDENCE/);
   assert.match(second.system, /Q1: What did the client actually tell us about delivery\?\nA1: Answer number 1/, "an earlier exchange is carried, labelled as conversation");
 
-  assert.deepStrictEqual(after.strategyProposal, proposalBefore, "the proposal is unchanged");
-  assert.strictEqual(after.strategyProposal!.proposalVersion, 1, "no new version");
-  assert.strictEqual(after.strategyProposalHistory, undefined, "nothing was superseded");
-  assert.strictEqual(after.strategyContext, contextBefore, "strategyContext is unchanged");
-  assert.deepStrictEqual(after.strategyDiagnosis, diagnosisBefore, "the diagnosis is unchanged");
+  assert.deepStrictEqual(after.strategy?.proposal, proposalBefore, "the proposal is unchanged");
+  assert.strictEqual(after.strategy!.proposal!.proposalVersion, 1, "no new version");
+  assert.strictEqual(after.strategy?.proposalHistory, undefined, "nothing was superseded");
+  assert.strictEqual(after.strategy?.context, contextBefore, "strategyContext is unchanged");
+  assert.deepStrictEqual(after.strategy?.diagnosis, diagnosisBefore, "the diagnosis is unchanged");
   assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "no Handoff, Activity Log or other Notion write");
-  assert.strictEqual(after.strategyDiscussion!.turns.length, 2);
+  assert.strictEqual(after.strategy!.discussion!.turns.length, 2);
   assert.strictEqual(after.awaiting, "strategy_discussion", "the discussion stays open until Martin ends it");
   assert.ok(log.sentTexts.includes(`Hat: Strategy Analyst.\n\nAnswer number 2, from the client evidence.`), "the answer is shown to Martin");
 });
@@ -3945,9 +3938,9 @@ test("Discuss 4. A question the Outbound Data Gate refuses is reported as a gate
   assert.match(said, /Your question or the material sent with it probably contains/);
   assert.ok(!/no AI provider is currently available/i.test(said));
   assert.match(said, /⛔ Refused by the Outbound Data Gate -- nothing was saved\./, "the status message ends on the real cause");
-  assert.deepStrictEqual(after.strategyDiscussion!.turns, [], "a failed turn never enters the saved conversation");
+  assert.deepStrictEqual(after.strategy!.discussion!.turns, [], "a failed turn never enters the saved conversation");
   assert.strictEqual(after.awaiting, "strategy_discussion", "the discussion stays open");
-  assert.strictEqual(after.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL", "a failed question never touches the approval state");
+  assert.strictEqual(after.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL", "a failed question never touches the approval state");
   assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "and never Holds the Handoff");
 });
 
@@ -3961,7 +3954,7 @@ test("Discuss 5. An infrastructure failure says so plainly, and nothing is saved
   const said = log.sentTexts.join("\n");
   assert.match(said, /No AI provider returned a usable result \(unparseable\)\. This is an infrastructure failure/);
   assert.match(said, /⛔ No usable answer came back -- nothing was saved\./);
-  assert.deepStrictEqual(after.strategyDiscussion!.turns, []);
+  assert.deepStrictEqual(after.strategy!.discussion!.turns, []);
 });
 
 test("Discuss 6. An answer the gate's own detector would refuse is shown in full but saved withheld -- so it can never block the next question", async (t) => {
@@ -3974,10 +3967,10 @@ test("Discuss 6. An answer the gate's own detector would refuse is shown in full
   const after = await handleStrategyDiscussion(env, state, "Why phase two?");
 
   assert.ok(log.sentTexts.includes("Hat: Strategy Analyst.\n\nName: Kwame Mensah raised the delivery issue."), "Martin still sees the full answer");
-  assert.match(after.strategyDiscussion!.turns[0].answer, /withheld from discussion memory/);
+  assert.match(after.strategy!.discussion!.turns[0].answer, /withheld from discussion memory/);
   assert.strictEqual(calls.length, 2, "the next question still reached the AI -- the saved memory did not trip the gate");
   assert.ok(!calls[1].system.includes("Kwame Mensah"), "the flagged answer is never re-sent");
-  assert.strictEqual(after.strategyDiscussion!.turns[1].answer, "Phase two follows from the diagnosis.");
+  assert.strictEqual(after.strategy!.discussion!.turns[1].answer, "Phase two follows from the diagnosis.");
 });
 
 test("Discuss 7. A question on a discussion the proposal has moved past is refused before any AI call, and the stale discussion is closed", async (t) => {
@@ -3985,15 +3978,15 @@ test("Discuss 7. A question on a discussion the proposal has moved past is refus
   await handleInterventionApproval(env, state, 1, "discuss");
   // The proposal (and its staged approval) moved on to v2 while the v1
   // discussion was still open: only the discussion's own binding is stale.
-  const movedOn = { ...state.strategyProposal!, proposalVersion: 2 };
-  state.strategyProposal = movedOn;
-  state.pendingStrategyApproval = { ...state.pendingStrategyApproval!, proposalVersion: 2 };
+  const movedOn = { ...state.strategy?.proposal!, proposalVersion: 2 };
+  strategyOf(state).proposal = movedOn;
+  strategyOf(state).pendingApproval = { ...state.strategy?.pendingApproval!, proposalVersion: 2 };
 
   const after = await handleStrategyDiscussion(env, state, "Why phase two?");
 
   assert.strictEqual(calls.length, 0, "never answered against a version it was not opened on");
-  assert.deepStrictEqual(after.strategyProposal, movedOn, "the proposal is untouched");
-  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.deepStrictEqual(after.strategy?.proposal, movedOn, "the proposal is untouched");
+  assert.strictEqual(after.strategy?.discussion, undefined);
   assert.strictEqual(after.awaiting, undefined);
   assert.strictEqual(store.get(WORKSPACE_POINTER), undefined, "the pointer is released");
 });
@@ -4002,14 +3995,14 @@ test("Discuss 8. Old-version Discuss and End buttons do nothing -- no discussion
   const { log, env, state } = await presentedProposal(t);
   await handleInterventionApproval(env, state, 1, "refine");
   const v2 = await handleStrategyRefinement(env, state, "Tighten the timeline.");
-  assert.strictEqual(v2.strategyProposal!.proposalVersion, 2);
+  assert.strictEqual(v2.strategy!.proposal!.proposalVersion, 2);
   await handleInterventionApproval(env, v2, 2, "discuss");
   const requestsBefore = log.requests.length;
 
   await handleInterventionApproval(env, v2, 1, "discuss");
   const after = await handleInterventionApproval(env, v2, 1, "end_discussion");
 
-  assert.strictEqual(after.strategyDiscussion?.proposalVersion, 2, "the v2 discussion is still open");
+  assert.strictEqual(after.strategy?.discussion?.proposalVersion, 2, "the v2 discussion is still open");
   assert.strictEqual(after.awaiting, "strategy_discussion");
   assert.deepStrictEqual(notionWrites(log.requests.slice(requestsBefore)), [], "a stale Discuss/End press writes nothing to Notion");
   assert.match(log.sentTexts.at(-1)!, /already been resolved or superseded -- nothing to do/);
@@ -4019,15 +4012,15 @@ test("Discuss 9. End returns the Work to the proposal awaiting a decision and re
   const { log, env, state, store } = await presentedProposal(t);
   await handleInterventionApproval(env, state, 1, "discuss");
   await handleStrategyDiscussion(env, state, "Why phase two?");
-  const proposalBefore = structuredClone(state.strategyProposal);
+  const proposalBefore = structuredClone(state.strategy?.proposal);
 
   const after = await handleInterventionApproval(env, state, 1, "end_discussion");
 
-  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(after.strategy?.discussion, undefined);
   assert.strictEqual(after.awaiting, undefined);
   assert.strictEqual(after.stage, "awaiting_intervention_approval");
-  assert.strictEqual(after.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
-  assert.deepStrictEqual(after.strategyProposal, proposalBefore);
+  assert.strictEqual(after.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.deepStrictEqual(after.strategy?.proposal, proposalBefore);
   assert.strictEqual(store.get(WORKSPACE_POINTER), undefined);
   assert.deepStrictEqual(log.sentButtons.at(-1), after.pendingActionSummary!.buttons, "the proposal's own four buttons come back");
 
@@ -4057,14 +4050,14 @@ test("Discuss 10. Revise is the unchanged Refine path: the discussion closes, Ma
   await handleStrategyDiscussion(env, state, "UNIQUE-DISCUSSION-QUESTION: is the rollout too fast?");
 
   const refining = await handleInterventionApproval(env, state, 1, "refine");
-  assert.strictEqual(refining.strategyDiscussion, undefined, "Revise closes the discussion");
+  assert.strictEqual(refining.strategy?.discussion, undefined, "Revise closes the discussion");
   assert.strictEqual(refining.awaiting, "strategy_refinement_reason");
   assert.strictEqual(store.get(WORKSPACE_POINTER), state.workId, "the typed instruction will reach this Work");
 
   const after = await handleStrategyRefinement(env, refining, "Make phase one six weeks.");
 
-  assert.strictEqual(after.strategyProposal!.proposalVersion, 2, "the existing Refine/versioning path made v2");
-  assert.strictEqual(after.strategyApprovalState, "AWAITING_INTERVENTION_APPROVAL");
+  assert.strictEqual(after.strategy!.proposal!.proposalVersion, 2, "the existing Refine/versioning path made v2");
+  assert.strictEqual(after.strategy?.approvalState, "AWAITING_INTERVENTION_APPROVAL");
   assert.strictEqual(revisionSystems.length, 1);
   assert.ok(revisionSystems[0].includes("Make phase one six weeks."), "Martin's own instruction drives the revision");
   assert.ok(!revisionSystems[0].includes("UNIQUE-DISCUSSION"), "no discussion question or answer is passed into Revise");
@@ -4078,9 +4071,9 @@ test("Discuss 11. Approve during a discussion closes it and then approves exactl
 
   const after = await handleInterventionApproval(env, state, 1, "approve");
 
-  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(after.strategy?.discussion, undefined);
   assert.strictEqual(store.get(WORKSPACE_POINTER), undefined);
-  assert.strictEqual(after.strategyApprovalState, "APPROVED");
+  assert.strictEqual(after.strategy?.approvalState, "APPROVED");
   assert.ok(log.handoffCreateBody, "the Finance Handoff is created as before");
 });
 
@@ -4090,9 +4083,9 @@ test("Discuss 12. Reject during a discussion closes it and then rejects exactly 
 
   const after = await handleInterventionApproval(env, state, 1, "reject");
 
-  assert.strictEqual(after.strategyDiscussion, undefined);
+  assert.strictEqual(after.strategy?.discussion, undefined);
   assert.strictEqual(store.get(WORKSPACE_POINTER), undefined);
-  assert.strictEqual(after.strategyApprovalState, "REJECTED");
+  assert.strictEqual(after.strategy?.approvalState, "REJECTED");
 });
 
 test("Discuss 13. The re-pickup guard still refuses while a discussion is open", async (t) => {
@@ -4102,8 +4095,8 @@ test("Discuss 13. The re-pickup guard still refuses while a discussion is open",
 
   const after = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(after.strategyDiscussion?.proposalVersion, 1, "the open discussion is untouched");
-  assert.strictEqual(after.strategyProposal!.proposalVersion, 1);
+  assert.strictEqual(after.strategy?.discussion?.proposalVersion, 1, "the open discussion is untouched");
+  assert.strictEqual(after.strategy!.proposal!.proposalVersion, 1);
 });
 
 test("Discuss 14. With the pointer claimed, a plain Workspace message reaches the Strategy discussion handler through the router's existing pointer check", async (t) => {

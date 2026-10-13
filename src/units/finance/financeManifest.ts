@@ -3,6 +3,7 @@ import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as finance from "./valueBasedPricingAssessor";
+import { migrateLegacyFinanceState } from "./financeState";
 
 /**
  * Finance's Unit Registry manifest (ENIG Operating Model design doc,
@@ -134,6 +135,8 @@ export const financeManifest: UnitManifest = {
   // Handoff-originated Work is taken in through handlePickup -- a separate
   // declaration, NOT the entryHandler (see this file's doc comment).
   handoffPickup: { handler: (env, state, skills) => finance.handlePickup(env, state, skills) },
+  // Finance's state lives in WorkState.finance; a Work saved with the old loose fields is read into it on load.
+  migrateWorkState: migrateLegacyFinanceState,
 };
 
 /**

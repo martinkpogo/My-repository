@@ -175,12 +175,12 @@ test("findCallbackHandler resolves leadopportunity on Lead Generation Specialist
   assert.ok(handler, "leadopportunity must resolve on Lead Generation Specialist's own manifest entry");
 
   const state = fakeWorkState({
-    pendingLeadOpportunity: { organisation: "Acme Co", evidence: "Some evidence", reason: "Some reason", sourceUrl: "https://example.com", handoffId: "handoff-1" },
+    sales: { pendingLeadOpportunity: { organisation: "Acme Co", evidence: "Some evidence", reason: "Some reason", sourceUrl: "https://example.com", handoffId: "handoff-1" } },
   });
 
   const result = await handler(fakeEnv(), state, false);
 
-  assert.strictEqual(result.pendingLeadOpportunity, undefined);
+  assert.strictEqual(result.sales?.pendingLeadOpportunity, undefined);
 });
 
 test("salesManifest: Sales Executive declares one ungated workflow action plus the six privileged commits, each 'write' and each carrying a description", () => {

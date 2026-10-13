@@ -761,7 +761,7 @@ test("proposeLeadOpportunity sets pendingLeadOpportunity and presents evidence-b
   const state = fakeOpportunityState();
   const updated = await proposeLeadOpportunity(fakeEnv(), state, SAMPLE_OPPORTUNITY);
 
-  assert.deepStrictEqual(updated.pendingLeadOpportunity, SAMPLE_OPPORTUNITY);
+  assert.deepStrictEqual(updated.sales?.pendingLeadOpportunity, SAMPLE_OPPORTUNITY);
   assert.ok(sentText.includes("Zenith Co"));
   assert.ok(sentText.includes(SAMPLE_OPPORTUNITY.evidence));
   assert.ok(sentText.includes("No Lead has been created"));
@@ -877,10 +877,10 @@ test("handleLeadOpportunityApproval creates a Lead only on explicit approval", a
     globalThis.fetch = originalFetch;
   });
 
-  const state = fakeOpportunityState({ actionName: "record_lead", pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+  const state = fakeOpportunityState({ actionName: "record_lead", sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
   const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
 
-  assert.strictEqual(updated.pendingLeadOpportunity, undefined, "pending state must be cleared once decided");
+  assert.strictEqual(updated.sales?.pendingLeadOpportunity, undefined, "pending state must be cleared once decided");
   // Martin's decision (2026-10-12): his approval of THIS candidate, on a Work
   // recording record_lead, authorizes exactly this Lead create (Access checks
   // the proof bound to Work + record_lead + the Leads data source).
@@ -927,10 +927,10 @@ test("handleLeadOpportunityApproval creates no Lead on rejection", async (t) => 
     globalThis.fetch = originalFetch;
   });
 
-  const state = fakeOpportunityState({ pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+  const state = fakeOpportunityState({ sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
   const updated = await handleLeadOpportunityApproval(fakeEnv(), state, false);
 
-  assert.strictEqual(updated.pendingLeadOpportunity, undefined);
+  assert.strictEqual(updated.sales?.pendingLeadOpportunity, undefined);
   assert.strictEqual(leadCreated, false, "rejection must never create a Lead");
   assert.ok(sentText.includes("rejected"));
   assert.ok(sentText.includes("No Lead was created"));
@@ -950,10 +950,10 @@ test("handleLeadOpportunityApproval fails closed when no pending opportunity exi
     globalThis.fetch = originalFetch;
   });
 
-  const state = fakeOpportunityState({ pendingLeadOpportunity: undefined });
+  const state = fakeOpportunityState({ sales: { pendingLeadOpportunity: undefined } });
   const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
 
-  assert.strictEqual(updated.pendingLeadOpportunity, undefined);
+  assert.strictEqual(updated.sales?.pendingLeadOpportunity, undefined);
   assert.ok(sentText.includes("No valid pending opportunity finding"));
 });
 
@@ -996,7 +996,7 @@ test("handleLeadOpportunityApproval refuses to create a duplicate Lead even afte
     globalThis.fetch = originalFetch;
   });
 
-  const state = fakeOpportunityState({ pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+  const state = fakeOpportunityState({ sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
   await handleLeadOpportunityApproval(fakeEnv(), state, true);
 
   assert.strictEqual(leadCreated, false, "must never create a duplicate Lead, even on explicit approval");
@@ -1351,7 +1351,7 @@ function installApprovalMock(t: any, leadsWrite: "ok" | "fail" = "ok") {
 test("handleLeadOpportunityApproval: rejecting remembers the organisation for 180 days and closes the Work", async (t) => {
   installApprovalMock(t);
   const env = fakeEnv();
-  const state = fakeOpportunityState({ actionName: "record_lead", pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+  const state = fakeOpportunityState({ actionName: "record_lead", sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
 
   const updated = await handleLeadOpportunityApproval(env, state, false);
 
@@ -1367,22 +1367,22 @@ test("handleLeadOpportunityApproval: a card whose Work does not record record_le
   // (or a read one), so Martin's approval cannot be bound to an approval-gated
   // write and Access refuses the create.
   for (const actionName of [undefined, "discover_leads"]) {
-    const state = fakeOpportunityState({ ...(actionName ? { actionName } : {}), pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+    const state = fakeOpportunityState({ ...(actionName ? { actionName } : {}), sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
     const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
     assert.ok(!mock.sent.some((m) => m.includes("Lead recorded")), `no success may be reported (actionName=${actionName})`);
-    assert.deepStrictEqual(updated.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate stays staged rather than being silently dropped");
+    assert.deepStrictEqual(updated.sales?.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate stays staged rather than being silently dropped");
   }
   assert.strictEqual(mock.leadCreates(), 0, "the Leads database is never written");
 });
 
 test("handleLeadOpportunityApproval: a failed Leads write re-stages the candidate so the SAME card's Approve works again", async (t) => {
   const mock = installApprovalMock(t, "fail");
-  const state = fakeOpportunityState({ actionName: "record_lead", pendingLeadOpportunity: SAMPLE_OPPORTUNITY });
+  const state = fakeOpportunityState({ actionName: "record_lead", sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
 
   const afterFailure = await handleLeadOpportunityApproval(fakeEnv(), state, true);
 
   assert.strictEqual(mock.leadCreates(), 1, "the write was attempted once");
-  assert.deepStrictEqual(afterFailure.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate is staged again for a retry");
+  assert.deepStrictEqual(afterFailure.sales?.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate is staged again for a retry");
   assert.notStrictEqual(afterFailure.stage, "complete", "a failed write does not close the Work");
   assert.ok(mock.sent.some((m) => m.includes("Tap Approve on the card again")));
 });

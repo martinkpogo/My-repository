@@ -4,6 +4,7 @@ import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as strategy from "./strategyAnalyst";
+import { migrateLegacyStrategyState } from "./strategyState";
 
 /**
  * Strategy's Unit Registry manifest (ENIG Operating Model design doc,
@@ -248,6 +249,8 @@ export const strategyManifest: UnitManifest = {
   // Handoff-originated Work is taken in through handlePickup -- a separate
   // declaration, NOT the entryHandler (see this file's doc comment).
   handoffPickup: { handler: (env, state, skills) => strategy.handlePickup(env, state, skills) },
+  // Strategy's state lives in WorkState.strategy; a Work saved with the old loose fields is read into it on load.
+  migrateWorkState: migrateLegacyStrategyState,
 };
 
 /**

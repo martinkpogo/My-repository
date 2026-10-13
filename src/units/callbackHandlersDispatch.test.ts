@@ -18,6 +18,7 @@ import * as salesProposal from "./sales/tokenSafeProposal";
 import type { StrategyProposal } from "../handoffContracts/strategyBoundary";
 import type { Env, WorkState } from "../types";
 
+import { salesOf } from "./sales/salesState";
 /**
  * Covers WP7's dispatch contract: handleCallback's Unit-specific business
  * prefix branches (entity, matter, sprop, salesprop) moved onto the owning
@@ -214,24 +215,22 @@ function strategyState(): WorkState {
     stage: "awaiting_approval",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    strategyApprovalState: "AWAITING_INTERVENTION_APPROVAL",
-    // Only the fields identityMatches reads at runtime are constructed here
+    strategy: { approvalState: "AWAITING_INTERVENTION_APPROVAL", // Only the fields identityMatches reads at runtime are constructed here
     // (proposalId + proposalVersion); the full StrategyProposal shape is
     // strategyAnalyst.test's own subject.
-    strategyProposal: { proposalId: "prop-1", proposalVersion: 2 } as StrategyProposal,
-    pendingStrategyApproval: {
+      proposal: { proposalId: "prop-1", proposalVersion: 2 } as StrategyProposal, pendingApproval: {
       kind: "strategy_intervention",
       strategyWorkSessionId: "work_cb_strategy",
       proposalId: "prop-1",
       proposalVersion: 2,
       decisionOptions: ["approve", "refine", "reject"],
-    },
+    } },
   };
 }
 
 function proposalState(): WorkState {
   const state = salesState();
-  state.salesProposal = {
+  salesOf(state).proposal = {
     pageId: "prop-page-1",
     pageUrl: "https://notion.so/prop-page-1",
     proposalId: "PROP-7",

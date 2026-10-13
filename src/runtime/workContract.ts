@@ -61,9 +61,10 @@ import type { Unit, WorkState } from "../types";
  *     except Marketing's direct entry, which seeds a placeholder
  *     ("Marketing") before its own intake resolves the real Hat -- see
  *     "Known gaps and drift".
- *   - Unit-specific state fields (`quote`, `proposalDraft`,
- *     `strategyDiagnosis`, `marketingDraft`, ...) are business execution
- *     state the Work carries for its Handlers, not kernel concepts.
+ *   - Unit-specific state (the `strategy`, `finance`, `sales`, `bd` and
+ *     `marketing` slices of WorkState: a quote, a diagnosis, a draft, ...)
+ *     is business execution state the Work carries for its Handlers, not
+ *     kernel concepts.
  */
 
 /** Which Workspace interaction mode the Work was entered from. */

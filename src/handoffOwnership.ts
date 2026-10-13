@@ -63,7 +63,12 @@ import { logActivity } from "./log";
  * substantive context are also left alone -- they are evidence the chain
  * carries forward, not interaction state.
  */
-export type StagedInteractionField = keyof WorkState | `marketing.${"pendingTransition" | "pendingPaidMediaAction"}`;
+export type StagedInteractionField =
+  | keyof WorkState
+  | `marketing.${"pendingTransition" | "pendingPaidMediaAction"}`
+  | `strategy.${"pendingHandoff" | "pendingApproval" | "pendingRefinement"}`
+  | `bd.${"pendingHandoff" | "pendingDevelop" | "pendingNextMove"}`
+  | `sales.${"pendingProposalRevision" | "pendingLeadOpportunity"}`;
 
 /**
  * Clears one staged-interaction field. A dotted path (`marketing.pendingTransition`)
@@ -86,14 +91,14 @@ export const STAGED_INTERACTION_FIELDS: readonly StagedInteractionField[] = [
   "pendingApproval",
   "marketing.pendingTransition",
   "marketing.pendingPaidMediaAction",
-  "pendingStrategyHandoff",
-  "pendingBDHandoff",
-  "pendingBDDevelop",
-  "pendingBDNextMove",
-  "pendingStrategyApproval",
-  "pendingStrategyRefinement",
-  "pendingSalesProposalRevision",
-  "pendingLeadOpportunity",
+  "strategy.pendingHandoff",
+  "bd.pendingHandoff",
+  "bd.pendingDevelop",
+  "bd.pendingNextMove",
+  "strategy.pendingApproval",
+  "strategy.pendingRefinement",
+  "sales.pendingProposalRevision",
+  "sales.pendingLeadOpportunity",
   "pendingActionSummary",
   "pendingHandoffAutoCheck",
   "workStatus",

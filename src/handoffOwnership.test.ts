@@ -125,13 +125,13 @@ function strategyState(): WorkState {
       buttons: [[{ text: "Approve", callback_data: "sprop:work-1:1.a" }]],
       createdAt: "2026-10-01T00:00:00.000Z",
     },
-    pendingStrategyApproval: {
+    strategy: { pendingApproval: {
       kind: "strategy_intervention",
       strategyWorkSessionId: "work-1",
       proposalId: "prop-1",
       proposalVersion: 1,
       decisionOptions: ["approve", "refine", "reject"],
-    },
+    } },
     workStatus: { hat: STRATEGY_HAT, header: "Strategy Analyst — diagnose", done: ["read Handoff"] },
     workStatusMessageId: 4242,
   };
@@ -170,7 +170,7 @@ test("pickup adopts the Handoff destination: Strategy-owned Work records Finance
   // The sending Unit's staged interaction does not travel.
   assert.strictEqual(state.awaiting, undefined, "a stale awaiting reply must not survive the transfer");
   assert.strictEqual(state.pendingActionSummary, undefined, "a stale re-sent approval button must not survive");
-  assert.strictEqual(state.pendingStrategyApproval, undefined, "the sending Unit's staged approval must not survive");
+  assert.strictEqual(state.strategy?.pendingApproval, undefined, "the sending Unit's staged approval must not survive");
   assert.strictEqual(state.workStatus, undefined, "a stale status bubble must not be edited by the receiving Unit");
   assert.strictEqual(state.workStatusMessageId, undefined, "the receiving Unit must not edit the sending Unit's status message");
 

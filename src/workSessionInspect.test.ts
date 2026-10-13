@@ -94,32 +94,34 @@ function richState(): WorkState {
     handoffId: "3eecb004-e583-8122-87d8-f4153856758b",
     stage: "strategy_blocked",
     updatedAt: "2026-10-05T07:56:07.677Z",
-    strategySkillCycleUnavailable: false,
     chatId: 987654321,
     threadId: 42,
     entityName: "SENTINEL_ENTITY_NAME",
     matterName: "SENTINEL_MATTER_NAME",
     enquiryText: "SENTINEL_ENQUIRY_TEXT",
-    strategyContext: "SENTINEL_STRATEGY_CONTEXT",
-    strategyDiagnosis: "SENTINEL_STRATEGY_DIAGNOSIS",
-    strategyProposal: "SENTINEL_STRATEGY_PROPOSAL",
-    pendingStrategyApproval: "SENTINEL_PENDING_STRATEGY_APPROVAL",
-    strategySourceBoundaryAttestation: "SENTINEL_ATTESTATION",
-    strategySkillFindings: [
-      {
-        skillId: "brand_strategy",
-        status: "completed",
-        finding: "SENTINEL_FINDING",
-        evidenceLimitation: "SENTINEL_EVIDENCE_LIMITATION",
-        implication: "SENTINEL_IMPLICATION",
-        unresolvedQuestion: "SENTINEL_UNRESOLVED_QUESTION",
-      },
-      {
-        skillId: "business_strategy",
-        status: "failed",
-        failureReason: "SENTINEL_FAILURE_REASON",
-      },
-    ],
+    strategy: {
+      skillCycleUnavailable: false,
+      context: "SENTINEL_STRATEGY_CONTEXT",
+      diagnosis: "SENTINEL_STRATEGY_DIAGNOSIS",
+      proposal: "SENTINEL_STRATEGY_PROPOSAL",
+      pendingApproval: "SENTINEL_PENDING_STRATEGY_APPROVAL",
+      sourceBoundaryAttestation: "SENTINEL_ATTESTATION",
+      skillFindings: [
+        {
+          skillId: "brand_strategy",
+          status: "completed",
+          finding: "SENTINEL_FINDING",
+          evidenceLimitation: "SENTINEL_EVIDENCE_LIMITATION",
+          implication: "SENTINEL_IMPLICATION",
+          unresolvedQuestion: "SENTINEL_UNRESOLVED_QUESTION",
+        },
+        {
+          skillId: "business_strategy",
+          status: "failed",
+          failureReason: "SENTINEL_FAILURE_REASON",
+        },
+      ],
+    },
   } as unknown as WorkState;
 }
 
@@ -218,10 +220,12 @@ test("retrieval: six-invocation sequence is returned in exact order with array o
     workId: WORK_ID,
     stage: "strategy_blocked",
     updatedAt: "2026-10-05T07:56:07.677Z",
-    strategySkillFindings: skillIds.map((skillId, index) => ({
-      skillId,
-      status: index % 2 === 0 ? "completed" : "failed",
-    })),
+    strategy: {
+      skillFindings: skillIds.map((skillId, index) => ({
+        skillId,
+        status: index % 2 === 0 ? "completed" : "failed",
+      })),
+    },
   } as unknown as WorkState;
   const { env } = createFakeEnv({ state });
 
@@ -254,7 +258,7 @@ test("retrieval: strategySkillCycleUnavailable distinguishes false from absent",
     const state = {
       workId: WORK_ID,
       stage: "strategy_blocked",
-      strategySkillCycleUnavailable: cycleUnavailable,
+      strategy: { skillCycleUnavailable: cycleUnavailable },
     } as unknown as WorkState;
     const { env } = createFakeEnv({ state });
     const res = await handleWorkSessionState(inspectRequest(), env);

@@ -23,6 +23,7 @@ import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresent
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
 
+import { strategyOf } from "./strategyState";
 /**
  * Strategy Analyst execution -- one dedicated runtime for the Strategy
  * Unit's single active Hat (governance retrieval -> Handoff context reconstruction ->
@@ -578,8 +579,8 @@ export async function handleDirectRequest(env: Env, state: WorkState, text: stri
   // Strategy must never populate them by resolving real-world identity.
   state.entityName = evalResult.contract.entityToken;
   state.matterName = state.matterToken;
-  state.strategyQuestion = evalResult.contract.sanitizedContext;
-  state.strategyContext = evalResult.contract.sanitizedContext;
+  strategyOf(state).question = evalResult.contract.sanitizedContext;
+  strategyOf(state).context = evalResult.contract.sanitizedContext;
 
   await logActivity(env, {
     entry: `Strategy direct request received: ${state.matterToken}`,
@@ -612,14 +613,14 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   // The next proposal version comes only through the governed Refine path.
   // Refused before the claim and any AI call, with the WorkSession and the
   // Handoff Status left exactly as they are.
-  if (state.strategyApprovalState === "AWAITING_INTERVENTION_APPROVAL" || state.strategyApprovalState === "REFINEMENT_REQUESTED") {
-    const version = state.strategyProposal?.proposalVersion;
-    console.error(`Strategy handlePickup: refused for work ${state.workId} -- proposal${version ? ` v${version}` : ""} is ${state.strategyApprovalState}`);
+  if (state.strategy?.approvalState === "AWAITING_INTERVENTION_APPROVAL" || state.strategy?.approvalState === "REFINEMENT_REQUESTED") {
+    const version = state.strategy?.proposal?.proposalVersion;
+    console.error(`Strategy handlePickup: refused for work ${state.workId} -- proposal${version ? ` v${version}` : ""} is ${state.strategy?.approvalState}`);
     await logActivity(env, {
       entry: `Strategy pickup refused — proposal already awaiting Martin's decision: ${state.matterToken || state.entityToken || state.workId}`,
       type: "Blocker",
       area: "Strategy",
-      decisionRationale: `This WorkSession's Strategy Proposal${version ? ` v${version}` : ""} is already in the approval/refinement lifecycle (${state.strategyApprovalState}). Picking the Handoff up again would rerun the diagnosis and replace the pending proposal, so the pickup was refused: no claim, no diagnosis, no proposal change. A new proposal version must come through the governed Refine path.`,
+      decisionRationale: `This WorkSession's Strategy Proposal${version ? ` v${version}` : ""} is already in the approval/refinement lifecycle (${state.strategy?.approvalState}). Picking the Handoff up again would rerun the diagnosis and replace the pending proposal, so the pickup was refused: no claim, no diagnosis, no proposal change. A new proposal version must come through the governed Refine path.`,
       nextActions: "Resolve the pending proposal with Approve, Refine or Reject. The Handoff's Status was not changed.",
       outcome: "Blocked",
       workId: state.workId,
@@ -681,8 +682,8 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
 
   state.entityToken = evalResult.contract.entityToken;
   state.matterToken = evalResult.contract.matterToken ?? "";
-  state.strategyQuestion = evalResult.contract.sanitizedContext;
-  state.strategyContext = evalResult.contract.sanitizedContext;
+  strategyOf(state).question = evalResult.contract.sanitizedContext;
+  strategyOf(state).context = evalResult.contract.sanitizedContext;
   if (state.workStatus) state.workStatus.header = strategyProgressHeader(state, "picking up a Handoff");
   await advanceWorkStatus(env, state, "Checking the Sales boundary record, the Commercial Value Evidence block and the Matter");
 
@@ -702,7 +703,7 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
     { entityToken: state.entityToken, matterToken: state.matterToken },
     strategyAnalystAccess(state),
   );
-  state.strategySourceBoundaryAttestation = sourceBoundaryEvidence.ok ? sourceBoundaryEvidence.attestation : undefined;
+  strategyOf(state).sourceBoundaryAttestation = sourceBoundaryEvidence.ok ? sourceBoundaryEvidence.attestation : undefined;
   if (!sourceBoundaryEvidence.ok) {
     console.error(
       `Strategy handlePickup: no usable source-boundary attestation for handoff ${state.handoffId} (${sourceBoundaryEvidence.reason}) -- the proposal gate will fail closed.`,
@@ -727,8 +728,8 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
     state.handoffId!,
     strategyAnalystAccess(state),
   );
-  state.commercialValueEvidenceBlock = commercialValueEvidence.ok ? commercialValueEvidence.block : undefined;
-  state.commercialValueEvidenceError = commercialValueEvidence.ok ? undefined : commercialValueEvidence.reason;
+  strategyOf(state).commercialValueEvidenceBlock = commercialValueEvidence.ok ? commercialValueEvidence.block : undefined;
+  strategyOf(state).commercialValueEvidenceError = commercialValueEvidence.ok ? undefined : commercialValueEvidence.reason;
   if (!commercialValueEvidence.ok) {
     console.error(
       `Strategy handlePickup: no usable Commercial Value Evidence block for handoff ${state.handoffId} (${commercialValueEvidence.reason}) -- the proposal gate will fail closed.`,
@@ -865,8 +866,8 @@ async function runDiagnosis(env: Env, state: WorkState, skills: ResolvedActionSk
 }
 
 async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  const strategyQuestion = state.strategyQuestion ?? "";
-  const strategyContext = state.strategyContext ?? "";
+  const strategyQuestion = state.strategy?.question ?? "";
+  const strategyContext = state.strategy?.context ?? "";
 
   const cycle = await runStrategySkillCycle({
     env,
@@ -880,9 +881,9 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     console.warn(
       `Strategy runDiagnosis: Skill cycle unavailable for work ${state.workId} (${cycle.reason}${cycle.cause ? `; cause: ${cycle.cause}` : ""}) -- proceeding directly to core diagnosis without Skill composition.`,
     );
-    state.strategySkillCycleUnavailable = true;
-    state.strategySkillCycleUnavailableCause = cycle.cause;
-    state.strategySkillFindings = cycle.findings;
+    strategyOf(state).skillCycleUnavailable = true;
+    strategyOf(state).skillCycleUnavailableCause = cycle.cause;
+    strategyOf(state).skillFindings = cycle.findings;
     await advanceWorkStatus(env, state, `Skill planning was unavailable (${cycle.cause ?? "no usable plan"}) -- continuing with the core diagnosis alone`);
     return runCoreDiagnosis(env, state);
   }
@@ -893,9 +894,9 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
   // handleStrategyFeedback's direct-continuation retry path reuses the same
   // state object), so this attempt's real outcome is never shadowed by a
   // leftover true/false from an earlier, differently-resolved attempt.
-  state.strategySkillCycleUnavailable = undefined;
-  state.strategySkillCycleUnavailableCause = undefined;
-  state.strategySkillFindings = cycle.findings;
+  strategyOf(state).skillCycleUnavailable = undefined;
+  strategyOf(state).skillCycleUnavailableCause = undefined;
+  strategyOf(state).skillFindings = cycle.findings;
 
   if (cycle.status === "hold") {
     console.error(`Strategy runDiagnosis: Skill cycle held for work ${state.workId} -- ${cycle.reason}`);
@@ -906,7 +907,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     console.log(
       `Strategy runDiagnosis: Strategy Analysis ran for work ${state.workId} and determined no Strategy Skill was required -- proceeding directly to core diagnosis.`,
     );
-    state.strategySkillCycleUnavailable = false;
+    strategyOf(state).skillCycleUnavailable = false;
     await advanceWorkStatus(env, state, "Strategy Analysis judged that no Strategy Skill is needed");
     return runCoreDiagnosis(env, state);
   }
@@ -921,7 +922,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     `Strategy runDiagnosis: Skill cycle for work ${state.workId} invoked ${cycle.findings.length} Strategy Skill(s): ${cycle.findings.map((f) => `${f.skillId}:${f.status}`).join(", ")}.`,
   );
 
-  state.strategyContext = `${strategyContext}\n\nStrategy Analysis synthesis:\n${cycle.synthesizedContext ?? ""}`;
+  strategyOf(state).context = `${strategyContext}\n\nStrategy Analysis synthesis:\n${cycle.synthesizedContext ?? ""}`;
   console.log(`Strategy runDiagnosis: Skill cycle synthesis for work ${state.workId} sufficient -- folding into strategyContext before core diagnosis.`);
   return runCoreDiagnosis(env, state);
 }
@@ -953,7 +954,7 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
 
   const outcome = await generateWithOutcome<StrategyDiagnosisResult>(env, {
     taskId: "strategy.diagnosis",
-    parts: { ...buildDiagnosisPromptParts(governance.hatDefinition, governance.universalRoleContract), situation: state.strategyContext ?? "" },
+    parts: { ...buildDiagnosisPromptParts(governance.hatDefinition, governance.universalRoleContract), situation: state.strategy?.context ?? "" },
     maxTokens: 3000,
   });
   if (!outcome.ok) {
@@ -974,7 +975,7 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
   // The gate passed. An unproven cause stays an explicitly labelled hypothesis
   // in everything downstream; a supported cause or no-recommendation result is unchanged.
   const disciplined = applyUnprovenCauseDiscipline(result);
-  state.strategyDiagnosis = disciplined;
+  strategyOf(state).diagnosis = disciplined;
   return deliverDiagnosis(env, state, disciplined);
 }
 
@@ -1010,7 +1011,7 @@ async function handleBlocked(env: Env, state: WorkState, reason: string): Promis
   // invocation metadata is appended, never mixed in front of or in place of
   // it. When the cycle recorded no findings this is byte-for-byte the same
   // `reason` as before, so non-cycle blockers are unchanged.
-  const blockerReason = reason + skillInvocationSummary(state.strategySkillFindings);
+  const blockerReason = reason + skillInvocationSummary(state.strategy?.skillFindings);
   await finishWorkStatus(env, state, "⛔ Held -- the reason is below.", "failed");
   await logActivity(env, {
     entry: `Strategy diagnosis blocked`,
@@ -1176,10 +1177,10 @@ async function routeToUnit(env: Env, state: WorkState, result: StrategyDiagnosis
       ? "Take the strategic direction above as input to marketing-specific strategy/execution decisions."
       : "Take the strategic direction above as input to commercial progression.";
 
-  state.pendingStrategyHandoff = {
+  strategyOf(state).pendingHandoff = {
     unit: route.unit,
     hat: route.hat,
-    handoffTitle: `Strategy diagnosis for ${route.hat}: ${(state.strategyQuestion ?? state.workId).slice(0, 60)}`,
+    handoffTitle: `Strategy diagnosis for ${route.hat}: ${(state.strategy?.question ?? state.workId).slice(0, 60)}`,
     reason,
     requiredNextAction,
     expectedOutput: `${route.hat} to use this diagnosis as direct input to its own work.`,
@@ -1219,7 +1220,7 @@ async function routeToUnit(env: Env, state: WorkState, result: StrategyDiagnosis
  * this explicit approval is.
  */
 export async function handleStrategyHandoffApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  const pending = state.pendingStrategyHandoff;
+  const pending = state.strategy?.pendingHandoff;
 
   if (!pending) {
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "There's no pending handoff to act on.");
@@ -1227,7 +1228,7 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
   }
 
   if (!approved) {
-    state.pendingStrategyHandoff = undefined;
+    strategyOf(state).pendingHandoff = undefined;
     state.pendingActionSummary = undefined;
     await logActivity(env, {
       entry: `Strategy handoff to ${pending.hat} declined by Martin`,
@@ -1278,7 +1279,7 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
         mintApprovalProofForWork(state, env.HANDOFFS_DATA_SOURCE_ID),
       ),
     );
-    state.pendingStrategyHandoff = undefined;
+    strategyOf(state).pendingHandoff = undefined;
     state.pendingActionSummary = undefined;
     await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);
     await logActivity(env, {
@@ -1616,14 +1617,14 @@ async function developStrategyProposal(env: Env, state: WorkState, diagnosis: St
   const raw = await generate<RawStrategyProposal>(env, {
     taskId: "strategy.proposal_drafting",
     mode: "json",
-    parts: { ...buildProposalDraftingPromptParts(governance.hatDefinition, governance.universalRoleContract, diagnosis), situation: state.strategyContext ?? "" },
+    parts: { ...buildProposalDraftingPromptParts(governance.hatDefinition, governance.universalRoleContract, diagnosis), situation: state.strategy?.context ?? "" },
     maxTokens: 4000,
   });
   if (!raw) {
     return handleBlocked(env, state, "Could not generate a complete Strategic Intervention Proposal from the validated diagnosis -- the drafting call returned no usable output.");
   }
 
-  const nextVersion = (state.strategyProposal?.proposalVersion ?? 0) + 1;
+  const nextVersion = (state.strategy?.proposal?.proposalVersion ?? 0) + 1;
   const proposalId = crypto.randomUUID();
   const proposal = normalizeStrategyProposal(raw, proposalId, nextVersion);
   await advanceWorkStatus(env, state, "Checking the drafted proposal is complete");
@@ -1769,7 +1770,7 @@ async function presentStrategyProposalForApproval(
   // gate CONSUMES evidence recorded by the sender; Strategy never re-runs
   // the Sales boundary check, and the absence of identity-bearing content
   // is never inferred as proof the check happened.
-  let sourceBoundary = state.strategySourceBoundaryAttestation;
+  let sourceBoundary = state.strategy?.sourceBoundaryAttestation;
   if (state.entryType === "direct_request") {
     sourceBoundary = { handoffId: state.handoffId ?? state.workId, checked: true, result: "Passed", checks: [], identityFieldsChecked: [] };
   } else if (
@@ -1803,11 +1804,11 @@ async function presentStrategyProposalForApproval(
   // handled the same honest way Gate 2 handles it: recorded as having no
   // upstream determination, never fabricated. Only a Handoff-originated work
   // item requires the block.
-  if (state.entryType !== "direct_request" && !state.commercialValueEvidenceBlock) {
+  if (state.entryType !== "direct_request" && !state.strategy?.commercialValueEvidenceBlock) {
     return handleBlocked(
       env,
       state,
-      `no upstream Commercial Value Evidence block could be read from this work item's Sales -> Strategy Handoff (${state.commercialValueEvidenceError ?? "the block is absent"}), so the proposal would be routed downstream with no attributable commercial-value determination -- refusing to present it for approval. Strategy never authors, estimates, or infers that determination itself.`,
+      `no upstream Commercial Value Evidence block could be read from this work item's Sales -> Strategy Handoff (${state.strategy?.commercialValueEvidenceError ?? "the block is absent"}), so the proposal would be routed downstream with no attributable commercial-value determination -- refusing to present it for approval. Strategy never authors, estimates, or infers that determination itself.`,
     );
   }
   const identityCheck = checkStrategyProposalForKnownIdentity(proposal, {
@@ -1818,19 +1819,19 @@ async function presentStrategyProposalForApproval(
   if (identityCheck.violation) {
     return handleBlocked(env, state, identityCheck.violation);
   }
-  state.strategyProposalTokenSafety = {
+  strategyOf(state).proposalTokenSafety = {
     proposalId: proposal.proposalId,
     proposalVersion: proposal.proposalVersion,
     sourceBoundary: { checked: true, identityFieldsChecked: sourceBoundary.identityFieldsChecked },
     proposalContent: { checked: true, identityFieldsChecked: identityCheck.identityFieldsChecked },
   };
 
-  const previousVersion = state.strategyProposal;
+  const previousVersion = state.strategy?.proposal;
   if (previousVersion) {
-    state.strategyProposalHistory = [...(state.strategyProposalHistory ?? []), previousVersion];
+    strategyOf(state).proposalHistory = [...(state.strategy?.proposalHistory ?? []), previousVersion];
   }
   const proposalVersion = proposal.proposalVersion;
-  state.strategyProposal = proposal;
+  strategyOf(state).proposal = proposal;
 
   await logActivity(env, {
     entry: `Strategy Proposal ${logVerb === "revised" ? "revised (v" + proposalVersion + ")" : "created"}: ${state.matterToken || state.entityToken || state.workId}`,
@@ -1856,7 +1857,7 @@ async function presentStrategyProposalForApproval(
   const buttons = strategyProposalButtons(state.workId, proposalVersion);
   await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, message, buttons);
 
-  state.pendingStrategyApproval = {
+  strategyOf(state).pendingApproval = {
     kind: "strategy_intervention",
     strategyWorkSessionId: state.workId,
     proposalId: proposal.proposalId,
@@ -1877,7 +1878,7 @@ async function presentStrategyProposalForApproval(
     outcome: "Active",
   });
 
-  state.strategyApprovalState = "AWAITING_INTERVENTION_APPROVAL";
+  strategyOf(state).approvalState = "AWAITING_INTERVENTION_APPROVAL";
   state.stage = "awaiting_intervention_approval";
   state.awaiting = undefined;
   return state;
@@ -1990,10 +1991,10 @@ export async function handleInterventionApproval(
   // incrementing per-work-item counter, so matching it against
   // pendingStrategyApproval/state.strategyProposal gives the same
   // stale/superseded-proposal protection a proposalId match would.
-  const pending = state.pendingStrategyApproval;
-  const proposal = state.strategyProposal;
+  const pending = state.strategy?.pendingApproval;
+  const proposal = state.strategy?.proposal;
   const identityMatches =
-    state.strategyApprovalState === "AWAITING_INTERVENTION_APPROVAL" &&
+    state.strategy?.approvalState === "AWAITING_INTERVENTION_APPROVAL" &&
     !!pending &&
     pending.strategyWorkSessionId === state.workId &&
     pending.proposalVersion === proposalVersion &&
@@ -2008,7 +2009,7 @@ export async function handleInterventionApproval(
       // console line above is its record. A discussion that is itself no
       // longer current is closed; a current one (opened on the newer
       // version this old button predates) is left exactly as it is.
-      if (state.strategyDiscussion && !strategyDiscussionIsCurrent(state)) await closeStrategyDiscussion(env, state);
+      if (state.strategy?.discussion && !strategyDiscussionIsCurrent(state)) await closeStrategyDiscussion(env, state);
       await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "This button belongs to a proposal version that has already been resolved or superseded -- nothing to do.");
       return state;
     }
@@ -2016,7 +2017,7 @@ export async function handleInterventionApproval(
       entry: `Strategy proposal approval callback ignored — stale or superseded`,
       type: "Blocker",
       area: "Strategy",
-      decisionRationale: `Callback v${proposalVersion} did not match the current pending approval (state: ${state.strategyApprovalState ?? "none"}). Treated as a no-op.`,
+      decisionRationale: `Callback v${proposalVersion} did not match the current pending approval (state: ${state.strategy?.approvalState ?? "none"}). Treated as a no-op.`,
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, "This proposal has already been resolved or superseded -- nothing to do.");
@@ -2028,7 +2029,7 @@ export async function handleInterventionApproval(
 
   // Approve, Refine and Reject are decisions: an open discussion ends first
   // (its pointer released), then the decision runs exactly as before.
-  if (state.strategyDiscussion) await closeStrategyDiscussion(env, state);
+  if (state.strategy?.discussion) await closeStrategyDiscussion(env, state);
 
   if (decision === "refine") {
     // Binds the refinement text Martin is about to type to the EXACT
@@ -2037,10 +2038,10 @@ export async function handleInterventionApproval(
     // at this exact moment) -- handleStrategyRefinement re-verifies this
     // against state.strategyProposal before applying anything, so a stale
     // or superseded refinement reply is a fail-closed no-op.
-    state.pendingStrategyRefinement = { proposalId: proposal!.proposalId, proposalVersion };
-    state.pendingStrategyApproval = undefined;
+    strategyOf(state).pendingRefinement = { proposalId: proposal!.proposalId, proposalVersion };
+    strategyOf(state).pendingApproval = undefined;
     state.pendingActionSummary = undefined;
-    state.strategyApprovalState = "REFINEMENT_REQUESTED";
+    strategyOf(state).approvalState = "REFINEMENT_REQUESTED";
     await logActivity(env, {
       entry: `Strategy proposal refinement requested: ${state.matterToken || state.entityToken || state.workId}`,
       type: "Decision",
@@ -2059,9 +2060,9 @@ export async function handleInterventionApproval(
   }
 
   if (decision === "reject") {
-    state.pendingStrategyApproval = undefined;
+    strategyOf(state).pendingApproval = undefined;
     state.pendingActionSummary = undefined;
-    state.strategyApprovalState = "REJECTED";
+    strategyOf(state).approvalState = "REJECTED";
     if (state.handoffId) {
       await closeHandoffIfOpen(
         env,
@@ -2091,12 +2092,12 @@ export async function handleInterventionApproval(
   // so a commit can never produce a Finance Handoff missing the upstream
   // determination. It still says nothing about what the determination IS --
   // `Insufficient Evidence` rides through untouched (see Gate 3 above).
-  const upstreamCommercialValueEvidence = state.entryType === "direct_request" ? null : state.commercialValueEvidenceBlock;
+  const upstreamCommercialValueEvidence = state.entryType === "direct_request" ? null : state.strategy?.commercialValueEvidenceBlock;
   if (state.entryType !== "direct_request" && !upstreamCommercialValueEvidence) {
     return handleBlocked(
       env,
       state,
-      `the Commercial Value Evidence block this proposal was approved with is no longer on record (${state.commercialValueEvidenceError ?? "the block is absent"}) -- refusing to commit a Handoff to Finance that carries no attributable commercial-value determination. Strategy never authors that determination itself.`,
+      `the Commercial Value Evidence block this proposal was approved with is no longer on record (${state.strategy?.commercialValueEvidenceError ?? "the block is absent"}) -- refusing to commit a Handoff to Finance that carries no attributable commercial-value determination. Strategy never authors that determination itself.`,
     );
   }
   try {
@@ -2163,9 +2164,9 @@ export async function handleInterventionApproval(
 
     await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);
     state.handoffId = handoff.id;
-    state.pendingStrategyApproval = undefined;
+    strategyOf(state).pendingApproval = undefined;
     state.pendingActionSummary = undefined;
-    state.strategyApprovalState = "APPROVED";
+    strategyOf(state).approvalState = "APPROVED";
 
     await logActivity(env, {
       entry: `Martin approved Strategy Proposal -- Strategy -> Finance Handoff created`,
@@ -2222,8 +2223,8 @@ export async function handleInterventionApproval(
  * buttons themselves.
  */
 export async function handleStrategyRefinement(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const pending = state.pendingStrategyRefinement;
-  const currentProposal = state.strategyProposal;
+  const pending = state.strategy?.pendingRefinement;
+  const currentProposal = state.strategy?.proposal;
   const identityMatches =
     !!pending &&
     !!currentProposal &&
@@ -2231,7 +2232,7 @@ export async function handleStrategyRefinement(env: Env, state: WorkState, text:
     pending.proposalVersion === currentProposal.proposalVersion;
 
   if (!identityMatches) {
-    state.pendingStrategyRefinement = undefined;
+    strategyOf(state).pendingRefinement = undefined;
     await releaseWorkspaceReplies(env, state);
     console.error(`Strategy handleStrategyRefinement: stale/mismatched refinement request for work ${state.workId}`);
     await logActivity(env, {
@@ -2255,7 +2256,7 @@ export async function handleStrategyRefinement(env: Env, state: WorkState, text:
     return state;
   }
 
-  state.pendingStrategyRefinement = undefined;
+  strategyOf(state).pendingRefinement = undefined;
   await releaseWorkspaceReplies(env, state);
   await sendStrategyRefinementInProgressAck(env, state, currentProposal!.proposalVersion);
   return withWorkspaceTypingIndicator(env, () => reviseStrategyProposal(env, state, currentProposal!, instruction));
@@ -2339,14 +2340,14 @@ async function releaseWorkspaceReplies(env: Env, state: WorkState): Promise<void
  * version it was not opened on.
  */
 function strategyDiscussionIsCurrent(state: WorkState): boolean {
-  const discussion = state.strategyDiscussion;
-  const proposal = state.strategyProposal;
-  const pending = state.pendingStrategyApproval;
+  const discussion = state.strategy?.discussion;
+  const proposal = state.strategy?.proposal;
+  const pending = state.strategy?.pendingApproval;
   return (
     !!discussion &&
     !!proposal &&
     !!pending &&
-    state.strategyApprovalState === "AWAITING_INTERVENTION_APPROVAL" &&
+    state.strategy?.approvalState === "AWAITING_INTERVENTION_APPROVAL" &&
     discussion.proposalId === proposal.proposalId &&
     discussion.proposalVersion === proposal.proposalVersion &&
     pending.proposalId === proposal.proposalId &&
@@ -2356,7 +2357,7 @@ function strategyDiscussionIsCurrent(state: WorkState): boolean {
 
 /** Ends any open discussion and returns the Work to the plain proposal-awaiting-decision state. */
 async function closeStrategyDiscussion(env: Env, state: WorkState): Promise<void> {
-  state.strategyDiscussion = undefined;
+  strategyOf(state).discussion = undefined;
   if (state.awaiting === "strategy_discussion") state.awaiting = undefined;
   if (state.stage === "strategy_discussing") state.stage = "awaiting_intervention_approval";
   await releaseWorkspaceReplies(env, state);
@@ -2374,7 +2375,7 @@ async function openStrategyDiscussion(env: Env, state: WorkState, proposal: Stra
     );
     return state;
   }
-  state.strategyDiscussion = { proposalId: proposal.proposalId, proposalVersion: version, turns: [] };
+  strategyOf(state).discussion = { proposalId: proposal.proposalId, proposalVersion: version, turns: [] };
   state.awaiting = "strategy_discussion";
   state.stage = "strategy_discussing";
   await claimWorkspaceReplies(env, state);
@@ -2389,7 +2390,7 @@ async function openStrategyDiscussion(env: Env, state: WorkState, proposal: Stra
 
 async function endStrategyDiscussion(env: Env, state: WorkState, proposal: StrategyProposal): Promise<WorkState> {
   const version = proposal.proposalVersion;
-  if (!state.strategyDiscussion) {
+  if (!state.strategy?.discussion) {
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `No discussion is open -- proposal v${version} is awaiting your decision.`, strategyProposalButtons(state.workId, version));
     return state;
   }
@@ -2419,7 +2420,7 @@ function buildProposalDiscussionPromptParts(
   proposal: StrategyProposal,
   turns: readonly { question: string; answer: string }[],
 ): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
-  const findings = state.strategySkillFindings ?? [];
+  const findings = state.strategy?.skillFindings ?? [];
   return {
     ...strategyGovernancePersonaBehavior(hatDefinition, universalRoleContract),
     skillContent: [
@@ -2432,15 +2433,15 @@ function buildProposalDiscussionPromptParts(
     ].join("\n\n"),
     context: [
       "=== CLIENT EVIDENCE (sanitized, captured when the Handoff was picked up; includes the Strategy Analysis synthesis when one ran) ===",
-      state.strategyContext || state.strategyQuestion || "(none on record)",
+      state.strategy?.context || state.strategy?.question || "(none on record)",
       "=== STRATEGY SKILL FINDINGS ===",
       findings.length > 0 ? findingsText(findings) : "(no Strategy Skill was invoked for this diagnosis)",
       "=== DIAGNOSIS ===",
-      state.strategyDiagnosis ? JSON.stringify(state.strategyDiagnosis) : "(none on record)",
+      state.strategy?.diagnosis ? JSON.stringify(state.strategy?.diagnosis) : "(none on record)",
       `=== CURRENT PROPOSAL (v${proposal.proposalVersion}) ===`,
       JSON.stringify(proposal),
       "=== UPSTREAM COMMERCIAL VALUE EVIDENCE (carried from Sales; Strategy never authors it) ===",
-      state.commercialValueEvidenceBlock ?? "(none on record)",
+      state.strategy?.commercialValueEvidenceBlock ?? "(none on record)",
       "=== THIS DISCUSSION SO FAR (conversation, not evidence) ===",
       turns.length > 0 ? turns.map((t, i) => `Q${i + 1}: ${t.question}\nA${i + 1}: ${t.answer}`).join("\n\n") : "(this is the first question)",
       "=== RESPONSE FORMAT (execution mechanics) ===",
@@ -2472,8 +2473,8 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
     );
     return state;
   }
-  const discussion = state.strategyDiscussion!;
-  const proposal = state.strategyProposal!;
+  const discussion = state.strategy?.discussion!;
+  const proposal = state.strategy?.proposal!;
   const version = proposal.proposalVersion;
   const buttons = strategyDiscussionButtons(state.workId, version);
 
@@ -2497,7 +2498,7 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
     return state;
   }
 
-  const findingsCount = state.strategySkillFindings?.length ?? 0;
+  const findingsCount = state.strategy?.skillFindings?.length ?? 0;
   await advanceWorkStatus(
     env,
     state,
@@ -2557,13 +2558,13 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
   // the record unchanged would delete the block and turn a recoverable
   // clarification into a permanent provenance failure. So the block is
   // re-appended verbatim when it is not already in the base being written.
-  const baseContext = state.strategyContext ?? "";
+  const baseContext = state.strategy?.context ?? "";
   const preservedValueEvidenceBlock =
-    state.commercialValueEvidenceBlock && !baseContext.includes(state.commercialValueEvidenceBlock)
-      ? `\n\n${state.commercialValueEvidenceBlock}`
+    state.strategy?.commercialValueEvidenceBlock && !baseContext.includes(state.strategy?.commercialValueEvidenceBlock)
+      ? `\n\n${state.strategy?.commercialValueEvidenceBlock}`
       : "";
   const augmentedContext = `${baseContext}${preservedValueEvidenceBlock}\n\nAdditional detail: ${text}`;
-  state.strategyContext = augmentedContext;
+  strategyOf(state).context = augmentedContext;
 
   if (!state.handoffId) {
     // No Handoff context to requeue against (shouldn't normally occur) --
@@ -2591,7 +2592,7 @@ export async function handleStrategyClarification(env: Env, state: WorkState, te
 
 /** Free-text follow-up after a delivered diagnosis -- re-runs with the added context. */
 export async function handleStrategyFeedback(env: Env, state: WorkState, text: string, skills: ResolvedActionSkillSet): Promise<WorkState> {
-  state.strategyContext = `${state.strategyContext ?? ""}\n\nMartin's follow-up: ${text}`;
+  strategyOf(state).context = `${state.strategy?.context ?? ""}\n\nMartin's follow-up: ${text}`;
   await sendStrategyInProgressAck(env, state);
   return runDiagnosis(env, state, skills);
 }

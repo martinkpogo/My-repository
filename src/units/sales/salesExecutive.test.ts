@@ -215,11 +215,11 @@ test("Source-boundary attestation: the Sales -> Strategy Handoff write records e
 
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.checked, true);
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.result, "Passed");
-  assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.handoffId, "handoff-page-1");
-  assert.deepStrictEqual([...result.strategySourceBoundaryAttestation!.identityFieldsChecked].sort(), ["entityName", "matterName"]);
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.checked, true);
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.result, "Passed");
+  assert.deepStrictEqual([...result.strategy!.sourceBoundaryAttestation!.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.handoffId, "handoff-page-1");
+  assert.deepStrictEqual([...result.strategy!.sourceBoundaryAttestation!.identityFieldsChecked].sort(), ["entityName", "matterName"]);
 });
 
 test("Durable evidence: the created Sales -> Strategy Handoff itself carries the Passed source-boundary marker -- result, binding, five checks, and no identity-bearing content", async (t) => {
@@ -264,7 +264,7 @@ test("Source-boundary attestation: optional email is recorded as checked when pr
 
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
-  assert.ok(result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("email"));
+  assert.ok(result.strategy!.sourceBoundaryAttestation!.identityFieldsChecked.includes("email"));
 });
 
 test("Source-boundary attestation: optional phone is recorded as checked when present on entityDraft", async (t) => {
@@ -273,7 +273,7 @@ test("Source-boundary attestation: optional phone is recorded as checked when pr
 
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
-  assert.ok(result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("phone"));
+  assert.ok(result.strategy!.sourceBoundaryAttestation!.identityFieldsChecked.includes("phone"));
 });
 
 test("Source-boundary attestation: optional contactName is recorded as checked when present on an Individual-typed entityDraft", async (t) => {
@@ -282,7 +282,7 @@ test("Source-boundary attestation: optional contactName is recorded as checked w
 
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
-  assert.ok(result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("contactName"));
+  assert.ok(result.strategy!.sourceBoundaryAttestation!.identityFieldsChecked.includes("contactName"));
 });
 
 test("Source-boundary attestation: an Organisation-typed entityDraft does not record contactName (avoids double-flagging the same org name)", async (t) => {
@@ -291,7 +291,7 @@ test("Source-boundary attestation: an Organisation-typed entityDraft does not re
 
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
-  assert.ok(!result.strategySourceBoundaryAttestation!.identityFieldsChecked.includes("contactName"));
+  assert.ok(!result.strategy!.sourceBoundaryAttestation!.identityFieldsChecked.includes("contactName"));
 });
 
 test("Existing known-identity Handoff violation still blocks the Sales -> Strategy write, and no attestation is recorded", async (t) => {
@@ -299,7 +299,7 @@ test("Existing known-identity Handoff violation still blocks the Sales -> Strate
   const state = fakeState({ entryType: "inbound_enquiry", entityName: "Meridian Foods Ghana Ltd", matterName: "Cold Chain Logistics Redesign" });
 
   await assert.rejects(() => handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging for Meridian Foods Ghana Ltd specifically."));
-  assert.strictEqual(state.strategySourceBoundaryAttestation, undefined, "no attestation may be recorded when the underlying Handoff write itself was refused");
+  assert.strictEqual(state.strategy?.sourceBoundaryAttestation, undefined, "no attestation may be recorded when the underlying Handoff write itself was refused");
 });
 
 test("1b. Sales does not create a Sales -> Finance Handoff -- the obsolete direct entry point is gone", async (t) => {
@@ -1321,7 +1321,7 @@ test("Pickup-origin provenance: a handoff_pickup session satisfies the provenanc
 
   // LOG-965 source-boundary attestation remains mandatory for handoff_pickup.
   assert.strictEqual(
-    result.strategySourceBoundaryAttestation?.result,
+    result.strategy?.sourceBoundaryAttestation?.result,
     "Passed",
     "a handoff_pickup session must still compute and record the source-boundary attestation",
   );
@@ -1474,7 +1474,7 @@ test("Provenance distinction: direct_request remains its own value and does not 
     /\[source_boundary_check result=Passed\b/,
     "direct_request does NOT exempt the Sales -> Strategy Handoff from the LOG-965 source-boundary attestation",
   );
-  assert.strictEqual(result.strategySourceBoundaryAttestation?.result, "Passed");
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation?.result, "Passed");
 });
 
 test("Pickup-origin provenance: an undeclared provenance value is rejected exactly like a missing one -- no Handoff, Blocker logged", async (t) => {

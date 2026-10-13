@@ -14,6 +14,7 @@ import { kvDelete, kvGet, kvPut } from "../../kvStore";
 import { getSessionStub, newWorkId } from "../../sessionRouting";
 import { runProspectResearch, summarizeResearchSynthesis } from "../../runtime/actionResearch";
 
+import { salesOf } from "./salesState";
 /**
  * Autonomous counterpart to the Martin-supplied /lead command in
  * leadDiscovery.ts -- same Hat, same authority boundaries, same Leads
@@ -236,7 +237,7 @@ export async function proposeLeadOpportunity(
   state: WorkState,
   opportunity: PendingLeadOpportunity,
 ): Promise<WorkState> {
-  state.pendingLeadOpportunity = opportunity;
+  salesOf(state).pendingLeadOpportunity = opportunity;
   state.stage = "awaiting_lead_approval";
 
   const target: HatMessageTarget = { chatId: state.chatId, threadId: state.threadId, hat: HAT_TARGET_NAME, workId: state.workId };
@@ -288,11 +289,11 @@ export async function proposeLeadOpportunity(
  * time may have passed and another Lead could have appeared meanwhile.
  */
 export async function handleLeadOpportunityApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  const opportunity = state.pendingLeadOpportunity;
+  const opportunity = state.sales?.pendingLeadOpportunity;
   const stagedSummary = state.pendingActionSummary;
   // The staged approval is consumed BEFORE anything else runs, so a second
   // tap on the same card (a replay) finds nothing and is a no-op.
-  state.pendingLeadOpportunity = undefined;
+  salesOf(state).pendingLeadOpportunity = undefined;
   state.pendingActionSummary = undefined;
 
   const target: HatMessageTarget = { chatId: state.chatId, threadId: state.threadId, hat: HAT_TARGET_NAME, workId: state.workId };
@@ -306,7 +307,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
   // it was staged: the same card's Approve button then works again, and a
   // Lead still exists only after Martin's own fresh tap.
   const restageForRetry = () => {
-    state.pendingLeadOpportunity = opportunity;
+    salesOf(state).pendingLeadOpportunity = opportunity;
     state.pendingActionSummary = stagedSummary;
   };
 

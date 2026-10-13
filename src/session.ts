@@ -36,6 +36,7 @@ import { recordWorkAction } from "./units/dispatch";
 import { workSessionContext } from "./access";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
 
+import { strategyOf } from "./units/strategy/strategyState";
 export class WorkSession extends DurableObject<Env> {
   /**
    * Creates the Work. `matterId`/`matterToken` are the ALREADY-RESOLVED
@@ -401,8 +402,8 @@ export class WorkSession extends DurableObject<Env> {
       state.stage = "cancelled";
       state.awaiting = undefined;
       state.pendingActionSummary = undefined;
-      state.pendingStrategyApproval = undefined;
-      state.pendingStrategyHandoff = undefined;
+      strategyOf(state).pendingApproval = undefined;
+      strategyOf(state).pendingHandoff = undefined;
       await logActivity(this.env, {
         entry: `Work item cancelled: ${state.entityName ?? state.matterName ?? state.workId}`,
         type: "Activity",
@@ -701,8 +702,8 @@ export class WorkSession extends DurableObject<Env> {
       const activeKey = `active:${state.chatId}:${state.threadId ?? "dm"}`;
       const active = await kvGet(this.env, activeKey);
       if (active === state.workId) await kvDelete(this.env, activeKey);
-      if (state.financeThreadId !== undefined && state.financeThreadId !== state.threadId) {
-        const financeActiveKey = `active:${state.chatId}:${state.financeThreadId}`;
+      if (state.finance?.threadId !== undefined && state.finance?.threadId !== state.threadId) {
+        const financeActiveKey = `active:${state.chatId}:${state.finance?.threadId}`;
         const financeActive = await kvGet(this.env, financeActiveKey);
         if (financeActive === state.workId) await kvDelete(this.env, financeActiveKey);
       }

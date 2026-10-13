@@ -137,7 +137,7 @@ function approvedStrategyProposal(overrides: Partial<StrategyProposal> = {}): St
  * that compared no field (the Runtime holds no contact identity -- an
  * Entity/Matter name is always its own token).
  */
-function validAttestation(proposalId: string, proposalVersion: number): WorkState["strategyProposalTokenSafety"] {
+function validAttestation(proposalId: string, proposalVersion: number): NonNullable<WorkState["strategy"]>["proposalTokenSafety"] {
   return {
     proposalId,
     proposalVersion,
@@ -170,12 +170,10 @@ function fakeState(overrides: Partial<WorkState> = {}): WorkState {
     handoffId: HO64_ID,
     entityToken: "E-20",
     matterToken: "MAT-20",
-    strategyApprovalState: "APPROVED",
-    strategyProposal: approvedStrategyProposal(),
-    // Test fixture only: no production code sets this today (see
-    // verifyStrategyProposalTokenSafety). Tests of the gate itself remove it.
-    strategyProposalTokenSafety: validAttestation("strategy-prop-1", 1),
     ...overrides,
+    strategy: { approvalState: "APPROVED", proposal: approvedStrategyProposal(), // Test fixture only: no production code sets this today (see
+    // verifyStrategyProposalTokenSafety). Tests of the gate itself remove it.
+      proposalTokenSafety: validAttestation("strategy-prop-1", 1), ...overrides.strategy },
   };
 }
 
@@ -378,7 +376,7 @@ test("1. HO-64 produces exactly one canonical Proposal linked to HO-64", async (
   const recs = proposals(world);
   assert.strictEqual(recs.length, 1);
   assert.deepStrictEqual(recs[0].properties.Handoff.relation, [{ id: HO64_ID }]);
-  assert.strictEqual(state.salesProposal?.proposalId, "PROP-7");
+  assert.strictEqual(state.sales?.proposal?.proposalId, "PROP-7");
   assert.strictEqual(text(world.pages.get(HO64_ID)!.properties.Status), "Closed");
 });
 
@@ -407,14 +405,14 @@ test("1b. A Handoff picked up with no continuing WorkSession (only handoffId in 
   const state = await handleProposalHandoffPickup(env, freshState, NO_ACTION_SKILLS);
 
   assert.strictEqual(proposals(world).length, 1, "pickup must succeed and produce the canonical Proposal without any continuing-session identity");
-  assert.strictEqual(state.salesProposal?.proposalId, "PROP-7");
+  assert.strictEqual(state.sales?.proposal?.proposalId, "PROP-7");
   assert.strictEqual(state.blockedReason, undefined);
 });
 
 test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, same content", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
   const contentBefore = text(proposals(world)[0].properties["Proposal Content"]);
-  assert.strictEqual(state.salesProposal?.approvalStatus, "Approved", "the Doc verified, so the initial Version is already Approved");
+  assert.strictEqual(state.sales?.proposal?.approvalStatus, "Approved", "the Doc verified, so the initial Version is already Approved");
 
   // Same WorkSession reprocesses (e.g. HO-64 set back to Pending by hand).
   world.pages.get(HO64_ID)!.properties.Status = { select: { name: "Pending" } };
@@ -426,9 +424,9 @@ test("2. Reprocessing HO-64 is idempotent -- no second record, no new Version, s
   const rec = proposals(world)[0];
   assert.strictEqual(text(rec.properties.Version), "v1");
   assert.strictEqual(text(rec.properties["Proposal Content"]), contentBefore);
-  assert.strictEqual(again.salesProposal?.currentVersion, 1);
-  assert.strictEqual(again.salesProposal?.approvalStatus, "Approved", "an already-Approved Proposal is not re-approved or downgraded");
-  assert.strictEqual(fresh.salesProposal?.proposalId, "PROP-7");
+  assert.strictEqual(again.sales?.proposal?.currentVersion, 1);
+  assert.strictEqual(again.sales?.proposal?.approvalStatus, "Approved", "an already-Approved Proposal is not re-approved or downgraded");
+  assert.strictEqual(fresh.sales?.proposal?.proposalId, "PROP-7");
   assert.strictEqual(world.versionPages.length, 1, "no additional version page on reprocess");
   assert.strictEqual(approvalRequests(world).length, 0, "an auto-approved initial Version is never re-presented as an approval request");
 });
@@ -489,7 +487,7 @@ test("16. On approval, Runtime resolves Entity_Token/Matter_Token to their real 
 
   const ready = await handleSalesProposalDecision(env, state, 7, 1, "approve");
 
-  assert.strictEqual(ready.salesProposal?.approvalStatus, "Approved");
+  assert.strictEqual(ready.sales?.proposal?.approvalStatus, "Approved");
   assert.strictEqual(text(world.pages.get("matter-page-20")!.properties.Status), "Proposal", "the Matter's operational Status must advance on approval");
   for (const f of world.fetches) {
     assert.ok(!/googleapis|gmail|drive/i.test(f.url), `no Google access: ${f.url}`);
@@ -514,7 +512,7 @@ test("16b. On approval, an Entity_Token/Matter_Token that doesn't resolve fails 
   // No Matter/Entity pages seeded -- tokens do not resolve.
   const ready = await handleSalesProposalDecision(env, state, 7, 1, "approve");
 
-  assert.strictEqual(ready.salesProposal?.approvalStatus, "Approved", "Martin's approval itself still applies even when the Matter status can't be advanced");
+  assert.strictEqual(ready.sales?.proposal?.approvalStatus, "Approved", "Martin's approval itself still applies even when the Matter status can't be advanced");
   assert.ok(world.telegram.some((m) => /Matter status NOT advanced/.test(m.text)), "Martin must be told the Matter status wasn't advanced");
 });
 
@@ -528,10 +526,10 @@ test("Sales does not require state.strategyProposal for Proposal production -- t
   // absent -- "nothing to verify" -- so this specific gate does not itself
   // block this path; resolveFacts's own Handoff-sourced parsing is what
   // actually supplies the Strategy facts here.
-  const { world, state } = await createV1(t, { strategyProposal: undefined, strategyProposalTokenSafety: undefined, strategyApprovalState: undefined });
+  const { world, state } = await createV1(t, { strategy: { proposal: undefined, proposalTokenSafety: undefined, approvalState: undefined } });
   assert.strictEqual(proposals(world).length, 1, "a Proposal is still produced, sourced entirely from the Handoff");
-  assert.strictEqual(state.salesProposal?.facts?.strategyProposalId, "strategy-prop-1");
-  assert.strictEqual(state.salesProposal?.facts?.strategyProposalVersion, 1);
+  assert.strictEqual(state.sales?.proposal?.facts?.strategyProposalId, "strategy-prop-1");
+  assert.strictEqual(state.sales?.proposal?.facts?.strategyProposalVersion, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -542,7 +540,7 @@ test("5. The complete Proposal content is stored (beyond 2,000 chars, not trunca
   const { world, state } = await createV1(t);
   const rec = proposals(world)[0].properties;
   const stored = text(rec["Proposal Content"]);
-  assert.strictEqual(stored, state.salesProposal!.versions[0].content, "stored content is the full composed Proposal");
+  assert.strictEqual(stored, state.sales!.proposal!.versions[0].content, "stored content is the full composed Proposal");
   for (const heading of [
     "PROPOSAL IDENTIFICATION",
     "EXECUTIVE SUMMARY / CONTEXT",
@@ -577,8 +575,8 @@ test("6. The Finance quote remains exactly GHS 420,000", async (t) => {
   assert.match(text(rec["Quote Rationale"]), /^Currency: GHS\./);
   const content = text(rec["Proposal Content"]);
   assert.match(content, /\nInvestment: GHS 420,000\n/);
-  assert.strictEqual(state.salesProposal!.facts!.quote.price, 420000);
-  assert.strictEqual(state.salesProposal!.facts!.quote.currency, "GHS");
+  assert.strictEqual(state.sales!.proposal!.facts!.quote.price, 420000);
+  assert.strictEqual(state.sales!.proposal!.facts!.quote.currency, "GHS");
 });
 
 function section(content: string, heading: string): string {
@@ -634,7 +632,7 @@ test("8b. Proposal Content holds commercial substance only; the approved hash co
   ]) {
     assert.ok(!content.toLowerCase().includes(internal.toLowerCase()), `internal material in Proposal Content: ${internal}`);
   }
-  const v1 = state.salesProposal!.versions[0];
+  const v1 = state.sales!.proposal!.versions[0];
   assert.strictEqual(v1.content, content);
   assert.strictEqual(v1.contentHash, createHash("sha256").update(content).digest("hex"), "hash is of Proposal Content only");
   const snapshot = world.versionPages[0].children.map((b: any) => b.paragraph.rich_text[0].text.content).join("");
@@ -659,8 +657,8 @@ test("9. A newly generated Proposal is Pending Approval, Approved Version blank,
   assert.strictEqual(text(rec["Approved Version"]), "");
   assert.strictEqual(text(rec["Artifact Status"]), "Not Requested");
   assert.strictEqual(text(rec.Version), "v1");
-  assert.strictEqual(state.salesProposal?.approvalStatus, "Pending Approval");
-  assert.strictEqual(state.salesProposal?.approvedVersion, undefined);
+  assert.strictEqual(state.sales?.proposal?.approvalStatus, "Pending Approval");
+  assert.strictEqual(state.sales?.proposal?.approvedVersion, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -677,13 +675,13 @@ test("10. The approval request presents the complete Proposal and identifies the
 
   await handleSalesProposalDecision(env, state, 7, 1, "revise");
   await handleSalesProposalRevisionText(env, state, "State payment terms as 50% on signature, 50% on completion.");
-  assert.strictEqual(state.salesProposal?.currentVersion, 2);
+  assert.strictEqual(state.sales?.proposal?.currentVersion, 2);
 
   const reqs = approvalRequests(world);
   assert.strictEqual(reqs.length, 1);
   const full = world.telegram.map((m) => m.text).join("");
   assert.match(reqs[0].text, /Proposal: PROP-7 · Version: v2/);
-  assert.ok(!full.includes(state.salesProposal!.versions[1].content.slice(-200)), "the Proposal text is not written into Telegram -- it is read in the Doc");
+  assert.ok(!full.includes(state.sales!.proposal!.versions[1].content.slice(-200)), "the Proposal text is not written into Telegram -- it is read in the Doc");
   const buttons = world.telegram.at(-1)!.buttons.flat();
   assert.deepStrictEqual(
     buttons.map((b: any) => b.callback_data),
@@ -699,7 +697,7 @@ test("11-12, 15. Approving the exact Version sets Approved, records Approved Ver
   assert.strictEqual(text(rec["Approval Status"]), "Approved");
   assert.strictEqual(text(rec["Approved Version"]), "v1");
   assert.strictEqual(text(rec["Artifact Status"]), "Pending Identity Resolution");
-  assert.strictEqual(result.salesProposal?.approvedVersion, 1);
+  assert.strictEqual(result.sales?.proposal?.approvedVersion, 1);
   const approvalLog = world.logs.find((l) => text(l.Entry).startsWith("Proposal approved: PROP-7 v1"));
   assert.ok(approvalLog, "approval event recorded in the Activity & Decision Log");
   assert.strictEqual(text(approvalLog!.Type), "Decision");
@@ -710,7 +708,7 @@ test("13. A stale approval cannot approve a newer or different Version", async (
   const { world, env, state } = await createV1(t);
   await handleSalesProposalDecision(env, state, 7, 1, "revise");
   await handleSalesProposalRevisionText(env, state, "State payment terms as 50% on signature, 50% on completion.");
-  assert.strictEqual(state.salesProposal?.currentVersion, 2);
+  assert.strictEqual(state.sales?.proposal?.currentVersion, 2);
 
   await handleSalesProposalDecision(env, state, 7, 1, "approve"); // the old v1 button
   let rec = proposals(world)[0].properties;
@@ -746,7 +744,7 @@ test("13c. An unrecognised Approval Status on the record fails closed (cannot di
 test("14. A substantive revision after approval creates a new Version, keeps the approved substance, and requires renewed approval", async (t) => {
   const { world, env, state } = await createV1(t);
   await handleSalesProposalDecision(env, state, 7, 1, "approve");
-  const v1Content = state.salesProposal!.versions[0].content;
+  const v1Content = state.sales!.proposal!.versions[0].content;
 
   await handleSalesProposalDecision(env, state, 7, 1, "revise");
   assert.strictEqual(state.awaiting, "sales_proposal_revision");
@@ -764,7 +762,7 @@ test("14. A substantive revision after approval creates a new Version, keeps the
   assert.ok(!v2Content.includes("Introduced in"), "amendment provenance is review material, not Proposal Content");
   assert.match(approvalRequests(world).at(-1)!.text + world.telegram.at(-1)!.text, /Amendment introduced in v2 at Martin's direction\./);
   assert.match(v2Content, /GHS 420,000/, "the Finance quote is untouched by a Sales revision");
-  assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "approved v1 substance is kept unchanged");
+  assert.strictEqual(state.sales!.proposal!.versions[0].content, v1Content, "approved v1 substance is kept unchanged");
   assert.strictEqual(world.versionPages.length, 2, "v1 and v2 each keep their own child page");
   assert.ok(approvalRequests(world).at(-1)!.text.includes("Proposal: PROP-7 · Version: v2"));
 
@@ -778,7 +776,7 @@ test("14b. A revision that would introduce identity is refused -- no new Version
   await handleSalesProposalDecision(env, state, 7, 1, "revise");
   await handleSalesProposalRevisionText(env, state, "Send it to jane.doe@client.com");
   assert.strictEqual(text(proposals(world)[0].properties.Version), "v1");
-  assert.strictEqual(state.salesProposal?.currentVersion, 1);
+  assert.strictEqual(state.sales?.proposal?.currentVersion, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -872,8 +870,8 @@ test("18g. A Proposal record without a Proposal ID fails closed -- it stays Draf
 
 test("18g-2. A Proposal ID without a prefix is still bound by its number", async (t) => {
   const { state } = await createV1(t, {}, { proposalPrefix: null });
-  assert.strictEqual(state.salesProposal?.proposalId, "7");
-  assert.strictEqual(state.salesProposal?.proposalNumber, 7);
+  assert.strictEqual(state.sales?.proposal?.proposalId, "7");
+  assert.strictEqual(state.sales?.proposal?.proposalNumber, 7);
 });
 
 test("18h. A non-Finance Handoff is refused (never routed through this path)", async (t) => {
@@ -938,7 +936,7 @@ test("buildProposalContent is deterministic", () => {
 // ---------------------------------------------------------------------------
 
 test("S1. Without a token-safety attestation for the approved Strategy Proposal (the production state today), nothing is produced", async (t) => {
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: undefined });
+  const { world, state } = await createV1(t, { strategy: { proposalTokenSafety: undefined } });
   assert.strictEqual(proposals(world).length, 0, "no Proposal record");
   assert.strictEqual(approvalRequests(world).length, 0, "nothing presented for approval");
   assert.match(state.blockedReason ?? "", /Strategy Proposal identity boundary: .*strategy-prop-1 v1.*no token-safety attestation on record/);
@@ -949,21 +947,21 @@ test("S1. Without a token-safety attestation for the approved Strategy Proposal 
 
 test("S2. An attestation for a different Strategy Proposal version does not count", async (t) => {
   const { world, state } = await createV1(t, {
-    strategyProposalTokenSafety: validAttestation("strategy-prop-1", 2),
+    strategy: { proposalTokenSafety: validAttestation("strategy-prop-1", 2) },
   });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /is for Strategy proposal strategy-prop-1 v2, not the approved strategy-prop-1 v1/);
 });
 
 test("S3. The gate is not a text heuristic: a clean-looking but unverified Strategy Proposal is still refused", async (t) => {
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: undefined, entityName: undefined, matterName: undefined });
+  const { world, state } = await createV1(t, { strategy: { proposalTokenSafety: undefined }, entityName: undefined, matterName: undefined });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /no token-safety attestation on record/);
 });
 
 test("S5. A legacy {proposalId, proposalVersion, basis} attestation (no sourceBoundary/proposalContent) cannot pass verification", async (t) => {
   const legacy = { proposalId: "strategy-prop-1", proposalVersion: 1, basis: "approved by Martin" } as any;
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: legacy });
+  const { world, state } = await createV1(t, { strategy: { proposalTokenSafety: legacy } });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check/);
 });
@@ -975,7 +973,7 @@ test("S6. An attestation whose sourceBoundary check is not recorded as having ru
     sourceBoundary: { checked: false, identityFieldsChecked: ["entityName", "matterName"] },
     proposalContent: { checked: true, identityFieldsChecked: [] },
   } as any;
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: incomplete });
+  const { world, state } = await createV1(t, { strategy: { proposalTokenSafety: incomplete } });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /does not confirm the Sales source-boundary identity check ran and passed/);
 });
@@ -986,28 +984,28 @@ test("S7. An attestation with no proposalContent check fails verification", asyn
     proposalVersion: 1,
     sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "matterName"] },
   } as any;
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: incomplete });
+  const { world, state } = await createV1(t, { strategy: { proposalTokenSafety: incomplete } });
   assert.strictEqual(proposals(world).length, 0);
   assert.match(state.blockedReason ?? "", /does not confirm the complete Strategy Proposal was independently checked/);
 });
 
 test("S8. The attestation Strategy really produces for a Handoff-originated proposal passes -- a source-boundary marker naming entityName,contactName and a proposal check that compared no field (MAT-26, HO-86 -> HO-87)", async (t) => {
-  const asProduced: WorkState["strategyProposalTokenSafety"] = {
+  const asProduced: NonNullable<WorkState["strategy"]>["proposalTokenSafety"] = {
     proposalId: "strategy-prop-1",
     proposalVersion: 1,
     sourceBoundary: { checked: true, identityFieldsChecked: ["entityName", "contactName"] },
     proposalContent: { checked: true, identityFieldsChecked: [] },
   };
-  const { world, state } = await createV1(t, { strategyProposalTokenSafety: asProduced }, {}, { googleDoc: true });
+  const { world, state } = await createV1(t, { strategy: { proposalTokenSafety: asProduced } }, {}, { googleDoc: true });
   assert.strictEqual(state.blockedReason, undefined);
   assert.strictEqual(proposals(world).length, 1, "the Proposal is produced");
 });
 
 test("S4. Reprocessing an existing Proposal without verification does not re-hydrate Strategy facts, so no new Version can be built from them", async (t) => {
   const { world, env } = await createV1(t);
-  const fresh = await handleProposalHandoffPickup(env, fakeState({ strategyProposalTokenSafety: undefined }), NO_ACTION_SKILLS);
+  const fresh = await handleProposalHandoffPickup(env, fakeState({ strategy: { proposalTokenSafety: undefined } }), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 1);
-  assert.strictEqual(fresh.salesProposal?.facts, undefined);
+  assert.strictEqual(fresh.sales?.proposal?.facts, undefined);
   await handleSalesProposalDecision(env, fresh, 7, 1, "revise");
   await handleSalesProposalRevisionText(env, fresh, "Clarify the audit scope.");
   assert.strictEqual(text(proposals(world)[0].properties.Version), "v1", "no new Version without verified facts");
@@ -1082,7 +1080,7 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
     handoffId: SRC,
     entityToken: "E-20",
     matterToken: "MAT-20",
-    quote: { price: 420000, currency: "GHS", rationale },
+    finance: { quote: { price: 420000, currency: "GHS", rationale } },
   };
 
   // Take the id back from the PERSISTED record, not from Finance's state: the
@@ -1121,8 +1119,8 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
 
   const salesState = await handleProposalHandoffPickup(env, freshSales, NO_ACTION_SKILLS);
   assert.ok(!salesState.blockedReason, `pickup must succeed: ${salesState.blockedReason}`);
-  assert.strictEqual(salesState.salesProposal?.entityToken, "E-20", "entityToken taken from the Handoff");
-  assert.strictEqual(salesState.salesProposal?.matterToken, "MAT-20", "matterToken taken from the Handoff");
+  assert.strictEqual(salesState.sales?.proposal?.entityToken, "E-20", "entityToken taken from the Handoff");
+  assert.strictEqual(salesState.sales?.proposal?.matterToken, "MAT-20", "matterToken taken from the Handoff");
 
   // Exactly one Proposal, linked to the originating Handoff, token-only identity
   const recs = proposals(world);
@@ -1266,7 +1264,7 @@ test("Version pages 1. v1 is a child page of the Proposal record, and the record
   // v1 is auto-approved once its Doc verifies, so the Approved Version Link is
   // set to exactly that version's page.
   assert.strictEqual(rec.properties["Approved Version Link"].url, page.url, "the auto-approved version's page is the Approved Version Link");
-  assert.strictEqual(state.salesProposal!.versions[0].pageUrl, page.url);
+  assert.strictEqual(state.sales!.proposal!.versions[0].pageUrl, page.url);
   assert.ok(
     world.telegram.map((m) => m.text).join("").includes("https://docs.google.com/document/d/doc-1/edit"),
     "with a verified Google Doc, Martin reads the version in the Doc",
@@ -1395,7 +1393,7 @@ test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the curre
   const calls = withGoogleFake(t);
   const { kv, store } = kvWithGoogleAccount();
   const env = fakeEnv({ STATE_KV: kv });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
 
   await handleSalesProposalDecision(env, state, 7, 1, "doc");
 
@@ -1424,13 +1422,13 @@ test("Google Doc 0. The approved message carries the Doc link and none of the Pr
 
   const state = await handleProposalHandoffPickup(env, fakeState(), NO_ACTION_SKILLS);
 
-  const content = state.salesProposal!.versions[0].content;
+  const content = state.sales!.proposal!.versions[0].content;
   const approved = world.telegram.map((m) => m.text).join("");
   assert.ok(approved.includes("https://docs.google.com/document/d/doc-1/edit"), "the Doc link is in the approved message");
   assert.ok(!approved.includes(content.slice(-200)), "no Proposal text in Telegram");
   assert.strictEqual(calls.filter((c) => c.method === "POST" && c.url.endsWith("/drive/v3/files")).length, 2, "folder then Doc");
   assert.ok(store.has("google_doc_watch:doc-1"), "the Doc is watched, bound to the version");
-  assert.strictEqual(state.salesProposal?.approvalStatus, "Approved", "the Doc verified, so the initial Version is auto-approved");
+  assert.strictEqual(state.sales?.proposal?.approvalStatus, "Approved", "the Doc verified, so the initial Version is auto-approved");
   const buttons = world.telegram.at(-1)!.buttons.flat().map((b: any) => b.callback_data);
   assert.ok(!buttons.some((d: string) => d.endsWith(".g")), "no Create button once the Doc exists");
   assert.ok(!buttons.some((d: string) => d.endsWith(".a")), "no Approve button -- the initial Version is already approved");
@@ -1464,7 +1462,7 @@ test("Google Doc 3. No authorized account, several accounts, or a failed create 
   const failing = withGoogleFake(t, { failDocCreate: true });
   await handleSalesProposalDecision(fakeEnv({ STATE_KV: kvWithGoogleAccount().kv }), state, 7, 1, "doc");
   assert.match(world.telegram.at(-1)!.text, /Couldn't create the Google Doc: creat/);
-  assert.strictEqual(state.salesProposal!.doc?.url, undefined, "a failed create records no Doc");
+  assert.strictEqual(state.sales!.proposal!.doc?.url, undefined, "a failed create records no Doc");
   assert.ok(failing.length > 0);
 });
 
@@ -1474,13 +1472,13 @@ test("Google Doc 4. A button for a version that is no longer current makes no Do
   const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
   await handleSalesProposalDecision(env, state, 7, 1, "revise");
   await handleSalesProposalRevisionText(env, state, "Add a second training session.");
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
   const before = calls.length;
 
   await handleSalesProposalDecision(env, state, 7, 1, "doc");
 
   assert.strictEqual(calls.length, before, "no Google call for the old version");
-  assert.strictEqual(state.salesProposal!.doc?.version, 2, "the Doc was brought to v2 by the revision, not recreated for v1");
+  assert.strictEqual(state.sales!.proposal!.doc?.version, 2, "the Doc was brought to v2 by the revision, not recreated for v1");
 });
 
 test("Google Doc 5. A revision updates the SAME Doc: clean v2 on top, v1->v2 redline below with removed text struck through and added text marked, binding moved to v2", async (t) => {
@@ -1489,14 +1487,14 @@ test("Google Doc 5. A revision updates the SAME Doc: clean v2 on top, v1->v2 red
   const { kv, store } = kvWithGoogleAccount();
   const env = fakeEnv({ STATE_KV: kv });
   const state = await handleProposalHandoffPickup(env, fakeState(), NO_ACTION_SKILLS);
-  const v1 = state.salesProposal!.versions[0].content;
+  const v1 = state.sales!.proposal!.versions[0].content;
   const creates = () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/drive/v3/files")).length;
   assert.strictEqual(creates(), 2, "folder + one Doc");
 
   await handleSalesProposalDecision(env, state, 7, 1, "revise");
   await handleSalesProposalRevisionText(env, state, "Add a second training session.");
 
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   assert.strictEqual(sp.currentVersion, 2);
   assert.strictEqual(creates(), 2, "no second Doc was created");
   assert.strictEqual(sp.doc!.version, 2);
@@ -1530,14 +1528,14 @@ test("Google Doc 6. If the Doc cannot be brought to the new version, its link is
   const req = approvalRequests(world).at(-1)!.text;
   assert.match(req, /The Google Doc could not be created \(the Doc is still at v1/);
   assert.ok(!req.includes("docs.google.com"), "the stale Doc is not linked as the current version");
-  assert.strictEqual(state.salesProposal!.doc!.version, 1);
+  assert.strictEqual(state.sales!.proposal!.doc!.version, 1);
   assert.strictEqual(JSON.parse(store.get("google_doc_watch:doc-1")!).proposal.version, 1);
   assert.ok(calls.length > 0);
 });
 
 test("Doc comment 1. A change request on the current version's Doc runs the revision path: v2 with the change recorded verbatim, pending approval, v1 untouched", async (t) => {
   const { world, env, state } = await createV1(t);
-  const v1Content = state.salesProposal!.versions[0].content;
+  const v1Content = state.sales!.proposal!.versions[0].content;
 
   const { result } = await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: 'Regarding "training": Add a second session for the retail team.' });
 
@@ -1546,7 +1544,7 @@ test("Doc comment 1. A change request on the current version's Doc runs the revi
   assert.strictEqual(text(rec.Version), "v2");
   assert.strictEqual(text(rec["Approval Status"]), "Pending Approval");
   assert.match(text(rec["Proposal Content"]), /Regarding "training": Add a second session for the retail team\./);
-  assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "v1 is kept unchanged");
+  assert.strictEqual(state.sales!.proposal!.versions[0].content, v1Content, "v1 is kept unchanged");
   assert.strictEqual(world.versionPages.length, 2, "v2 has its own page");
   assert.ok(approvalRequests(world).at(-1)!.text.includes("Version: v2"), "v2 comes back to Martin for approval");
 });
@@ -1554,14 +1552,14 @@ test("Doc comment 1. A change request on the current version's Doc runs the revi
 test("Doc comment 2. A comment on a superseded version's Doc creates nothing and says which version is current", async (t) => {
   const { world, env, state } = await createV1(t);
   await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "First change." });
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
   const pagesBefore = world.versionPages.length;
 
   const { result } = await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Second change on the old Doc." });
 
   assert.strictEqual(result.kind, "stale");
   assert.match((result as any).detail, /copy of v1, but PROP-7 is now at v2/);
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
   assert.strictEqual(world.versionPages.length, pagesBefore);
 });
 
@@ -1573,9 +1571,9 @@ test("Doc comment 3. A comment that would put real identity into the Proposal is
 
   assert.strictEqual(result.kind, "refused");
   assert.match((result as any).detail, /identity-bearing value/);
-  assert.strictEqual(state.salesProposal!.currentVersion, 1);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 1);
   assert.strictEqual(world.versionPages.length, pagesBefore);
-  assert.strictEqual(state.pendingSalesProposalRevision, undefined, "no revision is left half-open");
+  assert.strictEqual(state.sales?.pendingProposalRevision, undefined, "no revision is left half-open");
 });
 
 test("Doc comment 4. A Work that no longer belongs to Sales refuses the request", async (t) => {
@@ -1600,7 +1598,7 @@ test("Doc formatting 1. A formatting request on the current version's Doc restyl
   const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
   await handleSalesProposalDecision(env, state, 7, 1, "doc");
   const docTextBefore = calls.text();
-  const v1Content = state.salesProposal!.versions[0].content;
+  const v1Content = state.sales!.proposal!.versions[0].content;
   const versionPagesBefore = world.versionPages.length;
   const telegramBefore = world.telegram.length;
   const actionBefore = state.actionName;
@@ -1619,10 +1617,10 @@ test("Doc formatting 1. A formatting request on the current version's Doc restyl
   assert.ok(lastRequests.some((r: any) => r.updateParagraphStyle?.paragraphStyle?.namedStyleType === "HEADING_1"), "canonical section-heading style applied");
   assert.ok(lastRequests.some((r: any) => r.createParagraphBullets), "native bullets applied");
   // Governance state: nothing moved.
-  assert.strictEqual(state.salesProposal!.currentVersion, 1);
-  assert.strictEqual(state.salesProposal!.versions.length, 1);
-  assert.strictEqual(state.salesProposal!.approvalStatus, "Pending Approval");
-  assert.strictEqual(state.salesProposal!.approvedVersion, undefined);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 1);
+  assert.strictEqual(state.sales!.proposal!.versions.length, 1);
+  assert.strictEqual(state.sales!.proposal!.approvalStatus, "Pending Approval");
+  assert.strictEqual(state.sales!.proposal!.approvedVersion, undefined);
   assert.strictEqual(state.actionName, actionBefore, "no Work Action progression");
   assert.strictEqual(world.versionPages.length, versionPagesBefore, "no version page created");
   assert.strictEqual(world.telegram.length, telegramBefore, "no message sent");
@@ -1637,7 +1635,7 @@ test("Doc formatting 2. A formatting request on a superseded version's Doc is re
   const env = fakeEnv({ STATE_KV: kvWithGoogleAccount().kv });
   await handleSalesProposalDecision(env, state, 7, 1, "doc");
   await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Add a second training session." });
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
   const pagesBefore = world.versionPages.length;
   const docTextAtV2 = calls.text();
 
@@ -1645,7 +1643,7 @@ test("Doc formatting 2. A formatting request on a superseded version's Doc is re
 
   assert.strictEqual(result.kind, "stale");
   assert.match((result as any).detail, /copy of v1, but PROP-7 is now at v2/);
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
   assert.strictEqual(world.versionPages.length, pagesBefore);
   assert.strictEqual(calls.text(), docTextAtV2, "the Doc is not touched by the refused request");
 });
@@ -1692,8 +1690,8 @@ test("Doc formatting 5. Repeating a formatting request is idempotent: same text,
   assert.deepStrictEqual(first.result, { kind: "formatted" });
   assert.deepStrictEqual(second.result, { kind: "formatted" });
   assert.strictEqual(calls.text(), docTextBefore, "a repeated delivery changes nothing about the Doc");
-  assert.strictEqual(state.salesProposal!.currentVersion, 1, "no version is created by repeated formatting");
-  assert.strictEqual(state.salesProposal!.versions.length, 1);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 1, "no version is created by repeated formatting");
+  assert.strictEqual(state.sales!.proposal!.versions.length, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -1740,7 +1738,7 @@ const batchUpdatesOn = (calls: { url: string }[]) => calls.filter((c) => c.url.i
 
 test("Doc clarification 1. An unclassifiable comment is carried on the Work as awaiting, with its exact bindings, and Martin is asked on Telegram -- nothing is routed and nothing is created", async (t) => {
   const { world, state, calls, env } = await clarificationFixture(t);
-  const versionsBefore = state.salesProposal!.versions.length;
+  const versionsBefore = state.sales!.proposal!.versions.length;
   const telegramBefore = world.telegram.length;
   const stylingBefore = batchUpdatesOn(calls);
 
@@ -1749,11 +1747,11 @@ test("Doc clarification 1. An unclassifiable comment is carried on the Work as a
   assert.deepStrictEqual(result, { ok: true });
   assert.strictEqual(state.awaiting, "proposal_doc_clarification", "the continuation uses the existing awaiting mechanism");
   assert.strictEqual(state.stage, "awaiting_proposal_doc_clarification");
-  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "comment, document, Proposal, version and the comment's own text are all carried");
+  assert.deepStrictEqual(state.sales?.pendingProposalDocClarification, CLARIFICATION, "comment, document, Proposal, version and the comment's own text are all carried");
   assert.strictEqual(world.telegram.length, telegramBefore + 1, "Martin is asked on Telegram, the channel that can actually be answered");
   assert.match(world.telegram.at(-1)!.text, /formatting only/);
   assert.match(world.telegram.at(-1)!.text, /new Version for your approval/);
-  assert.strictEqual(state.salesProposal!.versions.length, versionsBefore, "no Version is created by asking");
+  assert.strictEqual(state.sales!.proposal!.versions.length, versionsBefore, "no Version is created by asking");
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "no styling is applied by asking");
 });
 
@@ -1761,12 +1759,12 @@ test("Doc clarification 2. The continuation is refused when its bindings do not 
   const { state, env } = await clarificationFixture(t);
   // The Work moves to v2: the v1 continuation can no longer be recorded.
   await applyProposalDocComment(env, state, { proposalNumber: 7, version: 1, text: "Add a second training session." });
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
 
   const stale = await requestProposalDocClarification(env, state, CLARIFICATION);
   assert.strictEqual(stale.result.ok, false);
   assert.match((stale.result as any).detail, /no longer the current Version/);
-  assert.strictEqual(state.pendingProposalDocClarification, undefined, "a superseded version's comment is never recorded as a live request");
+  assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined, "a superseded version's comment is never recorded as a live request");
   assert.strictEqual(state.awaiting, undefined);
 
   const wrongProposal = await requestProposalDocClarification(env, state, { ...CLARIFICATION, proposalNumber: 9 });
@@ -1780,7 +1778,7 @@ test("Doc clarification 2. The continuation is refused when its bindings do not 
   const second = await requestProposalDocClarification(env, state, { ...CLARIFICATION, version: 2, commentId: "c-clar-2" });
   assert.strictEqual(second.result.ok, false, "a second ambiguous comment is answered rather than queued");
   assert.match((second.result as any).detail, /already outstanding for another comment/);
-  assert.strictEqual(state.pendingProposalDocClarification!.commentId, "c-clar-1", "the request Martin is already being asked about is never silently replaced");
+  assert.strictEqual(state.sales!.pendingProposalDocClarification!.commentId, "c-clar-1", "the request Martin is already being asked about is never silently replaced");
 });
 
 test("Doc clarification 3. A clarification that resolves to formatting routes the SAME comment's request through the governed formatting pass: style-only, byte-identical text, no Version, comment closed out once", async (t) => {
@@ -1795,8 +1793,8 @@ test("Doc clarification 3. A clarification that resolves to formatting routes th
   const requests = calls.filter((c) => c.url.includes(":batchUpdate")).at(-1)!.body.requests;
   assert.ok(requests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets), "the routed formatting pass is style-only: no insert, delete or replace");
   assert.strictEqual(calls.text(), docTextBefore, "the Doc's text is byte-identical");
-  assert.strictEqual(state.salesProposal!.currentVersion, 1, "formatting never creates a Version");
-  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 1, "formatting never creates a Version");
+  assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);
   assert.strictEqual(state.awaiting, undefined, "the Work is no longer awaiting anything");
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "the comment is closed out exactly once, before the routed handler ran");
   assert.match(world.telegram.at(-1)!.text, /restyled to the canonical layout/);
@@ -1806,18 +1804,18 @@ test("Doc clarification 4. A clarification that resolves to a text change routes
   const { state, calls, kv, env } = await clarificationFixture(t, "substantive");
   const comment = { ...CLARIFICATION, text: 'Add a second session for "training".' };
   await requestProposalDocClarification(env, state, comment);
-  const v1Content = state.salesProposal!.versions[0].content;
+  const v1Content = state.sales!.proposal!.versions[0].content;
   const stylingBefore = batchUpdatesOn(calls);
 
   await handleProposalDocClarificationText(env, state, "Change the content as the comment says.");
 
-  assert.strictEqual(state.salesProposal!.currentVersion, 2, "the ordinary revision path ran");
-  assert.match(state.salesProposal!.versions[1].content, /Add a second session for/, "the ORIGINAL comment's text is recorded verbatim -- the clarification only chose the route");
-  assert.strictEqual(state.salesProposal!.versions[0].content, v1Content, "the approved-in-place v1 content is untouched");
-  assert.strictEqual(state.salesProposal!.approvedVersion, undefined, "a new Version still needs approval");
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2, "the ordinary revision path ran");
+  assert.match(state.sales!.proposal!.versions[1].content, /Add a second session for/, "the ORIGINAL comment's text is recorded verbatim -- the clarification only chose the route");
+  assert.strictEqual(state.sales!.proposal!.versions[0].content, v1Content, "the approved-in-place v1 content is untouched");
+  assert.strictEqual(state.sales!.proposal!.approvedVersion, undefined, "a new Version still needs approval");
   assert.ok(batchUpdatesOn(calls) > stylingBefore, "the revision path itself brings the watched Doc to v2 (as it always has) -- the clarification adds no Doc effect of its own");
   assert.match(calls.text(), /Add a second session for/, "the Doc follows the revision path to v2, not a formatting pass of its own");
-  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);
   assert.strictEqual(state.awaiting, undefined);
   assert.strictEqual(kv.store.get(`google_comment_processed:${comment.commentId}`), "1", "the comment is closed out exactly once, before the revision ran");
 });
@@ -1830,8 +1828,8 @@ test("Doc clarification 5. A clarification that is still ambiguous changes nothi
   await handleProposalDocClarificationText(env, state, "Just, you know, make it better.");
 
   assert.strictEqual(state.awaiting, "proposal_doc_clarification", "the Work keeps waiting for an answer");
-  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "the SAME request is still carried, unchanged");
-  assert.strictEqual(state.salesProposal!.currentVersion, 1, "no Version is created from an ambiguous request");
+  assert.deepStrictEqual(state.sales?.pendingProposalDocClarification, CLARIFICATION, "the SAME request is still carried, unchanged");
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 1, "no Version is created from an ambiguous request");
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "no styling is applied to an ambiguous request");
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), undefined, "the comment is still unprocessed, so it cannot be lost");
 });
@@ -1846,8 +1844,8 @@ test("Doc clarification 6. A clarification that arrives after the Version moved 
   await handleProposalDocClarificationText(env, state, "Formatting only.");
 
   assert.strictEqual(state.awaiting, undefined);
-  assert.strictEqual(state.pendingProposalDocClarification, undefined);
-  assert.strictEqual(state.salesProposal!.currentVersion, 2, "nothing is routed for a superseded Version");
+  assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2, "nothing is routed for a superseded Version");
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "and the superseded Doc is never restyled");
   assert.match(world.telegram.at(-1)!.text, /Not applied/);
   assert.match(world.telegram.at(-1)!.text, /now at v2/, "the honest answer says which Version is current");
@@ -1860,15 +1858,15 @@ test("Doc clarification 7. A resumed clarification is routed exactly once -- a d
   const reply = "Add the second session the comment asks for.";
 
   await handleProposalDocClarificationText(env, state, reply);
-  assert.strictEqual(state.salesProposal!.currentVersion, 2, "the first delivery routed the request");
-  const versionsAfterFirst = state.salesProposal!.versions.length;
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2, "the first delivery routed the request");
+  const versionsAfterFirst = state.sales!.proposal!.versions.length;
   const stylingAfterFirst = batchUpdatesOn(calls);
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1");
 
   await handleProposalDocClarificationText(env, state, reply);
 
-  assert.strictEqual(state.salesProposal!.versions.length, versionsAfterFirst, "the same comment never creates a second Version");
-  assert.strictEqual(state.salesProposal!.currentVersion, 2);
+  assert.strictEqual(state.sales!.proposal!.versions.length, versionsAfterFirst, "the same comment never creates a second Version");
+  assert.strictEqual(state.sales!.proposal!.currentVersion, 2);
   assert.strictEqual(batchUpdatesOn(calls), stylingAfterFirst, "and never restyles the Doc again");
 });
 
@@ -1876,7 +1874,7 @@ test("Doc clarification 8. A processed-marker write that fails (KV write quota) 
   const { world, state, calls, kv, env } = await clarificationFixture(t, "substantive");
   await requestProposalDocClarification(env, state, CLARIFICATION);
   const reply = "Add the second session the comment asks for.";
-  const versionsBefore = state.salesProposal!.versions.length;
+  const versionsBefore = state.sales!.proposal!.versions.length;
   const stylingBefore = batchUpdatesOn(calls);
   // Cloudflare's per-day KV write quota: the processed-marker cannot persist.
   const originalPut = kv.kv.put;
@@ -1889,8 +1887,8 @@ test("Doc clarification 8. A processed-marker write that fails (KV write quota) 
 
   assert.strictEqual(returned, state, "the unchanged Work is returned -- nothing was settled");
   assert.strictEqual(state.awaiting, "proposal_doc_clarification", "the continuation stays outstanding");
-  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "with the SAME comment, document, Proposal and version bindings");
-  assert.strictEqual(state.salesProposal!.versions.length, versionsBefore, "no Version was created from a comment whose marker did not persist");
+  assert.deepStrictEqual(state.sales?.pendingProposalDocClarification, CLARIFICATION, "with the SAME comment, document, Proposal and version bindings");
+  assert.strictEqual(state.sales!.proposal!.versions.length, versionsBefore, "no Version was created from a comment whose marker did not persist");
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "and no Doc effect ran");
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), undefined, "the comment stays unprocessed, so it cannot be lost");
   assert.match(world.telegram.at(-1)!.text, /Storage write failure/, "Martin is told the truth, not a generic execution failure");
@@ -1900,11 +1898,11 @@ test("Doc clarification 8. A processed-marker write that fails (KV write quota) 
   kv.kv.put = originalPut;
   await handleProposalDocClarificationText(env, state, reply);
 
-  assert.strictEqual(state.salesProposal!.versions.length, versionsBefore + 1, "the retry completed the deferred request exactly once");
-  assert.match(state.salesProposal!.versions.at(-1)!.content, /Maybe improve it somehow/, "the ORIGINAL comment's text is what the retried request records verbatim -- the clarification only chose the route");
+  assert.strictEqual(state.sales!.proposal!.versions.length, versionsBefore + 1, "the retry completed the deferred request exactly once");
+  assert.match(state.sales!.proposal!.versions.at(-1)!.content, /Maybe improve it somehow/, "the ORIGINAL comment's text is what the retried request records verbatim -- the clarification only chose the route");
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "and closes the comment out");
   assert.strictEqual(state.awaiting, undefined);
-  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);
 });
 
 test("Doc clarification 9. A stale continuation whose marker write fails is never half-closed: the Work keeps waiting, truthfully reported, and the later retry closes it off honestly", async (t) => {
@@ -1924,7 +1922,7 @@ test("Doc clarification 9. A stale continuation whose marker write fails is neve
   // NB: `awaiting` was already cleared by the v1->v2 revision itself (the
   // new Version's approval request owns the flag), so the continuity signal
   // that must survive a failed marker write is the carried request itself.
-  assert.deepStrictEqual(state.pendingProposalDocClarification, CLARIFICATION, "a failed marker write never half-closes the continuation");
+  assert.deepStrictEqual(state.sales?.pendingProposalDocClarification, CLARIFICATION, "a failed marker write never half-closes the continuation");
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), undefined, "the comment is not closed off either");
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "and the superseded Doc is never restyled");
   assert.match(world.telegram.at(-1)!.text, /Storage write failure/, "the refusal is truthful, not a generic execution failure");
@@ -1934,7 +1932,7 @@ test("Doc clarification 9. A stale continuation whose marker write fails is neve
   await handleProposalDocClarificationText(env, state, "Formatting only.");
 
   assert.strictEqual(state.awaiting, undefined);
-  assert.strictEqual(state.pendingProposalDocClarification, undefined);
+  assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);
   assert.strictEqual(kv.store.get(`google_comment_processed:${CLARIFICATION.commentId}`), "1", "a closed-off comment cannot be re-asked on every future poll");
   assert.strictEqual(batchUpdatesOn(calls), stylingBefore, "still nothing routed for a superseded Version");
   assert.match(world.telegram.at(-1)!.text, /Not applied/);
@@ -1953,7 +1951,7 @@ test("Doc clarification 9. A stale continuation whose marker write fails is neve
 
 /** Opens the cycle on an Approved v1 with one substantive comment. */
 async function openCycleOnV1(env: Env, state: WorkState, commentId: string, requestedChange = "Shorten the scope section.") {
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   return reopenProposalApprovalCycle(env, state, sp, {
     documentId: sp.doc!.documentId,
     commentId,
@@ -1964,7 +1962,7 @@ async function openCycleOnV1(env: Env, state: WorkState, commentId: string, requ
 
 test("Lifecycle 1. The initial Version becomes Approved only after the canonical Doc is written and verified -- and the live record carries that exact binding", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
 
   assert.strictEqual(sp.approvalStatus, "Approved");
   assert.strictEqual(sp.approvedVersion, 1, "the Approved Version is the verified initial Version");
@@ -1983,7 +1981,7 @@ test("Lifecycle 1. The initial Version becomes Approved only after the canonical
 test("Lifecycle 2. If the canonical Doc cannot be written and verified, the initial Version is NEVER approved: Pending, no Approved Version, no Approve tap", async (t) => {
   const { world, state } = await createV1(t); // no authorized Google account -> Doc cannot verify
 
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   assert.strictEqual(sp.approvalStatus, "Pending Approval");
   assert.strictEqual(sp.approvedVersion, undefined, "approval is never claimed before the Doc verifies");
 
@@ -2001,7 +1999,7 @@ test("Lifecycle 2. If the canonical Doc cannot be written and verified, the init
 
 test("Lifecycle 3. A substantive comment on an Approved Version reopens the cycle IMMEDIATELY: Pending Approval, Approved Version cleared, artifact Held, item registered", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   assert.strictEqual(sp.approvalStatus, "Approved");
 
   const reopened = await openCycleOnV1(env, state, "c-cycle-1");
@@ -2016,7 +2014,7 @@ test("Lifecycle 3. A substantive comment on an Approved Version reopens the cycl
   assert.strictEqual(text(rec["Approved Version"]), "", "so nothing stale stays releasable even if the change then fails");
   assert.strictEqual(text(rec["Artifact Status"]), "Held");
 
-  const cycle = state.proposalApprovalCycle!;
+  const cycle = state.sales?.proposalApprovalCycle!;
   assert.strictEqual(cycle.proposalNumber, 7);
   assert.strictEqual(cycle.documentId, sp.doc!.documentId);
   assert.strictEqual(cycle.items["c-cycle-1"].outcome, "awaiting_application");
@@ -2026,7 +2024,7 @@ test("Lifecycle 3. A substantive comment on an Approved Version reopens the cycl
 
 test("Lifecycle 4. Resolution observed BEFORE the change is applied can never complete the cycle", async (t) => {
   const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-resolve-first");
 
   // Martin resolves the comment while the change is still unapplied.
@@ -2037,12 +2035,12 @@ test("Lifecycle 4. Resolution observed BEFORE the change is applied can never co
   assert.strictEqual(out.kind, "held_unsatisfied");
   assert.ok(out.reasons!.some((r) => r.includes("c-resolve-first") && r.includes("not been applied")), out.reasons!.join("; "));
   assert.strictEqual(sp.approvalStatus, "Pending Approval", "resolving first never approves");
-  assert.strictEqual(state.proposalApprovalCycle!.items["c-resolve-first"].observedResolved, true, "the resolution itself is still recorded honestly");
+  assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-resolve-first"].observedResolved, true, "the resolution itself is still recorded honestly");
 });
 
 test("Lifecycle 5. One unresolved comment blocks approval even when every other comment in the cycle is applied and resolved", async (t) => {
   const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-done");
   await openCycleOnV1(env, state, "c-open");
   recordProposalCycleItemOutcome(state, "c-done", "applied", 2);
@@ -2061,7 +2059,7 @@ test("Lifecycle 5. One unresolved comment blocks approval even when every other 
 
 test("Lifecycle 6. A refused (unffillable) change keeps the cycle closed forever -- a resolution over it still cannot approve", async (t) => {
   const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-refused", "Put the client's real company name in the Proposal.");
   recordProposalCycleItemOutcome(state, "c-refused", "refused");
 
@@ -2074,7 +2072,7 @@ test("Lifecycle 6. A refused (unffillable) change keeps the cycle closed forever
 
 test("Lifecycle 7. A satisfied cycle (applied + verified + resolved, Doc matching the current Version) approves that exact Version through the ONE shared approval write -- no resolver attribution is required -- and repeating the poll is idempotent", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-final");
   recordProposalCycleItemOutcome(state, "c-final", "applied", 1);
   // v1 was auto-approved on its own verified Doc, then withdrawn by the reopen
@@ -2125,7 +2123,7 @@ test("Lifecycle 7. A satisfied cycle (applied + verified + resolved, Doc matchin
 
 test("Lifecycle 7b. The completion write is the SHARED approval write: it fails closed on the same live-record preconditions, so a record that moved on is never approved", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-precond");
   recordProposalCycleItemOutcome(state, "c-precond", "applied", 1);
 
@@ -2142,7 +2140,7 @@ test("Lifecycle 7b. The completion write is the SHARED approval write: it fails 
 
 test("Lifecycle 8. The approve route refuses while any actionable comment is outstanding: a bare tap never overrides an open cycle", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-still-open");
 
   await handleSalesProposalDecision(env, state, 7, 1, "approve");
@@ -2155,7 +2153,7 @@ test("Lifecycle 8. The approve route refuses while any actionable comment is out
 
 test("Lifecycle 9. A comment on a foreign Doc or a stale Version is refused and opens no cycle, leaving the approval untouched", async (t) => {
   const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   const actionBefore = state.actionName;
 
   const wrongDoc = await reopenProposalApprovalCycle(env, state, sp, {
@@ -2174,7 +2172,7 @@ test("Lifecycle 9. A comment on a foreign Doc or a stale Version is refused and 
   });
   assert.ok("reason" in staleVersion && staleVersion.reason.includes("not the current"), JSON.stringify(staleVersion));
 
-  assert.strictEqual(state.proposalApprovalCycle, undefined, "a refused comment never opens a cycle");
+  assert.strictEqual(state.sales?.proposalApprovalCycle, undefined, "a refused comment never opens a cycle");
   assert.strictEqual(sp.approvalStatus, "Approved", "the approval is not disturbed by a refused comment");
   assert.strictEqual(sp.approvedVersion, 1);
   assert.strictEqual(state.actionName, actionBefore, "a refused comment does not advance the Work's Action either");
@@ -2192,13 +2190,13 @@ test("Lifecycle 10. A resolution observed for a comment OUTSIDE the current cycl
 
   assert.strictEqual(out.kind, "held_unsatisfied", "an unrelated comment's resolution is ignored");
   assert.ok(out.reasons!.some((r) => r.includes("c-mine") && r.includes("not yet observed resolved")), out.reasons!.join("; "));
-  assert.strictEqual(state.proposalApprovalCycle!.items["c-mine"].observedResolved, false);
-  assert.strictEqual(state.proposalApprovalCycle!.items["c-someone-elses"], undefined, "a foreign comment is never absorbed into the cycle");
+  assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-mine"].observedResolved, false);
+  assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-someone-elses"], undefined, "a foreign comment is never absorbed into the cycle");
 });
 
 test("Lifecycle 11. A cycle whose Doc no longer matches the current Version stays held -- stale document evidence never approves", async (t) => {
   const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-doc-drift");
   recordProposalCycleItemOutcome(state, "c-doc-drift", "applied", 1);
 
@@ -2215,7 +2213,7 @@ test("Lifecycle 11. A cycle whose Doc no longer matches the current Version stay
 
 test("Lifecycle 12. END TO END: auto-approve on verification -> a Doc comment reopens the cycle and applies the change -> Martin resolves the comment -> the Proposal becomes Approved for the exact current Version, with no attribution hold", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   const v1Content = sp.versions[0].content;
 
   // 1. Initial Version is approved purely because its Doc verified.
@@ -2238,8 +2236,8 @@ test("Lifecycle 12. END TO END: auto-approve on verification -> a Doc comment re
   assert.strictEqual(text(rec["Approved Version"]), "", "v1's approval does not leak onto v2");
   assert.strictEqual(sp.currentVersion, 2);
   assert.strictEqual(sp.approvedVersion, undefined);
-  assert.strictEqual(state.proposalApprovalCycle!.items["c-e2e"].outcome, "applied", "the change was applied AND the Doc verified at v2");
-  assert.strictEqual(state.proposalApprovalCycle!.items["c-e2e"].appliedVersion, 2);
+  assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-e2e"].outcome, "applied", "the change was applied AND the Doc verified at v2");
+  assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-e2e"].appliedVersion, 2);
   assert.ok(sp.versions[0].content === v1Content, "v1 is untouched");
 
   // 3. Resolution arrives: applied + verified + Doc matches v2 -> the cycle
@@ -2258,7 +2256,7 @@ test("Lifecycle 12. END TO END: auto-approve on verification -> a Doc comment re
 
 test("Lifecycle 13. A substantive comment whose change is REFUSED still leaves the Proposal pending and unreleasable", async (t) => {
   const { world, env, state } = await createV1(t, { entityName: "Acme Foods Ghana Ltd" }, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
   assert.strictEqual(sp.approvalStatus, "Approved");
 
   const { result } = await applyProposalDocComment(env, state, {
@@ -2271,7 +2269,7 @@ test("Lifecycle 13. A substantive comment whose change is REFUSED still leaves t
 
   assert.strictEqual(result.kind, "refused");
   assert.strictEqual(sp.currentVersion, 1, "no Version was created");
-  const cycle = state.proposalApprovalCycle!;
+  const cycle = state.sales?.proposalApprovalCycle!;
   assert.strictEqual(cycle.items["c-identity"].outcome, "refused", "the refusal is recorded as the item's outcome");
   assert.ok(unsatisfiedCycleItems(cycle).some((i) => i.commentId === "c-identity" && i.reason.includes("refused")));
 
@@ -2283,7 +2281,7 @@ test("Lifecycle 13. A substantive comment whose change is REFUSED still leaves t
 
 test("Lifecycle 14. A new substantive comment AFTER a cycle-completion approval reopens THAT approval, and the previously satisfied items cannot complete the new cycle on their own", async (t) => {
   const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
-  const sp = state.salesProposal!;
+  const sp = state.sales?.proposal!;
 
   // Complete one full cycle so v1 is Approved by the cycle itself.
   await openCycleOnV1(env, state, "c-first");

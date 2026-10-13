@@ -170,7 +170,7 @@ test("findCallbackHandler resolves strategyhandoff on Strategy Analyst and genui
   mockTelegramFetch(t);
   const env = fakeEnv();
   const state = fakeWorkState({
-    pendingStrategyHandoff: {
+    strategy: { pendingHandoff: {
       unit: "Sales",
       hat: "Sales Executive",
       handoffTitle: "Test handoff",
@@ -181,7 +181,7 @@ test("findCallbackHandler resolves strategyhandoff on Strategy Analyst and genui
       verifiedFactsAndSources: "Test facts",
       assumptions: "Test assumptions",
       openQuestions: "Test questions",
-    },
+    } },
   });
 
   const hat = strategyManifest.hats["Strategy Analyst"];
@@ -190,6 +190,6 @@ test("findCallbackHandler resolves strategyhandoff on Strategy Analyst and genui
 
   const result = await handler(env, state, false);
 
-  assert.strictEqual(result.pendingStrategyHandoff, undefined);
+  assert.strictEqual(result.strategy?.pendingHandoff, undefined);
 });
 

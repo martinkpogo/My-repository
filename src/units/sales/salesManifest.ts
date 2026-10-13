@@ -7,6 +7,7 @@ import { discoverLeadsReadHandler, handleLeadOpportunityApproval } from "./leadG
 import * as sales from "./salesExecutive";
 import * as salesProposal from "./tokenSafeProposal";
 import { salesHandoffPickup } from "./handoffIntake";
+import { migrateLegacySalesState } from "./salesState";
 
 /**
  * Sales's Unit Registry manifest (ENIG Operating Model design doc, "The
@@ -580,6 +581,8 @@ export const salesManifest: UnitManifest = {
   // intake rules (call-notes turned away per LOG-987, pickup held while
   // Sales Executive is paused) live in handoffIntake.ts.
   handoffPickup: salesHandoffPickup(),
+  // Sales's state lives in WorkState.sales; a Work saved with the old loose fields is read into it on load.
+  migrateWorkState: migrateLegacySalesState,
 };
 
 /**

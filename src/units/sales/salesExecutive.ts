@@ -40,6 +40,7 @@ import { retrieveAndConsumeCallNotes } from "../../records/callNotes/callNotesRe
 import { serializeCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
 
+import { recordStrategySourceBoundaryAttestation } from "../../handoffContracts/strategyAttestation";
 // Canonical Notion governance sources for this Hat. Explicit page IDs, not
 // title search, per the Universal Role Contract's evidence rule (a
 // consequential source must be attributable, not guessed at by name match).
@@ -1629,7 +1630,7 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
   // session reads); this WorkState copy is kept because the same-session
   // path still benefits from it, and for audit. See
   // WorkState.strategySourceBoundaryAttestation's own doc comment.
-  state.strategySourceBoundaryAttestation = sourceBoundaryAttestation;
+  recordStrategySourceBoundaryAttestation(state, sourceBoundaryAttestation);
 
   state.handoffId = handoff.id;
   // Sales's execution ends here. Strategy is a separate Unit and must
