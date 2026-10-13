@@ -106,6 +106,8 @@ const KV_CIRCUIT_FAILURE_THRESHOLD = 2;
 const KV_CIRCUIT_COOLDOWN_MS = 60_000;
 /** Minimum sweep interval for maybeSweepKvFallback. */
 const SWEEP_THROTTLE_MS = 15 * 60_000;
+/** Minimum spacing between quota-spending writes of a poller diagnostics heartbeat (kvPutHeartbeat). */
+export const POLL_HEARTBEAT_MIN_INTERVAL_MS = 15 * 60_000;
 /** Default/max rows moved per sweep pass. */
 const SWEEP_DEFAULT_LIMIT = 100;
 
@@ -659,6 +661,28 @@ export async function kvPut(env: Env, key: string, value: string, opts?: { expir
     if (kvError) throw kvError;
     throw tursoErr; // circuit was open (no fresh KV attempt): the Turso failure is the only evidence to surface
   }
+}
+
+/**
+ * Diagnostics-heartbeat write that spends KV quota at most once per
+ * `minIntervalMs`. The value is always the current ISO-8601 time, so the
+ * stored value doubles as its own "last written" marker: KV reads are not
+ * quota-limited, so the read-then-conditionally-write costs no write budget.
+ *
+ * Best-effort by design, like the heartbeats it serves: an unreadable or
+ * unparseable stored value, or a failed read, falls through to a normal
+ * kvPut (the old behaviour), so the throttle can only ever REMOVE writes --
+ * never add one or hide a failure the caller was already tolerating.
+ */
+export async function kvPutHeartbeat(env: Env, key: string, minIntervalMs: number): Promise<void> {
+  try {
+    const stored = await kvGet(env, key);
+    const lastWritten = stored ? Date.parse(stored) : NaN;
+    if (Number.isFinite(lastWritten) && now() - lastWritten >= 0 && now() - lastWritten < minIntervalMs) return;
+  } catch {
+    // Unreadable: fall through to the write below.
+  }
+  await kvPut(env, key, new Date(now()).toISOString());
 }
 
 export async function kvDelete(env: Env, key: string): Promise<void> {
