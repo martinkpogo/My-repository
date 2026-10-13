@@ -8,6 +8,7 @@ import * as sales from "./salesExecutive";
 import * as salesProposal from "./tokenSafeProposal";
 import { salesHandoffPickup } from "./handoffIntake";
 import { migrateLegacySalesState } from "./salesState";
+import { SALES_OPERATIONS } from "./salesOperations";
 
 /**
  * Sales's Unit Registry manifest (ENIG Operating Model design doc, "The
@@ -583,6 +584,8 @@ export const salesManifest: UnitManifest = {
   handoffPickup: salesHandoffPickup(),
   // Sales's state lives in WorkState.sales; a Work saved with the old loose fields is read into it on load.
   migrateWorkState: migrateLegacySalesState,
+  // What callers may do to a Sales-owned Work through its stub (Doc-comment handling, Lead cards).
+  operations: SALES_OPERATIONS,
 };
 
 /**

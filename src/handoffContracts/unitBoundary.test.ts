@@ -61,3 +61,12 @@ test("The Call Notes record module imports no Unit", () => {
     assert.ok(!/from\s+["'][^"']*\/units\//.test(readFileSync(file, "utf8")), `${file} must not import a Unit`);
   }
 });
+
+test("WorkSession carries no Sales code -- what Sales lets a caller do to a Work is declared on its manifest (UnitManifest.operations)", () => {
+  const session = readFileSync(join(__dirname, "..", "session.ts"), "utf8");
+  assert.ok(!/units\/sales\//.test(session), "session.ts must not import Sales code");
+  for (const name of ["handleProposalDocComment", "syncProposalDocApprovalCycle", "handleProposalDocFormatting", "requestProposalDocClarification", "proposeLeadOpportunity"]) {
+    assert.ok(!session.includes(name), `session.ts must not define ${name} -- it is a Sales operation, run through runUnitOperation`);
+  }
+  assert.ok(session.includes("async runUnitOperation("), "the one generic entry exists");
+});

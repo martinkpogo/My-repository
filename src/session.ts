@@ -1,6 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
-import * as salesProposal from "./units/sales/tokenSafeProposal";
 import { handleMarketingIntake } from "./units/marketing/marketingManifest";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
@@ -17,6 +16,7 @@ import { sendMessage, sendOperationsMessage } from "./telegram";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { migrateSavedWork } from "./workStateMigration";
+import { runUnitOperationOnWork } from "./units/unitOperations";
 import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
 import {
@@ -24,8 +24,6 @@ import {
   handleGoogleFolderSelection,
   handleGoogleActionApproval,
 } from "./googleOAuth";
-import { proposeLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
-import type { PendingLeadOpportunity } from "./units/sales/leadGenerationDiscovery";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
@@ -353,16 +351,17 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
-   * Presents an evidence-backed opportunity finding to Martin for explicit
-   * approval before it may become a Lead -- invoked on a freshly created
-   * WorkSession with no live chat behind it. Currently has no caller:
-   * the only one (the Research & Intelligence Handoff consumer) was
-   * removed with that retired Unit, and the owning Action that will feed
-   * this gate is not yet designed.
+   * The ONE generic entry for what a Unit lets a caller do to a Work it owns
+   * (UnitManifest.operations): Sales's Proposal-Doc comment handling and Lead
+   * cards, for example, which used to be a named method each on this class.
+   * Runs the operation inside this Work's execute cycle and returns its result,
+   * or the operation's declared `failed` answer if it threw. Fails closed for a
+   * Unit that declares no such operation. The logic lives with the Unit.
    */
-  async proposeLeadOpportunity(opportunity: PendingLeadOpportunity): Promise<WorkState> {
-    return this.execute((state) => proposeLeadOpportunity(this.env, state, opportunity));
+  async runUnitOperation(unit: Unit, name: string, input: unknown): Promise<unknown> {
+    return runUnitOperationOnWork(this.env, unit, name, input, (fn) => this.execute(fn));
   }
+
 
   /**
    * The existing, generic terminal action for any work item -- this is
@@ -415,80 +414,9 @@ export class WorkSession extends DurableObject<Env> {
     });
   }
 
-  /**
-   * A change request arriving as a comment on a Runtime Sales Proposal's
-   * Google Doc (see googleDocComments.ts). Runs the Proposal's ordinary
-   * revision path on this Work -- nothing here edits the Doc or the approved
-   * version -- and reports how it ended so the poller can answer the
-   * comment. A thrown failure inside the Work is reported by execute() as
-   * usual and surfaces here as a refusal.
-   */
-  async handleProposalDocComment(input: { proposalNumber: number; version: number; text: string; commentId?: string; documentId?: string }): Promise<salesProposal.ProposalDocCommentResult> {
-    let result: salesProposal.ProposalDocCommentResult | undefined;
-    await this.execute(async (state) => {
-      const applied = await salesProposal.applyProposalDocComment(this.env, state, input);
-      result = applied.result;
-      return applied.state;
-    });
-    return result ?? { kind: "refused", detail: "the change could not be applied; Martin was notified." };
-  }
 
-  /**
-   * Feeds the resolution state observed on this Proposal's Doc back into the
-   * Work's approval cycle and evaluates whether that cycle may complete
-   * (see evaluateProposalApprovalCycle). Resolution is a SEPARATE signal from
-   * comment processing: it is observed here, on its own, so a resolved
-   * comment is never confused with an applied one -- and only when BOTH are
-   * satisfied (plus the Doc read back as the exact current Version) does the
-   * cycle complete and approve through the shared approval write. Runs inside
-   * `execute`, so the recorded resolution observations, and any completion,
-   * land in the same durable write as the rest of the Work.
-   */
-  async syncProposalDocApprovalCycle(input: { documentId: string; observations: { commentId: string; resolved: boolean; modifiedTime?: string }[] }): Promise<{ kind: string; approvedVersion?: number; reasons?: string[] }> {
-    let out: { kind: string; approvedVersion?: number; reasons?: string[] } = { kind: "no_cycle" };
-    await this.execute(async (state) => {
-      out = await salesProposal.evaluateProposalApprovalCycle(this.env, state, input.observations);
-      return state;
-    });
-    return out;
-  }
 
-  /**
-   * A presentation-only request arriving as a comment on a Runtime Sales
-   * Proposal's own Google Doc (see googleDocComments.ts's classification
-   * step). Applies the canonical layout styling to that exact Doc and
-   * reports how it ended so the poller can answer the comment. Creates no
-   * Version and changes no content, hash, approval state or Action -- only
-   * the Doc's presentation, verified text-identical before and after.
-   */
-  async handleProposalDocFormatting(input: { proposalNumber: number; version: number }): Promise<salesProposal.ProposalDocFormattingResult> {
-    let result: salesProposal.ProposalDocFormattingResult | undefined;
-    await this.execute(async (state) => {
-      const applied = await salesProposal.applyProposalDocFormatting(this.env, state, input);
-      result = applied.result;
-      return applied.state;
-    });
-    return result ?? { kind: "refused", detail: "the Doc could not be formatted; Martin was notified." };
-  }
 
-  /**
-   * Records that a comment on this Proposal's Doc could not be classified,
-   * and moves the Work onto `state.awaiting` for Martin's clarification of
-   * that exact comment. Runs inside `execute`, so the pending request and the
-   * awaiting state land in the same durable write as the rest of the Work --
-   * a crash cannot leave a half-recorded request behind. The comment itself
-   * is deliberately NOT marked processed here: it stays recoverable until a
-   * route actually handles it (see handleProposalDocClarificationText).
-   */
-  async requestProposalDocClarification(input: { proposalNumber: number; version: number; commentId: string; documentId: string; text: string }): Promise<salesProposal.ProposalDocClarificationResult> {
-    let result: salesProposal.ProposalDocClarificationResult | undefined;
-    await this.execute(async (state) => {
-      const requested = await salesProposal.requestProposalDocClarification(this.env, state, input);
-      result = requested.result;
-      return requested.state;
-    });
-    return result ?? { ok: false, detail: "the clarification could not be recorded; Martin was notified.", retryable: false };
-  }
 
   async handleCallback(action: string, value: string): Promise<WorkState> {
     // The interactive Tool Registry smoke confirmation is handled OUTSIDE

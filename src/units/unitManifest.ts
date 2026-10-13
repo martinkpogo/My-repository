@@ -87,6 +87,25 @@ export interface HandoffPickupDeclaration {
   hold?: (env: Env, handoff: { id: string; properties?: Record<string, any> }) => Promise<boolean>;
 }
 
+/**
+ * An operation a Unit exposes on a Work it owns, for callers that reach a
+ * specific Work only through its Durable Object stub -- the Doc-comment
+ * poller, the Drive notification path, a discovery run. Declared on the
+ * manifest (UnitManifest.operations) so WorkSession carries ONE generic entry
+ * (`runUnitOperation`) instead of a named method per Unit feature.
+ *
+ * `run` executes inside the Work's own execute cycle (so its state change is
+ * saved with the rest of the Work, and a thrown failure is reported and rolled
+ * back exactly like any other Work step) and returns the new state plus the
+ * result the caller wants. `failed` is what the caller receives when `run`
+ * threw: the execute cycle reports the failure and swallows it, so the caller
+ * gets this declared, honest answer instead of an exception.
+ */
+export interface UnitOperation<I = any, R = any> {
+  run: (env: Env, state: WorkState, input: I) => Promise<{ state: WorkState; result: R }>;
+  failed: R;
+}
+
 /** Resumes a WorkSession left paused on one of this Hat's own `awaiting` states. */
 export type AwaitingStateHandler = (
   env: Env,
@@ -256,6 +275,13 @@ export interface UnitManifest {
    * their next save.
    */
   migrateWorkState?: (saved: Record<string, unknown>) => void;
+
+  /**
+   * The operations this Unit exposes on a Work it owns, keyed by name -- see
+   * UnitOperation. Reached through `WorkSession.runUnitOperation(unit, name,
+   * input)`. A name no Unit declares is refused, never guessed.
+   */
+  operations?: Record<string, UnitOperation>;
 }
 
 export function findHatManifest(hatName: string | undefined, manifest: UnitManifest): HatManifest | undefined {

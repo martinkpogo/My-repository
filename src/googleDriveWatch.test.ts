@@ -1,3 +1,4 @@
+import { salesOperationStub } from "./testSupport/salesOperationStub";
 import test from "node:test";
 import assert from "node:assert";
 import type { Env } from "./types";
@@ -154,7 +155,7 @@ function createFakeEnv(overrides: Partial<Record<string, unknown>> = {}) {
     DRIVE_DOC_LOCK: lock as unknown as DurableObjectNamespace,
     WORK_SESSION: {
       idFromName: (name: string) => name,
-      get: () => ({
+      get: () => salesOperationStub({
         syncProposalDocApprovalCycle: async (req: any) => {
           syncCalls.push(req);
           return { kind: "no_cycle" };
