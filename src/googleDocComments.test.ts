@@ -1,3 +1,4 @@
+import { salesOperationStub } from "./testSupport/salesOperationStub";
 import test from "node:test";
 import assert from "node:assert";
 import type { Env } from "./types";
@@ -501,7 +502,7 @@ async function setUpProposalDoc(
   });
   (fakeEnv as any).WORK_SESSION = {
     idFromName: (name: string) => name,
-    get: () => ({
+    get: () => salesOperationStub({
       handleProposalDocComment: async (req: any) => {
         calls.push(req);
         return result;
@@ -1284,7 +1285,7 @@ test("pagination 8. a Proposal Doc's approval cycle observes comments from EVERY
   });
   (fakeEnv as any).WORK_SESSION = {
     idFromName: (name: string) => name,
-    get: () => ({
+    get: () => salesOperationStub({
       handleProposalDocComment: async () => ({ kind: "revised", newVersion: 2 }),
       handleProposalDocFormatting: async () => ({ kind: "formatted" }),
       requestProposalDocClarification: async () => ({ ok: true }),

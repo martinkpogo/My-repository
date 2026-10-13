@@ -12,6 +12,7 @@ import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { discoveryCronContext, mintApprovalProofForWork, workSessionContext, type AccessContext } from "../../access";
 import { kvDelete, kvGet, kvPut } from "../../kvStore";
 import { getSessionStub, newWorkId } from "../../sessionRouting";
+import { SALES_OPERATION } from "./salesOperationNames";
 import { runProspectResearch, summarizeResearchSynthesis } from "../../runtime/actionResearch";
 
 import { salesOf } from "./salesState";
@@ -462,7 +463,7 @@ async function presentScreenedCandidate(
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
     await stub.init(workId, presentTo.chatId, "Sales", HAT_TARGET_NAME, presentTo.threadId, { actionName: "record_lead" });
-    await stub.proposeLeadOpportunity(opportunity);
+    await stub.runUnitOperation("Sales", SALES_OPERATION.proposeLeadOpportunity, opportunity);
     await kvPut(
       env,
       leadCandidateMemoryKey(opportunity.organisation),

@@ -1,3 +1,4 @@
+import { salesOperationStub } from "../../testSupport/salesOperationStub";
 import test from "node:test";
 import assert from "node:assert";
 import {
@@ -23,9 +24,11 @@ function createMockWorkSession() {
     init: async (...args: any[]) => {
       calls.init.push(args);
     },
-    proposeLeadOpportunity: async (...args: any[]) => {
-      calls.proposeLeadOpportunity.push(args);
-    },
+    ...salesOperationStub({
+      proposeLeadOpportunity: async (opportunity: any) => {
+        calls.proposeLeadOpportunity.push([opportunity]);
+      },
+    }),
   };
   return {
     calls,

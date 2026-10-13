@@ -7,7 +7,12 @@ import {
 } from "./googleOAuth";
 import { generate } from "./ai";
 import { logActivity } from "./log";
-import { getSessionStub } from "./sessionRouting";
+import {
+  handleProposalDocComment,
+  handleProposalDocFormatting,
+  requestProposalDocClarificationOnWork,
+  syncProposalDocApprovalCycle,
+} from "./units/sales/salesOperations";
 import { sendOperationsMessage } from "./telegram";
 import { kvGet, kvPut, maybeSweepKvFallback } from "./kvStore";
 import { DRIVE_DOC_LOCK_TTL_MS, driveDocLockStub } from "./driveDocLockState";
@@ -388,7 +393,7 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
     // multi-turn flow uses -- and the comment is deliberately left
     // unprocessed so it cannot be lost. If the Work cannot hold it, that is
     // reported honestly and nothing is settled by guesswork.
-    const requested = await getSessionStub(env, binding.workId).requestProposalDocClarification({
+    const requested = await requestProposalDocClarificationOnWork(env, binding.workId, {
       proposalNumber: binding.proposalNumber,
       version: binding.version,
       commentId: comment.id,
@@ -420,7 +425,7 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
   await markProcessed(env, comment.id);
 
   if (intent === "formatting") {
-    const result = await getSessionStub(env, binding.workId).handleProposalDocFormatting({
+    const result = await handleProposalDocFormatting(env, binding.workId, {
       proposalNumber: binding.proposalNumber,
       version: binding.version,
     });
@@ -438,7 +443,7 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
     return { handled: true, outcome: "formatting_not_applied", detail: `${result.kind}: ${result.detail}` };
   }
 
-  const result = await getSessionStub(env, binding.workId).handleProposalDocComment({
+  const result = await handleProposalDocComment(env, binding.workId, {
     proposalNumber: binding.proposalNumber,
     version: binding.version,
     text,
@@ -738,7 +743,7 @@ export async function processGoogleDocComments(env: Env, doc: WatchedGoogleDoc):
         resolved: c.resolved === true,
         modifiedTime: c.modifiedTime,
       }));
-      const sync = await getSessionStub(env, doc.proposal.workId).syncProposalDocApprovalCycle({
+      const sync = await syncProposalDocApprovalCycle(env, doc.proposal.workId, {
         documentId: doc.documentId,
         observations,
       });
