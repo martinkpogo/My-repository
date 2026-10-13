@@ -614,14 +614,8 @@ export interface WorkState {
    */
   financeJudgmentContext?: string;
 
-  /** Original task text for a Marketing work item — carried across redo/clarification loops. */
-  marketingTaskText?: string;
-  /** The current Marketing Hat's drafted output, shown to Martin for approval before anything is treated as done. */
-  marketingDraft?: string;
-  /** A proposed transition to another Marketing Hat (routing or escalation), pending Martin's confirmation. */
-  pendingTransition?: { toHat: string; reason: string };
-  /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
-  pendingPaidMediaAction?: { description: string };
+  /** Marketing's slice of this Work's state (task text, draft, pending transition and spend action) -- see MarketingWorkState. */
+  marketing?: import("./units/marketing/marketingState").MarketingWorkState;
 
   /**
    * The live status checklist of this Work's current run, shown in one

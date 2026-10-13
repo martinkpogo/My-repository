@@ -15,6 +15,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { richText, select } from "../../notion";
 import { updateHandoff } from "../../handoffWriter";
 import { handleHandoffPickup } from "../../hats/executionEngine";
+import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
 
 /**
  * Marketing's Unit Registry manifest (ENIG Operating Model design doc,
@@ -137,7 +138,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     generate<HatActionDecision>(env, {
       taskId: "marketing.hat_action_decision",
       mode: "json",
-      parts: { ...buildHatPromptParts(hat, universalRoleContract), situation: state.marketingTaskText ?? "" },
+      parts: { ...buildHatPromptParts(hat, universalRoleContract), situation: state.marketing?.taskText ?? "" },
     }),
   );
 
@@ -191,7 +192,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       return state;
     }
 
-    state.pendingTransition = { toHat: target, reason: decision.reason ?? "" };
+    marketingOf(state).pendingTransition = { toHat: target, reason: decision.reason ?? "" };
     await finishWorkStatus(env, state, `✅ Proposed handing this to ${target} -- confirm below.`, "succeeded");
     await logActivity(env, {
       entry: `${hatName} proposed routing to ${target}`,
@@ -222,7 +223,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
 
   // action === "draft"
   const isPaidMedia = hatName === "Digital Marketer" && decision.involves_spend === true;
-  state.marketingDraft = decision.draft ?? "";
+  marketingOf(state).draft = decision.draft ?? "";
 
   await finishWorkStatus(
     env,
@@ -231,7 +232,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     "succeeded",
   );
   if (isPaidMedia) {
-    state.pendingPaidMediaAction = { description: decision.draft ?? "" };
+    marketingOf(state).pendingPaidMediaAction = { description: decision.draft ?? "" };
     const paidMediaMessage = `*Paid media action*\n\n${decision.draft}\n\nThis involves spend and requires your explicit approval before anything runs. Approve this budget/spend?`;
     const paidMediaButtons = [
       [
@@ -277,7 +278,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
  * - Stage 2 evaluates specific registered sequential relationships between candidates deterministically.
  */
 export async function handleMarketingIntake(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.marketingTaskText = text;
+  marketingOf(state).taskText = text;
 
   // Stage 1: LLM identifies candidate Hats and establishing context
   const stage1 = await classifyCandidateHats<MarketingHatName>(
@@ -340,15 +341,15 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
 
 /** Redo loop: append Martin's reasoning to the task text and re-run the current Hat's decision from scratch. */
 export async function handleMarketingFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  state.marketingTaskText = `${state.marketingTaskText ?? ""}\n\nMartin's feedback: ${text}`;
+  marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nMartin's feedback: ${text}`;
   return dispatchMarketingHat(env, state);
 }
 
 /** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
 export async function handleMarketingClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const augmented = `${state.marketingTaskText ?? ""}\n\nAdditional detail: ${text}`;
+  const augmented = `${state.marketing?.taskText ?? ""}\n\nAdditional detail: ${text}`;
   if (isMarketingHat(state.hat)) {
-    state.marketingTaskText = augmented;
+    marketingOf(state).taskText = augmented;
     return dispatchMarketingHat(env, state);
   }
   return handleMarketingIntake(env, state, augmented);
@@ -372,7 +373,7 @@ export const MARKET_TRANSITION_CALLBACK_PREFIX = "markettransition" as const;
  * transition and re-runs dispatchMarketingHat under the new Hat.
  */
 export async function handleTransitionApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
-  const pending = state.pendingTransition;
+  const pending = state.marketing?.pendingTransition;
   if (!pending) {
     await sendWorkspaceHatMessage(env, state, "This transition has already been resolved -- nothing to do.");
     return state;
@@ -381,14 +382,14 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
 
   if (!approved) {
     await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what to reconsider and I'll take another look.");
-    state.pendingTransition = undefined;
+    marketingOf(state).pendingTransition = undefined;
     state.awaiting = "marketing_feedback";
     return state;
   }
 
   const fromHat = state.hat;
   state.hat = pending.toHat;
-  state.pendingTransition = undefined;
+  marketingOf(state).pendingTransition = undefined;
   await logActivity(env, {
     entry: `Marketing work routed: ${fromHat} -> ${pending.toHat}`,
     type: "Decision",
@@ -449,7 +450,7 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
       state.handoffId,
       {
         Status: select("Closed"),
-        "Work Completed": richText((state.marketingDraft ?? "").slice(0, 1900)),
+        "Work Completed": richText((state.marketing?.draft ?? "").slice(0, 1900)),
       },
       workSessionContext(state),
     ).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
@@ -459,12 +460,12 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     entry: `${state.hat} output approved`,
     type: "Decision",
     area: "Marketing",
-    decisions: state.marketingDraft?.slice(0, 500) ?? "",
+    decisions: state.marketing?.draft?.slice(0, 500) ?? "",
     decisionRationale: "Approved by Martin.",
     outcome: "Complete",
   });
   await sendWorkspaceHatMessage(env, state, `Approved.`);
-  state.marketingDraft = undefined;
+  marketingOf(state).draft = undefined;
   state.stage = "complete";
   state.awaiting = undefined;
   return state;
@@ -499,7 +500,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
 
   if (!approved) {
     await sendWorkspaceHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
-    state.pendingPaidMediaAction = undefined;
+    marketingOf(state).pendingPaidMediaAction = undefined;
     state.awaiting = "marketing_feedback";
     return state;
   }
@@ -508,13 +509,13 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
     entry: `Digital Marketer paid media action approved`,
     type: "Decision",
     area: "Marketing",
-    decisions: state.pendingPaidMediaAction?.description.slice(0, 500) ?? "",
+    decisions: state.marketing?.pendingPaidMediaAction?.description.slice(0, 500) ?? "",
     decisionRationale: "Budget/spend approved by Martin.",
     outcome: "Complete",
   });
   await sendWorkspaceHatMessage(env, state, `Spend approved.`);
-  state.pendingPaidMediaAction = undefined;
-  state.marketingDraft = undefined;
+  marketingOf(state).pendingPaidMediaAction = undefined;
+  marketingOf(state).draft = undefined;
   state.stage = "complete";
   state.awaiting = undefined;
   return state;
@@ -622,6 +623,8 @@ export const marketingManifest: UnitManifest = {
   // Marketing takes in Handoffs addressed to any of its Hats; the Handoff's
   // destination facts decide which Hat owns the Work (resolved by discovery).
   handoffPickup: { handler: (env, state, skills) => handleHandoffPickup(env, state, skills) },
+  // Marketing's state lives in WorkState.marketing; a Work saved with the old loose fields is read into it on load.
+  migrateWorkState: migrateLegacyMarketingState,
 };
 
 /**
@@ -640,5 +643,5 @@ export async function dispatchMarketingHat(env: Env, state: WorkState): Promise<
     // silently no-opping if that invariant is ever violated.
     throw new Error(`dispatchMarketingHat: "${hatName}" is not a registered Marketing Hat.`);
   }
-  return hat.entryHandler(env, state, "handle_request", state.marketingTaskText ?? "", await resolveRecordedActionSkills(hat, "handle_request"));
+  return hat.entryHandler(env, state, "handle_request", state.marketing?.taskText ?? "", await resolveRecordedActionSkills(hat, "handle_request"));
 }

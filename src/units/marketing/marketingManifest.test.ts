@@ -106,7 +106,7 @@ test("findCallbackHandler resolves markettransition on Marketing Strategist and 
   mockTelegramFetch(t);
   const env = fakeEnv();
   const state = fakeWorkState({
-    pendingTransition: { toHat: "Digital Marketer", reason: "Needs paid media expertise" },
+    marketing: { pendingTransition: { toHat: "Digital Marketer", reason: "Needs paid media expertise" } },
   });
 
   const hat = marketingManifest.hats["Marketing Strategist"];
@@ -115,7 +115,7 @@ test("findCallbackHandler resolves markettransition on Marketing Strategist and 
 
   const result = await handler(env, state, false);
 
-  assert.strictEqual(result.pendingTransition, undefined);
+  assert.strictEqual(result.marketing?.pendingTransition, undefined);
   assert.strictEqual(result.awaiting, "marketing_feedback");
   assert.strictEqual(result.hat, "Marketing Strategist", "must not commit the Hat transition on rejection");
 });
@@ -125,7 +125,7 @@ test("findCallbackHandler resolves marketdraft on Marketing Strategist and genui
   const env = fakeEnv();
   const state = fakeWorkState({
     stage: "awaiting_marketing_draft_approval",
-    marketingDraft: "Some drafted output",
+    marketing: { draft: "Some drafted output" },
   });
 
   const hat = marketingManifest.hats["Marketing Strategist"];
@@ -136,7 +136,7 @@ test("findCallbackHandler resolves marketdraft on Marketing Strategist and genui
 
   assert.strictEqual(result.awaiting, "marketing_feedback");
   assert.strictEqual(result.stage, "awaiting_marketing_draft_approval", "must not advance to complete on rejection");
-  assert.strictEqual(result.marketingDraft, "Some drafted output", "must not discard the draft on rejection -- only on approval");
+  assert.strictEqual(result.marketing?.draft, "Some drafted output", "must not discard the draft on rejection -- only on approval");
 });
 
 test("findCallbackHandler resolves marketpaid on Digital Marketer and genuinely delegates to handlePaidMediaApproval -- rejecting a pending spend action discards it and holds on marketing_feedback without closing the stage, proving real delegation", async (t) => {
@@ -145,7 +145,7 @@ test("findCallbackHandler resolves marketpaid on Digital Marketer and genuinely 
   const state = fakeWorkState({
     hat: "Digital Marketer",
     stage: "awaiting_paid_media_approval",
-    pendingPaidMediaAction: { description: "Boost a Facebook post, $200 budget" },
+    marketing: { pendingPaidMediaAction: { description: "Boost a Facebook post, $200 budget" } },
   });
 
   const hat = marketingManifest.hats["Digital Marketer"];
@@ -154,7 +154,7 @@ test("findCallbackHandler resolves marketpaid on Digital Marketer and genuinely 
 
   const result = await handler(env, state, false);
 
-  assert.strictEqual(result.pendingPaidMediaAction, undefined);
+  assert.strictEqual(result.marketing?.pendingPaidMediaAction, undefined);
   assert.strictEqual(result.awaiting, "marketing_feedback");
   assert.strictEqual(result.stage, "awaiting_paid_media_approval", "must not advance to complete on rejection");
 });
@@ -214,7 +214,7 @@ test("Status: a Marketing Hat run shows its real steps and ends on the draft awa
     AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "A positioning brief draft." }) }) } as any,
   });
 
-  await handleMarketingFeedback(env, fakeWorkState({ marketingTaskText: "Draft a positioning brief for MAT-9." }), "Make it shorter.");
+  await handleMarketingFeedback(env, fakeWorkState({ marketing: { taskText: "Draft a positioning brief for MAT-9." } }), "Make it shorter.");
 
   const final = sentTexts.filter((s) => s.startsWith("Hat: Marketing Strategist.\n\n🧭")).at(-1)!;
   let at = -1;

@@ -9,6 +9,7 @@ import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { workSessionContext } from "./access";
 import { isTerminalWorkStage } from "./matterContinuation";
 import { deriveSessionLabel } from "./sessionsIndex";
+import { migrateWorkState } from "./workStateMigration";
 
 /**
  * Saved-Work compatibility contract.
@@ -25,15 +26,22 @@ import { deriveSessionLabel } from "./sessionsIndex";
 
 // Every field WorkState persists today. Removing or renaming one fails the
 // first test below; ADDING one is fine (append it here when you do).
+//
+// Marketing's four fields (marketingTaskText, marketingDraft, pendingTransition,
+// pendingPaidMediaAction) moved into the `marketing` slice on 2026-10-13 --
+// a DELIBERATE migration, not a stranding: migrateLegacyMarketingState reads
+// a Work saved with the old loose fields into the slice on load (see the
+// "Legacy shape" test below), so this list tracks the CURRENT shape and the
+// migration function is what keeps the old one readable.
 const PERSISTED_FIELDS = [
   "actionName", "awaiting", "bdOpportunity", "blockedReason", "callNotes", "candidateEntities", "candidateMatters", "chatId",
   "commercialEvidence", "commercialValueEvidenceBlock", "commercialValueEvidenceError", "createdAt", "enquiryText", "entityDraft",
   "entityId", "entityName", "entityToken", "entryType", "externalOperations", "financeJudgmentContext", "financeThreadId", "handoffId",
-  "hat", "investmentToleranceContext", "marketingDraft", "marketingTaskText", "matterDraft", "matterId", "matterIdUnresolved",
+  "hat", "investmentToleranceContext", "marketing", "matterDraft", "matterId", "matterIdUnresolved",
   "matterName", "matterToken", "measurementBaseline", "pendingActionSummary", "pendingApproval", "pendingBDDevelop", "pendingBDHandoff",
-  "pendingBDNextMove", "pendingGoogleAction", "pendingHandoffAutoCheck", "pendingLeadOpportunity", "pendingPaidMediaAction",
+  "pendingBDNextMove", "pendingGoogleAction", "pendingHandoffAutoCheck", "pendingLeadOpportunity",
   "pendingProposalDocClarification", "pendingSalesProposalRevision", "pendingSmokeSelection", "pendingStrategyApproval",
-  "pendingStrategyHandoff", "pendingStrategyRefinement", "pendingTransition", "proposalApprovalCycle", "proposalDraft",
+  "pendingStrategyHandoff", "pendingStrategyRefinement", "proposalApprovalCycle", "proposalDraft",
   "proposalRevisionCount", "proposedIntervention", "qualification", "quote", "salesProposal", "stage", "strategyApprovalState",
   "strategyContext", "strategyDiagnosis", "strategyDiscussion", "strategyProposal", "strategyProposalHistory",
   "strategyProposalTokenSafety", "strategyQuestion", "strategySkillCycleUnavailable", "strategySkillCycleUnavailableCause",
@@ -137,7 +145,10 @@ const SAVED: Record<string, Record<string, unknown>> = {
     pendingActionSummary: { label: "Opportunity: Acme", message: "m", buttons: [], createdAt: "2026-10-12T10:00:00.000Z" },
     createdAt: "2026-10-12T10:00:00.000Z", updatedAt: "2026-10-12T10:00:00.000Z",
   },
-  "Marketing parked on draft feedback": {
+  // Deliberately in the OLD (pre-2026-10-13) shape -- loose marketingTaskText/
+  // marketingDraft, no `marketing` slice -- so this fixture also exercises
+  // migrateWorkState below, not just today's shape.
+  "Marketing parked on draft feedback (old saved shape)": {
     workId: "w-mkt-1", chatId: 1, unit: "Marketing", hat: "Content Manager", actionName: "handle_request", stage: "marketing_draft_review",
     awaiting: "marketing_feedback", marketingTaskText: "t", marketingDraft: "d", createdAt: "2026-10-05T10:00:00.000Z", updatedAt: "2026-10-05T11:00:00.000Z",
   },
@@ -164,4 +175,19 @@ test("A Work saved in today's shape still reads through every generic path after
     // The Hat that owns it is still registered.
     assert.ok(findUnitManifest(state.unit as NonNullable<WorkState["unit"]>)?.hats[state.hat as string], `${name}: its Hat is still registered`);
   }
+});
+
+test("Legacy shape: a Marketing Work saved before the `marketing` slice existed is migrated on load, and migration is idempotent", () => {
+  const saved = JSON.parse(JSON.stringify(SAVED["Marketing parked on draft feedback (old saved shape)"])) as Record<string, unknown>;
+  assert.ok(!("marketing" in saved), "fixture must genuinely be in the old shape to prove anything");
+
+  const migrated = migrateWorkState(saved) as unknown as WorkState;
+  assert.deepStrictEqual(migrated.marketing, { taskText: "t", draft: "d" }, "the loose fields are read into the slice");
+  assert.strictEqual("marketingTaskText" in migrated, false, "the old loose field is removed, not merely shadowed");
+  assert.strictEqual("marketingDraft" in migrated, false);
+  assert.strictEqual(typeof resolveAwaitingHandler(migrated), "function", "dispatch still resolves its continuation after migration");
+
+  // Running it again (the next load of an already-migrated Work) changes nothing.
+  const again = migrateWorkState(JSON.parse(JSON.stringify(migrated)));
+  assert.deepStrictEqual(again, JSON.parse(JSON.stringify(migrated)), "migrating an already-current Work is a no-op");
 });
