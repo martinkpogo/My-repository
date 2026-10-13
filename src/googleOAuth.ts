@@ -5,6 +5,7 @@ import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from
 import { generate } from "./ai";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
+import { isAdminAuthorized } from "./adminAuth";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -226,8 +227,7 @@ export function base64url(bytes: Uint8Array): string {
 
 export async function handleGoogleOAuthStart(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const key = url.searchParams.get("key");
-  if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+  if (!isAdminAuthorized(request, env)) {
     return new Response("forbidden", { status: 403 });
   }
   const state = generateState();
@@ -381,8 +381,7 @@ export async function testGoogleDriveConnection(
 
 export async function handleGoogleDriveTest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const key = url.searchParams.get("key");
-  if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+  if (!isAdminAuthorized(request, env)) {
     return new Response("forbidden", { status: 403 });
   }
 
