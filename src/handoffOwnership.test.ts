@@ -348,20 +348,23 @@ test("a transfer clears every staged-interaction field and deliberately retains 
   const state = strategyState();
   // Seed every field on the list with a sentinel, whatever its real type,
   // so this test proves the clearing itself rather than one fixture's state.
+  const read = (field: string): unknown => field.split(".").reduce<unknown>((acc, key) => (acc as Record<string, unknown> | undefined)?.[key], state);
   for (const field of STAGED_INTERACTION_FIELDS) {
-    (state as unknown as Record<string, unknown>)[field] = field === "workStatusMessageId" ? 1 : { sentinel: field };
+    const [head, tail] = field.split(".");
+    const value = field === "workStatusMessageId" ? 1 : { sentinel: field };
+    if (tail === undefined) (state as unknown as Record<string, unknown>)[head] = value;
+    else ((state as unknown as Record<string, Record<string, unknown>>)[head] ??= {})[tail] = value;
   }
+  // Evidence the chain carries forward lives in the same Marketing slice and must survive.
+  (state as unknown as Record<string, Record<string, unknown>>).marketing.taskText = "carried-forward task";
   (state as unknown as Record<string, unknown>).pendingGoogleAction = { sentinel: "google" };
 
   await adoptHandoffOwnership(fakeEnv(), state, "Finance");
 
   for (const field of STAGED_INTERACTION_FIELDS) {
-    assert.strictEqual(
-      (state as unknown as Record<string, unknown>)[field],
-      undefined,
-      `${field} must not travel from the sending Unit to the receiving one`,
-    );
+    assert.strictEqual(read(field), undefined, `${field} must not travel from the sending Unit to the receiving one`);
   }
+  assert.strictEqual(read("marketing.taskText"), "carried-forward task", "clearing a staged field inside a Unit's slice leaves the rest of the slice alone");
   assert.deepStrictEqual(
     (state as unknown as Record<string, unknown>).pendingGoogleAction,
     { sentinel: "google" },

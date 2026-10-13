@@ -63,11 +63,29 @@ import { logActivity } from "./log";
  * substantive context are also left alone -- they are evidence the chain
  * carries forward, not interaction state.
  */
-export const STAGED_INTERACTION_FIELDS: readonly (keyof WorkState)[] = [
+export type StagedInteractionField = keyof WorkState | `marketing.${"pendingTransition" | "pendingPaidMediaAction"}`;
+
+/**
+ * Clears one staged-interaction field. A dotted path (`marketing.pendingTransition`)
+ * clears a field inside a Unit's state slice and leaves the rest of the slice
+ * (the task text and draft are evidence the chain carries forward) alone.
+ */
+export function clearStagedInteractionField(state: WorkState, field: StagedInteractionField): void {
+  const [head, tail] = field.split(".") as [string, string | undefined];
+  const record = state as unknown as Record<string, unknown>;
+  if (tail === undefined) {
+    record[head] = undefined;
+    return;
+  }
+  const slice = record[head];
+  if (slice && typeof slice === "object") (slice as Record<string, unknown>)[tail] = undefined;
+}
+
+export const STAGED_INTERACTION_FIELDS: readonly StagedInteractionField[] = [
   "awaiting",
   "pendingApproval",
-  "pendingTransition",
-  "pendingPaidMediaAction",
+  "marketing.pendingTransition",
+  "marketing.pendingPaidMediaAction",
   "pendingStrategyHandoff",
   "pendingBDHandoff",
   "pendingBDDevelop",
@@ -128,9 +146,7 @@ export async function adoptHandoffOwnership(env: Env, state: WorkState, expected
   state.unit = unit;
   state.hat = hat;
   state.actionName = candidate.actionName;
-  for (const field of STAGED_INTERACTION_FIELDS) {
-    (state as unknown as Record<string, unknown>)[field] = undefined;
-  }
+  for (const field of STAGED_INTERACTION_FIELDS) clearStagedInteractionField(state, field);
 
   // Governance evidence for the transfer itself: which Handoff moved it,
   // from where to where. Written by the receiving Unit's area.

@@ -246,6 +246,16 @@ export interface UnitManifest {
    * its Pending Handoffs are counted and reported but never picked up.
    */
   handoffPickup?: HandoffPickupDeclaration;
+
+  /**
+   * Reads this Unit's OLD saved-state shape (loose top-level fields) into its
+   * slice of WorkState and removes the loose fields. Only a Unit that has
+   * moved its state into its own slice declares this. Must be idempotent and
+   * must never overwrite a value already in the slice; applied to every saved
+   * Work on load (src/workStateMigration.ts), so in-flight Works convert on
+   * their next save.
+   */
+  migrateWorkState?: (saved: Record<string, unknown>) => void;
 }
 
 export function findHatManifest(hatName: string | undefined, manifest: UnitManifest): HatManifest | undefined {

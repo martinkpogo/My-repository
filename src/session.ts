@@ -16,6 +16,7 @@ import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/sk
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
+import { migrateSavedWork } from "./workStateMigration";
 import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
 import {
@@ -80,7 +81,7 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   async getState(): Promise<WorkState | undefined> {
-    return this.ctx.storage.get<WorkState>("state");
+    return migrateSavedWork(await this.ctx.storage.get<WorkState>("state"));
   }
 
   // Marketing's own intake resolves WHICH Marketing Hat owns a direct
@@ -612,7 +613,7 @@ export class WorkSession extends DurableObject<Env> {
     const release = installWorkPersistence(
       String(state.workId),
       workStatePersistence(state, async () => {
-        const persisted = (await this.ctx.storage.get<WorkState>("state")) ?? state;
+        const persisted = migrateSavedWork(await this.ctx.storage.get<WorkState>("state")) ?? state;
         await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations });
       }),
     );

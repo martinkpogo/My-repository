@@ -1,3 +1,4 @@
+import { marketingOf } from "../units/marketing/marketingState";
 import type { Env, WorkState } from "../types";
 import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
 import { workSessionContext } from "../access";
@@ -46,7 +47,7 @@ import { dispatchMarketingHat } from "../units/marketing/marketingManifest";
  * originated work, since the sender already determined which Hat this
  * belongs to; reads the Handoff's own Reason/Verified Facts & Sources as
  * the task text, the same shape dispatchMarketingHat already expects from
- * state.marketingTaskText.
+ * state.marketing?.taskText.
  */
 export async function handleHandoffPickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
   const handoff = await getPage(env, state.handoffId!, workSessionContext(state));
@@ -64,7 +65,7 @@ export async function handleHandoffPickup(env: Env, state: WorkState, _skills: R
   // this Handoff's lifecycle.
   await updateHandoff(env, state.handoffId!, { Status: select("Picked-up") }, workSessionContext(state));
   state.hat = "Marketing Strategist";
-  state.marketingTaskText = taskText;
+  marketingOf(state).taskText = taskText;
   await logActivity(env, {
     entry: `Marketing Strategist picked up a Handoff`,
     type: "Activity",
