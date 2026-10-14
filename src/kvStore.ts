@@ -626,6 +626,7 @@ async function serveRow(
 ): Promise<string> {
   const bytes = decodeEnvelope(live.row.value) ? live.row.value : wrapValue(live.entry.value, live.entry.seq);
   try {
+    noteKvWrite(key, "repair");
     await env.STATE_KV.put(key, bytes, live.ttl !== null ? { expirationTtl: Math.max(live.ttl, 60) } : undefined);
   } catch (err) {
     console.error(`kvStore: KV repair write failed for ${key}`, err);
@@ -635,8 +636,31 @@ async function serveRow(
   return live.entry.value;
 }
 
+/**
+ * The KEY CLASS of a KV key: everything up to and including its first colon
+ * (`google_comment_processed:AAAC...` -> `google_comment_processed:`), or the
+ * whole key when it has no colon. Safe to log: the part after the colon can
+ * carry identifiers (an account email, a document or comment id), so it is
+ * never included.
+ */
+export function kvKeyClass(key: string): string {
+  const colon = key.indexOf(":");
+  return colon === -1 ? key : key.slice(0, colon + 1);
+}
+
+/**
+ * One log line per KV write attempt, by key class and write path. Cloudflare's
+ * KV analytics cannot attribute writes to keys, so this is how the free
+ * tier's 1,000-writes-a-day budget is attributed (count `kv_write` lines by
+ * `class` in Workers logs). It counts attempts, before the write is issued.
+ */
+function noteKvWrite(key: string, path: "put" | "repair" | "sweep"): void {
+  console.log(`kv_write class=${kvKeyClass(key)} path=${path}`);
+}
+
 export async function kvPut(env: Env, key: string, value: string, opts?: { expirationTtl?: number }): Promise<void> {
   const cfg = tursoConfig(env);
+  noteKvWrite(key, "put");
   if (!cfg || !isFallbackEligible(key)) return env.STATE_KV.put(key, value, opts);
 
   // Versioned envelope: the seq stamps this write so reads/sweeps can tell
@@ -826,6 +850,7 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
       // Preserve the row's version when restoring, so a row whose shadow
       // delete later fails can never win against a subsequent KV write.
       const bytes = decodeEnvelope(row.value) ? row.value : wrapValue(entry.value, entry.seq);
+      noteKvWrite(row.key, "sweep");
       await env.STATE_KV.put(row.key, bytes, ttl !== null ? { expirationTtl: Math.max(ttl, 60) } : undefined);
     } catch (err) {
       console.error(`kvStore: sweep KV write failed at ${row.key}; remaining rows held for a later pass`, err);
