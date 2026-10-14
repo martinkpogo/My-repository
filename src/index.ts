@@ -34,7 +34,7 @@ import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
-import { kvDelete, kvGet, kvList, kvPut, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
+import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 import { isAdminAuthorized } from "./adminAuth";
@@ -229,7 +229,7 @@ export default {
       // (e.g. if this key's write rate is briefly exceeded). This key records
       // ANY discovery run, whatever started it; the native Cron Trigger also
       // writes its own `last_native_cron_run` so the two can be told apart.
-      await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
+      await kvPutHeartbeat(env, "last_cron_run", CRON_STAMP_MIN_INTERVAL_MS).catch((err) =>
         console.error("Failed to record last_cron_run", err),
       );
       try {
@@ -501,11 +501,10 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    const ranAt = new Date().toISOString();
-    await kvPut(env, "last_cron_run", ranAt).catch((err) => console.error("Failed to record last_cron_run", err));
+    await kvPutHeartbeat(env, "last_cron_run", CRON_STAMP_MIN_INTERVAL_MS).catch((err) => console.error("Failed to record last_cron_run", err));
     // Native-only timestamp, so /admin/last-cron-run can tell this trigger
     // apart from an external caller of /admin/run-finance-discovery.
-    await kvPut(env, "last_native_cron_run", ranAt).catch((err) => console.error("Failed to record last_native_cron_run", err));
+    await kvPutHeartbeat(env, "last_native_cron_run", CRON_STAMP_MIN_INTERVAL_MS).catch((err) => console.error("Failed to record last_native_cron_run", err));
     // Section 5B reconciliation heartbeat (throttled internally; a no-op when
     // Turso is unconfigured). Runs here as well as in the comment poll so the
     // sweep does not depend on any single entry point staying scheduled.

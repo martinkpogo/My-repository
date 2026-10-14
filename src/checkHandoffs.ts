@@ -9,7 +9,7 @@ import { resolveOrganization } from "./runtime/organization";
 import { resolveActionExecution } from "./runtime/actionResolution";
 import { workContractForRequest, type WorkRequest } from "./runtime/workContract";
 import { resolveMatterIdFromToken } from "./matterContinuation";
-import { kvDelete, kvGet, kvPut } from "./kvStore";
+import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvPut, kvPutHeartbeat } from "./kvStore";
 
 /**
  * Handoff discovery -- the single implementation behind the /checkhandoffs
@@ -478,7 +478,7 @@ export async function runCheckHandoffs(
     // native Cron Trigger already run -- exposed as a command (and now
     // also as an automatic continuation and a webhook-triggered run) so it
     // can run immediately rather than waiting for the next scheduled cycle.
-    await kvPut(env, "last_cron_run", new Date().toISOString()).catch((err) =>
+    await kvPutHeartbeat(env, "last_cron_run", CRON_STAMP_MIN_INTERVAL_MS).catch((err) =>
       console.error("Failed to record last_cron_run", err),
     );
     const unitHere = resolveUnitForThread(env, threadId);
