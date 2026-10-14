@@ -294,6 +294,36 @@ test("F. malformed Tool definitions fail closed (validateToolOperations)", () =>
   assert.match(validateToolOperations([base, { ...base }]) ?? "", /registered more than once/);
 });
 
+test("F2. a contradictory duplicate registration names the field that disagrees -- 'which contract governs this id?' must have an answer", () => {
+  const base: ToolOperationDefinition = {
+    toolId: "demo",
+    operationId: "demo.act",
+    version: "1.0",
+    effect: "external_mutation",
+    validateInput: () => null,
+    resolveTarget: async () => ({ ok: true, target: { resourceId: "demo:1" } }),
+    run: async () => ({ state: "succeeded", tool_id: "demo", operation_id: "demo.act", verified: true, remote_resource: { document_id: "1" } }),
+  };
+  const versionConflict = validateToolOperations([base, { ...base, version: "2.0" }]);
+  assert.match(versionConflict ?? "", /registered more than once/);
+  assert.match(versionConflict ?? "", /DISAGREE on version "1\.0" vs "2\.0"/, "the conflicting field is named, not flattened away");
+
+  // Ordering matters and is asserted: the effect classification rule runs
+  // BEFORE duplicate detection, so an unpermitted effect is reported as an
+  // unknown effect rather than being absorbed into a duplicate diagnostic.
+  assert.match(
+    validateToolOperations([base, { ...base, effect: "external_read" as any }]) ?? "",
+    /declares unknown effect "external_read"/,
+    "an unknown effect is caught by its own rule first",
+  );
+});
+
+test("F3. the registration table's own input fails closed with a diagnostic rather than an iteration crash", () => {
+  assert.match(validateToolOperations(5 as any) ?? "", /must be a list of operation definitions -- got number/);
+  assert.match(validateToolOperations(null as any) ?? "", /must be a list of operation definitions/);
+  assert.equal(validateToolOperations([]), null, "an empty table is well-formed -- nothing is registered");
+});
+
 test("G. Action declarations validate against the registry: unregistered operations are defects, exact ones pass", () => {
   const declaring = [{ name: "proposal_submit", tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }] }];
   assert.equal(validateActionToolDeclarations(declaring), null);
@@ -301,6 +331,49 @@ test("G. Action declarations validate against the registry: unregistered operati
   assert.match(validateActionToolDeclarations(unregistered) ?? "", /not registered in the Tool Registry/);
   const noDeclaration = [{ name: "new_enquiry" }];
   assert.equal(validateActionToolDeclarations(noDeclaration), null, "an Action with no declaration has nothing to cross-check");
+});
+
+test("G2. the cross-check reports EVERY defective declaration, not just the first -- one pass is enough to fix a manifest", () => {
+  const aggregate = validateActionToolDeclarations([
+    { name: "one", tool_operations: [{ tool_id: "x", operation_id: "x.nope", required: false }] },
+    { name: "two", tool_operations: [{ tool_id: "y", operation_id: "y.nope", required: false }] },
+    { name: "three", tool_operations: [{ tool_id: "google_docs", operation_id: "create_and_verify", required: false }] },
+  ]);
+  assert.match(aggregate ?? "", /^3 Tool operation declaration defects:/, "the count leads the diagnostic");
+  assert.match(aggregate ?? "", /action "one" declares Tool operation x\.nope/, "the first defect names its Action and operation");
+  assert.match(aggregate ?? "", /action "two" declares Tool operation y\.nope/, "the second defect is reported too, not swallowed");
+  assert.match(aggregate ?? "", /three: declared Tool operation google_docs\.create_and_verify is inconsistent/, "defects of DIFFERENT classes aggregate into the same report");
+  // A single defect keeps the exact one-line message the Unit Registry build
+  // (and its test) depends on.
+  assert.equal(
+    validateActionToolDeclarations([{ name: "solo", tool_operations: [{ tool_id: "x", operation_id: "x.nope", required: false }] }]),
+    'action "solo" declares Tool operation x.nope, which is not registered in the Tool Registry -- a declaration may name only an exact registered operation',
+    "one defect stays one line, so assembly diagnostics are unchanged for the common case",
+  );
+});
+
+test("G3. the cross-check applies the SAME shape rule as the Action Registry, so a malformed declaration is never reported as merely 'not registered'", () => {
+  assert.match(
+    validateActionToolDeclarations([{ name: "n", tool_operations: [{ tool_id: "google_docs", operation_id: "create_and_verify", required: false }] }]) ?? "",
+    /is inconsistent -- operation ids are Tool-scoped/,
+    "an un-namespaced operation id names its real defect here, not a false 'not registered'",
+  );
+  assert.match(
+    validateActionToolDeclarations([{ name: "n", tool_operations: [null] as any }]) ?? "",
+    /^n: every declared Tool operation must be an object carrying tool_id, operation_id and required -- got null$/,
+  );
+  for (const bad of ["google_docs", 5, null]) {
+    assert.match(
+      validateActionToolDeclarations([{ name: "n", tool_operations: bad as any }]) ?? "",
+      /tool_operations must be a list of Tool operation declarations when declared/,
+      `a non-list must fail closed with a diagnostic for ${JSON.stringify(bad)}, never throw`,
+    );
+  }
+  assert.match(
+    validateActionToolDeclarations("not a list" as any) ?? "",
+    /requires a list of registered Actions/,
+    "the cross-check's own input fails closed too",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -350,6 +423,32 @@ test("K. an Action that does not declare the operation is denied (undeclared Act
   const env = fakeEnv({}, kv);
   const undeclaredContext = workSessionContext(toolState({ actionName: "new_enquiry" }));
   await expectDenied(env, undeclaredContext, /does not declare Tool operation google_docs\.create_and_verify/, t);
+});
+
+test("K2. registration plus a valid declaration still grant nothing -- the declaration half resolves, the authorization half denies", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+
+  // (a) the operation IS registered, and (b) this Action's declaration of it
+  // resolves cleanly at the registration boundary. Both are true, and both
+  // are only the ALLOWLIST half of the decision.
+  assert.ok(
+    resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID),
+    "the operation is registered in the Tool Registry",
+  );
+  assert.equal(
+    validateActionToolDeclarations([
+      { name: "proposal_submit", tool_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }] },
+    ]),
+    null,
+    "the declaration cross-check passes for it",
+  );
+
+  // (c) neither fact authorizes anything: an Action that does not declare the
+  // operation is still denied, and the approval-gated declaring Action is
+  // still denied without bound proof. Registration never became permission.
+  await expectDenied(env, workSessionContext(toolState({ actionName: "new_enquiry" })), /does not declare Tool operation google_docs\.create_and_verify/, t);
+  await expectDenied(env, workSessionContext(toolState({ actionName: "proposal_approve" })), /requires Martin's explicit approval/, t);
 });
 
 test("L. a caller cannot substitute a different Action: an asserted-Action mismatch fails closed", async (t) => {

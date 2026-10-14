@@ -298,6 +298,11 @@ export async function dispatchAction<A extends string>(
  * silently accepted one would be reading a guess as a declaration. Returns
  * the reason string on failure, or null when the definition is well-formed.
  *
+ * A declared Tool operation's own shape is decided by the shared
+ * `validateActionToolOperations` rule below, which the Tool Registry's
+ * cross-check also applies -- so this boundary and that one cannot disagree
+ * about what a well-formed declaration is.
+ *
  * Deliberately NOT checked here: whether a Hat is allowed to declare a given
  * consequence or approval requirement. That is a governance question about
  * the Unit's organizational model, not a shape question about one object.
@@ -319,30 +324,83 @@ export function validateActionDefinition(action: ActionDefinition<string>): stri
   if (action.consequence === "internal" && action.requiresApproval) {
     return `${action.name}: declared consequence "internal" but requiresApproval is true -- internal actions mutate execution state only and must never gate on approval`;
   }
+  if (action.skill_requirements !== undefined && !Array.isArray(action.skill_requirements)) {
+    return `${action.name}: skill_requirements must be a list of Skill requirements when declared -- a non-list is a malformed Action, never an empty one`;
+  }
   for (const requirement of action.skill_requirements ?? []) {
     if (!SKILL_IDS.includes(requirement.skill_id)) {
       return `${action.name}: declares an unknown Skill id "${String(requirement.skill_id)}" -- Skill requirements resolve by exact id only`;
     }
   }
+  const toolDeclarationDefect = validateActionToolOperations(action.name, action.tool_operations);
+  if (toolDeclarationDefect) return toolDeclarationDefect;
+  const applicabilityDefect = validateApplicability(action.name, action.applicability);
+  if (applicabilityDefect) return applicabilityDefect;
+  return null;
+}
+
+/**
+ * Shape validation for one Action's declared Tool operations
+ * (`ActionDefinition.tool_operations`) -- the DECLARATION half of the Tool
+ * contract, decided without consulting the Tool Registry. Whether the named
+ * operation is actually registered is the separate cross-check
+ * `validateActionToolDeclarations` performs (src/runtime/toolRegistry.ts),
+ * which calls this same rule first. One rule, two boundaries: neither can
+ * accept a declaration the other rejects.
+ *
+ * Fails closed, and every defect names the Action:
+ *   - a declared-but-non-list value. Omission is valid (the field is
+ *     optional); anything else is a malformed Action and is never silently
+ *     read as an empty allowlist -- previously a non-iterable value reached
+ *     the loop below and threw a raw TypeError instead of a diagnostic;
+ *   - a non-object entry, or a missing/blank tool id or operation id
+ *     ("any Tool"/"any operation" is never read from an omission);
+ *   - an operation id that is not namespaced by its OWN tool id. The Tool
+ *     Registry registers every operation as `<toolId>.<operationId>` and
+ *     resolves exactly that pair, so a declaration naming an operation
+ *     outside its declared Tool's namespace can NEVER resolve -- it fails
+ *     here, stating that, rather than surfacing later at the cross-check as
+ *     a misleading "not registered in the Tool Registry";
+ *   - a missing boolean `required` (omission is never a declaration);
+ *   - the same operation declared twice (the permitted allowlist would be
+ *     ambiguous about which entry governs).
+ *
+ * Deliberately NOT decided here: whether this Action may USE the operation.
+ * That is authorization -- the Work's own resolved Action, its effect
+ * classification, Access, and bound approval evidence. A declaration is only
+ * the allowlist half of that decision and grants nothing by existing.
+ */
+export function validateActionToolOperations(
+  actionName: string,
+  declarations: readonly ActionToolOperation[] | undefined,
+): string | null {
+  if (declarations === undefined) return null;
+  if (!Array.isArray(declarations)) {
+    return `${actionName}: tool_operations must be a list of Tool operation declarations when declared -- a non-list is a malformed Action, never an empty allowlist`;
+  }
   const declaredToolOperations = new Set<string>();
-  for (const declaration of action.tool_operations ?? []) {
-    if (typeof declaration?.tool_id !== "string" || !declaration.tool_id.trim()) {
-      return `${action.name}: a declared Tool operation must carry a non-empty tool id -- omission is never "any Tool"`;
+  for (const declaration of declarations) {
+    if (typeof declaration !== "object" || declaration === null) {
+      return `${actionName}: every declared Tool operation must be an object carrying tool_id, operation_id and required -- got ${declaration === null ? "null" : typeof declaration}`;
+    }
+    if (typeof declaration.tool_id !== "string" || !declaration.tool_id.trim()) {
+      return `${actionName}: a declared Tool operation must carry a non-empty tool id -- omission is never "any Tool"`;
     }
     if (typeof declaration.operation_id !== "string" || !declaration.operation_id.trim()) {
-      return `${action.name}: a declared Tool operation must carry a non-empty operation id -- omission is never "any operation"`;
+      return `${actionName}: a declared Tool operation must carry a non-empty operation id -- omission is never "any operation"`;
     }
     if (typeof declaration.required !== "boolean") {
-      return `${action.name}: declared Tool operation ${declaration.tool_id}.${declaration.operation_id} must state "required" explicitly -- omission is never a declaration`;
+      return `${actionName}: declared Tool operation ${declaration.tool_id}.${declaration.operation_id} must state "required" explicitly -- omission is never a declaration`;
+    }
+    if (!declaration.operation_id.startsWith(`${declaration.tool_id}.`)) {
+      return `${actionName}: declared Tool operation ${declaration.tool_id}.${declaration.operation_id} is inconsistent -- operation ids are Tool-scoped ("${declaration.tool_id}.<operation>"), and an operation declared outside its own Tool's namespace can never resolve in the Tool Registry`;
     }
     const key = `${declaration.tool_id}.${declaration.operation_id}`;
     if (declaredToolOperations.has(key)) {
-      return `${action.name}: declares Tool operation ${key} more than once -- a declaration is stated exactly once`;
+      return `${actionName}: declares Tool operation ${key} more than once -- a declaration is stated exactly once`;
     }
     declaredToolOperations.add(key);
   }
-  const applicabilityDefect = validateApplicability(action.name, action.applicability);
-  if (applicabilityDefect) return applicabilityDefect;
   return null;
 }
 

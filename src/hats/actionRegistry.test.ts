@@ -210,3 +210,60 @@ test("validateActionDefinition: malformed Tool operation declarations fail close
     "a duplicate declaration makes the allowlist ambiguous",
   );
 });
+
+test("validateActionDefinition: a Tool-scoped operation id is required -- an operation declared outside its own Tool's namespace can never resolve", () => {
+  // The Tool Registry registers and resolves exactly `<toolId>.<operationId>`,
+  // so a declaration whose two fields disagree is malformed at the DECLARATION
+  // boundary, naming that reason -- not a resolvable-looking allowlist entry
+  // that only fails later as an unhelpful "not registered".
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [{ tool_id: "google_docs", operation_id: "create_and_verify", required: false }] })) ?? "",
+    /is inconsistent -- operation ids are Tool-scoped/,
+    "a bare operation id is not a Tool-scoped one",
+  );
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [{ tool_id: "google_docs", operation_id: "google_drive.ensure_folder", required: false }] })) ?? "",
+    /is inconsistent -- operation ids are Tool-scoped/,
+    "an operation belonging to a DIFFERENT Tool is equally unresolvable under this Tool id",
+  );
+  // The two forms above were previously accepted by this boundary and rejected
+  // only by the cross-check, so the two boundaries disagreed on "well-formed".
+  assert.equal(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [{ tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: true }] })),
+    null,
+    "a correctly Tool-scoped declaration still validates",
+  );
+});
+
+test("validateActionDefinition: a declared-but-non-list tool_operations is a malformed Action, never an empty allowlist and never an iteration crash", () => {
+  for (const bad of ["google_docs", 5, null, { tool_id: "google_docs" }]) {
+    const defect = validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: bad as any }));
+    assert.match(defect ?? "", /tool_operations must be a list of Tool operation declarations when declared/, `got a diagnostic for ${JSON.stringify(bad)}`);
+  }
+  assert.equal(validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: undefined })), null, "omission stays valid -- the field is optional");
+  assert.equal(validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [] })), null, "an empty list is an explicit empty allowlist");
+});
+
+test("validateActionDefinition: a non-object declaration entry fails closed naming the Action, instead of throwing", () => {
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ tool_operations: [null] as any })) ?? "",
+    /declares_tools: every declared Tool operation must be an object.*got null/,
+  );
+});
+
+test("validateActionDefinition: skill_requirements must be a list when declared -- a non-list fails closed rather than throwing", () => {
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ skill_requirements: "research_signal" as any })) ?? "",
+    /skill_requirements must be a list of Skill requirements when declared/,
+  );
+  assert.match(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ skill_requirements: 3 as any })) ?? "",
+    /skill_requirements must be a list of Skill requirements when declared/,
+  );
+  assert.equal(validateActionDefinition(TOOL_DECLARING_ACTION({ skill_requirements: undefined })), null);
+  assert.equal(
+    validateActionDefinition(TOOL_DECLARING_ACTION({ skill_requirements: [{ skill_id: "research_signal" }] })),
+    null,
+    "a registered Skill id still validates",
+  );
+});

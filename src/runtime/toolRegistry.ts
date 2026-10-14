@@ -53,6 +53,11 @@ import type { Env, ExternalToolOperationRecord } from "../types";
 import type { AccessContext } from "../access";
 import { AccessDeniedError, evaluateExternalMutationAccess } from "../access";
 import type { ActionDefinition } from "../hats/actionRegistry";
+// Value import: the DECLARATION shape rule lives next to the Action
+// definition that owns it, so the two validation boundaries cannot drift
+// apart on what "a well-formed Tool operation declaration" means. No cycle:
+// actionRegistry.ts imports only the Skill Registry, which is a leaf.
+import { validateActionToolOperations } from "../hats/actionRegistry";
 import { googleDocsToolOperation } from "./tools/googleDocsTool";
 import { googleDocsUpdateToolOperation } from "./tools/googleDocsUpdateTool";
 import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
@@ -172,7 +177,10 @@ export function resolveToolOperation(toolId: string, operationId: string): ToolO
  * requests are served rather than being resolvable at runtime.
  */
 export function validateToolOperations(operations: readonly ToolOperationDefinition[]): string | null {
-  const seen = new Set<string>();
+  if (!Array.isArray(operations)) {
+    return `the Tool Registry registration table must be a list of operation definitions -- got ${typeof operations}`;
+  }
+  const seen = new Map<string, ToolOperationDefinition>();
   for (const operation of operations) {
     if (typeof operation?.toolId !== "string" || !operation.toolId.trim()) return "a registered Tool operation must carry a non-empty toolId";
     if (typeof operation?.operationId !== "string" || !operation.operationId.trim()) return "a registered Tool operation must carry a non-empty operationId";
@@ -193,10 +201,31 @@ export function validateToolOperations(operations: readonly ToolOperationDefinit
     if (operation.reconcile !== undefined && typeof operation.reconcile !== "function") {
       return `registered operation ${operation.operationId} declares a non-function reconcile step`;
     }
-    if (seen.has(operation.operationId)) {
-      return `Tool operation "${operation.operationId}" is registered more than once -- registration is exact and single`;
+    const prior = seen.get(operation.operationId);
+    if (prior) {
+      // Registration is exact and single, so a duplicate is always a defect --
+      // but the ACTIONABLE part is which contract would govern the id if both
+      // were kept. A silent disagreement (same id, different version or
+      // effect) is the dangerous one, so it is named rather than flattened
+      // into a bare "registered more than once".
+      //
+      // Of the three, only `version` can disagree today: the namespace rule
+      // above pins toolId to operationId, and `external_mutation` is the only
+      // permitted effect, so neither can differ without failing earlier. Both
+      // comparisons are kept deliberately: the moment a second effect class is
+      // permitted, that rule admits both definitions and this is the only
+      // place that would notice the id had two different contracts.
+      const disagreements: string[] = [];
+      if (prior.toolId !== operation.toolId) disagreements.push(`toolId "${String(prior.toolId)}" vs "${String(operation.toolId)}"`);
+      if (prior.version !== operation.version) disagreements.push(`version "${String(prior.version)}" vs "${String(operation.version)}"`);
+      if (prior.effect !== operation.effect) disagreements.push(`effect "${String(prior.effect)}" vs "${String(operation.effect)}"`);
+      const detail =
+        disagreements.length > 0
+          ? `; the two registrations DISAGREE on ${disagreements.join(", ")}, so which contract governs ${operation.operationId} would have no answer`
+          : "";
+      return `Tool operation "${operation.operationId}" is registered more than once -- registration is exact and single${detail}`;
     }
-    seen.add(operation.operationId);
+    seen.set(operation.operationId, operation);
   }
   return null;
 }
@@ -210,21 +239,46 @@ export function validateToolRegistry(): string | null {
  * The registry half of manifest validation: every Tool operation an Action
  * DECLARES must be an exactly registered operation, checked where manifests
  * assemble (buildUnitRegistry) so a declaration naming an unknown operation
- * fails the test/deploy gate rather than surfacing on a live request. Shape
- * (non-empty ids, explicit `required`, no duplicates) is checked earlier, by
- * `validateActionDefinition`.
+ * fails the test/deploy gate rather than surfacing on a live request.
+ *
+ * This boundary is self-defending: it runs the SAME declaration shape rule
+ * `validateActionDefinition` runs (validateActionToolOperations, src/hats/
+ * actionRegistry.ts) before resolving anything, so a malformed declaration
+ * is reported as what it is here too, rather than as a raw iteration error
+ * or as a misleading "not registered". Shape (non-empty ids, explicit
+ * `required`, Tool-scoped operation id, no duplicates) is decided there;
+ * existence is decided here by exact registry lookup.
+ *
+ * Every defect is reported, not just the first: a manifest with several bad
+ * declarations should be fixable in one pass, and the build error names each
+ * Action and operation. A single defect keeps the exact one-line message.
  */
 export function validateActionToolDeclarations(
   actions: readonly Pick<ActionDefinition<string>, "name" | "tool_operations">[],
 ): string | null {
+  if (!Array.isArray(actions)) {
+    return `the Tool Registry cross-check requires a list of registered Actions -- got ${typeof actions}`;
+  }
+  const defects: string[] = [];
   for (const action of actions) {
+    if (typeof action !== "object" || action === null) {
+      defects.push(`every registered Action must be an object carrying its name and its Tool operation declarations -- got ${typeof action}`);
+      continue;
+    }
+    const shapeDefect = validateActionToolOperations(action.name, action.tool_operations);
+    if (shapeDefect) {
+      defects.push(shapeDefect);
+      continue;
+    }
     for (const declaration of action.tool_operations ?? []) {
       if (!resolveToolOperation(declaration.tool_id, declaration.operation_id)) {
-        return `action "${action.name}" declares Tool operation ${declaration.operation_id}, which is not registered in the Tool Registry -- a declaration may name only an exact registered operation`;
+        defects.push(`action "${action.name}" declares Tool operation ${declaration.operation_id}, which is not registered in the Tool Registry -- a declaration may name only an exact registered operation`);
       }
     }
   }
-  return null;
+  if (defects.length === 0) return null;
+  if (defects.length === 1) return defects[0];
+  return `${defects.length} Tool operation declaration defects:\n  ${defects.join("\n  ")}`;
 }
 
 // ---------------------------------------------------------------------------
