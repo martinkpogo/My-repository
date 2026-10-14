@@ -5,6 +5,7 @@ import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from
 import { generate } from "./ai";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
+import { cachedWatchRegistry, invalidateWatchRegistry } from "./watchRegistryCache";
 import { isAdminAuthorized } from "./adminAuth";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -1285,6 +1286,7 @@ export async function readGoogleDocStyling(
 
 export async function registerWatchedGoogleDoc(env: Env, doc: WatchedGoogleDoc): Promise<void> {
   await kvPut(env, `google_doc_watch:${doc.documentId}`, JSON.stringify(doc));
+  await invalidateWatchRegistry("docs");
 }
 
 /**
@@ -1310,7 +1312,11 @@ export async function getWatchedGoogleDoc(env: Env, documentId: string): Promise
   }
 }
 
-export async function listWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[]> {
+export async function listWatchedGoogleDocs(env: Env, options: { fresh?: boolean } = {}): Promise<WatchedGoogleDoc[]> {
+  return cachedWatchRegistry("docs", () => loadWatchedGoogleDocs(env), options);
+}
+
+async function loadWatchedGoogleDocs(env: Env): Promise<WatchedGoogleDoc[]> {
   const docs: WatchedGoogleDoc[] = [];
   let cursor: string | undefined;
   do {
@@ -1347,9 +1353,14 @@ export interface WatchedGoogleSheet {
  */
 export async function registerWatchedGoogleSheet(env: Env, sheet: WatchedGoogleSheet): Promise<void> {
   await kvPut(env, `google_sheet_watch:${sheet.spreadsheetId}`, JSON.stringify(sheet));
+  await invalidateWatchRegistry("sheets");
 }
 
-export async function listWatchedGoogleSheets(env: Env): Promise<WatchedGoogleSheet[]> {
+export async function listWatchedGoogleSheets(env: Env, options: { fresh?: boolean } = {}): Promise<WatchedGoogleSheet[]> {
+  return cachedWatchRegistry("sheets", () => loadWatchedGoogleSheets(env), options);
+}
+
+async function loadWatchedGoogleSheets(env: Env): Promise<WatchedGoogleSheet[]> {
   const sheets: WatchedGoogleSheet[] = [];
   let cursor: string | undefined;
   do {
@@ -1398,7 +1409,7 @@ export async function cleanupDefaultGoogleAccount(env: Env): Promise<CleanupDefa
 
   const docsRepointed: string[] = [];
   const docsOrphaned: string[] = [];
-  const watchedDocs = await listWatchedGoogleDocs(env);
+  const watchedDocs = await listWatchedGoogleDocs(env, { fresh: true });
   for (const doc of watchedDocs) {
     if (doc.accountIdentifier !== "default") continue;
     if (target) {

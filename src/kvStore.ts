@@ -108,6 +108,16 @@ const KV_CIRCUIT_COOLDOWN_MS = 60_000;
 const SWEEP_THROTTLE_MS = 15 * 60_000;
 /** Minimum spacing between quota-spending writes of a poller diagnostics heartbeat (kvPutHeartbeat). */
 export const POLL_HEARTBEAT_MIN_INTERVAL_MS = 15 * 60_000;
+
+/**
+ * Minimum spacing between quota-spending writes of the discovery-run
+ * timestamps (`last_cron_run`, `last_native_cron_run`). They are diagnostics
+ * read by /admin/last-cron-run and the watchdog (stale threshold 75 minutes),
+ * so a value up to this old is as useful as an exact one, and writing one on
+ * every discovery entry point spent roughly 10 of the free tier's 1,000
+ * daily KV writes an hour.
+ */
+export const CRON_STAMP_MIN_INTERVAL_MS = 15 * 60_000;
 /** Default/max rows moved per sweep pass. */
 const SWEEP_DEFAULT_LIMIT = 100;
 
