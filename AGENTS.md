@@ -119,6 +119,18 @@ Reports must explicitly distinguish:
 
 Never report an intended or prospective action as complete. Final evidence must include exact files changed, local commit SHA, confirmed remote branch state, PR URL if returned, merge confirmation, deployment state, validation/checks performed, and unresolved states or pending approvals.
 
+## Task instructions and review
+
+- Non-trivial tasks are written to `docs/task-instruction-template.md`. An instruction that omits the no-change scope, the boundaries or the verification commands is incomplete; ask for them before starting.
+- **Live-state check.** Before relying on a Notion page, data source, secret, setting or other external resource, confirm it exists and is readable now. If it is missing or deleted, stop and report; never substitute hard-coded content for it.
+- **Diff review.** Before reporting done, check the diff against this list and state the result for each:
+  1. It stays inside the scope and does not touch the no-change scope.
+  2. It adds no second mechanism for something that already has one.
+  3. It hard-codes nothing that should be read live from Notion.
+  4. `docs/enig-operating-model.md` is updated in the same change if the change alters what it describes.
+  5. No test was weakened, skipped or deleted.
+- Martin holds final authority over architecture and governance decisions; the Architect advises. The stop-and-report rule above still applies: an agent that meets such a decision stops and reports it to Martin.
+
 ## Provider and data-boundary constraints
 
 - Provider selection is infrastructure policy, not business authority.
