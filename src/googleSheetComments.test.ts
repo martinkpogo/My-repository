@@ -273,6 +273,11 @@ test("ignores a comment from anyone other than the sheet's own authorized accoun
   assert.strictEqual(replied, false, "must never reply to a comment from an unauthorized identity");
   assert.strictEqual(updated, false, "must never execute an edit requested by an unauthorized identity");
   assert.strictEqual(result.commentsProcessed, 0);
+  assert.strictEqual(
+    result.diagnostics.find((d) => d.commentId === "comment-2")?.outcome,
+    "unauthorized_author",
+    "the exact recorded outcome names the refusal",
+  );
 
   const processedMarker = await fakeEnv.STATE_KV.get("google_comment_processed:comment-2");
   assert.strictEqual(processedMarker, "1", "still marked processed so it isn't re-checked forever");

@@ -2028,7 +2028,7 @@ test("Lifecycle 4. Resolution observed BEFORE the change is applied can never co
   await openCycleOnV1(env, state, "c-resolve-first");
 
   // Martin resolves the comment while the change is still unapplied.
-  const out = await evaluateProposalApprovalCycle(env, state, [
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-resolve-first", resolved: true, modifiedTime: "2026-10-11T10:00:00.000Z" },
   ]);
 
@@ -2046,7 +2046,7 @@ test("Lifecycle 5. One unresolved comment blocks approval even when every other 
   recordProposalCycleItemOutcome(state, "c-done", "applied", 2);
   recordProposalCycleItemOutcome(state, "c-open", "applied", 2);
 
-  const out = await evaluateProposalApprovalCycle(env, state, [
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-done", resolved: true, modifiedTime: "2026-10-11T10:00:00.000Z" },
     { commentId: "c-open", resolved: false },
   ]);
@@ -2063,7 +2063,7 @@ test("Lifecycle 6. A refused (unffillable) change keeps the cycle closed forever
   await openCycleOnV1(env, state, "c-refused", "Put the client's real company name in the Proposal.");
   recordProposalCycleItemOutcome(state, "c-refused", "refused");
 
-  const out = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-refused", resolved: true }]);
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [{ commentId: "c-refused", resolved: true }]);
 
   assert.strictEqual(out.kind, "held_unsatisfied");
   assert.ok(out.reasons!.some((r) => r.includes("c-refused") && r.includes("refused")), out.reasons!.join("; "));
@@ -2080,7 +2080,7 @@ test("Lifecycle 7. A satisfied cycle (applied + verified + resolved, Doc matchin
   const approvedEntriesBefore = world.logs.filter((l) => text(l.Entry).startsWith("Proposal approved: PROP-7 v1")).length;
   assert.strictEqual(approvedEntriesBefore, 1);
 
-  const out = await evaluateProposalApprovalCycle(env, state, [
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-final", resolved: true, modifiedTime: "2026-10-11T11:00:00.000Z" },
   ]);
 
@@ -2105,7 +2105,7 @@ test("Lifecycle 7. A satisfied cycle (applied + verified + resolved, Doc matchin
 
   // Idempotent: a repeated poll of the completed cycle writes nothing and
   // repeats no external effect.
-  const again = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-final", resolved: true }]);
+  const again = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [{ commentId: "c-final", resolved: true }]);
   assert.strictEqual(again.kind, "already_approved");
   assert.strictEqual(again.approvedVersion, 1, "the already-approved Version is reported, not re-minted");
   assert.strictEqual(sp.approvedVersion, 1);
@@ -2131,7 +2131,7 @@ test("Lifecycle 7b. The completion write is the SHARED approval write: it fails 
   const rec = proposals(world)[0].properties;
   rec["Proposal Content"] = rt("Tampered after the cycle was satisfied.");
 
-  const out = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-precond", resolved: true }]);
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [{ commentId: "c-precond", resolved: true }]);
   assert.strictEqual(out.kind, "held_unsatisfied", "an untrustworthy live record fails closed");
   assert.ok(out.reasons!.some((r) => r.includes("no longer matches")), out.reasons!.join("; "));
   assert.strictEqual(sp.approvalStatus, "Pending Approval", "nothing was approved");
@@ -2180,10 +2180,11 @@ test("Lifecycle 9. A comment on a foreign Doc or a stale Version is refused and 
 
 test("Lifecycle 10. A resolution observed for a comment OUTSIDE the current cycle never advances that cycle", async (t) => {
   const { env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.sales?.proposal!;
   await openCycleOnV1(env, state, "c-mine");
   recordProposalCycleItemOutcome(state, "c-mine", "applied", 1);
 
-  const out = await evaluateProposalApprovalCycle(env, state, [
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-mine", resolved: false },
     { commentId: "c-someone-elses", resolved: true, modifiedTime: "2026-10-11T12:00:00.000Z" },
   ]);
@@ -2192,6 +2193,44 @@ test("Lifecycle 10. A resolution observed for a comment OUTSIDE the current cycl
   assert.ok(out.reasons!.some((r) => r.includes("c-mine") && r.includes("not yet observed resolved")), out.reasons!.join("; "));
   assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-mine"].observedResolved, false);
   assert.strictEqual(state.sales!.proposalApprovalCycle!.items["c-someone-elses"], undefined, "a foreign comment is never absorbed into the cycle");
+});
+
+test("Lifecycle 10b. TWO DOCUMENTS: observations supplied for Doc B are refused before any cycle item is touched and before any write, while the cycle's own Doc behaves exactly as before", async (t) => {
+  const { world, env, state } = await createV1(t, {}, {}, { googleDoc: true });
+  const sp = state.sales?.proposal!;
+  await openCycleOnV1(env, state, "c-doc-a");
+  recordProposalCycleItemOutcome(state, "c-doc-a", "applied", 1);
+  const cycle = state.sales!.proposalApprovalCycle!;
+  assert.strictEqual(cycle.documentId, sp.doc!.documentId, "the cycle is bound to the canonical Doc (Doc A)");
+
+  const fetchesBefore = world.fetches.length;
+  const logsBefore = world.logs.length;
+  const telegramBefore = world.telegram.length;
+  const recordBefore = JSON.stringify(proposals(world)[0].properties);
+  const actionBefore = state.actionName;
+
+  // The SAME comment id the cycle holds -- observed by a pass over Doc B.
+  const out = await evaluateProposalApprovalCycle(env, state, "some-other-doc", [
+    { commentId: "c-doc-a", resolved: true, modifiedTime: "2026-10-11T15:00:00.000Z" },
+  ]);
+
+  assert.strictEqual(out.kind, "foreign_document", `Doc B's pass is refused outright, never silently dropped: ${JSON.stringify(out)}`);
+  assert.ok(out.reasons!.some((r) => r.includes("some-other-doc") && r.includes(cycle.documentId)), out.reasons!.join("; "));
+  assert.strictEqual(cycle.items["c-doc-a"].observedResolved, false, "Doc B's observation is never absorbed into Doc A's cycle -- the item is untouched");
+  assert.strictEqual(sp.approvalStatus, "Pending Approval", "the Proposal's approval state is untouched");
+  assert.strictEqual(state.actionName, actionBefore, "no Work Action advances");
+  assert.strictEqual(world.fetches.length, fetchesBefore, "no Notion (or any other) call was made at all -- the refusal happens before every read and write");
+  assert.strictEqual(world.logs.length, logsBefore, "no Activity entry is written");
+  assert.strictEqual(world.telegram.length, telegramBefore, "no message is sent");
+  assert.strictEqual(JSON.stringify(proposals(world)[0].properties), recordBefore, "the live Proposals row is byte-identical");
+
+  // Matching document: behaviour is exactly what it was before the binding check.
+  const ok = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
+    { commentId: "c-doc-a", resolved: true, modifiedTime: "2026-10-11T15:00:00.000Z" },
+  ]);
+  assert.strictEqual(ok.kind, "approved", "the cycle's own Doc still completes the cycle");
+  assert.strictEqual(sp.approvalStatus, "Approved");
+  assert.strictEqual(sp.approvedVersion, 1);
 });
 
 test("Lifecycle 11. A cycle whose Doc no longer matches the current Version stays held -- stale document evidence never approves", async (t) => {
@@ -2205,7 +2244,7 @@ test("Lifecycle 11. A cycle whose Doc no longer matches the current Version stay
 
   // The Doc falls behind the Version it is supposed to show.
   sp.doc!.version = 0;
-  const drifted = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-doc-drift", resolved: true }]);
+  const drifted = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [{ commentId: "c-doc-drift", resolved: true }]);
   assert.strictEqual(drifted.kind, "held_unsatisfied", "stale document evidence never approves");
   assert.ok(drifted.reasons!.some((r) => r.includes("bound to v0")), drifted.reasons!.join("; "));
   assert.strictEqual(sp.approvalStatus, "Pending Approval");
@@ -2242,7 +2281,7 @@ test("Lifecycle 12. END TO END: auto-approve on verification -> a Doc comment re
 
   // 3. Resolution arrives: applied + verified + Doc matches v2 -> the cycle
   //    completes and approves exactly v2. No resolver identity is required.
-  const done = await evaluateProposalApprovalCycle(env, state, [
+  const done = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-e2e", resolved: true, modifiedTime: "2026-10-11T13:00:00.000Z" },
   ]);
   assert.strictEqual(done.kind, "approved");
@@ -2273,7 +2312,7 @@ test("Lifecycle 13. A substantive comment whose change is REFUSED still leaves t
   assert.strictEqual(cycle.items["c-identity"].outcome, "refused", "the refusal is recorded as the item's outcome");
   assert.ok(unsatisfiedCycleItems(cycle).some((i) => i.commentId === "c-identity" && i.reason.includes("refused")));
 
-  const out = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-identity", resolved: true }]);
+  const out = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [{ commentId: "c-identity", resolved: true }]);
   assert.strictEqual(out.kind, "held_unsatisfied", "a refused change can never be satisfied, even resolved");
   assert.strictEqual(sp.approvalStatus, "Pending Approval");
   assert.strictEqual(text(proposals(world)[0].properties["Approval Status"]), "Pending Approval");
@@ -2286,7 +2325,7 @@ test("Lifecycle 14. A new substantive comment AFTER a cycle-completion approval 
   // Complete one full cycle so v1 is Approved by the cycle itself.
   await openCycleOnV1(env, state, "c-first");
   recordProposalCycleItemOutcome(state, "c-first", "applied", 1);
-  const first = await evaluateProposalApprovalCycle(env, state, [{ commentId: "c-first", resolved: true }]);
+  const first = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [{ commentId: "c-first", resolved: true }]);
   assert.strictEqual(first.kind, "approved");
   assert.strictEqual(sp.approvalStatus, "Approved");
 
@@ -2311,7 +2350,7 @@ test("Lifecycle 14. A new substantive comment AFTER a cycle-completion approval 
   // The old, satisfied item is still satisfied -- but it is not the new
   // cycle's whole content: c-second is applied at v2 yet UNRESOLVED, so the
   // cycle cannot complete on the earlier item's strength.
-  const blocked = await evaluateProposalApprovalCycle(env, state, [
+  const blocked = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-first", resolved: true, modifiedTime: "2026-10-11T11:00:00.000Z" },
     { commentId: "c-second", resolved: false },
   ]);
@@ -2322,7 +2361,7 @@ test("Lifecycle 14. A new substantive comment AFTER a cycle-completion approval 
   // Resolving the outstanding comment completes the cycle for the NEW
   // Version -- and a duplicate observation of it in the same poll changes
   // nothing.
-  const done = await evaluateProposalApprovalCycle(env, state, [
+  const done = await evaluateProposalApprovalCycle(env, state, sp.doc!.documentId, [
     { commentId: "c-second", resolved: true, modifiedTime: "2026-10-11T14:00:00.000Z" },
     { commentId: "c-second", resolved: true, modifiedTime: "2026-10-11T14:00:00.000Z" },
   ]);

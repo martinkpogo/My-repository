@@ -202,6 +202,55 @@ async function reportReplyFailure(
   ).catch((err) => console.error("reportReplyFailure: could not send the Operations alert", err));
 }
 
+/**
+ * The one honest answer to a Proposal comment whose handler or transport
+ * escaped AFTER its processed marker was already written (the marker runs
+ * before the handler, so such a comment is durably done and will never be
+ * picked up by a later pass). The escaped pass may have stopped before any
+ * outcome existed, so this never claims success and never implies a retry: it
+ * tells the thread the request was not applied, and reports the failure to
+ * Operations with identifiers only -- never comment or reply content.
+ *
+ * Both attempts are best-effort and independently guarded: a reply that
+ * cannot be delivered (or an alert that cannot be sent) is logged and
+ * swallowed here, so neither can replace the `unhandled_exception` diagnostic
+ * the caller records FIRST, nor change control flow, nor re-enter any
+ * handler. The comment stays marked -- unmarking would risk a duplicate
+ * revision after an ambiguous outcome.
+ */
+async function answerEscapedProposalComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<void> {
+  if (!doc.proposal) return;
+  let marked: string | null = null;
+  try {
+    // Only a CONFIRMED marker gates the answer: replying to a comment that is
+    // still unprocessed could contradict the pass a later poll legitimately
+    // runs over it.
+    marked = await kvGet(env, `google_comment_processed:${comment.id}`);
+  } catch (err) {
+    console.error(`answerEscapedProposalComment: could not read the processed marker for comment ${comment.id}`, err);
+    return;
+  }
+  if (!marked) return;
+  try {
+    await sendOperationsMessage(
+      env,
+      `⚠️ Google Doc comment pass stopped\nDocument: ${doc.documentId}\nComment: ${comment.id}\n\nThe pass stopped with an error after this comment was marked processed. The comment was answered as not applied and is never retried automatically (a retry could duplicate an uncertain outcome). No comment content is included in this message.`,
+    );
+  } catch (err) {
+    console.error(`answerEscapedProposalComment: could not send the Operations notification for comment ${comment.id}`, err);
+  }
+  try {
+    await replyToComment(
+      token,
+      doc.documentId,
+      comment.id,
+      "Not applied -- an internal error stopped this comment's pass before any outcome could be confirmed, and Martin has been notified. Please treat this request as not applied.",
+    );
+  } catch (err) {
+    console.error(`answerEscapedProposalComment: could not deliver the honest reply for comment ${comment.id}`, err);
+  }
+}
+
 async function resolveComment(token: string, documentId: string, commentId: string): Promise<void> {
   await fetch(`https://www.googleapis.com/drive/v3/files/${documentId}/comments/${commentId}?fields=id`, {
     method: "PATCH",
@@ -717,12 +766,16 @@ export async function processGoogleDocComments(env: Env, doc: WatchedGoogleDoc):
         continue;
       }
       console.error(`processGoogleDocComments: error processing comment ${comment.id} on ${doc.documentId}`, err);
+      // The original failure evidence is recorded FIRST, so nothing that
+      // follows can replace it; only then is the Proposal thread answered
+      // honestly (best-effort, independently guarded, never a retry).
       diagnostics.push({
         documentId: doc.documentId,
         commentId: comment.id,
         outcome: "unhandled_exception",
         detail: err instanceof Error ? err.message : String(err),
       });
+      await answerEscapedProposalComment(env, doc, comment, token);
     }
   }
 

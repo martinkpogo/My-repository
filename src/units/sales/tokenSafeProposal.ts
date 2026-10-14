@@ -1679,16 +1679,35 @@ export function recordProposalCycleItemOutcome(state: WorkState, commentId: stri
  * unapplied/refused change, a Doc that will not verify, a Doc bound to a
  * different Version, or any uncertainty in the live record returns
  * `held_unsatisfied` with the reason and writes nothing.
+ *
+ * The observations are also bound to the document they were read from: a
+ * `documentId` that is not this cycle's own canonical Doc returns
+ * `foreign_document` with the reason, before any item is touched and before
+ * anything can be written, so a pass over another Doc can never advance it.
  */
 export async function evaluateProposalApprovalCycle(
   env: Env,
   state: WorkState,
+  documentId: string,
   observations: { commentId: string; resolved: boolean; modifiedTime?: string }[],
-): Promise<{ kind: "no_cycle" | "held_unsatisfied" | "approved" | "already_approved"; approvedVersion?: number; reasons?: string[] }> {
+): Promise<{ kind: "no_cycle" | "foreign_document" | "held_unsatisfied" | "approved" | "already_approved"; approvedVersion?: number; reasons?: string[] }> {
   const sp = state.sales?.proposal;
   const cycle = state.sales?.proposalApprovalCycle;
   if (!sp || !cycle) return { kind: "no_cycle" };
   if (cycle.proposalNumber !== sp.proposalNumber) return { kind: "no_cycle" };
+  // Document binding, checked as soon as the cycle is loaded and BEFORE the
+  // observation loop below mutates any item: the cycle belongs to the
+  // Proposal's canonical Doc, so observations supplied for any other document
+  // are refused outright with the reason (which reaches the poller's
+  // `approval_cycle_synced` diagnostic), never absorbed and never written.
+  if (documentId !== cycle.documentId) {
+    return {
+      kind: "foreign_document",
+      reasons: [
+        `observations were supplied for document ${documentId}, but this cycle is bound to the Proposal's canonical Doc ${cycle.documentId} -- a pass over another document never advances it`,
+      ],
+    };
+  }
   // Idempotency guard, checked before anything can be written.
   if (sp.approvalStatus === "Approved") return { kind: "already_approved", approvedVersion: sp.approvedVersion };
 

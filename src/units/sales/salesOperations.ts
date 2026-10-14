@@ -58,10 +58,12 @@ export const SALES_OPERATIONS: Record<string, UnitOperation> = {
    * Resolution is a SEPARATE signal from comment processing: a resolved
    * comment is never confused with an applied one, and only when BOTH are
    * satisfied (plus the Doc read back as the exact current Version) does the
-   * cycle complete and approve through the shared approval write.
+   * cycle complete and approve through the shared approval write. The
+   * document the pass read them from travels with the observations and is
+   * checked against the cycle's own canonical Doc before anything runs.
    */
   [SALES_OPERATION.syncProposalDocApprovalCycle]: {
-    run: async (env, state, input: ApprovalCycleInput) => ({ state, result: await evaluateProposalApprovalCycle(env, state, input.observations) }),
+    run: async (env, state, input: ApprovalCycleInput) => ({ state, result: await evaluateProposalApprovalCycle(env, state, input.documentId, input.observations) }),
     failed: { kind: "no_cycle" },
   } satisfies UnitOperation<ApprovalCycleInput, ApprovalCycleResult>,
 

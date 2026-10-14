@@ -68,6 +68,22 @@ test("an operation no Unit declares is refused, never silently skipped", async (
   await assert.rejects(() => runUnitOperationOnWork(ENV, "Finance", SALES_OPERATION.handleProposalDocComment, {}, execute), /Finance declares no operation/);
 });
 
+test("a Sales operation dispatched against a Work that belongs to ANOTHER Unit fails closed: declared 'failed' answer, handler never runs, nothing saved", async () => {
+  const foreign = { ...WORK, unit: "Strategy" } as WorkState;
+  const before = JSON.stringify(foreign);
+  const { execute, saved, reported } = fakeExecute(foreign);
+
+  const result = await runUnitOperationOnWork(ENV, "Sales", SALES_OPERATION.handleProposalDocComment, { proposalNumber: 6, version: 1, text: "change it" }, execute);
+
+  // Had the handler run, this Proposal-less Work would have answered
+  // { kind: "stale" } (see the matching-Unit test above). The declared
+  // 'failed' answer instead proves the handler was never entered.
+  assert.deepStrictEqual(result, { kind: "refused", detail: "the change could not be applied; Martin was notified." }, "the caller gets the operation's declared 'failed' answer");
+  assert.strictEqual(saved.length, 0, "no state save -- execute reports and rolls back, so no Notion write can be reached either");
+  assert.strictEqual(reported.length, 1, "the refusal is reported by the execute cycle, like any failed run");
+  assert.strictEqual(JSON.stringify(foreign), before, "the Work's state is byte-identical: nothing was executed or mutated");
+});
+
 test("the typed Sales callers reach the Work through the ONE generic entry, naming Sales and the operation", async () => {
   const seen: [string, string, unknown][] = [];
   const env = {

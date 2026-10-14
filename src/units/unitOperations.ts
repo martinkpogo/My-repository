@@ -10,7 +10,12 @@ import { findUnitManifest } from "./registry";
  * (execute reports and swallows the failure).
  *
  * Fails closed: a Unit with no such operation is an error, never a silent
- * no-op.
+ * no-op -- and the operation must also belong to the Work it was dispatched
+ * against: the fetched Work's own `state.unit` must match the Unit named in
+ * the dispatch, checked BEFORE the handler runs. A mismatch executes no
+ * handler, saves no state and reaches no Notion write (the throw is what
+ * keeps execute from saving, exactly as for a handler that threw), and the
+ * caller receives this operation's declared `failed` answer.
  */
 export async function runUnitOperationOnWork(
   env: Env,
@@ -24,6 +29,9 @@ export async function runUnitOperationOnWork(
   let completed = false;
   let result: unknown;
   await execute(async (state) => {
+    if (state.unit !== unit) {
+      throw new Error(`Work ${state.workId} belongs to ${state.unit ?? "no Unit"}, not ${unit} -- operation "${name}" was refused before its handler ran.`);
+    }
     const out = await operation.run(env, state, input);
     result = out.result;
     completed = true;
