@@ -37,6 +37,7 @@ import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { kvDelete, kvGet, kvList, kvPut, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
+import { isAdminAuthorized } from "./adminAuth";
 
 export { WorkSession } from "./session";
 // The per-Doc lock for the Drive notification path. Exported from the Worker
@@ -149,8 +150,7 @@ export default {
     // comment. Safe to call repeatedly: a no-op once the "default" token
     // is gone.
     if (url.pathname === "/admin/cleanup-default-google-account" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -181,8 +181,7 @@ export default {
     // response carries the Registry outcome (state, reason, document id/url
     // when one exists) and no credentials.
     if (url.pathname === "/admin/smoke-google-docs" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const workId = `smoke-googledocs-${crypto.randomUUID()}`;
@@ -206,8 +205,7 @@ export default {
     // secret. Never requires the bot token to leave Cloudflare. Gated on the
     // webhook secret you already set, so only you can trigger it.
     if (url.pathname === "/admin/register-webhook" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const webhookUrl = `${url.origin}/telegram/webhook`;
@@ -223,8 +221,7 @@ export default {
     // discovery runs twice per cycle (the GitHub Actions workflow that did
     // was removed 2026-10-12). Gated the same as every other admin endpoint.
     if (url.pathname === "/admin/run-finance-discovery" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       // Best-effort diagnostic timestamp for /admin/last-cron-run and the
@@ -269,8 +266,7 @@ export default {
     // whether Sales Executive's isolated pipeline is paused, same as the
     // /lead command.
     if (url.pathname === "/admin/run-lead-discovery" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -331,8 +327,7 @@ export default {
     // the SAME single-document pass (processGoogleDocComments), so they cannot
     // drift in what a pass means.
     if (url.pathname === "/admin/poll-google-doc-comments" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -378,8 +373,7 @@ export default {
     // Diagnostic: when did the cron trigger last actually run, per the
     // Worker's own record - no live-watching required, check anytime.
     if (url.pathname === "/admin/last-cron-run" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await kvGet(env, "last_cron_run");
@@ -395,8 +389,7 @@ export default {
     // path, so this KV record is the only way to confirm that scheduler
     // is actually firing.
     if (url.pathname === "/admin/last-google-doc-comment-poll" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await kvGet(env, "last_google_doc_comment_poll_run");
@@ -411,8 +404,7 @@ export default {
     // fallback into KV on demand (the automatic sweep runs throttled from
     // the comment poll and scheduled()). Never exposes the auth token.
     if (url.pathname === "/admin/turso-fallback" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const sweep = url.searchParams.get("sweep") === "1" ? await sweepKvFallback(env) : null;
@@ -427,8 +419,7 @@ export default {
     // /admin/poll-google-doc-comments above. Meant to be hit every 30-60s
     // by a second cron-job.org schedule.
     if (url.pathname === "/admin/poll-google-sheet-comments" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       try {
@@ -449,8 +440,7 @@ export default {
     // the separate cron-job.org schedule hitting
     // /admin/poll-google-sheet-comments.
     if (url.pathname === "/admin/last-google-sheet-comment-poll" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await kvGet(env, "last_google_sheet_comment_poll_run");
@@ -481,8 +471,7 @@ export default {
     // with no one told. Throttled independently so a prolonged outage
     // doesn't spam.
     if (url.pathname === "/admin/watchdog" && request.method === "GET") {
-      const key = url.searchParams.get("key");
-      if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+      if (!isAdminAuthorized(request, env)) {
         return new Response("forbidden", { status: 403 });
       }
       const lastRun = await kvGet(env, "last_cron_run");

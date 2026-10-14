@@ -4,6 +4,7 @@ import { processGoogleDocComments } from "./googleDocComments";
 import { sendOperationsMessage } from "./telegram";
 import { kvGet, kvPut, kvList } from "./kvStore";
 import { DRIVE_DOC_LOCK_TTL_MS, DRIVE_DOC_COOLDOWN_MS, driveDocLockStub } from "./driveDocLockState";
+import { isAdminAuthorized } from "./adminAuth";
 
 /**
  * Google Drive `files.watch` push notifications for watched Proposal Docs.
@@ -731,8 +732,7 @@ function adminJson(status: number, body: unknown): Response {
 
 /** Shared fail-closed admin gate for the Drive watch endpoints. Returns a Response to send, or null when authorized. */
 function requireAdminKey(request: Request, env: Env): Response | null {
-  const key = new URL(request.url).searchParams.get("key");
-  if (!env.WORKER_ADMIN_KEY || key !== env.WORKER_ADMIN_KEY) {
+  if (!isAdminAuthorized(request, env)) {
     return adminJson(403, { ok: false, error: "forbidden" });
   }
   return null;

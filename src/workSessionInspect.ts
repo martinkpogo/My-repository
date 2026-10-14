@@ -1,5 +1,6 @@
 import type { Env, WorkState } from "./types";
 import { getSessionStub } from "./sessionRouting";
+import { isAdminAuthorized } from "./adminAuth";
 
 /**
  * GET /admin/work-session-state -- READ-ONLY operator inspection of one
@@ -41,8 +42,7 @@ function jsonError(status: number, error: string): Response {
 }
 
 export async function handleWorkSessionState(request: Request, env: Env): Promise<Response> {
-  const adminKey = request.headers.get("X-Worker-Admin-Key");
-  if (!env.WORKER_ADMIN_KEY || !adminKey || adminKey !== env.WORKER_ADMIN_KEY) {
+  if (!isAdminAuthorized(request, env)) {
     return new Response("forbidden", { status: 403 });
   }
 
