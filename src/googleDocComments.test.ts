@@ -1455,7 +1455,7 @@ test("marker 4. the Operations alert for a rejected reply contains NO comment or
 // retrying the operation, or losing the original failure evidence.
 // ---------------------------------------------------------------------------
 
-test("escape 1. a Proposal handler that THROWS after the processed marker is answered honestly: unhandled_exception preserved, a 'Not applied' reply attempted, a content-free Operations notification sent, and the handler never runs twice", async (t) => {
+test("escape 1. a Proposal handler that THROWS after the processed marker is answered with the interruption's true uncertainty: unhandled_exception preserved, an 'outcome could not be confirmed' reply attempted (never 'not applied'), a content-free Operations notification sent, and the handler never runs twice", async (t) => {
   const { fakeEnv } = createFakeEnv();
   // Enable the Operations stream (sendOperationsMessage needs the group chat
   // + topic), so the notification is observable exactly as in production.
@@ -1506,10 +1506,14 @@ test("escape 1. a Proposal handler that THROWS after the processed marker is ans
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-1"), "1", "the comment stays durably processed");
   assert.strictEqual(calls.length, 1, "the handler ran exactly once -- a second execution attempt never happens");
 
-  // The thread is answered honestly: not applied, no success claimed.
+  // The thread is answered with the truth about the escape: the outcome is
+  // unconfirmed, and neither a failure nor a delivery claim is invented.
   assert.ok(reply, "an honest reply WAS attempted despite the escape");
-  assert.match(reply.content, /Not applied --/, "the reply states the operation was not applied");
-  assert.ok(!/applied successfully|change recorded|formatting applied/i.test(reply.content), "the reply never claims success");
+  assert.match(reply.content, /could not be confirmed/, "the reply states the outcome honestly as unconfirmed");
+  assert.match(reply.content, /check the Proposal/, "the reply points to the authoritative records");
+  assert.ok(!/Not applied/i.test(reply.content), "the reply never claims the request was not applied -- even a lost transport call may hide a completed run");
+  assert.ok(!/Martin has been notified/i.test(reply.content), "the reply never claims the Operations notification was delivered -- it is best-effort and may itself fail");
+  assert.ok(!/applied successfully|change recorded|formatting applied/i.test(reply.content), "the reply never claims success either");
   assert.strictEqual(resolved, false, "a failed pass never resolves the comment");
   assert.strictEqual(batchUpdated, false, "the Doc itself is never touched");
 
@@ -1571,5 +1575,116 @@ test("escape 2. when the honest reply itself cannot be delivered, the original u
   assert.strictEqual(replyAttempts, 1, "the reply was attempted exactly once (and its failure is swallowed, never re-run)");
   assert.ok(operationsAlerts.length >= 1, "the Operations notification still went out");
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-2"), "1", "the marker is kept");
+  assert.strictEqual(calls.length, 1, "the handler is never entered a second time");
+});
+
+test("escape 3. a SUCCESSFUL revision followed by a failure in the confirmation reply is answered with the interruption's true uncertainty -- the reply never states the revision was not applied", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
+
+  // The handler SUCCEEDS this time (v2 is created through the governed
+  // path); the failure comes LATER, while the pass is delivering the
+  // "Change recorded" confirmation -- exactly the case where "not applied"
+  // would have been a lie.
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+
+  let reply: any = null;
+  let replies = 0;
+  let replyAttempts = 0;
+  let resolved = false;
+  const operationsAlerts: any[] = [];
+  const originalFetch = globalThis.fetch;
+  const inner = mockFetchWith({
+    comments: [{ id: "c-esc-3", content: "add a delivery-risk paragraph", resolved: false, author: { me: true }, quotedFileContent: { value: "Scope" } }],
+    onReply: (_id, body) => {
+      replies += 1;
+      reply = body;
+    },
+    onResolve: () => (resolved = true),
+    onTelegram: (body) => operationsAlerts.push(body),
+  });
+  // The FIRST reply POST (the success confirmation) fails at the network
+  // level; the escape answer's own reply (attempt 2) goes through.
+  globalThis.fetch = (async (url: any, init?: any) => {
+    if (String(url).includes("/comments/") && String(url).includes("/replies") && init?.method === "POST") {
+      replyAttempts += 1;
+      if (replyAttempts === 1) throw new Error("confirmation reply network down");
+    }
+    return inner(url, init);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.strictEqual(replyAttempts, 2, "the failure happened AFTER the successful revision, in the confirmation reply; the second attempt is the escape answer");
+  assert.strictEqual(replies, 1, "exactly one reply was delivered -- the escape answer");
+  assert.strictEqual(calls.length, 1, "the handler ran exactly once -- the successful revision was never re-entered");
+  assert.strictEqual(result.diagnostics.find((d) => d.commentId === "c-esc-3")?.outcome, "unhandled_exception", "the interruption is preserved as its own diagnostic");
+
+  assert.ok(reply, "the thread was still answered");
+  assert.match(reply.content, /could not be confirmed/, "the outcome is stated honestly as unconfirmed");
+  assert.ok(!/Not applied/i.test(reply.content), "the reply never states the revision was not applied -- it may well exist");
+  assert.ok(!/change recorded|was created from this comment/i.test(reply.content), "and it does not claim a success it cannot confirm either");
+  assert.ok(!/Martin has been notified/i.test(reply.content), "and it makes no notification claim");
+  assert.strictEqual(resolved, false, "the comment stays open -- Martin's resolve remains the approval signal");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-3"), "1", "the processed marker is kept");
+  assert.ok(operationsAlerts.length >= 1, "Operations is notified that the outcome is unconfirmed (identifiers only)");
+  assert.ok(!JSON.stringify(operationsAlerts).includes("delivery-risk"), "no comment content reaches the Operations stream");
+});
+
+test("escape 4. when the Operations notification itself fails, the thread is still answered -- and the reply never claims Martin was notified", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
+
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+  // The handler itself escapes (as in escape 1) so the pass reaches the
+  // escape answer -- and then that answer's own notification fails.
+  (fakeEnv as any).WORK_SESSION = {
+    idFromName: (name: string) => name,
+    get: () =>
+      salesOperationStub({
+        handleProposalDocComment: async (req: any) => {
+          calls.push(req);
+          throw new Error("WorkSession transport unavailable");
+        },
+        handleProposalDocFormatting: async () => ({ kind: "formatted" }),
+        requestProposalDocClarification: async () => ({ ok: true }),
+        syncProposalDocApprovalCycle: async () => ({ kind: "no_cycle" }),
+      }),
+  };
+
+  let reply: any = null;
+  let telegramFailures = 0;
+  const originalFetch = globalThis.fetch;
+  const inner = mockFetchWith({
+    comments: [{ id: "c-esc-4", content: "tighten the budget", resolved: false, author: { me: true }, quotedFileContent: { value: "Budget" } }],
+    onReply: (_id, body) => (reply = body),
+  });
+  // The notification's own send fails; the reply attempt must survive it,
+  // and the reply must not paper over the failure with a delivery claim.
+  globalThis.fetch = (async (url: any, init?: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      telegramFailures += 1;
+      throw new Error("telegram down");
+    }
+    return inner(url, init);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  assert.ok(telegramFailures >= 1, "the notification send genuinely failed");
+  assert.strictEqual(result.diagnostics.find((d) => d.commentId === "c-esc-4")?.outcome, "unhandled_exception", "the original failure evidence survives the notification failure");
+  assert.ok(reply, "the thread is still answered despite the failed notification");
+  assert.match(reply.content, /could not be confirmed/, "with the honest uncertainty");
+  assert.ok(!/Martin has been notified/i.test(reply.content), "crucially: with the notification failed, the reply still never claims Martin was notified");
+  assert.ok(!/Not applied/i.test(reply.content), "and it still never claims the request was not applied");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-4"), "1", "the processed marker is kept");
   assert.strictEqual(calls.length, 1, "the handler is never entered a second time");
 });
