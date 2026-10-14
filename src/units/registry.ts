@@ -14,6 +14,15 @@ import { financeManifest } from "./finance/financeManifest";
  * Unit is added or removed: one import, one entry. Cloudflare Workers
  * has no runtime filesystem, so this cannot be literal auto-discovery.
  *
+ * WHAT THIS IS NOT: it is not the list of Units that exist. That is
+ * identity -- src/types.ts's ALL_UNITS, all seven of them, which is what
+ * workspaceRouter resolves an addressee against. This table is capability:
+ * which of those Units has a built, validated execution manifest (five
+ * today). The two stay separate on purpose -- a Unit named in ALL_UNITS and
+ * absent here is addressable and fails closed at dispatch, never executable
+ * by accident; a manifest registered here must name a Unit ALL_UNITS already
+ * declares (both are typed `Unit`, so that direction is compile-time).
+ *
  * Only Units actually built on the manifest pattern appear here. Every
  * Unit except Creative & Design and Operations (both undefined -- see the
  * design doc's rollout order) is registered now, but several only
@@ -120,6 +129,18 @@ export function buildUnitRegistry(manifests: Partial<Record<Unit, UnitManifest>>
   const prefixOwner: Record<string, string> = {};
   for (const [unit, manifest] of Object.entries(manifests)) {
     if (!manifest) continue;
+    // The table key IS how every caller finds this manifest
+    // (findUnitManifest(state.unit) -> manifest.unit), and manifest.unit is
+    // then what the runtime compares against the Work's addressed Unit and a
+    // Handoff's destination fact. A copy-paste registering one Unit's manifest
+    // under another Unit's key would make lookups resolve one identity while
+    // enforcement and log lines state another -- so key and declared identity
+    // must agree, or the registry is refused at assembly.
+    if (manifest.unit !== unit) {
+      defects.push(
+        `registry entry "${unit}": the manifest declares Unit "${manifest.unit}" -- a registry key must match the manifest's own Unit identity, or Unit-keyed lookups resolve the wrong Unit's manifest`,
+      );
+    }
     for (const [hatName, hat] of Object.entries(manifest.hats)) {
       const defect = validateHatManifest(hat);
       if (defect) defects.push(`Unit "${unit}", Hat "${hatName}": ${defect}`);

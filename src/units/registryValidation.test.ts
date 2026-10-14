@@ -4,6 +4,8 @@ import assert from "node:assert";
 import { buildUnitRegistry, getUnitManifests } from "./registry";
 import { salesManifest } from "./sales/salesManifest";
 import { financeManifest } from "./finance/financeManifest";
+import { ALL_HATS } from "../hats/registry";
+import { ALL_UNITS, type Unit } from "../types";
 import type { UnitManifest } from "./unitManifest";
 
 /**
@@ -201,4 +203,121 @@ test("registry build: the real registry's Tool declarations all resolve to regis
   // reaching this line without a throw is the proof the real registry -- with
   // its Tool declarations and the Tool Registry integrity check -- assembles cleanly.
   assert.ok(Object.keys(getUnitManifests()).length >= 5);
+});
+
+// ---------------------------------------------------------------------------
+// HatManifest.pickupHandler: the optional Handoff-reception contract.
+// ---------------------------------------------------------------------------
+
+test("manifest contract: a Hat with no pickupHandler still validates -- pickup is optional, never a per-Hat requirement", () => {
+  assert.strictEqual(
+    salesManifest.hats["Sales Executive"].pickupHandler,
+    undefined,
+    "no production manifest declares one yet -- the field must not become mandatory by accident",
+  );
+  // Reaching here without a throw is the proof: the real manifests build
+  // with the field entirely absent.
+  assert.strictEqual(buildUnitRegistry({ Sales: salesManifest }).Sales, salesManifest);
+});
+
+test("manifest contract: a Hat declaring a valid pickupHandler is accepted and carried through the registry unchanged", async () => {
+  const handler = async (_env: unknown, state: any, _skills: unknown) => state;
+  const withPickup = withSalesExecutiveHat((hat) => ({ ...hat, pickupHandler: handler }));
+  const built = buildUnitRegistry({ Sales: withPickup });
+  assert.strictEqual(
+    built.Sales?.hats["Sales Executive"].pickupHandler,
+    handler,
+    "the registry must hand the declared pickup executor back exactly as declared",
+  );
+});
+
+test("registry build: a Hat whose pickupHandler is not callable throws at build, naming Unit, Hat and field", () => {
+  const broken = withSalesExecutiveHat((hat) => ({
+    ...hat,
+    pickupHandler: "handlePickup" as unknown as NonNullable<UnitManifest["hats"][string]["pickupHandler"]>,
+  }));
+  assert.throws(
+    () => buildUnitRegistry({ Sales: broken }),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.ok(message.includes('Unit "Sales"'), `must name the Unit, got: ${message}`);
+      assert.ok(message.includes('Hat "Sales Executive"'), `must name the Hat, got: ${message}`);
+      assert.ok(message.includes("pickupHandler"), `must name the field, got: ${message}`);
+      assert.ok(message.includes("PickupHandler signature"), `must state the contract it violates, got: ${message}`);
+      return true;
+    },
+    "a declared-but-unusable pickup handler must fail the build, never surface as a dead pickup on a live Handoff",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Unit identity vs. registered execution capability, and their registries.
+// ---------------------------------------------------------------------------
+
+test("Unit identity and registered capability stay distinct: every registered Unit is declared identity, and the two identity-only Units never gain a manifest", () => {
+  const registered = Object.keys(getUnitManifests());
+  for (const unit of registered) {
+    assert.ok(
+      (ALL_UNITS as readonly string[]).includes(unit),
+      `registered Unit "${unit}" must also be declared organizational identity`,
+    );
+  }
+  // Creative & Design and Operations are real, addressable Units with no
+  // built manifest -- the pair must not be reconciled in EITHER direction:
+  // not dropped from identity, not promoted to capability.
+  for (const unit of ["Creative & Design", "Operations"] as const) {
+    assert.ok(ALL_UNITS.includes(unit), `${unit} must remain declared organizational identity`);
+    assert.ok(!registered.includes(unit), `${unit} must not become executable just by being a Unit`);
+  }
+});
+
+test("ALL_UNITS and the Unit union agree in both directions -- a Unit cannot be added without updating the runtime list", () => {
+  type MissingUnit = Exclude<Unit, (typeof ALL_UNITS)[number]>;
+  // Compile-time proof: any Unit absent from ALL_UNITS makes this assignment
+  // a type error, so the test file itself fails to typecheck.
+  const exhaustive: MissingUnit extends never ? true : ["ALL_UNITS is missing", MissingUnit] = true;
+  assert.strictEqual(exhaustive, true, "every member of the Unit union must appear in ALL_UNITS");
+  // The reverse direction (a list entry that is not a Unit) is enforced by
+  // `satisfies readonly Unit[]` where ALL_UNITS is declared in types.ts.
+  assert.strictEqual(ALL_UNITS.length, new Set(ALL_UNITS).size, "ALL_UNITS must hold no duplicate Unit names");
+  assert.ok(ALL_UNITS.length >= 7, `ALL_UNITS must cover every declared Unit, got ${ALL_UNITS.length}`);
+});
+
+test("ALL_HATS and the Unit Registry declare exactly the same Hat names for every registered Unit", () => {
+  // The two registries record the same fact (which Hats exist for a
+  // manifest-based Unit) from different angles -- ALL_HATS is discovery
+  // metadata (unit + specialization, no execution), the manifest is
+  // execution (handlers, no `unit` on the Hat). They are deliberately not
+  // merged (different owners, and the manifest graph pulls in the
+  // access.ts cycle), so they are proven consistent instead.
+  const manifests = getUnitManifests();
+  for (const [unit, manifest] of Object.entries(manifests)) {
+    const manifestHatNames = Object.keys(manifest.hats).sort();
+    const discoveryHatNames = ALL_HATS.filter((h) => h.unit === unit).map((h) => h.name).sort();
+    assert.deepStrictEqual(
+      discoveryHatNames,
+      manifestHatNames,
+      `ALL_HATS and ${unit}'s manifest must declare the same Hat names -- discovery must never offer a Hat execution cannot run, or hide one it can`,
+    );
+  }
+  for (const hat of ALL_HATS) {
+    assert.ok(
+      (ALL_UNITS as readonly string[]).includes(hat.unit),
+      `Hat "${hat.name}" registers Unit "${hat.unit}", which is not a declared Unit identity`,
+    );
+  }
+});
+
+test("registry build: a manifest registered under another Unit's key throws at build, naming the key and the declared identity", () => {
+  assert.throws(
+    () => buildUnitRegistry({ Strategy: salesManifest }),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.ok(message.includes('registry entry "Strategy"'), `must name the registry key, got: ${message}`);
+      assert.ok(message.includes('declares Unit "Sales"'), `must name the manifest's own identity, got: ${message}`);
+      assert.ok(message.includes("must match the manifest's own Unit identity"), `must state the invariant, got: ${message}`);
+      return true;
+    },
+    "Unit-keyed lookups (findUnitManifest(state.unit)) must never resolve a manifest that declares a different Unit",
+  );
 });

@@ -54,6 +54,10 @@ export type EntryHandler<A extends string = string> = (
  * EntryHandler: it reconstructs Handoff context first. It receives the Skills
  * its recorded Action declared, resolved and integrity-verified exactly as an
  * entry would -- empty for an Action that declares none.
+ *
+ * Declared per Hat as the optional `HatManifest.pickupHandler` (see that
+ * field's own comment for the entry/pickup distinction and for why absence
+ * means "no pickup path", never a fallback to entryHandler).
  */
 export type PickupHandler = (env: Env, state: WorkState, skills: ResolvedActionSkillSet) => Promise<WorkState>;
 
@@ -200,6 +204,47 @@ export interface HatManifest<A extends string = string> {
   entryHandler: EntryHandler<A>;
 
   /**
+   * This Hat's Handoff-pickup executor -- the governed Handoff Reception
+   * contract. OPTIONAL: it exists only for a Hat that actually executes
+   * Handoffs, and its absence is meaningful (see below), not a gap to fill.
+   *
+   * It is deliberately NOT a second name for `entryHandler`. The two differ
+   * in origin, in what the kernel has already done, and in what the handler
+   * must reconstruct:
+   *
+   * - `entryHandler` runs a DIRECT entry. The Action is resolved from this
+   *   very request's own text (Stage 1 Hat, Stage 2 action within this Hat's
+   *   declared list) and the handler works from free text plus the Skills the
+   *   resolved Action declared. Nothing has been recorded before it runs.
+   * - `pickupHandler` runs a HANDOFF-ORIGINATED continuation. By the time it
+   *   runs, Pickup Discovery has resolved the Handoff's destination Unit/Hat
+   *   as facts and the kernel has already resolved AND RECORDED the Action
+   *   against this Hat's own declared list; it receives that Work state plus
+   *   the recorded Action's own resolved Skills. Its job is to reconstruct
+   *   the Handoff context that state does not carry and continue the Work.
+   *
+   * What stays kernel behaviour and is never declared here: ownership
+   * adoption of the Handoff destination (handoffOwnership's
+   * runWithAdoptedOwnership) and Skill resolution through the recorded Action
+   * (session.ts's runUnderRecordedSkills). The manifest only declares WHICH
+   * function executes the pickup for this Hat -- the same division of labour
+   * as every other chokepoint on this contract: declarative Unit-specific
+   * fact, never kernel mechanism.
+   *
+   * No default and no fallback. A Hat with no `pickupHandler` has no
+   * manifest-driven pickup path, and the kernel must not guess a substitute
+   * for it (fail closed -- resolve nothing rather than route a pickup to an
+   * entry handler that would re-derive context this Work already has). A
+   * pickup aimed at such a Hat is refused by the mechanism that owns
+   * dispatch, not silently reinterpreted.
+   *
+   * Dispatch wiring for this field belongs to the Governed Handoff Reception
+   * workstream; declaring and validating it here is what gives that wiring a
+   * closed, testable contract to resolve against.
+   */
+  pickupHandler?: PickupHandler;
+
+  /**
    * This Hat's own `awaiting` states, keyed exactly as `state.awaiting` is set when a WorkSession pauses for a reply.
    * Empty if the Hat has no multi-turn flows. A state referenced in `state.awaiting` but missing here fails closed
    * (per the design doc's fail-closed manifest completeness): handleTextReply resolves nothing and sends its unchanged
@@ -320,6 +365,14 @@ export function findCallbackHandler(prefix: string, hat: HatManifest): ApprovalC
  */
 export function validateHatManifest(hat: HatManifest): string | null {
   if (!hat.name || !hat.name.trim()) return "a Hat manifest must declare the Hat's registered name";
+  // Optional, but never merely "absent" and unusable at the same time: an
+  // absent pickupHandler simply means this Hat has no manifest-driven pickup
+  // path (the kernel resolves nothing for it, fail closed), while a present
+  // one that isn't a callable is a manifest defect that must fail the build
+  // rather than surface as a dead pickup on a live Handoff.
+  if (hat.pickupHandler !== undefined && typeof hat.pickupHandler !== "function") {
+    return `${hat.name}: pickupHandler must be a function with the PickupHandler signature (env, state, skills) -- a Hat that declares one but cannot run it would leave a Handoff pickup unresolved`;
+  }
   if (!hat.responsibilityId || !hat.responsibilityId.trim()) {
     return `${hat.name}: a Hat must declare the id of the Responsibility it owns, for its Actions to be associated with`;
   }

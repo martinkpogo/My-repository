@@ -169,6 +169,46 @@ export type Unit =
   | "Creative & Design"
   | "Operations";
 
+/**
+ * Every Unit's organizational identity, as runtime data -- the ONE canonical
+ * list of Unit names for any consumer that needs the names as values
+ * (deterministic addressee matching in workspaceRouter.ts, and tests).
+ * It lives beside the `Unit` union above because that union is its type-level
+ * twin, and neither direction can drift silently:
+ *
+ * - a name in this list that is not a `Unit` fails `satisfies readonly Unit[]`
+ *   at compile time; and
+ * - a `Unit` missing from this list fails `Exclude<Unit, (typeof
+ *   ALL_UNITS)[number]> extends never` in src/units/registryValidation.test.ts.
+ *
+ * Deliberately NOT derived from the Unit Registry (src/units/registry.ts).
+ * The two answer different questions and must stay distinct:
+ *
+ * - identity -- "which Units exist" -- covers all of them, including Creative
+ *   & Design and Operations, which have no built runtime manifest. Addressing
+ *   an identity-only Unit must never make it executable (router.ts still fails
+ *   closed for a Unit with no manifest).
+ * - capability -- "which Units have a built manifest" -- is the registry's
+ *   `Partial<Record<Unit, UnitManifest>>`, deliberately partial for exactly
+ *   the same reason. Deriving identity from it would silently drop two real
+ *   Units; deriving capability from this list would imply all seven can run
+ *   governed work.
+ *
+ * It also cannot live in registry.ts for a mechanical reason: registry.ts
+ * statically imports every manifest, and those manifests import access.ts
+ * (the deliberate cycle its lazy table exists to break) -- pulling that into
+ * workspaceRouter.ts would load that cycle for a list of seven strings.
+ */
+export const ALL_UNITS = [
+  "Sales",
+  "Marketing",
+  "Business Development",
+  "Finance",
+  "Strategy",
+  "Creative & Design",
+  "Operations",
+] as const satisfies readonly Unit[];
+
 export type QualificationAssessment = "Satisfied" | "Not Satisfied" | "Insufficient Evidence";
 
 export interface QualificationConditionResult {

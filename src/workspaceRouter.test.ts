@@ -4,7 +4,7 @@ import { resolveAddressee, resolveWorkspaceRouting, type WorkspaceDecision } fro
 import { routeIncomingText, dispatchCowork } from "./router";
 import { isSemanticTaskId } from "./dataBoundary/registry";
 import { setWorkspaceMode } from "./sessionRouting";
-import type { Env } from "./types";
+import { ALL_UNITS, type Env } from "./types";
 import type { UnitManifest, HatManifest } from "./units/unitManifest";
 
 /**
@@ -150,6 +150,14 @@ test("D. Retired Research & Intelligence names are not addressable -- no Unit, H
   assert.strictEqual(resolveAddressee("R&I, what does this market look like?"), null);
   assert.strictEqual(resolveAddressee("Research & Intelligence, what does this market look like?"), null);
   assert.strictEqual(resolveAddressee("Research & Intelligence Analyst, research this competitor."), null);
+});
+
+test("D2. Every declared Unit identity is addressable as a bare vocative -- identity is what gets resolved here, not execution (test U below proves dispatch still fails closed for the manifest-less ones)", () => {
+  for (const unit of ALL_UNITS) {
+    const result = resolveAddressee(`${unit}, please take a look at this.`);
+    assert.strictEqual(result?.unit, unit, `${unit} must be addressable -- it is declared Unit identity in src/types.ts's ALL_UNITS`);
+    assert.strictEqual(result?.hat, undefined, `${unit} must resolve to the Unit, not to a Hat`);
+  }
 });
 
 test("E. A Unit name appearing mid-sentence is never treated as addressing (structural, not semantic)", () => {

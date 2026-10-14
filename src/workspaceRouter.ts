@@ -1,4 +1,4 @@
-import type { Env, Unit } from "./types";
+import { ALL_UNITS, type Env, type Unit } from "./types";
 import { ALL_HATS } from "./hats/registry";
 import { getWorkspaceMode, isCoworkClarificationPending, setCoworkClarificationPending } from "./sessionRouting";
 
@@ -41,16 +41,6 @@ export type WorkspaceDecision =
   | { mode: "clarify"; question: string }
   | { mode: "blocked"; reason: string };
 
-const VALID_UNITS: Unit[] = [
-  "Sales",
-  "Marketing",
-  "Business Development",
-  "Finance",
-  "Strategy",
-  "Creative & Design",
-  "Operations",
-];
-
 const CLARIFICATION_QUESTION =
   "Who should own this work? Name the Unit or Hat (e.g. Sales, Strategy, Finance, Marketing).";
 
@@ -60,10 +50,21 @@ interface Addressee {
   hat?: string;
 }
 
-/** Every name a message could deterministically address, longest-first so a specific Hat wins over its bare Unit name. */
+/**
+ * Every name a message could deterministically address, longest-first so a
+ * specific Hat wins over its bare Unit name.
+ *
+ * The Unit half comes from the canonical identity list (src/types.ts's
+ * ALL_UNITS) -- not a copy of it, and not from the Unit Registry. Addressing
+ * is identity, not execution: Creative & Design and Operations are
+ * addressable here exactly like the five manifest-based Units, and dispatch
+ * still fails closed for them afterwards (router.ts's "no governed entry
+ * point" path), so naming them in this list never creates a WorkSession or
+ * makes an identity-only Unit executable.
+ */
 function buildAddresseeCandidates(): Addressee[] {
   const hatEntries: Addressee[] = ALL_HATS.map((h) => ({ name: h.name, unit: h.unit as Unit, hat: h.name }));
-  const unitEntries: Addressee[] = VALID_UNITS.map((u) => ({ name: u, unit: u }));
+  const unitEntries: Addressee[] = ALL_UNITS.map((u) => ({ name: u, unit: u }));
   return [...hatEntries, ...unitEntries].sort((a, b) => b.name.length - a.name.length);
 }
 
