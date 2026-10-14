@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import crypto from "node:crypto";
 import { handleNotionWebhookRequest, verifyNotionSignature, evaluateHandoffPageForWebhook } from "./notionWebhook";
+import { unitsWithHandoffPickup } from "./checkHandoffs";
+import { getUnitManifests } from "./units/registry";
 import type { Env } from "./types";
 
 const SECRET = "test-notion-webhook-secret";
@@ -346,6 +348,43 @@ test("10. Missing Matter_Token fails closed", () => {
   page.properties.Matter_Token = { rich_text: [] };
   const result = evaluateHandoffPageForWebhook(env, page);
   assert.strictEqual(result.relevant, false);
+});
+
+// --- "To Unit" routing is registry-driven, never a private Unit list --------
+
+test("11. The webhook's routable set IS the Unit Registry's handoffPickup declarations: every registered Unit is relevant exactly when its manifest declares pickup (no second, hardcoded Unit list)", () => {
+  const env = fakeEnv();
+  const pickupUnits = new Set<string>(unitsWithHandoffPickup());
+  const registered = Object.keys(getUnitManifests());
+  assert.ok(registered.length > 0, "fixture sanity: the registry must have at least one Unit");
+  assert.ok(pickupUnits.size > 0, "fixture sanity: at least one Unit must declare handoffPickup");
+
+  for (const unit of registered) {
+    const result = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: { name: unit } } }));
+    if (pickupUnits.has(unit)) {
+      assert.strictEqual(result.relevant, true, `Unit "${unit}" declares handoffPickup, so a Pending Work Handoff to it must wake discovery`);
+    } else {
+      // Registered but no pickup declaration (today: Business Development):
+      // filtered out fail-closed, so discovery is never woken for a Unit
+      // that has no pickup handler to run.
+      assert.strictEqual(result.relevant, false, `Unit "${unit}" declares no handoffPickup, so the Handoff must not wake discovery`);
+      if (!result.relevant) assert.match(result.reason, /declare Handoff pickup/);
+    }
+  }
+});
+
+test("12. An unregistered/retired Unit name in To Unit fails closed rather than being routed by guess", () => {
+  const env = fakeEnv();
+  const result = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: { name: "Research & Intelligence" } } }));
+  assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /declare Handoff pickup/);
+});
+
+test("13. An empty To Unit fails closed", () => {
+  const env = fakeEnv();
+  const result = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: null } }));
+  assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing or does not declare/);
 });
 
 // --- 14. duplicate delivery does not double-process -------------------------

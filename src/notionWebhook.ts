@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { systemContext } from "./access";
 import { getPage, plainText } from "./notion";
-import { runCheckHandoffs } from "./checkHandoffs";
+import { runCheckHandoffs, unitsWithHandoffPickup } from "./checkHandoffs";
 
 /**
  * POST /notion/webhook -- the externally-created-Handoff detection path.
@@ -90,7 +90,26 @@ function extractPageIdFromEvent(payload: unknown): string | null {
   return id;
 }
 
-const ROUTABLE_UNITS = new Set(["Finance", "Sales", "Marketing", "Strategy"]);
+/**
+ * Which "To Unit" values this filter will wake the discovery engine for is
+ * NOT a list this module owns: it is read live from the Unit Registry, i.e.
+ * exactly the Units whose UnitManifest declares a `handoffPickup`
+ * (checkHandoffs.unitsWithHandoffPickup -- the same declarations discovery,
+ * session scheduling and pickup dispatch all key off). A hardcoded set here
+ * would be a second, independent statement of "who can pick up a Handoff",
+ * one that silently drifts the moment a Unit is added/retired on its
+ * manifest: a Pending Handoff addressed to it would be filtered out at the
+ * webhook and never woken, with no test anywhere failing. Resolved per call
+ * (not at module load) so the registry is read at evaluation time, exactly
+ * as every other caller does.
+ *
+ * A Unit that declares no pickup is still rejected -- the reason is now
+ * simply stated as the manifest fact it is, rather than as membership in a
+ * private list.
+ */
+function routableUnits(): Set<string> {
+  return new Set<string>(unitsWithHandoffPickup());
+}
 
 export type HandoffWebhookFilterResult =
   | { relevant: true; toUnit: string; entityToken: string; matterToken: string }
@@ -126,8 +145,8 @@ export function evaluateHandoffPageForWebhook(
     return { relevant: false, reason: `Status is "${status || "(empty)"}", not Pending -- already claimed, held, or closed` };
   }
   const toUnit = plainText(page.properties["To Unit"]);
-  if (!ROUTABLE_UNITS.has(toUnit)) {
-    return { relevant: false, reason: `"To Unit" ("${toUnit || "(empty)"}") is missing or not a Unit with routing/pickup logic` };
+  if (!routableUnits().has(toUnit)) {
+    return { relevant: false, reason: `"To Unit" ("${toUnit || "(empty)"}") is missing or does not declare Handoff pickup on its Unit manifest` };
   }
   const entityToken = plainText(page.properties.Entity_Token).trim();
   if (!entityToken) {
