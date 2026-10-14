@@ -278,6 +278,11 @@ test("ignores a comment from anyone other than the doc's own authorized account 
   assert.strictEqual(replied, false, "must never reply to a comment from an unauthorized identity");
   assert.strictEqual(batchUpdated, false, "must never execute an edit requested by an unauthorized identity");
   assert.strictEqual(result.commentsProcessed, 0);
+  assert.strictEqual(
+    result.diagnostics.find((d) => d.commentId === "comment-2")?.outcome,
+    "unauthorized_author",
+    "the exact recorded outcome names the refusal",
+  );
 
   const processedMarker = await fakeEnv.STATE_KV.get("google_comment_processed:comment-2");
   assert.strictEqual(processedMarker, "1", "still marked processed so it isn't re-checked forever");
@@ -589,10 +594,15 @@ test("a proposal-bound Doc comment from anyone but the authorizing account is ig
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleDocComments(fakeEnv);
+  const pollResult = await pollGoogleDocComments(fakeEnv);
 
   assert.strictEqual(calls.length, 0);
   assert.strictEqual(replied, false);
+  assert.strictEqual(
+    pollResult.diagnostics.find((d: any) => d.commentId === "c-p2")?.outcome,
+    "unauthorized_author",
+    "the exact recorded outcome names the refusal",
+  );
 });
 
 test("a change the Work refuses (stale version) is answered 'Not applied' and the comment stays unresolved", async (t) => {
@@ -1436,4 +1446,130 @@ test("marker 4. the Operations alert for a rejected reply contains NO comment or
   assert.ok(!alert.includes("TOPSECRET-COMMENT-PAYLOAD"), "the comment's text never reaches the Operations stream");
   assert.ok(!alert.includes("select the text"), "the reply's text never reaches the Operations stream either");
   assert.ok(!alert.toLowerCase().includes("figure"), "nor any other fragment of the comment");
+});
+
+// ---------------------------------------------------------------------------
+// An escaped Proposal handler AFTER the processed marker: the comment is
+// durably done (the marker runs before the handler), so it must be answered
+// honestly instead of silently closed off -- without ever unmarking it,
+// retrying the operation, or losing the original failure evidence.
+// ---------------------------------------------------------------------------
+
+test("escape 1. a Proposal handler that THROWS after the processed marker is answered honestly: unhandled_exception preserved, a 'Not applied' reply attempted, a content-free Operations notification sent, and the handler never runs twice", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  // Enable the Operations stream (sendOperationsMessage needs the group chat
+  // + topic), so the notification is observable exactly as in production.
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
+
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+  // Replace the Work stub so the substantive-comment handler itself escapes
+  // (a Durable Object transport failure) AFTER the poller wrote the marker.
+  (fakeEnv as any).WORK_SESSION = {
+    idFromName: (name: string) => name,
+    get: () =>
+      salesOperationStub({
+        handleProposalDocComment: async (req: any) => {
+          calls.push(req);
+          throw new Error("WorkSession transport unavailable");
+        },
+        handleProposalDocFormatting: async () => ({ kind: "formatted" }),
+        requestProposalDocClarification: async () => ({ ok: true }),
+        syncProposalDocApprovalCycle: async () => ({ kind: "no_cycle" }),
+      }),
+  };
+
+  let reply: any = null;
+  let resolved = false;
+  let batchUpdated = false;
+  const operationsAlerts: any[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchWith({
+    comments: [{ id: "c-esc-1", content: "SECRET-ESCAPE-PAYLOAD shorten the scope", resolved: false, author: { me: true }, quotedFileContent: { value: "Scope section" } }],
+    onReply: (_id, body) => (reply = body),
+    onResolve: () => (resolved = true),
+    onBatchUpdate: () => ((batchUpdated = true), true),
+    onTelegram: (body) => operationsAlerts.push(body),
+  });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  // The original failure evidence is preserved verbatim.
+  const diag = result.diagnostics.find((d) => d.commentId === "c-esc-1");
+  assert.strictEqual(diag?.outcome, "unhandled_exception", "the escape is still recorded as its own diagnostic");
+  assert.ok(diag?.detail?.includes("WorkSession transport unavailable"), `the diagnostic keeps the original error: ${diag?.detail}`);
+
+  // The marker written before the handler is KEPT -- no unmark, no blind retry.
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-1"), "1", "the comment stays durably processed");
+  assert.strictEqual(calls.length, 1, "the handler ran exactly once -- a second execution attempt never happens");
+
+  // The thread is answered honestly: not applied, no success claimed.
+  assert.ok(reply, "an honest reply WAS attempted despite the escape");
+  assert.match(reply.content, /Not applied --/, "the reply states the operation was not applied");
+  assert.ok(!/applied successfully|change recorded|formatting applied/i.test(reply.content), "the reply never claims success");
+  assert.strictEqual(resolved, false, "a failed pass never resolves the comment");
+  assert.strictEqual(batchUpdated, false, "the Doc itself is never touched");
+
+  // Martin is notified through Operations -- identifiers only.
+  assert.ok(operationsAlerts.length >= 1, "the Operations notification was sent");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes(DOC_ID), "the alert names the affected document");
+  assert.ok(alert.includes("c-esc-1"), "the alert names the affected comment");
+  assert.ok(!alert.includes("SECRET-ESCAPE-PAYLOAD"), "no comment content reaches the Operations stream");
+  assert.ok(!alert.includes("shorten the scope"), "nor any fragment of it");
+});
+
+test("escape 2. when the honest reply itself cannot be delivered, the original unhandled_exception evidence and the Operations notification still stand -- and nothing is re-executed", async (t) => {
+  const { fakeEnv } = createFakeEnv();
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
+
+  const calls: any[] = [];
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+  (fakeEnv as any).WORK_SESSION = {
+    idFromName: (name: string) => name,
+    get: () =>
+      salesOperationStub({
+        handleProposalDocComment: async (req: any) => {
+          calls.push(req);
+          throw new Error("WorkSession transport unavailable");
+        },
+        handleProposalDocFormatting: async () => ({ kind: "formatted" }),
+        requestProposalDocClarification: async () => ({ ok: true }),
+        syncProposalDocApprovalCycle: async () => ({ kind: "no_cycle" }),
+      }),
+  };
+
+  let replyAttempts = 0;
+  const operationsAlerts: any[] = [];
+  const originalFetch = globalThis.fetch;
+  const inner = mockFetchWith({
+    comments: [{ id: "c-esc-2", content: "tighten the budget", resolved: false, author: { me: true }, quotedFileContent: { value: "Budget" } }],
+    onTelegram: (body) => operationsAlerts.push(body),
+  });
+  // The reply endpoint's own network call fails -- the failure of the
+  // best-effort answer must not replace the original evidence. The attempt
+  // is counted here (the inner mock never sees it).
+  globalThis.fetch = (async (url: any, init?: any) => {
+    if (String(url).includes("/comments/") && String(url).includes("/replies") && init?.method === "POST") {
+      replyAttempts += 1;
+      throw new Error("reply network down");
+    }
+    return inner(url, init);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await pollGoogleDocComments(fakeEnv);
+
+  const diag = result.diagnostics.find((d) => d.commentId === "c-esc-2");
+  assert.strictEqual(diag?.outcome, "unhandled_exception", "the original failure evidence survives the failed reply attempt");
+  assert.ok(diag?.detail?.includes("WorkSession transport unavailable"), "with the original error intact");
+  assert.strictEqual(replyAttempts, 1, "the reply was attempted exactly once (and its failure is swallowed, never re-run)");
+  assert.ok(operationsAlerts.length >= 1, "the Operations notification still went out");
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-2"), "1", "the marker is kept");
+  assert.strictEqual(calls.length, 1, "the handler is never entered a second time");
 });
