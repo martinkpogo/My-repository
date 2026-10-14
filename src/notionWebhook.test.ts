@@ -4,8 +4,12 @@ import { test } from "node:test";
 import crypto from "node:crypto";
 import { handleNotionWebhookRequest, verifyNotionSignature, evaluateHandoffPageForWebhook } from "./notionWebhook";
 import { unitsWithHandoffPickup } from "./checkHandoffs";
-import { getUnitManifests } from "./units/registry";
-import type { Env } from "./types";
+import { buildUnitRegistry, getUnitManifests } from "./units/registry";
+import { financeManifest } from "./units/finance/financeManifest";
+import type { UnitManifest } from "./units/unitManifest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Env, Unit } from "./types";
 
 const SECRET = "test-notion-webhook-secret";
 
@@ -122,6 +126,33 @@ function eventBody(pageId = "page-1") {
     type: "page.properties_updated",
     entity: { id: pageId, type: "page" },
   });
+}
+
+// --- synthetic newly-registered Unit fixtures -------------------------------
+//
+// A Unit that exists ONLY as a registry table entry in a test: no production
+// code names it, and it is never added to the real registry. `as Unit` is the
+// cast that lets a name outside the production Unit union stand in for the
+// Unit an architect would add later; the manifests below are the minimum a
+// new Unit would declare.
+
+const SYNTHETIC_UNIT = "Synthetic Test Unit" as Unit;
+
+function syntheticManifest(declaresPickup: boolean): UnitManifest {
+  const base = {
+    unit: SYNTHETIC_UNIT,
+    hats: {},
+    intakeClassificationTaskId: "test_intake",
+    intakeIntroLine: "synthetic test Unit used only by this test file",
+    actionClassificationTaskId: "test_action",
+  } as unknown as UnitManifest;
+  if (!declaresPickup) return base;
+  return { ...base, handoffPickup: { handler: async () => {} } } as unknown as UnitManifest;
+}
+
+/** The production registry plus a synthetic entry -- the table a newly registered Unit would live in. */
+function registryWithSyntheticUnit(declaresPickup: boolean): Partial<Record<Unit, UnitManifest>> {
+  return { ...getUnitManifests(), [SYNTHETIC_UNIT]: syntheticManifest(declaresPickup) };
 }
 
 // --- signature verification -------------------------------------------------
@@ -385,6 +416,68 @@ test("13. An empty To Unit fails closed", () => {
   const result = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: null } }));
   assert.strictEqual(result.relevant, false);
   if (!result.relevant) assert.match(result.reason, /missing or does not declare/);
+});
+
+// --- a SYNTHETIC newly registered Handoff-capable Unit ----------------------
+//
+// The loop in test 11 proves the filter agrees with today's manifests. These
+// prove the case the registry cannot show on its own: a Unit that is NOT
+// registered in production, added purely by declaring `handoffPickup` on its
+// manifest in a registry table, is accepted by the SAME filter -- with no
+// Unit-specific branch, no private Unit list and no change to production
+// code. The filter runs unmodified; only the registry table it reads is a
+// fixture (the `manifests` seam, which production callers never pass).
+
+test("11b. A SYNTHETIC newly registered Unit declaring handoffPickup is accepted by the webhook filter -- generic by construction, no Unit-specific branch", () => {
+  const env = fakeEnv();
+  const table = registryWithSyntheticUnit(true);
+
+  // The synthetic Unit really is in the table's pickup set...
+  assert.ok(unitsWithHandoffPickup(table).includes(SYNTHETIC_UNIT), "the synthetic manifest must declare pickup");
+  // ...and the production filter accepts a Pending Work Handoff addressed to it.
+  const result = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: { name: SYNTHETIC_UNIT } } }), table);
+  assert.strictEqual(result.relevant, true, "a newly registered Handoff-capable Unit must wake discovery");
+  if (result.relevant) {
+    assert.strictEqual(result.toUnit, SYNTHETIC_UNIT);
+    assert.strictEqual(result.entityToken, "E-20");
+    assert.strictEqual(result.matterToken, "MAT-20");
+  }
+});
+
+test("11c. The SAME synthetic Unit without a pickup declaration is refused, and an unknown Unit stays refused -- acceptance is about the manifest declaration, never the Unit's identity", () => {
+  const env = fakeEnv();
+  // Registered in the table, but declares no pickup.
+  const noDeclaration = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: { name: SYNTHETIC_UNIT } } }), registryWithSyntheticUnit(false));
+  assert.strictEqual(noDeclaration.relevant, false);
+  if (!noDeclaration.relevant) assert.match(noDeclaration.reason, /declare Handoff pickup/);
+
+  // Not in the table at all (today's production registry): unknown Unit, fail closed.
+  const unknown = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage({ "To Unit": { select: { name: SYNTHETIC_UNIT } } }));
+  assert.strictEqual(unknown.relevant, false);
+
+  // The routable predicate is declaration PRESENCE, not deep validity: a
+  // malformed declaration (present, no handler) is not silently repaired here.
+  // That is deliberate -- execution is where it fails, closed, in
+  // WorkSession.runHandoffPickup (src/session.ts:266-273: nothing is claimed
+  // or persisted and the Handoff stays Pending), never at the filter.
+});
+
+test("11d. Registry assembly accepts a Unit purely by registration -- a valid manifest under a new Unit key passes buildUnitRegistry and enters the pickup set, with no registry-code change", () => {
+  // The real assembly path, run over a table whose Unit key production has
+  // never heard of: if registering a new Unit required a Unit-specific branch
+  // anywhere, this is where it would have to appear.
+  const assembled = buildUnitRegistry({ [SYNTHETIC_UNIT]: financeManifest } as Partial<Record<Unit, UnitManifest>>);
+  assert.ok(assembled[SYNTHETIC_UNIT], "a valid manifest must survive assembly under an unfamiliar Unit key");
+  assert.ok(unitsWithHandoffPickup(assembled).includes(SYNTHETIC_UNIT), "its handoffPickup must be visible to the same discovery predicate");
+});
+
+test("11e. The webhook filter carries no Unit list and no Unit-specific branch in source -- it can only read the registry's declarations", () => {
+  const source = readFileSync(join(__dirname, "notionWebhook.ts"), "utf8");
+  assert.ok(/unitsWithHandoffPickup\(/.test(source), "the filter must derive its routable set from the registry predicate");
+  assert.ok(!/ROUTABLE_UNITS/.test(source), "the former hardcoded Unit set must be gone");
+  for (const unitName of ["Finance", "Sales", "Marketing", "Strategy", "Business Development", "Creative & Design", "Operations"]) {
+    assert.ok(!source.includes(`"${unitName}"`), `notionWebhook.ts must not name Unit "${unitName}" -- the registry declares who picks up`);
+  }
 });
 
 // --- 14. duplicate delivery does not double-process -------------------------
