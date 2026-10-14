@@ -206,10 +206,20 @@ async function reportReplyFailure(
  * The one honest answer to a Proposal comment whose handler or transport
  * escaped AFTER its processed marker was already written (the marker runs
  * before the handler, so such a comment is durably done and will never be
- * picked up by a later pass). The escaped pass may have stopped before any
- * outcome existed, so this never claims success and never implies a retry: it
- * tells the thread the request was not applied, and reports the failure to
- * Operations with identifiers only -- never comment or reply content.
+ * picked up by a later pass).
+ *
+ * WHAT ESCAPED IS GENUINELY UNKNOWN. The throw can come from before any
+ * outcome existed (a lost Durable Object transport call), but it can equally
+ * come from AFTER a successful revision, when the confirmation reply or the
+ * resolve could not be delivered -- and a lost response may even hide a
+ * completed run. The error that reaches the caller carries no origin, so the
+ * escape is answered with its true uncertainty: processing was interrupted,
+ * the outcome could not be confirmed, and the authoritative Proposal and
+ * Operations records are where it can be checked. It NEVER claims the request
+ * was not applied, NEVER claims success, NEVER implies a retry, and never
+ * claims the Operations notification was delivered -- that notification is
+ * itself best-effort and may fail, and a failed claim would be worse than
+ * silence.
  *
  * Both attempts are best-effort and independently guarded: a reply that
  * cannot be delivered (or an alert that cannot be sent) is logged and
@@ -234,7 +244,7 @@ async function answerEscapedProposalComment(env: Env, doc: WatchedGoogleDoc, com
   try {
     await sendOperationsMessage(
       env,
-      `⚠️ Google Doc comment pass stopped\nDocument: ${doc.documentId}\nComment: ${comment.id}\n\nThe pass stopped with an error after this comment was marked processed. The comment was answered as not applied and is never retried automatically (a retry could duplicate an uncertain outcome). No comment content is included in this message.`,
+      `⚠️ Google Doc comment pass stopped\nDocument: ${doc.documentId}\nComment: ${comment.id}\n\nThe pass stopped with an error after this comment was marked processed and the outcome of the request could not be confirmed -- it may have been applied before the interruption. The comment is answered with that uncertainty and is never retried automatically (a retry could duplicate an uncertain outcome). No comment content is included in this message.`,
     );
   } catch (err) {
     console.error(`answerEscapedProposalComment: could not send the Operations notification for comment ${comment.id}`, err);
@@ -244,7 +254,7 @@ async function answerEscapedProposalComment(env: Env, doc: WatchedGoogleDoc, com
       token,
       doc.documentId,
       comment.id,
-      "Not applied -- an internal error stopped this comment's pass before any outcome could be confirmed, and Martin has been notified. Please treat this request as not applied.",
+      "An internal error interrupted processing, so the outcome of this request could not be confirmed. Please check the Proposal and its Operations record before taking any further action.",
     );
   } catch (err) {
     console.error(`answerEscapedProposalComment: could not deliver the honest reply for comment ${comment.id}`, err);
@@ -767,8 +777,9 @@ export async function processGoogleDocComments(env: Env, doc: WatchedGoogleDoc):
       }
       console.error(`processGoogleDocComments: error processing comment ${comment.id} on ${doc.documentId}`, err);
       // The original failure evidence is recorded FIRST, so nothing that
-      // follows can replace it; only then is the Proposal thread answered
-      // honestly (best-effort, independently guarded, never a retry).
+      // follows can replace it; only then is the Proposal thread told the
+      // truth about the escape -- an interruption whose outcome could not be
+      // confirmed (best-effort, independently guarded, never a retry).
       diagnostics.push({
         documentId: doc.documentId,
         commentId: comment.id,
