@@ -51,6 +51,16 @@ Every production Handoff write goes through `src/handoffWriter.ts`'s `createHand
 - Any change that alters what the document describes updates the document in the same change, resolving the issue or adding it to the document's Open Questions list.
 - These rules do not relax the Authority Model: a genuinely new architectural or governance decision still stops and returns to Architect.
 
+## Concurrent development — mandatory reading
+
+`docs/concurrent-development.md` is the authoritative guide for how independent coding sessions work on ENIG in parallel. Before touching `src/units/`, `src/types.ts`, `src/session.ts`, `src/index.ts`, `src/hats/`, or `src/runtime/`, read it.
+
+- One session = one Git worktree **and** one branch, cut from a freshly fetched remote tip. A worktree isolates your working directory, not your architectural dependencies: two worktrees do not make two branches that change the same shared interface safe to merge.
+- A Unit's own directory (`src/units/<Unit>/`) is edited by that session alone. Cross a Unit boundary only with a Handoff record whose shared formats live in `src/handoffContracts/` — never by importing another Unit's code.
+- Generic infrastructure (`src/runtime/`, `src/platform/`, `src/dataBoundary/`, `src/ai/`) must stay Unit-free and compose with Units only through the shared contracts in `src/units/`. Declare a Unit-specific fact on its `UnitManifest`, never as a branch in generic code.
+- `src/types.ts`, `src/handoffContracts/`, `src/records/`, `src/units/{registry,unitManifest,dispatch,awaitingDispatch,unitOperations}.ts`, `src/session.ts`, `src/index.ts`, `src/hats/` and `src/router.ts` are shared or integration-owned: announce a change to any of them, and never resolve a contract conflict by guessing.
+- `src/handoffContracts/unitBoundary.test.ts` enforces these boundaries in `npm test` and in PR Validation. Run `npm run typecheck` and `npm test` before opening a PR; a green local run is not a green CI run, and a merged PR is not a deployed revision.
+
 ## Claude Code execution contract
 
 Claude Code is trusted to execute the full engineering lifecycle inside the approved boundary. Its execution authority is **task-scoped**.
