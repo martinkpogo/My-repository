@@ -16,7 +16,7 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 | `npm ci` | exit 0 |
 | Baseline `npx tsx --test` | **1499 tests, 0 fail** (before any change in this branch) |
 | `npm run typecheck` (`tsc --noEmit`) after changes | **exit 0** |
-| `npx tsx --test` after changes | **1509 tests, 0 fail** (+10 new, none weakened/removed) |
+| `npx tsx --test` after changes | **1513 tests, 0 fail** (+14 new, none weakened/removed) |
 | `gh` CLI | not installed; GitHub API used with the credential-helper token |
 
 ---
@@ -129,7 +129,7 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 | File | Change |
 | --- | --- |
 | `src/notionWebhook.ts` | `ROUTABLE_UNITS` constant removed; `routableUnits()` now derives from `unitsWithHandoffPickup()`; refusal reason states the manifest fact. |
-| `src/notionWebhook.test.ts` | +3 conformance tests (registry-driven accept/reject loop, unregistered Unit, empty `To Unit`). |
+| `src/notionWebhook.test.ts` | +7 conformance tests (registry-driven accept/reject loop, unregistered Unit, empty `To Unit`). |
 | `src/platform/skillRegistry.test.ts` | +7 conformance tests for package-resolution branches (status/runtime/format/integrity/version/unknown id), mutation restored in `finally`. |
 | `docs/enig-operating-model.md` | Skill-Registry drift corrected (3 places); +2 Known-gaps entries (Result verification gap; deleted research governance pages). |
 | `docs/foundation-kernel-conformance-matrix.md` | This deliverable. |
@@ -142,8 +142,8 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 
 * `npm ci` → exit 0
 * `npm run typecheck` (`tsc --noEmit`) → **exit 0**
-* `npx tsx --test` → **1509 tests, 1509 pass, 0 fail, 0 skipped** (exit 0; baseline was 1499/0)
-* Focused runs: `npx tsx --test src/notionWebhook.test.ts` → 24/24; `npx tsx --test src/platform/skillRegistry.test.ts` → 12/12
+* `npx tsx --test` → **1513 tests, 1513 pass, 0 fail, 0 skipped** (exit 0; baseline was 1499/0)
+* Focused runs: `npx tsx --test src/notionWebhook.test.ts` → 28/28; `npx tsx --test src/platform/skillRegistry.test.ts` → 12/12
 
 ## 6. Remaining gaps (all requiring an Architect decision — none invented in code)
 
