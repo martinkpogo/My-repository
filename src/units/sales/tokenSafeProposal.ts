@@ -2089,6 +2089,53 @@ export async function applyProposalDocFormatting(
   return { state, result: { kind: "refused", detail: outcome.reason ?? `${outcome.state}: no detail` } };
 }
 
+/** The outcome of ONE automated Doc-thread reply: actually delivered, or refused with the gate's honest reason. */
+export type ProposalDocCommentReplyResult = { sent: true } | { sent: false; detail: string };
+
+/**
+ * Posts ONE automated reply to a comment on this Proposal's Doc -- the
+ * governed form of the Doc-thread replies googleDocComments.ts used to issue
+ * as direct Drive calls. Martin's Access-context decision (2026-10-15)
+ * authorized exactly this: a cron-driven Google reply runs ONLY through the
+ * registered external-mutation gate (`google_drive.reply_to_comment`,
+ * invoked here under this Work's own resolved Action), never as a direct
+ * Google call. Everything the boundary supplies therefore applies: the
+ * Work's Action must DECLARE the operation (denied otherwise), an
+ * approval-gated Action demands bound approval evidence (a comment arriving
+ * under `proposal_approve` is refused, exactly like the formatting path), the
+ * trusted target must be a watched file under its own authorized account,
+ * durable intent/outcome records apply, and an uncertain reply is never
+ * repeated (the operation declares no reconciliation step).
+ *
+ * Deliberately does NOT judge WHY a reply may or may not go out beyond what
+ * the boundary reports: the caller (the comment poller) keeps the comment's
+ * own marker-before-reply, deduplication and failure-reporting contract, and
+ * a non-success here is reported to Operations and never retried. No state
+ * of this Work is changed by a reply.
+ */
+export async function sendProposalDocCommentReply(
+  env: Env,
+  state: WorkState,
+  input: { documentId: string; commentId: string; content: string; accountIdentifier: string },
+): Promise<{ state: WorkState; result: ProposalDocCommentReplyResult }> {
+  const outcome = await invokeTool(
+    env,
+    {
+      tool_id: "google_drive",
+      operation_id: "google_drive.reply_to_comment",
+      input: { file_id: input.documentId, comment_id: input.commentId, content: input.content, account_identifier: input.accountIdentifier },
+    },
+    workSessionContext(state),
+  );
+  if (outcome.state === "succeeded") return { state, result: { sent: true } };
+  // Every non-success keeps its honest shape: `denied` (no declaration on
+  // the Work's Action, missing bound approval evidence, or an unresolvable
+  // target) made no request; `failed` names the stage; and
+  // `partially_completed`/`unverified` mark a reply that may exist and must
+  // never be repeated.
+  return { state, result: { sent: false, detail: outcome.reason ?? `${outcome.state}: no detail` } };
+}
+
 /**
  * `retryable: false` marks a refusal that can never succeed for this comment
  * (its Doc, Proposal or Version no longer matches the Work), so the poller

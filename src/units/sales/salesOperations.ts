@@ -8,7 +8,9 @@ import {
   applyProposalDocFormatting,
   evaluateProposalApprovalCycle,
   requestProposalDocClarification,
+  sendProposalDocCommentReply,
   type ProposalDocClarificationResult,
+  type ProposalDocCommentReplyResult,
   type ProposalDocCommentResult,
   type ProposalDocFormattingResult,
 } from "./tokenSafeProposal";
@@ -27,6 +29,7 @@ import {
 type DocCommentInput = { proposalNumber: number; version: number; text: string; commentId?: string; documentId?: string };
 type DocFormattingInput = { proposalNumber: number; version: number };
 type DocClarificationInput = { proposalNumber: number; version: number; commentId: string; documentId: string; text: string };
+type DocReplyInput = { documentId: string; commentId: string; content: string; accountIdentifier: string };
 type ApprovalCycleInput = { documentId: string; observations: { commentId: string; resolved: boolean; modifiedTime?: string }[] };
 type ApprovalCycleResult = { kind: string; approvedVersion?: number; reasons?: string[] };
 
@@ -89,6 +92,19 @@ export const SALES_OPERATIONS: Record<string, UnitOperation> = {
     run: (env, state, input: DocClarificationInput) => requestProposalDocClarification(env, state, input),
     failed: { ok: false, detail: "the clarification could not be recorded; Martin was notified.", retryable: false },
   } satisfies UnitOperation<DocClarificationInput, ProposalDocClarificationResult>,
+
+  /**
+   * Posts ONE automated reply to a comment on this Proposal's Doc through the
+   * registered external-mutation gate (google_drive.reply_to_comment) under
+   * this Work's own resolved Action -- Martin's Access-context decision
+   * (2026-10-15). A denial (no declaration, missing bound approval evidence,
+   * unresolvable target) makes no request and is reported by the caller; this
+   * operation changes no state of the Work.
+   */
+  [SALES_OPERATION.replyProposalDocComment]: {
+    run: (env, state, input: DocReplyInput) => sendProposalDocCommentReply(env, state, input),
+    failed: { sent: false, detail: "the reply operation could not run; Martin was notified." },
+  } satisfies UnitOperation<DocReplyInput, ProposalDocCommentReplyResult>,
 };
 
 // ---------------------------------------------------------------------------
@@ -109,6 +125,9 @@ export const handleProposalDocFormatting = (env: Env, workId: string, input: Doc
 
 export const requestProposalDocClarificationOnWork = (env: Env, workId: string, input: DocClarificationInput) =>
   call<ProposalDocClarificationResult>(env, workId, SALES_OPERATION.requestProposalDocClarification, input);
+
+export const replyProposalDocComment = (env: Env, workId: string, input: DocReplyInput) =>
+  call<ProposalDocCommentReplyResult>(env, workId, SALES_OPERATION.replyProposalDocComment, input);
 
 export const syncProposalDocApprovalCycle = (env: Env, workId: string, input: ApprovalCycleInput) =>
   call<ApprovalCycleResult>(env, workId, SALES_OPERATION.syncProposalDocApprovalCycle, input);

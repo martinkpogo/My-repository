@@ -128,43 +128,6 @@ async function markProcessed(env: Env, commentId: string): Promise<void> {
 }
 
 /**
- * Sends a reply and REPORTS whether the provider actually accepted it --
- * the plain `replyToComment` above ignores the response entirely, which
- * silently claims success for a rejected reply.
- *
- * A failure is reported to Operations and never thrown back into the poll
- * loop: the caller has already written its processed marker before replying,
- * so the comment is durably done and a retry is not safe (it could duplicate
- * a reply after an uncertain provider outcome). The marker is not cleared and
- * the reply is not retried -- the failure is made visible and the flow stops.
- */
-async function replyToCommentChecked(
-  env: Env,
-  token: string,
-  spreadsheetId: string,
-  commentId: string,
-  content: string,
-  operation: string,
-): Promise<{ ok: boolean; status: number }> {
-  let res: Response;
-  try {
-    res = await fetch(`https://www.googleapis.com/drive/v3/files/${spreadsheetId}/comments/${commentId}/replies?fields=id`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
-    });
-  } catch (err) {
-    await reportReplyFailure(env, operation, spreadsheetId, commentId, `request failed: ${err instanceof Error ? err.message : String(err)}`);
-    return { ok: false, status: 0 };
-  }
-  if (!res.ok) {
-    await reportReplyFailure(env, operation, spreadsheetId, commentId, `HTTP ${res.status}`);
-    return { ok: false, status: res.status };
-  }
-  return { ok: true, status: res.status };
-}
-
-/**
  * The one place a failed sheet-comment reply is made operationally visible.
  * Deliberately carries ONLY identifiers and the failure category -- never the
  * comment's text, never the reply text, never the anchored cell content.
@@ -180,8 +143,30 @@ async function reportReplyFailure(
 ): Promise<void> {
   await sendOperationsMessage(
     env,
-    `⚠️ Google Sheet comment reply not delivered\nOperation: ${operation}\nSpreadsheet: ${spreadsheetId}\nComment: ${commentId}\nReason: ${reason}\n\nThe comment is already marked processed, so this reply is not retried automatically (a retry could duplicate it after an uncertain outcome). No comment content is included in this message.`,
+    `⚠️ Google Sheet comment reply not delivered\nOperation: ${operation}\nSpreadsheet: ${spreadsheetId}\nComment: ${commentId}\nReason: ${reason}\n\nThis reply is not retried automatically (a duplicate could reach the commenter after an uncertain outcome or a refusal), and the comment's own processing state is unchanged. No comment content is included in this message.`,
   ).catch((err) => console.error("reportReplyFailure: could not send the Operations alert", err));
+}
+
+/**
+ * Delivers (or refuses) ONE automated reply to a Sheet comment. Martin's
+ * Access-context decision (2026-10-15) authorized automated Docs/Sheets
+ * replies ONLY through the registered external-mutation gate under the
+ * comment's Work Action -- there is no direct Drive reply any more. A
+ * watched Spreadsheet carries NO Work binding (see WatchedGoogleSheet), so
+ * no Work Action could ever authorize a reply on it: every automated Sheet
+ * reply is therefore refused FAIL-CLOSED here -- never posted around the
+ * gate -- and reported to Operations with identifiers only. The comment's
+ * own marker-before-reply, dedup and no-retry contracts are unchanged: the
+ * marker runs first, and a refused reply is never retried.
+ */
+async function refuseReplyWithoutWorkAction(env: Env, sheet: WatchedGoogleSheet, commentId: string, operation: string): Promise<void> {
+  await reportReplyFailure(
+    env,
+    operation,
+    sheet.spreadsheetId,
+    commentId,
+    "no Work Action authorizes a reply on this spreadsheet (it is not bound to a Work), so the automated reply was refused fail-closed rather than posted outside the governed gate",
+  );
 }
 
 export type SheetCommentOutcome =
@@ -213,10 +198,14 @@ interface ProcessSheetCommentResult {
  * then NEVER applied: comment-triggered cell edits have no registered Tool
  * operation, no Action declaration and no Architect-approved authorization
  * path, and this boundary never mints authorization -- so the flow fails
- * closed with an honest reply and reports the missing authorization
- * decision (outcome `edit_not_authorized`) instead of mutating the sheet.
- * The dedup marker still runs, so the same request is never re-attempted on
- * every poll.
+ * closed with an honest report (outcome `edit_not_authorized`) instead of
+ * mutating the sheet. The dedup marker still runs, so the same request is
+ * never re-attempted on every poll.
+ *
+ * Every reply this flow composes is refused FAIL-CLOSED (a Sheet carries no
+ * Work binding, so no Work Action could ever authorize an automated reply --
+ * Martin's decision, 2026-10-15; see refuseReplyWithoutWorkAction): reported
+ * to Operations with identifiers only, never posted around the gate.
  */
 async function processSheetComment(
   env: Env,
@@ -246,19 +235,14 @@ async function processSheetComment(
 
   const quoted = comment.quotedFileContent?.value?.trim();
   if (!quoted) {
-    // MARKER BEFORE REPLY (same contract as googleDocComments.ts's non-Proposal
-    // branches): the reply is best-effort, so the comment must be durably
-    // marked before it is attempted -- a reply that fails must never leave the
-    // comment unmarked, or the next poll would reply to the human again.
+    // MARKER BEFORE REPLY (same contract as googleDocComments.ts's branches):
+    // the reply is best-effort, so the comment must be durably marked before
+    // it is attempted -- a refused or failed reply must never leave the
+    // comment unmarked, or the next poll would process it again. The reply
+    // itself is refused fail-closed (no Work Action on a Sheet -- see
+    // refuseReplyWithoutWorkAction).
     await markProcessed(env, comment.id);
-    await replyToCommentChecked(
-      env,
-      token,
-      sheet.spreadsheetId,
-      comment.id,
-      "I can only execute edits anchored to a specific cell right now — please select the cell you want changed, then comment on it.",
-      "no_anchor",
-    );
+    await refuseReplyWithoutWorkAction(env, sheet, comment.id, "no_anchor");
     return { handled: true, outcome: "no_anchor" };
   }
 
@@ -282,16 +266,7 @@ async function processSheetComment(
   if (matches.length !== 1) {
     // Marker FIRST -- the reply is best-effort and never retried.
     await markProcessed(env, comment.id);
-    await replyToCommentChecked(
-      env,
-      token,
-      sheet.spreadsheetId,
-      comment.id,
-      matches.length === 0
-        ? "I couldn't find the exact cell content you selected anymore — it may have already changed. Please re-select the cell and comment again."
-        : `The selected value appears in ${matches.length} cells, so I can't safely target just this one — please make sure the cell's content is unique before commenting again.`,
-      "anchor_not_unique",
-    );
+    await refuseReplyWithoutWorkAction(env, sheet, comment.id, "anchor_not_unique");
     return { handled: true, outcome: "anchor_not_unique", detail: `quoted="${quoted}" occurrences=${matches.length}` };
   }
 
@@ -311,14 +286,7 @@ async function processSheetComment(
   if (!instruction || !instruction.understood || !instruction.replacementText?.trim()) {
     // Marker FIRST -- same contract as the other branches in this family.
     await markProcessed(env, comment.id);
-    await replyToCommentChecked(
-      env,
-      token,
-      sheet.spreadsheetId,
-      comment.id,
-      "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what this cell should become?",
-      "ai_not_understood",
-    );
+    await refuseReplyWithoutWorkAction(env, sheet, comment.id, "ai_not_understood");
     return { handled: true, outcome: "ai_not_understood", detail: instruction ? JSON.stringify(instruction) : "generate() returned null" };
   }
 
@@ -338,20 +306,16 @@ async function processSheetComment(
   // marker first and treats the reply as best-effort: a reply that fails must
   // never leave the comment unmarked, because an unmarked comment is
   // re-processed from scratch on the next poll and would be replied to again
-  // -- and a duplicate reply to a human is worse than a missing one. If the
-  // reply is then rejected, that is reported to Operations (identifiers and
-  // failure category only -- never the comment's or the reply's text) and
-  // deliberately NOT retried: the provider's outcome is uncertain, so a retry
-  // could duplicate the reply. See replyToCommentChecked.
+  // -- and a duplicate reply to a human is worse than a missing one.
+  //
+  // THE REFUSAL REPLY ITSELF IS NOW GOVERNED (Martin's decision, 2026-10-15):
+  // automated Sheets replies run only through the registered
+  // external-mutation gate under the comment's Work Action, and a Sheet has
+  // no Work binding -- so this reply is refused fail-closed and reported to
+  // Operations with identifiers only (see refuseReplyWithoutWorkAction). The
+  // REFUSAL of the edit itself is unchanged: nothing in the sheet is touched.
   await markProcessed(env, comment.id);
-  await replyToCommentChecked(
-    env,
-    token,
-    sheet.spreadsheetId,
-    comment.id,
-    `I can't apply this edit: comment-triggered cell edits are not an authorized operation in the governed external-effect boundary, so nothing in this spreadsheet was changed. This is reported to Martin as a missing authorization decision, not carried out.`,
-    "edit_not_authorized",
-  );
+  await refuseReplyWithoutWorkAction(env, sheet, comment.id, "edit_not_authorized");
 
   await logActivity(env, {
     entry: "Google Sheet comment-triggered edit refused",

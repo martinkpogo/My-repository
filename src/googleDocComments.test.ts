@@ -182,15 +182,17 @@ test("pollGoogleDocComments does nothing when no docs are watched", async () => 
   assert.strictEqual(result.commentsProcessed, 0);
 });
 
-test("refuses a comment-anchored edit from the doc's own authorized account -- no authorization path exists, so nothing is written and the refusal is reported", async (t) => {
+test("refuses a comment-anchored edit from the doc's own authorized account -- no authorization path exists, so nothing is written and the refusal reply is refused fail-closed and reported", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
   let repliedCommentId: string | null = null;
-  let repliedBody: any = null;
   let resolvedCommentId: string | null = null;
   let batchUpdateBody: any = null;
-  let telegramSent = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -204,9 +206,8 @@ test("refuses a comment-anchored edit from the doc's own authorized account -- n
         quotedFileContent: { value: "Friday" },
       },
     ],
-    onReply: (id, body) => {
+    onReply: (id) => {
       repliedCommentId = id;
-      repliedBody = body;
     },
     onResolve: (id) => {
       resolvedCommentId = id;
@@ -215,8 +216,8 @@ test("refuses a comment-anchored edit from the doc's own authorized account -- n
       batchUpdateBody = body;
       return true;
     },
-    onTelegram: () => {
-      telegramSent = true;
+    onTelegram: (body) => {
+      operationsAlerts.push(body);
     },
   });
   t.after(() => {
@@ -227,16 +228,22 @@ test("refuses a comment-anchored edit from the doc's own authorized account -- n
 
   assert.strictEqual(result.docsChecked, 1);
   assert.strictEqual(result.commentsProcessed, 1, "the comment is handled -- marked processed so the same request is never re-attempted on every poll");
-  assert.strictEqual(repliedCommentId, "comment-1");
-  assert.ok(
-    repliedBody.content.includes("not an authorized operation"),
-    `the refusal must state the missing authorization honestly, got: ${repliedBody?.content}`,
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "no direct Drive reply may be posted: a non-Proposal Doc has no Work Action, so the automated reply is refused fail-closed (Martin's decision, 2026-10-15)",
   );
-  assert.ok(repliedBody.content.includes("nothing in this document was changed"), "the refusal must state that nothing changed");
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Google comment reply not delivered"), `the alert names the failed reply, got: ${alert}`);
+  assert.ok(alert.includes("edit_not_authorized"), "the alert names the exact operation that was refused");
+  assert.ok(alert.includes(DOC_ID), "the alert names the affected document");
+  assert.ok(alert.includes("comment-1"), "the alert names the affected comment");
+  assert.ok(alert.includes("refused fail-closed"), "the alert carries the fail-closed reason");
+  assert.ok(!alert.includes("not an authorized operation"), "the reply's text never leaves the Worker");
   assert.strictEqual(resolvedCommentId, null, "an edit that was not applied is never resolved");
   assert.strictEqual(batchUpdateBody, null, "no Docs batchUpdate may be sent outside the governed external-effect boundary");
   assert.strictEqual(result.diagnostics.at(-1)!.outcome, "edit_not_authorized");
-  assert.strictEqual(telegramSent, false, "the refusal reaches the commenter directly; no extra Telegram signal is manufactured");
 
   const processedMarker = await fakeEnv.STATE_KV.get("google_comment_processed:comment-1");
   assert.strictEqual(processedMarker, "1");
@@ -291,9 +298,13 @@ test("ignores a comment from anyone other than the doc's own authorized account 
 test("asks for clarification when the comment has no anchored selection, without guessing a target", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
-  let repliedBody: any = null;
+  let repliedCommentId: string | null = null;
   let batchUpdated = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -307,30 +318,46 @@ test("asks for clarification when the comment has no anchored selection, without
         // no quotedFileContent -- a general, unanchored comment
       },
     ],
-    onReply: (_id, body) => {
-      repliedBody = body;
+    onReply: (id) => {
+      repliedCommentId = id;
     },
     onBatchUpdate: () => {
       batchUpdated = true;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleDocComments(fakeEnv);
+  const result = await pollGoogleDocComments(fakeEnv);
 
-  assert.strictEqual(batchUpdated, false);
-  assert.ok(repliedBody.content.toLowerCase().includes("select"));
+  assert.strictEqual(batchUpdated, false, "without an anchored selection there is nothing to edit, and no target may be guessed");
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "no_anchor", "the classification is unchanged");
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "the guidance reply is refused fail-closed: this Doc has no Work Action that could authorize an automated reply",
+  );
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Operation: no_anchor"), `the alert names the exact operation, got: ${alert}`);
+  assert.ok(alert.includes("refused fail-closed"), "the alert carries the fail-closed reason");
+  assert.ok(!alert.includes("fix the date"), "the comment's text never reaches the Operations stream");
+  assert.ok(!alert.toLowerCase().includes("select the text"), "the reply's text never reaches the Operations stream either");
 });
 
 test("fails closed and asks for a unique selection when the anchored text appears more than once", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
-  let repliedBody: any = null;
+  let repliedCommentId: string | null = null;
   let batchUpdated = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -344,33 +371,48 @@ test("fails closed and asks for a unique selection when the anchored text appear
         quotedFileContent: { value: "Friday" },
       },
     ],
-    onReply: (_id, body) => {
-      repliedBody = body;
+    onReply: (id) => {
+      repliedCommentId = id;
     },
     onBatchUpdate: () => {
       batchUpdated = true;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleDocComments(fakeEnv);
+  const result = await pollGoogleDocComments(fakeEnv);
 
   assert.strictEqual(batchUpdated, false, "must never guess which occurrence to replace");
-  assert.ok(repliedBody.content.includes("2 times"));
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "anchor_not_unique", "the classification is unchanged");
+  assert.ok((result.diagnostics.at(-1)!.detail ?? "").includes("occurrences=2"), result.diagnostics.at(-1)!.detail);
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "the guidance reply is refused fail-closed: this Doc has no Work Action that could authorize an automated reply",
+  );
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Operation: anchor_not_unique"), `the alert names the exact operation, got: ${alert}`);
+  assert.ok(!alert.includes("Friday"), "neither the comment's text nor the anchored selection reaches the Operations stream");
 });
 
 test("asks for clarification when the AI cannot determine a specific replacement", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
   fakeEnv.AI = {
     run: async () => ({ response: JSON.stringify({ understood: false }) }),
   } as unknown as Ai;
 
-  let repliedBody: any = null;
+  let repliedCommentId: string | null = null;
   let batchUpdated = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -384,22 +426,32 @@ test("asks for clarification when the AI cannot determine a specific replacement
         quotedFileContent: { value: "Friday" },
       },
     ],
-    onReply: (_id, body) => {
-      repliedBody = body;
+    onReply: (id) => {
+      repliedCommentId = id;
     },
     onBatchUpdate: () => {
       batchUpdated = true;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleDocComments(fakeEnv);
+  const result = await pollGoogleDocComments(fakeEnv);
 
-  assert.strictEqual(batchUpdated, false);
-  assert.ok(repliedBody.content.toLowerCase().includes("clarify"));
+  assert.strictEqual(batchUpdated, false, "an ununderstood instruction is never turned into a guess");
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "ai_not_understood", "the classification is unchanged");
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "the clarification reply is refused fail-closed: this Doc has no Work Action that could authorize an automated reply",
+  );
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Operation: ai_not_understood"), `the alert names the exact operation, got: ${alert}`);
+  assert.ok(!alert.includes("not sure"), "the comment's text never reaches the Operations stream");
 });
 
 test("skips an already-resolved comment without replying or editing", async (t) => {
@@ -493,6 +545,9 @@ async function setUpProposalDoc(
     clarificationResult?: any;
     cycleSyncCalls?: any[];
     cycleSyncResult?: any;
+    /** Records the governed reply the poller sent (it now runs ONLY through the Work's registered gate -- never as a direct Drive POST). */
+    onReplySent?: (req: any) => void;
+    replyResult?: any;
   } = {},
 ) {
   await persistGoogleTokens(fakeEnv, { access_token: "tok-1", refresh_token: "refresh-1", expires_in: 3600 }, OWNER_EMAIL);
@@ -524,6 +579,15 @@ async function setUpProposalDoc(
         opts.clarificationCalls?.push(req);
         return opts.clarificationResult ?? { ok: true };
       },
+      // Martin's Access-context decision (2026-10-15): an automated
+      // Doc-thread reply runs ONLY through the registered external-mutation
+      // gate on this Work (google_drive.reply_to_comment), so the poller
+      // reaches it here instead of posting to Drive directly. By default the
+      // gate reports the reply as sent; a test can script a refusal.
+      replyProposalDocComment: async (req: any) => {
+        opts.onReplySent?.(req);
+        return opts.replyResult ?? { sent: true };
+      },
       // The approval-cycle sync runs on every poll of a Proposal Doc,
       // independently of whether any comment needed processing -- resolution
       // is observed on its own so a Martin resolve between polls can complete
@@ -551,14 +615,16 @@ async function setUpProposalDoc(
 test("a comment on a proposal-bound Doc requests a change for its version, replies, is deliberately LEFT UNRESOLVED, and never edits the Doc", async (t) => {
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
   let reply: any = null;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { onReplySent: (req: any) => (reply = req) });
   let resolved: string | null = null;
   let edited = false;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-p1", content: "Make the scope shorter", resolved: false, author: { me: true }, quotedFileContent: { value: "Scope section" } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: (id) => (resolved = id),
     onBatchUpdate: () => ((edited = true), true),
   });
@@ -575,6 +641,9 @@ test("a comment on a proposal-bound Doc requests a change for its version, repli
   ]);
   assert.ok(reply.content.includes("PROP-6 v2") && reply.content.includes("unchanged"));
   assert.ok(reply.content.includes("leaving this comment OPEN"), "the reply tells Martin his own resolve completes the cycle");
+  assert.strictEqual(reply.documentId, DOC_ID, "the governed reply targets exactly this watched Doc");
+  assert.strictEqual(reply.commentId, "c-p1", "exactly this comment");
+  assert.strictEqual(reply.accountIdentifier, OWNER_EMAIL, "and goes out under the watched file's own authorized account");
   assert.strictEqual(resolved, null, "a substantive comment is NEVER auto-resolved -- resolution is Martin's own signal");
   assert.strictEqual(edited, false);
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-p1"), "1");
@@ -608,13 +677,15 @@ test("a proposal-bound Doc comment from anyone but the authorizing account is ig
 test("a change the Work refuses (stale version) is answered 'Not applied' and the comment stays unresolved", async (t) => {
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "stale", detail: "this Doc is v1 but PROP-6 is now v2." });
   let reply: any = null;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "stale", detail: "this Doc is v1 but PROP-6 is now v2." }, { onReplySent: (req: any) => (reply = req) });
   let resolved = false;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-p3", content: "Shorten", resolved: false, author: { me: true } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: () => (resolved = true),
   });
   t.after(() => {
@@ -631,14 +702,20 @@ test("a presentation-only comment runs the formatting-only path: no revision, no
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
   const formattingCalls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "formatting" }), formattingCalls });
   let reply: any = null;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+    intentResponse: JSON.stringify({ intent: "formatting" }),
+    formattingCalls,
+    onReplySent: (req: any) => (reply = req),
+  });
   let resolved: string | null = null;
   let edited = false;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-f1", content: "Improve the formatting of this proposal", resolved: false, author: { me: true } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: (id) => (resolved = id),
     onBatchUpdate: () => ((edited = true), true),
   });
@@ -664,12 +741,18 @@ test("a mixed-intent comment (formatting + a text change) is substantive: it nev
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
   const formattingCalls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "substantive" }), formattingCalls });
   let reply: any = null;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+    intentResponse: JSON.stringify({ intent: "substantive" }),
+    formattingCalls,
+    onReplySent: (req: any) => (reply = req),
+  });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-m1", content: "Improve the formatting and shorten the scope", resolved: false, author: { me: true } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -688,14 +771,21 @@ test("an ambiguous comment is held for clarification: neither handler runs, noth
   const calls: any[] = [];
   const formattingCalls: any[] = [];
   const clarificationCalls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: JSON.stringify({ intent: "ambiguous" }), formattingCalls, clarificationCalls });
   let replies = 0;
   let reply: any = null;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+    intentResponse: JSON.stringify({ intent: "ambiguous" }),
+    formattingCalls,
+    clarificationCalls,
+    onReplySent: (req: any) => (replies++, (reply = req)),
+  });
   let resolved = false;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-a1", content: "Maybe improve it somehow?", resolved: false, author: { me: true } }],
-    onReply: (_id, body) => (replies++, (reply = body)),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: () => (resolved = true),
   });
   t.after(() => {
@@ -734,12 +824,18 @@ test("classifier output that is malformed, unexpected or unparsable fails closed
     const { fakeEnv } = createFakeEnv();
     const calls: any[] = [];
     const formattingCalls: any[] = [];
-    await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { intentResponse: response, formattingCalls });
     let reply: any = null;
+    await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+      intentResponse: response,
+      formattingCalls,
+      onReplySent: (req: any) => (reply = req),
+    });
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mockFetchWith({
       comments: [{ id: `c-b${idx}`, content: "Improve the formatting", resolved: false, author: { me: true } }],
-      onReply: (_id, body) => (reply = body),
+      onReply: () => {
+        throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+      },
     });
     t.after(() => {
       globalThis.fetch = originalFetch;
@@ -757,17 +853,20 @@ test("a formatting request the Work refuses is answered 'Not applied' and the co
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
   const formattingCalls: any[] = [];
+  let reply: any = null;
   await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
     intentResponse: JSON.stringify({ intent: "formatting" }),
     formattingCalls,
     formattingResult: { kind: "stale", detail: "this Doc is a copy of v1, but PROP-6 is now at v2. Comment on the current version's Doc." },
+    onReplySent: (req: any) => (reply = req),
   });
-  let reply: any = null;
   let resolved = false;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-r1", content: "Make it look nicer", resolved: false, author: { me: true } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: () => (resolved = true),
   });
   t.after(() => {
@@ -791,17 +890,20 @@ test("a clarification that can never be recorded is answered honestly and closed
   const never = createFakeEnv();
   const neverCalls: any[] = [];
   const neverClarifications: any[] = [];
+  let neverReplies = 0;
+  let neverReply: any = null;
   await setUpProposalDoc(never.fakeEnv, neverCalls, { kind: "revised", newVersion: 2 }, {
     intentResponse: JSON.stringify({ intent: "ambiguous" }),
     clarificationCalls: neverClarifications,
     clarificationResult: { ok: false, detail: "v1 is no longer the current Version of PROP-6, so no clarification was recorded.", retryable: false },
+    onReplySent: (req: any) => (neverReplies++, (neverReply = req)),
   });
-  let neverReplies = 0;
-  let neverReply: any = null;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-a2", content: "Maybe improve it somehow?", resolved: false, author: { me: true } }],
-    onReply: (_id, body) => (neverReplies++, (neverReply = body)),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
   });
   try {
     await pollGoogleDocComments(never.fakeEnv);
@@ -990,13 +1092,15 @@ test("a RESOLVED substantive comment on a Proposal Doc is still processed -- res
   const { fakeEnv } = createFakeEnv();
   const calls: any[] = [];
   const cycleSyncCalls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { cycleSyncCalls });
   let reply: any = null;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, { cycleSyncCalls, onReplySent: (req: any) => (reply = req) });
   let resolved: string | null = null;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-pre", content: "Make the scope shorter", resolved: true, modifiedTime: "2026-10-11T09:45:00.000Z", author: { me: true }, quotedFileContent: { value: "Scope section" } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: (id) => (resolved = id),
   });
   t.after(() => {
@@ -1303,6 +1407,7 @@ test("pagination 8. a Proposal Doc's approval cycle observes comments from EVERY
         syncCalls.push(req);
         return { kind: "held_unsatisfied" };
       },
+      replyProposalDocComment: async () => ({ sent: true }),
     }),
   };
   t.after(() => {
@@ -1336,9 +1441,12 @@ test("pagination 8. a Proposal Doc's approval cycle observes comments from EVERY
 // (it replies through replyToComment and manages its own markers).
 // ---------------------------------------------------------------------------
 
-test("marker 1. a non-Proposal Doc persists the processed marker BEFORE calling the reply endpoint", async (t) => {
+test("marker 1. a non-Proposal Doc persists the processed marker BEFORE any reply attempt, and the refused reply never reaches the reply endpoint", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
   const order: string[] = [];
   const kv = fakeEnv.STATE_KV as any;
@@ -1350,9 +1458,10 @@ test("marker 1. a non-Proposal Doc persists the processed marker BEFORE calling 
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
-    // no quotedFileContent -> the no_anchor branch replies.
+    // no quotedFileContent -> the no_anchor branch attempts its guidance reply.
     comments: [{ id: "c-order-1", content: "fix the date", resolved: false, author: { me: true } }],
-    onReply: (_id, _body) => order.push("reply"),
+    onReply: () => order.push("reply"),
+    onTelegram: () => order.push("telegram"),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -1360,7 +1469,15 @@ test("marker 1. a non-Proposal Doc persists the processed marker BEFORE calling 
 
   await pollGoogleDocComments(fakeEnv);
 
-  assert.deepStrictEqual(order, ["marker:google_comment_processed:c-order-1", "reply"], "the marker is durably written before the reply endpoint is called");
+  assert.ok(
+    !order.includes("reply"),
+    "no reply endpoint is called at all: a non-Proposal Doc has no Work Action, so the automated reply is refused fail-closed before any request",
+  );
+  assert.deepStrictEqual(
+    order,
+    ["marker:google_comment_processed:c-order-1", "telegram"],
+    "the marker is durably written before the reply is attempted; the refused reply is then reported to Operations",
+  );
 });
 
 test("marker 2. when a non-Proposal Doc's marker cannot be persisted, the reply is never attempted and the comment stays unprocessed", async (t) => {
@@ -1383,11 +1500,12 @@ test("marker 2. when a non-Proposal Doc's marker cannot be persisted, the reply 
   const result = await pollGoogleDocComments(fakeEnv);
 
   assert.strictEqual(replies, 0, "no reply is attempted when the marker that guards it did not persist");
+  assert.strictEqual(telegramSent, 0, "and no reply report is manufactured for an attempt that never ran");
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-order-2"), null, "the comment stays unprocessed, so nothing is lost");
   assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-order-2")?.outcome, "persistence_unavailable", "recorded as its own truthful outcome");
 });
 
-test("marker 3. a REJECTED reply on a non-Proposal Doc keeps the marker, is reported to Operations, and never claims success", async (t) => {
+test("marker 3. a refused reply on a non-Proposal Doc keeps the marker, is reported to Operations, and never claims success", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
   // Enable the Operations stream so sendOperationsMessage actually dispatches
@@ -1398,9 +1516,8 @@ test("marker 3. a REJECTED reply on a non-Proposal Doc keeps the marker, is repo
   const operationsAlerts: any[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
-    // no quotedFileContent -> the no_anchor branch replies.
+    // no quotedFileContent -> the no_anchor branch attempts its guidance reply.
     comments: [{ id: "c-reject-1", content: "SECRET-COMMENT-WORD please fix the date", resolved: false, author: { me: true } }],
-    replyStatus: 403, // provider rejects the reply
     onReply: (_id, body) => (replyBody = body),
     onTelegram: (body) => operationsAlerts.push(body),
   });
@@ -1410,19 +1527,22 @@ test("marker 3. a REJECTED reply on a non-Proposal Doc keeps the marker, is repo
 
   const result = await pollGoogleDocComments(fakeEnv);
 
-  assert.ok(replyBody, "the reply WAS attempted");
-  assert.strictEqual(replyBody.content.toLowerCase().includes("select"), true, "the intended reply text was what we tried to send");
-  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-reject-1"), "1", "the marker is kept even though the reply failed -- it is never cleared");
+  assert.strictEqual(
+    replyBody,
+    null,
+    "no reply endpoint is called at all: a non-Proposal Doc has no Work Action, so the automated reply is refused fail-closed before any request",
+  );
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-reject-1"), "1", "the marker is kept -- it is never cleared");
   assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-reject-1")?.outcome, "no_anchor", "the comment is still recorded as processed");
 
-  assert.ok(operationsAlerts.length >= 1, "the rejected reply is reported through the Operations stream");
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
   const alert = JSON.stringify(operationsAlerts);
   assert.ok(alert.includes(DOC_ID), "the alert names the affected document");
   assert.ok(alert.includes("c-reject-1"), "the alert names the affected comment");
-  assert.ok(/HTTP\s+403/.test(alert), "the alert carries the failure category (HTTP 403)");
+  assert.ok(alert.includes("refused fail-closed"), "the alert carries the refusal category");
 });
 
-test("marker 4. the Operations alert for a rejected reply contains NO comment or reply content", async (t) => {
+test("marker 4. the Operations alert for a refused reply contains NO comment or reply content", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedDoc(fakeEnv);
   (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
@@ -1432,7 +1552,6 @@ test("marker 4. the Operations alert for a rejected reply contains NO comment or
   globalThis.fetch = mockFetchWith({
     // Distinctive strings that must NEVER appear in the Operations alert.
     comments: [{ id: "c-noleak-1", content: "TOPSECRET-COMMENT-PAYLOAD change the figure", resolved: false, author: { me: true } }],
-    replyStatus: 500,
     onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
@@ -1465,6 +1584,7 @@ test("escape 1. a Proposal handler that THROWS after the processed marker is ans
   await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
   // Replace the Work stub so the substantive-comment handler itself escapes
   // (a Durable Object transport failure) AFTER the poller wrote the marker.
+  // The governed reply still runs through this Work's gate (no direct POST).
   (fakeEnv as any).WORK_SESSION = {
     idFromName: (name: string) => name,
     get: () =>
@@ -1476,6 +1596,10 @@ test("escape 1. a Proposal handler that THROWS after the processed marker is ans
         handleProposalDocFormatting: async () => ({ kind: "formatted" }),
         requestProposalDocClarification: async () => ({ ok: true }),
         syncProposalDocApprovalCycle: async () => ({ kind: "no_cycle" }),
+        replyProposalDocComment: async (req: any) => {
+          reply = req;
+          return { sent: true };
+        },
       }),
   };
 
@@ -1486,7 +1610,9 @@ test("escape 1. a Proposal handler that THROWS after the processed marker is ans
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-esc-1", content: "SECRET-ESCAPE-PAYLOAD shorten the scope", resolved: false, author: { me: true }, quotedFileContent: { value: "Scope section" } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onResolve: () => (resolved = true),
     onBatchUpdate: () => ((batchUpdated = true), true),
     onTelegram: (body) => operationsAlerts.push(body),
@@ -1532,6 +1658,7 @@ test("escape 2. when the honest reply itself cannot be delivered, the original u
 
   const calls: any[] = [];
   await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
+  let replyAttempts = 0;
   (fakeEnv as any).WORK_SESSION = {
     idFromName: (name: string) => name,
     get: () =>
@@ -1543,26 +1670,26 @@ test("escape 2. when the honest reply itself cannot be delivered, the original u
         handleProposalDocFormatting: async () => ({ kind: "formatted" }),
         requestProposalDocClarification: async () => ({ ok: true }),
         syncProposalDocApprovalCycle: async () => ({ kind: "no_cycle" }),
+        // The governed reply gate REFUSES this time -- the failure of the
+        // best-effort answer must not replace the original evidence. The
+        // attempt is counted here, and the refusal is reported to Operations
+        // by the poller (identifiers only), never re-run.
+        replyProposalDocComment: async () => {
+          replyAttempts += 1;
+          return { sent: false, detail: "the reply gate refused: transport unavailable" };
+        },
       }),
   };
 
-  let replyAttempts = 0;
   const operationsAlerts: any[] = [];
   const originalFetch = globalThis.fetch;
-  const inner = mockFetchWith({
+  globalThis.fetch = mockFetchWith({
     comments: [{ id: "c-esc-2", content: "tighten the budget", resolved: false, author: { me: true }, quotedFileContent: { value: "Budget" } }],
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
     onTelegram: (body) => operationsAlerts.push(body),
   });
-  // The reply endpoint's own network call fails -- the failure of the
-  // best-effort answer must not replace the original evidence. The attempt
-  // is counted here (the inner mock never sees it).
-  globalThis.fetch = (async (url: any, init?: any) => {
-    if (String(url).includes("/comments/") && String(url).includes("/replies") && init?.method === "POST") {
-      replyAttempts += 1;
-      throw new Error("reply network down");
-    }
-    return inner(url, init);
-  }) as typeof fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
@@ -1570,46 +1697,55 @@ test("escape 2. when the honest reply itself cannot be delivered, the original u
   const result = await pollGoogleDocComments(fakeEnv);
 
   const diag = result.diagnostics.find((d) => d.commentId === "c-esc-2");
-  assert.strictEqual(diag?.outcome, "unhandled_exception", "the original failure evidence survives the failed reply attempt");
+  assert.strictEqual(diag?.outcome, "unhandled_exception", "the original failure evidence survives the refused reply attempt");
   assert.ok(diag?.detail?.includes("WorkSession transport unavailable"), "with the original error intact");
-  assert.strictEqual(replyAttempts, 1, "the reply was attempted exactly once (and its failure is swallowed, never re-run)");
+  assert.strictEqual(replyAttempts, 1, "the reply was attempted exactly once through the governed gate (and its refusal is swallowed, never re-run)");
   assert.ok(operationsAlerts.length >= 1, "the Operations notification still went out");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Google comment reply not delivered"), `the refused reply is itself reported, got: ${alert}`);
+  assert.ok(!alert.includes("tighten the budget"), "no comment content reaches the Operations stream");
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-2"), "1", "the marker is kept");
   assert.strictEqual(calls.length, 1, "the handler is never entered a second time");
 });
 
-test("escape 3. a SUCCESSFUL revision followed by a failure in the confirmation reply is answered with the interruption's true uncertainty -- the reply never states the revision was not applied", async (t) => {
+test("escape 3. a SUCCESSFUL formatting pass followed by a failure in the resolve step is answered with the interruption's true uncertainty -- the reply never states the request was not applied", async (t) => {
   const { fakeEnv } = createFakeEnv();
   (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
-  // The handler SUCCEEDS this time (v2 is created through the governed
-  // path); the failure comes LATER, while the pass is delivering the
-  // "Change recorded" confirmation -- exactly the case where "not applied"
-  // would have been a lie.
+  // The formatting handler SUCCEEDS this time (the governed pass completes);
+  // the failure comes LATER, in the resolve step after the confirmation reply
+  // -- exactly the case where "not applied" would have been a lie about work
+  // that really did complete.
   const calls: any[] = [];
-  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
-
+  const formattingCalls: any[] = [];
   let reply: any = null;
   let replies = 0;
-  let replyAttempts = 0;
+  await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 }, {
+    intentResponse: JSON.stringify({ intent: "formatting" }),
+    formattingCalls,
+    onReplySent: (req: any) => {
+      replies += 1;
+      reply = req;
+    },
+  });
+
   let resolved = false;
   const operationsAlerts: any[] = [];
   const originalFetch = globalThis.fetch;
   const inner = mockFetchWith({
     comments: [{ id: "c-esc-3", content: "add a delivery-risk paragraph", resolved: false, author: { me: true }, quotedFileContent: { value: "Scope" } }],
-    onReply: (_id, body) => {
-      replies += 1;
-      reply = body;
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
     },
     onResolve: () => (resolved = true),
     onTelegram: (body) => operationsAlerts.push(body),
   });
-  // The FIRST reply POST (the success confirmation) fails at the network
-  // level; the escape answer's own reply (attempt 2) goes through.
+  // The resolve PATCH's own network call fails; the escape answer's own
+  // governed reply (attempt 2) goes through.
   globalThis.fetch = (async (url: any, init?: any) => {
-    if (String(url).includes("/comments/") && String(url).includes("/replies") && init?.method === "POST") {
-      replyAttempts += 1;
-      if (replyAttempts === 1) throw new Error("confirmation reply network down");
+    if (String(url).includes(`/comments/`) && init?.method === "PATCH") {
+      resolved = true;
+      throw new Error("resolve network down");
     }
     return inner(url, init);
   }) as typeof fetch;
@@ -1619,17 +1755,17 @@ test("escape 3. a SUCCESSFUL revision followed by a failure in the confirmation 
 
   const result = await pollGoogleDocComments(fakeEnv);
 
-  assert.strictEqual(replyAttempts, 2, "the failure happened AFTER the successful revision, in the confirmation reply; the second attempt is the escape answer");
-  assert.strictEqual(replies, 1, "exactly one reply was delivered -- the escape answer");
-  assert.strictEqual(calls.length, 1, "the handler ran exactly once -- the successful revision was never re-entered");
+  assert.strictEqual(formattingCalls.length, 1, "the successful formatting pass ran exactly once -- it was never re-entered");
+  assert.strictEqual(calls.length, 0, "the substantive revision path is never taken");
+  assert.strictEqual(replies, 2, "the confirmation reply was delivered, then the escape answered with the interruption's truth");
   assert.strictEqual(result.diagnostics.find((d) => d.commentId === "c-esc-3")?.outcome, "unhandled_exception", "the interruption is preserved as its own diagnostic");
 
+  // The LAST reply is the escape answer, and it is the one judged here.
   assert.ok(reply, "the thread was still answered");
   assert.match(reply.content, /could not be confirmed/, "the outcome is stated honestly as unconfirmed");
-  assert.ok(!/Not applied/i.test(reply.content), "the reply never states the revision was not applied -- it may well exist");
-  assert.ok(!/change recorded|was created from this comment/i.test(reply.content), "and it does not claim a success it cannot confirm either");
+  assert.ok(!/Not applied/i.test(reply.content), "the reply never states the request was not applied -- the formatting really did complete");
   assert.ok(!/Martin has been notified/i.test(reply.content), "and it makes no notification claim");
-  assert.strictEqual(resolved, false, "the comment stays open -- Martin's resolve remains the approval signal");
+  assert.strictEqual(resolved, true, "the resolve step genuinely failed after being attempted");
   assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-esc-3"), "1", "the processed marker is kept");
   assert.ok(operationsAlerts.length >= 1, "Operations is notified that the outcome is unconfirmed (identifiers only)");
   assert.ok(!JSON.stringify(operationsAlerts).includes("delivery-risk"), "no comment content reaches the Operations stream");
@@ -1643,6 +1779,7 @@ test("escape 4. when the Operations notification itself fails, the thread is sti
   await setUpProposalDoc(fakeEnv, calls, { kind: "revised", newVersion: 2 });
   // The handler itself escapes (as in escape 1) so the pass reaches the
   // escape answer -- and then that answer's own notification fails.
+  let reply: any = null;
   (fakeEnv as any).WORK_SESSION = {
     idFromName: (name: string) => name,
     get: () =>
@@ -1654,15 +1791,20 @@ test("escape 4. when the Operations notification itself fails, the thread is sti
         handleProposalDocFormatting: async () => ({ kind: "formatted" }),
         requestProposalDocClarification: async () => ({ ok: true }),
         syncProposalDocApprovalCycle: async () => ({ kind: "no_cycle" }),
+        replyProposalDocComment: async (req: any) => {
+          reply = req;
+          return { sent: true };
+        },
       }),
   };
 
-  let reply: any = null;
   let telegramFailures = 0;
   const originalFetch = globalThis.fetch;
   const inner = mockFetchWith({
     comments: [{ id: "c-esc-4", content: "tighten the budget", resolved: false, author: { me: true }, quotedFileContent: { value: "Budget" } }],
-    onReply: (_id, body) => (reply = body),
+    onReply: () => {
+      throw new Error("a Proposal Doc reply must never be a direct Drive POST -- it goes through the Work's registered gate");
+    },
   });
   // The notification's own send fails; the reply attempt must survive it,
   // and the reply must not paper over the failure with a delivery claim.

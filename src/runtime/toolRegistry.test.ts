@@ -25,6 +25,7 @@ import { GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, GOOGLE_DOCS_TOOL_ID } from 
 import { GOOGLE_DOCS_UPDATE_OPERATION_ID } from "./tools/googleDocsUpdateTool";
 import { GOOGLE_DOCS_FORMAT_OPERATION_ID } from "./tools/googleDocsFormatTool";
 import { GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, GOOGLE_DRIVE_TOOL_ID } from "./tools/googleDriveFolderTool";
+import { GOOGLE_DRIVE_REPLY_OPERATION_ID } from "./tools/googleDriveReplyTool";
 import { installStatePersistence } from "./workPersistence";
 import { buildProposalDocLayout, buildProposalDocStyleRequests, expectedDocParagraphStyles } from "../proposalRedline";
 
@@ -1050,23 +1051,32 @@ function folderServer(name = FOLDER_INPUT.folder_name, folderId = "folder-1") {
   };
 }
 
-test("AQ. all four registered Google Workspace operations resolve exactly -- id, contract version, effect, handlers and reconciliation", () => {
+test("AQ. all five registered Google Workspace operations resolve exactly -- id, contract version, effect, handlers and reconciliation (the reply deliberately declares none)", () => {
   const create = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID);
   const update = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID);
   const format = resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_FORMAT_OPERATION_ID);
   const folder = resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID);
-  for (const operation of [create, update, format, folder]) {
+  const reply = resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DRIVE_REPLY_OPERATION_ID);
+  for (const operation of [create, update, format, folder, reply]) {
     assert.ok(operation, "every declared operation must be exactly registered");
     assert.equal(operation.version, "1.0");
     assert.equal(operation.effect, "external_mutation");
     assert.equal(typeof operation.validateInput, "function");
     assert.equal(typeof operation.resolveTarget, "function");
     assert.equal(typeof operation.run, "function");
-    assert.equal(typeof operation.reconcile, "function");
   }
+  for (const operation of [create, update, format, folder]) {
+    assert.equal(typeof operation!.reconcile, "function");
+  }
+  // The comment-reply operation declares NO reconciliation step on purpose:
+  // an uncertain comment reply must never be repeated, so the invocation
+  // boundary refuses to re-send it instead (see googleDriveReplyTool.ts).
+  assert.equal(reply!.reconcile, undefined, "the reply operation deliberately declares no reconciliation -- an uncertain reply is never repeated");
   assert.equal(update!.operationId, "google_docs.update_and_verify");
   assert.equal(format!.operationId, "google_docs.format_and_verify");
   assert.equal(folder!.toolId, "google_drive");
+  assert.equal(reply!.operationId, "google_drive.reply_to_comment");
+  assert.equal(reply!.toolId, "google_drive");
   assert.equal(resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID), null, "operations never resolve across Tools");
 });
 

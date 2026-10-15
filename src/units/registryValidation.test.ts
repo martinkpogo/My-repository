@@ -179,6 +179,7 @@ test("registry build: the real registry's Tool declarations all resolve to regis
     "google_docs.update_and_verify",
     "google_docs.format_and_verify",
     "google_drive.ensure_folder",
+    "google_drive.reply_to_comment",
   ];
   let declared = 0;
   for (const manifest of Object.values(getUnitManifests())) {
@@ -196,7 +197,11 @@ test("registry build: the real registry's Tool declarations all resolve to regis
       }
     }
   }
-  assert.strictEqual(declared, 12, `proposal_draft, proposal_submit and proposal_approve must each declare the four registered Google Workspace operations, got ${declared}`);
+  assert.strictEqual(
+    declared,
+    15,
+    `proposal_draft, proposal_submit and proposal_approve must each declare the four registered Google Workspace operations plus google_drive.reply_to_comment, got ${declared}`,
+  );
   // getUnitManifests() itself runs buildUnitRegistry over the real manifests;
   // reaching this line without a throw is the proof the real registry -- with
   // its Tool declarations and the Tool Registry integrity check -- assembles cleanly.
