@@ -176,15 +176,18 @@ test("pollGoogleSheetComments does nothing when no sheets are watched", async ()
   assert.strictEqual(result.commentsProcessed, 0);
 });
 
-test("refuses a comment-anchored cell edit from the sheet's own authorized account -- no authorization path exists, so nothing is written and the refusal is reported", async (t) => {
+test("refuses a comment-anchored cell edit from the sheet's own authorized account -- no authorization path exists, so nothing is written and the refusal reply is refused fail-closed and reported", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
   let repliedCommentId: string | null = null;
-  let repliedBody: any = null;
   let resolvedCommentId: string | null = null;
   let updatedRange: string | null = null;
   let updatedBody: any = null;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -201,9 +204,8 @@ test("refuses a comment-anchored cell edit from the sheet's own authorized accou
         quotedFileContent: { value: "Planned" },
       },
     ],
-    onReply: (id, body) => {
+    onReply: (id) => {
       repliedCommentId = id;
-      repliedBody = body;
     },
     onResolve: (id) => {
       resolvedCommentId = id;
@@ -213,6 +215,7 @@ test("refuses a comment-anchored cell edit from the sheet's own authorized accou
       updatedBody = body;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -222,12 +225,19 @@ test("refuses a comment-anchored cell edit from the sheet's own authorized accou
 
   assert.strictEqual(result.sheetsChecked, 1);
   assert.strictEqual(result.commentsProcessed, 1, "the comment is handled -- marked processed so the same request is never re-attempted on every poll");
-  assert.strictEqual(repliedCommentId, "comment-1");
-  assert.ok(
-    repliedBody.content.includes("not an authorized operation"),
-    `the refusal must state the missing authorization honestly, got: ${repliedBody?.content}`,
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "no direct Drive reply may be posted: a Sheet has no Work Action, so the automated reply is refused fail-closed (Martin's decision, 2026-10-15)",
   );
-  assert.ok(repliedBody.content.includes("nothing in this spreadsheet was changed"), "the refusal must state that nothing changed");
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Google Sheet comment reply not delivered"), `the alert names the failed reply, got: ${alert}`);
+  assert.ok(alert.includes("edit_not_authorized"), "the alert names the exact operation that was refused");
+  assert.ok(alert.includes(SHEET_ID), "the alert names the affected spreadsheet");
+  assert.ok(alert.includes("comment-1"), "the alert names the affected comment");
+  assert.ok(alert.includes("refused fail-closed"), "the alert carries the fail-closed reason");
+  assert.ok(!alert.includes("not an authorized operation"), "the reply's text never leaves the Worker");
   assert.strictEqual(resolvedCommentId, null, "an edit that was not applied is never resolved");
   assert.strictEqual(updatedRange, null, "no cell may be written outside the governed external-effect boundary");
   assert.strictEqual(updatedBody, null, "no cell value may be sent");
@@ -286,9 +296,13 @@ test("ignores a comment from anyone other than the sheet's own authorized accoun
 test("asks for clarification when the comment has no anchored cell, without guessing a target", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
-  let repliedBody: any = null;
+  let repliedCommentId: string | null = null;
   let updated = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -302,30 +316,45 @@ test("asks for clarification when the comment has no anchored cell, without gues
         // no quotedFileContent -- a general, unanchored comment
       },
     ],
-    onReply: (_id, body) => {
-      repliedBody = body;
+    onReply: (id) => {
+      repliedCommentId = id;
     },
     onCellUpdate: () => {
       updated = true;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleSheetComments(fakeEnv);
+  const result = await pollGoogleSheetComments(fakeEnv);
 
-  assert.strictEqual(updated, false);
-  assert.ok(repliedBody.content.toLowerCase().includes("select"));
+  assert.strictEqual(updated, false, "without an anchored cell there is nothing to edit, and no target may be guessed");
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "no_anchor", "the classification is unchanged");
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "the guidance reply is refused fail-closed: a Sheet has no Work Action that could authorize an automated reply",
+  );
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Operation: no_anchor"), `the alert names the exact operation, got: ${alert}`);
+  assert.ok(alert.includes("refused fail-closed"), "the alert carries the fail-closed reason");
+  assert.ok(!alert.includes("status column"), "the comment's text never reaches the Operations stream");
 });
 
 test("fails closed and asks for a unique cell when the anchored value appears more than once", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
-  let repliedBody: any = null;
+  let repliedCommentId: string | null = null;
   let updated = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -342,33 +371,48 @@ test("fails closed and asks for a unique cell when the anchored value appears mo
         quotedFileContent: { value: "Planned" },
       },
     ],
-    onReply: (_id, body) => {
-      repliedBody = body;
+    onReply: (id) => {
+      repliedCommentId = id;
     },
     onCellUpdate: () => {
       updated = true;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleSheetComments(fakeEnv);
+  const result = await pollGoogleSheetComments(fakeEnv);
 
   assert.strictEqual(updated, false, "must never guess which cell to replace");
-  assert.ok(repliedBody.content.includes("2 cells"));
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "anchor_not_unique", "the classification is unchanged");
+  assert.ok((result.diagnostics.at(-1)!.detail ?? "").includes("occurrences=2"), result.diagnostics.at(-1)!.detail);
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "the guidance reply is refused fail-closed: a Sheet has no Work Action that could authorize an automated reply",
+  );
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Operation: anchor_not_unique"), `the alert names the exact operation, got: ${alert}`);
+  assert.ok(!alert.includes("Planned"), "neither the comment's text nor the anchored cell content reaches the Operations stream");
 });
 
 test("asks for clarification when the AI cannot determine a specific replacement", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
   fakeEnv.AI = {
     run: async () => ({ response: JSON.stringify({ understood: false }) }),
   } as unknown as Ai;
 
-  let repliedBody: any = null;
+  let repliedCommentId: string | null = null;
   let updated = false;
+  const operationsAlerts: any[] = [];
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
@@ -382,22 +426,32 @@ test("asks for clarification when the AI cannot determine a specific replacement
         quotedFileContent: { value: "Planned" },
       },
     ],
-    onReply: (_id, body) => {
-      repliedBody = body;
+    onReply: (id) => {
+      repliedCommentId = id;
     },
     onCellUpdate: () => {
       updated = true;
       return true;
     },
+    onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  await pollGoogleSheetComments(fakeEnv);
+  const result = await pollGoogleSheetComments(fakeEnv);
 
-  assert.strictEqual(updated, false);
-  assert.ok(repliedBody.content.toLowerCase().includes("clarify"));
+  assert.strictEqual(updated, false, "an ununderstood instruction is never turned into a guess");
+  assert.strictEqual(result.diagnostics.at(-1)!.outcome, "ai_not_understood", "the classification is unchanged");
+  assert.strictEqual(
+    repliedCommentId,
+    null,
+    "the clarification reply is refused fail-closed: a Sheet has no Work Action that could authorize an automated reply",
+  );
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
+  const alert = JSON.stringify(operationsAlerts);
+  assert.ok(alert.includes("Operation: ai_not_understood"), `the alert names the exact operation, got: ${alert}`);
+  assert.ok(!alert.includes("not sure"), "the comment's text never reaches the Operations stream");
 });
 
 test("skips an already-resolved comment without replying or editing", async (t) => {
@@ -715,9 +769,12 @@ function failKvWritesFor(fakeEnv: Env, failingPrefix: string) {
   };
 }
 
-test("marker 1. a Sheet persists the processed marker BEFORE calling the reply endpoint", async (t) => {
+test("marker 1. a Sheet persists the processed marker BEFORE any reply attempt, and the refused reply never reaches the reply endpoint", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
+  // Enable the Operations stream so the refusal report is observable exactly
+  // as in production (getOperationsTarget needs the group chat + topic).
+  (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
 
   const order: string[] = [];
   const kv = fakeEnv.STATE_KV as any;
@@ -729,9 +786,10 @@ test("marker 1. a Sheet persists the processed marker BEFORE calling the reply e
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
-    // no quotedFileContent -> the no_anchor branch replies.
+    // no quotedFileContent -> the no_anchor branch attempts its guidance reply.
     comments: [{ id: "c-order-1", content: "fix the cell", resolved: false, author: { me: true } }],
     onReply: () => order.push("reply"),
+    onTelegram: () => order.push("telegram"),
   });
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -739,7 +797,15 @@ test("marker 1. a Sheet persists the processed marker BEFORE calling the reply e
 
   await pollGoogleSheetComments(fakeEnv);
 
-  assert.deepStrictEqual(order, ["marker:google_comment_processed:c-order-1", "reply"], "the marker is durably written before the reply endpoint is called");
+  assert.ok(
+    !order.includes("reply"),
+    "no reply endpoint is called at all: a Sheet has no Work Action, so the automated reply is refused fail-closed before any request",
+  );
+  assert.deepStrictEqual(
+    order,
+    ["marker:google_comment_processed:c-order-1", "telegram"],
+    "the marker is durably written before the reply is attempted; the refused reply is then reported to Operations",
+  );
 });
 
 test("marker 2. when a Sheet's marker cannot be persisted, the reply is never attempted and the comment stays unprocessed", async (t) => {
@@ -764,7 +830,7 @@ test("marker 2. when a Sheet's marker cannot be persisted, the reply is never at
   assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-order-2")?.outcome, "persistence_unavailable", "recorded as its own truthful outcome, same contract as Docs");
 });
 
-test("marker 3. a REJECTED reply on a Sheet keeps the marker, is reported to Operations, and never claims success", async (t) => {
+test("marker 3. a refused reply on a Sheet keeps the marker, is reported to Operations, and never claims success", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
   // Enable the Operations stream so sendOperationsMessage actually dispatches
@@ -775,9 +841,8 @@ test("marker 3. a REJECTED reply on a Sheet keeps the marker, is reported to Ope
   const operationsAlerts: any[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetchWith({
-    // no quotedFileContent -> the no_anchor branch replies.
+    // no quotedFileContent -> the no_anchor branch attempts its guidance reply.
     comments: [{ id: "c-reject-1", content: "SECRET-COMMENT-WORD please fix the cell", resolved: false, author: { me: true } }],
-    replyStatus: 403, // provider rejects the reply
     onReply: (_id, body) => (replyBody = body),
     onTelegram: (body) => operationsAlerts.push(body),
   });
@@ -787,19 +852,22 @@ test("marker 3. a REJECTED reply on a Sheet keeps the marker, is reported to Ope
 
   const result = await pollGoogleSheetComments(fakeEnv);
 
-  assert.ok(replyBody, "the reply WAS attempted");
-  assert.strictEqual(replyBody.content.toLowerCase().includes("cell"), true, "the intended reply text was what we tried to send");
-  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-reject-1"), "1", "the marker is kept even though the reply failed -- it is never cleared");
+  assert.strictEqual(
+    replyBody,
+    null,
+    "no reply endpoint is called at all: a Sheet has no Work Action, so the automated reply is refused fail-closed before any request",
+  );
+  assert.strictEqual(await fakeEnv.STATE_KV.get("google_comment_processed:c-reject-1"), "1", "the marker is kept -- it is never cleared");
   assert.strictEqual(result.diagnostics.find((d: any) => d.commentId === "c-reject-1")?.outcome, "no_anchor", "the comment is still recorded as processed");
 
-  assert.ok(operationsAlerts.length >= 1, "the rejected reply is reported through the Operations stream");
+  assert.ok(operationsAlerts.length >= 1, "the refused reply is reported through the Operations stream");
   const alert = JSON.stringify(operationsAlerts);
   assert.ok(alert.includes(SHEET_ID), "the alert names the affected spreadsheet");
   assert.ok(alert.includes("c-reject-1"), "the alert names the affected comment");
-  assert.ok(/HTTP\s+403/.test(alert), "the alert carries the failure category (HTTP 403)");
+  assert.ok(alert.includes("refused fail-closed"), "the alert carries the refusal category");
 });
 
-test("marker 4. the Operations alert for a rejected Sheet reply contains NO comment or reply content", async (t) => {
+test("marker 4. the Operations alert for a refused Sheet reply contains NO comment or reply content", async (t) => {
   const { fakeEnv } = createFakeEnv();
   await setUpWatchedSheet(fakeEnv);
   (fakeEnv as any).OPERATIONS_TOPIC_ID = "2";
@@ -809,7 +877,6 @@ test("marker 4. the Operations alert for a rejected Sheet reply contains NO comm
   globalThis.fetch = mockFetchWith({
     // Distinctive strings that must NEVER appear in the Operations alert.
     comments: [{ id: "c-noleak-1", content: "TOPSECRET-COMMENT-PAYLOAD change the figure", resolved: false, author: { me: true } }],
-    replyStatus: 500,
     onTelegram: (body) => operationsAlerts.push(body),
   });
   t.after(() => {

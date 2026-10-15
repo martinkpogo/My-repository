@@ -1356,6 +1356,27 @@ export async function registerWatchedGoogleSheet(env: Env, sheet: WatchedGoogleS
   await invalidateWatchRegistry("sheets");
 }
 
+/**
+ * Reads ONE watched sheet straight from the trusted server-side registration
+ * record (the same key registerWatchedGoogleSheet writes), by spreadsheet id.
+ *
+ * The exact mirror of getWatchedGoogleDoc: the registered comment-reply
+ * operation (google_drive.reply_to_comment) resolves its target from this
+ * record, so a reply may only ever target a spreadsheet this Worker itself
+ * created and watches -- never an arbitrary Drive file. Returns null when the
+ * spreadsheet is not registered, which is a hard stop (fail-closed).
+ */
+export async function getWatchedGoogleSheet(env: Env, spreadsheetId: string): Promise<WatchedGoogleSheet | null> {
+  if (!spreadsheetId) return null;
+  const raw = await kvGet(env, `google_sheet_watch:${spreadsheetId}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WatchedGoogleSheet;
+  } catch {
+    return null;
+  }
+}
+
 export async function listWatchedGoogleSheets(env: Env, options: { fresh?: boolean } = {}): Promise<WatchedGoogleSheet[]> {
   return cachedWatchRegistry("sheets", () => loadWatchedGoogleSheets(env), options);
 }

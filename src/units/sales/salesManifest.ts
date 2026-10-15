@@ -337,12 +337,24 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     //     formatting request arriving while approval is pending is refused
     //     rather than silently styled (Martin's decision, 2026-10-09);
     //   - google_drive.ensure_folder: the dedicated Proposal-docs Drive
-    //     folder the Doc is created into (ensureProposalDoc's folder step).
+    //     folder the Doc is created into (ensureProposalDoc's folder step);
+    //   - google_drive.reply_to_comment: the automated reply to a comment on
+    //     this Proposal's Doc (sendProposalDocCommentReply, driven by the
+    //     comment poller). It is the governed form of the Doc-thread replies
+    //     the poller used to post directly, authorized by Martin's
+    //     Access-context decision (2026-10-15): a cron-driven Google reply
+    //     runs ONLY through the external-mutation gate under this Work's own
+    //     resolved Action. Under `proposal_approve` it fails closed on the
+    //     missing bound approval evidence (same as format_and_verify), so a
+    //     comment arriving while approval is pending gets no automated reply
+    //     rather than one outside the gate; a denial is reported to
+    //     Operations and never retried.
     tool_operations: [
       { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", required: false },
       { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
+      { tool_id: "google_drive", operation_id: "google_drive.reply_to_comment", required: false },
     ],
     applicability: {
       mode: "any",
@@ -367,12 +379,16 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // presentation of a Version -- and therefore the Doc creation, the
     // folder step and the update of an existing Doc in ensureProposalDoc --
     // runs under, recorded before presentForApproval and again on the retry
-    // button's flow.
+    // button's flow. Also declares google_drive.reply_to_comment (same
+    // rationale as proposal_draft's): this is the steady-state Action a
+    // comment on the Proposal's Doc arrives under, so the poller's automated
+    // Doc-thread reply is judged against it (Martin's decision, 2026-10-15).
     tool_operations: [
       { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", required: false },
       { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
+      { tool_id: "google_drive", operation_id: "google_drive.reply_to_comment", required: false },
     ],
     applicability: {
       mode: "all",
@@ -395,12 +411,18 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     // evidence bound to this work, action, operation and target (which the
     // current flow never mints), so a stale tap fails closed with an
     // approval denial rather than mutating anything. Full rationale: see
-    // proposal_draft's tool_operations comment.
+    // proposal_draft's tool_operations comment. Also declares
+    // google_drive.reply_to_comment under the SAME gated reasoning: a
+    // comment arriving while this Action is recorded fails closed on the
+    // missing bound approval evidence, so its automated Doc-thread reply is
+    // refused rather than posted outside the gate (Martin's decision,
+    // 2026-10-15).
     tool_operations: [
       { tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.update_and_verify", required: false },
       { tool_id: "google_docs", operation_id: "google_docs.format_and_verify", required: false },
       { tool_id: "google_drive", operation_id: "google_drive.ensure_folder", required: false },
+      { tool_id: "google_drive", operation_id: "google_drive.reply_to_comment", required: false },
     ],
     applicability: {
       mode: "all",

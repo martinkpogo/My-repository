@@ -57,6 +57,7 @@ import { googleDocsToolOperation } from "./tools/googleDocsTool";
 import { googleDocsUpdateToolOperation } from "./tools/googleDocsUpdateTool";
 import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
 import { googleDriveEnsureFolderToolOperation } from "./tools/googleDriveFolderTool";
+import { googleDriveReplyToolOperation } from "./tools/googleDriveReplyTool";
 import { getWorkPersistence, type ToolOperationPersistence } from "./workPersistence";
 
 // ---------------------------------------------------------------------------
@@ -157,6 +158,7 @@ const TOOL_OPERATIONS: readonly ToolOperationDefinition[] = [
   googleDocsUpdateToolOperation,
   googleDocsFormatToolOperation,
   googleDriveEnsureFolderToolOperation,
+  googleDriveReplyToolOperation,
 ];
 
 /** Exact resolution: no prefix match, no substitution, no fallback. Returns null for anything not registered. */

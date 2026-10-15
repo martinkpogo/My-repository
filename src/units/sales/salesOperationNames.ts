@@ -10,4 +10,5 @@ export const SALES_OPERATION = {
   syncProposalDocApprovalCycle: "sync_proposal_doc_approval_cycle",
   handleProposalDocFormatting: "handle_proposal_doc_formatting",
   requestProposalDocClarification: "request_proposal_doc_clarification",
+  replyProposalDocComment: "reply_proposal_doc_comment",
 } as const;

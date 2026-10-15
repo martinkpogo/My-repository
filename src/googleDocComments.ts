@@ -10,6 +10,7 @@ import { logActivity } from "./log";
 import {
   handleProposalDocComment,
   handleProposalDocFormatting,
+  replyProposalDocComment,
   requestProposalDocClarificationOnWork,
   syncProposalDocApprovalCycle,
 } from "./units/sales/salesOperations";
@@ -131,52 +132,56 @@ async function fetchComments(token: string, documentId: string): Promise<DriveCo
   }
 }
 
-async function replyToComment(token: string, documentId: string, commentId: string, content: string): Promise<void> {
-  await fetch(`https://www.googleapis.com/drive/v3/files/${documentId}/comments/${commentId}/replies?fields=id`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-  });
-}
-
 /**
- * Sends a reply and REPORTS whether the provider actually accepted it --
- * `replyToComment` above ignores the response entirely, which silently
- * claims success for a rejected reply. This variant (used only by the
- * NON-Proposal branches; the Proposal path is deliberately untouched) reads
- * the status and returns a failure rather than pretending.
+ * Sends ONE automated reply to a comment on a Proposal Doc THROUGH THE GOVERNED
+ * GATE -- never as a direct Drive call. Martin's Access-context decision
+ * (2026-10-15) authorized exactly this: a cron-driven Google reply runs only
+ * through the registered external-mutation operation
+ * (`google_drive.reply_to_comment`), invoked on the comment's Work through
+ * its Durable Object so Access can judge it by that Work's own resolved
+ * Action (`sendProposalDocCommentReply`, tokenSafeProposal.ts). The reply
+ * text is composed HERE (it belongs to this flow) but never leaves the
+ * Worker except through that gate: an Action that does not declare the
+ * operation, an approval-gated Action without bound approval evidence, an
+ * unwatched file or a mismatched account are all DENIED before any request.
  *
- * A failure is reported to Operations as its own signal, never swallowed and
- * never thrown back into the poll loop: the caller has already written its
- * processed marker before replying, so the comment is durably done and a
- * retry is not safe (it could duplicate a reply after an uncertain provider
- * outcome). The alert therefore reports and stops; it does not clear the
- * marker and does not retry.
+ * A document with no Proposal binding has NO Work, and therefore no Work
+ * Action that could authorize a reply: such a reply is fail-closed
+ * (never sent) rather than routed around the gate -- no second mechanism,
+ * no bypass.
+ *
+ * Best-effort and never thrown, exactly like the direct replies it replaces:
+ * a denied or failed reply is reported to Operations through
+ * reportReplyFailure (identifiers and failure category only) and is never
+ * retried -- the caller's marker-before-reply and dedup contracts are
+ * unchanged, and a reply's outcome never changes the comment's own outcome.
  */
-async function replyToCommentChecked(
-  env: Env,
-  token: string,
-  documentId: string,
-  commentId: string,
-  content: string,
-  operation: string,
-): Promise<{ ok: boolean; status: number }> {
-  let res: Response;
+async function deliverReply(env: Env, doc: WatchedGoogleDoc, commentId: string, content: string, operation: string): Promise<void> {
+  if (!doc.proposal) {
+    await reportReplyFailure(
+      env,
+      operation,
+      doc.documentId,
+      commentId,
+      "no Work Action authorizes a reply on this document (it is not bound to a Work), so the automated reply was refused fail-closed rather than posted outside the governed gate",
+    );
+    return;
+  }
+  let result: { sent: boolean; detail?: string };
   try {
-    res = await fetch(`https://www.googleapis.com/drive/v3/files/${documentId}/comments/${commentId}/replies?fields=id`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+    result = await replyProposalDocComment(env, doc.proposal.workId, {
+      documentId: doc.documentId,
+      commentId,
+      content,
+      accountIdentifier: doc.accountIdentifier,
     });
   } catch (err) {
-    await reportReplyFailure(env, operation, documentId, commentId, `request failed: ${err instanceof Error ? err.message : String(err)}`);
-    return { ok: false, status: 0 };
+    await reportReplyFailure(env, operation, doc.documentId, commentId, `the governed reply operation failed: ${err instanceof Error ? err.message : String(err)}`);
+    return;
   }
-  if (!res.ok) {
-    await reportReplyFailure(env, operation, documentId, commentId, `HTTP ${res.status}`);
-    return { ok: false, status: res.status };
+  if (!result.sent) {
+    await reportReplyFailure(env, operation, doc.documentId, commentId, result.detail ?? "the governed reply gate refused the reply without a reason");
   }
-  return { ok: true, status: res.status };
 }
 
 /**
@@ -198,7 +203,7 @@ async function reportReplyFailure(
 ): Promise<void> {
   await sendOperationsMessage(
     env,
-    `⚠️ Google comment reply not delivered\nOperation: ${operation}\nDocument: ${documentId}\nComment: ${commentId}\nReason: ${reason}\n\nThe comment is already marked processed, so this reply is not retried automatically (a retry could duplicate it after an uncertain outcome). No comment content is included in this message.`,
+    `⚠️ Google comment reply not delivered\nOperation: ${operation}\nDocument: ${documentId}\nComment: ${commentId}\nReason: ${reason}\n\nThis reply is not retried automatically (a duplicate could reach the commenter after an uncertain outcome or a refusal), and the comment's own processing state is unchanged. No comment content is included in this message.`,
   ).catch((err) => console.error("reportReplyFailure: could not send the Operations alert", err));
 }
 
@@ -228,7 +233,7 @@ async function reportReplyFailure(
  * handler. The comment stays marked -- unmarking would risk a duplicate
  * revision after an ambiguous outcome.
  */
-async function answerEscapedProposalComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<void> {
+async function answerEscapedProposalComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment): Promise<void> {
   if (!doc.proposal) return;
   let marked: string | null = null;
   try {
@@ -250,11 +255,12 @@ async function answerEscapedProposalComment(env: Env, doc: WatchedGoogleDoc, com
     console.error(`answerEscapedProposalComment: could not send the Operations notification for comment ${comment.id}`, err);
   }
   try {
-    await replyToComment(
-      token,
-      doc.documentId,
+    await deliverReply(
+      env,
+      doc,
       comment.id,
       "An internal error interrupted processing, so the outcome of this request could not be confirmed. Please check the Proposal and its Operations record before taking any further action.",
+      "escaped_comment",
     );
   } catch (err) {
     console.error(`answerEscapedProposalComment: could not deliver the honest reply for comment ${comment.id}`, err);
@@ -468,15 +474,16 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
         return { handled: false, outcome: "ambiguous_intent", detail: `clarification deferred: ${requested.detail}` };
       }
       await markProcessed(env, comment.id);
-      await replyToComment(token, doc.documentId, comment.id, `Nothing was changed -- ${requested.detail}`);
+      await deliverReply(env, doc, comment.id, `Nothing was changed -- ${requested.detail}`, "clarification_refused");
       return { handled: true, outcome: "ambiguous_intent", detail: `clarification not recorded: ${requested.detail}` };
     }
     await markProposalDocClarificationRequested(env, comment.id);
-    await replyToComment(
-      token,
-      doc.documentId,
+    await deliverReply(
+      env,
+      doc,
       comment.id,
       "I couldn't tell whether this is a presentation-only formatting request or a requested change to the Proposal's content. Nothing has been changed. Reply to me in Telegram, stating one of: (a) formatting only -- presentation changes, no text change; or (b) the exact content/text change you want.",
+      "clarification_requested",
     );
     return { handled: true, outcome: "ambiguous_intent", detail: "clarification requested; the comment stays unprocessed until it is answered" };
   }
@@ -489,16 +496,17 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
       version: binding.version,
     });
     if (result.kind === "formatted") {
-      await replyToComment(
-        token,
-        doc.documentId,
+      await deliverReply(
+        env,
+        doc,
         comment.id,
         `Formatting applied -- the Doc's content is unchanged and no new version was created (this Doc stays at ${binding.proposalId} v${binding.version}).`,
+        "formatting_applied",
       );
       await resolveComment(token, doc.documentId, comment.id);
       return { handled: true, outcome: "formatting_applied", detail: `formatted ${binding.proposalId} v${binding.version}` };
     }
-    await replyToComment(token, doc.documentId, comment.id, `Not applied -- ${result.detail}`);
+    await deliverReply(env, doc, comment.id, `Not applied -- ${result.detail}`, "formatting_not_applied");
     return { handled: true, outcome: "formatting_not_applied", detail: `${result.kind}: ${result.detail}` };
   }
 
@@ -516,15 +524,16 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
     // completes only when he resolves it. Auto-resolving here would both
     // forge that signal and, under the new lifecycle, silently close the
     // cycle the comment just opened.
-    await replyToComment(
-      token,
-      doc.documentId,
+    await deliverReply(
+      env,
+      doc,
       comment.id,
       `Change recorded -- ${binding.proposalId} v${result.newVersion} was created from this comment. This Doc (v${binding.version}) is unchanged. I am deliberately leaving this comment OPEN: resolve it yourself once you are happy with the change, because your resolve is what completes the approval cycle for ${binding.proposalId}.`,
+      "change_recorded",
     );
     return { handled: true, outcome: "change_requested", detail: `change request -> ${binding.proposalId} v${result.newVersion}` };
   }
-  await replyToComment(token, doc.documentId, comment.id, `Not applied -- ${result.detail}`);
+  await deliverReply(env, doc, comment.id, `Not applied -- ${result.detail}`, "change_not_applied");
   return { handled: true, outcome: "change_not_applied", detail: `${result.kind}: ${result.detail}` };
 }
 
@@ -538,10 +547,15 @@ async function processProposalComment(env: Env, doc: WatchedGoogleDoc, comment: 
  * then NEVER applied: comment-triggered in-place edits have no registered
  * Tool operation, no Action declaration and no Architect-approved
  * authorization path, and this boundary never mints authorization -- so the
- * flow fails closed with an honest reply and reports the missing
- * authorization decision (outcome `edit_not_authorized`) instead of
- * mutating the document. The dedup marker still runs, so the same request
- * is never re-attempted on every poll.
+ * flow fails closed with an honest report (outcome `edit_not_authorized`)
+ * instead of mutating the document. The dedup marker still runs, so the
+ * same request is never re-attempted on every poll.
+ *
+ * Every reply this flow composes goes through the GOVERNED reply gate
+ * (deliverReply): a Proposal-bound Doc's replies run through the registered
+ * external-mutation operation under the comment's Work Action; a
+ * non-Proposal Doc has no Work, so its replies are refused fail-closed and
+ * reported to Operations instead of being posted outside the gate.
  */
 async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveComment, token: string): Promise<ProcessCommentResult> {
   const alreadyProcessed = await kvGet(env, `google_comment_processed:${comment.id}`);
@@ -584,10 +598,9 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
     // best-effort, so a failed reply must never leave the comment to be
     // re-processed on every poll.
     await markProcessed(env, comment.id);
-    await replyToCommentChecked(
+    await deliverReply(
       env,
-      token,
-      doc.documentId,
+      doc,
       comment.id,
       "I can only execute edits anchored to specific selected text right now — please select the text you want changed, then comment on that selection.",
       "no_anchor",
@@ -607,10 +620,9 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
     // Marker FIRST: the reply is best-effort and is never retried, so the
     // comment must be durably done before it is attempted.
     await markProcessed(env, comment.id);
-    await replyToCommentChecked(
+    await deliverReply(
       env,
-      token,
-      doc.documentId,
+      doc,
       comment.id,
       occurrences === 0
         ? "I couldn't find the exact text you selected anymore — it may have already changed. Please re-select and comment again."
@@ -633,10 +645,9 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   if (!instruction || !instruction.understood || !instruction.replacementText?.trim()) {
     // Marker FIRST -- same contract as the other branches in this family.
     await markProcessed(env, comment.id);
-    await replyToCommentChecked(
+    await deliverReply(
       env,
-      token,
-      doc.documentId,
+      doc,
       comment.id,
       "I wasn't able to determine a specific replacement from this comment — could you clarify exactly what the selected text should become?",
       "ai_not_understood",
@@ -661,15 +672,17 @@ async function processComment(env: Env, doc: WatchedGoogleDoc, comment: DriveCom
   // fails must never leave the comment unmarked, because an unmarked comment
   // is re-processed from scratch on the next poll and would be replied to
   // again -- and a duplicate reply to a human is worse than a missing one.
-  // If the reply is then rejected, that is reported to Operations (identifiers
-  // and failure category only -- never the comment's or the reply's text) and
-  // deliberately NOT retried: the provider's outcome is uncertain, so a retry
-  // could duplicate the reply. See replyToCommentChecked.
+  //
+  // THE REPLY ITSELF IS NOW GOVERNED (Martin's decision, 2026-10-15): it
+  // goes only through the registered external-mutation gate under the
+  // comment's Work Action. A non-Proposal document has NO Work, so this
+  // refusal reply cannot be authorized and is fail-closed -- not sent,
+  // reported to Operations with identifiers only (see deliverReply). The
+  // REFUSAL of the edit itself is unchanged: nothing in the Doc is touched.
   await markProcessed(env, comment.id);
-  await replyToCommentChecked(
+  await deliverReply(
     env,
-    token,
-    doc.documentId,
+    doc,
     comment.id,
     `I can't apply this edit: comment-triggered in-place edits are not an authorized operation in the governed external-effect boundary, so nothing in this document was changed. This is reported to Martin as a missing authorization decision, not carried out.`,
     "edit_not_authorized",
@@ -786,7 +799,7 @@ export async function processGoogleDocComments(env: Env, doc: WatchedGoogleDoc):
         outcome: "unhandled_exception",
         detail: err instanceof Error ? err.message : String(err),
       });
-      await answerEscapedProposalComment(env, doc, comment, token);
+      await answerEscapedProposalComment(env, doc, comment);
     }
   }
 

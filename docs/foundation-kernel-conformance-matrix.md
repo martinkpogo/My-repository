@@ -67,8 +67,8 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 | --- | --- |
 | **Contract** | Access answers "is this operation permitted"; external mutations require a Work recording a declaring `write` Action plus bound approval evidence where the Action demands it. |
 | **Code** | `src/access.ts:518` (`evaluateAccess`), `:675` (`evaluateExternalMutationAccess`), `:952` (`mintApprovalProofForWork`); the only external-mutation call site is `src/runtime/toolRegistry.ts:476` inside `invokeTool`, in the documented fail-closed order (exact operation → input contract → target from trusted state → Access) |
-| **Tests** | `src/access.test.ts`, `src/runtime/toolRegistry.test.ts` |
-| **Disclosed (not fixed here)** | Google comment replies/resolutions and the comment-triggered edit paths are *outside* `invokeTool`. This is explicitly reserved in `docs/enig-operating-model.md` ("Governance, reserved flows around the Tool Registry"): comment replies/resolutions are recorded as communication, `processComment`/`processSheetComment` fail closed with `edit_not_authorized`, and each conversion "is still an Architect decision". Routing them through Access would require choosing the Access context for cron-driven Google writes — a security-boundary decision. **Stops here, reported.** |
+| **Tests** | `src/access.test.ts`, `src/runtime/toolRegistry.test.ts`, `src/runtime/tools/googleDriveReplyTool.test.ts` (the reply operation: Action-declaration denial, read-context denial, approval-gated refusal and correctly-bound-proof acceptance, all with zero Google calls) |
+| **Disclosed (not fixed here)** | **Comment replies are now INSIDE the boundary** (Architect decision, 2026-10-15): every automated Doc-thread reply runs through the registered `google_drive.reply_to_comment` operation, reached via the Sales unit operation `reply_proposal_doc_comment` dispatched inside the comment's Work's own Durable Object -- so the Access context for cron-driven reply writes is the comment's Work's own recorded Action, with bound approval evidence where that Action is approval-gated (the security-boundary question that previously stopped here is thereby answered, not bypassed). Where no Work Action exists (non-Proposal Docs, all Sheet comments) the reply is refused fail-closed with a content-free Operations alert. What remains *outside*: the comment-triggered in-place edit paths (`processComment`/`processSheetComment` fail closed with `edit_not_authorized`) and comment resolutions, which are deliberately never automated (Martin's own resolve is the signal). |
 
 ### F. Data identity / token safety — **Conforms**
 
@@ -84,9 +84,9 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 | | |
 | --- | --- |
 | **Contract** | One static code-owned registry; a caller cannot register, select or substitute an operation; every declared operation must resolve exactly. |
-| **Code** | `src/runtime/toolRegistry.ts:155` (`TOOL_OPERATIONS`, today 4 registered ops, all Google), `:165` exact lookup, `:206` registry self-validation; declarations validated at registry assembly `src/units/registry.ts:126-130` |
-| **Tests** | `src/runtime/toolRegistry.test.ts` (unknown op → `denied`, input contract, Access denial, approval-evidence denial) |
-| **Disclosed** | See §E for the deliberately-unregistered Google comment flows. |
+| **Code** | `src/runtime/toolRegistry.ts:155` (`TOOL_OPERATIONS`, today 5 registered ops, all Google; `google_drive.reply_to_comment` added 2026-10-15 and deliberately declaring **no** `reconcile`, so an uncertain reply is refused rather than repeated), `:165` exact lookup, `:206` registry self-validation; declarations validated at registry assembly `src/units/registry.ts:126-130` (the three Proposal Actions each declare the reply op `required: false`, and `src/units/registryValidation.test.ts` asserts all 15 declarations resolve) |
+| **Tests** | `src/runtime/toolRegistry.test.ts` (unknown op → `denied`, input contract, Access denial, approval-evidence denial, and AQ: all five ops resolve with the reply's absent `reconcile`), `src/runtime/tools/googleDriveReplyTool.test.ts` (15 tests: exact input contract, trusted-target denials, honest outcome mapping, durable intent-before-effect/outcome-after, and the never-repeat refusal for an uncertain reply) |
+| **Disclosed** | See §E: comment replies were brought into the registry on 2026-10-15; the comment-triggered edit paths remain deliberately unregistered and fail closed. |
 
 ### H. Generic Worker + manifest boundaries — **Gap found and closed here**
 
@@ -148,7 +148,7 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 ## 6. Remaining gaps (all requiring an Architect decision — none invented in code)
 
 1. **Result verification before closure** (§J) — no acceptance/completion evaluation anywhere; Handoff closure is Unit-authored free text.
-2. **Google comment replies/resolutions & comment-triggered edits outside `invokeTool`** (§E) — reserved in the operating model; converting them needs an Access-context decision.
+2. **Google comment-triggered in-place edits remain outside `invokeTool`** (§E) — selected-passage Doc edits and Sheet cell edits fail closed with `edit_not_authorized`; converting them needs an Architect decision. **Comment replies were closed on 2026-10-15** (registered `google_drive.reply_to_comment` operation; Access context = the comment's Work's own recorded Action, dispatched inside the Work's Durable Object; refused fail-closed where no Work Action exists), and comment resolutions are deliberately never automated (Martin's own resolve is the signal).
 3. **Deleted research governance pages** (§3) — research/lead-gen research blocked fail-closed pending a Notion-write decision.
 4. **MVP verification** — a real quote request run end-to-end through the complete governed Handoff workflow has **not** been performed or verified in this task.
 
