@@ -1,7 +1,8 @@
-import type { Env } from "./types";
+import type { Env, Unit } from "./types";
 import { systemContext } from "./access";
 import { getPage, plainText } from "./notion";
-import { runCheckHandoffs } from "./checkHandoffs";
+import { runCheckHandoffs, unitsWithHandoffPickup } from "./checkHandoffs";
+import type { UnitManifest } from "./units/unitManifest";
 
 /**
  * POST /notion/webhook -- the externally-created-Handoff detection path.
@@ -90,7 +91,33 @@ function extractPageIdFromEvent(payload: unknown): string | null {
   return id;
 }
 
-const ROUTABLE_UNITS = new Set(["Finance", "Sales", "Marketing", "Strategy"]);
+/**
+ * Which "To Unit" values this filter will wake the discovery engine for is
+ * NOT a list this module owns: it is read live from the Unit Registry, i.e.
+ * exactly the Units whose UnitManifest declares a `handoffPickup`
+ * (checkHandoffs.unitsWithHandoffPickup -- the same declarations discovery,
+ * session scheduling and pickup dispatch all key off). A hardcoded set here
+ * would be a second, independent statement of "who can pick up a Handoff",
+ * one that silently drifts the moment a Unit is added/retired on its
+ * manifest: a Pending Handoff addressed to it would be filtered out at the
+ * webhook and never woken, with no test anywhere failing. Resolved per call
+ * (not at module load) so the registry is read at evaluation time, exactly
+ * as every other caller does.
+ *
+ * A Unit that declares no pickup is still rejected -- the reason is now
+ * simply stated as the manifest fact it is, rather than as membership in a
+ * private list.
+ *
+ * `manifests` (and the identical optional parameter on
+ * evaluateHandoffPageForWebhook) is a TEST SEAM and exists ONLY so a test can
+ * push a synthetic registry table -- including a Unit that is not registered
+ * in production -- through this exact filter without mutating the real,
+ * memoized, boot-validated registry. Production callers never pass it; the
+ * predicate and the default remain unchanged.
+ */
+function routableUnits(manifests?: Partial<Record<Unit, UnitManifest>>): Set<string> {
+  return new Set<string>(unitsWithHandoffPickup(manifests));
+}
 
 export type HandoffWebhookFilterResult =
   | { relevant: true; toUnit: string; entityToken: string; matterToken: string }
@@ -110,6 +137,7 @@ export type HandoffWebhookFilterResult =
 export function evaluateHandoffPageForWebhook(
   env: Env,
   page: { properties: Record<string, any>; parent?: { data_source_id?: string }; archived?: boolean; inTrash?: boolean },
+  manifests?: Partial<Record<Unit, UnitManifest>>,
 ): HandoffWebhookFilterResult {
   if (page.archived || page.inTrash) {
     return { relevant: false, reason: "page is archived/trashed" };
@@ -126,8 +154,8 @@ export function evaluateHandoffPageForWebhook(
     return { relevant: false, reason: `Status is "${status || "(empty)"}", not Pending -- already claimed, held, or closed` };
   }
   const toUnit = plainText(page.properties["To Unit"]);
-  if (!ROUTABLE_UNITS.has(toUnit)) {
-    return { relevant: false, reason: `"To Unit" ("${toUnit || "(empty)"}") is missing or not a Unit with routing/pickup logic` };
+  if (!routableUnits(manifests).has(toUnit)) {
+    return { relevant: false, reason: `"To Unit" ("${toUnit || "(empty)"}") is missing or does not declare Handoff pickup on its Unit manifest` };
   }
   const entityToken = plainText(page.properties.Entity_Token).trim();
   if (!entityToken) {

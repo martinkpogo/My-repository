@@ -298,9 +298,19 @@ export async function discoverPendingHandoffsForUnit(
   return scheduled;
 }
 
-/** Every Unit whose manifest declares a Handoff pickup, in registry order. */
-export function unitsWithHandoffPickup(): Unit[] {
-  return (Object.entries(getUnitManifests()) as [Unit, UnitManifest | undefined][]).filter(([, manifest]) => manifest?.handoffPickup).map(([unit]) => unit);
+/**
+ * Every Unit whose manifest declares a Handoff pickup, in registry order.
+ *
+ * `manifests` defaults to the real Unit Registry and exists ONLY so a test can
+ * exercise this predicate against a synthetic registry table -- a Unit that is
+ * not registered in production -- without mutating the real (memoized,
+ * boot-validated) one. Production callers never pass it; this is the same seam
+ * shape, and for the same reason, as discoverPendingHandoffsForUnit's
+ * `declaration` parameter above. It adds no mechanism: the predicate is
+ * unchanged, and the default still resolves the registry at call time.
+ */
+export function unitsWithHandoffPickup(manifests: Partial<Record<Unit, UnitManifest>> = getUnitManifests()): Unit[] {
+  return (Object.entries(manifests) as [Unit, UnitManifest | undefined][]).filter(([, manifest]) => manifest?.handoffPickup).map(([unit]) => unit);
 }
 
 /**
