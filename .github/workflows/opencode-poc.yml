@@ -1,0 +1,88 @@
+name: OpenCode PoC (Free Model)
+
+# Purpose: prove that GitHub Actions can run the OpenCode CLI non-interactively
+# with OpenCode Zen's free "MiMo-V2.6 Flash Free" model and get a report back,
+# without any machine staying online.
+#
+# Conditions (approved by Architect/Martin):
+#   - Explicitly select MiMo-V2.6 Flash Free via the verified identifier
+#     opencode/mimo-v2.6-flash-free (provider "opencode" = OpenCode Zen).
+#   - No fallback to a paid model: the model is pinned in three places
+#     (pre-flight catalog check, --model flag, config "model" and "small_model"),
+#     and every failure path below fails closed instead of substituting a model.
+#   - OPENCODE_API_KEY comes from GitHub Actions Secrets and is never printed.
+#   - workflow_dispatch only, zero GITHUB_TOKEN permissions, harmless prompt.
+#   - No checkout: nothing from this repository is sent to the model.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  poc:
+    name: Free-model non-interactive probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Fail closed before doing anything if the secret is absent. The value is
+      # referenced only as ${{ secrets.* }}, which GitHub masks in every log.
+      - name: Fail closed if OPENCODE_API_KEY is not configured
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [ -z "$OPENCODE_API_KEY" ]; then
+            echo "::error::OPENCODE_API_KEY secret is not configured. Add it under Settings > Secrets and variables > Actions before running this workflow."
+            exit 1
+          fi
+          echo "OPENCODE_API_KEY is present (value auto-masked by GitHub)."
+
+      # Official installer, pinned to the same known-good version as local dev.
+      # Pinning also skips the unauthenticated api.github.com "latest release"
+      # lookup, which is rate-limited on shared runner IPs.
+      - name: Install official OpenCode CLI (pinned)
+        run: curl -fsSL https://opencode.ai/install | bash -s -- --version 2.0.27
+
+      - name: Show CLI version
+        run: opencode --version
+
+      # Guarantee-of-no-fallback pre-flight: if the exact free model is not
+      # offered by the CLI on this runner, abort rather than let any run
+      # proceed with a different model.
+      - name: Confirm the free model is offered by the CLI (no-substitution guard)
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if ! opencode models | tr -d '\r' | grep -Fq 'opencode/mimo-v2.6-flash-free'; then
+            echo "::error::opencode/mimo-v2.6-flash-free is not offered by the CLI. Stopping: no model substitution is permitted."
+            exit 1
+          fi
+          echo "Model opencode/mimo-v2.6-flash-free is available."
+
+      # Runs in an EMPTY directory (no actions/checkout), so the only bytes sent
+      # to the model are the fixed harmless prompt below. small_model is pinned
+      # to the free model too, because OpenCode otherwise uses a paid default
+      # (gpt-5-nano) for session-title generation.
+      - name: Run fixed harmless prompt with the free model
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_AUTO_SHARE: "false"
+          OPENCODE_DISABLE_AUTOUPDATE: "true"
+          OPENCODE_CONFIG_CONTENT: '{"$schema":"https://opencode.ai/config.json","model":"opencode/mimo-v2.6-flash-free","small_model":"opencode/mimo-v2.6-flash-free","share":"disabled"}'
+        run: |
+          mkdir -p "$RUNNER_TEMP/opencode-poc"
+          cd "$RUNNER_TEMP/opencode-poc"
+          opencode run \
+            --model opencode/mimo-v2.6-flash-free \
+            'Reply with exactly the text OPENCODE_POC_OK and nothing else.' \
+            | tee "$RUNNER_TEMP/poc-output.txt"
+
+      # Exact whole-line match so the marker must come back as the complete
+      # response, not merely appear inside an echoed prompt.
+      - name: Assert the fixed test message came back
+        run: |
+          if ! tr -d '\r' < "$RUNNER_TEMP/poc-output.txt" | grep -Fxq 'OPENCODE_POC_OK'; then
+            echo "::error::Expected the exact line OPENCODE_POC_OK was not returned. Inspect the previous step's log."
+            exit 1
+          fi
+          echo "Verified: opencode/mimo-v2.6-flash-free returned OPENCODE_POC_OK non-interactively."
