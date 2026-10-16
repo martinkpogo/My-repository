@@ -27,13 +27,16 @@
 opaque_token_boundary:
   rule: >
     Every Handoff field that becomes another Unit's AI input context
-    (Handoff title, Reason, Required Next Action, Expected Output,
+    (Handoff title, Reason, Sources, Required Next Action, Expected Output,
     Acceptance Criteria, Assumptions, Open Questions, Verified Facts &
     Sources, Work Completed) must identify the Entity/Matter ONLY by its
     Entity_Token and Matter_Token (e.g. "E-20", "MAT-20") -- never by the
     real Entity/company name, a real contact's name, an email address, a
     phone number, or any other detail that identifies who they actually
-    are.
+    are. Sources URLs are included deliberately: a Notion pretty-URL slug
+    is derived from the page title, so a link whose slug carries a real
+    company or contact name writes identity into the Handoff just as
+    surely as prose would.
 
   never_write:
     - Real Entity/company name (e.g. "Meridian Foods Ghana Ltd")
@@ -73,6 +76,45 @@ opaque_token_boundary:
     (test-engagement data, not a real client-data exposure) rather than
     scrubbed; see the Activity & Decision Log entry consolidating HO-58
     for the full account. This file exists to stop it happening again.
+
+# --- The Sources property (manual equivalent) ---
+#
+# The runtime enforces Sources validation in code at one point:
+# src/handoffWriter.ts's createHandoff/updateHandoff (deterministic,
+# no fetches) and src/handoffSources.ts's resolveHandoffSources at pickup
+# (the full binding chain, fail-closed). A manual writer bypasses both and
+# must apply the same discipline by hand.
+
+sources_property:
+  when_present_means: >
+    The Handoff's evidence lives on the canonical artifacts it names, and
+    with the Sources path enabled the runtime reads ONLY what it declares
+    (the free-text Call_Notes_ID reference is never consulted as a
+    fallback for a Sources-enabled Handoff, and the Handoff's own
+    narrative is outranked by the declared source exactly as a declared
+    canonical Call Notes page outranks it). Never add the property "for
+    documentation" on a Handoff whose evidence is actually its narrative.
+
+  write_only_exact_references:
+    - Exact Notion PAGE links (a page id URL; never a database/view link,
+      never a title to search for)
+    - Direct Google Docs/Sheets file links on docs.google.com (note: a
+      Google Sheet source is parsed but refused by the runtime today --
+      no trusted binding exists for spreadsheets; do not write one)
+    - At least one reference; no duplicates of the same page/file
+    - Only on a route whose contract permits the types involved
+      (today: Sales->Strategy, call_notes optional)
+
+  never_write:
+    - Title-matched, searched, or guessed references
+    - Links whose slug or query string carries real identity
+    - A Sources property on a Handoff whose recorded route has no source
+      route contract (the runtime refuses such a record fail-closed)
+
+  incident_reference: >
+    No incident yet -- the property went live with Phase 2 (2026-10-16)
+    together with this file's update, unlike opaque_token_boundary whose
+    HO-58 incident predates its enforcement.
 
 # --- Sales -> Strategy source-boundary attestation (manual equivalent) ---
 #

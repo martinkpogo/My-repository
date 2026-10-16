@@ -3,6 +3,7 @@ import type { NotionProperties, NotionPage } from "./notion";
 import { createPage, richText, updatePage } from "./notion";
 import type { AccessContext } from "./access";
 import { buildMarker, markerFieldEntries, markerPattern, type MarkerEvidence } from "./markerChannel";
+import { HANDOFF_SOURCES_PROPERTY, extractHandoffSources, handoffSourceRouteContract } from "./handoffSources";
 
 /**
  * Single runtime enforcement point for the canonical Handoff identity-write
@@ -23,7 +24,7 @@ import { buildMarker, markerFieldEntries, markerPattern, type MarkerEvidence } f
  * enforcement point, not one per Unit.
  */
 
-/** Every Handoff field that becomes another Unit's AI input context -- the protected set this boundary applies to. */
+/** Every Handoff field that becomes another Unit's AI input context -- the protected set this boundary applies to. `Sources` carries direct artifact URLs whose pretty-URL slugs are derived from page titles, so the URL text is checked exactly like any other protected field: real identity must never travel into one. */
 export const PROTECTED_HANDOFF_FIELDS = [
   "Handoff",
   "Reason",
@@ -34,6 +35,7 @@ export const PROTECTED_HANDOFF_FIELDS = [
   "Open Questions",
   "Verified Facts & Sources",
   "Work Completed",
+  "Sources",
 ] as const;
 
 export class HandoffWriteViolationError extends Error {
@@ -44,24 +46,52 @@ export class HandoffWriteViolationError extends Error {
 }
 
 /**
- * The direct-page `Sources` property (src/handoffSources.ts) exists only on
- * the READ side today: the live Handoffs database has no `Sources` property,
- * and the runtime never writes an unknown property to Notion, never migrates
- * the schema, and never pretends the schema has already changed. Both write
- * paths below refuse any payload that carries the property, so no
- * createHandoff/updateHandoff call -- today or by accident later -- can
- * attempt to persist it before an approved schema change actually exists.
- * This is a refusal, not a strip: silently dropping the property would
- * create a record that claims sources its producer supplied and its consumer
- * can never see.
+ * The direct-page `Sources` property (src/handoffSources.ts) is writable
+ * since Phase 2: the live Handoffs database carries it as a rich-text
+ * property (schema change approved by the Architect), and this is the only
+ * write path that may persist it -- one enforcement point, not one per
+ * Unit.
+ *
+ * Write-side validation here is DETERMINISTIC (no fetches, so a transient
+ * page-read issue can never fail an otherwise valid write): the payload
+ * must parse into at least one exact direct reference (a Notion page link
+ * or a recognized direct Google Docs/Sheets URL -- no duplicates, no
+ * title-matched or searchable text), the Handoff's recorded route must have
+ * a source route contract, and every reference's type must be one that
+ * contract permits. Identity-safety of the URL text itself is covered by
+ * `Sources` membership in PROTECTED_HANDOFF_FIELDS below (the primary
+ * identity control runs over it on every create and update). The FULL
+ * binding validation -- exact page fetch, real parent database, tokens,
+ * lifecycle, approval attestation, Google registration binding -- runs
+ * fail-closed at pickup, in resolveHandoffSources, before any consumer
+ * treats a reference as evidence.
  */
-const HANDOFF_SOURCES_PROPERTY = "Sources";
-
-function assertSourcesNotWritten(properties: NotionProperties, operation: string): void {
-  if ((properties as Record<string, unknown>)[HANDOFF_SOURCES_PROPERTY] !== undefined) {
+function validateHandoffSourcesWrite(properties: NotionProperties, operation: string): void {
+  const raw = (properties as Record<string, unknown>)[HANDOFF_SOURCES_PROPERTY];
+  if (raw === undefined || raw === null) return;
+  const extraction = extractHandoffSources(properties);
+  if (!extraction.ok) {
+    throw new HandoffWriteViolationError(`the Handoff ${operation} payload carries an unusable "${HANDOFF_SOURCES_PROPERTY}" property: ${extraction.reason}`);
+  }
+  if (extraction.mode !== "sources") return; // unreachable: a present property extracts as "sources" or refuses
+  const fromUnit = selectName(properties["From Unit"]) ?? "";
+  const toUnit = selectName(properties["To Unit"]) ?? "";
+  const routeKey = `${fromUnit || "(none)"}->${toUnit || "(none)"}`;
+  const contract = handoffSourceRouteContract(fromUnit, toUnit);
+  if (!contract) {
     throw new HandoffWriteViolationError(
-      `the Handoff ${operation} payload carries a "${HANDOFF_SOURCES_PROPERTY}" property, but the live Handoffs database has no such property -- the runtime never writes an unknown property to Notion. The direct-page Sources path is read-side only until an approved schema change adds the property.`,
+      `the Handoff ${operation} payload carries "${HANDOFF_SOURCES_PROPERTY}", but route "${routeKey}" has no Handoff source route contract -- which sources may travel a route is an explicit contract decision, so an uncontracted route is refused rather than guessed.`,
     );
+  }
+  for (const ref of extraction.refs) {
+    const type = ref.kind === "google" ? ref.type : undefined;
+    if (!type) continue; // a Notion reference's type comes from its real parent data source, decided at pickup -- permission re-checked there per-type
+    const permitted = contract.required.includes(type) || contract.optional.includes(type);
+    if (contract.prohibited.includes(type) || !permitted) {
+      throw new HandoffWriteViolationError(
+        `the Handoff ${operation} payload carries a ${type} reference in "${HANDOFF_SOURCES_PROPERTY}" that route "${routeKey}" does not permit -- the pickup would refuse it anyway, so it is refused here instead of creating a record that fails validation on arrival.`,
+      );
+    }
   }
 }
 
@@ -402,10 +432,11 @@ export async function createHandoff(
   identity: HandoffIdentity,
   access: AccessContext,
 ): Promise<{ page: NotionPage; sourceBoundaryAttestation: HandoffSourceBoundaryAttestation }> {
-  // A `Sources` payload is refused before anything else: the live Handoffs
-  // database has no such property, and validate-then-create means no write
-  // attempt ever reaches Notion with it.
-  assertSourcesNotWritten(properties, "create");
+  // A `Sources` payload is validated first, fail-closed: exact direct
+  // references on a contracted route whose contract permits each Google
+  // reference's type -- refused before anything else, so no write attempt
+  // ever reaches Notion with a payload the pickup would refuse anyway.
+  validateHandoffSourcesWrite(properties, "create");
   // Source-boundary checks 1 & 2 -- established first, fail closed: a
   // Handoff with no operational Entity/Matter reference never reaches
   // createPage. Not weakened; this IS the basis for both checks.
@@ -500,7 +531,7 @@ export async function updateHandoff(
   access: AccessContext,
   identity?: HandoffIdentity,
 ): Promise<NotionPage> {
-  assertSourcesNotWritten(properties, "update");
+  validateHandoffSourcesWrite(properties, "update");
   validateHandoffProperties(properties, identity ?? { entityToken: "", matterToken: "" });
   return updatePage(env, handoffId, properties, access);
 }

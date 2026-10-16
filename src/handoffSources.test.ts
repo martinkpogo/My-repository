@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   HANDOFF_SOURCE_ROUTE_CONTRACTS,
   parseNotionPageLink,
+  parseGoogleFileLink,
   extractHandoffSources,
   resolveHandoffSources,
+  readGoogleDocSourceContent,
   handoffSourceRouteContract,
   type HandoffSourceRouteContract,
 } from "./handoffSources";
@@ -55,12 +57,12 @@ const HANDOFFS_PAGE_ID = "99999999-8888-8888-7777-777766666666";
 const PROPOSALS_HEX = "0a0a0a0a0b0b0b0b0c0c0c0c0d0d0d0d";
 const PROPOSALS_PAGE_ID = "0a0a0a0a-0b0b-0b0b-0c0c-0c0c0d0d0d0d";
 
-function fakeEnv(): Env {
+function fakeEnv(kv: Record<string, string> = {}): Env {
   return {
     AI: {} as any,
     WORK_SESSION: {} as any,
     STATE_KV: {
-      get: async () => null,
+      get: async (key: string) => kv[key] ?? null,
       put: async () => undefined,
       delete: async () => undefined,
       list: async () => ({ keys: [], list_complete: true, cursor: undefined }) as any,
@@ -146,6 +148,10 @@ function mockSourcesFetch(
     pages?: Record<string, PageFixture>;
     /** Whether the Handoff's Entity/Matter tokens resolve to real records. */
     resolves?: boolean;
+    /** Drive file metadata served by exact file id (files.get). */
+    googleFiles?: Record<string, { id?: string; name?: string; mimeType?: string; trashed?: boolean }>;
+    /** Google Docs documents served by exact file id (documents.get). */
+    googleDocs?: Record<string, any>;
   } = {},
 ): MockLog {
   const originalFetch = globalThis.fetch;
@@ -157,6 +163,22 @@ function mockSourcesFetch(
     if (method === "PATCH" || method === "PUT" || method === "DELETE") {
       log.writes.push(`${method} ${urlStr}`);
       return new Response(JSON.stringify({ id: "x", url: "https://notion.so/x", properties: {} }), { status: 200 });
+    }
+    if (urlStr.startsWith("https://www.googleapis.com/drive/v3/files/") && method === "GET") {
+      const fileId = urlStr.split("/drive/v3/files/").pop()?.split("?")[0] ?? "";
+      const file = opts.googleFiles?.[fileId];
+      if (!file) {
+        return new Response(JSON.stringify({ error: { code: 404, message: "File not found" } }), { status: 404 });
+      }
+      return new Response(JSON.stringify(file), { status: 200 });
+    }
+    if (urlStr.startsWith("https://docs.googleapis.com/v1/documents/") && method === "GET") {
+      const fileId = urlStr.split("/v1/documents/").pop() ?? "";
+      const doc = opts.googleDocs?.[fileId];
+      if (!doc) {
+        return new Response(JSON.stringify({ error: { code: 404, message: "Document not found" } }), { status: 404 });
+      }
+      return new Response(JSON.stringify(doc), { status: 200 });
     }
     if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
       const resolves = opts.resolves ?? true;
@@ -270,15 +292,19 @@ interface ResolveOptions {
   fromUnit?: string;
   toUnit?: string;
   contracts?: Readonly<Record<string, HandoffSourceRouteContract>>;
+  /** The Google binding-hop seam: the persisted identity of the Work a Doc's registration is bound to. */
+  readBoundWorkState?: (workId: string) => Promise<{ entityId?: string; matterId?: string } | undefined>;
+  env?: Env;
 }
 
 function resolve(properties: Record<string, any>, opts: ResolveOptions = {}) {
-  return resolveHandoffSources(fakeEnv(), {
+  return resolveHandoffSources(opts.env ?? fakeEnv(), {
     properties: properties as any,
     tokens: opts.tokens ?? { entityToken: "E-47", matterToken: "M-12" },
     route: { fromUnit: opts.fromUnit ?? "Sales", toUnit: opts.toUnit ?? "Strategy" },
     access: pickupContext(),
     ...(opts.contracts ? { contracts: opts.contracts } : {}),
+    ...(opts.readBoundWorkState ? { readBoundWorkState: opts.readBoundWorkState } : {}),
   });
 }
 
@@ -387,12 +413,12 @@ test("extraction: a null Sources property is legacy too", () => {
 
 test("extraction: a present property with one link resolves its exact page id (read shape)", () => {
   const result = extractHandoffSources(handoffProperties({ Sources: sourcesReadShape([CN_PAGE_URL]) }));
-  assert.deepEqual(result, { ok: true, mode: "sources", pageIds: [CN_PAGE_ID] });
+  assert.deepEqual(result, { ok: true, mode: "sources", refs: [{ kind: "notion", pageId: CN_PAGE_ID }] });
 });
 
 test("extraction: a present property in the write shape (text.link only) resolves too", () => {
   const result = extractHandoffSources(handoffProperties({ Sources: sourcesWriteShape([CN_PAGE_URL]) }));
-  assert.deepEqual(result, { ok: true, mode: "sources", pageIds: [CN_PAGE_ID] });
+  assert.deepEqual(result, { ok: true, mode: "sources", refs: [{ kind: "notion", pageId: CN_PAGE_ID }] });
 });
 
 test("extraction: a present property carrying no link at all is refused -- nothing is inferred to fill it", () => {
@@ -429,7 +455,7 @@ test("sources: one canonical Call Notes page resolves fully -- fetched by exact 
   assert.equal(result.ok, true, result.ok ? "" : result.reason);
   if (!result.ok || result.mode !== "sources") return;
 
-  assert.deepEqual(result.sources, [{ type: "call_notes", pageId: CN_PAGE_ID }]);
+  assert.deepEqual(result.sources, [{ type: "call_notes", id: CN_PAGE_ID }]);
   assert.equal(result.callNotes?.callNotesId, "CN-007");
   assert.equal(result.callNotes?.status, "Ready");
   assert.equal(result.callNotes?.attestation.result, "Approved", "the recorded approval attestation was re-validated against this record");
@@ -531,7 +557,7 @@ test("sources: two pages of the same type are conflicting references -- which on
     t,
     { [CN_PAGE_ID]: await callNotesPageFixture(), [CN2_PAGE_ID]: second },
     handoffProperties({ Sources: sourcesReadShape([CN_PAGE_URL, `https://www.notion.so/${CN2_HEX}`]) }),
-    /references more than one call_notes page/,
+    /references more than one call_notes source/,
   );
 });
 
@@ -849,4 +875,357 @@ test("sources: the production route table permits exactly the documented types o
     prohibited: ["handoffs"],
   });
   assert.equal(handoffSourceRouteContract("Strategy", "Finance"), undefined, "any other route has no contract until one is declared");
+});
+
+// ---------------------------------------------------------------------------
+// Google file links: only exact docs.google.com direct file links parse.
+// ---------------------------------------------------------------------------
+
+const GDOC_FILE_ID = "abc123DEF456ghi789jkl012mno345pq";
+const GSHEET_FILE_ID = "sheet123ABC456def789GHI012jkl345mn";
+const GOOGLE_ACCOUNT = "martin@example.com";
+const DOC_MIME = "application/vnd.google-apps.document";
+const SHEET_MIME = "application/vnd.google-apps.spreadsheets";
+
+test("parseGoogleFileLink: a direct Google Doc URL resolves to the exact file id and the type its URL claims", () => {
+  for (const url of [
+    `https://docs.google.com/document/d/${GDOC_FILE_ID}/edit`,
+    `https://docs.google.com/document/d/${GDOC_FILE_ID}/preview`,
+    `https://docs.google.com/document/d/${GDOC_FILE_ID}?usp=sharing`,
+    `http://docs.google.com/document/u/0/d/${GDOC_FILE_ID}/edit`.replace("/u/0", ""),
+  ]) {
+    assert.deepEqual(parseGoogleFileLink(url), { ok: true, fileType: "google_doc", fileId: GDOC_FILE_ID }, url);
+  }
+});
+
+test("parseGoogleFileLink: a direct Google Sheets URL resolves to google_sheet", () => {
+  assert.deepEqual(parseGoogleFileLink(`https://docs.google.com/spreadsheets/d/${GSHEET_FILE_ID}/edit#gid=0`), {
+    ok: true,
+    fileType: "google_sheet",
+    fileId: GSHEET_FILE_ID,
+  });
+});
+
+test("parseGoogleFileLink: a lookalike host is refused -- never normalized into docs.google.com", () => {
+  const result = parseGoogleFileLink(`https://docs.google.com.evil.example/document/d/${GDOC_FILE_ID}/edit`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not a docs\.google\.com direct file link/);
+});
+
+test("parseGoogleFileLink: other Google products, the /u/<n>/ variant, and drive.google.com share links are refused", () => {
+  for (const url of [
+    `https://docs.google.com/presentation/d/${GDOC_FILE_ID}/edit`,
+    `https://docs.google.com/forms/d/${GDOC_FILE_ID}/edit`,
+    `https://drive.google.com/file/d/${GDOC_FILE_ID}/view`,
+    `https://docs.google.com/document/u/0/d/${GDOC_FILE_ID}/edit`,
+  ]) {
+    const result = parseGoogleFileLink(url);
+    assert.equal(result.ok, false, url);
+    if (!result.ok) assert.match(result.reason, /not a direct file link|not a docs\.google\.com direct file link/, url);
+  }
+});
+
+test("parseGoogleFileLink: a missing or unrecognizable file id is refused", () => {
+  for (const url of ["https://docs.google.com/document/d/edit", "https://docs.google.com/document/d/short/edit"]) {
+    const result = parseGoogleFileLink(url);
+    assert.equal(result.ok, false, url);
+    if (!result.ok) assert.match(result.reason, /recognizable Google file id/, url);
+  }
+});
+
+test("parseGoogleFileLink: not a URL is refused", () => {
+  const result = parseGoogleFileLink("just some words");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /is not a URL/);
+});
+
+test("extraction: a mixed Sources property resolves typed refs -- a Notion page and a Google Doc, each exact", () => {
+  const result = extractHandoffSources(
+    handoffProperties({ Sources: sourcesWriteShape([CN_PAGE_URL, `https://docs.google.com/document/d/${GDOC_FILE_ID}/edit`]) }),
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    mode: "sources",
+    refs: [
+      { kind: "notion", pageId: CN_PAGE_ID },
+      { kind: "google", type: "google_doc", fileId: GDOC_FILE_ID },
+    ],
+  });
+});
+
+test("extraction: the same Google file through two URL shapes is one reference written twice -- refused", () => {
+  const result = extractHandoffSources(
+    handoffProperties({
+      Sources: sourcesWriteShape([
+        `https://docs.google.com/document/d/${GDOC_FILE_ID}/edit`,
+        `https://docs.google.com/document/d/${GDOC_FILE_ID}/preview`,
+      ]),
+    }),
+  );
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /references Google file .* more than once/);
+});
+
+// ---------------------------------------------------------------------------
+// Google source resolution: registration binding, actual type, no Sheets read.
+// ---------------------------------------------------------------------------
+
+/** A route contract that permits the Google types, so their full validation chain can be exercised (the production table permits none). */
+const GOOGLE_PERMITTING_CONTRACTS = routeContracts({
+  "Sales->Strategy": { required: [], optional: ["call_notes", "google_doc", "google_sheet"], prohibited: ["handoffs"] },
+});
+
+function googleKv(overrides: Record<string, string> = {}): Record<string, string> {
+  return {
+    [`google_doc_watch:${GDOC_FILE_ID}`]: JSON.stringify({
+      documentId: GDOC_FILE_ID,
+      accountIdentifier: GOOGLE_ACCOUNT,
+      title: "Proposal review",
+      createdAt: "2026-10-01T00:00:00.000Z",
+      proposal: { workId: "work-prop-1", proposalNumber: 6, proposalId: "PROP-6", version: 2 },
+    }),
+    [`google_sheet_watch:${GSHEET_FILE_ID}`]: JSON.stringify({
+      spreadsheetId: GSHEET_FILE_ID,
+      accountIdentifier: GOOGLE_ACCOUNT,
+      title: "Numbers",
+      createdAt: "2026-10-01T00:00:00.000Z",
+    }),
+    [`google_oauth_tokens:${GOOGLE_ACCOUNT}`]: JSON.stringify({
+      access_token: "access-token-1",
+      refresh_token: "refresh-token-1",
+      expires_at: Date.now() + 3_600_000,
+      account_identifier: GOOGLE_ACCOUNT,
+      updated_at: "2026-10-01T00:00:00.000Z",
+    }),
+    ...overrides,
+  };
+}
+
+function googleDocUrl(fileId = GDOC_FILE_ID) {
+  return `https://docs.google.com/document/d/${fileId}/edit`;
+}
+
+/** A Google-source Handoff payload whose Reason carries no free-text Call_Notes_ID reference (that transport is checked separately from the Sources path). */
+function googleHandoffProperties(url: string) {
+  return handoffProperties({ Reason: rich("Commercial fit approved."), Sources: sourcesWriteShape([url]) });
+}
+
+/** The validated-source shape readGoogleDocSourceContent consumes -- built directly: content reading is its own seam. */
+const VALIDATED_DOC_SOURCE = {
+  fileId: GDOC_FILE_ID,
+  accountIdentifier: GOOGLE_ACCOUNT,
+  title: "Proposal review",
+  proposal: { workId: "work-prop-1", proposalId: "PROP-6", version: 2 },
+};
+
+function boundWorkState(overrides: { entityId?: string; matterId?: string } = { matterId: "matter-page-1", entityId: "entity-page-1" }) {
+  return async () => overrides;
+}
+
+test("sources: a registered, bound Google Doc resolves fully -- exact file, registration binding, Drive-verified type; content is NOT read at resolution", async (t) => {
+  const log = mockSourcesFetch(t, {
+    googleFiles: { [GDOC_FILE_ID]: { id: GDOC_FILE_ID, name: "Proposal review", mimeType: DOC_MIME } },
+  });
+  const result = await resolve(googleHandoffProperties(googleDocUrl()), {
+    contracts: GOOGLE_PERMITTING_CONTRACTS,
+    env: fakeEnv(googleKv()),
+    readBoundWorkState: boundWorkState(),
+  });
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok || result.mode !== "sources") return;
+  assert.deepEqual(result.sources, [{ type: "google_doc", id: GDOC_FILE_ID }]);
+  assert.equal(result.googleDoc?.fileId, GDOC_FILE_ID);
+  assert.equal(result.googleDoc?.accountIdentifier, GOOGLE_ACCOUNT);
+  assert.equal(result.googleDoc?.proposal.proposalId, "PROP-6");
+  assert.equal(result.googleDoc?.proposal.version, 2);
+  assert.equal(log.writes.length, 0, "resolution writes nothing");
+  assert.equal(log.requests.filter((r) => r.includes("/documents/")).length, 0, "the Doc's CONTENT is not read at resolution -- only its binding and type");
+  assert.equal(log.requests.filter((r) => r.includes("/drive/v3/files/")).length, 1, "exactly one files.get -- the actual type verified once");
+});
+
+test("sources: an UNREGISTERED Google Doc is refused -- account access alone is never a relationship", async (t) => {
+  await expectGoogleRefused(
+    t,
+    googleDocUrl("unregisteredfile00011122233344455"),
+    /is not registered by this Worker/,
+    {},
+  );
+});
+
+test("sources: a registered Doc with no proposal/Work binding is refused -- nothing ties it to an Entity/Matter", async (t) => {
+  await expectGoogleRefused(
+    t,
+    googleDocUrl(),
+    /no proposal\/Work binding/,
+    {
+      [`google_doc_watch:${GDOC_FILE_ID}`]: JSON.stringify({
+        documentId: GDOC_FILE_ID,
+        accountIdentifier: GOOGLE_ACCOUNT,
+        title: "Loose doc",
+        createdAt: "2026-10-01T00:00:00.000Z",
+      }),
+    },
+  );
+});
+
+test("sources: a Doc bound to a Work whose state cannot be read is refused -- an unverifiable binding is never assumed", async (t) => {
+  await expectGoogleRefused(t, googleDocUrl(), /no longer has readable state/, googleKv(), {
+    readBoundWorkState: async () => undefined,
+  });
+});
+
+test("sources: a Doc bound to another Matter is refused -- the binding must name exactly this Handoff's Matter", async (t) => {
+  await expectGoogleRefused(t, googleDocUrl(), /not bound to this Handoff's Matter/, googleKv(), {
+    readBoundWorkState: boundWorkState({ matterId: "matter-page-OTHER", entityId: "entity-page-1" }),
+  });
+});
+
+test("sources: a link that claims a Doc but whose Drive mimeType is a Sheet is refused -- the API decides the type, never the URL", async (t) => {
+  await expectGoogleRefused(t, googleDocUrl(), /Drive API reports mimeType/, googleKv(), {
+    readBoundWorkState: boundWorkState(),
+    files: { [GDOC_FILE_ID]: { id: GDOC_FILE_ID, mimeType: SHEET_MIME } },
+  });
+});
+
+test("sources: a trashed Doc is refused -- only a live file may be a source", async (t) => {
+  await expectGoogleRefused(t, googleDocUrl(), /in the trash/, googleKv(), {
+    readBoundWorkState: boundWorkState(),
+    files: { [GDOC_FILE_ID]: { id: GDOC_FILE_ID, mimeType: DOC_MIME, trashed: true } },
+  });
+});
+
+test("sources: a Doc whose registered account holds no authorized token is refused -- the type cannot be verified, so nothing is read", async (t) => {
+  await expectGoogleRefused(t, googleDocUrl(), /no currently authorized Google token/, {
+    [`google_doc_watch:${GDOC_FILE_ID}`]: googleKv()[`google_doc_watch:${GDOC_FILE_ID}`],
+  }, {
+    readBoundWorkState: boundWorkState(),
+  });
+});
+
+test("sources: a Drive API failure is refused with its HTTP status -- never read unverified", async (t) => {
+  await expectGoogleRefused(t, googleDocUrl(), /HTTP 404/, googleKv(), {
+    readBoundWorkState: boundWorkState(),
+    files: {}, // the files.get 404s
+  });
+});
+
+test("sources: a registered Google Sheet is refused with the precise missing contract -- account identity only, no binding, no bounded range", async (t) => {
+  await expectGoogleRefused(
+    t,
+    `https://docs.google.com/spreadsheets/d/${GSHEET_FILE_ID}/edit`,
+    /registration carries account identity only .*no declared bounded worksheet range/s,
+    googleKv(),
+    {
+      files: { [GSHEET_FILE_ID]: { id: GSHEET_FILE_ID, mimeType: SHEET_MIME } },
+      readBoundWorkState: boundWorkState(),
+    },
+  );
+});
+
+test("sources: an UNREGISTERED Google Sheet is refused the same way -- and nothing about it is ever read", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  const kv = googleKv();
+  delete kv[`google_sheet_watch:${GSHEET_FILE_ID}`]; // nothing registered about this spreadsheet at all
+  const result = await resolve(googleHandoffProperties(`https://docs.google.com/spreadsheets/d/${GSHEET_FILE_ID}/edit`), {
+    contracts: GOOGLE_PERMITTING_CONTRACTS,
+    env: fakeEnv(kv),
+    readBoundWorkState: boundWorkState(),
+  });
+  assert.equal(result.ok, false, "an unregistered spreadsheet is never a source");
+  if (result.ok) return;
+  assert.match(result.reason, /not registered by this Worker/);
+  assert.equal(log.requests.filter((r) => !r.includes("/pages/") && !r.includes("/data_sources/")).length, 0, "no Google API was ever contacted about the spreadsheet");
+  assert.equal(log.writes.length, 0);
+});
+
+test("sources: a Google Doc on a route whose contract does not permit google_doc is refused BEFORE any Google API is contacted (production table)", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  // No contracts seam: the production table, where Sales->Strategy permits only call_notes.
+  const result = await resolve(googleHandoffProperties(googleDocUrl()), {
+    env: fakeEnv(googleKv()),
+    readBoundWorkState: boundWorkState(),
+  });
+  assert.equal(result.ok, false, "no production route permits google_doc today -- the contract decides, not the code path");
+  if (result.ok) return;
+  assert.match(result.reason, /does not permit google_doc sources/);
+  assert.equal(log.requests.filter((r) => r.includes("googleapis.com")).length, 0, "permission is checked before any Google API is contacted");
+});
+
+/** Runs one Google-source refusal through the full chain and asserts the exact reason plus the no-write/no-search discipline. */
+async function expectGoogleRefused(
+  t: any,
+  url: string,
+  matcher: RegExp,
+  kv: Record<string, string>,
+  extra: {
+    readBoundWorkState?: (workId: string) => Promise<{ entityId?: string; matterId?: string } | undefined>;
+    files?: Record<string, { id?: string; mimeType?: string; trashed?: boolean }>;
+  } = {},
+) {
+  const log = mockSourcesFetch(t, { googleFiles: extra.files ?? {} });
+  const result = await resolve(googleHandoffProperties(url), {
+    contracts: GOOGLE_PERMITTING_CONTRACTS,
+    env: fakeEnv(kv),
+    ...(extra.readBoundWorkState ? { readBoundWorkState: extra.readBoundWorkState } : {}),
+  });
+  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
+  if (result.ok) return;
+  assert.match(result.reason, matcher, "the refusal must say exactly what stopped it");
+  assert.equal(log.writes.length, 0, "a refusal issues no write of any kind");
+  assert.equal(log.callNotesQueries.length, 0, "a refusal never falls back to a database search");
+  assert.equal(log.requests.filter((r) => r.includes("/documents/")).length, 0, "no content read ever happened on a refused source");
+}
+
+// ---------------------------------------------------------------------------
+// readGoogleDocSourceContent: the content read, only for an already
+// validated source -- read-only, empty refused.
+// ---------------------------------------------------------------------------
+
+function docBody(text: string) {
+  return {
+    body: {
+      content: [
+        {
+          paragraph: {
+            elements: [{ textRun: { content: text } }],
+          },
+        },
+      ],
+    },
+  };
+}
+
+test("readGoogleDocSourceContent: reads the validated Doc's text through the Docs API -- read-only", async (t) => {
+  mockSourcesFetch(t, { googleDocs: { [GDOC_FILE_ID]: docBody("The commercial situation, recorded.") } });
+  const read = await readGoogleDocSourceContent(fakeEnv(googleKv()), VALIDATED_DOC_SOURCE);
+  assert.equal(read.ok, true, read.ok ? "" : read.reason);
+  if (!read.ok) return;
+  assert.match(read.content, /The commercial situation, recorded\./);
+});
+
+test("readGoogleDocSourceContent: a document with no text is refused -- nothing is inferred to fill the gap", async (t) => {
+  mockSourcesFetch(t, { googleDocs: { [GDOC_FILE_ID]: docBody("") } });
+  const read = await readGoogleDocSourceContent(fakeEnv(googleKv()), VALIDATED_DOC_SOURCE);
+  assert.equal(read.ok, false);
+  if (read.ok) return;
+  assert.match(read.reason, /carries no text content/);
+});
+
+test("readGoogleDocSourceContent: an account with no authorized token refuses the read -- never through another account", async (t) => {
+  mockSourcesFetch(t, { googleDocs: { [GDOC_FILE_ID]: docBody("text") } });
+  const read = await readGoogleDocSourceContent(fakeEnv({}), VALIDATED_DOC_SOURCE);
+  assert.equal(read.ok, false);
+  if (read.ok) return;
+  assert.match(read.reason, /no currently authorized token/);
+});
+
+test("readGoogleDocSourceContent: a failed Docs read surfaces its HTTP status", async (t) => {
+  mockSourcesFetch(t, {}); // documents.get 404s
+  const read = await readGoogleDocSourceContent(fakeEnv(googleKv()), VALIDATED_DOC_SOURCE);
+  assert.equal(read.ok, false);
+  if (read.ok) return;
+  assert.match(read.reason, /HTTP 404/);
 });
