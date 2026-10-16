@@ -451,3 +451,55 @@ test("parseSourceBoundaryMarker: missing, Failed, incomplete, malformed, and unb
   // Bound to a different Handoff's operational references.
   assert.strictEqual(parseSourceBoundaryMarker(passedMarker, { ...expected, matterToken: "MAT-99" }).ok, false);
 });
+
+// --- The direct-page Sources property (Phase 1 compatibility seam) ---------
+//
+// The live Handoffs database has NO "Sources" property. The runtime's
+// read-side resolver (src/handoffSources.ts) may therefore consume the
+// property when a record carries one, but the governed writer must never
+// SEND it: an unknown property in a Notion payload fails the write, and a
+// half-written Handoff is worse than a refused one. This is a refusal, not
+// a strip -- dropping it silently would persist a record whose declared
+// sources its consumer can never see.
+
+const SOURCES_URL = `https://www.notion.so/Acme-Case-Notes-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`;
+const SOURCES_PROPERTY = {
+  rich_text: [{ type: "text", text: { content: SOURCES_URL, link: { url: SOURCES_URL } } }],
+};
+
+function hasSourcesViolation(err: unknown): boolean {
+  return err instanceof HandoffWriteViolationError && /never writes an unknown property to Notion/.test((err as Error).message);
+}
+
+test("createHandoff: a payload carrying a Sources property is refused outright -- zero Notion calls, the unknown property never reaches the API", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  await assert.rejects(
+    () => createHandoff(env, validProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env)),
+    hasSourcesViolation,
+  );
+  assert.strictEqual(calls.length, 0, "refused before ANY Notion call -- not create-then-repair");
+});
+
+test("updateHandoff: a lifecycle update carrying a Sources property is refused outright -- zero Notion calls", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  await assert.rejects(
+    () => updateHandoff(env, "page-1", validProperties({ Sources: SOURCES_PROPERTY }), lifecycleAccess("page-1")),
+    hasSourcesViolation,
+  );
+  assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
+});
+
+test("createHandoff: the compatibility seam is exact -- a payload with NO Sources property still writes, and the sent payload carries no Sources key", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const { page } = await createHandoff(env, validProperties(), baseIdentity, createAccess(env));
+  assert.strictEqual(page.id, "page-1");
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(calls[0].body.properties, "Sources"),
+    false,
+    "legacy payloads (no Sources property) are byte-identical to what the writer always sent",
+  );
+});

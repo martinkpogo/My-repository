@@ -18,7 +18,8 @@ import { recordWorkAction } from "../dispatch";
 import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
-import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, strategyClarificationReason } from "./strategyEvidence";
+import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, readCallNotesSourceEvidence, strategyClarificationReason } from "./strategyEvidence";
+import { extractHandoffSources, resolveHandoffSources, type HandoffSourcesResolution } from "../../handoffSources";
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
@@ -203,9 +204,68 @@ export async function resolveStrategyHandoffContext(
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
 
-    // ---- Evidence order 1 -> 2 -> 3 -> 4 ----------------------------------
-    // 1. The Handoff's own approved evidence, whenever it is substantive.
-    // 2. Otherwise the approved Call Notes record, read read-only and
+    // ---- Step 0: the Handoff's direct-page Sources property, if it has one -
+    // Compatibility seam (src/handoffSources.ts): a Handoff with no
+    // `Sources` property resolves `legacy` here with no fetch at all, and
+    // the evidence order below runs exactly as it always has. A
+    // SOURCES-ENABLED Handoff has every reference resolved and validated
+    // here FIRST -- the exact page fetched by id (never a database search),
+    // its real parent database, the route contract, its Entity/Matter
+    // binding to this Handoff's tokens, its Status, its registry fields and
+    // its recorded Approval Attestation -- and when that resolution names a
+    // canonical Call Notes page, THAT page is this Handoff's authoritative
+    // evidence (step 1a below; the producer declares its evidence lives on
+    // the canonical record and deliberately does not duplicate it into the
+    // Handoff). A defective, unverifiable or uncontracted declaration stops
+    // the pickup with the exact reason through the existing Clarification
+    // path -- never a fallback to narrative, and the free-text
+    // Call_Notes_ID reference is never consulted as a fallback for a
+    // canonical page.
+    const sourcesExtraction = extractHandoffSources(handoff.properties);
+    if (!sourcesExtraction.ok) {
+      return {
+        success: false,
+        insufficientContext: {
+          isInsufficient: true,
+          category: "unresolved material fact",
+          reason: strategyClarificationReason(handoffEvidence, sourcesExtraction.reason),
+        },
+      };
+    }
+    let resolvedSources: HandoffSourcesResolution | null = null;
+    if (sourcesExtraction.mode === "sources") {
+      await progress?.advance("The Handoff declares direct-page sources -- resolving the canonical pages it names");
+      resolvedSources = await resolveHandoffSources(env, {
+        properties: handoff.properties,
+        tokens: { entityToken, matterToken },
+        route: {
+          fromUnit: plainText(handoff.properties["From Unit"]),
+          toUnit: plainText(handoff.properties["To Unit"]),
+        },
+        access,
+      });
+      if (!resolvedSources.ok) {
+        return {
+          success: false,
+          insufficientContext: {
+            isInsufficient: true,
+            category: "unresolved material fact",
+            reason: strategyClarificationReason(handoffEvidence, resolvedSources.reason),
+          },
+        };
+      }
+    }
+
+    // ---- Evidence order 0 -> 1a -> 1 -> 2 -> 3 -> 4 ------------------------
+    // 1a. A canonical Call Notes page named in the Handoff's Sources
+    //     property (Sources-enabled Handoffs only) is the authoritative
+    //     evidence -- read read-only and idempotently through the shared
+    //     gate 6, after the resolver proved everything gates 1-5 prove.
+    // 1. The Handoff's own approved evidence, whenever it is substantive
+    //    (legacy Handoffs unchanged; also a Sources-enabled Handoff that
+    //    declares no canonical Call Notes page).
+    // 2. Otherwise the approved Call Notes record via the legacy free-text
+    //    reference, read read-only and
     //    idempotently by Strategy itself -- strategyEvidence.ts owns the
     //    order, the six gates (the last of which retrieves the record's own
     //    page body as the substantive evidence), and why this path never
@@ -215,7 +275,28 @@ export async function resolveStrategyHandoffContext(
     // 4. Still unresolved -> Clarification Needed naming the exact fact and
     //    why it materially affects the decision. Never a generic request.
     let evidenceBase: string;
-    if (hasSubstantiveEvidence(handoffEvidence)) {
+    if (resolvedSources?.mode === "sources" && resolvedSources.callNotes) {
+      await progress?.advance("The Handoff declares a canonical Call Notes source -- reading that approved record's own page body");
+      const callNotes = await readCallNotesSourceEvidence(env, resolvedSources.callNotes, access);
+      if (!callNotes.ok) {
+        return {
+          success: false,
+          insufficientContext: {
+            isInsufficient: true,
+            category: "unresolved material fact",
+            reason: strategyClarificationReason(handoffEvidence, callNotes.reason),
+          },
+        };
+      }
+      console.log(
+        `Strategy evidence: Sources-enabled handoff ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, via ${callNotes.via}, read-only, attestation re-verified) and its page body as the evidence base.`,
+      );
+      progress?.note(`Read approved Call Notes ${callNotes.callNotesId} (direct-page Sources, read-only, attestation re-verified)`);
+      evidenceBase = [
+        `=== Evidence source: approved Call Notes record ${callNotes.callNotesId} (canonical page named in the Handoff's Sources property; read-only, attestation re-verified against this record's registry fields) ===`,
+        callNotes.evidenceText,
+      ].join("\n");
+    } else if (hasSubstantiveEvidence(handoffEvidence)) {
       evidenceBase = handoffEvidence;
     } else if (!entityToken) {
       // Nothing of the Handoff's own, and no token to bind a governed record
@@ -223,6 +304,24 @@ export async function resolveStrategyHandoffContext(
       // reason for the missing Entity rather than a Call Notes reason for a
       // check that could not even have been attempted.
       evidenceBase = handoffEvidence;
+    } else if (resolvedSources?.mode === "sources") {
+      // The Sources path is enabled but names no canonical Call Notes page,
+      // and the Handoff's own evidence is not substantive. The free-text
+      // reference convention is never consulted as a fallback here (the
+      // resolver already refused any free-text Call_Notes_ID reference not
+      // backed by the canonical page), so there is nothing else governed to
+      // read -- Clarification names the exact gap.
+      return {
+        success: false,
+        insufficientContext: {
+          isInsufficient: true,
+          category: "unresolved material fact",
+          reason: strategyClarificationReason(
+            handoffEvidence,
+            `the Handoff's Sources property declares its sources but carries no canonical Call Notes page, and the Handoff holds no substantive evidence of its own -- with the Sources path enabled the free-text Call_Notes_ID reference is never consulted as a fallback for it.`,
+          ),
+        },
+      };
     } else {
       await progress?.advance("The Handoff holds no substantive evidence of its own -- reading the approved Call Notes record it references");
       const callNotes = await readApprovedCallNotesEvidence(
@@ -242,7 +341,7 @@ export async function resolveStrategyHandoffContext(
         };
       }
       console.log(
-        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, read-only, attestation re-verified) and its page body as the evidence base.`,
+        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, via ${callNotes.via}, read-only, attestation re-verified) and its page body as the evidence base.`,
       );
       progress?.note(`Read approved Call Notes ${callNotes.callNotesId} (read-only, attestation re-verified)`);
       evidenceBase = [

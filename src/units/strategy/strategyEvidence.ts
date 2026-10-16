@@ -4,7 +4,8 @@ import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../../records/callNotes/callNotesRecord";
 import { stripCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
-import { parseRecordApprovalMarker } from "../../records/callNotes/callNotesMarker";
+import { parseRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
+import { resolveHandoffSources, type ResolvedCallNotesSource } from "../../handoffSources";
 
 /**
  * Strategy's evidence-retrieval order (ENIG Core Structure v3.0) and its
@@ -12,11 +13,39 @@ import { parseRecordApprovalMarker } from "../../records/callNotes/callNotesMark
  *
  * **The order, exactly once, in this order:**
  *
+ *   0. **The Handoff's direct-page `Sources` property, when it has one.**
+ *      The compatibility seam (src/handoffSources.ts): a Handoff whose
+ *      record carries no `Sources` property resolves `legacy` here and the
+ *      order below runs exactly as it always has. A SOURCES-ENABLED Handoff
+ *      resolves first -- every reference fetched as the exact page its URL
+ *      names and validated against the route contract, the page's real
+ *      parent database, the Handoff's own Entity/Matter bindings, the
+ *      record's Status, and its recorded `Approval Attestation` -- and when
+ *      that resolution names a canonical Call Notes page, THAT page is the
+ *      authoritative evidence source for this Handoff (step 1a). A
+ *      defective, unverifiable, or uncontracted Sources declaration stops
+ *      the pickup with the exact reason: it never falls back to narrative,
+ *      and the free-text `Call_Notes_ID` reference is never consulted as a
+ *      fallback for a canonical page.
+ *   1a. **The canonical Call Notes page named in `Sources`** (Sources-enabled
+ *      Handoffs only) -- the record's registry fields identify it and, after
+ *      the resolver's validation, its own page body is read through the same
+ *      governed `getPageContent` helper (gate 6) and is the substantive
+ *      evidence. The producer declares its evidence lives on the canonical
+ *      record and deliberately does not duplicate it into the Handoff, so
+ *      this step takes precedence over order 1's narrative for a
+ *      Sources-enabled Handoff; a body that is empty or only points at
+ *      evidence is refused through the same structured path, never replaced
+ *      by the Handoff's narrative.
  *   1. **The current approved Handoff evidence.** The Handoff's own
  *      `Verified Facts & Sources`, falling back to `Reason` when that field
  *      is absent. This is the sending Unit's recorded, source-boundary-
- *      attested account and it always wins when it is substantive.
- *   2. **Approved sanitized Call Notes**, but ONLY when order 1 yields no
+ *      attested account and it always wins when it is substantive -- for a
+ *      legacy Handoff, and for a Sources-enabled Handoff that declares no
+ *      canonical Call Notes page (its declared sources still validated in
+ *      full before this point).
+ *   2. **Approved sanitized Call Notes** (legacy Handoffs), but ONLY when
+ *      order 1 yields no
  *      substantive evidence. Read here, read-only and idempotently, by
  *      Strategy itself -- there is no Runtime Sales evidence-processing
  *      worker in this path, and nothing is consumed or transitioned. The
@@ -75,6 +104,13 @@ export type StrategyCallNotesEvidence =
       evidenceText: string;
       callNotesId: string;
       status: string;
+      /**
+       * Which governed reference carried the record: the Handoff's
+       * direct-page `Sources` property (the new canonical path), or the
+       * legacy free-text `Call_Notes_ID` reference. Telemetry only -- both
+       * paths validate identically before any body is read.
+       */
+      via: "sources" | "reference";
     }
   | { ok: false; reason: string };
 
@@ -159,6 +195,41 @@ export async function readApprovedCallNotesEvidence(
 ): Promise<StrategyCallNotesEvidence> {
   const refuse = (detail: string): StrategyCallNotesEvidence => ({ ok: false, reason: detail });
 
+  // ---- Step 0: the Handoff's direct-page Sources property, if it has one --
+  // The compatibility seam: a Handoff whose record carries no `Sources`
+  // property resolves `legacy` and every gate below runs exactly as before
+  // (the free-text Call_Notes_ID reference convention). A SOURCES-ENABLED
+  // Handoff takes the canonical path instead: src/handoffSources.ts has
+  // already fetched the exact referenced page by id and validated its real
+  // parent database, the route contract, its Entity/Matter binding to this
+  // Handoff's tokens, its lifecycle Status (Ready or Consumed -- this path
+  // never writes, so already-consumed still carries approved evidence), its
+  // registry fields, and its recorded approval attestation. In that mode
+  // the free-text reference is never consulted as a fallback -- an invalid
+  // or missing canonical reference is refused outright (and the resolver
+  // already refused a Sources-enabled Handoff whose free-text Call_Notes_ID
+  // disagrees with its canonical page).
+  const sources = await resolveHandoffSources(env, {
+    properties: handoffProperties,
+    tokens,
+    route: {
+      fromUnit: plainText(handoffProperties["From Unit"]),
+      toUnit: plainText(handoffProperties["To Unit"]),
+    },
+    access,
+  });
+  if (!sources.ok) return refuse(sources.reason);
+
+  if (sources.mode === "sources") {
+    if (!sources.callNotes) {
+      return refuse(
+        `the Handoff's Sources property carries no canonical Call Notes page, and with the Sources path enabled the free-text Call_Notes_ID reference is never consulted as a fallback -- there is no governed Call Notes record this Handoff establishes.`,
+      );
+    }
+    const callNotes = sources.callNotes;
+    return readCallNotesPageBodyEvidence(env, callNotes.pageId, access, callNotes.record, callNotes.status, "sources");
+  }
+
   // ---- Gate 1: the Handoff's own reference -------------------------------
   const reference = extractCallNotesReference(handoffProperties);
   if (!reference.ok) return refuse(reference.reason);
@@ -233,22 +304,61 @@ export async function readApprovedCallNotesEvidence(
   // before this line, which is what makes "wrong record / unapproved record
   // => no body read" mechanically true rather than a matter of ordering by
   // convention.
-  //
-  // One read of the top-level block children through the governed helper
-  // every other page read in this codebase uses -- non-recursive, so nested
-  // children are not followed, and never followed by a second mechanism. The
-  // Evidence Package named in the record's properties is NOT retrieved or
-  // followed: the body is the evidence this slice reads, and only the body.
+  return readCallNotesPageBodyEvidence(env, located.id, access, registry.record, status, "reference");
+}
+
+/**
+ * Gate 6 for an ALREADY-RESOLVED canonical source, used by
+ * `resolveStrategyHandoffContext` when the Handoff's `Sources` property
+ * resolved a Call Notes page: the resolver has already fetched the exact
+ * page, proven its real parent database, route-contract permission,
+ * Entity/Matter binding, Status (Ready or Consumed -- this reader never
+ * writes, so an already-consumed record still carries approved evidence),
+ * registry fields and recorded `Approval Attestation`. Only the body read
+ * (gate 6) and its substantive-body checks remain, exactly as the legacy
+ * path runs them -- one shared implementation, never a second reader.
+ */
+export async function readCallNotesSourceEvidence(
+  env: Env,
+  source: ResolvedCallNotesSource,
+  access: AccessContext,
+): Promise<StrategyCallNotesEvidence> {
+  return readCallNotesPageBodyEvidence(env, source.pageId, access, source.record, source.status, "sources");
+}
+
+/**
+ * Gate 6, shared by both governed reference paths: only after a record has
+ * been proven to be THE approved one (by the resolver's Sources validation,
+ * or by gates 1-5 of the legacy query path) is its page body retrieved --
+ * one read of the top-level block children through the governed
+ * `getPageContent` helper every other page read in this codebase uses --
+ * non-recursive, so nested children are not followed, and never followed by
+ * a second mechanism. The Evidence Package named in the record's properties
+ * is NOT retrieved or followed: the body is the evidence this slice reads,
+ * and only the body. A read failure is converted into the same structured
+ * `{ ok: false, reason }` refusal every other failure takes, and an empty
+ * or reference-only body is refused so a metadata-only record can never
+ * masquerade as substantive evidence.
+ */
+async function readCallNotesPageBodyEvidence(
+  env: Env,
+  pageId: string,
+  access: AccessContext,
+  record: CallNotesApprovalRecord,
+  status: string,
+  via: "sources" | "reference",
+): Promise<StrategyCallNotesEvidence> {
+  const refuse = (detail: string): StrategyCallNotesEvidence => ({ ok: false, reason: detail });
   let rawBody: string;
   try {
-    rawBody = await getPageContent(env, located.id, access);
+    rawBody = await getPageContent(env, pageId, access);
   } catch (err) {
     // Converted into the same structured refusal every other failure here
     // takes, so an unreadable body is a named gap for order 4 to clarify on
     // rather than a generic outer exception about Handoff access.
-    console.error(`Strategy: Call Notes page body read failed for ${located.id}`, err);
+    console.error(`Strategy: Call Notes page body read failed for ${pageId}`, err);
     return refuse(
-      `the approved Call Notes record ${located.id} could not be read beyond its registry fields (${
+      `the approved Call Notes record ${pageId} could not be read beyond its registry fields (${
         err instanceof Error ? err.message : String(err)
       }) -- those registry fields identify the record but are not the evidence, so there is no substantive evidence to diagnose from.`,
     );
@@ -257,7 +367,7 @@ export async function readApprovedCallNotesEvidence(
   const body = rawBody.trim();
   if (!body) {
     return refuse(
-      `Call Notes record ${located.id} carries no page body -- its eight registry fields identify the approved record but hold no narrative, so there is no substantive evidence to diagnose from.`,
+      `Call Notes record ${pageId} carries no page body -- its eight registry fields identify the approved record but hold no narrative, so there is no substantive evidence to diagnose from.`,
     );
   }
   if (!hasSubstantiveEvidence(body)) {
@@ -265,7 +375,7 @@ export async function readApprovedCallNotesEvidence(
     // structured Commercial Value Evidence block POINTS AT evidence; by the
     // same test order 1 uses, it is not the business situation.
     return refuse(
-      `Call Notes record ${located.id} carries a page body but nothing substantive in it -- what it holds only points at evidence (a reference or a recorded determination) rather than being the business situation, so there is no substantive evidence to diagnose from.`,
+      `Call Notes record ${pageId} carries a page body but nothing substantive in it -- what it holds only points at evidence (a reference or a recorded determination) rather than being the business situation, so there is no substantive evidence to diagnose from.`,
     );
   }
 
@@ -273,13 +383,14 @@ export async function readApprovedCallNotesEvidence(
     ok: true,
     evidenceText: [
       "=== Call Notes registry fields (identification: which approved record was read; the field set the attestation binds) ===",
-      callNotesEvidenceText(registry.record),
+      callNotesEvidenceText(record),
       "",
       "=== Approved Call Notes page content (the substantive evidence, read after attestation) ===",
       body,
     ].join("\n"),
-    callNotesId: registry.record.callNotesId,
+    callNotesId: record.callNotesId,
     status,
+    via,
   };
 }
 

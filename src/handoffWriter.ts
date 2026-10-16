@@ -44,6 +44,28 @@ export class HandoffWriteViolationError extends Error {
 }
 
 /**
+ * The direct-page `Sources` property (src/handoffSources.ts) exists only on
+ * the READ side today: the live Handoffs database has no `Sources` property,
+ * and the runtime never writes an unknown property to Notion, never migrates
+ * the schema, and never pretends the schema has already changed. Both write
+ * paths below refuse any payload that carries the property, so no
+ * createHandoff/updateHandoff call -- today or by accident later -- can
+ * attempt to persist it before an approved schema change actually exists.
+ * This is a refusal, not a strip: silently dropping the property would
+ * create a record that claims sources its producer supplied and its consumer
+ * can never see.
+ */
+const HANDOFF_SOURCES_PROPERTY = "Sources";
+
+function assertSourcesNotWritten(properties: NotionProperties, operation: string): void {
+  if ((properties as Record<string, unknown>)[HANDOFF_SOURCES_PROPERTY] !== undefined) {
+    throw new HandoffWriteViolationError(
+      `the Handoff ${operation} payload carries a "${HANDOFF_SOURCES_PROPERTY}" property, but the live Handoffs database has no such property -- the runtime never writes an unknown property to Notion. The direct-page Sources path is read-side only until an approved schema change adds the property.`,
+    );
+  }
+}
+
+/**
  * The identity this write is being validated against. entityToken/
  * matterToken are required on creation (see createHandoff). The display-
  * name/contact fields are supplied only when the calling Unit actually
@@ -380,6 +402,10 @@ export async function createHandoff(
   identity: HandoffIdentity,
   access: AccessContext,
 ): Promise<{ page: NotionPage; sourceBoundaryAttestation: HandoffSourceBoundaryAttestation }> {
+  // A `Sources` payload is refused before anything else: the live Handoffs
+  // database has no such property, and validate-then-create means no write
+  // attempt ever reaches Notion with it.
+  assertSourcesNotWritten(properties, "create");
   // Source-boundary checks 1 & 2 -- established first, fail closed: a
   // Handoff with no operational Entity/Matter reference never reaches
   // createPage. Not weakened; this IS the basis for both checks.
@@ -474,6 +500,7 @@ export async function updateHandoff(
   access: AccessContext,
   identity?: HandoffIdentity,
 ): Promise<NotionPage> {
+  assertSourcesNotWritten(properties, "update");
   validateHandoffProperties(properties, identity ?? { entityToken: "", matterToken: "" });
   return updatePage(env, handoffId, properties, access);
 }

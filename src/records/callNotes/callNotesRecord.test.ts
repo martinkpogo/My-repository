@@ -11,6 +11,7 @@ import {
   type CallNotesApprovalRecord,
 } from "./callNotesMarker";
 import { workSessionContext } from "../../access";
+import type { HandoffSourceRouteContract } from "../../handoffSources";
 import type { Env, WorkState } from "../../types";
 
 /**
@@ -131,6 +132,16 @@ interface MockOptions {
   resolves?: boolean;
   /** The record's live Status at the lifecycle's compare step. */
   liveStatus?: string;
+  /**
+   * Direct-page `Sources` property URLs (the Phase 1 compatibility seam).
+   * Absent = the legacy free-text `Call_Notes_ID` transport.
+   */
+  sourcesUrls?: string[];
+  /** The canonical page the Sources URLs point at; defaults to a valid Ready, correctly bound, attested record. */
+  sourcesRecord?: any;
+  /** The route recorded on the Handoff (`From Unit`/`To Unit`), which the Sources resolver reads for its contract lookup. */
+  fromUnit?: string;
+  toUnit?: string;
 }
 
 interface MockLog {
@@ -173,6 +184,20 @@ function mockConsumeFetch(t: any, opts: MockOptions = {}): MockLog {
             Matter_Token: rich("M-12"),
             Reason: rich(reason),
             Handoff: { title: [{ plain_text: title, text: { content: title } }] },
+            ...(opts.sourcesUrls
+              ? {
+                  Sources: {
+                    rich_text: opts.sourcesUrls.map((url) => ({
+                      type: "text",
+                      text: { content: url, link: { url } },
+                      plain_text: url,
+                      href: url,
+                    })),
+                  },
+                }
+              : {}),
+            ...(opts.fromUnit ? { "From Unit": { select: { name: opts.fromUnit } } } : {}),
+            ...(opts.toUnit ? { "To Unit": { select: { name: opts.toUnit } } } : {}),
           },
         }),
         { status: 200 },
@@ -240,6 +265,32 @@ function mockConsumeFetch(t: any, opts: MockOptions = {}): MockLog {
       );
     }
 
+    // The canonical page a Sources-enabled Handoff names: served by its
+    // exact id (whatever slug the URL carried is irrelevant -- only the id
+    // reached here), and it is the ONLY Call Notes page that exists in a
+    // sources-mode mock: no query route is ever needed, because issuing one
+    // would already prove the direct reference was not trusted.
+    if (urlStr.endsWith(`/pages/${SOURCES_PAGE_ID}`)) {
+      if (method === "PATCH") {
+        log.writes.push(String(init.body));
+        const body = JSON.parse(String(init.body));
+        if (body.properties?.Status?.select?.name) log.liveStatus = body.properties.Status.select.name;
+        return new Response(
+          JSON.stringify({ id: SOURCES_PAGE_ID, url: `https://notion.so/${SOURCES_PAGE_ID}`, parent: { type: "data_source_id", data_source_id: "call-notes-ds" }, properties: {} }),
+          { status: 200 },
+        );
+      }
+      const page = opts.sourcesRecord ?? (await callNotesPage(REGISTRY, {}, SOURCES_PAGE_ID));
+      return new Response(
+        JSON.stringify({
+          ...page,
+          id: SOURCES_PAGE_ID,
+          url: `https://notion.so/${SOURCES_PAGE_ID}`,
+        }),
+        { status: 200 },
+      );
+    }
+
     throw new Error(`Unexpected fetch in call-notes consumption test: ${method} ${urlStr}`);
   }) as typeof fetch;
 
@@ -250,24 +301,31 @@ function mockConsumeFetch(t: any, opts: MockOptions = {}): MockLog {
   return log;
 }
 
-function consume() {
+function consume(contracts?: Readonly<Record<string, HandoffSourceRouteContract>>) {
   return retrieveAndConsumeCallNotes(
     fakeEnv(),
     "handoff-1",
     { entityToken: "E-47", matterToken: "M-12" },
     pickupContext(),
+    ...(contracts ? [contracts] : []),
   );
 }
 
-async function expectRefused(t: any, opts: MockOptions, matcher: RegExp) {
+async function expectRefused(
+  t: any,
+  opts: MockOptions,
+  matcher: RegExp,
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
+) {
   const log = mockConsumeFetch(t, opts);
   const startingStatus = opts.liveStatus ?? "Ready";
-  const result = await consume();
+  const result = await consume(contracts);
   assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
-  if (result.ok) return;
+  if (result.ok) return log;
   assert.match(result.reason, matcher, "the refusal must say which gate stopped it");
   assert.equal(log.liveStatus, startingStatus, "a refusal must never advance the record");
   assert.equal(log.writes.length, 0, "a refusal must issue no write at all");
+  return log;
 }
 
 // ---------------------------------------------------------------------------
@@ -486,4 +544,160 @@ test("consumption: replaying against an already-Consumed record is refused with 
 
 test("consumption: a Superseded record is refused with no write", async (t) => {
   await expectRefused(t, { liveStatus: "Superseded", records: [await callNotesPage(REGISTRY, { Status: { select: { name: "Ready" } } })] }, /Status "Superseded", not "Ready"/);
+});
+
+// ---------------------------------------------------------------------------
+// Gate 0 -- the Handoff's direct-page Sources property (Phase 1 seam).
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical Call Notes page a Sources-enabled Handoff names. Its id is a
+ * real 32-hex Notion page id, because the resolver accepts nothing else.
+ */
+const SOURCES_PAGE_ID = "aaaa1111-bbbb-2222-cccc-3333dddd4444";
+const SOURCES_PAGE_URL = `https://www.notion.so/Acme-Call-Notes-aaaa1111-bbbb-2222-cccc-3333dddd4444`;
+
+/**
+ * A synthetic contract for the route a call-notes Handoff travels. NO
+ * production contract exists for it (the `From Unit` the isolated Sales
+ * project records is not verifiable from this repo), so production refuses
+ * such a Sources-enabled Handoff fail-closed -- see the uncontracted-route
+ * test below. This table exists only to exercise the success path through
+ * the resolver's injected-contract seam; production callers never pass one.
+ */
+const SOURCES_CONTRACT: Readonly<Record<string, HandoffSourceRouteContract>> = {
+  "Sales->Sales": { required: ["call_notes"], optional: [], prohibited: ["handoffs"] },
+};
+
+test("sources: a Sources-enabled Handoff consumes the exact canonical page it names -- no database search, Ready -> Consumed, identical registry evidence", async (t) => {
+  const log = mockConsumeFetch(t, { sourcesUrls: [SOURCES_PAGE_URL], fromUnit: "Sales", toUnit: "Sales" });
+  const result = await consume(SOURCES_CONTRACT);
+
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok) return;
+
+  assert.equal(result.pageId, SOURCES_PAGE_ID, "the consumed record is the one the link named, resolved by exact page id");
+  assert.equal(result.attestation.result, "Approved");
+  assert.equal(log.liveStatus, "Consumed", "the canonical record is advanced Ready -> Consumed");
+  assert.equal(log.writes.length, 1, "exactly one lifecycle write");
+  assert.deepEqual(JSON.parse(log.writes[0]).properties, { Status: { select: { name: "Consumed" } } }, "the write may touch Status and nothing else");
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${SOURCES_PAGE_ID}`),
+    "the canonical page was fetched by its exact id",
+  );
+  assert.ok(
+    !log.requests.some((r) => r.includes("call-notes-ds/query")),
+    "the exact-title search is never issued -- the direct page id IS the reference",
+  );
+  assert.equal(
+    result.evidenceText,
+    [
+      "Call_Notes_ID: CN-007",
+      "Entity: E-47",
+      "Matter: M-12",
+      "Call Date: 2026-09-28",
+      "Call Type: Discovery",
+      "Source ID: SRC-1",
+      "Source Type: Sales Call",
+      "Version: 1",
+    ].join("\n"),
+    "the same registry fields the legacy transport passed on -- only HOW the record was located changed",
+  );
+  assert.ok(
+    !result.evidenceText.includes("De-identified call notes for a positioning engagement."),
+    "the Handoff's narrative is never part of the evidence",
+  );
+});
+
+test("sources: a Superseded canonical page is refused with no write", async (t) => {
+  await expectRefused(
+    t,
+    {
+      sourcesUrls: [SOURCES_PAGE_URL],
+      fromUnit: "Sales",
+      toUnit: "Sales",
+      sourcesRecord: await callNotesPage(REGISTRY, { Status: { select: { name: "Superseded" } } }, SOURCES_PAGE_ID),
+    },
+    /only Ready or Consumed/,
+    SOURCES_CONTRACT,
+  );
+});
+
+test("sources: an already-Consumed canonical page is refused -- Sales consumes only Ready records, whatever the resolver accepts", async (t) => {
+  await expectRefused(
+    t,
+    {
+      sourcesUrls: [SOURCES_PAGE_URL],
+      fromUnit: "Sales",
+      toUnit: "Sales",
+      sourcesRecord: await callNotesPage(REGISTRY, { Status: { select: { name: "Consumed" } } }, SOURCES_PAGE_ID),
+    },
+    /only a Ready record may be consumed/,
+    SOURCES_CONTRACT,
+  );
+});
+
+test("sources: a tampered attestation on the canonical page refuses consumption with no write", async (t) => {
+  const foreignMarker = await buildRecordApprovalMarker({ ...REGISTRY, callDate: "2026-01-01" }, "Approved");
+  await expectRefused(
+    t,
+    {
+      sourcesUrls: [SOURCES_PAGE_URL],
+      fromUnit: "Sales",
+      toUnit: "Sales",
+      sourcesRecord: await callNotesPage(REGISTRY, { "Approval Attestation": rich(foreignMarker) }, SOURCES_PAGE_ID),
+    },
+    /fields_hash does not match/,
+    SOURCES_CONTRACT,
+  );
+});
+
+test("sources: an Entity binding mismatch on the canonical page refuses consumption with no write", async (t) => {
+  await expectRefused(
+    t,
+    {
+      sourcesUrls: [SOURCES_PAGE_URL],
+      fromUnit: "Sales",
+      toUnit: "Sales",
+      sourcesRecord: await callNotesPage(REGISTRY, { Entity: { relation: [{ id: "some-other-entity" }] } }, SOURCES_PAGE_ID),
+    },
+    /not bound to this Handoff's Entity/,
+    SOURCES_CONTRACT,
+  );
+});
+
+test("sources: a free-text Call_Notes_ID disagreeing with the canonical page is refused -- conflicting references, no write, no search", async (t) => {
+  const log = await expectRefused(
+    t,
+    {
+      reason: "Call notes for commercial qualification. Call_Notes_ID: CN-999",
+      sourcesUrls: [SOURCES_PAGE_URL],
+      fromUnit: "Sales",
+      toUnit: "Sales",
+    },
+    /conflicting references/,
+    SOURCES_CONTRACT,
+  );
+  assert.ok(
+    !log.requests.some((r) => r.includes("call-notes-ds/query")),
+    "the disagreement is caught at the page level -- neither id triggers a search",
+  );
+});
+
+test("sources: a Sources-enabled call-notes Handoff on a route with no declared contract is refused -- the free-text reference is never a fallback", async (t) => {
+  const log = mockConsumeFetch(t, { sourcesUrls: [SOURCES_PAGE_URL], fromUnit: "Sales", toUnit: "Sales" });
+  // No injected contract: production's table has no entry for this route
+  // (declaring one is Martin's decision -- the From Unit the isolated
+  // project records cannot be verified from this repo).
+  const result = await consume();
+
+  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
+  if (result.ok) return;
+  assert.match(result.reason, /has no Handoff source route contract/);
+  assert.equal(log.writes.length, 0, "a refusal issues no write");
+  assert.equal(log.liveStatus, "Ready", "a refusal never advances the record");
+  assert.ok(
+    !log.requests.some((r) => r.includes("call-notes-ds/query")),
+    "the DEFAULT_REASON's Call_Notes_ID: CN-007 is NEVER consulted as a fallback for a Handoff whose Sources path could not be validated",
+  );
 });
