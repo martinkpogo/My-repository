@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readApprovedCallNotesEvidence } from "./strategyEvidence";
+import { readApprovedCallNotesEvidence, readGoogleDocSourceEvidence } from "./strategyEvidence";
 import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
 import { workSessionContext } from "../../access";
 import type { Env, WorkState } from "../../types";
@@ -387,4 +387,81 @@ test("sources: a route with no declared contract is refused -- which sources may
     { sourcesPage: await recordFixture(SOURCES_PAGE_ID) },
   );
   assert.deepEqual(log.blockReads, [], "nothing is read on an uncontracted route");
+});
+
+// ---------------------------------------------------------------------------
+// The Google Doc source evidence step: content read only for an ALREADY
+// VALIDATED source, substantive-by-the-same-test-as-order-1.
+// ---------------------------------------------------------------------------
+
+const GDOC_FILE_ID = "abc123DEF456ghi789jkl012mno345pq";
+const GDOC_ACCOUNT = "martin@example.com";
+
+const VALIDATED_GDOC_SOURCE = {
+  fileId: GDOC_FILE_ID,
+  accountIdentifier: GDOC_ACCOUNT,
+  title: "Proposal review",
+  proposal: { workId: "work-prop-1", proposalId: "PROP-6", version: 2 },
+};
+
+function fakeEnvWithGoogleToken(): Env {
+  const kv: Record<string, string> = {
+    [`google_oauth_tokens:${GDOC_ACCOUNT}`]: JSON.stringify({
+      access_token: "access-token-1",
+      refresh_token: "refresh-token-1",
+      expires_at: Date.now() + 3_600_000,
+      account_identifier: GDOC_ACCOUNT,
+      updated_at: "2026-10-01T00:00:00.000Z",
+    }),
+  };
+  const env = fakeEnv() as any;
+  env.STATE_KV = {
+    get: async (key: string) => kv[key] ?? null,
+    put: async () => undefined,
+    delete: async () => undefined,
+    list: async () => ({ keys: [], list_complete: true, cursor: undefined }),
+  };
+  return env as Env;
+}
+
+function mockDocsFetch(t: any, text: string) {
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+    if (String(url).startsWith("https://docs.googleapis.com/v1/documents/")) {
+      return new Response(
+        JSON.stringify({ body: { content: [{ paragraph: { elements: [{ textRun: { content: text } }] } }] } }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch in strategyEvidence google test: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return requests;
+}
+
+test("googleDoc evidence: a validated Doc's substantive content becomes the evidence base -- read-only through the Docs API", async (t) => {
+  const requests = mockDocsFetch(
+    t,
+    "Direct client statement: the quarterly reporting pack takes four staff days to assemble because three systems disagree on project codes.",
+  );
+  const evidence = await readGoogleDocSourceEvidence(fakeEnvWithGoogleToken(), VALIDATED_GDOC_SOURCE);
+  assert.equal(evidence.ok, true, evidence.ok ? "" : evidence.reason);
+  if (!evidence.ok) return;
+  assert.match(evidence.evidenceText, /quarterly reporting pack/);
+  assert.equal(evidence.fileId, GDOC_FILE_ID);
+  assert.equal(evidence.proposalId, "PROP-6");
+  assert.equal(evidence.version, 2);
+  assert.equal(requests.filter((r) => r.includes("/documents/")).length, 1, "exactly one Docs read, nothing else");
+});
+
+test("googleDoc evidence: a Doc whose text only points at evidence is refused -- the same substantive test order 1 applies", async (t) => {
+  mockDocsFetch(t, "Call_Notes_ID: CN-007");
+  const evidence = await readGoogleDocSourceEvidence(fakeEnvWithGoogleToken(), VALIDATED_GDOC_SOURCE);
+  assert.equal(evidence.ok, false, "a reference-only document is not the business situation");
+  if (evidence.ok) return;
+  assert.match(evidence.reason, /nothing substantive in it/);
 });

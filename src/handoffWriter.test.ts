@@ -452,43 +452,122 @@ test("parseSourceBoundaryMarker: missing, Failed, incomplete, malformed, and unb
   assert.strictEqual(parseSourceBoundaryMarker(passedMarker, { ...expected, matterToken: "MAT-99" }).ok, false);
 });
 
-// --- The direct-page Sources property (Phase 1 compatibility seam) ---------
+// --- The Sources property (Phase 2: writable, fail-closed validation) ------
 //
-// The live Handoffs database has NO "Sources" property. The runtime's
-// read-side resolver (src/handoffSources.ts) may therefore consume the
-// property when a record carries one, but the governed writer must never
-// SEND it: an unknown property in a Notion payload fails the write, and a
-// half-written Handoff is worse than a refused one. This is a refusal, not
-// a strip -- dropping it silently would persist a record whose declared
-// sources its consumer can never see.
+// The live Handoffs database carries Sources as rich text (the schema change
+// the Architect approved with Phase 2). The governed writer is the only
+// write path: a payload whose Sources references parse into exact direct
+// references, on a route whose contract permits each reference's type, is
+// written; everything else is refused BEFORE any Notion call. The full
+// binding validation (exact page fetch, real parent database, tokens,
+// lifecycle, approval attestation, Google registration binding) stays
+// read-side in resolveHandoffSources, fail-closed at pickup.
 
-const SOURCES_URL = `https://www.notion.so/Acme-Case-Notes-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`;
+const SOURCES_URL = `https://www.notion.so/Call-Notes-CN-007-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`;
 const SOURCES_PROPERTY = {
   rich_text: [{ type: "text", text: { content: SOURCES_URL, link: { url: SOURCES_URL } } }],
 };
 
-function hasSourcesViolation(err: unknown): boolean {
-  return err instanceof HandoffWriteViolationError && /never writes an unknown property to Notion/.test((err as Error).message);
-}
-
-test("createHandoff: a payload carrying a Sources property is refused outright -- zero Notion calls, the unknown property never reaches the API", async (t) => {
+test("createHandoff (Sales -> Strategy): a valid Sources payload is written -- the sent payload carries the Sources property with its link", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  await assert.rejects(
-    () => createHandoff(env, validProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env)),
-    hasSourcesViolation,
-  );
-  assert.strictEqual(calls.length, 0, "refused before ANY Notion call -- not create-then-repair");
+  const { page } = await createHandoff(env, salesToStrategyProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env));
+  assert.strictEqual(page.id, "page-1");
+  assert.strictEqual(calls.length, 1);
+  const written = calls[0].body.properties.Sources?.rich_text?.[0];
+  assert.strictEqual(written?.text?.link?.url, SOURCES_URL, "the Sources reference travels verbatim with its link");
 });
 
-test("updateHandoff: a lifecycle update carrying a Sources property is refused outright -- zero Notion calls", async (t) => {
+test("updateHandoff: a lifecycle update may carry Sources -- but only with its contracted route recorded on the payload", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
+  await updateHandoff(env, "page-1", salesToStrategyProperties({ Sources: SOURCES_PROPERTY }), lifecycleAccess("page-1"));
+  assert.ok(calls.length >= 1);
+  const update = calls.find((c) => c.method === "PATCH");
+  assert.strictEqual(update?.body?.properties?.Sources?.rich_text?.[0]?.text?.link?.url, SOURCES_URL);
+});
+
+test("createHandoff: Sources on an uncontracted route is refused outright -- zero Notion calls", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  // validProperties() is Strategy -> Finance: a real route, but one with no
+  // Handoff source route contract -- which routes carry sources is an
+  // explicit contract decision, never guessed.
   await assert.rejects(
-    () => updateHandoff(env, "page-1", validProperties({ Sources: SOURCES_PROPERTY }), lifecycleAccess("page-1")),
-    hasSourcesViolation,
+    () => createHandoff(env, validProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env)),
+    (err: unknown) => err instanceof HandoffWriteViolationError && /has no Handoff source route contract/.test((err as Error).message),
   );
   assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
+});
+
+test("createHandoff: a Google reference on a route whose contract does not permit its type is refused outright -- zero Notion calls", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const googleDocUrl = "https://docs.google.com/document/d/abc123DEF456ghi789jkl012mno345pq/edit";
+  await assert.rejects(
+    () =>
+      createHandoff(
+        env,
+        salesToStrategyProperties({
+          Sources: { rich_text: [{ type: "text", text: { content: googleDocUrl, link: { url: googleDocUrl } } }] },
+        }),
+        baseIdentity,
+        createAccess(env),
+      ),
+    (err: unknown) => err instanceof HandoffWriteViolationError && /does not permit/.test((err as Error).message),
+  );
+  assert.strictEqual(calls.length, 0, "the pickup would refuse it anyway -- refused here instead of creating a doomed record");
+});
+
+test("createHandoff: malformed Sources references are refused outright -- zero Notion calls, each with its exact reason", async (t) => {
+  const cases: Array<{ name: string; urls: string[]; expected: RegExp }> = [
+    { name: "not a URL at all", urls: ["just some words"], expected: /neither an exact Notion page link .*nor a recognized direct Google/ },
+    { name: "a database link, not a page link", urls: ["https://www.notion.so/Acme-Case-Notes-12345678-abcd-ef01-2345-6789abcdef01?v=deadbeef"], expected: /database-view parameter/ },
+    { name: "a drive.google.com share link", urls: ["https://drive.google.com/file/d/abc123DEF456ghi789jkl012mno345pq/view"], expected: /neither an exact Notion page link .*nor a recognized direct Google/ },
+    { name: "the same page referenced twice", urls: [SOURCES_URL, SOURCES_URL.replace("Call-Notes-", "Other-")], expected: /more than once/ },
+    { name: "the same Google file referenced through two URL shapes", urls: ["https://docs.google.com/document/d/abc123DEF456ghi789jkl012mno345pq/edit", "https://docs.google.com/document/d/abc123DEF456ghi789jkl012mno345pq/preview"], expected: /references Google file .* more than once/ },
+  ];
+  for (const c of cases) {
+    await t.test(c.name, async (t) => {
+      const calls = mockNotionFetch(t);
+      const env = fakeEnv();
+      const property = { rich_text: c.urls.map((url) => ({ type: "text", text: { content: url, link: { url } } })) };
+      await assert.rejects(
+        () => createHandoff(env, salesToStrategyProperties({ Sources: property }), baseIdentity, createAccess(env)),
+        (err: unknown) => err instanceof HandoffWriteViolationError && c.expected.test((err as Error).message),
+        c.name,
+      );
+      assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
+    });
+  }
+  await t.test("present but empty", async (t) => {
+    const calls = mockNotionFetch(t);
+    const env = fakeEnv();
+    await assert.rejects(
+      () => createHandoff(env, salesToStrategyProperties({ Sources: { rich_text: [] } }), baseIdentity, createAccess(env)),
+      (err: unknown) => err instanceof HandoffWriteViolationError && /carries no link/.test((err as Error).message),
+    );
+    assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
+  });
+});
+
+test("createHandoff: real identity inside a Sources URL is refused -- the URL text is protected like every other Handoff field", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const urlWithIdentity = `https://www.notion.so/Call-Notes-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee?email=comfort@meridianfoods.com`;
+  await assert.rejects(
+    () =>
+      createHandoff(
+        env,
+        salesToStrategyProperties({
+          Sources: { rich_text: [{ type: "text", text: { content: urlWithIdentity, link: { url: urlWithIdentity } } }] },
+        }),
+        { ...baseIdentity, email: "comfort@meridianfoods.com" },
+        createAccess(env),
+      ),
+    (err: unknown) => err instanceof HandoffWriteViolationError && /email/.test((err as Error).message),
+  );
+  assert.strictEqual(calls.length, 0, "a failed identity check must never produce a Handoff write");
 });
 
 test("createHandoff: the compatibility seam is exact -- a payload with NO Sources property still writes, and the sent payload carries no Sources key", async (t) => {

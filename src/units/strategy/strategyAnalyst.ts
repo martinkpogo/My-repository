@@ -18,7 +18,7 @@ import { recordWorkAction } from "../dispatch";
 import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
-import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, readCallNotesSourceEvidence, strategyClarificationReason } from "./strategyEvidence";
+import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, readCallNotesSourceEvidence, readGoogleDocSourceEvidence, strategyClarificationReason } from "./strategyEvidence";
 import { extractHandoffSources, resolveHandoffSources, type HandoffSourcesResolution } from "../../handoffSources";
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
@@ -256,14 +256,19 @@ export async function resolveStrategyHandoffContext(
       }
     }
 
-    // ---- Evidence order 0 -> 1a -> 1 -> 2 -> 3 -> 4 ------------------------
+    // ---- Evidence order 0 -> 1a -> 1a' -> 1 -> 2 -> 3 -> 4 ----------------
     // 1a. A canonical Call Notes page named in the Handoff's Sources
     //     property (Sources-enabled Handoffs only) is the authoritative
     //     evidence -- read read-only and idempotently through the shared
     //     gate 6, after the resolver proved everything gates 1-5 prove.
+    // 1a'. Otherwise a canonical Google Doc source (Sources-enabled
+    //     Handoffs only, on a route whose contract permits google_doc) --
+    //     its registration binding to this Handoff's Matter and its actual
+    //     file type already verified by the resolver -- read read-only
+    //     through the Docs API as the evidence base.
     // 1. The Handoff's own approved evidence, whenever it is substantive
     //    (legacy Handoffs unchanged; also a Sources-enabled Handoff that
-    //    declares no canonical Call Notes page).
+    //    declares no canonical Call Notes page and no Google Doc source).
     // 2. Otherwise the approved Call Notes record via the legacy free-text
     //    reference, read read-only and
     //    idempotently by Strategy itself -- strategyEvidence.ts owns the
@@ -296,6 +301,31 @@ export async function resolveStrategyHandoffContext(
         `=== Evidence source: approved Call Notes record ${callNotes.callNotesId} (canonical page named in the Handoff's Sources property; read-only, attestation re-verified against this record's registry fields) ===`,
         callNotes.evidenceText,
       ].join("\n");
+    } else if (resolvedSources?.mode === "sources" && resolvedSources.googleDoc) {
+      // A declared Google Doc source outranks the Handoff's own narrative
+      // exactly like a declared canonical Call Notes page does: the
+      // producer says its evidence lives on the canonical artifact and
+      // deliberately does not duplicate it into the Handoff.
+      await progress?.advance("The Handoff declares a canonical Google Doc source -- reading that document's content");
+      const doc = await readGoogleDocSourceEvidence(env, resolvedSources.googleDoc);
+      if (!doc.ok) {
+        return {
+          success: false,
+          insufficientContext: {
+            isInsufficient: true,
+            category: "unresolved material fact",
+            reason: strategyClarificationReason(handoffEvidence, doc.reason),
+          },
+        };
+      }
+      console.log(
+        `Strategy evidence: Sources-enabled handoff ${handoffId} -- read Google Doc source ${doc.fileId} (Proposal ${doc.proposalId} v${doc.version}, read-only, registration binding verified to this Handoff's Matter) as the evidence base.`,
+      );
+      progress?.note(`Read Google Doc source ${doc.fileId} (direct-page Sources, read-only, binding verified)`);
+      evidenceBase = [
+        `=== Evidence source: canonical Google Doc ${doc.fileId} (Proposal ${doc.proposalId} v${doc.version}; named in the Handoff's Sources property; read-only, registration binding verified to this Handoff's Matter) ===`,
+        doc.evidenceText,
+      ].join("\n");
     } else if (hasSubstantiveEvidence(handoffEvidence)) {
       evidenceBase = handoffEvidence;
     } else if (!entityToken) {
@@ -305,12 +335,13 @@ export async function resolveStrategyHandoffContext(
       // check that could not even have been attempted.
       evidenceBase = handoffEvidence;
     } else if (resolvedSources?.mode === "sources") {
-      // The Sources path is enabled but names no canonical Call Notes page,
-      // and the Handoff's own evidence is not substantive. The free-text
-      // reference convention is never consulted as a fallback here (the
-      // resolver already refused any free-text Call_Notes_ID reference not
-      // backed by the canonical page), so there is nothing else governed to
-      // read -- Clarification names the exact gap.
+      // The Sources path is enabled but names no canonical Call Notes page
+      // and no Google Doc source, and the Handoff's own evidence is not
+      // substantive. The free-text reference convention is never consulted
+      // as a fallback here (the resolver already refused any free-text
+      // Call_Notes_ID reference not backed by the canonical page), so
+      // there is nothing else governed to read -- Clarification names the
+      // exact gap.
       return {
         success: false,
         insufficientContext: {
@@ -318,7 +349,7 @@ export async function resolveStrategyHandoffContext(
           category: "unresolved material fact",
           reason: strategyClarificationReason(
             handoffEvidence,
-            `the Handoff's Sources property declares its sources but carries no canonical Call Notes page, and the Handoff holds no substantive evidence of its own -- with the Sources path enabled the free-text Call_Notes_ID reference is never consulted as a fallback for it.`,
+            `the Handoff's Sources property declares its sources but carries neither a canonical Call Notes page nor a validated Google Doc source, and the Handoff holds no substantive evidence of its own -- with the Sources path enabled the free-text Call_Notes_ID reference is never consulted as a fallback for it.`,
           ),
         },
       };

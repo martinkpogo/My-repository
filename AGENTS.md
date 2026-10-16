@@ -30,7 +30,7 @@ Both Claude Code and Jules may reason deeply about implementation inside an appr
 
 ## The Handoff identity-write boundary
 
-Every Handoff field that becomes another Unit's AI input context (Handoff title, Reason, Required Next Action, Expected Output, Acceptance Criteria, Assumptions, Open Questions, Verified Facts & Sources, and Work Completed) may identify the Entity/Matter only by its opaque `Entity_Token`/`Matter_Token`—never a real Entity/company name, contact name, email address, phone number, or other identifying detail. Real identity may be read while preparing a Handoff, but must be resolved to tokens before anything is written.
+Every Handoff field that becomes another Unit's AI input context (Handoff title, Reason, Sources, Required Next Action, Expected Output, Acceptance Criteria, Assumptions, Open Questions, Verified Facts & Sources, and Work Completed) may identify the Entity/Matter only by its opaque `Entity_Token`/`Matter_Token`—never a real Entity/company name, contact name, email address, phone number, or other identifying detail. Real identity may be read while preparing a Handoff, but must be resolved to tokens before anything is written.
 
 Every production Handoff write goes through `src/handoffWriter.ts`'s `createHandoff`/`updateHandoff`, which require `Entity_Token`/`Matter_Token` and reject protected identity fields fail-closed. Do not write to the Handoffs database (`HANDOFFS_DATA_SOURCE_ID`) any other way. A Handoff created, updated, or resubmitted by hand through a Notion tool call bypasses that code path and must follow `handoff-writing-rules.yaml` in the repository root before writing anything, applying the same discipline every time.
 

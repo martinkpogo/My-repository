@@ -4,13 +4,16 @@ import type { AccessContext, GovernedSource } from "./access";
 import { resolveEntityMatterFromTokens } from "./identityResolution";
 import { extractCallNotesReference, mentionsCallNotesReference, readApprovalRecord } from "./records/callNotes/callNotesReference";
 import { parseRecordApprovalMarker, type CallNotesApprovalRecord, type RecordApprovalAttestation } from "./records/callNotes/callNotesMarker";
+import { extractDocText, getValidGoogleAccessToken, getWatchedGoogleDoc, getWatchedGoogleSheet } from "./googleOAuth";
+import { getSessionStub } from "./sessionRouting";
 
 /**
- * Runtime resolution of a Handoff's future `Sources` rich-text property:
- * direct links to exact canonical Notion pages, fetched BY PAGE ID and
- * validated against the route contract, the page's real parent database,
- * the Handoff's own Entity/Matter bindings, lifecycle state, and -- where
- * the source type has one -- its recorded approval attestation.
+ * Runtime resolution of a Handoff's `Sources` rich-text property: direct
+ * links to exact canonical artifacts -- Notion pages fetched BY PAGE ID,
+ * and (since Phase 2) exact Google Docs -- each validated against the route
+ * contract, the artifact's own binding to this Handoff's Entity/Matter, its
+ * lifecycle state, and -- where the source type has one -- its recorded
+ * approval attestation.
  *
  * **This is direct-page resolution, deliberately not lookup.** Every
  * reference is fetched as the exact page its URL names. Nothing here
@@ -22,17 +25,17 @@ import { parseRecordApprovalMarker, type CallNotesApprovalRecord, type RecordApp
  * closed when the query found zero or several records) with an unambiguous
  * page-identity reference, while keeping every gate the query path had.
  *
- * **Compatibility seam (the live Handoffs database has no `Sources`
- * property yet).** The path is activated per-Handoff by the PRESENCE of the
- * property on the record: `extractHandoffSources` returns `legacy` when the
- * property is absent, and every existing consumer keeps behaving exactly as
- * before (the free-text `Call_Notes_ID` reference convention in
+ * **Compatibility seam (activation by property presence).** The path is
+ * activated per-Handoff by the PRESENCE of the property on the record:
+ * `extractHandoffSources` returns `legacy` when the property is absent,
+ * and every existing consumer keeps behaving exactly as before (the
+ * free-text `Call_Notes_ID` reference convention in
  * `src/records/callNotes/callNotesRecord.ts`). When the property IS
  * present, this resolver governs and the legacy free-text reference is
  * never a fallback -- a Sources-enabled Handoff whose references do not
- * validate is refused outright. Nothing here writes to Notion, migrates
- * the schema, or requires the property to exist: the resolver reads
- * whatever the record actually carries.
+ * validate is refused outright. Nothing here writes to Notion: the single
+ * governed writer (src/handoffWriter.ts, Phase 2) owns the write side,
+ * and the resolver reads whatever the record actually carries.
  *
  * **What is validated, and where.** Source types come from the page's REAL
  * parent database (read back from Notion by `getPage`, never from the URL's
@@ -49,6 +52,38 @@ import { parseRecordApprovalMarker, type CallNotesApprovalRecord, type RecordApp
  * same `parseRecordApprovalMarker` the legacy query path validates -- no
  * new approval mechanism, and Call Notes approval hashing / evidence
  * versioning is untouched).
+ *
+ * **Google sources bind through registration, never through access (Phase
+ * 2).** A `Sources` entry may also name an exact Google Doc
+ * (`docs.google.com/document/d/<file-id>/...`) or Google Sheet
+ * (`docs.google.com/spreadsheets/d/<file-id>/...`). The URL identifies the
+ * FILE; it proves nothing about the relationship. Validation order for a
+ * Google reference: the route contract must permit the type; the exact file
+ * must be found in this Worker's own watch registry
+ * (`google_doc_watch:`/`google_sheet_watch:` -- the trusted server-side
+ * registration records written only for files this system itself created);
+ * for a Doc, its recorded proposal/Work binding must resolve, through that
+ * Work's persisted state, to exactly this Handoff's Matter (and Entity, when
+ * the Work recorded one) -- account access, a title, or a mention of a
+ * token in file content is NEVER treated as proof of the relationship; the
+ * file's actual type is then verified through the authorized Drive API
+ * (never assumed from the URL); and only after all of that passes may the
+ * Doc's content be read, read-only, through the Docs API
+ * (`readGoogleDocSourceContent`). A Google Sheet is parsed and refused: the
+ * watched-sheet registration carries account identity only -- no
+ * proposal/Work/Entity/Matter binding and no declared bounded worksheet
+ * range -- so no trusted relationship and no safe read scope can be
+ * established for it today, and the refusal names exactly that missing
+ * contract rather than reading every tab of an unbounded spreadsheet.
+ *
+ * **Managed import cycle (the same discipline as src/access.ts).** This
+ * module imports `googleOAuth.ts` (watch registry + Google API access),
+ * which transitively imports the Unit registry, which transitively imports
+ * this module through the Units' evidence paths. The cycle is therefore
+ * real and deliberate: every reference to a googleOAuth binding here
+ * happens strictly inside a function body at call time, never at module
+ * initialization, so module-evaluation order cannot dereference an
+ * unfinished binding. The same rule the registry build already follows.
  *
  * **Identity boundary.** A source page is a canonical operational record
  * referenced by opaque page identity; resolving one reads no real-world
@@ -71,12 +106,28 @@ import { parseRecordApprovalMarker, type CallNotesApprovalRecord, type RecordApp
 export const HANDOFF_SOURCES_PROPERTY = "Sources";
 
 /**
- * The source types a `Sources` reference can name -- the governed canonical
- * databases, reusing access.ts's GovernedSource vocabulary so the type of a
- * reference is decided by the same mapping Access uses. A reference's type
- * is determined by the page's ACTUAL parent data source, never by the URL.
+ * The source types a `Sources` reference can name. Two families, kept
+ * explicit: the governed canonical Notion databases (reusing access.ts's
+ * GovernedSource vocabulary, so a Notion reference's type is decided by the
+ * same mapping Access uses, from the page's REAL parent data source -- never
+ * from the URL), and the two governed Google artifact types (whose type is
+ * claimed by the URL's shape and then RE-VERIFIED against the file's actual
+ * mimeType through the authorized Drive API before any content is read).
  */
-export type HandoffSourceType = GovernedSource;
+export type GoogleHandoffSourceType = "google_doc" | "google_sheet";
+
+export type HandoffSourceType = GovernedSource | GoogleHandoffSourceType;
+
+/**
+ * One extracted reference, before any fetch. A Notion reference carries
+ * only its page id (its TYPE is never taken from the URL -- it is decided
+ * from the page's real parent data source at resolution). A Google
+ * reference carries the type its URL claims plus the exact file id; that
+ * claim is verified against the Drive API at resolution.
+ */
+export type HandoffSourceRef =
+  | { kind: "notion"; pageId: string }
+  | { kind: "google"; type: GoogleHandoffSourceType; fileId: string };
 
 /**
  * A route contract: what may, must, and must not travel a Handoff route as
@@ -112,6 +163,15 @@ export interface HandoffSourceRouteContract {
  *   fully; absent the Handoff carries narrative evidence as before.
  *   `handoffs` is prohibited: a Handoff is never evidence for another
  *   Handoff, and a self/cycle reference would make evidence unresolvable.
+ *
+ * The Google source types (`google_doc`, `google_sheet`) have their full
+ * per-type validation implemented in this module, but NO production route
+ * contract lists them today: which routes may carry a Google artifact is a
+ * route-contract governance decision (recorded in docs/enig-operating-model.md's
+ * Open questions), added here deliberately, never inferred because the
+ * validation happens to exist. A Sources payload naming a Google file on a
+ * route that does not list its type is refused -- at the writer and at
+ * resolution alike.
  */
 export const HANDOFF_SOURCE_ROUTE_CONTRACTS: Readonly<Record<string, HandoffSourceRouteContract>> = {
   "Sales->Strategy": {
@@ -200,21 +260,102 @@ export function parseNotionPageLink(raw: string): NotionPageLink {
   return { ok: true, pageId: formatPageId(hexRuns[hexRuns.length - 1].toLowerCase()) };
 }
 
+export type GoogleFileLink =
+  | { ok: true; fileType: GoogleHandoffSourceType; fileId: string }
+  | { ok: false; reason: string };
+
+/**
+ * A Google file id: Drive's own character set (`A-Za-z0-9_-`), bounded
+ * below so a truncated path segment never resolves to a "file", and bounded
+ * above so a whole path cannot be swallowed as one id. Real Google file ids
+ * are 33+ characters; the floor here is deliberately low enough not to
+ * encode that provider detail as a contract.
+ */
+const GOOGLE_FILE_ID_SHAPE = /^[A-Za-z0-9_-]{10,}$/;
+
+/**
+ * Parses ONE direct Google file link into its exact file id and the type
+ * its URL claims.
+ *
+ * Fail closed on every shape that is not a recognized direct file link:
+ * not a URL, not the exact `docs.google.com` host (a lookalike host is
+ * refused, never normalized into one), a path that is not
+ * `/document/d/<id>` or `/spreadsheets/d/<id>` (including `/presentation/`,
+ * `/forms/`, `drive.google.com/file/d/...`, and the `/u/<n>/` account
+ * variants, which are refused rather than approximated), and a missing or
+ * unrecognizable file id.
+ *
+ * The returned `fileType` is what the URL CLAIMS. Resolution re-verifies
+ * the actual type through the authorized Drive API before any content is
+ * read -- this parse never establishes the file's real type by itself.
+ */
+export function parseGoogleFileLink(raw: string): GoogleFileLink {
+  const value = (raw ?? "").trim();
+  if (!value) {
+    return { ok: false, reason: "an empty Sources entry is not a Google file link." };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { ok: false, reason: `"${value.slice(0, 120)}" is not a URL, so it cannot name an exact Google file.` };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, reason: `"${value.slice(0, 120)}" is not an http(s) Google file link.` };
+  }
+  if (parsed.hostname.toLowerCase() !== "docs.google.com") {
+    return {
+      ok: false,
+      reason: `"${value.slice(0, 120)}" is not a docs.google.com direct file link -- only exact Google Docs/Sheets file URLs on docs.google.com may be sources (drive.google.com share links, shortcuts, and lookalike hosts are refused, never resolved by search).`,
+    };
+  }
+  const match = /^\/(document|spreadsheets)\/d\/([^/]+)/.exec(parsed.pathname);
+  if (!match) {
+    return {
+      ok: false,
+      reason: `"${value.slice(0, 120)}" is not a direct file link -- expected /document/d/<file-id>/ or /spreadsheets/d/<file-id>/.`,
+    };
+  }
+  const fileId = match[2];
+  if (!GOOGLE_FILE_ID_SHAPE.test(fileId)) {
+    return {
+      ok: false,
+      reason: `"${value.slice(0, 120)}" does not carry a recognizable Google file id, so it cannot be resolved to an exact file.`,
+    };
+  }
+  return { ok: true, fileType: match[1] === "document" ? "google_doc" : "google_sheet", fileId };
+}
+
+/**
+ * The write shape for a `Sources` payload: one rich-text item per URL, each
+ * carrying its `text.link.url`. The single sanctioned way a runtime producer
+ * builds the property (the writer's extraction reads exactly this shape), so
+ * no producer hand-assembles rich-text items and no reference can be written
+ * as link-less plain text that the read side would then have to guess about.
+ */
+export function sourcesRichText(urls: readonly string[]): { rich_text: Array<{ type: "text"; text: { content: string; link: { url: string } } }> } {
+  return {
+    rich_text: urls.map((url) => ({ type: "text" as const, text: { content: url, link: { url } } })),
+  };
+}
+
 export type HandoffSourceExtraction =
   | { ok: true; mode: "legacy" }
-  | { ok: true; mode: "sources"; pageIds: string[] }
+  | { ok: true; mode: "sources"; refs: HandoffSourceRef[] }
   | { ok: false; reason: string };
 
 /**
  * Reads the Handoff's own `Sources` property, if it has one.
  *
- * `legacy` (no fetches, no validation) is the compatibility seam: the live
- * Handoffs database has no `Sources` property, so every existing Handoff
- * reads back legacy and its consumers behave exactly as before. A PRESENT
- * property turns the Sources path on and must carry at least one direct
- * page link; duplicate references to the same page are refused right here
- * (before any fetch), as a duplicate is a conflicting reference by
- * construction.
+ * `legacy` (no fetches, no validation) is the compatibility seam: a
+ * Handoff whose record carries no `Sources` property reads back legacy and
+ * its consumers behave exactly as before. A PRESENT property turns the
+ * Sources path on and must carry at least one direct link -- to an exact
+ * Notion page or a recognized direct Google Docs/Sheets URL; anything else
+ * is refused right here, before any fetch. Duplicate references to the same
+ * page id or the same Google file id are refused the same way (a duplicate
+ * is a conflicting reference by construction -- the same file named twice
+ * through two URL shapes is still one reference written twice).
  */
 export function extractHandoffSources(properties: NotionProperties | undefined): HandoffSourceExtraction {
   const prop = (properties as Record<string, unknown> | undefined)?.[HANDOFF_SOURCES_PROPERTY];
@@ -234,24 +375,39 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
   if (urls.length === 0) {
     return {
       ok: false,
-      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property is present but carries no link -- a Sources-enabled Handoff must reference at least one exact canonical page, and nothing is inferred to fill the gap.`,
+      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property is present but carries no link -- a Sources-enabled Handoff must reference at least one exact canonical artifact, and nothing is inferred to fill the gap.`,
     };
   }
-  const pageIds: string[] = [];
+  const refs: HandoffSourceRef[] = [];
   for (const url of urls) {
-    const link = parseNotionPageLink(url);
-    if (!link.ok) {
-      return { ok: false, reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable reference: ${link.reason}` };
+    const notion = parseNotionPageLink(url);
+    if (notion.ok) {
+      if (refs.some((r) => r.kind === "notion" && r.pageId === notion.pageId)) {
+        return {
+          ok: false,
+          reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property references page ${notion.pageId} more than once -- duplicate references are refused rather than de-duplicated.`,
+        };
+      }
+      refs.push({ kind: "notion", pageId: notion.pageId });
+      continue;
     }
-    if (pageIds.includes(link.pageId)) {
-      return {
-        ok: false,
-        reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property references page ${link.pageId} more than once -- duplicate references are refused rather than de-duplicated.`,
-      };
+    const google = parseGoogleFileLink(url);
+    if (google.ok) {
+      if (refs.some((r) => r.kind === "google" && r.fileId === google.fileId)) {
+        return {
+          ok: false,
+          reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property references Google file ${google.fileId} more than once -- duplicate references are refused rather than de-duplicated.`,
+        };
+      }
+      refs.push({ kind: "google", type: google.fileType, fileId: google.fileId });
+      continue;
     }
-    pageIds.push(link.pageId);
+    return {
+      ok: false,
+      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable reference: "${url.slice(0, 120)}" is neither an exact Notion page link (${notion.reason}) nor a recognized direct Google Docs/Sheets file link (${google.reason})`,
+    };
   }
-  return { ok: true, mode: "sources", pageIds };
+  return { ok: true, mode: "sources", refs };
 }
 
 /** A validated canonical Call Notes source: which approved record the link names, and the evidence of its approval. */
@@ -267,7 +423,29 @@ export interface ResolvedCallNotesSource {
 
 export interface ResolvedHandoffSourceRef {
   type: HandoffSourceType;
-  pageId: string;
+  /** The exact identity resolved: a dashed Notion page id, or the Google file id for a `google_doc` source. */
+  id: string;
+}
+
+/**
+ * A validated Google Doc source: the exact file, its registered account,
+ * and the proposal/Work binding its registration carries -- the hop this
+ * source's Entity/Matter trust is established through (the bound Work's
+ * persisted state must name exactly this Handoff's Matter). Content is NOT
+ * read here; consumers read it through `readGoogleDocSourceContent`, only
+ * after this resolution has passed.
+ */
+export interface ResolvedGoogleDocSource {
+  fileId: string;
+  accountIdentifier: string;
+  title: string;
+  proposal: { workId: string; proposalId: string; version: number };
+}
+
+/** The subset of a bound Work's persisted state the Google-source binding check needs. */
+export interface BoundWorkIdentity {
+  entityId?: string;
+  matterId?: string;
 }
 
 export type HandoffSourcesResolution =
@@ -278,6 +456,8 @@ export type HandoffSourcesResolution =
       sources: ResolvedHandoffSourceRef[];
       /** The one validated canonical Call Notes source, when the Handoff carries one. */
       callNotes?: ResolvedCallNotesSource;
+      /** The one validated Google Doc source, when the Handoff carries one. */
+      googleDoc?: ResolvedGoogleDocSource;
     }
   | { ok: false; reason: string };
 
@@ -392,11 +572,157 @@ async function validateSourcePage(
   }
 }
 
+/** The mimeType the Drive API reports for each Google source type the URL claims. */
+const GOOGLE_DRIVE_MIME_TYPES: Record<GoogleHandoffSourceType, string> = {
+  google_doc: "application/vnd.google-apps.document",
+  google_sheet: "application/vnd.google-apps.spreadsheets",
+};
+
+/**
+ * Validates one extracted Google reference. Every step fails closed with a
+ * non-sensitive reason and no write:
+ *
+ *   1. **Trusted registration** -- the exact file id must be found in this
+ *      Worker's own watch registry, which is written only for files the
+ *      system itself created (opt-in-by-creation). A file the system does
+ *      not own has no binding to anything, and account access alone is
+ *      never treated as a relationship.
+ *   2. **Business binding** (Docs only) -- the registration's proposal/Work
+ *      binding must resolve, through that Work's persisted state, to
+ *      exactly this Handoff's Matter (and Entity, when the Work recorded
+ *      one). No title match, no token mention in file content, no
+ *      second-guessing.
+ *   3. **Actual file type** -- verified through the authorized Drive API
+ *      (`files.get fields=id,mimeType,trashed`), never assumed from the
+ *      URL: a link that claims a Doc but resolves to another type, or to a
+ *      trashed file, is refused.
+ *
+ * A Google Sheet is parsed but refused at step 1/2: the watched-sheet
+ * registration carries account identity only -- no proposal/Work/Entity/
+ * Matter binding and no declared bounded worksheet range -- so neither a
+ * trusted relationship nor a safe read scope can be established for it
+ * today. The refusal names that missing contract precisely; nothing about
+ * a Sheet is ever read.
+ */
+async function validateGoogleSource(
+  env: Env,
+  ref: { type: GoogleHandoffSourceType; fileId: string },
+  binding: { entityId: string; matterId: string },
+  readBoundWorkState: (workId: string) => Promise<BoundWorkIdentity | undefined>,
+): Promise<{ ok: true; googleDoc?: ResolvedGoogleDocSource } | { ok: false; reason: string }> {
+  if (ref.type === "google_sheet") {
+    const sheet = await getWatchedGoogleSheet(env, ref.fileId);
+    if (!sheet) {
+      return {
+        ok: false,
+        reason: `spreadsheet ${ref.fileId} is not registered by this Worker, and no trusted relationship exists between an arbitrary spreadsheet and this Handoff's Entity/Matter -- account access alone is never treated as proof of a relationship.`,
+      };
+    }
+    return {
+      ok: false,
+      reason: `spreadsheet ${ref.fileId} is registered for comment polling, but the watched-sheet registration carries account identity only -- no proposal/Work/Entity/Matter binding, and no declared bounded worksheet range. No trusted relationship between this exact spreadsheet and this Handoff's Matter can be established, so the source is refused before any read: the missing contract is a registration binding the sheet to the Handoff's Entity/Matter (or another authorized canonical business record) plus a deterministic bounded range to read.`,
+    };
+  }
+
+  const doc = await getWatchedGoogleDoc(env, ref.fileId);
+  if (!doc) {
+    return {
+      ok: false,
+      reason: `document ${ref.fileId} is not registered by this Worker, and no trusted relationship exists between an arbitrary Drive file and this Handoff's Entity/Matter -- account access alone is never treated as proof of a relationship.`,
+    };
+  }
+  if (!doc.proposal) {
+    return {
+      ok: false,
+      reason: `document ${ref.fileId} is registered, but its registration carries no proposal/Work binding, so nothing ties this exact file to an Entity/Matter -- refusing rather than inventing a binding from account access or the file's title.`,
+    };
+  }
+  let state: BoundWorkIdentity | undefined;
+  try {
+    state = await readBoundWorkState(doc.proposal.workId);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `document ${ref.fileId} is bound to Work ${doc.proposal.workId}, whose state could not be read (${err instanceof Error ? err.message : String(err)}) -- an unverifiable binding is refused, never assumed.`,
+    };
+  }
+  if (!state) {
+    return {
+      ok: false,
+      reason: `document ${ref.fileId} is bound to Work ${doc.proposal.workId}, which no longer has readable state -- the binding to this Handoff's Entity/Matter cannot be verified.`,
+    };
+  }
+  if (!state.matterId || state.matterId !== binding.matterId) {
+    return {
+      ok: false,
+      reason: `document ${ref.fileId} is bound (through its registered Proposal work ${doc.proposal.workId}) to Matter ${state.matterId || "(none recorded)"} but this Handoff's Matter resolves to ${binding.matterId} -- the document is not bound to this Handoff's Matter.`,
+    };
+  }
+  if (state.entityId && state.entityId !== binding.entityId) {
+    return {
+      ok: false,
+      reason: `document ${ref.fileId} is bound (through its registered Proposal work ${doc.proposal.workId}) to Entity ${state.entityId} but this Handoff's Entity resolves to ${binding.entityId} -- the document is not bound to this Handoff's Entity.`,
+    };
+  }
+
+  const token = await getValidGoogleAccessToken(env, doc.accountIdentifier);
+  if (!token) {
+    return {
+      ok: false,
+      reason: `the account this document is registered under holds no currently authorized Google token, so the file's actual type cannot be verified through the Drive API -- the source is refused rather than read unverified.`,
+    };
+  }
+  let file: { id?: string; mimeType?: string; trashed?: boolean };
+  try {
+    const response = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(ref.fileId)}?fields=id,name,mimeType,trashed`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: `the Drive API could not verify document ${ref.fileId} (HTTP ${response.status}) -- the actual file type could not be established, so the source is refused rather than read unverified.`,
+      };
+    }
+    file = (await response.json()) as { id?: string; mimeType?: string; trashed?: boolean };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `the Drive API could not verify document ${ref.fileId} (${err instanceof Error ? err.message : String(err)}) -- the actual file type could not be established, so the source is refused rather than read unverified.`,
+    };
+  }
+  if (file.trashed) {
+    return { ok: false, reason: `document ${ref.fileId} is in the trash -- only a live file may be a source.` };
+  }
+  if (file.mimeType !== GOOGLE_DRIVE_MIME_TYPES[ref.type]) {
+    return {
+      ok: false,
+      reason: `the link claims a ${ref.type} but the Drive API reports mimeType "${file.mimeType || "(none)"}" for file ${ref.fileId} -- the actual file type is verified through the API, never assumed from the URL.`,
+    };
+  }
+  return {
+    ok: true,
+    googleDoc: {
+      fileId: ref.fileId,
+      accountIdentifier: doc.accountIdentifier,
+      title: doc.title,
+      proposal: { workId: doc.proposal.workId, proposalId: doc.proposal.proposalId, version: doc.proposal.version },
+    },
+  };
+}
+
+/** The production binding hop: the bound Work's own Durable Object (the same cross-session read workContinuation makes). */
+function defaultReadBoundWorkState(env: Env): (workId: string) => Promise<BoundWorkIdentity | undefined> {
+  return async (workId) => (await getSessionStub(env, workId).getState()) as BoundWorkIdentity | undefined;
+}
+
 /**
  * The one resolution entry point. Reads the Handoff's own properties
  * (the `Sources` property, the recorded From/To Unit, the tokens) and
- * resolves every reference to an exactly-fetched, validated canonical page
- * -- or returns `legacy` when the property is absent, or a refusal.
+ * resolves every reference to an exactly-fetched, validated canonical
+ * artifact -- Notion pages by id, Google Docs through the registration
+ * binding chain above -- or returns `legacy` when the property is absent,
+ * or a refusal.
  *
  * Consumers keep their own evidence/lifecycle semantics on top of this:
  * Sales's consume path still requires `Ready` before transitioning, and
@@ -411,12 +737,22 @@ export async function resolveHandoffSources(
     route: { fromUnit: string; toUnit: string };
     access: AccessContext;
     /**
+     * Test seam for the Google-source binding hop: reads the persisted
+     * state of the Work a Google Doc's registration is bound to. In
+     * production this resolves through that Work's own Durable Object
+     * (`WorkSession.getState`, via getSessionStub -- the same
+     * cross-session read `workContinuation` makes); omitting it uses that
+     * production path exactly. Production callers never pass it.
+     */
+    readBoundWorkState?: (workId: string) => Promise<BoundWorkIdentity | undefined>;
+    /**
      * Test seam, following the same pattern as
      * `discoverPendingSalesHandoffsForUnit(declaration)` and
      * `unitsWithHandoffPickup(manifests)`: a contract table to resolve
      * against instead of the production one, so the generic route-contract
      * machinery (required sources, per-type validation of `matters` /
-     * `entities` sources) can be exercised without a production route that
+     * `entities` sources, and the Google source types no production route
+     * permits yet) can be exercised without a production route that
      * permits those types. Production callers never pass it; omitting it
      * resolves against `HANDOFF_SOURCE_ROUTE_CONTRACTS` exactly as
      * production does.
@@ -456,47 +792,70 @@ export async function resolveHandoffSources(
 
   const sources: ResolvedHandoffSourceRef[] = [];
   let callNotes: ResolvedCallNotesSource | undefined;
+  let googleDoc: ResolvedGoogleDocSource | undefined;
 
-  for (const pageId of extraction.pageIds) {
+  /**
+   * The route-contract permission check, shared by both reference kinds:
+   * prohibited is refused by name; a type the contract neither requires nor
+   * permits is refused (the table decides, never code-path accident); and
+   * one reference of each type -- the Handoff's Entity/Matter are singular,
+   * so two sources of one type cannot both be "the" reference -- they are
+   * conflicting references, refused rather than arbitrated.
+   */
+  const routeKey = handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit);
+  const permitType = (type: HandoffSourceType, describe: string): string | null => {
+    if (contract.prohibited.includes(type)) {
+      return `source ${describe} is a ${type}, and ${type} sources are prohibited on route ${routeKey} by the route contract.`;
+    }
+    if (!contract.required.includes(type) && !contract.optional.includes(type)) {
+      return `source ${describe} is a ${type}, which is neither required nor optional on route ${routeKey} -- the route contract does not permit ${type} sources.`;
+    }
+    if (sources.some((s) => s.type === type)) {
+      return `the Handoff references more than one ${type} source -- which one is the source is ambiguous, so none is accepted.`;
+    }
+    return null;
+  };
+
+  for (const ref of extraction.refs) {
+    if (ref.kind === "google") {
+      // Permission first (no network), then the full binding/type chain --
+      // a type the route does not permit never reaches the Google APIs.
+      const denied = permitType(ref.type, `Google file ${ref.fileId}`);
+      if (denied) return refuse(denied);
+      const validated = await validateGoogleSource(env, ref, binding, input.readBoundWorkState ?? defaultReadBoundWorkState(env));
+      if (!validated.ok) return refuse(validated.reason);
+      sources.push({ type: ref.type, id: ref.fileId });
+      if (validated.googleDoc) googleDoc = validated.googleDoc;
+      continue;
+    }
+
     // The EXACT page, fetched by id through the governed read path (Access
     // evaluates it against the page's real data source). No search, no
     // title match, no second pass with a looser filter.
     let page: NotionPage;
     try {
-      page = await getPage(env, pageId, input.access);
+      page = await getPage(env, ref.pageId, input.access);
     } catch (err) {
       return refuse(
-        `source page ${pageId} could not be read (${err instanceof Error ? err.message : String(err)}) -- an inaccessible source is refused, never approximated by another record.`,
+        `source page ${ref.pageId} could not be read (${err instanceof Error ? err.message : String(err)}) -- an inaccessible source is refused, never approximated by another record.`,
       );
     }
     if (page.archived || page.inTrash) {
-      return refuse(`source page ${pageId} is archived or in the trash -- only a live canonical record may be a source.`);
+      return refuse(`source page ${ref.pageId} is archived or in the trash -- only a live canonical record may be a source.`);
     }
     const dataSourceId = page.parent?.type === "data_source_id" ? page.parent.data_source_id : undefined;
     if (!dataSourceId) {
-      return refuse(`source page ${pageId} is not a row of a canonical database (parent type "${page.parent?.type ?? "none"}") -- only canonical records may be sources.`);
+      return refuse(`source page ${ref.pageId} is not a row of a canonical database (parent type "${page.parent?.type ?? "none"}") -- only canonical records may be sources.`);
     }
     const type = handoffSourceTypeForDataSource(env, dataSourceId);
     if (!type) {
-      return refuse(`source page ${pageId} lives in data source ${dataSourceId}, which is not one of ENIG's canonical source databases -- refused rather than treated as an unnamed source.`);
+      return refuse(`source page ${ref.pageId} lives in data source ${dataSourceId}, which is not one of ENIG's canonical source databases -- refused rather than treated as an unnamed source.`);
     }
-    if (contract.prohibited.includes(type)) {
-      return refuse(`source page ${pageId} is a ${type} page, and ${type} sources are prohibited on route ${handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)} by the route contract.`);
-    }
-    if (!contract.required.includes(type) && !contract.optional.includes(type)) {
-      return refuse(
-        `source page ${pageId} is a ${type} page, which is neither required nor optional on route ${handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)} -- the route contract does not permit ${type} sources.`,
-      );
-    }
-    // One reference of each type: the Handoff's Entity/Matter are singular,
-    // so two pages of one type cannot both be "the" reference -- they are
-    // conflicting references, refused rather than arbitrated.
-    if (sources.some((s) => s.type === type)) {
-      return refuse(`the Handoff references more than one ${type} page -- which one is the source is ambiguous, so none is accepted.`);
-    }
+    const denied = permitType(type, `page ${ref.pageId}`);
+    if (denied) return refuse(denied);
     const validated = await validateSourcePage(type, page, binding);
     if (!validated.ok) return refuse(validated.reason);
-    sources.push({ type, pageId });
+    sources.push({ type, id: ref.pageId });
     if (validated.callNotes) callNotes = validated.callNotes;
   }
 
@@ -534,5 +893,54 @@ export async function resolveHandoffSources(
     );
   }
 
-  return { ok: true, mode: "sources", sources, ...(callNotes ? { callNotes } : {}) };
+  return {
+    ok: true,
+    mode: "sources",
+    sources,
+    ...(callNotes ? { callNotes } : {}),
+    ...(googleDoc ? { googleDoc } : {}),
+  };
+}
+
+export type GoogleDocContentRead = { ok: true; content: string } | { ok: false; reason: string };
+
+/**
+ * Reads the content of an ALREADY VALIDATED Google Doc source, read-only,
+ * through the Docs API with the registered account's token. Never called
+ * before `resolveHandoffSources` returned this source: the binding (route
+ * contract -> registration -> bound Work's Matter -> actual mimeType) is
+ * what earns this read. An empty document is refused outright -- a
+ * document that holds nothing cannot serve as substantive evidence, and
+ * nothing is inferred to fill the gap.
+ */
+export async function readGoogleDocSourceContent(env: Env, source: ResolvedGoogleDocSource): Promise<GoogleDocContentRead> {
+  const token = await getValidGoogleAccessToken(env, source.accountIdentifier);
+  if (!token) {
+    return {
+      ok: false,
+      reason: `the account this Google Doc source is registered under holds no currently authorized token, so its content cannot be read -- the source is refused rather than read through another account.`,
+    };
+  }
+  let response: Response;
+  try {
+    response = await fetch(`https://docs.googleapis.com/v1/documents/${encodeURIComponent(source.fileId)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `Google Doc source ${source.fileId} could not be read (${err instanceof Error ? err.message : String(err)}).`,
+    };
+  }
+  if (!response.ok) {
+    return { ok: false, reason: `Google Doc source ${source.fileId} could not be read (HTTP ${response.status}).` };
+  }
+  const content = extractDocText(await response.json()).trim();
+  if (!content) {
+    return {
+      ok: false,
+      reason: `Google Doc source ${source.fileId} carries no text content -- a document that holds nothing cannot serve as substantive evidence, and nothing is inferred to fill the gap.`,
+    };
+  }
+  return { ok: true, content };
 }

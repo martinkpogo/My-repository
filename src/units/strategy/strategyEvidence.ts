@@ -5,7 +5,7 @@ import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../../records/callNotes/callNotesRecord";
 import { stripCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { parseRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
-import { resolveHandoffSources, type ResolvedCallNotesSource } from "../../handoffSources";
+import { resolveHandoffSources, readGoogleDocSourceContent, type ResolvedCallNotesSource, type ResolvedGoogleDocSource } from "../../handoffSources";
 
 /**
  * Strategy's evidence-retrieval order (ENIG Core Structure v3.0) and its
@@ -419,4 +419,42 @@ export function strategyClarificationReason(
     `The approved Call Notes evidence could not be read either: ${refusal.endsWith(".") ? refusal : `${refusal}.`}`,
     "This materially affects the decision because every downstream judgment -- what the Problem is, what causes it, what direction a recommendation may take, and whether one is supported at all -- must be grounded in recorded evidence; without the situation itself there is nothing to ground them in, and no proposal could be defended or approved on an assumed one.",
   ].join(" ");
+}
+
+export type StrategyGoogleDocEvidence =
+  | { ok: true; evidenceText: string; fileId: string; proposalId: string; version: number }
+  | { ok: false; reason: string };
+
+/**
+ * Strategy's read of an ALREADY VALIDATED Google Doc source -- the evidence
+ * order's "further explicitly governed approved source" step, now with one
+ * that exists. The resolver has already proved everything before this runs:
+ * the route contract permits `google_doc`, the exact file is this Worker's
+ * own registered Doc, its registration's Proposal/Work binding resolves to
+ * exactly this Handoff's Matter, and the Drive API confirmed the actual
+ * file type. Only then is the content read, read-only, through the Docs
+ * API with the registered account's token -- and the text must carry
+ * substantive content by the same test order 1 uses: a document whose text
+ * only points at other evidence, or holds nothing, is refused rather than
+ * diagnosed from, exactly like a reference-only Call Notes body.
+ */
+export async function readGoogleDocSourceEvidence(
+  env: Env,
+  source: ResolvedGoogleDocSource,
+): Promise<StrategyGoogleDocEvidence> {
+  const read = await readGoogleDocSourceContent(env, source);
+  if (!read.ok) return { ok: false, reason: read.reason };
+  if (!hasSubstantiveEvidence(read.content)) {
+    return {
+      ok: false,
+      reason: `Google Doc source ${source.fileId} holds text but nothing substantive in it -- what it holds only points at evidence rather than being the business situation itself, so there is no substantive evidence to diagnose from.`,
+    };
+  }
+  return {
+    ok: true,
+    evidenceText: read.content,
+    fileId: source.fileId,
+    proposalId: source.proposal.proposalId,
+    version: source.proposal.version,
+  };
 }
