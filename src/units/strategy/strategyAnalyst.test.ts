@@ -336,6 +336,10 @@ interface FetchLog {
 const DEFAULT_CALL_NOTES_BODY =
   "Direct client statement: proposals take roughly 20 staff hours to clean up because there is no single system for colours, fonts and layouts, and three logo versions are in circulation.";
 
+/** The canonical Call Notes page a Sources-enabled Handoff names (a real 32-hex Notion id -- the resolver accepts nothing else). */
+const SOURCES_PAGE_ID = "aaaa1111-bbbb-2222-cccc-3333dddd4444";
+const SOURCES_PAGE_URL = `https://www.notion.so/Acme-Call-Notes-${SOURCES_PAGE_ID}`;
+
 function mockFetch(
   t: any,
   opts: {
@@ -389,6 +393,22 @@ function mockFetch(
      * Failed/custom marker to exercise fail-closed handling.
      */
     sourceBoundaryMarker?: string | null;
+    /**
+     * Direct-page `Sources` property URLs (the Phase 1 compatibility seam).
+     * When set, the fixture is a Sources-enabled Sales -> Strategy Handoff:
+     * the property is written onto the Handoff alongside From/To Unit, and
+     * the canonical Call Notes page it names is served at its exact page id
+     * -- never via the query route.
+     */
+    sourcesUrls?: string[];
+    /**
+     * The `Call_Notes_ID` written into the Reason, decoupled from the
+     * record's own registry id, so a test can make the two transports
+     * disagree on purpose.
+     */
+    reasonCallNotesId?: string;
+    /** The record's own `Call Notes ID` registry field; defaults to `callNotesId`, then `CN-007`. */
+    recordCallNotesId?: string;
   } = {},
 ): FetchLog {
   const originalFetch = globalThis.fetch;
@@ -413,9 +433,32 @@ function mockFetch(
       ? null
       : (opts.sourceBoundaryMarker ??
         buildSourceBoundaryMarker({ entityToken, matterToken }, "Passed", ["entityName", "matterName"]));
+  const reasonCallNotesId = opts.reasonCallNotesId ?? opts.callNotesId;
   const reason = `Commercial fit/progression approved for ${matterToken}. Entry type: inbound_enquiry.${
-    opts.callNotesId ? `\nCall_Notes_ID: ${opts.callNotesId}` : ""
+    reasonCallNotesId ? `\nCall_Notes_ID: ${reasonCallNotesId}` : ""
   }${sourceBoundaryMarker ? `\n${sourceBoundaryMarker}` : ""}`;
+
+  // The Call Notes record's canonical shape, shared by BOTH transports:
+  // the exact-title query serves it (legacy) and the exact page fetch serves
+  // it (Sources) -- one fixture, so "only HOW the record was located
+  // changed" is structurally true rather than a coincidence of two builders.
+  const buildCallNotesRecord = (index: number) => ({
+    id: index > 0 ? `cn-page-1-${index + 1}` : "cn-page-1",
+    url: `https://notion.so/cn-page-1${index > 0 ? `-${index + 1}` : ""}`,
+    parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
+    properties: {
+      "Call Notes ID": { title: [{ plain_text: opts.recordCallNotesId ?? opts.callNotesId ?? "CN-007" }] },
+      Status: { select: { name: opts.callNotesStatus ?? "Ready" } },
+      Version: { number: opts.callNotesVersion ?? 1 },
+      "Call Date": { date: { start: "2026-09-01" } },
+      "Call Type": { select: { name: "Discovery" } },
+      "Source ID": { rich_text: [{ plain_text: "SRC-1" }] },
+      "Source Type": { rich_text: [{ plain_text: "transcript" }] },
+      Entity: { relation: [{ id: opts.callNotesEntityRelation ?? "entity-page-1" }] },
+      Matter: { relation: [{ id: opts.callNotesMatterRelation ?? "matter-page-1" }] },
+      "Approval Attestation": { rich_text: [{ plain_text: opts.callNotesAttestation ?? "" }] },
+    },
+  });
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -429,7 +472,7 @@ function mockFetch(
     if (!urlStr.includes("api.notion.com") && !urlStr.includes("api.telegram.org")) {
       log.nonNotionHosts.push(`${method} ${urlStr}`);
     }
-    if (urlStr.includes("call-notes-ds") || urlStr.includes("/cn-page-1")) {
+    if (urlStr.includes("call-notes-ds") || urlStr.includes("/cn-page-1") || urlStr.includes(SOURCES_PAGE_ID)) {
       log.callNotesRequests.push(`${method} ${urlStr}`);
     }
 
@@ -452,6 +495,20 @@ function mockFetch(
             Reason: { rich_text: [{ plain_text: reason }] },
             Entity_Token: { rich_text: [{ plain_text: entityToken }] },
             Matter_Token: { rich_text: [{ plain_text: matterToken }] },
+            ...(opts.sourcesUrls
+              ? {
+                  Sources: {
+                    rich_text: opts.sourcesUrls.map((url) => ({
+                      type: "text",
+                      text: { content: url, link: { url } },
+                      plain_text: url,
+                      href: url,
+                    })),
+                  },
+                  "From Unit": { select: { name: "Sales" } },
+                  "To Unit": { select: { name: "Strategy" } },
+                }
+              : {}),
           },
         }),
         { status: 200 },
@@ -473,27 +530,21 @@ function mockFetch(
       if (!opts.callNotesId || requested !== opts.callNotesId || matchCount === 0) {
         return new Response(JSON.stringify({ results: [] }), { status: 200 });
       }
-      const record = (index: number) => ({
-        id: `cn-page-1${index > 0 ? `-${index + 1}` : ""}`,
-        url: `https://notion.so/cn-page-1${index > 0 ? `-${index + 1}` : ""}`,
-        parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
-        properties: {
-          "Call Notes ID": { title: [{ plain_text: opts.callNotesId }] },
-          Status: { select: { name: opts.callNotesStatus ?? "Ready" } },
-          Version: { number: opts.callNotesVersion ?? 1 },
-          "Call Date": { date: { start: "2026-09-01" } },
-          "Call Type": { select: { name: "Discovery" } },
-          "Source ID": { rich_text: [{ plain_text: "SRC-1" }] },
-          "Source Type": { rich_text: [{ plain_text: "transcript" }] },
-          Entity: { relation: [{ id: opts.callNotesEntityRelation ?? "entity-page-1" }] },
-          Matter: { relation: [{ id: opts.callNotesMatterRelation ?? "matter-page-1" }] },
-          "Approval Attestation": { rich_text: [{ plain_text: opts.callNotesAttestation ?? "" }] },
-        },
-      });
       return new Response(
         JSON.stringify({
-          results: Array.from({ length: matchCount }, (_, index) => record(index)),
+          results: Array.from({ length: matchCount }, (_, index) => buildCallNotesRecord(index)),
         }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes(`/pages/${SOURCES_PAGE_ID}`) && method === "GET") {
+      // The canonical page a Sources-enabled Handoff names, fetched by its
+      // EXACT id -- the only way a Sources-mode fixture serves a record.
+      // Any PATCH/PUT against it falls through to the throw at the bottom of
+      // this mock, which is itself the proof that Strategy never writes.
+      const page = buildCallNotesRecord(0);
+      return new Response(
+        JSON.stringify({ ...page, id: SOURCES_PAGE_ID, url: `https://notion.so/${SOURCES_PAGE_ID}` }),
         { status: 200 },
       );
     }
@@ -520,7 +571,7 @@ function mockFetch(
       // body actually came from.
       const pageId = urlStr.split("/blocks/")[1]?.split("/")[0] ?? "(unknown)";
       log.blockReads.push(pageId);
-      if (pageId === "cn-page-1") {
+      if (pageId === "cn-page-1" || pageId === SOURCES_PAGE_ID) {
         // Serves EXACTLY what the fixture declared as the record's body --
         // no extra blocks -- so a test asserting "this body is (not)
         // substantive" is asserting on what the reader actually saw.
@@ -4190,4 +4241,197 @@ test("Subrequest budget: a full pickup's status costs at most 1 send + 7 edits a
   const edits = log.requests.filter((r) => r.endsWith("/editMessageText")).length;
   assert.strictEqual(typing, 1, "one typing signal for the whole AI-backed run");
   assert.ok(edits <= 7, `status edits are capped (got ${edits})`);
+});
+
+// ---------------------------------------------------------------------------
+// Evidence order 1a -- the Handoff's direct-page Sources property.
+//
+// A Sources-enabled Handoff declares, structurally, which canonical pages
+// its evidence lives on. The pickup resolves and validates those pages
+// FIRST (exact page fetch, route contract, real parent database,
+// Entity/Matter binding, Status, registry fields, recorded attestation),
+// and a defective, unverifiable or uncontracted declaration stops the
+// pickup through the existing Clarification path -- never a fallback to
+// the narrative, never a fallback to the free-text reference. Legacy
+// Handoffs (no Sources property) are untouched by every test below.
+// ---------------------------------------------------------------------------
+
+const SUBSTANTIVE_NARRATIVE = `Recurring client complaints about late delivery over two quarters, tied to a warehouse capacity constraint.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`;
+
+test("Sources: the canonical Call Notes page is the evidence base even when the Handoff narrative is substantive -- authoritative because declared, and never duplicated into the Handoff", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(NO_RECOMMENDATION_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "the direct page id replaces the exact-title search entirely");
+  assert.ok(log.blockReads.includes(SOURCES_PAGE_ID), "the canonical record's own page body was read");
+  const prompt = prompts.find((p) => p.includes("Call_Notes_ID: CN-007"));
+  assert.ok(prompt, "the diagnosis prompt carries the governed Call Notes registry fields");
+  assert.ok(prompt!.includes(DEFAULT_CALL_NOTES_BODY), "the canonical record's BODY is the substantive evidence in the prompt");
+  assert.ok(
+    prompt!.includes("canonical page named in the Handoff's Sources property"),
+    "the evidence base is labelled as coming from the declared canonical page",
+  );
+  assert.ok(
+    !prompt!.includes("Recurring client complaints about late delivery"),
+    "the Handoff's own narrative is NOT the evidence base for a Sources-enabled Handoff -- the declared canonical page is authoritative",
+  );
+});
+
+test("Sources: a defective Sources declaration stops the pickup as a clarification BEFORE any AI call -- no fallback to the narrative", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: ["https://www.notion.so/not-an-exact-page"],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.awaiting, "strategy_clarification");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis runs on a Handoff whose declared sources are defective");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /Clarification needed/);
+  assert.match(message, /cannot be resolved to an exact page/, "the clarification names the exact defect");
+  assert.ok(
+    !message.includes("Recurring client complaints about late delivery"),
+    "the narrative is never substituted as evidence once the Sources declaration is defective",
+  );
+  const heldPatch = lastHandoffPatch(log);
+  assert.strictEqual(heldPatch.properties.Status.select.name, "Held", "the Handoff is HELD for clarification, not silently diagnosed from something else");
+});
+
+test("Sources: an unproven canonical page stops the pickup -- the body is never read, the attestation gate holds on the Sources path too", async (t) => {
+  const marker = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const tampered = marker.replace(/fields_hash=[0-9a-f]+/, `fields_hash=${"0".repeat(64)}`);
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: tampered,
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.ok(!log.blockReads.includes(SOURCES_PAGE_ID), "the body of an unproven record is never retrieved");
+  assert.match(log.sentTexts.join("\n"), /fields_hash does not match/);
+});
+
+test("Sources: a Superseded canonical page is refused -- no approved current evidence is diagnosed from", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    callNotesStatus: "Superseded",
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.match(log.sentTexts.join("\n"), /only Ready or Consumed/);
+});
+
+test("Sources: an already-Consumed canonical page still carries approved evidence -- Strategy's read is idempotent, and never writes", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    callNotesStatus: "Consumed",
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(NO_RECOMMENDATION_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered", "a Consumed record was already consumed by Sales -- its approved evidence is still read here, read-only");
+  assert.ok(log.blockReads.includes(SOURCES_PAGE_ID));
+  assert.ok(
+    log.callNotesRequests.every((request) => /^(GET|POST) /.test(request)),
+    `Strategy only ever reads the canonical record (requests: ${log.callNotesRequests.join(" | ")}) -- a PATCH would be a second consumer`,
+  );
+});
+
+test("Sources: a free-text Call_Notes_ID disagreeing with the canonical page is refused -- conflicting references, never resolved by letting one transport win", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    reasonCallNotesId: "CN-999",
+    callNotesAttestation: attestation,
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /conflicting references/);
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "neither id is looked up -- a conflicted Handoff establishes nothing");
+});
+
+test("Sources: a Sources-enabled Handoff needs no free-text Call_Notes_ID at all -- the canonical page stands alone", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesAttestation: attestation,
+  });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(NO_RECOMMENDATION_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "delivered");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "no reference to search for -- the page id is the whole reference");
+  const prompt = prompts.find((p) => p.includes("Call_Notes_ID: CN-007"));
+  assert.ok(prompt, "the registry fields of the canonical record reach the diagnosis prompt");
+  assert.ok(prompt!.includes(DEFAULT_CALL_NOTES_BODY), "with the record's own body as the substantive evidence");
+});
+
+test("Sources: a Handoff already claimed for another Work is refused before any source page is fetched", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    initialStatus: "Picked-up",
+    verifiedFacts: SUBSTANTIVE_NARRATIVE,
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "must not process a Handoff that isn't genuinely Pending");
+  assert.strictEqual(log.handoffPatchBodies.length, 0, "refused before any processing -- no Notion write occurs");
+  assert.ok(
+    !log.requests.some((request) => request.includes(SOURCES_PAGE_ID)),
+    "the claim boundary holds BEFORE the Sources path runs -- no canonical page is even fetched",
+  );
 });

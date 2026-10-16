@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { getPage, plainText, queryDataSource, relationIds, type NotionPage } from "../../notion";
+import { getPage, plainText, queryDataSource, relationIds } from "../../notion";
 import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { consumeReadyCallNotes } from "./callNotesLifecycle";
@@ -8,6 +8,7 @@ import {
   type CallNotesApprovalRecord,
   type RecordApprovalAttestation,
 } from "./callNotesMarker";
+import { resolveHandoffSources, type HandoffSourceRouteContract } from "../../handoffSources";
 
 /**
  * Runtime's consumption of a governed Call Notes record, reached from a
@@ -60,148 +61,14 @@ import {
  * evidence, and nothing there changes what Sales receives here.
  */
 
-/** The free-text fields a call-notes Handoff's own `Call_Notes_ID` reference is read from. */
-const REFERENCE_FIELDS = ["Reason", "Handoff"] as const;
-
-/**
- * The reference grammar, matching `requiredCategory:\s*call_notes`'s style of
- * "a key, a separator, a value" on the Handoff's free text.
- *
- * `[ \t]*` (not `\s*`) before the value matters: `\s` would let the pattern
- * swallow the newline after an empty reference and report the NEXT line's text
- * as the id, turning a malformed reference into a plausible one. Value capture
- * stops at the end of the line so a reference embedded in a sentence still
- * yields exactly what follows the key, and nothing before it.
- */
-const CALL_NOTES_REFERENCE_PATTERN = /Call_Notes_ID[ \t]*[:=][ \t]*([^\r\n]*)/;
-
-/** A reference is a single token; longer than this is malformed rather than an id. */
-const MAX_REFERENCE_LENGTH = 200;
-
-export type CallNotesReference =
-  | { ok: true; callNotesId: string }
-  | { ok: false; reason: string };
-
-/**
- * Reads the `Call_Notes_ID` reference a call-notes Handoff carries.
- *
- * Fail-closed on every way the reference can be unusable:
- *
- *   - **missing** -- neither free-text field mentions the key at all;
- *   - **empty** -- the key is present with no value after it;
- *   - **malformed** -- the value contains whitespace (a reference is one
- *     token, so `CN-007 (see below)` is not an id) or is absurdly long;
- *   - **ambiguous** -- the two fields record two DIFFERENT ids. Repeating the
- *     same id in both is not ambiguous and is accepted.
- *
- * It never falls back to `Entity_Token`/`Matter_Token` or to anything else on
- * the Handoff: those identify WHICH Entity and Matter the work concerns, not
- * which record to read, and inferring one from the other would be inventing a
- * lookup the record itself does not establish.
- *
- * `Verified Facts & Sources` is deliberately NOT searched. It is the Handoff's
- * substantive payload field, and this slice's whole point is that its content
- * is no longer authoritative about Call Notes -- using it as the place a
- * reference is looked up would keep one foot in the path being retired.
- */
-export function extractCallNotesReference(
-  properties: Record<string, any>,
-): CallNotesReference {
-  const found: string[] = [];
-
-  for (const field of REFERENCE_FIELDS) {
-    const raw = plainText(properties?.[field]);
-    if (!raw) continue;
-
-    const match = CALL_NOTES_REFERENCE_PATTERN.exec(raw);
-    if (!match) continue;
-
-    const value = match[1].trim();
-    if (!value) {
-      return { ok: false, reason: `the Handoff's ${field} records Call_Notes_ID with no value -- a reference with nothing after it is refused rather than looked up by any other means.` };
-    }
-    if (/\s/.test(value)) {
-      return { ok: false, reason: `the Handoff's ${field} records a malformed Call_Notes_ID ("${value.slice(0, MAX_REFERENCE_LENGTH)}") -- a Call Notes reference is a single whitespace-free token.` };
-    }
-    if (value.length > MAX_REFERENCE_LENGTH) {
-      return { ok: false, reason: `the Handoff's ${field} records a Call_Notes_ID longer than ${MAX_REFERENCE_LENGTH} characters, which is malformed rather than an id.` };
-    }
-    found.push(value);
-  }
-
-  if (found.length === 0) {
-    return {
-      ok: false,
-      reason: `the Handoff carries no Call_Notes_ID reference in its ${REFERENCE_FIELDS.join(" or ")} -- there is no governed Call Notes record to read, and the Handoff's own narrative is not used as one.`,
-    };
-  }
-
-  const distinct = [...new Set(found)];
-  if (distinct.length > 1) {
-    return { ok: false, reason: `the Handoff records conflicting Call_Notes_ID references (${distinct.join(", ")}) -- which record to consume is ambiguous, so nothing is read.` };
-  }
-
-  return { ok: true, callNotesId: distinct[0] };
-}
-
-/**
- * The registry record a validation runs against, built from the located Call
- * Notes record's own properties.
- *
- * `entity`/`matter` carry the Handoff's `Entity_Token`/`Matter_Token`, which is
- * exactly what gate 4 established the record's relations ARE: the relations were
- * compared to the pages those tokens resolve to, so the tokens are this record's
- * own Entity and Matter references by that check, and they are also the
- * representation the approved marker shape (`entity=E-47 matter=M-12`) and this
- * repository's own fixtures use. The fields' representation is an open contract
- * question `callNotesMarker.ts` explicitly leaves open -- if the creation
- * authority ever hashes a different representation, `fields_hash` disagrees and
- * this fails closed rather than guessing.
- */
-/**
- * Reads the record's own registry fields for validation -- exported so a
- * caller that must NOT consume the record (a read-only, idempotent consumer
- * that cannot transition Status without breaking its own retry loop) can
- * still re-verify the same attestation against exactly the same fields.
- * Exporting it changes no Sales behavior: `retrieveAndConsumeCallNotes`
- * calls it identically.
- */
-export function readApprovalRecord(
-  page: NotionPage,
-  entityToken: string,
-  matterToken: string,
-): { ok: true; record: CallNotesApprovalRecord } | { ok: false; reason: string } {
-  const properties = page.properties ?? {};
-
-  const callNotesId = plainText(properties["Call Notes ID"]).trim();
-  if (!callNotesId) {
-    return { ok: false, reason: "the located Call Notes record carries no Call Notes ID title, so it cannot be identified." };
-  }
-
-  const version = properties.Version?.number;
-  if (typeof version !== "number" || !Number.isInteger(version) || version < 0) {
-    // Read straight off the number property rather than through plainText()
-    // and a parse: plainText() would render a missing Version as "" and
-    // Number("") is 0, which would silently present an unversioned record as
-    // Version 0 instead of refusing it.
-    return { ok: false, reason: "the located Call Notes record's Version property is missing or is not a non-negative integer, so no exact current Version can be bound." };
-  }
-
-  const callDate = properties["Call Date"]?.date?.start;
-  return {
-    ok: true,
-    record: {
-      callNotesId,
-      entity: entityToken.trim(),
-      matter: matterToken.trim(),
-      callDate: typeof callDate === "string" ? callDate : "",
-      callType: plainText(properties["Call Type"]),
-      sourceId: plainText(properties["Source ID"]),
-      sourceType: plainText(properties["Source Type"]),
-      version,
-    },
-  };
-}
+/** The free-text reference convention and the registry reader live in
+ * ./callNotesReference.ts (a leaf module, so handoffSources.ts -- the
+ * direct-page Sources resolver -- can share exactly this implementation
+ * without an import cycle). They are re-exported here unchanged: every
+ * existing importer of this module keeps the same names and the same
+ * behavior; there is still exactly ONE implementation of each. */
+export { extractCallNotesReference, readApprovalRecord, type CallNotesReference } from "./callNotesReference";
+import { extractCallNotesReference, readApprovalRecord } from "./callNotesReference";
 
 /**
  * The governed record's eight registry fields, rendered for a model to read.
@@ -265,14 +132,73 @@ export async function retrieveAndConsumeCallNotes(
   handoffId: string,
   tokens: { entityToken: string; matterToken: string },
   access: AccessContext,
+  /**
+   * Test seam for the direct-page Sources path, mirroring
+   * `resolveHandoffSources`'s own: a contract table to resolve a
+   * Sources-enabled Handoff's route against instead of the production one.
+   * Production callers (salesExecutive's call-notes pickup) never pass it;
+   * omitting it resolves against `HANDOFF_SOURCE_ROUTE_CONTRACTS` exactly
+   * as production does. It has no effect on a legacy (Sources-absent)
+   * Handoff, which resolves before any route lookup.
+   */
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
 ): Promise<CallNotesConsumption> {
   const refuse = (detail: string): CallNotesConsumption => ({
     ok: false,
     reason: `Call Notes consumption refused for Handoff ${handoffId} -- ${detail}`,
   });
 
-  // ---- Gate 1: the Handoff's own reference -------------------------------
+  // ---- Gate 0: the Handoff's direct-page Sources property, if it has one --
+  // Compatibility seam: a Handoff with no `Sources` property resolves
+  // `legacy` here and gates 1-5 below run exactly as they always have (the
+  // free-text Call_Notes_ID reference convention). A SOURCES-ENABLED
+  // Handoff takes the canonical path instead: resolveHandoffSources has
+  // fetched the exact referenced page by id and validated its real parent
+  // database, the route contract, its Entity/Matter binding to this
+  // Handoff's tokens, its lifecycle Status, its registry fields, and its
+  // recorded approval attestation -- so the legacy reference extraction and
+  // exact database lookup below are deliberately NOT re-run (that would be
+  // a second mechanism over the same question, and a free-text reference is
+  // never a fallback for a canonical page). Consumption here is still
+  // stricter than Strategy's read-only acceptance: Ready is required,
+  // because this path transitions Ready -> Consumed.
   const handoff = await getPage(env, handoffId, access);
+  const sources = await resolveHandoffSources(env, {
+    properties: handoff.properties,
+    tokens,
+    route: {
+      fromUnit: plainText(handoff.properties?.["From Unit"]),
+      toUnit: plainText(handoff.properties?.["To Unit"]),
+    },
+    access,
+    ...(contracts ? { contracts } : {}),
+  });
+  if (!sources.ok) return refuse(sources.reason);
+
+  if (sources.mode === "sources") {
+    if (!sources.callNotes) {
+      return refuse(
+        `the Handoff's Sources property carries no canonical Call Notes page, and with the Sources path enabled the free-text Call_Notes_ID reference is never consulted as a fallback -- there is no governed Call Notes record this Handoff establishes.`,
+      );
+    }
+    const located = sources.callNotes;
+    if (located.status !== "Ready") {
+      return refuse(
+        `Call Notes record ${located.pageId} reports Status "${located.status}", not "Ready" -- only a Ready record may be consumed.`,
+      );
+    }
+    const claim = await consumeReadyCallNotes(env, located.pageId, access);
+    if (!claim.consumed) return refuse(claim.reason);
+    return {
+      ok: true,
+      record: located.record,
+      pageId: located.pageId,
+      attestation: located.attestation,
+      evidenceText: callNotesEvidenceText(located.record),
+    };
+  }
+
+  // ---- Gate 1: the Handoff's own reference -------------------------------
   const reference = extractCallNotesReference(handoff.properties);
   if (!reference.ok) return refuse(reference.reason);
 
