@@ -1072,8 +1072,6 @@ function mockPickupFetch(t: any, opts: {
       matter: "M-12",
       callDate: "2026-09-28",
       callType: "Discovery",
-      sourceId: "SRC-1",
-      sourceType: "Sales Call",
       version: 1,
     };
     const attestation = await buildRecordApprovalMarker(registry, "Approved");
@@ -1085,8 +1083,7 @@ function mockPickupFetch(t: any, opts: {
         "Call Notes ID": { title: [{ plain_text: "CN-007", text: { content: "CN-007" } }] },
         "Call Date": { date: { start: "2026-09-28" } },
         "Call Type": { select: { name: "Discovery" } },
-        "Source ID": { rich_text: [{ plain_text: "SRC-1", text: { content: "SRC-1" } }] },
-        "Source Type": { select: { name: "Sales Call" } },
+        "Note": { rich_text: [{ plain_text: "Direct client statement: the quarterly reporting pack takes four staff days to assemble." }] },
         "Status": { select: { name: "Ready" } },
         "Version": { number: 1 },
         "Entity": { relation: [{ id: "entity-page-1" }] },
@@ -1273,8 +1270,6 @@ test("Governed Call Notes consumption: the consumed record's registry fields -- 
       "Matter: M-12",
       "Call Date: 2026-09-28",
       "Call Type: Discovery",
-      "Source ID: SRC-1",
-      "Source Type: Sales Call",
       "Version: 1",
     ].join("\n"),
     "the consumed Call Notes record's own registry fields must become the session's value context -- read from that record and nowhere else",

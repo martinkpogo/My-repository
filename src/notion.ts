@@ -337,15 +337,20 @@ export function uniqueId(prop: any): string {
  * Retrieves a Notion page's block-children content as plain text, paginating
  * as needed.
  *
- * Two callers, one reader. **Governance pages** (Hat Definitions, Universal
- * Role Contract, etc.) are a flat sequence of a `code` block (the
- * machine-readable yaml definition) followed by prose blocks (the
- * human-readable explanation) — code blocks are tagged so the two stay
- * distinguishable. **An approved Call Notes record's page body** is the other:
- * Strategy reads it as the substantive evidence behind an attested record
- * (see `src/units/strategy/strategyEvidence.ts`), and that live record was
- * verified to hold its evidence as top-level heading / paragraph / list /
- * divider blocks, which is exactly what this function returns.
+ * **Governance pages** (Hat Definitions, Universal
+ * Role Contract, etc.) are the reader's production callers: a flat sequence
+ * of a `code` block (the machine-readable yaml definition) followed by prose
+ * blocks (the human-readable explanation) — code blocks are tagged so the two
+ * stay distinguishable.
+ *
+ * An approved Call Notes record is deliberately NOT one of this helper's
+ * callers: since the 2026-10-17 canonical-schema alignment, the record's
+ * `Note` rich-text property is the sole source of substantive note content,
+ * read from the page's own properties by
+ * `src/units/strategy/strategyEvidence.ts` — never the page body. This
+ * helper remains available to any governed page-content reader, but no Call
+ * Notes path reaches it, and adding a body fallback for Call Notes would be
+ * a contract change, not a reuse.
  *
  * Only top-level blocks are read; nested children are deliberately NOT
  * recursed into — that is the boundary of this helper, not an oversight. If a

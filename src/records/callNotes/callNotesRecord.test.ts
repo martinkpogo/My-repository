@@ -32,10 +32,22 @@ const REGISTRY: CallNotesApprovalRecord = {
   matter: "M-12",
   callDate: "2026-09-28",
   callType: "Discovery",
-  sourceId: "SRC-1",
-  sourceType: "Sales Call",
   version: 1,
 };
+
+/** The record's substantive `Note` (canonical schema: the sole source of note content). */
+const NOTE =
+  "Direct client statement: the quarterly reporting pack takes four staff days to assemble because three systems disagree on project codes.";
+
+/** The six canonical registry fields, in order -- what the evidence text must carry. */
+const REGISTRY_EVIDENCE = [
+  "Call_Notes_ID: CN-007",
+  "Entity: E-47",
+  "Matter: M-12",
+  "Call Date: 2026-09-28",
+  "Call Type: Discovery",
+  "Version: 1",
+].join("\n");
 
 const DEFAULT_REASON = "Call notes for commercial qualification. Call_Notes_ID: CN-007";
 const DEFAULT_TITLE = "Call Notes (Matter: M-12)";
@@ -109,8 +121,7 @@ async function callNotesPage(
       "Call Notes ID": { title: [{ plain_text: "CN-007", text: { content: "CN-007" } }] },
       "Call Date": { date: { start: "2026-09-28" } },
       "Call Type": { select: { name: "Discovery" } },
-      "Source ID": rich("SRC-1"),
-      "Source Type": { select: { name: "Sales Call" } },
+      "Note": rich(NOTE),
       "Status": { select: { name: "Ready" } },
       "Version": { number: 1 },
       "Entity": { relation: [{ id: "entity-page-1" }] },
@@ -491,16 +502,7 @@ test("consumption: a valid reference, record and attestation is retrieved, consu
 
   assert.equal(
     result.evidenceText,
-    [
-      "Call_Notes_ID: CN-007",
-      "Entity: E-47",
-      "Matter: M-12",
-      "Call Date: 2026-09-28",
-      "Call Type: Discovery",
-      "Source ID: SRC-1",
-      "Source Type: Sales Call",
-      "Version: 1",
-    ].join("\n"),
+    REGISTRY_EVIDENCE,
     "the governed record's own registry fields are what the existing qualification path receives",
   );
   assert.ok(
@@ -521,7 +523,7 @@ test("consumption: the evidence text carries every canonical registry field and 
       `evidence text must carry ${field}`,
     );
   }
-  assert.equal(result.evidenceText.split("\n").length, CALL_NOTES_APPROVAL_FIELDS.length, "no field beyond the canonical eight reaches the model");
+  assert.equal(result.evidenceText.split("\n").length, CALL_NOTES_APPROVAL_FIELDS.length, "no field beyond the canonical six reaches the model");
   assert.equal(callNotesEvidenceText(result.record), result.evidenceText, "the evidence text is derived from the record just consumed, not assembled separately");
   assert.equal(log.liveStatus, "Consumed");
 });
@@ -591,16 +593,7 @@ test("sources: a Sources-enabled Handoff consumes the exact canonical page it na
   );
   assert.equal(
     result.evidenceText,
-    [
-      "Call_Notes_ID: CN-007",
-      "Entity: E-47",
-      "Matter: M-12",
-      "Call Date: 2026-09-28",
-      "Call Type: Discovery",
-      "Source ID: SRC-1",
-      "Source Type: Sales Call",
-      "Version: 1",
-    ].join("\n"),
+    REGISTRY_EVIDENCE,
     "the same registry fields the legacy transport passed on -- only HOW the record was located changed",
   );
   assert.ok(

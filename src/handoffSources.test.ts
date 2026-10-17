@@ -35,8 +35,6 @@ const REGISTRY: CallNotesApprovalRecord = {
   matter: "M-12",
   callDate: "2026-09-28",
   callType: "Discovery",
-  sourceId: "SRC-1",
-  sourceType: "Sales Call",
   version: 1,
 };
 
@@ -247,8 +245,7 @@ async function callNotesPageFixture(
       "Call Notes ID": { title: [{ plain_text: registry.callNotesId }] },
       "Call Date": { date: { start: registry.callDate } },
       "Call Type": { select: { name: registry.callType } },
-      "Source ID": { rich_text: [{ plain_text: registry.sourceId }] },
-      "Source Type": { select: { name: registry.sourceType } },
+      Note: { rich_text: [{ plain_text: "Direct client statement: the quarterly reporting pack takes four staff days to assemble." }] },
       Status: { select: { name: "Ready" } },
       Version: { number: registry.version },
       Entity: { relation: [{ id: "entity-page-1" }] },

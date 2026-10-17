@@ -8,9 +8,11 @@ import type { AccessContext } from "../../access";
  * **The Runtime owns `Ready` -> `Consumed` and nothing else.** It never creates
  * a Call Notes record (Isolated Sales is the creation authority), never writes
  * `Superseded`, never writes any other property of the record, and never
- * re-reads or re-writes a record it already consumed. The lifecycle is
- * `Ready -> Consumed -> Superseded`: this module advances the first arrow, and
- * Isolated Sales owns both the create and the second.
+ * re-reads or re-writes a record it already consumed. The canonical schema
+ * (aligned 2026-10-17) permits only `Ready` and `Consumed`: this module
+ * advances `Ready -> Consumed`, and Isolated Sales owns creation. A legacy
+ * `Superseded` value is no longer a permitted option; if one is ever present
+ * it is refused exactly like any other non-Ready Status, with no write.
  *
  * **Why this shape.** It is deliberately the same compare-current-status ->
  * write-or-refuse guard `claimPendingHandoff` uses in `src/handoffLifecycle.ts`,
@@ -22,8 +24,8 @@ import type { AccessContext } from "../../access";
  * that true is re-reading Status at the actual write boundary rather than
  * trusting whatever the caller last saw.
  *
- * A record that is already `Consumed`, is `Superseded`, or carries any other
- * Status is refused **with no write at all**: the caller is told the current
+ * A record that is already `Consumed`, or carries any other Status, is refused
+ * **with no write at all**: the caller is told the current
  * Status and nothing is touched. That refusal is what makes replay safe -- the
  * second attempt observes `Consumed`, declines, and the record's history stays
  * a single honest transition instead of a double-consumed one.

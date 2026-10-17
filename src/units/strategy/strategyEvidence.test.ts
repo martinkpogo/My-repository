@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readApprovedCallNotesEvidence, readGoogleDocSourceEvidence } from "./strategyEvidence";
+import { readApprovedCallNotesEvidence, readCallNotesNoteProperty, readGoogleDocSourceEvidence } from "./strategyEvidence";
 import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
 import { workSessionContext } from "../../access";
 import type { Env, WorkState } from "../../types";
@@ -12,9 +12,11 @@ import type { Env, WorkState } from "../../types";
  * (a query on the Call Notes store), and the direct-page `Sources`
  * property (an exact page fetch). The invariants the operating model
  * promises hold for both: read-only (nothing is ever consumed here),
- * attestation verified before any body is read, a body that only points at
- * evidence refused rather than presented, and -- the point of the Sources
- * path -- no search ever standing in for a direct reference, nor a direct
+ * attestation verified before any note content is read, the record's `Note`
+ * property as the SOLE substantive source (the page body is never read, and
+ * a Note that is missing, wrong-typed, empty, or only points at evidence is
+ * refused rather than presented), and -- the point of the Sources path --
+ * no search ever standing in for a direct reference, nor a direct
  * reference silently downgraded to one.
  */
 
@@ -24,16 +26,14 @@ const REGISTRY: CallNotesApprovalRecord = {
   matter: "M-12",
   callDate: "2026-09-28",
   callType: "Discovery",
-  sourceId: "SRC-1",
-  sourceType: "Sales Call",
   version: 1,
 };
 
 const SOURCES_PAGE_ID = "aaaa1111-bbbb-2222-cccc-3333dddd4444";
 const SOURCES_PAGE_URL = `https://www.notion.so/Acme-Call-Notes-aaaa1111-bbbb-2222-cccc-3333dddd4444`;
 
-/** Distinct from every registry field, so "the body reached the evidence" is unambiguous. */
-const BODY =
+/** Distinct from every registry field, so "the note reached the evidence" is unambiguous. */
+const NOTE =
   "Direct client statement: the quarterly reporting pack takes four staff days to assemble because three systems disagree on project codes.";
 
 function fakeEnv(): Env {
@@ -102,7 +102,7 @@ interface MockLog {
   requests: string[];
   /** Every query issued against the Call Notes store -- the search only the legacy transport may make. */
   callNotesQueries: any[];
-  /** Page ids whose body blocks were actually read. */
+  /** Page ids whose block children were actually read -- must stay empty: no Call Notes path reads a page body. */
   blockReads: string[];
 }
 
@@ -120,8 +120,7 @@ async function recordFixture(
       "Call Notes ID": { title: [{ plain_text: registry.callNotesId }] },
       "Call Date": { date: { start: registry.callDate } },
       "Call Type": { select: { name: registry.callType } },
-      "Source ID": { rich_text: [{ plain_text: registry.sourceId }] },
-      "Source Type": { select: { name: registry.sourceType } },
+      Note: rich(NOTE),
       Status: { select: { name: "Ready" } },
       Version: { number: registry.version },
       Entity: { relation: [{ id: "entity-page-1" }] },
@@ -139,13 +138,17 @@ function mockEvidenceFetch(
     sourcesPage?: any;
     /** The record the LEGACY exact-title query returns. */
     queryRecord?: any;
-    /** The body blocks served for any page id. */
+    /**
+     * The body blocks served for any page id. Deliberately still served so a
+     * body-only record can be attempted on purpose -- proof that the reader
+     * refuses it and never fetches it.
+     */
     body?: string;
   } = {},
 ): MockLog {
   const originalFetch = globalThis.fetch;
   const log: MockLog = { requests: [], callNotesQueries: [], blockReads: [] };
-  const body = opts.body ?? BODY;
+  const body = opts.body ?? NOTE;
 
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
@@ -195,19 +198,10 @@ function mockEvidenceFetch(
       return new Response(JSON.stringify(opts.sourcesPage), { status: 200 });
     }
 
-    if (urlStr.endsWith("/pages/cn-page-1") && method === "GET") {
-      // The legacy record's own page: the body reader resolves the page's
-      // real parent before it reads a single block.
-      return new Response(
-        JSON.stringify({
-          id: "cn-page-1",
-          url: "https://notion.so/cn-page-1",
-          parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
-          properties: {},
-        }),
-        { status: 200 },
-      );
-    }
+    // NOTE: there is deliberately NO handler for `/pages/cn-page-1`. Since the
+    // Note-based reader, no Call Notes path re-fetches a located record's page:
+    // the Note comes straight from the properties each governed read already
+    // returned. Any such fetch lands on the throw below, which is the proof.
 
     if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
       const pageId = urlStr.split("/blocks/")[1].split("/")[0];
@@ -250,10 +244,39 @@ async function expectRefused(
 }
 
 // ---------------------------------------------------------------------------
+// The Note reader's own shape validation: present, rich text, non-empty.
+// ---------------------------------------------------------------------------
+
+test("note reader: the three defects -- absent, wrong-typed, empty -- are each their own structured, non-sensitive reason", () => {
+  const missing = readCallNotesNoteProperty({});
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.match(missing.reason, /carries no Note property/);
+
+  const wrongType = readCallNotesNoteProperty({ Note: { number: 5 } });
+  assert.equal(wrongType.ok, false);
+  if (!wrongType.ok) assert.match(wrongType.reason, /not rich text/);
+
+  const wrongShape = readCallNotesNoteProperty({ Note: { rich_text: "not-an-array" } });
+  assert.equal(wrongShape.ok, false);
+  if (!wrongShape.ok) assert.match(wrongShape.reason, /not rich text/);
+
+  const empty = readCallNotesNoteProperty({ Note: { rich_text: [{ plain_text: "   \n  " }] } });
+  assert.equal(empty.ok, false);
+  if (!empty.ok) assert.match(empty.reason, /carries an empty Note property/);
+
+  const healthy = readCallNotesNoteProperty({ Note: rich(NOTE) });
+  assert.equal(healthy.ok, true, healthy.ok ? "" : healthy.reason);
+  if (healthy.ok) assert.equal(healthy.note, NOTE, "the rich text is extracted verbatim");
+  for (const failure of [missing, wrongType, wrongShape, empty]) {
+    if (!failure.ok) assert.ok(!failure.reason.includes("quarterly"), "a refusal reason must never carry note content");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Legacy: the free-text reference transport, unchanged.
 // ---------------------------------------------------------------------------
 
-test("legacy: a Handoff with no Sources property resolves through the free-text reference -- one exact query, body read after attestation", async (t) => {
+test("legacy: a Handoff with no Sources property resolves through the free-text reference -- one exact query, the Note read after attestation and never the page body", async (t) => {
   const log = mockEvidenceFetch(t, { queryRecord: await recordFixture("cn-page-1") });
   const result = await readEvidence(properties());
 
@@ -265,9 +288,13 @@ test("legacy: a Handoff with no Sources property resolves through the free-text 
   assert.equal(result.status, "Ready");
   assert.equal(log.callNotesQueries.length, 1, "exactly one exact-title query locates the record");
   assert.equal(log.callNotesQueries[0]?.filter?.property, "Call Notes ID", "the query is the exact-title lookup, not a broad scan");
-  assert.deepEqual(log.blockReads, ["cn-page-1"], "the record's own body is read once, after the attestation");
+  assert.deepEqual(log.blockReads, [], "the record's page body is NEVER read -- the Note property is the sole source");
   assert.ok(result.evidenceText.includes("Call_Notes_ID: CN-007"), "registry fields identify the record");
-  assert.ok(result.evidenceText.includes(BODY), "the body is the substantive evidence");
+  assert.ok(result.evidenceText.includes(NOTE), "the Note is the substantive evidence");
+  assert.ok(
+    result.evidenceText.includes("=== Approved Call Notes note (the substantive evidence"),
+    "the Note is presented under its own label, never as metadata",
+  );
 });
 
 test("legacy: a missing free-text reference is refused -- nothing is inferred from Entity/Matter", async (t) => {
@@ -280,11 +307,22 @@ test("legacy: a missing free-text reference is refused -- nothing is inferred fr
   assert.deepEqual(log.blockReads, [], "no body is read");
 });
 
+test("legacy: a record whose page body carries text but whose Note is absent never succeeds -- the body is not a fallback", async (t) => {
+  const log = await expectRefused(
+    t,
+    properties(),
+    /carries no Note property/,
+    { queryRecord: await recordFixture("cn-page-1", { Note: undefined }), body: NOTE },
+  );
+  assert.equal(log.callNotesQueries.length, 1, "the record itself was located and every gate ahead of the Note passed");
+  assert.deepEqual(log.blockReads, [], "the substantive-looking page body is never fetched as a fallback");
+});
+
 // ---------------------------------------------------------------------------
 // Sources: the canonical-page transport.
 // ---------------------------------------------------------------------------
 
-test("sources: the canonical page is read directly -- the exact-title query is never issued, and the evidence is the page's own body", async (t) => {
+test("sources: the canonical page is read directly -- the exact-title query is never issued, and the evidence is that page's own Note", async (t) => {
   const log = mockEvidenceFetch(t, { sourcesPage: await recordFixture(SOURCES_PAGE_ID) });
   const result = await readEvidence(properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }));
 
@@ -295,9 +333,9 @@ test("sources: the canonical page is read directly -- the exact-title query is n
   assert.equal(result.callNotesId, "CN-007");
   assert.equal(result.status, "Ready");
   assert.equal(log.callNotesQueries.length, 0, "the direct page id replaces the search entirely");
-  assert.deepEqual(log.blockReads, [SOURCES_PAGE_ID], "the canonical record's own body is the evidence");
+  assert.deepEqual(log.blockReads, [], "the canonical record's page body is never read -- its Note is the evidence");
   assert.ok(result.evidenceText.includes("registry fields (identification"), "identification and evidence stay labelled");
-  assert.ok(result.evidenceText.includes(BODY));
+  assert.ok(result.evidenceText.includes(NOTE));
 });
 
 test("sources: an unreadable canonical page is refused, and NO search stands in for it", async (t) => {
@@ -330,20 +368,34 @@ test("sources: a broken free-text Call_Notes_ID beside a Sources property is ref
   );
 });
 
-test("sources: a tampered attestation refuses BEFORE any body is read", async (t) => {
+test("sources: an Entity mismatch refuses before any note content is read, and the refusal carries none", async (t) => {
+  const log = mockEvidenceFetch(t, {
+    sourcesPage: await recordFixture(SOURCES_PAGE_ID, { Entity: { relation: [{ id: "entity-page-9" }] } }),
+  });
+  const result = await readEvidence(properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }));
+  assert.equal(result.ok, false, "a record not bound to this Handoff's Entity must refuse");
+  if (result.ok) return;
+  assert.match(result.reason, /not bound to this Handoff's Entity/);
+  assert.ok(!result.reason.includes("quarterly"), "the note content must not leak into a pre-content refusal");
+  assert.deepEqual(log.blockReads, [], "nothing substantive is read for an unbound record");
+});
+
+test("sources: a tampered attestation refuses BEFORE any note content is read", async (t) => {
   const valid = await recordFixture(SOURCES_PAGE_ID);
   const marker = valid.properties["Approval Attestation"].rich_text[0].plain_text as string;
   const tampered = marker.replace(/fields_hash=[0-9a-f]+/, `fields_hash=${"0".repeat(64)}`);
-  const log = await expectRefused(
-    t,
-    properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }),
-    /fields_hash does not match/,
-    { sourcesPage: { ...valid, properties: { ...valid.properties, "Approval Attestation": rich(tampered) } } },
-  );
+  const log = mockEvidenceFetch(t, {
+    sourcesPage: { ...valid, properties: { ...valid.properties, "Approval Attestation": rich(tampered) } },
+  });
+  const result = await readEvidence(properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }));
+  assert.equal(result.ok, false, "an unproven record must refuse");
+  if (result.ok) return;
+  assert.match(result.reason, /fields_hash does not match/);
+  assert.ok(!result.reason.includes("quarterly"), "the note of an unproven record is never even parsed into a refusal");
   assert.deepEqual(log.blockReads, [], "the body of an unproven record is never retrieved");
 });
 
-test("sources: a Superseded canonical page is refused -- no approved current evidence", async (t) => {
+test("sources: a Superseded canonical page is refused -- no approved current evidence (a legacy value, still never consumed)", async (t) => {
   await expectRefused(
     t,
     properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }),
@@ -361,21 +413,40 @@ test("sources: an already-Consumed canonical page still carries approved evidenc
   assert.equal(result.via, "sources");
 });
 
-test("sources: an empty page body is refused rather than presented as evidence", async (t) => {
+test("sources: a record whose page body carries text but whose Note is absent never succeeds -- the body is not a fallback", async (t) => {
+  const log = await expectRefused(
+    t,
+    properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }),
+    /carries no Note property/,
+    { sourcesPage: await recordFixture(SOURCES_PAGE_ID, { Note: undefined }), body: NOTE },
+  );
+  assert.deepEqual(log.blockReads, [], "the substantive-looking page body is never fetched as a fallback");
+});
+
+test("sources: an empty Note is refused rather than presented as evidence", async (t) => {
   await expectRefused(
     t,
     properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }),
-    /carries no page body/,
-    { sourcesPage: await recordFixture(SOURCES_PAGE_ID), body: "" },
+    /carries an empty Note property/,
+    { sourcesPage: await recordFixture(SOURCES_PAGE_ID, { Note: rich("   ") }) },
   );
 });
 
-test("sources: a body that only points at evidence is refused by the same test order 1 uses", async (t) => {
+test("sources: a wrong-typed Note property is refused rather than coerced", async (t) => {
+  await expectRefused(
+    t,
+    properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }),
+    /Note property that is not rich text/,
+    { sourcesPage: await recordFixture(SOURCES_PAGE_ID, { Note: { number: 5 } }) },
+  );
+});
+
+test("sources: a Note that only points at evidence is refused by the same test order 1 uses", async (t) => {
   await expectRefused(
     t,
     properties({ Sources: sourcesProperty([SOURCES_PAGE_URL]) }),
     /only points at evidence/,
-    { sourcesPage: await recordFixture(SOURCES_PAGE_ID), body: "Call_Notes_ID: CN-007" },
+    { sourcesPage: await recordFixture(SOURCES_PAGE_ID, { Note: rich("Call_Notes_ID: CN-007") }) },
   );
 });
 

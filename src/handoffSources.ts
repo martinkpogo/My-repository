@@ -50,8 +50,9 @@ import { getSessionStub } from "./sessionRouting";
  * current evidence, its registry fields must be readable, and its
  * `Approval Attestation` must re-parse against those exact fields (the
  * same `parseRecordApprovalMarker` the legacy query path validates -- no
- * new approval mechanism, and Call Notes approval hashing / evidence
- * versioning is untouched).
+ * new approval mechanism; the marker format, including its six-field
+ * `fields_hash` after the 2026-10-17 canonical-schema alignment, is owned
+ * by `src/records/callNotes/callNotesMarker.ts`).
  *
  * **Google sources bind through registration, never through access (Phase
  * 2).** A `Sources` entry may also name an exact Google Doc
@@ -726,7 +727,8 @@ function defaultReadBoundWorkState(env: Env): (workId: string) => Promise<BoundW
  *
  * Consumers keep their own evidence/lifecycle semantics on top of this:
  * Sales's consume path still requires `Ready` before transitioning, and
- * Strategy still reads the page body only after this resolution succeeded.
+ * Strategy still reads the canonical record's `Note` property only after
+ * this resolution succeeded.
  * This resolver adds no write of any kind.
  */
 export async function resolveHandoffSources(
