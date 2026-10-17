@@ -1324,7 +1324,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
     await updateHandoff(env, state.handoffId!, {
       Status: select("Held"),
       "Open Questions": richText(
-        "Qualification assessment was inconclusive from the consumed Call Notes record's registry fields. Re-open the record (and its Evidence Package) and re-submit.",
+        "Qualification assessment was inconclusive from the consumed Call Notes record's registry fields. Re-open the record (and its Note) and re-submit.",
       ),
     }, workSessionContext(state)).catch((err) => console.error(`Sales: failed to mark call-notes Handoff ${state.handoffId} Held`, err));
     await sendOperationsMessage(

@@ -47,18 +47,19 @@ import { resolveHandoffSources, type HandoffSourceRouteContract } from "../../ha
  *      `consumeReadyCallNotes`.
  *
  * What this module deliberately does NOT do: create a Call Notes record, write
- * anything other than the Status transition, retrieve or verify the Evidence
- * Package, re-run an approval flow, or mint an ApprovalProof. The attestation
- * it validates is the procedural one the creation authority recorded on the
- * record -- it is not proof that any Runtime-side approval happened, and
- * nothing here should be described as having verified evidence contents.
+ * anything other than the Status transition, re-run an approval flow, or mint
+ * an ApprovalProof. The attestation it validates is the procedural one the
+ * creation authority recorded on the record -- it is not proof that any
+ * Runtime-side approval happened, and nothing here should be described as
+ * having verified evidence contents.
  *
- * Reading the record's PAGE BODY is deliberately absent from this path too:
- * Sales's consumption qualifies the record's registry fields, and the body is
- * read only by Strategy's separate, read-only evidence retrieval through the
- * same five gates plus a sixth (see `src/units/strategy/strategyEvidence.ts`).
- * Nothing here assumes the registry fields are the whole of a record's
- * evidence, and nothing there changes what Sales receives here.
+ * Reading the record's substantive `Note` property is deliberately absent from
+ * this path too: Sales's consumption qualifies the record's registry fields,
+ * and the `Note` is read only by Strategy's separate, read-only evidence
+ * retrieval through the same five gates plus a final step (see
+ * `src/units/strategy/strategyEvidence.ts`). Nothing here assumes the registry
+ * fields are the whole of a record's evidence, and nothing there changes what
+ * Sales receives here.
  */
 
 /** The free-text reference convention and the registry reader live in
@@ -71,20 +72,21 @@ export { extractCallNotesReference, readApprovalRecord, type CallNotesReference 
 import { extractCallNotesReference, readApprovalRecord } from "./callNotesReference";
 
 /**
- * The governed record's eight registry fields, rendered for a model to read.
+ * The governed record's six canonical registry fields, rendered for a model to
+ * read.
  *
  * Exactly `CALL_NOTES_APPROVAL_FIELDS`' own names -- so that what is presented
  * is what the governed record says and nothing else. Presentation only: this
- * text is never hashed, never written back anywhere, and carries no claim
- * about the Evidence Package (which no path in this repository retrieves) and
- * no narrative the record does not itself hold.
+ * text is never hashed, never written back anywhere, and carries no claim the
+ * record does not itself hold. (The canonical Call Notes schema carries no
+ * Evidence Package properties, so nothing about one is ever presented here.)
  *
  * What it IS, by caller: Sales's own `retrieveAndConsumeCallNotes` hands these
  * fields, unchanged, to the existing commercial-value extraction and
  * qualification path -- that contract is untouched by Strategy's evidence
  * retrieval. Strategy's read-only path (`src/units/strategy/strategyEvidence.ts`)
  * uses this same rendering as the IDENTIFICATION section of its evidence base
- * and appends the record's separately-read page body, labelled, as the
+ * and appends the record's separately-read `Note` property, labelled, as the
  * substantive evidence: the registry fields say which approved record was
  * read, they are never the situation a diagnosis is about.
  */
@@ -95,8 +97,6 @@ export function callNotesEvidenceText(record: CallNotesApprovalRecord): string {
     `Matter: ${record.matter}`,
     `Call Date: ${record.callDate}`,
     `Call Type: ${record.callType}`,
-    `Source ID: ${record.sourceId}`,
-    `Source Type: ${record.sourceType}`,
     `Version: ${String(record.version)}`,
   ].join("\n");
 }
@@ -266,8 +266,10 @@ export async function retrieveAndConsumeCallNotes(
 
   // Only now -- reference valid, record located exactly once, binding proven,
   // attestation proven against THIS record -- is the lifecycle transition
-  // attempted. Its own refusal (already Consumed, Superseded, ...) comes back
-  // as a refusal too, and is what makes a replay a no-op.
+  // attempted. Its own refusal (already Consumed, or any Status other than
+  // Ready -- `Superseded` is no longer a permitted schema option but is still
+  // refused rather than consumed) comes back as a refusal too, and is what
+  // makes a replay a no-op.
   const claim = await consumeReadyCallNotes(env, located.id, access);
   if (!claim.consumed) return refuse(claim.reason);
 

@@ -8,9 +8,25 @@
  * references (its `Call_Notes_ID`, Entity reference, Matter reference,
  * Version), and `fields_hash` -- a SHA-256 over the canonical text of the
  * agreed registry fields. The hash is what extends the binding beyond the
- * four references the marker spells out: change `Call Date`, `Call Type`,
- * `Source ID`, or `Source Type` after the attestation was written and the
- * hash no longer matches, so the record fails closed.
+ * four references the marker spells out: change `Call Date` or `Call Type`
+ * after the attestation was written and the hash no longer matches, so the
+ * record fails closed.
+ *
+ * **Canonical-schema alignment (2026-10-17).** The live Call Notes schema
+ * removed the `Source ID` and `Source Type` properties (along with
+ * `Evidence Package ID` / `Evidence Package Location`), so the canonical
+ * hash now binds the SIX remaining registry fields (`Call_Notes_ID`,
+ * `Entity`, `Matter`, `Call Date`, `Call Type`, `Version`) -- the marker
+ * contract carries no dependency on the removed properties. Changing the
+ * hashed field list changes every hash by construction, which is the
+ * deliberate migration boundary: a marker written under the former
+ * eight-field format fails closed at `fields_hash` (the reader can no longer
+ * even recompute it -- the two removed property values no longer exist on
+ * any live record) and is NEVER reinterpreted as a new-format approval. The
+ * external creation authority (Isolated Sales, which writes this marker
+ * outside the Worker) must compute `fields_hash` from this module's current
+ * format; until it does, new records' markers refuse fail-closed rather than
+ * validate -- coordination, recorded in docs/enig-operating-model.md.
  *
  * **What it is not.** It is **procedural assurance, not cryptographic proof
  * of Martin's approval event.** Nothing in this channel proves that a human
@@ -51,9 +67,11 @@ export type RecordApprovalResult = "Approved" | "Rejected";
 /**
  * The Call Notes registry fields the approval attestation binds, in the fixed
  * order the canonical hash uses. Field names are the contract's own
- * (`Call_Notes_ID`, `Call Date`, ...) and are part of the hashed value:
+ * (`Call_Notes_ID`, `Entity`, ...) and are part of the hashed value:
  * renaming one changes every hash, which is deliberate rather than a detail to
- * paper over.
+ * paper over. Exactly the six registry fields the canonical Call Notes schema
+ * carries; the removed `Source ID` / `Source Type` properties are deliberately
+ * absent and must never re-enter this list (see the module header).
  */
 export const CALL_NOTES_APPROVAL_FIELDS = [
   "Call_Notes_ID",
@@ -61,8 +79,6 @@ export const CALL_NOTES_APPROVAL_FIELDS = [
   "Matter",
   "Call Date",
   "Call Type",
-  "Source ID",
-  "Source Type",
   "Version",
 ] as const;
 
@@ -90,10 +106,6 @@ export interface CallNotesApprovalRecord {
   callDate: string;
   /** `Call Type`. */
   callType: string;
-  /** `Source ID`. */
-  sourceId: string;
-  /** `Source Type`. */
-  sourceType: string;
   /** `Version`. */
   version: number;
 }
@@ -142,8 +154,6 @@ export function canonicalCallNotesApprovalText(record: CallNotesApprovalRecord):
     Matter: record.matter.trim(),
     "Call Date": record.callDate.trim(),
     "Call Type": record.callType.trim(),
-    "Source ID": record.sourceId.trim(),
-    "Source Type": record.sourceType.trim(),
     Version: String(record.version),
   };
   return JSON.stringify(CALL_NOTES_APPROVAL_FIELDS.map((field) => [field, values[field]]));

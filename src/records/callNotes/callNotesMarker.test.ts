@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildMarker } from "../../markerChannel";
+import { hashContent } from "../../contentHash";
 import {
   CALL_NOTES_APPROVAL_FIELDS,
   RECORD_APPROVAL_MARKER_NAME,
@@ -33,8 +34,6 @@ const record: CallNotesApprovalRecord = {
   matter: "M-12",
   callDate: "2026-10-01",
   callType: "Discovery",
-  sourceId: "SRC-1",
-  sourceType: "Sales Call",
   version: 1,
 };
 
@@ -75,17 +74,19 @@ test("valid record-approval marker round trip: written by the creation authority
   assert.strictEqual(parsed.attestation.fieldsHash, await hashCallNotesApprovalRecord(record));
 });
 
-test("the canonical registry fields are exactly the agreed eight, in the order the hash binds them", () => {
+test("the canonical registry fields are exactly the agreed six, in the order the hash binds them -- and never the removed schema fields", () => {
   assert.deepStrictEqual([...CALL_NOTES_APPROVAL_FIELDS], [
     "Call_Notes_ID",
     "Entity",
     "Matter",
     "Call Date",
     "Call Type",
-    "Source ID",
-    "Source Type",
     "Version",
   ]);
+  const canonical = canonicalCallNotesApprovalText(record);
+  assert.ok(!canonical.includes("Source ID"), "the canonical hash text must carry no dependency on the removed Source ID property");
+  assert.ok(!canonical.includes("Source Type"), "the canonical hash text must carry no dependency on the removed Source Type property");
+  assert.ok(!canonical.includes("Evidence Package"), "the canonical hash text must carry no dependency on the removed Evidence Package properties");
 });
 
 test("the canonical hash is deterministic for a record, and changes when any field it covers changes", async () => {
@@ -95,8 +96,6 @@ test("the canonical hash is deterministic for a record, and changes when any fie
   for (const changed of [
     { callDate: "2026-10-02" },
     { callType: "Negotiation" },
-    { sourceId: "SRC-2" },
-    { sourceType: "Inbound" },
   ] as Array<Partial<CallNotesApprovalRecord>>) {
     assert.notStrictEqual(
       await hashCallNotesApprovalRecord({ ...record, ...changed }),
@@ -104,6 +103,38 @@ test("the canonical hash is deterministic for a record, and changes when any fie
       `${Object.keys(changed)[0]} must be covered by the hash`,
     );
   }
+});
+
+test("migration boundary: a retired eight-field attestation (the pre-2026-10-17 format that hashed Source ID/Source Type) is refused, never reinterpreted as a new-format approval", async () => {
+  // Reproduce the RETIRED serialization exactly -- the former eight-field
+  // canonical text, hashed with the repository's own hashContent primitive --
+  // and prove the current reader refuses its fields_hash rather than accepting
+  // it under any name. The two removed property values no longer exist on any
+  // live record, so an old-format hash can never be revalidated: the only
+  // honest outcome is a fail-closed refusal.
+  const legacyCanonicalText = JSON.stringify([
+    ["Call_Notes_ID", record.callNotesId],
+    ["Entity", record.entity],
+    ["Matter", record.matter],
+    ["Call Date", record.callDate],
+    ["Call Type", record.callType],
+    ["Source ID", "SRC-1"],
+    ["Source Type", "Sales Call"],
+    ["Version", String(record.version)],
+  ]);
+  const legacyMarker = buildMarker(RECORD_APPROVAL_MARKER_NAME, [
+    ["result", "Approved"],
+    ["record", record.callNotesId],
+    ["entity", record.entity],
+    ["matter", record.matter],
+    ["version", String(record.version)],
+    ["fields_hash", await hashContent(legacyCanonicalText)],
+  ]);
+  assert.match(
+    await refusalReason(legacyMarker),
+    /fields_hash does not match this record's registry fields/,
+    "an old-format marker must fail closed at the hash, never be reinterpreted",
+  );
 });
 
 test("missing marker: no marker, no approval -- and another marker type is never read as this one", async () => {
@@ -208,12 +239,10 @@ test("fields_hash mismatch: a tampered hash, and a registry field that moved aft
   assert.notStrictEqual(tampered, marker, "the marker must actually have been tampered with for this to prove anything");
   assert.match(await refusalReason(tampered), /fields_hash does not match this record's registry fields/);
 
-  // The four fields the marker does not spell out are bound by the hash alone.
+  // The two fields the marker does not spell out are bound by the hash alone.
   for (const drifted of [
     { callDate: "2026-10-05" },
     { callType: "Negotiation" },
-    { sourceId: "SRC-9" },
-    { sourceType: "Inbound" },
   ] as Array<Partial<CallNotesApprovalRecord>>) {
     assert.match(
       await refusalReason(marker, { ...record, ...drifted }),
@@ -223,7 +252,7 @@ test("fields_hash mismatch: a tampered hash, and a registry field that moved aft
   }
 });
 
-test("successful binding: the attestation holds for this record and fails for every one of the eight fields it covers", async () => {
+test("successful binding: the attestation holds for this record and fails for every one of the six fields it covers", async () => {
   const marker = await buildRecordApprovalMarker(record, "Approved");
 
   const parsed = await parseRecordApprovalMarker(marker, record);
@@ -235,8 +264,6 @@ test("successful binding: the attestation holds for this record and fails for ev
     ["Matter", { ...record, matter: "M-13" }],
     ["Call Date", { ...record, callDate: "2026-11-11" }],
     ["Call Type", { ...record, callType: "Negotiation" }],
-    ["Source ID", { ...record, sourceId: "SRC-77" }],
-    ["Source Type", { ...record, sourceType: "Inbound" }],
     ["Version", { ...record, version: 2 }],
   ];
   for (const [field, variant] of changed) {

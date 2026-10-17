@@ -272,8 +272,8 @@ export async function resolveStrategyHandoffContext(
     // 2. Otherwise the approved Call Notes record via the legacy free-text
     //    reference, read read-only and
     //    idempotently by Strategy itself -- strategyEvidence.ts owns the
-    //    order, the six gates (the last of which retrieves the record's own
-    //    page body as the substantive evidence), and why this path never
+    //    order, the six gates (the last of which reads the record's own
+    //    `Note` property as the substantive evidence), and why this path never
     //    consumes.
     // 3. There is no other explicitly governed approved source today, so
     //    nothing else is looked up here BY DESIGN -- see strategyEvidence.ts.
@@ -281,8 +281,8 @@ export async function resolveStrategyHandoffContext(
     //    why it materially affects the decision. Never a generic request.
     let evidenceBase: string;
     if (resolvedSources?.mode === "sources" && resolvedSources.callNotes) {
-      await progress?.advance("The Handoff declares a canonical Call Notes source -- reading that approved record's own page body");
-      const callNotes = await readCallNotesSourceEvidence(env, resolvedSources.callNotes, access);
+      await progress?.advance("The Handoff declares a canonical Call Notes source -- reading that approved record's own Note");
+      const callNotes = readCallNotesSourceEvidence(resolvedSources.callNotes);
       if (!callNotes.ok) {
         return {
           success: false,
@@ -294,7 +294,7 @@ export async function resolveStrategyHandoffContext(
         };
       }
       console.log(
-        `Strategy evidence: Sources-enabled handoff ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, via ${callNotes.via}, read-only, attestation re-verified) and its page body as the evidence base.`,
+        `Strategy evidence: Sources-enabled handoff ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, via ${callNotes.via}, read-only, attestation re-verified) and its Note as the evidence base.`,
       );
       progress?.note(`Read approved Call Notes ${callNotes.callNotesId} (direct-page Sources, read-only, attestation re-verified)`);
       evidenceBase = [
@@ -372,7 +372,7 @@ export async function resolveStrategyHandoffContext(
         };
       }
       console.log(
-        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, via ${callNotes.via}, read-only, attestation re-verified) and its page body as the evidence base.`,
+        `Strategy evidence: order-1 Handoff evidence non-substantive for ${handoffId} -- read approved Call Notes ${callNotes.callNotesId} (Status ${callNotes.status}, via ${callNotes.via}, read-only, attestation re-verified) and its Note as the evidence base.`,
       );
       progress?.note(`Read approved Call Notes ${callNotes.callNotesId} (read-only, attestation re-verified)`);
       evidenceBase = [

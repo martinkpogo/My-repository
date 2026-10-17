@@ -159,8 +159,6 @@ export function readApprovalRecord(
       matter: matterToken.trim(),
       callDate: typeof callDate === "string" ? callDate : "",
       callType: plainText(properties["Call Type"]),
-      sourceId: plainText(properties["Source ID"]),
-      sourceType: plainText(properties["Source Type"]),
       version,
     },
   };
