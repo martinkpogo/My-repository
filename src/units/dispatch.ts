@@ -123,6 +123,8 @@ interface DispatchTarget {
  */
 interface HatInterpretation {
   candidates: string[];
+  /** Stage 1's establishing signal, carried (when present) on the contract as `interpreted_establishing` for a Unit that declared registered Hat relationships. */
+  establishing?: boolean;
   reason?: string;
 }
 
@@ -157,6 +159,7 @@ async function interpretHat(
 
   return {
     candidates: (stage1?.candidates ?? []).filter((name) => hatNames.includes(name)),
+    establishing: stage1?.establishing,
     reason: stage1?.reason,
   };
 }
@@ -183,6 +186,7 @@ function contractForRequest(
       addressed_unit: manifest.unit,
       addressed_hat: priorHat,
       interpreted_hats: interpretation?.candidates,
+      interpreted_establishing: interpretation?.establishing,
     },
   };
   return workContractForRequest(request);

@@ -1,6 +1,7 @@
 import type { Env, Unit, WorkState } from "../types";
 import type { ActionDefinition, ConsequenceLevel } from "../hats/actionRegistry";
 import { validateActionDefinition } from "../hats/actionRegistry";
+import type { RelationshipDefinition } from "../hats/relationships";
 import type { SemanticTaskId } from "../dataBoundary/types";
 import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
 
@@ -258,6 +259,36 @@ export interface UnitManifest {
    * across Units.
    */
   actionClassificationTaskId: SemanticTaskId;
+
+  /**
+   * This Unit's own registered sequential Hat relationships, for Units whose
+   * Stage 1 intake can propose SEVERAL genuinely plausible candidate Hats
+   * and that resolve the tie between them through registered, deterministic
+   * relationships rather than by ambiguity (the shape of Marketing's
+   * Stage 1/2 intake: candidates + establishing in, one Hat or a fail-closed
+   * reason out -- see hats/relationships.ts's resolveCandidateRelationships).
+   *
+   * Declared DATA (the Unit's own registered RelationshipDefinition list,
+   * e.g. Marketing declares REGISTERED_MARKETING_RELATIONSHIPS by identity),
+   * never inferred rules and never kernel behaviour: the evaluation itself
+   * is the generic, pure resolveCandidateRelationships, invoked by the
+   * Organization boundary (resolveOrganization) when -- and only when -- all
+   * of these hold: the Work was addressed to no Hat, is from no Handoff
+   * destination, Stage 1 consulted an interpretation, and that interpretation
+   * validated to MORE than one Hat this Unit declares. A single validated
+   * candidate still resolves directly, exactly as before.
+   *
+   * Everything stays fail-closed: candidates are first validated against
+   * this Unit's declared Hats (an unregistered candidate never reaches
+   * relationship evaluation, so it can never become the selected Hat); a
+   * conditional relationship with no explicit establishing value, no
+   * registered relationship between the candidates, or several conflicting
+   * relationships all fail closed (ambiguous_ownership) rather than
+   * guessing. Optional, and absent for a Unit whose ambiguity must stop the
+   * request (the unchanged behaviour of every manifest that declares
+   * nothing here).
+   */
+  hatRelationships?: RelationshipDefinition<string>[];
 
   /**
    * How this Unit takes in Handoffs addressed to it -- see

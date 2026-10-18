@@ -7,9 +7,10 @@
  *
  * This is pure mechanism, proven here with a toy action set in
  * actionRegistry.test.ts -- it decides no real Unit's action list.
- * Business Development is the first real Unit wired to it
- * (businessDevelopmentManifest.ts); which of Sales, Marketing, Strategy,
- * or Finance's real actions map onto this model remains open.
+ * Every Unit manifest now declares its own ActionDefinitions against it
+ * (businessDevelopmentManifest, salesManifest, marketingManifest,
+ * strategyManifest, financeManifest); which actions each Unit declares
+ * remains that Unit's own declaration, never this module's.
  *
  * CORE PRINCIPLE (the actual fix): consequence and approval are two
  * different questions, not one.
