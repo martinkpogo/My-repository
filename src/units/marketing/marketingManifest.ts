@@ -6,7 +6,11 @@ import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unit
 import type { MarketingHatDefinition, MarketingHatName } from "../../hats/types";
 import { MARKETING_HAT_REGISTRY, isMarketingHat, marketingHatSummaryList } from "../../hats/registry";
 import { classifyCandidateHats } from "../../hats/intakeClassification";
-import { resolveMarketingCandidateRelationships, selectMarketingAmbiguityReasonCode } from "../../hats/relationships";
+import {
+  REGISTERED_MARKETING_RELATIONSHIPS,
+  resolveMarketingCandidateRelationships,
+  selectMarketingAmbiguityReasonCode,
+} from "../../hats/relationships";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
@@ -30,17 +34,30 @@ import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
  * valid candidates, backed by 5 registered relationship IDs -- see
  * relationships.ts/relationships.test.ts).
  *
- * That Stage 2 has no equivalent in the generic manifest dispatch
- * (unitManifest.ts's resolveHat only supports "exactly one candidate, or
- * ambiguous" -- it cannot express relationship-based tie-breaking across
- * several valid candidates). Forcing Marketing's real routing onto the
- * generic resolver would silently replace deterministic relationship
- * resolution with weaker ambiguity-by-default behavior for an
- * already-live, actively-used Unit with zero existing test coverage of
- * its actual decision logic -- a real regression risk, not merely a
- * cosmetic one. Per Architect/Martin's explicit direction: "manifest-based
+ * That Stage 2 had no equivalent in the generic manifest dispatch when
+ * this manifest was written (unitManifest.ts's Hat resolution only
+ * supported "exactly one candidate, or ambiguous" -- it could not express
+ * relationship-based tie-breaking across several valid candidates). Forcing
+ * Marketing's real routing onto the generic resolver at that time would
+ * have silently replaced deterministic relationship resolution with
+ * weaker ambiguity-by-default behavior for an already-live, actively-used
+ * Unit -- a real regression risk, not merely a cosmetic one. Per
+ * Architect/Martin's explicit direction: "manifest-based
  * should standardize the contract, not require every Unit to have
  * identical routing semantics."
+ *
+ * The generic contract NOW CAN express these semantics: this manifest
+ * declares hatRelationships (the same REGISTERED_MARKETING_RELATIONSHIPS
+ * constant, by reference), and resolveOrganization evaluates it whenever
+ * an intake interpretation validates to several of this Unit's Hats
+ * (conformance-tested against this real manifest). What still keeps the
+ * Cowork compatibility path below is behaviour equivalence, not capability:
+ * running Marketing's Cowork intake generically first would change its
+ * clarification semantics (Marketing's intake sets the Work onto
+ * awaiting: marketing_clarification so Martin's next reply re-runs
+ * classification; the generic ambiguity path replies and creates no Work),
+ * so the path stays until that equivalence is deliberately built and
+ * proven.
  *
  * So this manifest covers ONLY what happens once Marketing's own Stage
  * 1/2 (handleMarketingIntake below, relocated from executionEngine.ts)
@@ -63,17 +80,24 @@ import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
  * real behavior is a single free-form AI decision (draft | route |
  * clarify) per invocation, not a Stage-2-classified choice among several
  * Unit-declared verbs. Declaring one action here is documentation of that
- * shape, not a claim that Stage 2 action classification runs for
- * Marketing -- it doesn't; dispatchMarketingHat calls straight into
- * entryHandler, bypassing dispatchAction/resolveUnitRequest entirely,
- * exactly as Marketing's own Stage 1 stays outside resolveUnitRequest too.
+ * shape: on the compatibility path Stage 2 action classification never
+ * decides anything -- dispatchMarketingHat calls straight into
+ * entryHandler, bypassing dispatchAction/resolveUnitRequest, and
+ * dispatchCowork's Marketing branch keeps Marketing's own Stage 1 out of
+ * resolveUnitRequest entirely. On the generic paths that do reach this
+ * manifest (Chat's tryResolveUnitAction), Stage 1 runs through
+ * interpretHat and Stage 2 through classifyAction, while handle_request
+ * still resolves structurally from the Work's origin in Cowork's
+ * resolveUnitRequest.
  *
  * intakeClassificationTaskId/actionClassificationTaskId reuse the existing,
  * already-classified marketing.intake_classification/hat_action_decision
  * SemanticTaskIds (business_sensitive, TOKEN_SAFE_RUNTIME) -- required by
- * UnitManifest's shape, but never actually invoked through this manifest;
- * Marketing's own Stage 1/2 (handleMarketingIntake above) already calls
- * classifyCandidateHats with these same taskIds directly.
+ * UnitManifest's shape. Marketing's own Stage 1/2 (handleMarketingIntake
+ * above) calls classifyCandidateHats with these same taskIds directly on
+ * the Cowork compatibility path; the generic path reads them from this
+ * manifest too, when it runs Stage 1 itself (interpretHat) and, in Chat
+ * mode, Stage 2 (classifyAction).
  */
 type MarketingAction = "handle_request";
 
@@ -527,11 +551,29 @@ const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_PAID_CALLBACK_PREFIX]: handlePaidMediaApproval,
 };
 
-async function marketingEntryHandler(env: Env, state: WorkState, _actionName: MarketingAction, _text: string): Promise<WorkState> {
+/**
+ * The per-Hat manifest entry, reached from two call sites:
+ * dispatchMarketingHat (after Marketing's own Stage 1/2, a Handoff pickup,
+ * or an approval/feedback/clarification loop has already resolved state.hat
+ * and captured state.marketing.taskText -- so the capture below is a no-op
+ * there, since dispatchMarketingHat passes the captured text back in), and
+ * the generic handleUnitAction path (Organization/Action Resolution, e.g.
+ * Chat-mode Marketing), where the request text arrives as `text` and nothing
+ * has captured it yet. Capturing here means the generic path reaches the
+ * exact same runMarketingHat execution with the same taskText the
+ * compatibility path would have captured -- without it, the generic path
+ * would run the Hat decision on an empty situation, which is the specific
+ * gap the operating model records ("running it generically first would
+ * skip that classification and its task capture").
+ */
+async function marketingEntryHandler(env: Env, state: WorkState, _actionName: MarketingAction, text: string): Promise<WorkState> {
+  if (text && !state.marketing?.taskText) {
+    marketingOf(state).taskText = text;
+  }
   return runMarketingHat(env, state);
 }
 
-/** Marketing declares no "read" action -- handle_request is always "write" (a WorkSession always exists by the time this manifest is consulted; Stage 1 already ran in executionEngine.ts before any Hat, and therefore this manifest, is reached). Fails closed rather than silently no-opping. */
+/** Marketing declares no "read" action -- handle_request is always "write" (a WorkSession always exists by the time this manifest is consulted; Stage 1 already ran before any Hat, and therefore this manifest, is reached -- in interpretHat on the generic dispatch path, or in handleMarketingIntake on the compatibility path). Fails closed rather than silently no-opping. */
 async function marketingReadHandler(_env: Env, actionName: MarketingAction, _text: string): Promise<string> {
   throw new Error(`${actionName}: not a read action -- every Marketing Hat only declares "handle_request" ("write").`);
 }
@@ -574,11 +616,13 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       requiresApproval: true,
       // Every Marketing Hat declares exactly this one Action, so the
       // structural entry rule resolves it from the Work's origin -- the
-      // same rule Finance/Strategy use. What Marketing does NOT yet
-      // resolve at this boundary is WHICH Hat owns a direct request (its
-      // own intake classification inside executionEngine still does that,
-      // see Known gaps and drift); the Handoff pickup path, where the
-      // destination names the Hat, resolves fully here.
+      // same rule Finance/Strategy use. WHICH Hat owns a direct request is
+      // resolved before this boundary: by resolveOrganization's generic
+      // relationship step when the Unit Manifest declares hatRelationships
+      // (as Marketing does), or by Marketing's own intake classification
+      // (handleMarketingIntake) on the compatibility path; the Handoff
+      // pickup path, where the destination names the Hat, resolves fully
+      // here.
       applicability: {
         mode: "any",
         conditions: [
@@ -620,6 +664,18 @@ export const marketingManifest: UnitManifest = {
   intakeClassificationTaskId: "marketing.intake_classification",
   intakeIntroLine: "You route incoming Marketing-specialization tasks for ENIG, within the Sales, Marketing & Business Development Unit.",
   actionClassificationTaskId: "marketing.hat_action_decision",
+  // Marketing's own registered sequential Hat relationships -- the SAME
+  // REGISTERED_MARKETING_RELATIONSHIPS constant its own Stage 2
+  // (resolveMarketingCandidateRelationships) resolves against, declared as
+  // data on the manifest so the generic Organization boundary can express
+  // the identical deterministic tie-breaking for several validated Stage 1
+  // candidates (see UnitManifest.hatRelationships). One source of truth:
+  // this is a reference to the registered list, not a copy, and the
+  // evaluation is the same pure resolveCandidateRelationships in both
+  // paths. Marketing's Cowork intake still runs its own Stage 1/2 ahead of
+  // resolution (see the header comment above); the declaration is what the
+  // generic path consults for the routes that do reach it.
+  hatRelationships: REGISTERED_MARKETING_RELATIONSHIPS,
   // Marketing takes in Handoffs addressed to any of its Hats; the Handoff's
   // destination facts decide which Hat owns the Work (resolved by discovery).
   handoffPickup: { handler: (env, state, skills) => handleHandoffPickup(env, state, skills) },

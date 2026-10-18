@@ -1,6 +1,7 @@
 import type { Unit } from "../types";
 import type { HatManifest, UnitManifest } from "../units/unitManifest";
 import type { WorkContract } from "./workContract";
+import { resolveCandidateRelationships } from "../hats/relationships";
 
 /**
  * The Organization resolution boundary (ENIG Operating Model, current
@@ -63,12 +64,16 @@ export type OrganizationResolutionSource =
   | "handoff_destination"
   | "explicit_address"
   | "single_hat_ownership"
-  | "intake_interpretation";
+  | "intake_interpretation"
+  /** Several validated intake candidates resolved through the Unit's own declared relationships (UnitManifest.hatRelationships) -- deterministic evaluation of registered data over untrusted-but-validated candidates, never a model pick between them. */
+  | "registered_relationship";
 
 export interface OrganizationEvidence {
   resolved_from: OrganizationResolutionSource;
   /** True when untrusted intake interpretation candidates were consulted (and validated). False means the resolution is purely structural. */
   interpretation_consulted: boolean;
+  /** When the Hat was resolved through declared relationships, the id(s) of the registered relationship(s) that decided it -- the explicit machine-readable precedence rule, recorded rather than implied. */
+  relationship_id?: string;
   evaluated: {
     addressed_unit: string | null;
     addressed_hat: string | null;
@@ -90,6 +95,12 @@ export type OrganizationResolution =
  *   3. Single-Hat ownership -- the Unit's manifest declares one Hat.
  *   4. A validated intake interpretation -- exactly one candidate this
  *      Unit's manifest declares.
+ *   4b. When an interpretation validated to several candidates and the Unit
+ *      declared registered relationships (UnitManifest.hatRelationships),
+ *      those relationships decide deterministically (the recorded
+ *      relationship id names the explicit machine-readable precedence
+ *      rule); conditional relationships need the interpretation's
+ *      establishing value and fail closed without it.
  * Anything else, including a mismatched destination, fails closed.
  */
 export function resolveOrganization(contract: WorkContract, manifest: UnitManifest | undefined): OrganizationResolution {
@@ -181,6 +192,34 @@ export function resolveOrganization(contract: WorkContract, manifest: UnitManife
     return resolved(manifest, hat, "intake_interpretation", evaluated);
   }
 
+  // A Unit may resolve several validated candidates itself, through
+  // relationships it registered as data (see UnitManifest.hatRelationships).
+  // Deterministic and request-text-free: resolveCandidateRelationships is the
+  // same pure resolver the Unit's own Stage 2 uses, evaluated here so the
+  // generic path can express relationship-based tie-breaking instead of
+  // failing closed the moment there is more than one candidate. Candidates
+  // are already validated above; every unresolved outcome (no registered
+  // relationship, a conditional relationship without an explicit
+  // establishing value, conflicting relationships) fails closed below,
+  // exactly as the resolver reports it.
+  if (validCandidates.length > 1 && manifest.hatRelationships && manifest.hatRelationships.length > 0) {
+    const relationship = resolveCandidateRelationships(validCandidates, manifest.hatRelationships, context.interpreted_establishing);
+    if (relationship.resolved && relationship.hat) {
+      const hat = manifest.hats[relationship.hat];
+      if (hat) {
+        return resolved(manifest, hat, "registered_relationship", evaluated, relationship.relationshipId);
+      }
+      // Defensive: the resolver can only return a candidate it was given
+      // (all validated above), so this is unreachable -- fail closed rather
+      // than trust that invariant silently.
+    }
+    return {
+      kind: "failed",
+      reason: "ambiguous_ownership",
+      detail: `${manifest.unit} intake resolved ${validCandidates.length} possible Hats (${validCandidates.join(", ")}), and relationship resolution among them failed closed: ${relationship.reason ?? "no registered relationship decided a single Hat"}${relationship.reasonCode ? ` (reason code: ${relationship.reasonCode})` : ""}`,
+    };
+  }
+
   return {
     kind: "failed",
     reason: "ambiguous_ownership",
@@ -196,6 +235,7 @@ function resolved(
   hat: HatManifest,
   source: OrganizationResolutionSource,
   evaluated: OrganizationEvidence["evaluated"],
+  relationshipId?: string,
 ): OrganizationResolution {
   if (!hat.responsibilityId || !hat.responsibilityId.trim()) {
     return {
@@ -215,6 +255,13 @@ function resolved(
       hat: hat.name,
       responsibility: hat.responsibilityId,
     },
-    evidence: { resolved_from: source, interpretation_consulted: source === "intake_interpretation", evaluated },
+    evidence: {
+      resolved_from: source,
+      // A relationship resolution consumes intake-interpretation candidates,
+      // so an interpretation was consulted there too.
+      interpretation_consulted: source === "intake_interpretation" || source === "registered_relationship",
+      ...(relationshipId ? { relationship_id: relationshipId } : {}),
+      evaluated,
+    },
   };
 }

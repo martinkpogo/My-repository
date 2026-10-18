@@ -237,12 +237,18 @@ export async function dispatchCowork(
   if (decision.unit === "Marketing") {
     // COMPATIBILITY PATH -- Marketing is the one manifest Unit that does NOT
     // dispatch through the generic resolution path below: its own intake
-    // (marketingManifest.handleMarketingIntake) still resolves WHICH
-    // Marketing Hat owns the request and captures the task text, and that
-    // has to run before any manifest Action dispatch could. So the branch
-    // stands, recorded as a known migration gap, until that intake moves
-    // ahead of Organization resolution. Which Unit was addressed is already
-    // resolved deterministically by workspaceRouter either way.
+    // (marketingManifest.handleMarketingIntake) resolves WHICH Marketing Hat
+    // owns the request and captures the task text before any manifest
+    // Action dispatch. The generic contract CAN now express that resolution
+    // (the manifest declares hatRelationships and resolveOrganization
+    // evaluates them -- see UnitManifest.hatRelationships), but the branch
+    // stands for behaviour equivalence, not capability: Marketing's intake
+    // holds an ambiguous Work on awaiting: marketing_clarification so the
+    // next reply re-runs classification, which the generic ambiguity path
+    // (reply, no Work) does not. Recorded as a known migration gap until
+    // that equivalence is deliberately built and proven. Which Unit was
+    // addressed is already resolved deterministically by workspaceRouter
+    // either way.
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
     await stub.init(workId, chatId, "Marketing", decision.hat ?? "Marketing", threadId);

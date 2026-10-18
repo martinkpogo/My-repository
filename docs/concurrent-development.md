@@ -165,7 +165,10 @@ material architecture change, so they are documented rather than papered over:
   `strategyOf`. The Sales-specific guard does not cover these.
 - `src/hats/registry.ts` imports five Marketing Hat identity constants;
   `src/hats/executionEngine.ts` imports `dispatchMarketingHat` and `marketingOf`.
-  Marketing's Stage 1/2 resolution has no generic equivalent in `resolveHat`.
+  Marketing's own Stage 1/2 intake (`marketingManifest.handleMarketingIntake`)
+  still runs ahead of generic resolution on the Cowork path, though the
+  generic resolver can now express the same relationship tie-breaking
+  (`UnitManifest.hatRelationships` + `resolveOrganization`).
 - `src/googleDocComments.ts` imports Sales's `salesOperations`.
 
 If you are working in one of these files, **announce it** — a concurrent branch

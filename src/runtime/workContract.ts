@@ -102,6 +102,8 @@ export interface WorkRequest {
     addressed_hat?: string;
     /** Hat candidates proposed by an AI intake interpretation, when the Unit has several Hats and no addressee. Untrusted input: Resolution validates them against the canonical definitions and may only reject, never substitute. */
     interpreted_hats?: readonly string[];
+    /** Stage 1's establishing signal (true = establishing foundational direction from scratch; false = executing within already-established direction). Consumed only by relationship-based Hat resolution (a Unit manifest's optional `hatRelationships`); a Unit that declares none never has this read. Untrusted input, the same class as `interpreted_hats`: it can tip a declared conditional relationship one way or the other, never select an unregistered Hat, and a conditional relationship without it fails closed. */
+    interpreted_establishing?: boolean;
     /** An exact Action id proposed by an AI intake interpretation (or carried by a Handoff), when the Work context alone does not determine one Action. `undefined` means no interpretation has been attempted yet (Resolution may then require one); `null` means one was attempted and yielded nothing usable. Untrusted input: it can only match a declared applicability condition exactly or fail. */
     requested_action?: string | null;
     /** Destination facts when this Work is entered from a Handoff. */

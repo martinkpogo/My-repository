@@ -31,9 +31,11 @@ import { financeManifest } from "./finance/financeManifest";
  * - Marketing -- see marketingManifest.ts's own doc comment: fully
  *   migrated, all five Hats, every chokepoint including all three
  *   approval-callback prefixes. Stage 1/2 Hat resolution stays in
- *   src/hats/executionEngine.ts's own classifyCandidateHats +
- *   relationship-based tie-breaking, which has no equivalent in this
- *   registry's generic resolveHat -- registering marketingManifest here
+ *   marketingManifest.ts's own handleMarketingIntake (classifyCandidateHats
+ *   + relationship-based tie-breaking), which the generic path can now
+ *   express (UnitManifest.hatRelationships + resolveOrganization's
+ *   relationship step) but the Cowork compatibility branch does not use
+ *   yet -- registering marketingManifest here
  *   is for discoverability/consistency and its callbackHandlers'
  *   genuine dispatch, not because dispatchCowork's Marketing branch
  *   (still its own hardcoded branch, unchanged) ever calls
