@@ -116,18 +116,41 @@ test("several validated candidates resolve through a declared unconditional rela
   assert.strictEqual(result.evidence.resolved_from, "registered_relationship");
   assert.strictEqual(result.evidence.interpretation_consulted, true, "the relationship step consumes interpretation candidates");
   assert.strictEqual(result.evidence.relationship_id, "toy__alpha-beta", "the deciding registered relationship must be recorded, not implied");
-  assert.deepStrictEqual(result.evidence.evaluated.interpreted_hats, ["Alpha", "Beta"]);
+  // Every existing evidence field stays intact, and the establishing value
+  // this contract never supplied is recorded as an explicit null.
+  assert.deepStrictEqual(result.evidence.evaluated, {
+    addressed_unit: null,
+    addressed_hat: null,
+    interpreted_hats: ["Alpha", "Beta"],
+    interpreted_establishing: null,
+    handoff_destination: null,
+  });
 });
 
-test("establishing has no effect on an unconditional relationship -- same input, same resolved Hat", (t) => {
+test("establishing has no effect on an unconditional relationship -- selection stays the same, evidence records the supplied value faithfully", (t) => {
   forbidNetwork(t);
   const manifest = threeHatManifest(UNCONDITIONAL);
 
   const establishing = resolveOrganization(contractFor({ interpreted_hats: ["Alpha", "Beta"], interpreted_establishing: true }), manifest);
   const notEstablishing = resolveOrganization(contractFor({ interpreted_hats: ["Alpha", "Beta"], interpreted_establishing: false }), manifest);
+  const missing = resolveOrganization(contractFor({ interpreted_hats: ["Alpha", "Beta"] }), manifest);
 
-  assert.deepStrictEqual(establishing, notEstablishing);
-  assert.strictEqual(establishing.kind === "resolved" ? establishing.organization.hat : "", "Beta");
+  // Selection semantics are untouched by the supplied value.
+  assert.strictEqual(establishing.kind, "resolved");
+  assert.strictEqual(notEstablishing.kind, "resolved");
+  assert.strictEqual(missing.kind, "resolved");
+  if (establishing.kind !== "resolved" || notEstablishing.kind !== "resolved" || missing.kind !== "resolved") return;
+  assert.strictEqual(establishing.organization.hat, "Beta");
+  assert.deepStrictEqual(notEstablishing.organization, establishing.organization, "an explicit false must not change the unconditional selection");
+  assert.deepStrictEqual(missing.organization, establishing.organization, "a missing value must not change the unconditional selection");
+  assert.strictEqual(notEstablishing.evidence.relationship_id, "toy__alpha-beta");
+  assert.strictEqual(missing.evidence.relationship_id, "toy__alpha-beta");
+
+  // ...while the evidence records exactly what was presented: true, false,
+  // and null (never false) for a value that was never supplied.
+  assert.strictEqual(establishing.evidence.evaluated.interpreted_establishing, true);
+  assert.strictEqual(notEstablishing.evidence.evaluated.interpreted_establishing, false);
+  assert.strictEqual(missing.evidence.evaluated.interpreted_establishing, null, "missing must be null, never confused with false");
 });
 
 test("a conditional relationship resolves by the interpretation's establishing value, in both directions", (t) => {
@@ -140,6 +163,7 @@ test("a conditional relationship resolves by the interpretation's establishing v
     assert.strictEqual(establishing.organization.hat, "Alpha", "establishing direction is the `from` Hat's responsibility");
     assert.strictEqual(establishing.evidence.resolved_from, "registered_relationship");
     assert.strictEqual(establishing.evidence.relationship_id, "toy__alpha-beta-conditional");
+    assert.strictEqual(establishing.evidence.evaluated.interpreted_establishing, true, "the value that decided the relationship must be recorded as true");
   }
 
   const executing = resolveOrganization(contractFor({ interpreted_hats: ["Alpha", "Beta"], interpreted_establishing: false }), manifest);
@@ -147,6 +171,7 @@ test("a conditional relationship resolves by the interpretation's establishing v
   if (executing.kind === "resolved") {
     assert.strictEqual(executing.organization.hat, "Beta", "executing within established direction is the `to` Hat's responsibility");
     assert.strictEqual(executing.evidence.relationship_id, "toy__alpha-beta-conditional");
+    assert.strictEqual(executing.evidence.evaluated.interpreted_establishing, false, "the value that decided the relationship must be recorded as false");
   }
 });
 
@@ -163,6 +188,11 @@ test("a conditional relationship with no explicit establishing value fails close
   assert.strictEqual(result.reason, "ambiguous_ownership");
   assert.match(result.detail, /CONDITIONAL_ESTABLISHING_REQUIRED/, "the fail-closed reason code must be reported, not swallowed");
   assert.match(result.detail, /Alpha, Beta/, "the candidates that could not be decided must be named");
+  // A failed resolution carries only its failure -- no fabricated evidence
+  // record claiming an establishing value or a resolved Hat.
+  assert.deepStrictEqual(Object.keys(result).sort(), ["detail", "kind", "reason"]);
+  assert.ok(!("evidence" in result), "the failure path must not emit an evidence record");
+  assert.ok(!("organization" in result), "the failure path must not emit a resolved Organization");
 });
 
 test("candidates with no registered relationship between them fail closed with NO_REGISTERED_RELATIONSHIP", (t) => {
@@ -260,7 +290,7 @@ test("an explicitly addressed Hat wins -- the relationship step never overrides 
   forbidNetwork(t);
   const manifest = threeHatManifest(UNCONDITIONAL);
 
-  const result = resolveOrganization(contractFor({ addressed_hat: "Beta", interpreted_hats: ["Alpha", "Beta"] }), manifest);
+  const result = resolveOrganization(contractFor({ addressed_hat: "Beta", interpreted_hats: ["Alpha", "Beta"], interpreted_establishing: false }), manifest);
 
   assert.strictEqual(result.kind, "resolved");
   if (result.kind !== "resolved") return;
@@ -268,6 +298,11 @@ test("an explicitly addressed Hat wins -- the relationship step never overrides 
   assert.strictEqual(result.evidence.resolved_from, "explicit_address");
   assert.strictEqual(result.evidence.interpretation_consulted, false);
   assert.strictEqual(result.evidence.relationship_id, undefined);
+  // The presented establishing value is recorded verbatim even on a path
+  // that never consumes it -- evidence mirrors the contract, it does not
+  // infer who used what.
+  assert.strictEqual(result.evidence.evaluated.interpreted_establishing, false);
+  assert.strictEqual(result.evidence.evaluated.addressed_hat, "Beta");
 });
 
 test("a Handoff destination Hat wins -- relationships are never consulted for a destination fact", (t) => {

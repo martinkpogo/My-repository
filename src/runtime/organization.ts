@@ -78,6 +78,16 @@ export interface OrganizationEvidence {
     addressed_unit: string | null;
     addressed_hat: string | null;
     interpreted_hats: readonly string[];
+    /**
+     * Stage 1's establishing signal exactly as the Work contract presented
+     * it: `true` / `false` when explicitly supplied, `null` when it was
+     * missing -- an explicit null so "not supplied" can never be confused
+     * with "supplied false". Recorded verbatim from the contract for every
+     * resolved path, never derived from request text, the relationship
+     * definitions, the selected Hat, or a model call; the relationship step
+     * is the only resolution that consumes it.
+     */
+    interpreted_establishing: boolean | null;
     handoff_destination: { to_unit: string; to_hat: string | null } | null;
   };
 }
@@ -112,6 +122,9 @@ export function resolveOrganization(contract: WorkContract, manifest: UnitManife
     addressed_unit: context.addressed_unit ?? null,
     addressed_hat: context.addressed_hat ?? null,
     interpreted_hats: context.interpreted_hats ?? [],
+    // Recorded exactly as presented: undefined (missing) becomes null, while
+    // an explicit false stays false.
+    interpreted_establishing: context.interpreted_establishing ?? null,
     handoff_destination: context.handoff
       ? { to_unit: context.handoff.toUnit, to_hat: context.handoff.toHat ?? null }
       : null,
