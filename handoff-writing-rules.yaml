@@ -103,7 +103,7 @@ sources_property:
       no trusted binding exists for spreadsheets; do not write one)
     - At least one reference; no duplicates of the same page/file
     - Only on a route whose contract permits the types involved
-      (today: Sales->Strategy, call_notes optional)
+      (today: Sales->Strategy and Strategy->Finance, call_notes optional)
 
   never_write:
     - Title-matched, searched, or guessed references

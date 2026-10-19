@@ -490,11 +490,11 @@ test("updateHandoff: a lifecycle update may carry Sources -- but only with its c
 test("createHandoff: Sources on an uncontracted route is refused outright -- zero Notion calls", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  // validProperties() is Strategy -> Finance: a real route, but one with no
-  // Handoff source route contract -- which routes carry sources is an
-  // explicit contract decision, never guessed.
+  // Finance -> Sales is a real route with no Handoff source route contract
+  // (Strategy -> Finance gained one on 2026-10-19) -- which routes carry
+  // sources is an explicit contract decision, never guessed.
   await assert.rejects(
-    () => createHandoff(env, validProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env)),
+    () => createHandoff(env, validProperties({ "From Unit": select("Finance"), "To Unit": select("Sales"), Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env)),
     (err: unknown) => err instanceof HandoffWriteViolationError && /has no Handoff source route contract/.test((err as Error).message),
   );
   assert.strictEqual(calls.length, 0, "refused before ANY Notion call");

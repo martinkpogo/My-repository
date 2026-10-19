@@ -14,8 +14,10 @@ import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
 import { extractLabeledBlock } from "../../labeledBlock";
-import { parseCommercialValueEvidenceBlock, type CommercialValueEvidenceRecord } from "../../handoffContracts/commercialValueEvidence";
+import { COMMERCIAL_VALUE_EVIDENCE_START, parseCommercialValueEvidenceBlock, type CommercialValueEvidenceRecord } from "../../handoffContracts/commercialValueEvidence";
 import { resolveMatterFromText } from "../../identityResolution";
+import { extractHandoffSources, resolveHandoffSources } from "../../handoffSources";
+import { readCallNotesNoteProperty } from "../../records/callNotes/callNotesRecord";
 import type { AccessContext } from "../../access";
 import { mintApprovalProofForWork, workSessionContext } from "../../access";
 import type { ApprovalProof } from "../../types";
@@ -235,6 +237,50 @@ function buildFinancePromptParts(hatDefinition: string, universalRoleContract: s
 }
 
 /**
+ * Reads the Commercial Value Evidence block from the approved Call Notes
+ * record a Handoff names in its `Sources` property. The shared resolver
+ * (`resolveHandoffSources`) proves the exact page, its real parent database,
+ * the route contract (Strategy->Finance permits an optional `call_notes`
+ * link), its Entity/Matter binding to this Handoff's tokens, its lifecycle
+ * Status and its recorded approval attestation BEFORE anything is read; the
+ * identity it resolves for that binding is discarded and never enters this
+ * Hat's context. Read-only: only the Note's labelled block is taken, never
+ * the Note's other content.
+ *
+ * `{ ok: true, block: undefined }` means nothing to carry (no `Sources`, or
+ * the record's Note holds no block) -- the existing no-block judgment path
+ * then decides exactly as before. A present but unparseable block, or a
+ * declared source that cannot be resolved, is a refusal.
+ */
+async function readValueEvidenceFromDeclaredSources(
+  env: Env,
+  handoffProperties: Record<string, any>,
+  tokens: { entityToken: string; matterToken: string },
+  access: AccessContext,
+): Promise<{ ok: true; block?: string } | { ok: false; reason: string }> {
+  const extraction = extractHandoffSources(handoffProperties);
+  if (!extraction.ok) return { ok: false, reason: extraction.reason };
+  if (extraction.mode !== "sources") return { ok: true };
+
+  const sources = await resolveHandoffSources(env, {
+    properties: handoffProperties,
+    tokens,
+    route: { fromUnit: plainText(handoffProperties["From Unit"]), toUnit: plainText(handoffProperties["To Unit"]) },
+    access,
+  });
+  if (!sources.ok) return { ok: false, reason: sources.reason };
+  if (sources.mode !== "sources" || !sources.callNotes) return { ok: true };
+
+  const note = readCallNotesNoteProperty(sources.callNotes.page.properties);
+  if (!note.ok) return { ok: true };
+  const noteText = note.note;
+  if (!noteText.includes(COMMERCIAL_VALUE_EVIDENCE_START)) return { ok: true };
+  const parsed = parseCommercialValueEvidenceBlock(noteText);
+  if (!parsed.ok) return { ok: false, reason: `the Call Notes record's Note carries a Commercial Value Evidence block that cannot be used: ${parsed.reason}` };
+  return { ok: true, block: parsed.block };
+}
+
+/**
  * Reconstructs the business context this Hat needs directly from the
  * Handoff's own canonical Notion record, evaluated through the data boundary
  * closed-context contract.
@@ -269,9 +315,22 @@ export async function resolveHandoffBusinessContext(
     // confirmed live incident this mirrors. Always folded in so guidance
     // written there actually reaches the pricing judgment.
     const requiredNextAction = plainText(handoff.properties["Required Next Action"]);
-    const judgmentContext = requiredNextAction ? `${verifiedFacts}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : verifiedFacts;
     const entityToken = plainText(handoff.properties.Entity_Token);
     const matterToken = plainText(handoff.properties.Matter_Token);
+    const baseContext = requiredNextAction ? `${verifiedFacts}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : verifiedFacts;
+    // The Commercial Value Evidence block, when one exists, lives once in the
+    // approved Call Notes record this Handoff names in `Sources` (Martin,
+    // 2026-10-19) -- never copied into the Handoff. A declared source that
+    // cannot be resolved is refused outright; a resolved record whose Note
+    // simply carries no block leaves the existing no-block path unchanged.
+    const sourceEvidence = await readValueEvidenceFromDeclaredSources(env, handoff.properties, { entityToken, matterToken }, access);
+    if (!sourceEvidence.ok) {
+      return {
+        success: false,
+        insufficientContext: { isInsufficient: true, category: "declared evidence source", reason: sourceEvidence.reason },
+      };
+    }
+    const judgmentContext = sourceEvidence.block ? `${baseContext}\n\n${sourceEvidence.block}` : baseContext;
 
     return evaluateHandoffContext(
       {

@@ -141,24 +141,15 @@ export interface StrategyWorkState {
   sourceBoundaryAttestation?: HandoffSourceBoundaryAttestation;
 
   /**
-   * The upstream Commercial Value Evidence block exactly as it is written in
-   * the Sales -> Strategy Handoff's "Verified Facts & Sources" (markers
-   * included), read and structurally parsed at pickup -- see
-   * handoffContracts/commercialValueEvidence.ts. This is PROVENANCE, not a new
-   * evidence model: the determination inside it was produced upstream by
-   * Sales's deterministic `evaluateCommercialValueEvidence`, and Strategy
-   * copies this block byte-for-byte into the Strategy -> Finance Handoff so
-   * Finance judges against the same determination it was handed.
-   *
-   * Absent (with `commercialValueEvidenceError` saying why) whenever the
-   * block could not be read or could not be parsed deterministically --
-   * presentStrategyProposalForApproval treats that as a fail-closed provenance
-   * failure and never as a reason to doubt the determination itself: an
-   * `Insufficient Evidence` determination still sits here fully valid.
+   * @deprecated No longer read, written or forwarded (Martin, 2026-10-19):
+   * Strategy does not require or carry the Sales Commercial Value Evidence
+   * block; the evidence lives on the Call Notes page the Handoff declares in
+   * `Sources`. Kept only so a work item persisted before this change still
+   * round-trips through the legacy-shape migration.
    */
   commercialValueEvidenceBlock?: string;
 
-  /** Why `commercialValueEvidenceBlock` is absent (markers absent, not JSON, malformed field...). Carried only so a fail-closed gate can name the exact provenance gap. */
+  /** @deprecated See `commercialValueEvidenceBlock`. */
   commercialValueEvidenceError?: string;
 
   /**

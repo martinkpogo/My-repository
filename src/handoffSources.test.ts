@@ -865,13 +865,18 @@ test("sources: the canonical Call Notes id itself travels as the page's own regi
   assert.ok(!log.requests.some((r) => r.includes("call-notes-ds")), "no title-based lookup anywhere");
 });
 
-test("sources: the production route table permits exactly the documented types on Sales->Strategy", () => {
+test("sources: the production route table permits exactly the documented types on Sales->Strategy and Strategy->Finance", () => {
   assert.deepEqual(handoffSourceRouteContract("Sales", "Strategy"), {
     required: [],
     optional: ["call_notes"],
     prohibited: ["handoffs"],
   });
-  assert.equal(handoffSourceRouteContract("Strategy", "Finance"), undefined, "any other route has no contract until one is declared");
+  assert.deepEqual(handoffSourceRouteContract("Strategy", "Finance"), {
+    required: [],
+    optional: ["call_notes"],
+    prohibited: ["handoffs"],
+  });
+  assert.equal(handoffSourceRouteContract("Finance", "Sales"), undefined, "any other route has no contract until one is declared");
 });
 
 // ---------------------------------------------------------------------------

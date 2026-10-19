@@ -939,9 +939,9 @@ test("3c. Handoff pickup BLOCKS when the Handoff's tokens don't resolve to a rea
 // --- WP2: fail fast on known Handoff defects, before any AI call -----------
 //
 // handlePickup collects every defect it can see after its three reads --
-// unusable source-boundary attestation, missing Commercial Value Evidence
-// block (direct_request exempt, mirroring both proposal-gate checks),
-// present tokens that resolve to nothing -- and stops through the EXISTING
+// unusable source-boundary attestation and (Martin, 2026-10-19) NOT a
+// missing Commercial Value Evidence block -- that block is no longer read or
+// required --, present tokens that resolve to nothing -- and stops through the EXISTING
 // handleBlocked path with every defect named on its own line, in plain
 // words. No AI call happens on this path; the proposal-gate checks stay
 // unchanged as defence in depth.
@@ -977,26 +977,20 @@ test("WP2a. An unusable source-boundary attestation stops the pickup before any 
   assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented -- the proposal gate's own attestation check remains as defence in depth");
 });
 
-test("WP2b. A missing Commercial Value Evidence block stops the pickup before any AI call -- stage strategy_blocked, the reason names the defect", async (t) => {
+test("WP2b. A Handoff with NO Commercial Value Evidence block is NOT held -- the block is no longer required, pickup proceeds to the diagnosis", async (t) => {
   const log = mockFetch(t, { verifiedFacts: "Sales call notes: recurring client complaints about late delivery over two quarters." });
   const env = fakeEnv();
-  const { ai, calls } = countingZeroAi();
-  env.AI = ai;
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(result.awaiting, "strategy_clarification");
-  assert.strictEqual(calls(), 0, "ZERO AI calls on the fail-fast path");
-  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
-  assert.strictEqual(result.strategy?.commercialValueEvidenceBlock, undefined);
-  const message = log.sentTexts.join("\n");
-  assert.match(message, /Commercial Value Evidence is not usable: the === COMMERCIAL VALUE EVIDENCE === block is absent/, "the reason names the defect in plain words");
-  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented -- the proposal gate's own provenance check remains as defence in depth");
+  assert.notStrictEqual(result.stage, "strategy_blocked", "a missing block is not a pickup defect");
+  assert.ok(result.strategy?.question, "the diagnosis pipeline ran");
+  assert.ok(!log.sentTexts.some((m) => /Commercial Value Evidence is not usable/i.test(m)), "no Commercial Value Evidence defect is reported");
 });
 
-test("WP2c. Two defects at once are BOTH named -- one per line, in plain words", async (t) => {
+test("WP2c. A bad attestation is still named, and a missing Commercial Value Evidence block adds no second defect", async (t) => {
   const log = mockFetch(t, { sourceBoundaryMarker: null, verifiedFacts: "Sales call notes: recurring client complaints about late delivery over two quarters." });
   const env = fakeEnv();
   const { ai, calls } = countingZeroAi();
@@ -1010,14 +1004,8 @@ test("WP2c. Two defects at once are BOTH named -- one per line, in plain words",
   const held = log.sentTexts.find((m) => m.includes("Strategy diagnosis held"));
   assert.ok(held, "the stop goes through the existing handleBlocked path");
   const lines = held!.split("\n");
-  assert.ok(
-    lines.some((l) => l.includes("source-boundary attestation is not usable")),
-    "defect 1 is named on its own line",
-  );
-  assert.ok(
-    lines.some((l) => l.includes("Commercial Value Evidence is not usable")),
-    "defect 2 is named on its own line",
-  );
+  assert.ok(lines.some((l) => l.includes("source-boundary attestation is not usable")), "the attestation defect is named on its own line");
+  assert.ok(!lines.some((l) => l.includes("Commercial Value Evidence")), "no Commercial Value Evidence defect is named");
 });
 
 test("WP2d. A direct_request with no Commercial Value Evidence block is NOT blocked by this check -- pickup proceeds exactly like before", async (t) => {
@@ -1861,7 +1849,7 @@ const INSUFFICIENT_COMMERCIAL_VALUE_BLOCK = serializeCommercialValueEvidenceBloc
   evidence: null,
 });
 
-test("Provenance gate: a Sales -> Strategy Handoff with NO Commercial Value Evidence block fails the Strategy proposal gate closed -- never presented, never routed to Finance", async (t) => {
+test("A Sales -> Strategy Handoff with NO Commercial Value Evidence block reaches Approval Needed -- the block is no longer a gate", async (t) => {
   const log = mockFetch(t, {
     verifiedFacts:
       "Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.",
@@ -1872,20 +1860,12 @@ test("Provenance gate: a Sales -> Strategy Handoff with NO Commercial Value Evid
 
   const result = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(result.stage, "strategy_blocked", "missing provenance must fail closed -- now already at pickup, before any AI call");
-  assert.strictEqual(result.awaiting, "strategy_clarification");
-  assert.strictEqual(result.strategy?.approvalState, undefined, "no approval request is staged without provenance");
-  assert.strictEqual(result.strategy?.proposal, undefined, "the proposal is never adopted on a provenance failure");
-  assert.strictEqual(result.strategy?.commercialValueEvidenceBlock, undefined);
-  assert.strictEqual(log.handoffCreateBody, null, "no Strategy -> Finance Handoff is ever created");
-  const message = log.sentTexts.join("\n");
-  assert.match(message, /Strategy diagnosis held/, "the defect stops the pickup through the existing handleBlocked path");
-  assert.match(message, /Commercial Value Evidence is not usable/, "the failure names the exact block that is missing");
-  assert.match(message, /COMMERCIAL VALUE EVIDENCE/, "and the block's own marker, so the sender knows what to write");
-  assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented -- the proposal-gate provenance check remains as defence in depth");
+  assert.strictEqual(result.stage, "awaiting_intervention_approval");
+  assert.ok(result.strategy?.pendingApproval, "Approval Needed is reached without the block");
+  assert.ok(log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "the proposal is presented");
 });
 
-test("Provenance gate: a malformed Commercial Value Evidence block fails closed and names what could not be parsed -- never repaired, never ignored", async (t) => {
+test("A malformed Commercial Value Evidence block on the Handoff is ignored -- it neither holds the pickup nor reaches Finance", async (t) => {
   const log = mockFetch(t, {
     verifiedFacts:
       `Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.\n\n` +
@@ -1895,16 +1875,17 @@ test("Provenance gate: a malformed Commercial Value Evidence block fails closed 
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
-  const result = await handlePickup(env, state, STRATEGY_SKILLS);
+  const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
+  assert.strictEqual(afterPickup.stage, "awaiting_intervention_approval");
 
-  assert.strictEqual(result.strategy?.commercialValueEvidenceBlock, undefined, "an unparseable block is never carried as if it were valid");
-  assert.match(result.strategy?.commercialValueEvidenceError ?? "", /not valid JSON/);
-  assert.strictEqual(result.stage, "strategy_blocked");
-  assert.strictEqual(log.handoffCreateBody, null);
-  assert.match(log.sentTexts.join("\n"), /not valid JSON/, "the gate reports the exact parse failure");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
+  const factsText = (log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text as { text: { content: string } }[])
+    .map((i) => i.text.content)
+    .join("");
+  assert.ok(!factsText.includes(COMMERCIAL_VALUE_EVIDENCE_START), "no Commercial Value Evidence block reaches Finance");
 });
 
-test("An upstream `Insufficient Evidence` determination does NOT fail the Strategy proposal gate -- the gate checks provenance, pricing sufficiency is Finance's call", async (t) => {
+test("A legacy `Insufficient Evidence` block on the Handoff does not stop Strategy and is not forwarded -- Finance prices the approved intervention", async (t) => {
   const log = mockFetch(t, {
     verifiedFacts:
       `Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.\n\n` +
@@ -1916,67 +1897,41 @@ test("An upstream `Insufficient Evidence` determination does NOT fail the Strate
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
 
-  assert.strictEqual(afterPickup.stage, "awaiting_intervention_approval", "Strategy may be approved even when nothing is quantified upstream");
-  assert.ok(afterPickup.strategy?.pendingApproval, "Approval Needed is reached as usual");
-  const carried = parseCommercialValueEvidenceBlock(afterPickup.strategy?.commercialValueEvidenceBlock ?? "");
-  assert.ok(carried.ok, carried.ok ? "" : carried.reason);
-  assert.strictEqual(carried.record.determination, "Insufficient Evidence", "the determination is carried as-is, unchanged by Strategy");
-
-  // Strategy does not add a numerical-value requirement of its own: proposal
-  // completeness is unaffected by the determination.
+  assert.strictEqual(afterPickup.stage, "awaiting_intervention_approval");
   assert.strictEqual(evaluateProposalCompleteness(afterPickup.strategy?.proposal!).valid, true);
 
-  // And the approval still commits a Finance Handoff carrying both blocks.
   await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
   const factsText = (log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text as { text: { content: string } }[])
     .map((i) => i.text.content)
     .join("");
-  assert.ok(factsText.includes(INSUFFICIENT_COMMERCIAL_VALUE_BLOCK), "the insufficient determination still travels downstream verbatim");
+  assert.ok(!factsText.includes(INSUFFICIENT_COMMERCIAL_VALUE_BLOCK), "the legacy block is not forwarded");
 });
 
-test("Strategy copies the upstream Commercial Value Evidence block byte-identically into the Finance Handoff, beside the unchanged Strategy boundary representation", async (t) => {
+test("The Finance Handoff carries only the approved Strategy boundary representation -- no Commercial Value Evidence block, even when the Sales Handoff held one", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
-  assert.strictEqual(afterPickup.strategy?.commercialValueEvidenceBlock, DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK, "pickup holds the sender's bytes");
-
   await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const items: { text: { content: string } }[] = log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text;
   const factsText = items.map((i) => i.text.content).join("");
 
-  // Finance receives BOTH blocks.
-  assert.ok(factsText.includes(DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK), "the Commercial Value Evidence block is copied byte-for-byte, never paraphrased or regenerated");
-  const copied = extractLabeledBlock(factsText, COMMERCIAL_VALUE_EVIDENCE_START, COMMERCIAL_VALUE_EVIDENCE_END);
-  assert.strictEqual(
-    `${COMMERCIAL_VALUE_EVIDENCE_START}\n${copied}\n${COMMERCIAL_VALUE_EVIDENCE_END}`,
-    DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK,
-    "byte-equality of the carried block",
-  );
-  assert.ok(factsText.includes(STRATEGY_BOUNDARY_START) && factsText.includes(STRATEGY_BOUNDARY_END), "the approved Strategy boundary representation is present too");
-
-  // Deterministic parse of what Finance will read -- no interpretation needed.
-  const parsed = parseCommercialValueEvidenceBlock(factsText);
-  assert.ok(parsed.ok, parsed.ok ? "" : parsed.reason);
-  assert.strictEqual(parsed.record.determination, "Satisfied");
-  assert.strictEqual(parsed.block, DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK);
+  assert.ok(factsText.includes(STRATEGY_BOUNDARY_START) && factsText.includes(STRATEGY_BOUNDARY_END), "the approved Strategy boundary representation is present");
+  assert.ok(!factsText.includes(COMMERCIAL_VALUE_EVIDENCE_START), "no Commercial Value Evidence block is carried to Finance");
+  assert.ok(!parseCommercialValueEvidenceBlock(factsText).ok, "nothing for Finance to parse as upstream evidence");
 });
 
-test("A Strategy clarification preserves the upstream Commercial Value Evidence block when the evidence base came from approved Call Notes (order 2)", async (t) => {
+test("A Strategy clarification requeue appends only the clarification -- no Commercial Value Evidence block is re-appended", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   const state = fakeState({
     handoffId: "handoff-1",
     stage: "strategy_clarification",
     awaiting: "strategy_clarification",
-    strategy: { // Order-2 evidence base: the Handoff's own narrative carried only a
-    // reference, so `strategyContext` holds the retrieved Call Notes text
-    // and does NOT contain the block -- exactly the shape whose rewrite used
-    // to delete it.
-      context: "Fulfilment delays: recurring stockouts across the regional warehouse network.", commercialValueEvidenceBlock: DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK },
+    strategy: { context: "Fulfilment delays: recurring stockouts across the regional warehouse network." },
   });
 
   await handleStrategyClarification(env, state, "The board review is scheduled for the last week of the quarter.", STRATEGY_SKILLS);
@@ -1987,10 +1942,7 @@ test("A Strategy clarification preserves the upstream Commercial Value Evidence 
     .map((i) => i.text.content)
     .join("");
   assert.match(facts, /Additional detail: The board review is scheduled/);
-  assert.ok(facts.includes(DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK), "the block is re-appended verbatim, so the next pickup's provenance gate still passes");
-  const reparsed = parseCommercialValueEvidenceBlock(facts);
-  assert.ok(reparsed.ok, reparsed.ok ? "" : reparsed.reason);
-  assert.strictEqual(reparsed.block, DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK, "byte-identical after the rewrite");
+  assert.ok(!facts.includes(COMMERCIAL_VALUE_EVIDENCE_START), "no block is added");
 });
 
 test("30. Finance cannot receive an unapproved proposal -- never budget/WTP as the pricing basis", async (t) => {
@@ -3993,7 +3945,7 @@ test("Discuss 3. Several questions are answered from the Work's evidence, findin
   assert.match(first.system, /=== DIAGNOSIS ===/);
   assert.ok(first.system.includes(redactIdentityTerms(JSON.stringify(proposalBefore))), "grounded in the exact current proposal");
   assert.match(first.system, /=== HAT DEFINITION ===/, "the Hat's governance is loaded live, not hardcoded");
-  assert.match(first.system, /=== UPSTREAM COMMERCIAL VALUE EVIDENCE/);
+  assert.doesNotMatch(first.system, /UPSTREAM COMMERCIAL VALUE EVIDENCE/, "no Sales-side value block is part of the discussion context");
   assert.match(second.system, /Q1: What did the client actually tell us about delivery\?\nA1: Answer number 1/, "an earlier exchange is carried, labelled as conversation");
 
   assert.deepStrictEqual(after.strategy?.proposal, proposalBefore, "the proposal is unchanged");
@@ -4204,7 +4156,7 @@ test("Status 1. The pickup status message shows the real steps in order, ends on
   const final = statuses.at(-1)!;
   const order = [
     "✓ Reading the Sales -> Strategy Handoff",
-    "✓ Checking the Sales boundary record, the Commercial Value Evidence block and the Matter",
+    "✓ Checking the Sales boundary record and the Matter",
     "✓ Planning which Strategy Skills (if any) this diagnosis needs",
     "✓ Establishing the situation and running the diagnosis",
     "✓ Developing the full Strategic Intervention Proposal",
@@ -4245,7 +4197,7 @@ test("Status 3. A held pickup marks the step it stopped on and ends on the hold"
   await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   const final = log.sentTexts.filter((s) => s.startsWith("Hat: Strategy Analyst.\n\n🧭")).at(-1)!;
-  assert.match(final, /✗ Checking the Sales boundary record, the Commercial Value Evidence block and the Matter\n⛔ Held -- the reason is below\./);
+  assert.match(final, /✗ Checking the Sales boundary record and the Matter\n⛔ Held -- the reason is below\./);
 });
 
 test("Status 4. A discussion question shows its own steps and ends on the answer", async (t) => {
@@ -4469,4 +4421,40 @@ test("Sources: a Handoff already claimed for another Work is refused before any 
     !log.requests.some((request) => request.includes(SOURCES_PAGE_ID)),
     "the claim boundary holds BEFORE the Sources path runs -- no canonical page is even fetched",
   );
+});
+
+test("Sources: the Strategy -> Finance Handoff forwards the declared Call Notes link as a reference only -- no content, no Commercial Value Evidence block", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    verifiedFacts: "Call_Notes_ID: CN-007",
+  });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+
+  const afterPickup = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  assert.strictEqual(afterPickup.stage, "awaiting_intervention_approval");
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
+
+  const sources = log.handoffCreateBody.properties.Sources.rich_text as { text: { content: string; link: { url: string } } }[];
+  assert.strictEqual(sources.length, 1, "exactly the one declared link is forwarded");
+  assert.strictEqual(sources[0].text.link.url, `https://www.notion.so/${SOURCES_PAGE_ID.replace(/-/g, "")}`);
+  const facts = (log.handoffCreateBody.properties["Verified Facts & Sources"].rich_text as { text: { content: string } }[])
+    .map((i) => i.text.content)
+    .join("");
+  assert.ok(!facts.includes(COMMERCIAL_VALUE_EVIDENCE_START), "no value block is copied into the Finance Handoff");
+  assert.ok(!facts.includes("staff hours"), "no Call Notes content is copied either");
+});
+
+test("Sources: a Handoff with no Sources forwards none to Finance (legacy path unchanged)", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+
+  const afterPickup = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
+
+  assert.strictEqual(log.handoffCreateBody.properties.Sources, undefined, "no Sources property is written");
 });

@@ -164,6 +164,9 @@ export interface HandoffSourceRouteContract {
  *   fully; absent the Handoff carries narrative evidence as before.
  *   `handoffs` is prohibited: a Handoff is never evidence for another
  *   Handoff, and a self/cycle reference would make evidence unresolvable.
+ * - `Strategy->Finance` -- the same optional `call_notes` link, forwarded as
+ *   a reference only; Finance reads the Commercial Value Evidence block from
+ *   the record's Note.
  *
  * The Google source types (`google_doc`, `google_sheet`) have their full
  * per-type validation implemented in this module, but NO production route
@@ -176,6 +179,15 @@ export interface HandoffSourceRouteContract {
  */
 export const HANDOFF_SOURCE_ROUTE_CONTRACTS: Readonly<Record<string, HandoffSourceRouteContract>> = {
   "Sales->Strategy": {
+    required: [],
+    optional: ["call_notes"],
+    prohibited: ["handoffs"],
+  },
+  // Strategy->Finance (Martin, 2026-10-19): the pricing Handoff carries the
+  // SAME canonical Call Notes link, never a copy of its content, so Finance
+  // can read the Commercial Value Evidence block from the record's Note
+  // instead of Sales writing it into every Handoff.
+  "Strategy->Finance": {
     required: [],
     optional: ["call_notes"],
     prohibited: ["handoffs"],

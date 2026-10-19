@@ -2,7 +2,10 @@ import type { Env } from "../../types";
 import { plainText, queryDataSource, relationIds } from "../../notion";
 import type { AccessContext } from "../../access";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
-import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../../records/callNotes/callNotesRecord";
+import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord, readCallNotesNoteProperty } from "../../records/callNotes/callNotesRecord";
+
+// The Note reader is shared (Finance reads the same property); re-exported so existing imports keep working.
+export { readCallNotesNoteProperty };
 import { stripCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { parseRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
 import { resolveHandoffSources, readGoogleDocSourceContent, type ResolvedCallNotesSource, type ResolvedGoogleDocSource } from "../../handoffSources";
@@ -312,50 +315,6 @@ export async function readApprovedCallNotesEvidence(
   return readCallNotesNoteEvidence(located.id, located.properties, registry.record, status, "reference");
 }
 
-/**
- * Reads the record's `Note` rich-text property as raw text, validating its
- * shape first.
- *
- * Canonical Call Notes schema (aligned 2026-10-17): `Note` is the SOLE
- * canonical source of substantive note content. The page body is never read
- * by this slice, and there is no body fallback: a record whose `Note` is
- * missing, unreadable, or empty fails here regardless of what its page body
- * may hold.
- *
- * Every defect is a structured, non-sensitive reason that names the defect
- * and never the content: the property must be PRESENT, it must be rich text
- * (an array of rich-text items -- a number, select, or other wrong-typed
- * property is refused rather than coerced), and its extracted text must be
- * non-empty after trimming. Text extraction follows the same per-item shape
- * the repository's other rich-text readers accept (`plain_text`, falling
- * back to `text.content`), so a write-shaped item reads the same as a
- * read-shaped one; an item carrying neither contributes nothing, and a Note
- * made only of such items is refused as empty.
- */
-export function readCallNotesNoteProperty(
-  properties: Record<string, any> | undefined,
-): { ok: true; note: string } | { ok: false; reason: string } {
-  const prop = properties?.["Note"];
-  if (prop === undefined || prop === null) {
-    return { ok: false, reason: "carries no Note property" };
-  }
-  const items = (prop as { rich_text?: unknown }).rich_text;
-  if (!Array.isArray(items)) {
-    return { ok: false, reason: "carries a Note property that is not rich text" };
-  }
-  const note = items
-    .map((item) => {
-      const entry = item as { plain_text?: unknown; text?: { content?: unknown } } | null;
-      if (typeof entry?.plain_text === "string") return entry.plain_text;
-      if (typeof entry?.text?.content === "string") return entry.text.content;
-      return "";
-    })
-    .join("");
-  if (!note.trim()) {
-    return { ok: false, reason: "carries an empty Note property" };
-  }
-  return { ok: true, note };
-}
 
 /**
  * Gate 6 for an ALREADY-RESOLVED canonical source, used by
