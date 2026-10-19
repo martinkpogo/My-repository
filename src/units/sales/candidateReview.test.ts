@@ -363,6 +363,44 @@ test("renderBlockedCandidateReview: states the reason, the standing limitations,
   assert.ok(/Visual analysis: not performed/i.test(text), text);
 });
 
+test("renderCandidateReview: a failed social search and an empty social search stay distinguishable on the card -- 'did not complete' is never rendered as 'found none'", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // Provider failure: the search itself never succeeded.
+  globalThis.fetch = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+  const failed = await gatherPublicSocialSignals(envWithSearch(), "Nova Inc", discoveryCronContext());
+  const failedText = renderCandidateReview("Nova Inc", { ...VALIDATED_REVIEW, socialDisclosures: failed.disclosures });
+
+  assert.ok(failedText.includes("*Public social engagement signals*"), failedText);
+  assert.ok(failedText.includes("did not complete"), `the failed search must be disclosed on the card: ${failedText}`);
+  assert.ok(failedText.includes("an unsuccessful search is not an empty one"), failedText);
+  assert.ok(!failedText.includes("found no indexed result"), "a failed search must never render as a completed-but-empty one");
+  assert.ok(!/has no public social presence/i.test(failedText), "a failed search must never render as an established absence of presence");
+
+  // Completed but empty: the search succeeded and returned nothing.
+  globalThis.fetch = (async () => new Response(JSON.stringify({ results: [] }), { status: 200 })) as typeof fetch;
+  const empty = await gatherPublicSocialSignals(envWithSearch(), "Nova Inc", discoveryCronContext());
+  const emptyText = renderCandidateReview("Nova Inc", { ...VALIDATED_REVIEW, socialDisclosures: empty.disclosures });
+
+  assert.ok(emptyText.includes("found no indexed result"), `an empty search is disclosed as searched-and-found-nothing: ${emptyText}`);
+  assert.ok(/NOT evidence/i.test(emptyText), "an empty search still carries its not-evidence-of-absence disclosure on the card");
+  assert.ok(!emptyText.includes("did not complete"), "an empty search must never render as a failed one");
+
+  // Both outcomes survive onto a blocked review too -- a blocked review must
+  // not silently drop what actually happened during retrieval.
+  const blockedText = renderCandidateReview("Nova Inc", {
+    ...VALIDATED_REVIEW,
+    status: "blocked",
+    blockedReason: "the review cites source(s) that do not appear in any material this run retrieved: S9",
+    socialDisclosures: failed.disclosures,
+  });
+  assert.ok(blockedText.includes("NOT PRODUCED"), blockedText);
+  assert.ok(blockedText.includes("did not complete"), `a blocked card still discloses the failed search: ${blockedText}`);
+});
+
 // ---------------------------------------------------------------------------
 // Bounded visual analysis: capability reported, never built.
 // ---------------------------------------------------------------------------

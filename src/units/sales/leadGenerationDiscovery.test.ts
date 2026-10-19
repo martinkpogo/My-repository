@@ -5,8 +5,11 @@ import {
   DISCOVERY_QUERIES,
   LeadOpportunityDiscoveryCapability,
   MAX_APPROVAL_CARDS_PER_RUN,
+  checkCompanySpecificEvidence,
+  evidenceStatesProblemOrOpportunity,
   leadCandidateMemoryKey,
   handleLeadOpportunityApproval,
+  normaliseForGrounding,
   notifyDiscoveryRunSummary,
   proposeLeadOpportunity,
   runAutonomousLeadDiscovery,
@@ -16,6 +19,7 @@ import { salesManifest } from "./salesManifest";
 import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import {
   MAX_SOCIAL_SIGNAL_SEARCHES,
+  renderBlockedCandidateReview,
   socialSignalQueries,
 } from "./candidateReview";
 
@@ -88,7 +92,9 @@ const PASS_EVALUATION = JSON.stringify({
     {
       pass: true,
       organisation: "Acme Corp",
-      evidence: "Expanded into a new market but public positioning still emphasises its original offering.",
+      // Source-grounded observation: names the organisation and states the
+      // positioning-update signal (the strengthened evidence contract).
+      evidence: "Acme Corp expanded into a new market but its public positioning still emphasises its original offering.",
       decisionMakerOrRole: "",
       category: "positioning",
       reason: "Recent expansion without corresponding positioning update.",
@@ -353,6 +359,39 @@ const UNSUPPORTED_EVALUATION = JSON.stringify({
 });
 
 /**
+ * The confirmed live failure this threshold corrects (2026-10-19): the AI
+ * passed a candidate on a GENERAL article about brand messaging and dressed
+ * the observation up as Brand Russo's own problem. The evidence names the
+ * company, but the retrieved source never mentions it.
+ */
+const BRAND_RUSSO_EVALUATION = JSON.stringify({
+  candidates: [
+    {
+      pass: true,
+      organisation: "Brand Russo",
+      evidence: "Brand Russo's positioning is inconsistent with what it actually delivers.",
+      decisionMakerOrRole: "",
+      category: "positioning",
+      reason: "A perception gap may be costing it qualified enquiries.",
+    },
+  ],
+});
+
+/** A named organisation with a perfectly neutral event and nothing else -- real, but not a demonstrated problem. */
+const NEUTRAL_REBRAND_EVALUATION = JSON.stringify({
+  candidates: [
+    {
+      pass: true,
+      organisation: "Zenith Co",
+      evidence: "Zenith Co announced a rebrand of its visual identity.",
+      decisionMakerOrRole: "",
+      category: "brand",
+      reason: "A rebrand often signals strategic change.",
+    },
+  ],
+});
+
+/**
  * Installs a Tavily/Notion/LLM mock for one autonomous discovery run and
  * returns the facts a caller can assert on: which governed records were
  * actually created, every governed create body that went over the wire, and
@@ -362,21 +401,17 @@ const UNSUPPORTED_EVALUATION = JSON.stringify({
  * then assert that no identity-bearing value ever reached Notion, which is a
  * stronger claim than "the right number of records was created".
  */
-function installDiscoveryRun(t: any, evaluation: string, opts: { leadsQueryFails?: boolean } = {}) {
+function installDiscoveryRun(t: any, evaluation: string, opts: { leadsQueryFails?: boolean; tavilyResults?: Array<{ title: string; url: string; content: string }> } = {}) {
   const originalFetch = globalThis.fetch;
   const created: Record<string, number> = { handoffs: 0, leads: 0, proposals: 0, matters: 0, entities: 0 };
   const createBodies: any[] = [];
   const activityEntries: any[] = [];
+  const tavilyResults = opts.tavilyResults ?? [{ title: "Acme Corp expands into enterprise market", url: "https://example.com/acme", content: "Acme Corp expansion news." }];
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
     if (url.includes("api.tavily.com")) {
-      return new Response(
-        JSON.stringify({
-          results: [{ title: "Acme Corp expands into enterprise market", url: "https://example.com/acme", content: "Acme expansion news." }],
-        }),
-        { status: 200 },
-      );
+      return new Response(JSON.stringify({ results: tavilyResults }), { status: 200 });
     }
     if (url.includes("/blocks/")) {
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
@@ -527,7 +562,7 @@ test("Test D & G: A passing candidate is presented with no Handoff written -- it
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     }
     return new Response(
-      JSON.stringify({ choices: [{ message: { content: JSON.stringify({ candidates: [{ pass: true, organisation: "Delta Corp", evidence: "New product line launch", decisionMakerOrRole: "", category: "", reason: "" }] }) } }] }),
+      JSON.stringify({ choices: [{ message: { content: JSON.stringify({ candidates: [{ pass: true, organisation: "Delta Corp", evidence: "Delta Corp launched a new product line while its public positioning still describes only its original offering.", decisionMakerOrRole: "", category: "", reason: "" }] }) } }] }),
       { status: 200 },
     );
   }) as typeof fetch;
@@ -577,6 +612,126 @@ test("runAutonomousLeadDiscovery never creates a Lead from an inconsistent AI 'p
 
   assert.strictEqual(leadsCreatedCount, 0);
   assert.strictEqual(summary.skippedAsInsufficient, DISCOVERY_QUERIES.length);
+});
+
+// ===========================================================================
+// Company-specific evidence threshold (2026-10-19): the correction for a
+// confirmed live failure where a general article about inconsistent brand
+// messaging was presented on an approval card as if it demonstrated the
+// problem at a NAMED organisation.
+// ===========================================================================
+
+test("checkCompanySpecificEvidence: a general article about the problem category is never evidence about a company it does not name", () => {
+  const verdict = checkCompanySpecificEvidence(
+    { organisation: "Brand Russo", evidence: "Brand Russo's positioning is inconsistent with what it actually delivers." },
+    { title: "Why inconsistent brand messaging costs you customers", url: "https://example.com/brand-messaging-guide", snippet: "General advice: brands that mix their messaging confuse buyers." },
+  );
+  assert.strictEqual(verdict.ok, false, "the retrieved result never mentions Brand Russo -- the article is about the category, not the company");
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /does not name Brand Russo/);
+    assert.match(verdict.reason, /general article about the problem category/);
+  }
+});
+
+test("checkCompanySpecificEvidence: an observation not tied to the named organisation is held -- the card may only carry what says something about THIS company", () => {
+  const verdict = checkCompanySpecificEvidence(
+    { organisation: "Brand Russo", evidence: "The company's public messaging is inconsistent with what it delivers." },
+    { title: "Brand Russo positioning", url: "https://example.com/brand-russo", snippet: "Brand Russo expanded into a new market." },
+  );
+  assert.strictEqual(verdict.ok, false);
+  if (!verdict.ok) assert.match(verdict.reason, /evidence does not name Brand Russo/);
+});
+
+test("checkCompanySpecificEvidence: a neutral business event announced alone never establishes a problem -- rebrand, expansion, leadership change, product launch", () => {
+  const result = { title: "Zenith Co news", url: "https://example.com/zenith", snippet: "Zenith Co update." };
+  const neutralEvents = [
+    "Zenith Co announced a rebrand of its visual identity.",
+    "Zenith Co expanded into a new regional market.",
+    "Zenith Co appointed a new chief executive.",
+    "Zenith Co launched a new product line.",
+  ];
+  for (const evidence of neutralEvents) {
+    const verdict = checkCompanySpecificEvidence({ organisation: "Zenith Co", evidence }, result);
+    assert.strictEqual(verdict.ok, false, `a bare neutral event must be held: ${evidence}`);
+    if (!verdict.ok) assert.match(verdict.reason, /problem or opportunity signal/, verdict.reason);
+  }
+
+  // The same event WITH a grounded problem signal in the observation passes:
+  // the gate holds the bare announcement, not the company.
+  const grounded = checkCompanySpecificEvidence(
+    { organisation: "Zenith Co", evidence: "Zenith Co rebranded but its public positioning still describes only its original offering." },
+    result,
+  );
+  assert.deepStrictEqual(grounded, { ok: true });
+});
+
+test("normaliseForGrounding: punctuation- and case-insensitive for Latin names, and never collapses a non-Latin name to nothing", () => {
+  assert.strictEqual(normaliseForGrounding("Acme, Corp."), "acme corp");
+  assert.strictEqual(normaliseForGrounding("  ACME   corp "), "acme corp");
+  assert.strictEqual(normaliseForGrounding("株式会社サクラ"), "株式会社サクラ", "non-Latin names survive normalisation intact");
+
+  // End-to-end through the gate: a non-Latin organisation grounds the same way.
+  const verdict = checkCompanySpecificEvidence(
+    { organisation: "株式会社サクラ", evidence: "株式会社サクラ expanded but its positioning still describes only its original offering." },
+    { title: "株式会社サクラ rebrands", url: "https://example.com/sakura", snippet: "株式会社サクラ news." },
+  );
+  assert.deepStrictEqual(verdict, { ok: true });
+});
+
+test("evidenceStatesProblemOrOpportunity: bounded signal vocabulary -- a problem observation passes, a bare announcement and an empty string do not", () => {
+  assert.strictEqual(evidenceStatesProblemOrOpportunity(""), false);
+  assert.strictEqual(evidenceStatesProblemOrOpportunity("Zenith Co announced a rebrand."), false);
+  assert.strictEqual(evidenceStatesProblemOrOpportunity("Zenith Co's public messaging is unclear to buyers."), true);
+  assert.strictEqual(evidenceStatesProblemOrOpportunity("Zenith Co's growth has been stagnant for six quarters."), true);
+});
+
+test("LGS: a general problem-category article is HELD as insufficient evidence -- no approval card, no Work, no Lead, no Blocker", async (t) => {
+  const { created, activityEntries } = installDiscoveryRun(t, BRAND_RUSSO_EVALUATION, {
+    tavilyResults: [{ title: "Why inconsistent brand messaging costs you customers", url: "https://example.com/brand-messaging-guide", content: "General advice for owners: mixed messaging confuses buyers." }],
+  });
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+
+  assert.ok(summary.evaluated > 0, "the candidates were evaluated");
+  assert.strictEqual(summary.pendingApproval, 0, "a general article must never become an approval card claiming this company has the problem");
+  assert.strictEqual(summary.skippedAsInsufficient, summary.evaluated, "every such candidate is held as insufficient evidence");
+  assert.strictEqual((env as any).__sessions.init.length, 0, "no Work is created for a held candidate");
+  assert.strictEqual(created.leads, 0, "and no Lead");
+  assert.strictEqual(created.handoffs, 0, "and no Handoff");
+  assert.strictEqual(
+    activityEntries.filter((p) => p?.Type?.select?.name === "Blocker").length,
+    0,
+    "holding a candidate is a screening judgement, not a blocked governed write -- it must not be logged as a Blocker",
+  );
+});
+
+test("LGS: a neutral business event at a named organisation is HELD -- a bare rebrand announcement never becomes an approval card", async (t) => {
+  const { created } = installDiscoveryRun(t, NEUTRAL_REBRAND_EVALUATION, {
+    tavilyResults: [{ title: "Zenith Co announces rebrand", url: "https://example.com/zenith-rebrand", content: "Zenith Co unveiled a new logo and visual identity." }],
+  });
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+
+  assert.ok(summary.evaluated > 0, "the candidates were evaluated");
+  assert.strictEqual(summary.pendingApproval, 0, "a bare neutral event must not be presented as a demonstrated problem");
+  assert.strictEqual(summary.skippedAsInsufficient, summary.evaluated, "every such candidate is held as insufficient evidence");
+  assert.strictEqual((env as any).__sessions.init.length, 0, "no Work is created for a held candidate");
+  assert.strictEqual(created.leads, 0, "and no Lead");
+});
+
+test("LGS: a grounded observation that names the organisation IS presented -- carrying the organisation-named evidence and the source retrieval date", async (t) => {
+  installDiscoveryRun(t, PASS_EVALUATION);
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+
+  assert.strictEqual(summary.pendingApproval, 1, "a properly grounded candidate is still presented");
+  const opportunity = (env as any).__sessions.proposeLeadOpportunity[0][0];
+  assert.ok(opportunity.evidence.includes("Acme Corp"), `the card's observation names the organisation: ${opportunity.evidence}`);
+  assert.strictEqual(typeof opportunity.sourceRetrievedAt, "string", "the retrieval date travels to the card");
+  assert.ok(!Number.isNaN(Date.parse(opportunity.sourceRetrievedAt)), `the retrieval date is a real timestamp: ${opportunity.sourceRetrievedAt}`);
 });
 
 test("runAutonomousLeadDiscovery records nothing when governance retrieval fails -- fails closed, not open", async (t) => {
@@ -878,6 +1033,91 @@ test("proposeLeadOpportunity sets pendingLeadOpportunity and presents evidence-b
   assert.deepStrictEqual(updated.pendingActionSummary?.buttons, sentButtons);
 });
 
+test("proposeLeadOpportunity: the card labels evidence as a search-result snippet, the reason as a hypothesis, and dates the retrieval", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (String(url).includes("api.telegram.org")) {
+      sentTexts.push(JSON.parse(init.body).text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (String(url).includes("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      return new Response(
+        JSON.stringify({ id: url.split("/v1/pages/").pop()!.split("?")[0], url, parent: { type: "page", page_id: "governance-root" }, properties: {} }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // With a retrieval date recorded.
+  await proposeLeadOpportunity(fakeEnv(), fakeOpportunityState(), {
+    ...SAMPLE_OPPORTUNITY,
+    sourceRetrievedAt: "2026-10-19T08:00:00.000Z",
+  });
+  const dated = sentTexts[0];
+  assert.ok(dated.includes("Observed (search-result snippet -- the source page itself was not opened):"), `the observation must be labelled a snippet, not a page reading: ${dated}`);
+  assert.ok(dated.includes("Hypothesis -- why this may be worth pursuing, NOT established:"), `the reason must be labelled a hypothesis: ${dated}`);
+  assert.ok(dated.includes("Source: https://example.com/zenith (search-result snippet; retrieved 2026-10-19T08:00:00.000Z)"), `the source carries its retrieval date: ${dated}`);
+
+  // Without a retrieval date: the card says so rather than inventing one.
+  await proposeLeadOpportunity(fakeEnv(), fakeOpportunityState(), SAMPLE_OPPORTUNITY);
+  assert.ok(sentTexts[1].includes("Source: https://example.com/zenith (search-result snippet; retrieval time not recorded)"), `an unrecorded retrieval time is stated, never guessed: ${sentTexts[1]}`);
+});
+
+test("proposeLeadOpportunity: a BLOCKED evidence review is marked NOT PRODUCED on the card -- never readable as a validated review", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let sentText = "";
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    if (String(url).includes("api.telegram.org")) {
+      sentText = JSON.parse(init.body).text;
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (String(url).includes("/pages") && method === "POST") {
+      return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
+      return new Response(
+        JSON.stringify({ id: url.split("/v1/pages/").pop()!.split("?")[0], url, parent: { type: "page", page_id: "governance-root" }, properties: {} }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const blockedText = renderBlockedCandidateReview("Zenith Co", "the review cites source(s) that do not appear in any material this run retrieved: S9");
+  await proposeLeadOpportunity(fakeEnv(), fakeOpportunityState(), {
+    ...SAMPLE_OPPORTUNITY,
+    sourceRetrievedAt: "2026-10-19T08:00:00.000Z",
+    review: { status: "blocked", text: blockedText },
+  });
+
+  assert.ok(sentText.includes("Evidence review: NOT PRODUCED -- see below; this candidate has NOT passed an evidence review"), `a blocked review must be marked on the card: ${sentText}`);
+  assert.ok(!sentText.includes("Evidence review: validated"), "a blocked review must never be labelled validated");
+  assert.ok(sentText.includes("S9"), "the blocked reason is shown");
+  assert.ok(sentText.includes("NOT PRODUCED"), "the review body itself says NOT PRODUCED");
+  // The screening observation survives a blocked review, still labelled a snippet.
+  assert.ok(sentText.includes("Observed (search-result snippet -- the source page itself was not opened):"), "the observation is still on the card, still labelled a snippet");
+
+  // And a VALIDATED review is labelled for exactly what it is: validated against retrieved material only.
+  await proposeLeadOpportunity(fakeEnv(), fakeOpportunityState(), {
+    ...SAMPLE_OPPORTUNITY,
+    review: { status: "validated", text: "*Candidate review* — Zenith Co\nStatus: validated against the retrieved material only." },
+  });
+  assert.ok(sentText.includes("Evidence review: validated against the retrieved material only"), `a validated review says so, bounded to the retrieved material: ${sentText}`);
+});
+
 test("handleLeadOpportunityApproval clears pendingActionSummary alongside pendingLeadOpportunity, and a stale second tap is a safe no-op", async (t) => {
   const originalFetch = globalThis.fetch;
   let leadCreateCount = 0;
@@ -1163,7 +1403,7 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
     }
     if (urlStr.includes("api.tavily.com")) {
       outboundQueries.push(JSON.parse(init.body).query);
-      return new Response(JSON.stringify({ results: [{ title: "Nova Inc positioning shift", url: "https://example.com/nova", content: "Nova expansion." }] }), { status: 200 });
+      return new Response(JSON.stringify({ results: [{ title: "Acme Corp positioning shift", url: "https://example.com/nova", content: "Acme Corp expansion news." }] }), { status: 200 });
     }
     if (urlStr.includes("leads-ds") && method === "POST" && urlStr.endsWith("/query")) {
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
@@ -1347,13 +1587,26 @@ test("LeadOpportunityDiscoveryCapability fails closed when web search isn't conf
 /** A discovery run where every query surfaces three NEW organisations, so the per-run card cap is what limits presentation. */
 function installDistinctCandidateRun(t: any) {
   const originalFetch = globalThis.fetch;
-  let aiCalls = 0;
+  let searchBatch = 0;
   let leadsCreated = 0;
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
     if (url.includes("api.tavily.com")) {
+      // Every search call -- screening or the bounded public social-signal
+      // searches that follow a presented candidate -- gets its own batch of
+      // freshly-named organisations, so no two candidates ever share a memory
+      // key. The organisation name IS the result title, which is what lets the
+      // deterministic evidence gate (the retrieved result must name the
+      // organisation) pass for every one of them.
+      const batch = searchBatch++;
       return new Response(
-        JSON.stringify({ results: [0, 1, 2].map((i) => ({ title: `Result ${i}`, url: `https://example.com/r${i}`, content: "Expansion news." })) }),
+        JSON.stringify({
+          results: [0, 1, 2].map((i) => ({
+            title: `Org ${batch}-${i}`,
+            url: `https://example.com/org-${batch}-${i}`,
+            content: `Org ${batch}-${i} expanded into a new market.`,
+          })),
+        }),
         { status: 200 },
       );
     }
@@ -1367,18 +1620,23 @@ function installDistinctCandidateRun(t: any) {
       if (JSON.parse(init.body).parent?.data_source_id === "leads-ds") leadsCreated++;
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     }
-    aiCalls++;
-    const base = aiCalls * 10;
+    // The screening AI call is the one whose prompt lists the retrieved
+    // results as `[i] Title: ...`; the mock echoes those exact titles back as
+    // the organisations, so each candidate is grounded in ITS OWN result
+    // (the company-specific evidence threshold requires the retrieved result
+    // to name the organisation). Every other AI call -- the candidate review,
+    // for one -- gets no candidates back and can never manufacture one.
+    const titles = [...String(init?.body ?? "").matchAll(/\[\d+\] Title: ([^\\"]+)/g)].map((m) => m[1].trim());
     return new Response(
       JSON.stringify({
         choices: [
           {
             message: {
               content: JSON.stringify({
-                candidates: [0, 1, 2].map((i) => ({
+                candidates: titles.map((organisation) => ({
                   pass: true,
-                  organisation: `Org ${base + i}`,
-                  evidence: "Expanded into a new market but positioning still emphasises its original offering.",
+                  organisation,
+                  evidence: `${organisation} expanded into a new market but its public positioning still emphasises its original offering.`,
                   decisionMakerOrRole: "",
                   category: "positioning",
                   reason: "Expansion without a positioning update.",

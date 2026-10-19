@@ -587,6 +587,38 @@ test("EXEC 10. Missing/invalid safe context blocks execution fail-closed -- SAFE
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "SAFE_CONTEXT_UNAVAILABLE");
 });
 
+test("EXEC 10b. A cached-but-wrong safe context (log-entry-shaped text without the canonical section markers) also blocks SAFE_CONTEXT_UNAVAILABLE -- the structural validation is the gate, and neither AI nor any Notion re-fetch is reached", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const fetchCalls: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    fetchCalls.push(String(url));
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const forbiddenAi = {
+    run: async () => {
+      throw new Error("AI must not be called when the safe context is invalid");
+    },
+  };
+  // Shaped like an Activity & Decision Log entry rather than the governed
+  // context specification: comfortably past the minimum length, but carrying
+  // none of the required section markers -- the live failure mode after the
+  // canonical Research-Safe Consultancy Context page was deleted (retrieval
+  // must never re-point at a similarly-named log entry and accept it).
+  const logEntryShapedText =
+    "Activity & Decision Log entry: Lead discovery presented a candidate for approval. Decision rationale: hold pending review. Outcome: Active. This text is deliberately well past one hundred characters so that only the structural markers -- not the minimum-length check -- are what reject it as the Research-Safe Consultancy Context.";
+  const env = researchEnv(forbiddenAi, { [SAFE_CONTEXT_KV_KEY]: logEntryShapedText });
+
+  assert.strictEqual(isValidSafeContext(logEntryShapedText), false, "the fixture must fail the STRUCTURAL validation, not the length check");
+  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+
+  assert.strictEqual(outcome.status, "blocked");
+  if (outcome.status === "blocked") assert.strictEqual(outcome.code, "SAFE_CONTEXT_UNAVAILABLE");
+  assert.strictEqual(fetchCalls.length, 0, "a wrong cached context fails closed on what governance returned -- no silent Notion re-fetch, no substitute page");
+});
+
 test("EXEC 11. An ambiguous protocol selection blocks as AMBIGUOUS_PROTOCOL_SELECTION and carries the model's own reason -- never a guessed protocol", async () => {
   const env = researchEnv(scriptedAi({ selection: { protocols: ["Competitive Research"], ambiguous: true, reason: "Unclear whether this is about competitors or the whole market." } }));
 
