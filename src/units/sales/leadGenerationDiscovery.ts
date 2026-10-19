@@ -95,6 +95,187 @@ interface EvaluationBatchResponse {
   candidates: CandidateEvaluation[];
 }
 
+// ---------------------------------------------------------------------------
+// Company-specific evidence threshold (deterministic).
+// ---------------------------------------------------------------------------
+//
+// Correction for a confirmed live failure: an approval card cited a general
+// article about inconsistent brand messaging as if it demonstrated that a
+// NAMED organisation had that problem. The AI screening step judges only
+// search-result snippets, so nothing downstream could tell "the source is
+// about the problem category" apart from "the source shows THIS company has
+// the problem". These checks are the deterministic half of that distinction:
+// the named organisation must appear in the retrieved result itself, the
+// observation must name that organisation, and the observation must carry a
+// business problem/opportunity signal. They only ever HOLD a candidate
+// (counted as insufficient evidence, never presented as an approval card) --
+// they never turn a hold into a pass, they add no confidence score, and the
+// full Acquisition-Criteria judgement stays with the live governance/AI step
+// above them. A Lead still exists only after Martin's explicit approval.
+//
+// Known limitation, deliberately documented rather than papered over: the
+// signal vocabulary below is a bounded wordlist, not a semantic test. An
+// observation that genuinely shows a problem but is phrased entirely outside
+// this vocabulary is HELD rather than presented (the safe direction), and a
+// snippet that merely names the company in passing can still satisfy the
+// naming checks -- semantic source-grounding beyond naming cannot be verified
+// deterministically from a snippet at all, which is exactly why the candidate
+// review (candidateReview.ts) keeps every source labelled as a snippet and
+// Martin's approval stays the bar for a Lead.
+
+/**
+ * Unicode-aware normalisation for grounding comparisons: lowercases and
+ * collapses every run of non-letter/digit characters to one space, so
+ * "Acme, Corp." and "acme corp" compare equal while non-Latin names
+ * (e.g. 株式会社サクラ) survive intact rather than normalising to nothing.
+ */
+export function normaliseForGrounding(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/**
+ * Bounded problem-signal vocabulary drawn from the five problem-signal
+ * categories the Hat Definition's Acquisition Criteria name (criterion 2 is
+ * the strongest): unclear/inconsistent positioning and difficulty explaining
+ * the offer; a change without a corresponding positioning update; stagnant
+ * growth; a rebrand without evident strategic clarity; fragmented messaging
+ * and a perception gap versus actual capability.
+ *
+ * Deliberately EXCLUDES neutral event nouns -- rebrand, expansion,
+ * leadership change, product launch, acquisition, funding -- on purpose: an
+ * announcement of one of those, with nothing else, does not establish a
+ * problem, so an evidence string carrying only the event fails this check.
+ * Matched word-wise against the observation, case-insensitively.
+ */
+const PROBLEM_SIGNAL_SOURCES: readonly string[] = [
+  // Category 1 / 5: unclear or inconsistent positioning, difficulty explaining the offer, fragmented messaging.
+  "inconsisten\\w*",
+  "unclear",
+  "confus\\w*",
+  "fragment\\w*",
+  "struggl\\w*",
+  "difficult\\w*",
+  "explain\\w*",
+  "hard to (?:tell|explain|understand)",
+  "mixed messag\\w*",
+  "generic\\b",
+  // Category 2: a market/model change without a corresponding positioning update.
+  "still\\b",
+  "unchanged",
+  "outdated",
+  "no longer",
+  "without updat\\w*",
+  "not updat\\w*",
+  "no updat\\w*",
+  "hasn'?t updat\\w*",
+  "same (?:branding|positioning|messaging|identity|logo|tagline|offer)",
+  // Category 3: stagnant growth / a strategic shift showing as a problem.
+  "stagnan\\w*",
+  "flat\\b",
+  "declin\\w*",
+  "plateau\\w*",
+  "stall\\w*",
+  "slow(?:down|ing)\\b",
+  "drop(?:s|ped|ping)?\\b",
+  "shrink(?:s|ing)?\\b",
+  "slump(?:s|ed|ing)?\\b",
+  "underperform\\w*",
+  "problem\\w*\\b",
+  // Category 4: rebrand without evident strategic clarity.
+  "backlash",
+  "criticis\\w*",
+  "criticiz\\w*",
+  "panned",
+  // Category 5: perception gap versus actual capability.
+  "perceiv\\w*",
+  "lag(?:s|ged|ging)?\\b",
+  "behind\\b",
+  "weak(?:er|ness)?\\b",
+  "differentiat\\w*",
+  "indistinguishab\\w*",
+  // Adverse-outcome language only a genuine problem observation would carry.
+  "fail\\w*\\b",
+  "los(?:e|es|ing|t)\\b",
+  "churn\\w*",
+];
+
+const PROBLEM_SIGNAL_PATTERNS: readonly RegExp[] = PROBLEM_SIGNAL_SOURCES.map((source) => new RegExp(`\\b(?:${source})`, "i"));
+
+/**
+ * Whether an observation states (or quotes) a business problem or
+ * opportunity signal at all -- the mechanical half of "a neutral business
+ * event does not itself establish a problem". Never a diagnosis: it only
+ * says the observation is about a problem/signal rather than a bare
+ * announcement.
+ */
+export function evidenceStatesProblemOrOpportunity(evidence: string): boolean {
+  if (typeof evidence !== "string" || !evidence.trim()) return false;
+  const lower = evidence.toLowerCase();
+  return PROBLEM_SIGNAL_PATTERNS.some((pattern) => pattern.test(lower));
+}
+
+export type CompanySpecificEvidenceVerdict =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/**
+ * The deterministic evidence threshold a screening pass must additionally
+ * clear before its candidate may be presented for approval:
+ *
+ * 1. an organisation is named, with checkable source evidence;
+ * 2. the retrieved result itself names that organisation -- a general
+ *    article about the problem category is never evidence about a company
+ *    it does not mention;
+ * 3. the observation (evidence) names that organisation -- an observation
+ *    not tied to the named organisation cannot be presented as one;
+ * 4. the observation carries a business problem/opportunity signal -- a
+ *    rebrand, expansion, leadership change or product launch announcement
+ *    on its own does not establish a problem.
+ *
+ * A failure is reported with the reason; the caller holds the candidate as
+ * insufficient evidence (never presented). See the module comment above for
+ * the deliberate limitation of check 4.
+ */
+export function checkCompanySpecificEvidence(
+  evaluation: Pick<CandidateEvaluation, "organisation" | "evidence">,
+  result: Pick<SearchResult, "title" | "url" | "snippet">,
+): CompanySpecificEvidenceVerdict {
+  const organisation = (evaluation.organisation ?? "").trim();
+  const evidence = (evaluation.evidence ?? "").trim();
+  if (!organisation) return { ok: false, reason: "the evaluation names no organisation" };
+  if (!evidence) return { ok: false, reason: `the evaluation supplies no evidence for ${organisation}` };
+  if (!isCheckableUrl(result.url)) return { ok: false, reason: `the source url for ${organisation} is not a checkable http(s) url: ${result.url}` };
+
+  const normalisedOrganisation = normaliseForGrounding(organisation);
+  if (!normalisedOrganisation) {
+    return { ok: false, reason: `the organisation name "${organisation}" cannot be grounded in retrieved text` };
+  }
+
+  const resultText = normaliseForGrounding(`${result.title} ${result.url} ${result.snippet}`);
+  if (!resultText.includes(normalisedOrganisation)) {
+    return {
+      ok: false,
+      reason: `the retrieved result does not name ${organisation} -- a general article about the problem category is not evidence that this organisation has the problem`,
+    };
+  }
+
+  if (!normaliseForGrounding(evidence).includes(normalisedOrganisation)) {
+    return {
+      ok: false,
+      reason: `the evidence does not name ${organisation} -- an observation presented on the card must be tied to the named organisation`,
+    };
+  }
+
+  if (!evidenceStatesProblemOrOpportunity(evidence)) {
+    return {
+      ok: false,
+      reason: `the evidence for ${organisation} states no business problem or opportunity signal -- a neutral business event (rebrand, expansion, leadership change, product launch) announced on its own does not establish a problem`,
+    };
+  }
+
+  return { ok: true };
+}
+
 /**
  * Evaluates one query's search results in a single AI call against the
  * full canonical governance (including Acquisition Criteria) -- operates
@@ -102,6 +283,11 @@ interface EvaluationBatchResponse {
  * never fabricates a decision-maker, contact, or fact the snippet doesn't
  * contain. Returns [] (not null) on governance/AI failure so one failed
  * query doesn't abort the rest of the run -- the caller logs the failure.
+ * A `pass: true` here is NOT the end of screening: the caller additionally
+ * applies the deterministic company-specific evidence threshold
+ * (checkCompanySpecificEvidence below), because an AI pass alone cannot
+ * prove the observation is tied to the named organisation rather than to a
+ * general article about the problem category.
  *
  * Migrated (Skills architecture proof, Build order Step 2) to fetch the
  * shared `research-signal` Skill for its evidence discipline (never
@@ -142,7 +328,7 @@ export async function evaluateCandidates(env: Env, results: SearchResult[], skil
       behavior: governance.universalRoleContract,
       skillContent,
       context: candidatesText,
-      situation: `Evaluate EACH of the search results above independently against the Acquisition Criteria section in the Hat Definition -- operating business, strategic/commercial problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, and the evidence-threshold hard gate. If the snippet doesn't support a criterion, that criterion is not met -- do not assume it. A commodity request (logo/generic graphic design/social media graphics/basic branding) or mere existence/size/industry is never sufficient to pass.\n\nReturn JSON: {"candidates": [{"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the disciplined observation, or empty string if pass is false>", "decisionMakerOrRole": "<only if explicitly named/implied in the text, else empty string>", "category": "<short label, or empty string>", "reason": "..."}, ...]} -- exactly one entry per result given, in the same order.`,
+      situation: `Evaluate EACH of the search results above independently against the Acquisition Criteria section in the Hat Definition -- operating business, strategic/commercial problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, and the evidence-threshold hard gate. If the snippet doesn't support a criterion, that criterion is not met -- do not assume it. A commodity request (logo/generic graphic design/social media graphics/basic branding) or mere existence/size/industry is never sufficient to pass.\n\nCompany-specific evidence rules (hard gate -- a deterministic check enforces each one downstream and holds any candidate that fails it):\n- evidence must be a source-grounded OBSERVATION about the named organisation, taken from THIS result's own title/url/snippet, and must state the organisation's exact name. A general article about the problem category -- however accurate -- is never evidence that a particular company has that problem: if the result does not itself name the organisation, return pass: false with an empty organisation.\n- A neutral business event (a rebrand, an expansion, a leadership change, a product launch, an acquisition, a funding announcement) announced without source-grounded evidence of the problem or opportunity itself does NOT pass: the event is context, not a demonstrated problem.\n- "evidence" is what the snippet OBSERVES (an observed fact about the organisation); "reason" is why that may matter -- a hypothesis. Never present a possible business implication as an established fact, and never invent a contact, decision-maker, metric or date the snippet does not contain.\n\nReturn JSON: {"candidates": [{"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the disciplined observation, naming the organisation, or empty string if pass is false>", "decisionMakerOrRole": "<only if explicitly named/implied in the text, else empty string>", "category": "<short label, or empty string>", "reason": "..."}, ...]} -- exactly one entry per result given, in the same order.`,
     },
     light: true,
     maxTokens: 3000,
@@ -212,10 +398,20 @@ function emptyDiscoveryRunSummary(): DiscoveryRunSummary {
 
 export interface PendingLeadOpportunity {
   organisation: string;
+  /** The observed fact from the screening search-result snippet, naming the organisation -- never a hypothesis. */
   evidence: string;
+  /** Why this may be worth pursuing -- explicitly a hypothesis, never an established fact. */
   reason: string;
   category?: string;
   sourceUrl: string;
+  /**
+   * When the screening search result behind `evidence`/`sourceUrl` was
+   * actually retrieved (ISO-8601), so the card can date the observation.
+   * Absent only on opportunities staged without a live retrieval (direct
+   * tests, legacy staged state) -- the card then says the retrieval time is
+   * not recorded rather than inventing one.
+   */
+  sourceRetrievedAt?: string;
   /** Digest of the automatic research on this prospect (findings with sources, and limitations), or the reason it could not be done. Shown on the card; never decides anything. */
   research?: string;
   /**
@@ -281,11 +477,11 @@ export async function proposeLeadOpportunity(
     `*Opportunity Finding* -- ${opportunity.organisation}`,
     "",
     `Category: ${opportunity.category || "unclassified"}`,
-    `Evidence: ${opportunity.evidence}`,
-    `Why this looks worth pursuing: ${opportunity.reason}`,
-    `Source: ${opportunity.sourceUrl || "N/A"}`,
+    `Observed (search-result snippet -- the source page itself was not opened): ${opportunity.evidence}`,
+    `Hypothesis -- why this may be worth pursuing, NOT established: ${opportunity.reason}`,
+    `Source: ${opportunity.sourceUrl || "N/A"} (search-result snippet${opportunity.sourceRetrievedAt ? `; retrieved ${opportunity.sourceRetrievedAt}` : "; retrieval time not recorded"})`,
     "",
-    opportunity.review ? `${opportunity.review.text}\n` : "",
+    opportunity.review ? `Evidence review: ${opportunity.review.status === "validated" ? "validated against the retrieved material only" : "NOT PRODUCED -- see below; this candidate has NOT passed an evidence review"}\n${opportunity.review.text}\n` : "",
     opportunity.research ? `*Research*\n${opportunity.research}\n` : "",
     "Screened by Lead Generation against the Acquisition Criteria. No Lead has been created. Approve to record it as a Lead (Status: New), or reject to discard it -- a rejected organisation is not proposed again for 180 days. The evidence above is advisory input to that decision only: it is not a diagnosis, not a qualification, and not approval to contact anyone.",
   ].join("\n");
@@ -611,8 +807,16 @@ async function searchAndScreenForQuery(
       continue;
     }
 
-    if (!evaluation.organisation.trim() || !evaluation.evidence.trim() || !isCheckableUrl(result.url)) {
+    // The deterministic company-specific evidence threshold. An AI pass
+    // whose source never names the organisation, or whose observation names
+    // no problem/opportunity signal (a bare rebrand/expansion/leadership/
+    // product-launch announcement, or a general article about the problem
+    // category), is held as insufficient evidence -- never presented as a
+    // normal approval card implying the case is established.
+    const threshold = checkCompanySpecificEvidence(evaluation, result);
+    if (!threshold.ok) {
       summary.skippedAsInsufficient++;
+      console.log(`Lead Discovery: candidate held as insufficient evidence -- ${threshold.reason}`);
       continue;
     }
 
@@ -662,6 +866,7 @@ async function searchAndScreenForQuery(
         reason: evaluation.reason,
         category: evaluation.category,
         sourceUrl: result.url,
+        sourceRetrievedAt: result.retrieved_at,
       },
       result,
       access,
