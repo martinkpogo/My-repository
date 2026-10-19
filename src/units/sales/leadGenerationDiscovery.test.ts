@@ -122,6 +122,7 @@ test("runAutonomousLeadDiscovery does nothing when web search isn't configured -
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 0,
     screenedOut: 0,
     skippedAsDuplicate: 0,
@@ -180,6 +181,7 @@ test("notifyDiscoveryRunSummary distinguishes 'searches completed, nothing found
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 0,
     screenedOut: 0,
     skippedAsDuplicate: 0,
@@ -216,6 +218,7 @@ test("notifyDiscoveryRunSummary appends the search-failure note to a digest that
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 0,
     screenedOut: 11,
     skippedAsDuplicate: 0,
@@ -226,6 +229,53 @@ test("notifyDiscoveryRunSummary appends the search-failure note to a digest that
   assert.ok(sentTexts[0].includes("12 candidate(s) evaluated"), sentTexts[0]);
   assert.ok(sentTexts[0].includes("Search did not complete for 3 queries (1 unavailable, 2 failed)"), sentTexts[0]);
   assert.ok(sentTexts[0].includes("absence of results from those is not evidence"), sentTexts[0]);
+});
+
+test("notifyDiscoveryRunSummary names a failed duplicate check instead of reporting a clean run", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (_url: string, init: any) => {
+    sentTexts.push(JSON.parse(init.body).text);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await notifyDiscoveryRunSummary(fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" }), 1, undefined, {
+    evaluated: 12,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
+    duplicateCheckFailed: 3,
+    pendingApproval: 0,
+    screenedOut: 9,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
+  });
+  assert.ok(sentTexts[0].includes("12 candidate(s) evaluated"), sentTexts[0]);
+  assert.ok(sentTexts[0].includes("3 candidate(s) passed screening but could not be checked for duplicates"), sentTexts[0]);
+  assert.ok(sentTexts[0].includes("not evidence those organisations are new"), sentTexts[0]);
+  assert.ok(sentTexts[0].includes("see Blockers"), sentTexts[0]);
+
+  // A clean run must not grow the note.
+  sentTexts.length = 0;
+  await notifyDiscoveryRunSummary(fakeEnv({ TELEGRAM_GROUP_CHAT_ID: "-1004435157576" }), 1, undefined, {
+    evaluated: 12,
+    heldOverCap: 0,
+    skippedAlreadyPresented: 0,
+    presentationFailed: 0,
+    duplicateCheckFailed: 0,
+    pendingApproval: 0,
+    screenedOut: 12,
+    skippedAsDuplicate: 0,
+    skippedAsInsufficient: 0,
+    searchUnavailable: 0,
+    searchFailed: 0,
+  });
+  assert.ok(!sentTexts[0].includes("could not be checked for duplicates"), `a run with no such failure must not claim one: ${sentTexts[0]}`);
 });
 
 test("Test A: Candidate signal passes lightweight screening -> one approval card on a record_lead Work; no Handoff and no Lead is created", async (t) => {
@@ -312,7 +362,7 @@ const UNSUPPORTED_EVALUATION = JSON.stringify({
  * then assert that no identity-bearing value ever reached Notion, which is a
  * stronger claim than "the right number of records was created".
  */
-function installDiscoveryRun(t: any, evaluation: string) {
+function installDiscoveryRun(t: any, evaluation: string, opts: { leadsQueryFails?: boolean } = {}) {
   const originalFetch = globalThis.fetch;
   const created: Record<string, number> = { handoffs: 0, leads: 0, proposals: 0, matters: 0, entities: 0 };
   const createBodies: any[] = [];
@@ -332,6 +382,9 @@ function installDiscoveryRun(t: any, evaluation: string) {
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
     }
     if (url.includes("leads-ds") && method === "POST") {
+      if (opts.leadsQueryFails) {
+        return new Response(JSON.stringify({ object: "error", message: "Notion unavailable" }), { status: 500 });
+      }
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
     }
     if (url.includes("handoffs-ds") && method === "POST" && url.endsWith("/query")) {
@@ -373,6 +426,42 @@ test("LGS: a candidate passing lightweight screening is PRESENTED for approval -
     0,
     "presenting a candidate is not a refused governed write, so it must not be logged as a Blocker",
   );
+});
+
+test("LGS: a failed duplicate check is COUNTED and logged as a Blocker -- a Notion read failure is never reported as a clean bucket", async (t) => {
+  const { created, activityEntries } = installDiscoveryRun(t, PASS_EVALUATION, { leadsQueryFails: true });
+
+  const summary = await runAutonomousLeadDiscovery(fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" }), await lgsSkills());
+
+  assert.ok(summary.evaluated > 0, "the candidate really was evaluated");
+  assert.strictEqual(
+    summary.duplicateCheckFailed,
+    summary.evaluated,
+    "every candidate that passed screening but whose duplicate check threw is counted here -- previously it was dropped from the summary entirely",
+  );
+  assert.strictEqual(summary.pendingApproval, 0, "a candidate whose duplicate check failed must not be presented as if it were clear");
+  assert.strictEqual(created.leads, 0, "and it certainly creates no Lead");
+  assert.strictEqual(created.handoffs, 0, "and no Handoff");
+
+  const blockers = activityEntries.filter((p) => p?.Type?.select?.name === "Blocker");
+  assert.strictEqual(blockers.length, summary.duplicateCheckFailed, "each failure is logged as a Blocker");
+  for (const blocker of blockers) {
+    assert.ok(String(blocker?.Entry?.title?.[0]?.text?.content ?? "").includes("duplicate check failed"), `the Blocker names the failed duplicate check: ${JSON.stringify(blocker?.Entry)}`);
+  }
+
+  // The invariant this regression exists to protect: a run may never lose a
+  // candidate between buckets. The 2026-10-19 production run reported
+  // evaluated=39 with buckets summing to 38 -- exactly this path.
+  const buckets =
+    summary.screenedOut +
+    summary.skippedAsInsufficient +
+    summary.skippedAsDuplicate +
+    summary.duplicateCheckFailed +
+    summary.skippedAlreadyPresented +
+    summary.heldOverCap +
+    summary.pendingApproval +
+    summary.presentationFailed;
+  assert.strictEqual(buckets, summary.evaluated, "every evaluated candidate lands in exactly one bucket");
 });
 
 test("LGS: an unsupported diagnosis is screened out before any governed write -- no Handoff, no Lead, and nothing identity-bearing reaches Notion", async (t) => {
@@ -534,6 +623,7 @@ test("notifyDiscoveryRunSummary sends a single Hat-labeled digest, never one mes
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 1,
     screenedOut: 9,
     skippedAsDuplicate: 1,
@@ -564,6 +654,7 @@ test("notifyDiscoveryRunSummary catches Telegram errors gracefully without throw
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 0,
     screenedOut: 4,
     skippedAsDuplicate: 0,
@@ -606,6 +697,7 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 0,
     screenedOut: 1,
     skippedAsDuplicate: 0,
@@ -620,6 +712,7 @@ test("notifyDiscoveryRunSummary handles invalid or missing chatId cleanly withou
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     pendingApproval: 0,
     screenedOut: 1,
     skippedAsDuplicate: 0,

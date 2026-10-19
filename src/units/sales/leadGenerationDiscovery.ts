@@ -171,6 +171,16 @@ interface DiscoveryRunSummary {
   skippedAlreadyPresented: number;
   /** Candidates whose approval card could not be created or sent (logged as a Blocker each). */
   presentationFailed: number;
+  /**
+   * Candidates that passed screening but whose duplicate-Leads check failed.
+   * They are counted here rather than folded into `skippedAsDuplicate`, for
+   * the same reason a failed search is never reported as "no results": a
+   * Notion read that threw is not a finding that the organisation is new, and
+   * a candidate this run could not check is not a candidate this run handled.
+   * Counting them keeps the run's own accounting exhaustive -- every evaluated
+   * candidate lands in exactly one bucket.
+   */
+  duplicateCheckFailed: number;
   screenedOut: number;
   skippedAsDuplicate: number;
   skippedAsInsufficient: number;
@@ -191,6 +201,7 @@ function emptyDiscoveryRunSummary(): DiscoveryRunSummary {
     heldOverCap: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
+    duplicateCheckFailed: 0,
     screenedOut: 0,
     skippedAsDuplicate: 0,
     skippedAsInsufficient: 0,
@@ -610,6 +621,10 @@ async function searchAndScreenForQuery(
       duplicateLead = await findDuplicateLeads(env, evaluation.organisation, "");
     } catch (err) {
       console.error(`Lead Discovery: duplicate check failed for ${evaluation.organisation}`, err);
+      // Counted before the (fallible) Blocker write below: a candidate we
+      // could not check must show up in the run's own accounting even if the
+      // Activity & Decision Log write also fails -- logActivity never throws.
+      summary.duplicateCheckFailed++;
       await logActivity(env, {
         entry: `Lead discovery blocked -- duplicate check failed: ${evaluation.organisation}`,
         type: "Blocker",
@@ -894,8 +909,12 @@ export async function notifyDiscoveryRunSummary(env: Env, chatId: number, thread
       summary.searchUnavailable + summary.searchFailed > 0
         ? ` Search did not complete for ${summary.searchUnavailable + summary.searchFailed} quer${summary.searchUnavailable + summary.searchFailed === 1 ? "y" : "ies"} (${summary.searchUnavailable} unavailable, ${summary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.`
         : "";
+    const duplicateCheckNote =
+      summary.duplicateCheckFailed > 0
+        ? ` ${summary.duplicateCheckFailed} candidate(s) passed screening but could not be checked for duplicates, so no card was shown for them (see Blockers) -- that is a Notion read failure, not evidence those organisations are new.`
+        : "";
     const lines = [
-      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.pendingApproval} sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAlreadyPresented} already presented or recently rejected, ${summary.heldOverCap} held over the ${MAX_APPROVAL_CARDS_PER_RUN}-card cap, ${summary.skippedAsInsufficient} skipped for insufficient evidence.${summary.presentationFailed > 0 ? ` ${summary.presentationFailed} approval card(s) could not be sent (see Blockers).` : ""}${searchNote}`,
+      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.pendingApproval} sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAlreadyPresented} already presented or recently rejected, ${summary.heldOverCap} held over the ${MAX_APPROVAL_CARDS_PER_RUN}-card cap, ${summary.skippedAsInsufficient} skipped for insufficient evidence.${summary.presentationFailed > 0 ? ` ${summary.presentationFailed} approval card(s) could not be sent (see Blockers).` : ""}${duplicateCheckNote}${searchNote}`,
     ];
     if (summary.pendingApproval > 0) {
       lines.push("", "No Lead is created until you approve each finding in the Workspace topic.");
