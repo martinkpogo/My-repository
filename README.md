@@ -258,7 +258,7 @@ To enable fully automated PR checking, merging, and deployment after task submis
 #### 1. Repository Secrets (`Settings` -> `Secrets and variables` -> `Actions` -> `New repository secret`):
 * `CLOUDFLARE_API_TOKEN`: Cloudflare API token with Workers Deployment permissions.
 * `CLOUDFLARE_ACCOUNT_ID`: Cloudflare Account ID.
-* `WORKER_ADMIN_KEY`: Secret key matching `TELEGRAM_WEBHOOK_SECRET` for scheduled administrative jobs (e.g. Finance Handoff discovery).
+* `WORKER_ADMIN_KEY`: Operator key for scheduled administrative jobs (e.g. Finance Handoff discovery). It is a separate secret from `TELEGRAM_WEBHOOK_SECRET`; prefer sending it in the `X-Worker-Admin-Key` header rather than `?key=` (see `src/adminAuth.ts`).
 
 #### 2. Repository Settings for Auto-Merge & Actions Permissions:
 * **Allow auto-merge**: Go to `Settings` -> `General` -> `Pull Requests` and check **"Allow auto-merge"**.

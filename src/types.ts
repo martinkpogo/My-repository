@@ -45,6 +45,13 @@ export interface Env {
    * checks. Unset means every /admin/* endpoint fails closed (403).
    */
   WORKER_ADMIN_KEY?: string;
+  /**
+   * "1"/"true" makes the operator endpoints refuse the `?key=` query channel
+   * (src/adminAuth.ts); only the X-Worker-Admin-Key header is then accepted.
+   * Unset or anything else leaves `?key=` accepted. Off by default: turn it
+   * on only after every scheduler job sends the header.
+   */
+  ADMIN_REJECT_QUERY_KEY?: string;
   MARTIN_TELEGRAM_USER_ID: string;
   NOTION_TOKEN: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;

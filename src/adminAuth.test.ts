@@ -33,6 +33,56 @@ test("when a header is sent it is the credential: a wrong header is not rescued 
   assert.equal(isAdminAuthorized(req(`https://w.example/admin/x?key=${KEY}`, { [ADMIN_KEY_HEADER]: "wrong" }), env), false);
 });
 
+function captureLogs(fn: () => void): string[] {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => void lines.push(args.join(" "));
+  try {
+    fn();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+test("ADMIN_REJECT_QUERY_KEY on: ?key= is refused even when correct, the header still works", () => {
+  for (const flag of ["1", "true", "TRUE", " 1 "]) {
+    const strict = { WORKER_ADMIN_KEY: KEY, ADMIN_REJECT_QUERY_KEY: flag };
+    assert.equal(isAdminAuthorized(req(`https://w.example/admin/x?key=${KEY}`), strict), false, flag);
+    assert.equal(isAdminAuthorized(req("https://w.example/admin/x", { [ADMIN_KEY_HEADER]: KEY }), strict), true, flag);
+    assert.equal(isAdminAuthorized(req(`https://w.example/admin/x?key=${KEY}`, { [ADMIN_KEY_HEADER]: KEY }), strict), true, flag);
+  }
+});
+
+test("ADMIN_REJECT_QUERY_KEY off (unset, \"0\", or anything else): ?key= is still accepted", () => {
+  for (const flag of [undefined, "", "0", "false", "yes"]) {
+    assert.equal(isAdminAuthorized(req(`https://w.example/admin/x?key=${KEY}`), { WORKER_ADMIN_KEY: KEY, ADMIN_REJECT_QUERY_KEY: flag }), true, String(flag));
+  }
+});
+
+test("the query channel logs path and outcome only: never the presented key, a wrong guess, or the query string", () => {
+  const guess = "a-wrong-guess-value";
+  const lines = captureLogs(() => {
+    isAdminAuthorized(req(`https://w.example/admin/last-cron-run?key=${KEY}&x=1`), env);
+    isAdminAuthorized(req(`https://w.example/admin/last-cron-run?key=${guess}`), env);
+    isAdminAuthorized(req(`https://w.example/admin/last-cron-run?key=${KEY}`), { ...env, ADMIN_REJECT_QUERY_KEY: "1" });
+  });
+  assert.deepEqual(lines, [
+    "admin_auth channel=query outcome=accepted path=/admin/last-cron-run",
+    "admin_auth channel=query outcome=denied path=/admin/last-cron-run",
+    "admin_auth channel=query outcome=rejected_by_policy path=/admin/last-cron-run",
+  ]);
+  for (const line of lines) assert.ok(!line.includes(KEY) && !line.includes(guess) && !line.includes("x=1"));
+});
+
+test("the header channel writes no log line, and no credential at all writes none", () => {
+  const lines = captureLogs(() => {
+    isAdminAuthorized(req("https://w.example/admin/x", { [ADMIN_KEY_HEADER]: KEY }), env);
+    isAdminAuthorized(req("https://w.example/admin/x"), env);
+  });
+  assert.deepEqual(lines, []);
+});
+
 test("constantTimeEqual: equal, prefix, longer, shorter and multi-byte values", () => {
   assert.equal(constantTimeEqual("abc", "abc"), true);
   assert.equal(constantTimeEqual("abc", "abd"), false);

@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = false
 head_sampling_rate = 1
-redact_query_string = false
+redact_query_string = true
 
 [observability.logs]
 enabled = true
@@ -66,6 +66,11 @@ id = "9c01e73f957949d796de688c1c37cbf0"
 crons = ["*/30 * * * *"]
 
 [vars]
+# "1" makes /admin/* and the Google OAuth operator routes refuse `?key=` (header
+# only). Ships "0" (query channel still accepted): the scheduler jobs must send
+# X-Worker-Admin-Key first -- see src/adminAuth.ts. Declared here because
+# `wrangler deploy` deletes plain vars not declared in this file.
+ADMIN_REJECT_QUERY_KEY = "0"
 NOTION_VERSION = "2025-09-03"
 AI_MODEL_PRIMARY = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct-fast"

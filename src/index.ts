@@ -38,6 +38,7 @@ import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartb
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 import { isAdminAuthorized } from "./adminAuth";
+import { isTelegramWebhookAuthorized } from "./telegramWebhookAuth";
 
 export { WorkSession } from "./session";
 // The per-Doc lock for the Drive notification path. Exported from the Worker
@@ -86,11 +87,8 @@ export default {
     }
 
     if (url.pathname === "/telegram/webhook" && request.method === "POST") {
-      if (env.TELEGRAM_WEBHOOK_SECRET) {
-        const header = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
-        if (header !== env.TELEGRAM_WEBHOOK_SECRET) {
-          return new Response("forbidden", { status: 403 });
-        }
+      if (!isTelegramWebhookAuthorized(request, env)) {
+        return new Response("forbidden", { status: 403 });
       }
       const update = (await request.json()) as TelegramUpdate;
       try {
@@ -456,7 +454,7 @@ export default {
     // without re-running it -- a re-run would overwrite that evidence and
     // write to the Handoff/Activity Log. Header-gated (X-Worker-Admin-Key)
     // instead of ?key= so the admin secret never appears in the URL or in
-    // observability logs (wrangler.toml sets redact_query_string = false).
+    // observability logs (wrangler.toml now sets redact_query_string = true as well).
     // The handler makes exactly one Durable Object call: getState().
     if (url.pathname === "/admin/work-session-state" && request.method === "GET") {
       return handleWorkSessionState(request, env);
