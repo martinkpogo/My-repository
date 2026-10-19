@@ -9,11 +9,18 @@ import { sendOperationsHatMessage, sendWorkspaceHatMessage } from "../../telegra
 import type { HatMessageTarget } from "../../telegram";
 import { getLeadDiscoveryGovernance, findDuplicateLeads, isCheckableUrl } from "./leadDiscovery";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
-import { discoveryCronContext, mintApprovalProofForWork, workSessionContext, type AccessContext } from "../../access";
+import { AccessDeniedError, discoveryCronContext, mintApprovalProofForWork, workSessionContext, type AccessContext } from "../../access";
 import { kvDelete, kvGet, kvPut } from "../../kvStore";
 import { getSessionStub, newWorkId } from "../../sessionRouting";
 import { SALES_OPERATION } from "./salesOperationNames";
 import { runProspectResearch, summarizeResearchSynthesis } from "../../runtime/actionResearch";
+import {
+  buildCandidateReview,
+  gatherPublicSocialSignals,
+  renderBlockedCandidateReview,
+  renderCandidateReview,
+  type CandidateReview,
+} from "./candidateReview";
 
 import { salesOf } from "./salesState";
 /**
@@ -200,6 +207,16 @@ export interface PendingLeadOpportunity {
   sourceUrl: string;
   /** Digest of the automatic research on this prospect (findings with sources, and limitations), or the reason it could not be done. Shown on the card; never decides anything. */
   research?: string;
+  /**
+   * The evidence-backed candidate review built for this candidate (Slice A):
+   * source-linked observed facts, findings, explicitly-labelled
+   * interpretations and unknowns, surfaced conflicts, evidence limitations,
+   * the public social-signal retrieval disclosures, and the bounded visual
+   * analysis result -- already rendered for the card, and already validated
+   * fail-closed or marked blocked with its reason. Shown on the card;
+   * never decides anything, and never a Lead, Handoff or qualification.
+   */
+  review?: { status: CandidateReview["status"]; text: string };
   /** Legacy: the retired research Handoff a finding came from. Screened discovery candidates carry none. */
   handoffId?: string;
 }
@@ -257,8 +274,9 @@ export async function proposeLeadOpportunity(
     `Why this looks worth pursuing: ${opportunity.reason}`,
     `Source: ${opportunity.sourceUrl || "N/A"}`,
     "",
+    opportunity.review ? `${opportunity.review.text}\n` : "",
     opportunity.research ? `*Research*\n${opportunity.research}\n` : "",
-    "Screened by Lead Generation against the Acquisition Criteria. No Lead has been created. Approve to record it as a Lead (Status: New), or reject to discard it -- a rejected organisation is not proposed again for 180 days.",
+    "Screened by Lead Generation against the Acquisition Criteria. No Lead has been created. Approve to record it as a Lead (Status: New), or reject to discard it -- a rejected organisation is not proposed again for 180 days. The evidence above is advisory input to that decision only: it is not a diagnosis, not a qualification, and not approval to contact anyone.",
   ].join("\n");
 
   state.pendingActionSummary = {
@@ -446,19 +464,63 @@ async function researchCandidate(env: Env, opportunity: PendingLeadOpportunity, 
 }
 
 /**
+ * Builds the evidence-backed candidate review for ONE screened candidate:
+ * public social-signal retrieval plus the validated review, then rendered for
+ * the card. Never suppresses the approval card -- any unexpected failure here
+ * degrades to a BLOCKED review that says so, because Martin still has to see
+ * the candidate either way.
+ *
+ * An Access denial is re-thrown rather than degraded: AccessDeniedError is a
+ * governance decision, and turning it into "review unavailable" would downgrade
+ * exactly the stop the Access boundary exists to enforce.
+ */
+async function buildReviewForCandidate(
+  env: Env,
+  opportunity: PendingLeadOpportunity,
+  screeningResult: SearchResult,
+  access: AccessContext,
+  skills: ResolvedActionSkillSet,
+): Promise<{ status: CandidateReview["status"]; text: string }> {
+  try {
+    const social = await gatherPublicSocialSignals(env, opportunity.organisation, access);
+    const review: CandidateReview = await buildCandidateReview(env, opportunity.organisation, screeningResult, social, skills);
+    return { status: review.status, text: renderCandidateReview(opportunity.organisation, review) };
+  } catch (err) {
+    if (err instanceof AccessDeniedError) throw err;
+    console.error(`Lead Discovery: candidate review could not be built for ${opportunity.organisation}`, err);
+    return {
+      status: "blocked",
+      text: renderBlockedCandidateReview(
+        opportunity.organisation,
+        `the evidence step failed before it returned any output (${err instanceof Error ? err.message : "unknown error"})`,
+      ),
+    };
+  }
+}
+
+/**
  * Presents ONE screened candidate to Martin: its own Work, recording the
  * approval-gated record_lead Action from creation, then the approval card.
  * Nothing is written to the Leads database here. The candidate is remembered
  * as pending so a later run does not send a second card for it.
+ *
+ * `screeningResult` is the one retrieved search result that surfaced THIS
+ * candidate -- the only web source the review may attribute a fact to, since
+ * the other results from the same query belong to different organisations.
  */
 async function presentScreenedCandidate(
   env: Env,
   presentTo: CandidatePresentationTarget,
   opportunity: PendingLeadOpportunity,
+  screeningResult: SearchResult,
   access: AccessContext,
   skills: ResolvedActionSkillSet,
 ): Promise<boolean> {
-  opportunity = { ...opportunity, research: await researchCandidate(env, opportunity, access, skills) };
+  opportunity = {
+    ...opportunity,
+    research: await researchCandidate(env, opportunity, access, skills),
+    review: await buildReviewForCandidate(env, opportunity, screeningResult, access, skills),
+  };
   try {
     const workId = newWorkId();
     const stub = getSessionStub(env, workId);
@@ -576,13 +638,20 @@ async function searchAndScreenForQuery(
       continue;
     }
 
-    const presented = await presentScreenedCandidate(env, presentTo, {
-      organisation: evaluation.organisation.trim(),
-      evidence: evaluation.evidence.trim(),
-      reason: evaluation.reason,
-      category: evaluation.category,
-      sourceUrl: result.url,
-    }, access, skills);
+    const presented = await presentScreenedCandidate(
+      env,
+      presentTo,
+      {
+        organisation: evaluation.organisation.trim(),
+        evidence: evaluation.evidence.trim(),
+        reason: evaluation.reason,
+        category: evaluation.category,
+        sourceUrl: result.url,
+      },
+      result,
+      access,
+      skills,
+    );
     if (presented) summary.pendingApproval++;
     else summary.presentationFailed++;
   }
