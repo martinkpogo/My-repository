@@ -14,6 +14,10 @@ import {
 import type { Env, WorkState } from "../../types";
 import { salesManifest } from "./salesManifest";
 import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
+import {
+  MAX_SOCIAL_SIGNAL_SEARCHES,
+  socialSignalQueries,
+} from "./candidateReview";
 
 /** The Skills `discover_leads` declares, resolved through the Skill Registry -- the same path execution uses. */
 const lgsSkills = () => resolveRecordedActionSkills(salesManifest.hats["Lead Generation Specialist"], "discover_leads");
@@ -1125,13 +1129,30 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
   assert.ok(!ackText.includes("Research & Intelligence"), "the acknowledgement must not promise routing to a retired Unit");
   assert.strictEqual(handoffsCreatedCount, 0, "promising signals are held; no Handoff is produced");
   assert.strictEqual(leadsCreatedCount, 0, "on-demand discovery must never create a Lead directly");
-  assert.strictEqual(outboundQueries.length, 2, "both generated queries must have been searched");
+  // Both generated discovery queries must have been searched, in order --
+  // interleaved with (never replaced by) the candidate's own bounded public
+  // social-signal searches, which run when a screening candidate is presented.
+  const generatedQueries = outboundQueries.filter((q) => q.includes("the business") || q.includes("the operator"));
+  assert.deepStrictEqual(
+    generatedQueries,
+    ["positioning problem like the business has", "struggling brands the operator would notice"],
+    "both generated queries are searched in order, with the canonical redaction replacement applied",
+  );
+  const socialQueriesSent = outboundQueries.length - generatedQueries.length;
+  assert.ok(
+    socialQueriesSent <= MAX_SOCIAL_SIGNAL_SEARCHES,
+    `only the bounded public social-signal searches may accompany the generated ones (got ${socialQueriesSent}, bound ${MAX_SOCIAL_SIGNAL_SEARCHES})`,
+  );
+  const expectedSocialQueries = socialSignalQueries("Acme Corp").map((q) => q.query);
+  for (const query of outboundQueries) {
+    if (generatedQueries.includes(query)) continue;
+    assert.ok(expectedSocialQueries.includes(query), `nothing but the bounded social-signal searches may leave the runtime: ${query}`);
+    assert.ok(query.includes("Acme Corp"), `a social-signal search must name the candidate: ${query}`);
+  }
   for (const query of outboundQueries) {
     assert.ok(!/\bENIG\b/i.test(query), `identity must not leave the runtime in a search query: ${query}`);
     assert.ok(!/\bMartin\b/i.test(query), `identity must not leave the runtime in a search query: ${query}`);
   }
-  assert.ok(outboundQueries[0].includes("the business"), `the canonical redaction replacement must be applied: ${outboundQueries[0]}`);
-  assert.ok(outboundQueries[1].includes("the operator"), `the canonical redaction replacement must be applied: ${outboundQueries[1]}`);
 });
 
 test("LeadOpportunityDiscoveryCapability fails closed when search strategy generation is unavailable, without silently falling through", async (t) => {
