@@ -1027,6 +1027,45 @@ test("evaluateCandidateSynthesis: an observation that never names the organisati
   if (!verdict.ok) assert.match(verdict.reason, /no supporting observation for Nova Inc is grounded/, verdict.reason);
 });
 
+test("evaluateCandidateSynthesis: a visual observation alone can never qualify a candidate -- the gate reaches only retrieved sources, and a visual reading is not one", () => {
+  // A visual observation is structurally NOT a SourceRecord: sources are
+  // built only from retrieved search results (buildReviewSources takes
+  // SearchResult), so a fact resting on a visual reading cites no retrieved
+  // source and the grounding step can never reach it. This test pins that
+  // contract at the decision function itself, so a future vision capability
+  // cannot silently start qualifying Leads on a visual impression.
+  const visualOnlyReview: CandidateReview = {
+    ...synthesisFixture(),
+    sources: [],
+    facts: [{ id: "V1", statement: "Nova Inc's homepage renders three inconsistent logo lockups.", sourceIds: [] }],
+    findings: [{ id: "D1", statement: "Its visual branding presentation appears inconsistent.", evidenceIds: ["V1"] }],
+    opportunity: {
+      statement: "Nova Inc may have a brand-consistency gap worth investigating -- unconfirmed.",
+      findingIds: ["D1"],
+      alternativeExplanations: ["The variants may be deliberate per-product branding."],
+    },
+  };
+
+  const verdict = evaluateCandidateSynthesis("Nova Inc", visualOnlyReview);
+  assert.strictEqual(verdict.ok, false, "a hypothesis resting only on a visual observation may never qualify a candidate");
+  if (!verdict.ok) {
+    assert.match(
+      verdict.reason,
+      /no supporting observation for Nova Inc is grounded in retrieved material that names it/,
+      verdict.reason,
+    );
+  }
+
+  // And the gate is blind to the visual field in the OTHER direction too: the
+  // ordinary, retrieved-source-grounded review passes while carrying the same
+  // not_performed visual result, so visual contributes nothing to a pass
+  // either. Advisory evidence for Martin, never a qualification input.
+  const grounded = synthesisFixture();
+  assert.strictEqual(grounded.visualAnalysis.status, "not_performed", "production never produces a performed visual analysis today");
+  assert.strictEqual(grounded.visualAnalysis.advisory, true);
+  assert.strictEqual(evaluateCandidateSynthesis("Nova Inc", grounded).ok, true, "qualification comes from retrieved sources alone, not from any visual reading");
+});
+
 test("blockedCandidateReview: a review that could not be BUILT is blocked with its reason and renders nothing unvalidated", () => {
   const review = blockedCandidateReview("the evidence step failed before it returned any output (boom)");
   assert.strictEqual(review.status, "blocked");

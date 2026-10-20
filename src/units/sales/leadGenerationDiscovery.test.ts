@@ -18,6 +18,8 @@ import {
 import type { Env, WorkState } from "../../types";
 import { salesManifest } from "./salesManifest";
 import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
+import { resolveToolOperation } from "../../runtime/toolRegistry";
+import { GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, GOOGLE_DOCS_TOOL_ID } from "../../runtime/tools/googleDocsTool";
 import {
   MAX_SOCIAL_SIGNAL_SEARCHES,
   renderBlockedCandidateReview,
@@ -2112,4 +2114,68 @@ test("handleLeadOpportunityApproval: a failed Leads write re-stages the candidat
   assert.deepStrictEqual(afterFailure.sales?.pendingLeadOpportunity, SAMPLE_OPPORTUNITY, "the candidate is staged again for a retry");
   assert.notStrictEqual(afterFailure.stage, "complete", "a failed write does not close the Work");
   assert.ok(mock.sent.some((m) => m.includes("Tap Approve on the card again")));
+});
+
+// ---------------------------------------------------------------------------
+// Outbound email remains a separate, unapproved slice -- pinned here so the
+// lead-generation path can never grow a send capability unnoticed.
+// ---------------------------------------------------------------------------
+
+test("Slice A introduces no outbound email send path: the approval flow reaches only Notion and Telegram, and no email-send Tool operation is registered", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const hosts = new Set<string>();
+  globalThis.fetch = (async (url: string, init: any) => {
+    const method = init?.method ?? "GET";
+    hosts.add(new URL(String(url)).host);
+    if (String(url).includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (String(url).includes("leads-ds") && method === "POST" && String(url).endsWith("/query")) {
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (String(url).includes("/pages") && method === "POST") {
+      const body = JSON.parse(init.body ?? "{}");
+      if (body.parent?.data_source_id === "leads-ds") {
+        return new Response(JSON.stringify({ id: "lead-1", url: "https://notion.so/lead-1", properties: {} }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ id: "log-page" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const state = fakeOpportunityState({ actionName: "record_lead", sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
+  await handleLeadOpportunityApproval(fakeEnv(), state, true);
+
+  // Every host this governed path contacted. An email provider appearing here
+  // would mean discovery had grown a send path -- outbound email is a
+  // separate slice requiring its own approval.
+  assert.deepStrictEqual(
+    [...hosts].sort(),
+    ["api.notion.com", "api.telegram.org"],
+    "the approval path may reach only the Leads database and Telegram -- no email provider",
+  );
+
+  // The Tool Registry is the only sanctioned way a capability becomes
+  // executable, and its table is static and code-owned. No email-send
+  // operation may resolve -- while a real registered operation does, so this
+  // probe cannot pass vacuously.
+  assert.ok(
+    resolveToolOperation(GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID),
+    "the probe is not vacuous: a genuinely registered operation still resolves",
+  );
+  for (const [toolId, operationId] of [
+    ["email", "email.send"],
+    ["gmail", "gmail.send_message"],
+    ["sendgrid", "sendgrid.send_email"],
+    ["smtp", "smtp.send"],
+  ] as const) {
+    assert.strictEqual(
+      resolveToolOperation(toolId, operationId),
+      null,
+      `no ${toolId}.${operationId} operation may be registered -- outbound email is not approved`,
+    );
+  }
 });
