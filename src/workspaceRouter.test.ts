@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { resolveAddressee, resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { routeIncomingText, dispatchCowork } from "./router";
 import { isSemanticTaskId } from "./dataBoundary/registry";
-import { setWorkspaceMode } from "./sessionRouting";
+import { SALES_DIRECT_ENTRY_PAUSED, setWorkspaceMode } from "./sessionRouting";
 import type { Env } from "./types";
 import type { UnitManifest, HatManifest } from "./units/unitManifest";
 
@@ -690,5 +690,54 @@ test("Y. A failure in the lookup check (classifier matches, but the Notion read 
   assert.ok(
     !sent.some((m) => m.includes("Something went wrong")),
     "a lookup-check failure must never surface as a generic processing error",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Z. The paused Sales Executive direct entry -- standing policy, kept paused.
+// ---------------------------------------------------------------------------
+
+test("Z1. The Sales pause constant itself is still true -- flipping it is a governance change, never an incidental one", () => {
+  // SALES_DIRECT_ENTRY_PAUSED gates Sales Executive entry until an AI
+  // provider with an acceptable personal-data/training policy exists (see
+  // src/sessionRouting.ts). Pinning the value directly so a slice that
+  // silently re-enables direct Sales entry fails a test named for exactly
+  // that, rather than failing somewhere far from its cause.
+  assert.strictEqual(SALES_DIRECT_ENTRY_PAUSED, true, "Sales Executive direct entry must remain paused by standing policy");
+});
+
+test("Z2. A Sales Executive cowork decision is REFUSED by the pause -- the standing-policy message is sent and no Work is ever created", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({ WORK_SESSION: workSession as any });
+
+  await routeIncomingText(env, -1004435157576, "Sales, handle this new enterprise enquiry.", 604, {
+    resolveRouting: fixedDecision({ mode: "cowork", unit: "Sales", hat: "Sales Executive" }),
+  });
+
+  assert.strictEqual(calls.init.length, 0, "a paused Sales Executive decision must never fabricate a WorkSession");
+  assert.ok(
+    sent.some((m) => m.includes("Sales Executive intake is paused")),
+    "Martin is told the enquiry was not processed here, and why",
+  );
+  assert.ok(
+    sent.some((m) => m.includes("isolated Sales Executive project")),
+    "the pause message still points at the isolated Sales Executive project that owns the domain",
+  );
+});
+
+test("Z3. Lead Generation Specialist is deliberately EXEMPT from the Sales pause -- the pause gates Sales Executive entry, not lead discovery", async (t) => {
+  const sent = mockTelegramFetch(t);
+  const { calls, workSession } = createMockWorkSession();
+  const env = fakeEnv({ WORK_SESSION: workSession as any });
+
+  await routeIncomingText(env, -1004435157576, "Lead Generation Specialist, find leads in our segment.", 604, {
+    resolveRouting: fixedDecision({ mode: "cowork", unit: "Sales", hat: "Lead Generation Specialist" }),
+  });
+
+  assert.strictEqual(calls.init.length, 0, "Lead Discovery dispatches through the manifest path, never Sales Executive's entry");
+  assert.ok(
+    !sent.some((m) => m.includes("Sales Executive intake is paused")),
+    "the pause must never block lead discovery -- it is a separate specialisation by design",
   );
 });
