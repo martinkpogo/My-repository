@@ -5,7 +5,8 @@ import {
   DISCOVERY_QUERIES,
   LeadOpportunityDiscoveryCapability,
   MAX_APPROVAL_CARDS_PER_RUN,
-  checkCompanySpecificEvidence,
+  MAX_EVIDENCE_SYNTHESIS_PER_RUN,
+  checkCandidateNomination,
   evidenceStatesProblemOrOpportunity,
   leadCandidateMemoryKey,
   handleLeadOpportunityApproval,
@@ -20,7 +21,6 @@ import { resolveRecordedActionSkills } from "../../runtime/actionSkills";
 import {
   MAX_SOCIAL_SIGNAL_SEARCHES,
   renderBlockedCandidateReview,
-  socialSignalQueries,
 } from "./candidateReview";
 
 /** The Skills `discover_leads` declares, resolved through the Skill Registry -- the same path execution uses. */
@@ -102,6 +102,97 @@ const PASS_EVALUATION = JSON.stringify({
   ],
 });
 
+// ---------------------------------------------------------------------------
+// The mocked candidate-level review call.
+// ---------------------------------------------------------------------------
+//
+// Discovery issues two kinds of AI call for a candidate that reaches
+// presentation: the screening evaluation (a `candidates` array) and the
+// bounded candidate-level review (`facts`/`findings`/`interpretations`/
+// `opportunity`). These route the mocked AI between them, so a test exercises
+// the REAL candidate-level synthesis instead of a review call that happens to
+// fail and gets tolerated.
+
+/**
+ * A validated-shape review that SUPPORTS an opportunity hypothesis over the
+ * combined material: one fact naming the organisation (grounded in S1, the
+ * screening result, which names it too), a finding on that fact, a traceable
+ * hypothesis pointing at the finding, and one material alternative
+ * explanation.
+ *
+ * The fact and finding deliberately contain NO problem-signal keyword, so a
+ * candidate presented with this draft is presented because the candidate-level
+ * assessment supports the hypothesis -- not because a keyword list matched.
+ */
+function supportedReviewDraft(organisation: string) {
+  return {
+    facts: [
+      {
+        id: "F1",
+        statement: `${organisation}'s public site still presents the original offering while its product line has moved on.`,
+        sourceIds: ["S1"],
+      },
+    ],
+    findings: [
+      {
+        id: "D1",
+        statement: `The retrieved material shows the public story and the current offering of ${organisation} no longer line up.`,
+        evidenceIds: ["F1"],
+      },
+    ],
+    interpretations: [
+      { statement: `Buyers may be struggling to place ${organisation} because of that mismatch.`, findingIds: ["D1"] },
+    ],
+    unknowns: [`Whether ${organisation}'s own conversations show the same confusion.`],
+    conflicts: [],
+    limitations: ["Retrieval was snippet-only: no page, image, or engagement figure was inspected."],
+    opportunity: {
+      statement: `${organisation} may have a story-versus-offering mismatch worth investigating in a consultancy conversation -- unconfirmed.`,
+      findingIds: ["D1"],
+      alternativeExplanations: ["The change may be a staged rollout whose positioning update is still planned."],
+    },
+  };
+}
+
+/**
+ * A validated-shape review that assesses the combined material and finds NO
+ * company-specific opportunity in it -- the honest hold: passing mention,
+ * keyword-only match, repetitive or irrelevant sources, contradiction.
+ */
+function insufficientReviewDraft(organisation: string) {
+  return {
+    facts: [
+      {
+        id: "F1",
+        statement: `A public result names ${organisation} once, alongside commentary about the category rather than about it.`,
+        sourceIds: ["S1"],
+      },
+    ],
+    findings: [
+      { id: "D1", statement: `The retrieved material discusses the problem category around ${organisation}, not a demonstrated situation at it.`, evidenceIds: ["F1"] },
+    ],
+    interpretations: [],
+    unknowns: [`Whether ${organisation} has any positioning problem at all.`],
+    conflicts: [],
+    limitations: ["The retrieved material is a single snippet and was not inspected beyond it."],
+    opportunity: null,
+    opportunityHoldReason: `the retrieved material is category commentary in which ${organisation} is mentioned in passing, so nothing company-specific is established`,
+  };
+}
+
+/**
+ * Routes one mocked AI request: the bounded review call gets a review draft
+ * for the organisation under review; every other AI call (screening, on-demand
+ * query strategy) gets `fallback`.
+ */
+function mockAiContent(body: string, fallback: string, review: (organisation: string) => unknown = supportedReviewDraft): string {
+  if (body.includes("Build ONE evidence-backed review")) {
+    const organisation = body.match(/Candidate under review: ([^"\\]+?)(?:\\n|")/)?.[1]?.trim() || "the organisation";
+    return JSON.stringify(review(organisation));
+  }
+  return fallback;
+}
+
 test("DISCOVERY_QUERIES targets observable business situations without presupposing negative diagnoses", () => {
   assert.ok(Array.isArray(DISCOVERY_QUERIES) && DISCOVERY_QUERIES.length >= 5, "DISCOVERY_QUERIES must be a non-empty array with coverage across situation categories");
 
@@ -126,6 +217,7 @@ test("runAutonomousLeadDiscovery does nothing when web search isn't configured -
   assert.deepStrictEqual(summary, {
     evaluated: 0,
     heldOverCap: 0,
+    evidenceSynthesisAttempts: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
     duplicateCheckFailed: 0,
@@ -291,6 +383,7 @@ test("Test A: Candidate signal passes lightweight screening -> one approval card
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
+    const aiBody = String(init?.body ?? "");
     if (url.includes("api.tavily.com")) {
       return new Response(
         JSON.stringify({
@@ -318,7 +411,7 @@ test("Test A: Candidate signal passes lightweight screening -> one approval card
       }
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     }
-    return new Response(JSON.stringify({ choices: [{ message: { content: PASS_EVALUATION } }] }), { status: 200 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: mockAiContent(aiBody, PASS_EVALUATION) } }] }), { status: 200 });
   }) as typeof fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
@@ -401,17 +494,30 @@ const NEUTRAL_REBRAND_EVALUATION = JSON.stringify({
  * then assert that no identity-bearing value ever reached Notion, which is a
  * stronger claim than "the right number of records was created".
  */
-function installDiscoveryRun(t: any, evaluation: string, opts: { leadsQueryFails?: boolean; tavilyResults?: Array<{ title: string; url: string; content: string }> } = {}) {
+type TavilyResult = { title: string; url: string; content: string };
+/** Fixed results, or a per-call function (so one run can surface genuinely different result sets per search). */
+type TavilyResults = Array<TavilyResult> | ((ctx: { query: string; domainScoped: boolean; call: number }) => Array<TavilyResult>);
+
+function installDiscoveryRun(t: any, evaluation: string, opts: { leadsQueryFails?: boolean; tavilyResults?: TavilyResults; review?: (organisation: string) => unknown } = {}) {
   const originalFetch = globalThis.fetch;
   const created: Record<string, number> = { handoffs: 0, leads: 0, proposals: 0, matters: 0, entities: 0 };
   const createBodies: any[] = [];
   const activityEntries: any[] = [];
+  const searchQueries: Array<{ query: string; domainScoped: boolean }> = [];
   const tavilyResults = opts.tavilyResults ?? [{ title: "Acme Corp expands into enterprise market", url: "https://example.com/acme", content: "Acme Corp expansion news." }];
+  let tavilyCalls = 0;
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
+    const body = String(init?.body ?? "");
     if (url.includes("api.tavily.com")) {
-      return new Response(JSON.stringify({ results: tavilyResults }), { status: 200 });
+      const request = JSON.parse(body);
+      const query = String(request.query ?? "");
+      const domainScoped = Array.isArray(request.include_domains);
+      searchQueries.push({ query, domainScoped });
+      const call = tavilyCalls++;
+      const results = typeof tavilyResults === "function" ? tavilyResults({ query, domainScoped, call }) : tavilyResults;
+      return new Response(JSON.stringify({ results }), { status: 200 });
     }
     if (url.includes("/blocks/")) {
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
@@ -437,13 +543,18 @@ function installDiscoveryRun(t: any, evaluation: string, opts: { leadsQueryFails
       if (ds === "activity-log-ds") activityEntries.push(body.properties);
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", parent: { type: "data_source_id", data_source_id: ds }, properties: {} }), { status: 200 });
     }
-    return new Response(JSON.stringify({ choices: [{ message: { content: evaluation } }] }), { status: 200 });
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: mockAiContent(body, evaluation, opts.review ?? supportedReviewDraft) } }],
+      }),
+      { status: 200 },
+    );
   }) as typeof fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  return { created, createBodies, activityEntries };
+  return { created, createBodies, activityEntries, searchQueries };
 }
 
 test("LGS: a candidate passing lightweight screening is PRESENTED for approval -- no Handoff, no Lead, and no Blocker", async (t) => {
@@ -539,9 +650,13 @@ test("LGS: an unsupported diagnosis is screened out before any governed write --
 test("Test D & G: A passing candidate is presented with no Handoff written -- its unvalidated diagnosis is never asserted as a fact", async (t) => {
   const originalFetch = globalThis.fetch;
   let createdHandoffBody: any;
+  const deltaEvaluation = JSON.stringify({
+    candidates: [{ pass: true, organisation: "Delta Corp", evidence: "Delta Corp launched a new product line while its public positioning still describes only its original offering.", decisionMakerOrRole: "", category: "", reason: "" }],
+  });
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
+    const aiBody = String(init?.body ?? "");
     if (url.includes("api.tavily.com")) {
       return new Response(JSON.stringify({ results: [{ title: "Delta Corp new product line", url: "https://example.com/delta", content: "Delta new product." }] }), { status: 200 });
     }
@@ -562,7 +677,7 @@ test("Test D & G: A passing candidate is presented with no Handoff written -- it
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     }
     return new Response(
-      JSON.stringify({ choices: [{ message: { content: JSON.stringify({ candidates: [{ pass: true, organisation: "Delta Corp", evidence: "Delta Corp launched a new product line while its public positioning still describes only its original offering.", decisionMakerOrRole: "", category: "", reason: "" }] }) } }] }),
+      JSON.stringify({ choices: [{ message: { content: mockAiContent(aiBody, deltaEvaluation) } }] }),
       { status: 200 },
     );
   }) as typeof fetch;
@@ -615,14 +730,20 @@ test("runAutonomousLeadDiscovery never creates a Lead from an inconsistent AI 'p
 });
 
 // ===========================================================================
-// Company-specific evidence threshold (2026-10-19): the correction for a
-// confirmed live failure where a general article about inconsistent brand
-// messaging was presented on an approval card as if it demonstrated the
-// problem at a NAMED organisation.
+// Candidate-level evidence synthesis (2026-10-20). Nomination replaces the
+// per-snippet keyword gate: an AI pass must be tied to THIS retrieved result
+// and to a named organisation (deterministic, keyword-free), and whether the
+// candidate actually has a company-specific problem is decided afterwards by
+// the bounded candidate-level review over the whole retrieved evidence set
+// (evaluateCandidateSynthesis in candidateReview.ts). The 2026-10-19 card
+// that cited a general problem-category article for a NAMED organisation can
+// still not be produced: that article never names the company. What changed
+// is the false-negative side -- several individually neutral observations no
+// longer die on a wordlist before a review can weigh them together.
 // ===========================================================================
 
-test("checkCompanySpecificEvidence: a general article about the problem category is never evidence about a company it does not name", () => {
-  const verdict = checkCompanySpecificEvidence(
+test("checkCandidateNomination: a general article about the problem category never nominates a company it does not name", () => {
+  const verdict = checkCandidateNomination(
     { organisation: "Brand Russo", evidence: "Brand Russo's positioning is inconsistent with what it actually delivers." },
     { title: "Why inconsistent brand messaging costs you customers", url: "https://example.com/brand-messaging-guide", snippet: "General advice: brands that mix their messaging confuse buyers." },
   );
@@ -633,8 +754,8 @@ test("checkCompanySpecificEvidence: a general article about the problem category
   }
 });
 
-test("checkCompanySpecificEvidence: an observation not tied to the named organisation is held -- the card may only carry what says something about THIS company", () => {
-  const verdict = checkCompanySpecificEvidence(
+test("checkCandidateNomination: an observation not tied to the named organisation is never nominated -- the card may only carry what says something about THIS company", () => {
+  const verdict = checkCandidateNomination(
     { organisation: "Brand Russo", evidence: "The company's public messaging is inconsistent with what it delivers." },
     { title: "Brand Russo positioning", url: "https://example.com/brand-russo", snippet: "Brand Russo expanded into a new market." },
   );
@@ -642,7 +763,7 @@ test("checkCompanySpecificEvidence: an observation not tied to the named organis
   if (!verdict.ok) assert.match(verdict.reason, /evidence does not name Brand Russo/);
 });
 
-test("checkCompanySpecificEvidence: a neutral business event announced alone never establishes a problem -- rebrand, expansion, leadership change, product launch", () => {
+test("checkCandidateNomination: a neutral business event at a NAMED organisation IS nominated -- the keyword list no longer decides who receives a review", () => {
   const result = { title: "Zenith Co news", url: "https://example.com/zenith", snippet: "Zenith Co update." };
   const neutralEvents = [
     "Zenith Co announced a rebrand of its visual identity.",
@@ -651,18 +772,28 @@ test("checkCompanySpecificEvidence: a neutral business event announced alone nev
     "Zenith Co launched a new product line.",
   ];
   for (const evidence of neutralEvents) {
-    const verdict = checkCompanySpecificEvidence({ organisation: "Zenith Co", evidence }, result);
-    assert.strictEqual(verdict.ok, false, `a bare neutral event must be held: ${evidence}`);
-    if (!verdict.ok) assert.match(verdict.reason, /problem or opportunity signal/, verdict.reason);
+    const nomination = checkCandidateNomination({ organisation: "Zenith Co", evidence }, result);
+    assert.strictEqual(nomination.ok, true, `naming is the whole nomination bar, whatever the wording: ${evidence}`);
+    assert.strictEqual(
+      evidenceStatesProblemOrOpportunity(evidence),
+      false,
+      `the vocabulary records no signal for a bare event (it is a hint only): ${evidence}`,
+    );
   }
 
-  // The same event WITH a grounded problem signal in the observation passes:
-  // the gate holds the bare announcement, not the company.
-  const grounded = checkCompanySpecificEvidence(
+  // The same result with a signal-carrying observation nominates identically.
+  // Nomination is deliberately indifferent to the vocabulary in both
+  // directions: no keyword can create one, and no missing keyword can stop one.
+  const grounded = checkCandidateNomination(
     { organisation: "Zenith Co", evidence: "Zenith Co rebranded but its public positioning still describes only its original offering." },
     result,
   );
   assert.deepStrictEqual(grounded, { ok: true });
+
+  // ...and nomination alone still never presents anything: the candidate-
+  // level synthesis decides (asserted end-to-end below, where a neutral
+  // observation with a review that finds nothing company-specific is HELD
+  // without a card).
 });
 
 test("normaliseForGrounding: punctuation- and case-insensitive for Latin names, and never collapses a non-Latin name to nothing", () => {
@@ -670,23 +801,32 @@ test("normaliseForGrounding: punctuation- and case-insensitive for Latin names, 
   assert.strictEqual(normaliseForGrounding("  ACME   corp "), "acme corp");
   assert.strictEqual(normaliseForGrounding("株式会社サクラ"), "株式会社サクラ", "non-Latin names survive normalisation intact");
 
-  // End-to-end through the gate: a non-Latin organisation grounds the same way.
-  const verdict = checkCompanySpecificEvidence(
+  // End-to-end through nomination: a non-Latin organisation grounds the same way.
+  const verdict = checkCandidateNomination(
     { organisation: "株式会社サクラ", evidence: "株式会社サクラ expanded but its positioning still describes only its original offering." },
     { title: "株式会社サクラ rebrands", url: "https://example.com/sakura", snippet: "株式会社サクラ news." },
   );
   assert.deepStrictEqual(verdict, { ok: true });
 });
 
-test("evidenceStatesProblemOrOpportunity: bounded signal vocabulary -- a problem observation passes, a bare announcement and an empty string do not", () => {
+test("evidenceStatesProblemOrOpportunity: bounded signal vocabulary -- a problem observation matches, a bare announcement and an empty string do not, and it decides nothing", () => {
   assert.strictEqual(evidenceStatesProblemOrOpportunity(""), false);
   assert.strictEqual(evidenceStatesProblemOrOpportunity("Zenith Co announced a rebrand."), false);
   assert.strictEqual(evidenceStatesProblemOrOpportunity("Zenith Co's public messaging is unclear to buyers."), true);
   assert.strictEqual(evidenceStatesProblemOrOpportunity("Zenith Co's growth has been stagnant for six quarters."), true);
+
+  // Regression for the 2026-10-20 retargeting: this helper is a diagnosability
+  // hint logged with a hold, never part of a gate. Both facts must hold or the
+  // vocabulary has crept back into the decision path.
+  const nominationWithNoSignal = checkCandidateNomination(
+    { organisation: "Zenith Co", evidence: "Zenith Co announced a rebrand." },
+    { title: "Zenith Co news", url: "https://example.com/zenith", snippet: "Zenith Co update." },
+  );
+  assert.deepStrictEqual(nominationWithNoSignal, { ok: true}, "a signal-free observation must still be nominated for its review");
 });
 
 test("LGS: a general problem-category article is HELD as insufficient evidence -- no approval card, no Work, no Lead, no Blocker", async (t) => {
-  const { created, activityEntries } = installDiscoveryRun(t, BRAND_RUSSO_EVALUATION, {
+  const { created, activityEntries, searchQueries } = installDiscoveryRun(t, BRAND_RUSSO_EVALUATION, {
     tavilyResults: [{ title: "Why inconsistent brand messaging costs you customers", url: "https://example.com/brand-messaging-guide", content: "General advice for owners: mixed messaging confuses buyers." }],
   });
   const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
@@ -696,6 +836,16 @@ test("LGS: a general problem-category article is HELD as insufficient evidence -
   assert.ok(summary.evaluated > 0, "the candidates were evaluated");
   assert.strictEqual(summary.pendingApproval, 0, "a general article must never become an approval card claiming this company has the problem");
   assert.strictEqual(summary.skippedAsInsufficient, summary.evaluated, "every such candidate is held as insufficient evidence");
+  assert.strictEqual(
+    summary.evidenceSynthesisAttempts ?? 0,
+    0,
+    "a candidate the retrieval never names is held at nomination -- before any candidate-level search or review call is spent on it",
+  );
+  assert.strictEqual(
+    searchQueries.length,
+    DISCOVERY_QUERIES.length,
+    "only the screening searches ran: no candidate-specific or social search for a candidate that was never nominated",
+  );
   assert.strictEqual((env as any).__sessions.init.length, 0, "no Work is created for a held candidate");
   assert.strictEqual(created.leads, 0, "and no Lead");
   assert.strictEqual(created.handoffs, 0, "and no Handoff");
@@ -706,9 +856,12 @@ test("LGS: a general problem-category article is HELD as insufficient evidence -
   );
 });
 
-test("LGS: a neutral business event at a named organisation is HELD -- a bare rebrand announcement never becomes an approval card", async (t) => {
-  const { created } = installDiscoveryRun(t, NEUTRAL_REBRAND_EVALUATION, {
+test("LGS: a neutral business event at a named organisation is NOMINATED, given a candidate-level review, and still HELD when the material shows nothing company-specific", async (t) => {
+  const { created, searchQueries } = installDiscoveryRun(t, NEUTRAL_REBRAND_EVALUATION, {
     tavilyResults: [{ title: "Zenith Co announces rebrand", url: "https://example.com/zenith-rebrand", content: "Zenith Co unveiled a new logo and visual identity." }],
+    // The combined material really is just an event announcement, so the
+    // review honestly returns no company-specific opportunity hypothesis.
+    review: insufficientReviewDraft,
   });
   const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
 
@@ -716,13 +869,162 @@ test("LGS: a neutral business event at a named organisation is HELD -- a bare re
 
   assert.ok(summary.evaluated > 0, "the candidates were evaluated");
   assert.strictEqual(summary.pendingApproval, 0, "a bare neutral event must not be presented as a demonstrated problem");
-  assert.strictEqual(summary.skippedAsInsufficient, summary.evaluated, "every such candidate is held as insufficient evidence");
+  assert.ok(summary.skippedAsInsufficient > 0, "the review held the candidate as insufficient evidence");
+
+  // Half (1) of the 2026-10-20 correction: the keyword list no longer stops a
+  // neutrally-worded observation from receiving a real, substantive review.
+  // The candidate-level search ran and an attempt was spent -- the old gate
+  // would have stopped this candidate before any of that.
+  assert.ok(
+    (summary.evidenceSynthesisAttempts ?? 0) > 0,
+    "the neutral observation received a bounded candidate-level evidence review instead of dying on a wordlist",
+  );
+  assert.ok(
+    searchQueries.some((q) => !q.domainScoped && q.query === '"Zenith Co"'),
+    `the review first gathered candidate-specific public evidence for the named organisation: ${JSON.stringify(searchQueries)}`,
+  );
+  // ...and the budget kept that spending bounded: once MAX_EVIDENCE_SYNTHESIS_PER_RUN
+  // attempts were spent, later nominations were held rather than reviewed again.
+  assert.strictEqual(
+    summary.evidenceSynthesisAttempts,
+    MAX_EVIDENCE_SYNTHESIS_PER_RUN,
+    "the run stops at the synthesis budget instead of reviewing candidates with no end",
+  );
+  // Run-wide search volume stays a small constant: screening searches plus at
+  // most one candidate search and the bounded social step per attempt.
+  assert.ok(
+    searchQueries.length <= DISCOVERY_QUERIES.length + MAX_EVIDENCE_SYNTHESIS_PER_RUN * (1 + MAX_SOCIAL_SIGNAL_SEARCHES),
+    `searches stay bounded: ${searchQueries.length} (<= ${DISCOVERY_QUERIES.length} screening + ${MAX_EVIDENCE_SYNTHESIS_PER_RUN} attempts x ${1 + MAX_SOCIAL_SIGNAL_SEARCHES} retrieval searches)`,
+  );
+
+  // Half (2): the candidate-level assessment still holds it -- no card, no
+  // Work, no Lead -- and every candidate still lands in exactly one bucket
+  // (holds consume no card, so the card cap alone cannot bound them).
+  assert.strictEqual(summary.pendingApproval + summary.skippedAlreadyPresented + summary.heldOverCap + summary.skippedAsInsufficient, summary.evaluated, "every evaluated candidate lands in exactly one bucket");
   assert.strictEqual((env as any).__sessions.init.length, 0, "no Work is created for a held candidate");
   assert.strictEqual(created.leads, 0, "and no Lead");
 });
 
-test("LGS: a grounded observation that names the organisation IS presented -- carrying the organisation-named evidence and the source retrieval date", async (t) => {
-  installDiscoveryRun(t, PASS_EVALUATION);
+test("candidate-level synthesis: several individually NEUTRAL observations jointly support an opportunity hypothesis -- labelled unconfirmed, traceable to its facts, with a retained alternative explanation", async (t) => {
+  const NEUTRAL_EVALUATION = JSON.stringify({
+    candidates: [
+      {
+        pass: true,
+        organisation: "Acme Corp",
+        // A bare event announcement: no problem/opportunity vocabulary anywhere
+        // in the observation, so the retired wordlist gate could never have
+        // nominated this candidate at all.
+        evidence: "Acme Corp announced a rebrand of its visual identity this month.",
+        decisionMakerOrRole: "",
+        category: "rebrand",
+        reason: "Announced rebrand with no stated follow-through.",
+      },
+    ],
+  });
+  assert.strictEqual(
+    evidenceStatesProblemOrOpportunity("Acme Corp announced a rebrand of its visual identity this month."),
+    false,
+    "the screening observation itself carries no signal word -- whatever supports the hypothesis must be the combined review",
+  );
+
+  const { created } = installDiscoveryRun(t, NEUTRAL_EVALUATION, {
+    // Fresh, uniquely-url'd results per search so the review genuinely has
+    // several distinct observations to weigh: the screening announcement, the
+    // candidate-specific range page, and a social snippet.
+    tavilyResults: ({ domainScoped, query }) => {
+      if (domainScoped) {
+        return [{ title: "Acme Corp social post", url: "https://social.example.com/acme-post", content: "Acme Corp shared its latest release notes." }];
+      }
+      if (query.startsWith('"')) {
+        return [{ title: "Acme Corp product range page", url: "https://example.com/acme-range", content: "Acme Corp lists a wider range of products than its original site copy." }];
+      }
+      return [{ title: "Acme Corp announces rebrand", url: "https://example.com/acme-rebrand", content: "Acme Corp unveiled a new logo and visual identity." }];
+    },
+    // Each observation on its own is neutral: the finding (and the hypothesis
+    // built on it) exists only because the review weighs them together.
+    review: (organisation) => ({
+      facts: [
+        { id: "F1", statement: `${organisation} still describes only its original offering on its public site.`, sourceIds: ["S1"] },
+        { id: "F2", statement: `${organisation}'s product range page lists a wider range of products than that site copy does.`, sourceIds: ["S2"] },
+      ],
+      findings: [{ id: "D1", statement: `Two retrieved sources describe ${organisation} in two different ways.`, evidenceIds: ["F1", "F2"] }],
+      interpretations: [{ statement: `The mismatch may be why new buyers struggle to place ${organisation}.`, findingIds: ["D1"] }],
+      unknowns: [`Whether ${organisation}'s own sales conversations show the same confusion.`],
+      conflicts: [],
+      limitations: ["Retrieval was snippet-only; no page or image was inspected."],
+      opportunity: {
+        statement: `${organisation} may have a story-versus-offering mismatch worth investigating in a consultancy conversation -- unconfirmed.`,
+        findingIds: ["D1"],
+        alternativeExplanations: ["The rebrand may be the first step of a messaging update that is still in progress."],
+      },
+    }),
+  });
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+
+  assert.strictEqual(summary.pendingApproval, 1, "the combined assessment warrants presenting the candidate to Martin");
+  assert.strictEqual(created.leads, 0, "and still no Lead: Martin's explicit approval remains the only path to one");
+
+  const opportunity = (env as any).__sessions.proposeLeadOpportunity[0][0];
+  const text = String(opportunity.review.text ?? "");
+  assert.strictEqual(opportunity.review.status, "validated", "the hypothesis comes from a validated review");
+
+  // Every layer stays visible and linked: both neutral observations, the
+  // finding they jointly support, the hypothesis pointing at that finding,
+  // the explicit UNCONFIRMED label, and the retained alternative explanation.
+  assert.ok(text.includes("still describes only its original offering on its public site. [S1]"), `observation 1 with its source: ${text}`);
+  assert.ok(text.includes("wider range of products than that site copy does. [S2]"), `observation 2 with its source: ${text}`);
+  assert.ok(text.includes("Two retrieved sources describe Acme Corp in two different ways. [F1, F2]"), `the finding names both supporting facts: ${text}`);
+  assert.ok(text.includes("*Opportunity hypothesis*"), `the hypothesis is on the card: ${text}`);
+  assert.ok(text.includes("UNCONFIRMED"), "the hypothesis is labelled unconfirmed -- never an established fact");
+  assert.ok(text.includes("[supported by D1"), `the hypothesis states which findings support it: ${text}`);
+  assert.ok(text.includes("worth investigating in a consultancy conversation"), "it is framed as worth investigating, not as a demonstrated problem");
+  assert.ok(text.includes("*Alternative explanations*"), "the alternative explanations section is retained");
+  assert.ok(text.includes("still in progress"), `the material alternative explanation itself: ${text}`);
+});
+
+test("false-positive resistance: a problem keyword in the screening observation is NOT enough -- without grounded company-specific support the candidate is held, never carded", async (t) => {
+  const KEYWORD_EVALUATION = JSON.stringify({
+    candidates: [
+      {
+        pass: true,
+        organisation: "Acme Corp",
+        evidence: "Acme Corp has a positioning problem: its messaging is inconsistent across its marketing channels.",
+        decisionMakerOrRole: "",
+        category: "positioning",
+        reason: "Inconsistent messaging signals a positioning problem.",
+      },
+    ],
+  });
+  assert.strictEqual(
+    evidenceStatesProblemOrOpportunity("Acme Corp has a positioning problem: its messaging is inconsistent across its marketing channels."),
+    true,
+    "the observation DOES carry a signal word -- and that must not be what decides the outcome",
+  );
+
+  // The retrieved material the review actually weighs is only a passing
+  // mention in category commentary, so the review honestly finds no
+  // company-specific opportunity hypothesis.
+  const { created, searchQueries } = installDiscoveryRun(t, KEYWORD_EVALUATION, { review: insufficientReviewDraft });
+  const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
+
+  const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
+
+  assert.strictEqual(summary.pendingApproval, 0, "a keyword match with no grounded supporting context must never reach an approval card");
+  assert.ok((summary.evidenceSynthesisAttempts ?? 0) > 0, "the keyword did identify material for review -- the review is what refused it");
+  assert.ok(
+    searchQueries.some((q) => !q.domainScoped && q.query === '"Acme Corp"'),
+    "the candidate-specific search was still performed, so the refusal is an assessment of retrieved evidence, not a missing search",
+  );
+  assert.strictEqual(summary.skippedAsInsufficient + summary.heldOverCap, summary.evaluated, "every evaluated candidate still lands in exactly one bucket");
+  assert.strictEqual((env as any).__sessions.init.length, 0, "no Work is created for a held candidate");
+  assert.strictEqual(created.leads, 0, "and no Lead");
+  assert.strictEqual(created.handoffs, 0, "and no Handoff");
+});
+
+test("LGS: a grounded observation that names the organisation IS presented -- carrying the organisation-named evidence, the retrieval date, and a labelled UNCONFIRMED opportunity hypothesis", async (t) => {
+  const { searchQueries } = installDiscoveryRun(t, PASS_EVALUATION);
   const env = fakeEnv({ TAVILY_API_KEY: "key", GROQ_API_KEY: "key" });
 
   const summary = await runAutonomousLeadDiscovery(env, await lgsSkills());
@@ -732,6 +1034,27 @@ test("LGS: a grounded observation that names the organisation IS presented -- ca
   assert.ok(opportunity.evidence.includes("Acme Corp"), `the card's observation names the organisation: ${opportunity.evidence}`);
   assert.strictEqual(typeof opportunity.sourceRetrievedAt, "string", "the retrieval date travels to the card");
   assert.ok(!Number.isNaN(Date.parse(opportunity.sourceRetrievedAt)), `the retrieval date is a real timestamp: ${opportunity.sourceRetrievedAt}`);
+
+  // Candidate-level synthesis, on the card: a validated review whose
+  // hypothesis is traceable to findings and facts, explicitly marked as NOT
+  // established, with the material alternative explanation retained. The
+  // supporting fact carries no problem-signal keyword, so what established
+  // the hypothesis is the combined assessment -- not a wordlist match.
+  assert.strictEqual(opportunity.review.status, "validated", "the card carries a validated candidate-level review");
+  const reviewText = String(opportunity.review.text ?? "");
+  assert.ok(reviewText.includes("*Opportunity hypothesis*"), `the card states the opportunity hypothesis: ${reviewText}`);
+  assert.ok(reviewText.includes("UNCONFIRMED"), "the hypothesis is labelled unconfirmed, never an established fact");
+  assert.ok(reviewText.includes("[supported by D1"), `the hypothesis names the findings that support it: ${reviewText}`);
+  assert.ok(reviewText.includes("*Alternative explanations*"), "the material alternative explanation is retained on the card");
+  assert.ok(reviewText.includes("staged rollout"), `the alternative explanation itself is shown: ${reviewText}`);
+
+  // Bounded candidate-level retrieval: exactly one unscoped candidate-specific
+  // search (the organisation's own name, distinct from the domain-scoped
+  // social query of the same wording) plus the bounded social step.
+  const candidateSearches = searchQueries.filter((q) => !q.domainScoped && q.query === '"Acme Corp"');
+  assert.strictEqual(candidateSearches.length, 1, `exactly one candidate-specific search per attempt: ${JSON.stringify(searchQueries)}`);
+  const socialSearches = searchQueries.filter((q) => q.domainScoped || q.query.endsWith("official social media"));
+  assert.strictEqual(socialSearches.length, MAX_SOCIAL_SIGNAL_SEARCHES, "the social step stays at its own bound");
 });
 
 test("runAutonomousLeadDiscovery records nothing when governance retrieval fails -- fails closed, not open", async (t) => {
@@ -1386,7 +1709,7 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
   let ackText = "";
   let handoffsCreatedCount = 0;
   let leadsCreatedCount = 0;
-  const outboundQueries: string[] = [];
+  const outboundQueries: Array<{ query: string; domainScoped: boolean }> = [];
 
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
@@ -1402,7 +1725,8 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "governance text" }] } }] }), { status: 200 });
     }
     if (urlStr.includes("api.tavily.com")) {
-      outboundQueries.push(JSON.parse(init.body).query);
+      const request = JSON.parse(init.body);
+      outboundQueries.push({ query: request.query, domainScoped: Array.isArray(request.include_domains) });
       return new Response(JSON.stringify({ results: [{ title: "Acme Corp positioning shift", url: "https://example.com/nova", content: "Acme Corp expansion news." }] }), { status: 200 });
     }
     if (urlStr.includes("leads-ds") && method === "POST" && urlStr.endsWith("/query")) {
@@ -1427,6 +1751,13 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
     }
     if (body.includes("evidence-threshold hard gate")) {
       return new Response(JSON.stringify({ choices: [{ message: { content: PASS_EVALUATION } }] }), { status: 200 });
+    }
+    if (body.includes("Build ONE evidence-backed review")) {
+      // The bounded candidate-level review call for the presented candidate:
+      // route it to a real (mocked) review rather than letting it throw, so
+      // the presentation path under test is the governed one.
+      const organisation = body.match(/Candidate under review: ([^"\\]+?)(?:\\n|")/)?.[1]?.trim() || "the organisation";
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(supportedReviewDraft(organisation)) } }] }), { status: 200 });
     }
     if ((init?.method ?? "GET") === "GET" && url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
       // A standalone governance page (Hat Definition, Universal
@@ -1463,26 +1794,34 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
   assert.strictEqual(handoffsCreatedCount, 0, "promising signals are held; no Handoff is produced");
   assert.strictEqual(leadsCreatedCount, 0, "on-demand discovery must never create a Lead directly");
   // Both generated discovery queries must have been searched, in order --
-  // interleaved with (never replaced by) the candidate's own bounded public
-  // social-signal searches, which run when a screening candidate is presented.
-  const generatedQueries = outboundQueries.filter((q) => q.includes("the business") || q.includes("the operator"));
+  // interleaved with (never replaced by) the bounded retrieval a presented
+  // candidate's own synthesis performs: ONE candidate-specific public search
+  // plus the bounded social step. Nothing else may leave the runtime.
+  const generated = outboundQueries.filter((q) => q.query.includes("the business") || q.query.includes("the operator"));
   assert.deepStrictEqual(
-    generatedQueries,
+    generated.map((q) => q.query),
     ["positioning problem like the business has", "struggling brands the operator would notice"],
     "both generated queries are searched in order, with the canonical redaction replacement applied",
   );
-  const socialQueriesSent = outboundQueries.length - generatedQueries.length;
-  assert.ok(
-    socialQueriesSent <= MAX_SOCIAL_SIGNAL_SEARCHES,
-    `only the bounded public social-signal searches may accompany the generated ones (got ${socialQueriesSent}, bound ${MAX_SOCIAL_SIGNAL_SEARCHES})`,
+  const socialSearches = outboundQueries.filter((q) => q.domainScoped || q.query.endsWith("official social media"));
+  const candidateSearches = outboundQueries.filter((q) => !q.domainScoped && q.query === '"Acme Corp"');
+  assert.strictEqual(
+    socialSearches.length,
+    MAX_SOCIAL_SIGNAL_SEARCHES,
+    `the bounded social-signal step runs in full alongside the generated queries (got ${socialSearches.length}, bound ${MAX_SOCIAL_SIGNAL_SEARCHES})`,
   );
-  const expectedSocialQueries = socialSignalQueries("Acme Corp").map((q) => q.query);
-  for (const query of outboundQueries) {
-    if (generatedQueries.includes(query)) continue;
-    assert.ok(expectedSocialQueries.includes(query), `nothing but the bounded social-signal searches may leave the runtime: ${query}`);
-    assert.ok(query.includes("Acme Corp"), `a social-signal search must name the candidate: ${query}`);
-  }
-  for (const query of outboundQueries) {
+  assert.strictEqual(candidateSearches.length, 1, "the presented candidate's ONE bounded candidate-specific search ran");
+  assert.ok(
+    candidateSearches.length <= MAX_EVIDENCE_SYNTHESIS_PER_RUN,
+    `candidate-specific searches stay inside the synthesis budget (got ${candidateSearches.length}, bound ${MAX_EVIDENCE_SYNTHESIS_PER_RUN})`,
+  );
+  assert.strictEqual(
+    candidateSearches.length + socialSearches.length + generated.length,
+    outboundQueries.length,
+    `nothing but generated, candidate-specific and social searches leaves the runtime: ${JSON.stringify(outboundQueries)}`,
+  );
+  assert.ok(candidateSearches.every((q) => q.query.includes("Acme Corp")), "the candidate-specific search names the candidate");
+  for (const { query } of outboundQueries) {
     assert.ok(!/\bENIG\b/i.test(query), `identity must not leave the runtime in a search query: ${query}`);
     assert.ok(!/\bMartin\b/i.test(query), `identity must not leave the runtime in a search query: ${query}`);
   }
@@ -1592,12 +1931,13 @@ function installDistinctCandidateRun(t: any) {
   globalThis.fetch = (async (url: string, init: any) => {
     const method = init?.method ?? "GET";
     if (url.includes("api.tavily.com")) {
-      // Every search call -- screening or the bounded public social-signal
-      // searches that follow a presented candidate -- gets its own batch of
-      // freshly-named organisations, so no two candidates ever share a memory
-      // key. The organisation name IS the result title, which is what lets the
-      // deterministic evidence gate (the retrieved result must name the
-      // organisation) pass for every one of them.
+      // Every search call -- screening, the bounded candidate-specific search,
+      // or the bounded public social-signal searches that follow a presented
+      // candidate -- gets its own batch of freshly-named organisations, so no
+      // two candidates ever share a memory key. The organisation name IS the
+      // result title, which is what lets the deterministic nomination check
+      // (the retrieved result must name the organisation) pass for every one
+      // of them.
       const batch = searchBatch++;
       return new Response(
         JSON.stringify({
@@ -1620,13 +1960,25 @@ function installDistinctCandidateRun(t: any) {
       if (JSON.parse(init.body).parent?.data_source_id === "leads-ds") leadsCreated++;
       return new Response(JSON.stringify({ id: "page1", url: "https://notion.so/page1", properties: {} }), { status: 200 });
     }
+    const aiBody = String(init?.body ?? "");
+    if (aiBody.includes("Build ONE evidence-backed review")) {
+      // The bounded candidate-level review call for one presented candidate:
+      // a real (mocked) review draft built for the organisation under review,
+      // so presentation is the governed path -- nomination must be followed by
+      // a successful candidate-level synthesis to yield a card.
+      const organisation = aiBody.match(/Candidate under review: ([^"\\]+?)(?:\\n|")/)?.[1]?.trim() || "the organisation";
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify(supportedReviewDraft(organisation)) } }] }),
+        { status: 200 },
+      );
+    }
     // The screening AI call is the one whose prompt lists the retrieved
     // results as `[i] Title: ...`; the mock echoes those exact titles back as
     // the organisations, so each candidate is grounded in ITS OWN result
-    // (the company-specific evidence threshold requires the retrieved result
-    // to name the organisation). Every other AI call -- the candidate review,
-    // for one -- gets no candidates back and can never manufacture one.
-    const titles = [...String(init?.body ?? "").matchAll(/\[\d+\] Title: ([^\\"]+)/g)].map((m) => m[1].trim());
+    // (the nomination check requires the retrieved result to name the
+    // organisation). Every other AI call gets no candidates back and can
+    // never manufacture one.
+    const titles = [...aiBody.matchAll(/\[\d+\] Title: ([^\\"]+)/g)].map((m) => m[1].trim());
     return new Response(
       JSON.stringify({
         choices: [

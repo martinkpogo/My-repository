@@ -15,12 +15,20 @@ import { getSessionStub, newWorkId } from "../../sessionRouting";
 import { SALES_OPERATION } from "./salesOperationNames";
 import { runProspectResearch, summarizeResearchSynthesis } from "../../runtime/actionResearch";
 import {
+  blockedCandidateReview,
   buildCandidateReview,
+  evaluateCandidateSynthesis,
+  gatherCandidateEvidence,
   gatherPublicSocialSignals,
-  renderBlockedCandidateReview,
+  normaliseForGrounding,
   renderCandidateReview,
   type CandidateReview,
 } from "./candidateReview";
+
+// Re-exported so existing importers of the grounding normaliser keep working
+// from this module; its implementation lives with the review because the
+// candidate-level synthesis needs it too (one implementation, not two).
+export { normaliseForGrounding };
 
 import { salesOf } from "./salesState";
 /**
@@ -96,42 +104,60 @@ interface EvaluationBatchResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Company-specific evidence threshold (deterministic).
+// Nomination (deterministic) -- and what nomination is NOT.
 // ---------------------------------------------------------------------------
 //
-// Correction for a confirmed live failure: an approval card cited a general
-// article about inconsistent brand messaging as if it demonstrated that a
-// NAMED organisation had that problem. The AI screening step judges only
-// search-result snippets, so nothing downstream could tell "the source is
-// about the problem category" apart from "the source shows THIS company has
-// the problem". These checks are the deterministic half of that distinction:
-// the named organisation must appear in the retrieved result itself, the
-// observation must name that organisation, and the observation must carry a
-// business problem/opportunity signal. They only ever HOLD a candidate
-// (counted as insufficient evidence, never presented as an approval card) --
-// they never turn a hold into a pass, they add no confidence score, and the
-// full Acquisition-Criteria judgement stays with the live governance/AI step
-// above them. A Lead still exists only after Martin's explicit approval.
+// Two confirmed live failures define this boundary:
 //
-// Known limitation, deliberately documented rather than papered over: the
-// signal vocabulary below is a bounded wordlist, not a semantic test. An
-// observation that genuinely shows a problem but is phrased entirely outside
-// this vocabulary is HELD rather than presented (the safe direction), and a
-// snippet that merely names the company in passing can still satisfy the
-// naming checks -- semantic source-grounding beyond naming cannot be verified
-// deterministically from a snippet at all, which is exactly why the candidate
-// review (candidateReview.ts) keeps every source labelled as a snippet and
-// Martin's approval stays the bar for a Lead.
+// 2026-10-19 (false POSITIVE): an approval card cited a GENERAL article about
+// inconsistent brand messaging as if it demonstrated the problem at a NAMED
+// organisation -- a category article plus a problem word were being read as
+// company-specific proof.
+//
+// 2026-10-20 (false NEGATIVE): the correction for that failure gated on a
+// bounded problem-signal wordlist per SNIPPET, so several individually neutral
+// but jointly meaningful observations -- none of which used the vocabulary --
+// were held before any evidence review could weigh them together.
+//
+// The unit of assessment is therefore the CANDIDATE and its bounded,
+// retrieved evidence set, not a single snippet, and this stage is only the
+// first half of that:
+//
+// 1. NOMINATION (below: deterministic, free) -- the AI's pass must be tied to
+//    THIS retrieved result and to a named organisation. This is what stops a
+//    general article, an industry trend, or a passing mention of a company
+//    from nominating a company the result is not about. It says nothing about
+//    whether that company has a problem: no keyword establishes anything here.
+//
+// 2. CANDIDATE-LEVEL SYNTHESIS (candidateReview.ts: one bounded
+//    candidate-specific search + `buildCandidateReview` + the shared evidence
+//    validation + `evaluateCandidateSynthesis`) -- the screening result, the
+//    candidate-specific results and the bounded social snippets are weighed
+//    TOGETHER, and the candidate is presented only with a traceable,
+//    explicitly unconfirmed opportunity hypothesis, or held with the reason.
+//
+// `evidenceStatesProblemOrOpportunity` below is deliberately part of NEITHER
+// decision. It is a diagnosability hint only, logged with a hold so a reader
+// can see whether the screening observation happened to carry a signal term.
+// It may help identify material worth reviewing; it can never pass or hold a
+// candidate on its own, and a candidate whose observation contains none of
+// these stems still receives the substantive review.
+//
+// Both stages only ever HOLD a candidate (counted as insufficient evidence,
+// never an approval card), never turn a hold into a pass, and add no
+// confidence score. A Lead still exists only after Martin's explicit approval
+// of a presented card.
 
 /**
  * Unicode-aware normalisation for grounding comparisons: lowercases and
  * collapses every run of non-letter/digit characters to one space, so
  * "Acme, Corp." and "acme corp" compare equal while non-Latin names
  * (e.g. 株式会社サクラ) survive intact rather than normalising to nothing.
+ *
+ * Implemented once in `candidateReview.ts` (the candidate-level synthesis
+ * needs the same comparison) and re-exported from here, where the nomination
+ * gate uses it -- one implementation, not two.
  */
-export function normaliseForGrounding(text: string): string {
-  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-}
 
 /**
  * Bounded problem-signal vocabulary drawn from the five problem-signal
@@ -142,10 +168,19 @@ export function normaliseForGrounding(text: string): string {
  * and a perception gap versus actual capability.
  *
  * Deliberately EXCLUDES neutral event nouns -- rebrand, expansion,
- * leadership change, product launch, acquisition, funding -- on purpose: an
+ * leadership change, product launch, acquisition, funding -- because an
  * announcement of one of those, with nothing else, does not establish a
- * problem, so an evidence string carrying only the event fails this check.
- * Matched word-wise against the observation, case-insensitively.
+ * problem.
+ *
+ * THIS LIST DECIDES NOTHING (2026-10-20). It is no longer a gate: a keyword
+ * match may help identify material worth reviewing, but a snippet containing
+ * one of these stems proves no more than a snippet containing none of them.
+ * The candidate-level synthesis weighs relevance, specificity, consistency
+ * and alternative explanations instead, so individually neutral observations
+ * can jointly support an opportunity hypothesis while a keyword with no
+ * supporting context cannot. The only remaining use is the hold-log hint
+ * below, which records whether the screening observation happened to carry a
+ * signal term so a hold stays diagnosable.
  */
 const PROBLEM_SIGNAL_SOURCES: readonly string[] = [
   // Category 1 / 5: unclear or inconsistent positioning, difficulty explaining the offer, fragmented messaging.
@@ -203,10 +238,11 @@ const PROBLEM_SIGNAL_PATTERNS: readonly RegExp[] = PROBLEM_SIGNAL_SOURCES.map((s
 
 /**
  * Whether an observation states (or quotes) a business problem or
- * opportunity signal at all -- the mechanical half of "a neutral business
- * event does not itself establish a problem". Never a diagnosis: it only
- * says the observation is about a problem/signal rather than a bare
- * announcement.
+ * opportunity signal at all. NEVER a diagnosis and NEVER a gate (see the
+ * module comment): its only use is the hint recorded alongside a hold, so a
+ * reader can see whether the screening observation happened to carry a
+ * signal term. A candidate whose observation matches none of these stems is
+ * still nominated and still reviewed.
  */
 export function evidenceStatesProblemOrOpportunity(evidence: string): boolean {
   if (typeof evidence !== "string" || !evidence.trim()) return false;
@@ -214,32 +250,33 @@ export function evidenceStatesProblemOrOpportunity(evidence: string): boolean {
   return PROBLEM_SIGNAL_PATTERNS.some((pattern) => pattern.test(lower));
 }
 
-export type CompanySpecificEvidenceVerdict =
+export type CandidateNominationVerdict =
   | { ok: true }
   | { ok: false; reason: string };
 
 /**
- * The deterministic evidence threshold a screening pass must additionally
- * clear before its candidate may be presented for approval:
+ * The deterministic NOMINATION check: what an AI `pass: true` must be tied to
+ * before the candidate may receive a substantive candidate-level evidence
+ * review at all:
  *
  * 1. an organisation is named, with checkable source evidence;
  * 2. the retrieved result itself names that organisation -- a general
- *    article about the problem category is never evidence about a company
- *    it does not mention;
+ *    article about the problem category never nominates a company it does
+ *    not mention;
  * 3. the observation (evidence) names that organisation -- an observation
- *    not tied to the named organisation cannot be presented as one;
- * 4. the observation carries a business problem/opportunity signal -- a
- *    rebrand, expansion, leadership change or product launch announcement
- *    on its own does not establish a problem.
+ *    not tied to the named organisation cannot be presented as one.
  *
- * A failure is reported with the reason; the caller holds the candidate as
- * insufficient evidence (never presented). See the module comment above for
- * the deliberate limitation of check 4.
+ * Nomination is NOT evidence of a company-specific problem. There is no
+ * keyword requirement here (removed 2026-10-20): neutral events, sparse
+ * vocabulary and multi-source patterns all proceed to the review, which is
+ * what decides -- see `evaluateCandidateSynthesis` in candidateReview.ts. A
+ * failure holds the candidate as insufficient evidence with the reason
+ * logged: no review, no card, no Work.
  */
-export function checkCompanySpecificEvidence(
+export function checkCandidateNomination(
   evaluation: Pick<CandidateEvaluation, "organisation" | "evidence">,
   result: Pick<SearchResult, "title" | "url" | "snippet">,
-): CompanySpecificEvidenceVerdict {
+): CandidateNominationVerdict {
   const organisation = (evaluation.organisation ?? "").trim();
   const evidence = (evaluation.evidence ?? "").trim();
   if (!organisation) return { ok: false, reason: "the evaluation names no organisation" };
@@ -266,13 +303,13 @@ export function checkCompanySpecificEvidence(
     };
   }
 
-  if (!evidenceStatesProblemOrOpportunity(evidence)) {
-    return {
-      ok: false,
-      reason: `the evidence for ${organisation} states no business problem or opportunity signal -- a neutral business event (rebrand, expansion, leadership change, product launch) announced on its own does not establish a problem`,
-    };
-  }
-
+  // Deliberately NO keyword/vocabulary requirement here: nomination says the
+  // result and the observation are about THIS organisation, nothing more.
+  // Whether the material actually supports a company-specific problem is the
+  // candidate-level synthesis's decision (evaluateCandidateSynthesis), which
+  // weighs the whole bounded evidence set -- so a neutral event, a sparse
+  // vocabulary, or several individually neutral observations all still get
+  // their review instead of being held on a wordlist.
   return { ok: true };
 }
 
@@ -283,11 +320,12 @@ export function checkCompanySpecificEvidence(
  * never fabricates a decision-maker, contact, or fact the snippet doesn't
  * contain. Returns [] (not null) on governance/AI failure so one failed
  * query doesn't abort the rest of the run -- the caller logs the failure.
- * A `pass: true` here is NOT the end of screening: the caller additionally
- * applies the deterministic company-specific evidence threshold
- * (checkCompanySpecificEvidence below), because an AI pass alone cannot
- * prove the observation is tied to the named organisation rather than to a
- * general article about the problem category.
+ * A `pass: true` here is NOT the end of screening: the caller first applies
+ * the deterministic nomination check (checkCandidateNomination below) so a
+ * result that never names the organisation cannot nominate one, and every
+ * nomination then goes through the bounded candidate-level evidence synthesis
+ * -- an AI pass alone neither proves the observation is tied to the named
+ * organisation nor establishes a company-specific problem.
  *
  * Migrated (Skills architecture proof, Build order Step 2) to fetch the
  * shared `research-signal` Skill for its evidence discipline (never
@@ -328,7 +366,7 @@ export async function evaluateCandidates(env: Env, results: SearchResult[], skil
       behavior: governance.universalRoleContract,
       skillContent,
       context: candidatesText,
-      situation: `Evaluate EACH of the search results above independently against the Acquisition Criteria section in the Hat Definition -- operating business, strategic/commercial problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, and the evidence-threshold hard gate. If the snippet doesn't support a criterion, that criterion is not met -- do not assume it. A commodity request (logo/generic graphic design/social media graphics/basic branding) or mere existence/size/industry is never sufficient to pass.\n\nCompany-specific evidence rules (hard gate -- a deterministic check enforces each one downstream and holds any candidate that fails it):\n- evidence must be a source-grounded OBSERVATION about the named organisation, taken from THIS result's own title/url/snippet, and must state the organisation's exact name. A general article about the problem category -- however accurate -- is never evidence that a particular company has that problem: if the result does not itself name the organisation, return pass: false with an empty organisation.\n- A neutral business event (a rebrand, an expansion, a leadership change, a product launch, an acquisition, a funding announcement) announced without source-grounded evidence of the problem or opportunity itself does NOT pass: the event is context, not a demonstrated problem.\n- "evidence" is what the snippet OBSERVES (an observed fact about the organisation); "reason" is why that may matter -- a hypothesis. Never present a possible business implication as an established fact, and never invent a contact, decision-maker, metric or date the snippet does not contain.\n\nReturn JSON: {"candidates": [{"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the disciplined observation, naming the organisation, or empty string if pass is false>", "decisionMakerOrRole": "<only if explicitly named/implied in the text, else empty string>", "category": "<short label, or empty string>", "reason": "..."}, ...]} -- exactly one entry per result given, in the same order.`,
+      situation: `Evaluate EACH of the search results above independently against the Acquisition Criteria section in the Hat Definition -- operating business, strategic/commercial problem signal, business consequence, ENIG relevance, consultancy-readiness, reachability, and the evidence-threshold hard gate. If the snippet doesn't support a criterion, that criterion is not met -- do not assume it. A commodity request (logo/generic graphic design/social media graphics/basic branding) or mere existence/size/industry is never sufficient to pass.\n\nNomination rules (this step NOMINATES an organisation for a bounded candidate-level evidence review; it never establishes that the organisation has a problem -- a deterministic naming check downstream enforces that the result and the observation are about THIS organisation, and the candidate-level review then decides whether the combined retrieved material supports a company-specific opportunity hypothesis):\n- evidence must be a source-grounded OBSERVATION about the named organisation, taken from THIS result's own title/url/snippet, and must state the organisation's exact name. A general article about the problem category -- however accurate -- never nominates a company it does not mention: if the result does not itself name the organisation, return pass: false with an empty organisation.\n- A neutral business event (a rebrand, an expansion, a leadership change, a product launch, an acquisition, a funding announcement) may still NOMINATE the organisation: the event is context, not a demonstrated problem, and it only becomes evidence if the bounded candidate-level review finds the combined material warrants it. Never claim it as an established problem here either way.\n- "evidence" is what the snippet OBSERVES (an observed fact about the organisation); "reason" is why that may matter -- a hypothesis. Never present a possible business implication as an established fact, and never invent a contact, decision-maker, metric or date the snippet does not contain.\n\nReturn JSON: {"candidates": [{"pass": true|false, "organisation": "<name if identifiable, else empty string>", "evidence": "<the disciplined observation, naming the organisation, or empty string if pass is false>", "decisionMakerOrRole": "<only if explicitly named/implied in the text, else empty string>", "category": "<short label, or empty string>", "reason": "..."}, ...]} -- exactly one entry per result given, in the same order.`,
     },
     light: true,
     maxTokens: 3000,
@@ -349,10 +387,22 @@ interface DiscoveryRunSummary {
   pendingApproval: number;
   /**
    * Candidates that passed screening but were NOT presented because this
-   * run already sent MAX_APPROVAL_CARDS_PER_RUN cards. Nothing is
-   * remembered for them, so a later run can still present them.
+   * run hit a run cap: it already sent MAX_APPROVAL_CARDS_PER_RUN cards, or
+   * it already spent MAX_EVIDENCE_SYNTHESIS_PER_RUN candidate-level evidence
+   * syntheses. Nothing is remembered for them, so a later run can still
+   * present them.
    */
   heldOverCap: number;
+  /**
+   * Candidate-level evidence syntheses attempted this run -- each attempt is
+   * one bounded candidate-specific search plus one review call, and it is
+   * what keeps discovery cost finite when syntheses HOLD candidates instead
+   * of presenting them (holds do not consume approval cards, so the card cap
+   * alone would bound nothing there). Bounded by
+   * MAX_EVIDENCE_SYNTHESIS_PER_RUN; 0 when a run attempted none. Not a
+   * bucket: it is a subset of the candidates the buckets below account for.
+   */
+  evidenceSynthesisAttempts?: number;
   /** Candidates skipped because Martin already has a card for them pending, or rejected them recently. */
   skippedAlreadyPresented: number;
   /** Candidates whose approval card could not be created or sent (logged as a Blocker each). */
@@ -385,6 +435,7 @@ function emptyDiscoveryRunSummary(): DiscoveryRunSummary {
     evaluated: 0,
     pendingApproval: 0,
     heldOverCap: 0,
+    evidenceSynthesisAttempts: 0,
     skippedAlreadyPresented: 0,
     presentationFailed: 0,
     duplicateCheckFailed: 0,
@@ -430,6 +481,17 @@ export interface PendingLeadOpportunity {
 
 /** At most this many approval cards are sent per discovery run, so a run never floods the Workspace topic. */
 export const MAX_APPROVAL_CARDS_PER_RUN = 5;
+/**
+ * Upper bound on candidate-level evidence syntheses per discovery run. Each
+ * attempt is one bounded candidate-specific search (at most
+ * MAX_CANDIDATE_EVIDENCE_RESULTS snippets, candidateReview.ts) plus one
+ * review call, so a run's search volume and model calls stay bounded even in
+ * the worst case where every nominated candidate is held rather than
+ * presented (holds consume no approval card, so the card cap alone would not
+ * bound them). Matched to the approval-card cap deliberately: a run can never
+ * review more candidates than it could present.
+ */
+export const MAX_EVIDENCE_SYNTHESIS_PER_RUN = MAX_APPROVAL_CARDS_PER_RUN;
 /** How long a rejected candidate is remembered (never re-proposed in this window). */
 const REJECTED_CANDIDATE_TTL_SECONDS = 180 * 24 * 60 * 60;
 /** How long a presented-but-undecided candidate is remembered, so later runs do not send a second card for it. */
@@ -671,11 +733,17 @@ async function researchCandidate(env: Env, opportunity: PendingLeadOpportunity, 
 }
 
 /**
- * Builds the evidence-backed candidate review for ONE screened candidate:
- * public social-signal retrieval plus the validated review, then rendered for
- * the card. Never suppresses the approval card -- any unexpected failure here
- * degrades to a BLOCKED review that says so, because Martin still has to see
- * the candidate either way.
+ * Builds the CANDIDATE-LEVEL evidence set and review for ONE nominated
+ * candidate: the one bounded candidate-specific public search, the bounded
+ * public social-signal retrieval, then the validated review over the combined
+ * material (`buildCandidateReview`). The full review object comes back -- not
+ * just its text -- so the caller can take the candidate-level verdict (present
+ * a qualified hypothesis, or hold) BEFORE any research call, Work, or approval
+ * card is spent on the candidate.
+ *
+ * A non-governance failure degrades to a BLOCKED review with the reason, and a
+ * blocked review HELDS the candidate (`evaluateCandidateSynthesis`): Martin
+ * never sees a candidate whose candidate-level review could not be produced.
  *
  * An Access denial is re-thrown rather than degraded: AccessDeniedError is a
  * governance decision, and turning it into "review unavailable" would downgrade
@@ -683,25 +751,25 @@ async function researchCandidate(env: Env, opportunity: PendingLeadOpportunity, 
  */
 async function buildReviewForCandidate(
   env: Env,
-  opportunity: PendingLeadOpportunity,
+  organisation: string,
   screeningResult: SearchResult,
   access: AccessContext,
   skills: ResolvedActionSkillSet,
-): Promise<{ status: CandidateReview["status"]; text: string }> {
+): Promise<CandidateReview> {
   try {
-    const social = await gatherPublicSocialSignals(env, opportunity.organisation, access);
-    const review: CandidateReview = await buildCandidateReview(env, opportunity.organisation, screeningResult, social, skills);
-    return { status: review.status, text: renderCandidateReview(opportunity.organisation, review) };
+    // Retrieval order is deliberate: the candidate-specific search (this
+    // organisation's own name, unscoped public index) runs first, then the
+    // bounded social step -- both through the same registered, Access-gated
+    // `search` Tool as the screening search, with no second mechanism.
+    const candidateEvidence = await gatherCandidateEvidence(env, organisation, access, [screeningResult.url]);
+    const social = await gatherPublicSocialSignals(env, organisation, access);
+    return await buildCandidateReview(env, organisation, screeningResult, social, skills, candidateEvidence);
   } catch (err) {
     if (err instanceof AccessDeniedError) throw err;
-    console.error(`Lead Discovery: candidate review could not be built for ${opportunity.organisation}`, err);
-    return {
-      status: "blocked",
-      text: renderBlockedCandidateReview(
-        opportunity.organisation,
-        `the evidence step failed before it returned any output (${err instanceof Error ? err.message : "unknown error"})`,
-      ),
-    };
+    console.error(`Lead Discovery: candidate review could not be built for ${organisation}`, err);
+    return blockedCandidateReview(
+      `the evidence step failed before it returned any output (${err instanceof Error ? err.message : "unknown error"})`,
+    );
   }
 }
 
@@ -711,22 +779,24 @@ async function buildReviewForCandidate(
  * Nothing is written to the Leads database here. The candidate is remembered
  * as pending so a later run does not send a second card for it.
  *
- * `screeningResult` is the one retrieved search result that surfaced THIS
- * candidate -- the only web source the review may attribute a fact to, since
- * the other results from the same query belong to different organisations.
+ * `review` is the already-built, already-validated candidate-level review; the
+ * caller only calls this after `evaluateCandidateSynthesis` accepted it, so
+ * every card carries a traceable, explicitly unconfirmed opportunity
+ * hypothesis. `research` is also run only here, so a held candidate costs no
+ * research call either.
  */
 async function presentScreenedCandidate(
   env: Env,
   presentTo: CandidatePresentationTarget,
   opportunity: PendingLeadOpportunity,
-  screeningResult: SearchResult,
+  review: CandidateReview,
   access: AccessContext,
   skills: ResolvedActionSkillSet,
 ): Promise<boolean> {
   opportunity = {
     ...opportunity,
     research: await researchCandidate(env, opportunity, access, skills),
-    review: await buildReviewForCandidate(env, opportunity, screeningResult, access, skills),
+    review: { status: review.status, text: renderCandidateReview(opportunity.organisation, review) },
   };
   try {
     const workId = newWorkId();
@@ -758,12 +828,18 @@ async function presentScreenedCandidate(
  * Criteria -- the shared body for BOTH the fixed scheduled query list and
  * an on-demand request's AI-generated queries.
  *
- * A candidate that survives screening and the duplicate-Lead check is
- * presented to Martin as a Telegram approval card on its own record_lead
- * Work (Martin's decision, 2026-10-12: screening is the bar for a card; his
- * approval is the bar for a Lead). This function creates no Handoff and no
- * Lead. A candidate already pending or recently rejected is skipped, and at
- * most MAX_APPROVAL_CARDS_PER_RUN cards are sent per run.
+ * A candidate that passes screening is first NOMINATED deterministically
+ * (the result and the observation must be about this organisation), then
+ * assessed at the candidate level over its bounded, retrieved evidence set
+ * (one candidate-specific search + the bounded social step + the validated
+ * review). Only a nomination whose combined evidence supports a traceable,
+ * explicitly unconfirmed opportunity hypothesis is presented to Martin as a
+ * Telegram approval card on its own record_lead Work (Martin's decision,
+ * 2026-10-12: screening is the bar for a card; his approval is the bar for a
+ * Lead). This function creates no Handoff and no Lead. A candidate already
+ * pending or recently rejected is skipped; at most MAX_APPROVAL_CARDS_PER_RUN
+ * cards and MAX_EVIDENCE_SYNTHESIS_PER_RUN evidence syntheses are spent per
+ * run.
  */
 async function searchAndScreenForQuery(
   env: Env,
@@ -807,16 +883,17 @@ async function searchAndScreenForQuery(
       continue;
     }
 
-    // The deterministic company-specific evidence threshold. An AI pass
-    // whose source never names the organisation, or whose observation names
-    // no problem/opportunity signal (a bare rebrand/expansion/leadership/
-    // product-launch announcement, or a general article about the problem
-    // category), is held as insufficient evidence -- never presented as a
-    // normal approval card implying the case is established.
-    const threshold = checkCompanySpecificEvidence(evaluation, result);
-    if (!threshold.ok) {
+    // NOMINATION (deterministic, free): an AI pass is only a nomination when
+    // this retrieved result and this observation are actually about THIS
+    // organisation. A general article about the problem category, an industry
+    // trend, or an evidence string that names no such organisation never
+    // nominates one. There is deliberately no keyword requirement here -- see
+    // the module comment -- so a neutral or sparsely-worded observation still
+    // goes on to the candidate-level review.
+    const nomination = checkCandidateNomination(evaluation, result);
+    if (!nomination.ok) {
       summary.skippedAsInsufficient++;
-      console.log(`Lead Discovery: candidate held as insufficient evidence -- ${threshold.reason}`);
+      console.log(`Lead Discovery: candidate not nominated for evidence review -- ${nomination.reason}`);
       continue;
     }
 
@@ -856,19 +933,50 @@ async function searchAndScreenForQuery(
       summary.heldOverCap++;
       continue;
     }
+    // Bounded candidate-level synthesis. Holds consume no approval card, so
+    // the card cap above cannot bound this step: without an attempt budget a
+    // run whose nominated candidates are ALL held would keep searching and
+    // reviewing with no end. At most MAX_EVIDENCE_SYNTHESIS_PER_RUN attempts
+    // per run = at most that many bounded candidate-specific searches and
+    // review calls. Held candidates are never remembered, so a later run may
+    // nominate them again with fresh evidence.
+    if ((summary.evidenceSynthesisAttempts ?? 0) >= MAX_EVIDENCE_SYNTHESIS_PER_RUN) {
+      summary.heldOverCap++;
+      continue;
+    }
+    summary.evidenceSynthesisAttempts = (summary.evidenceSynthesisAttempts ?? 0) + 1;
+
+    // THE candidate-level assessment: the screening result, the bounded
+    // candidate-specific results and the bounded social snippets are weighed
+    // together and validated as one review. Either it yields a traceable,
+    // explicitly unconfirmed opportunity hypothesis -- presented as an
+    // approval-card candidate -- or the candidate is HELD with the reason,
+    // never carded and never turned into a Lead.
+    const organisation = evaluation.organisation.trim();
+    const review = await buildReviewForCandidate(env, organisation, result, access, skills);
+    const verdict = evaluateCandidateSynthesis(organisation, review);
+    if (!verdict.ok) {
+      summary.skippedAsInsufficient++;
+      console.log(
+        `Lead Discovery: candidate held after candidate-level evidence synthesis -- ${verdict.reason} ` +
+          `(screening observation ${evidenceStatesProblemOrOpportunity(evaluation.evidence) ? "carried" : "carried no"} problem-signal term; ` +
+          "that keyword hint records context only -- the combined retrieved material decides)",
+      );
+      continue;
+    }
 
     const presented = await presentScreenedCandidate(
       env,
       presentTo,
       {
-        organisation: evaluation.organisation.trim(),
+        organisation,
         evidence: evaluation.evidence.trim(),
         reason: evaluation.reason,
         category: evaluation.category,
         sourceUrl: result.url,
         sourceRetrievedAt: result.retrieved_at,
       },
-      result,
+      review,
       access,
       skills,
     );
@@ -879,9 +987,10 @@ async function searchAndScreenForQuery(
 
 /**
  * Runs one autonomous discovery cycle: search and lightweight screening
- * against the Acquisition Criteria. Each candidate that passes becomes a
- * Telegram approval card (see searchAndScreenForQuery); no Handoff or Lead
- * is created by the run itself. Cards attach to Martin's DM Work by default.
+ * against the Acquisition Criteria, then the bounded candidate-level evidence
+ * synthesis that decides whether each nomination may be carded (see
+ * searchAndScreenForQuery); no Handoff or Lead is created by the run itself.
+ * Cards attach to Martin's DM Work by default.
  */
 export async function runAutonomousLeadDiscovery(
   env: Env,
@@ -1047,7 +1156,7 @@ Return JSON: {"isDiscoveryRequest": true | false, "count": <integer, omit if not
       type: "Discovery",
       area: "Sales",
       activity: `Requested by Martin${focus ? ` -- focus: "${focus}"` : ""}. Queries: ${queries.map((q) => `"${q}"`).join(", ")}.`,
-      decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAlreadyPresented} already presented or recently rejected, ${runSummary.heldOverCap} held over the ${MAX_APPROVAL_CARDS_PER_RUN}-card cap, ${runSummary.presentationFailed} card(s) failed, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.${runSummary.searchUnavailable + runSummary.searchFailed > 0 ? ` Search did not complete for ${runSummary.searchUnavailable + runSummary.searchFailed} quer${runSummary.searchUnavailable + runSummary.searchFailed === 1 ? "y" : "ies"} (${runSummary.searchUnavailable} unavailable, ${runSummary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.` : ""}`,
+      decisionRationale: `${runSummary.screenedOut} screened out, ${runSummary.skippedAsDuplicate} skipped as duplicate, ${runSummary.skippedAlreadyPresented} already presented or recently rejected, ${runSummary.heldOverCap} held over a run cap (approval cards or evidence reviews), ${runSummary.presentationFailed} card(s) failed, ${runSummary.skippedAsInsufficient} skipped for insufficient evidence.${runSummary.searchUnavailable + runSummary.searchFailed > 0 ? ` Search did not complete for ${runSummary.searchUnavailable + runSummary.searchFailed} quer${runSummary.searchUnavailable + runSummary.searchFailed === 1 ? "y" : "ies"} (${runSummary.searchUnavailable} unavailable, ${runSummary.searchFailed} failed) -- absence of results from those is not evidence that nothing exists.` : ""}`,
       nextActions: runSummary.pendingApproval > 0 ? "Awaiting Martin's approval of each card. No Lead is created without it." : "No new candidate to present this run.",
       outcome: "Active",
     });
@@ -1119,7 +1228,7 @@ export async function notifyDiscoveryRunSummary(env: Env, chatId: number, thread
         ? ` ${summary.duplicateCheckFailed} candidate(s) passed screening but could not be checked for duplicates, so no card was shown for them (see Blockers) -- that is a Notion read failure, not evidence those organisations are new.`
         : "";
     const lines = [
-      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.pendingApproval} sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAlreadyPresented} already presented or recently rejected, ${summary.heldOverCap} held over the ${MAX_APPROVAL_CARDS_PER_RUN}-card cap, ${summary.skippedAsInsufficient} skipped for insufficient evidence.${summary.presentationFailed > 0 ? ` ${summary.presentationFailed} approval card(s) could not be sent (see Blockers).` : ""}${duplicateCheckNote}${searchNote}`,
+      `Scheduled discovery run: ${summary.evaluated} candidate(s) evaluated, ${summary.pendingApproval} sent to the Workspace topic for your approval, ${summary.screenedOut} screened out, ${summary.skippedAsDuplicate} skipped as possible duplicate(s), ${summary.skippedAlreadyPresented} already presented or recently rejected, ${summary.heldOverCap} held over a run cap (approval cards or evidence reviews), ${summary.skippedAsInsufficient} skipped for insufficient evidence.${summary.presentationFailed > 0 ? ` ${summary.presentationFailed} approval card(s) could not be sent (see Blockers).` : ""}${duplicateCheckNote}${searchNote}`,
     ];
     if (summary.pendingApproval > 0) {
       lines.push("", "No Lead is created until you approve each finding in the Workspace topic.");
