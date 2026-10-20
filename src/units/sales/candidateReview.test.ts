@@ -3,16 +3,20 @@ import assert from "node:assert/strict";
 import {
   MAX_SOCIAL_SIGNAL_SEARCHES,
   MAX_VISUAL_MATERIAL_BYTES,
+  MAX_CANDIDATE_EVIDENCE_RESULTS,
   PUBLIC_SOCIAL_SIGNAL_DOMAINS,
   PUBLICATION_DATE_LIMITATION,
   PUBLIC_SOCIAL_ACCESS_LIMITATION,
   SNIPPET_ONLY_LIMITATION,
   VISION_ANALYSE_OPERATION_ID,
   VISION_TOOL_ID,
+  blockedCandidateReview,
   buildCandidateReview,
   buildReviewSources,
   buildVisualAnalysis,
+  evaluateCandidateSynthesis,
   findUnsupportedMetricClaims,
+  gatherCandidateEvidence,
   gatherPublicSocialSignals,
   renderBlockedCandidateReview,
   renderCandidateReview,
@@ -25,6 +29,7 @@ import {
   type VisualAnalysisMaterial,
 } from "./candidateReview";
 import { AccessDeniedError, discoveryCronContext, workSessionContext } from "../../access";
+import { evidenceStatesProblemOrOpportunity } from "./leadGenerationDiscovery";
 import type { SearchResult } from "../../runtime/research/webSearch";
 import type { Env, WorkState } from "../../types";
 import { salesManifest } from "./salesManifest";
@@ -607,4 +612,432 @@ test("buildCandidateReview: when governance cannot be retrieved the review is bl
 
   assert.strictEqual(review.status, "blocked");
   assert.match(review.blockedReason ?? "", /governance could not be retrieved/, review.blockedReason ?? "");
+});
+
+// ===========================================================================
+// Candidate-level evidence synthesis (2026-10-20): the bounded candidate-
+// specific search, the combined review over the whole retrieved evidence set,
+// and the verdict that either presents a traceable, explicitly unconfirmed
+// opportunity hypothesis or holds the candidate with its reason.
+// ===========================================================================
+
+test("gatherCandidateEvidence: exactly ONE bounded, Access-gated candidate-specific search -- own endpoint, no credential in headers, results kept as snippets", async (t) => {
+  const requests: Array<{ url: string; body: any; headers: Record<string, string> }> = [];
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = (async (url: string, init?: any) => {
+    requests.push({ url: String(url), body: JSON.parse(init?.body ?? "{}"), headers: init?.headers ?? {} });
+    return new Response(
+      JSON.stringify({
+        results: [
+          { title: "Nova Inc | LinkedIn", url: "https://www.linkedin.com/company/nova-inc", content: "Company page for Nova Inc." },
+          { title: "Nova Inc expands into a new segment", url: "https://example.com/nova-news", content: "Nova Inc entered a new market segment." },
+        ],
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
+  const gathered = await gatherCandidateEvidence(envWithSearch(), "Nova Inc", discoveryCronContext());
+
+  assert.strictEqual(requests.length, 1, "one nominated candidate = one candidate-specific search, never a crawl");
+  assert.strictEqual(requests[0].body.query, '"Nova Inc"', "the search is the organisation's own name");
+  assert.ok(
+    requests[0].body.max_results <= MAX_CANDIDATE_EVIDENCE_RESULTS,
+    `the candidate-specific result set is bounded (got ${requests[0].body.max_results}, bound ${MAX_CANDIDATE_EVIDENCE_RESULTS})`,
+  );
+  assert.ok(requests[0].url.includes("api.tavily.com"), `the ONLY retrieval endpoint is the registered search provider: ${requests[0].url}`);
+  const headerNames = Object.fromEntries(Object.entries(requests[0].headers).map(([k, v]) => [k.toLowerCase(), v]));
+  assert.ok(!("authorization" in headerNames) && !("cookie" in headerNames), "no authorization or cookie header is ever sent");
+  assert.strictEqual(typeof requests[0].body.api_key, "string", "the provider credential travels only inside the registered search Tool's own request");
+
+  assert.strictEqual(gathered.retrievedCount, 2, "every retrieved snippet is kept");
+  assert.ok(gathered.sources.every((s) => s.sourceType === "web_search_result_snippet"), "candidate-specific results are snippets, never an inspected page");
+  assert.ok(gathered.disclosures.some((d) => d.includes("retrieved 2 result(s)")), gathered.disclosures.join("\n"));
+});
+
+test("gatherCandidateEvidence: a url the review already holds is never gathered twice -- repetition cannot inflate apparent support", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        results: [
+          { title: "Nova Inc expands", url: "https://example.com/dupe", content: "Nova Inc entered a new segment." },
+          { title: "Nova Inc expands", url: "https://example.com/dupe", content: "Nova Inc entered a new segment." },
+          { title: "Nova Inc positioning page", url: SCREENING_RESULT.url, content: "Nova Inc original positioning language." },
+          { title: "Nova Inc product range", url: "https://example.com/nova-range", content: "Nova Inc lists a wider product range." },
+        ],
+      }),
+      { status: 200 },
+    )) as typeof fetch;
+
+  const gathered = await gatherCandidateEvidence(envWithSearch(), "Nova Inc", discoveryCronContext(), [SCREENING_RESULT.url]);
+
+  const urls = gathered.sources.map((s) => s.url);
+  assert.deepStrictEqual(urls, ["https://example.com/dupe", "https://example.com/nova-range"], "the screening url and the repeated url are both dropped");
+  assert.strictEqual(new Set(urls).size, urls.length, "one url = one source");
+  assert.ok(gathered.disclosures.some((d) => d.includes("duplicate(s) of an already-retrieved url omitted")), gathered.disclosures.join("\n"));
+});
+
+test("gatherCandidateEvidence: 'searched, found nothing' and 'the search never succeeded' stay distinct -- neither is ever evidence about the organisation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  let mode: "empty" | "failed" = "empty";
+  globalThis.fetch = (async () =>
+    mode === "empty" ? new Response(JSON.stringify({ results: [] }), { status: 200 }) : new Response("boom", { status: 500 })) as typeof fetch;
+
+  const empty = await gatherCandidateEvidence(envWithSearch(), "Nova Inc", discoveryCronContext());
+  mode = "failed";
+  const failed = await gatherCandidateEvidence(envWithSearch(), "Nova Inc", discoveryCronContext());
+
+  assert.strictEqual(empty.retrievedCount, 0, "an empty search yields no sources");
+  assert.ok(empty.disclosures.some((d) => d.includes("found no indexed result") && /NOT evidence/i.test(d)), `an empty search is disclosed as searched-nothing: ${empty.disclosures.join("\n")}`);
+  assert.ok(!empty.disclosures.some((d) => d.includes("did not complete")), "an empty search must never claim it failed");
+
+  assert.strictEqual(failed.retrievedCount, 0, "a failed search yields no sources");
+  assert.ok(failed.disclosures.some((d) => d.includes("did not complete")), `a failed search is disclosed as failed: ${failed.disclosures.join("\n")}`);
+  assert.ok(
+    !failed.disclosures.some((d) => d.includes("found no indexed result")),
+    "a search that never succeeded must never be rendered as one that searched and found nothing",
+  );
+  assert.ok(!failed.disclosures.some((d) => /NOT evidence that/i.test(d)), "a failure carries no claim at all about what exists");
+});
+
+test("gatherCandidateEvidence: an Access denial propagates -- it is a governance stop, never downgraded to a search failure", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  let fetchCalled = false;
+  globalThis.fetch = (async () => {
+    fetchCalled = true;
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  const denyingContext = workSessionContext({ workId: "work_candidate_evidence_denial" } as WorkState);
+  await assert.rejects(
+    () => gatherCandidateEvidence(envWithSearch(), "Nova Inc", denyingContext),
+    (err: unknown) => err instanceof AccessDeniedError,
+    "an Access denial must surface as AccessDeniedError",
+  );
+  assert.strictEqual(fetchCalled, false, "no provider request may be made once Access denies");
+});
+
+const OPPORTUNITY_REVIEW_JSON = {
+  facts: [
+    { id: "F1", statement: "Nova Inc still describes only its original offering in its public copy.", sourceIds: ["S1"] },
+    { id: "F2", statement: "A candidate-specific result lists a wider Nova Inc product range than that copy does.", sourceIds: ["S2"] },
+  ],
+  findings: [
+    { id: "D1", statement: "Nova Inc's public story and its current offering differ across the retrieved sources.", evidenceIds: ["F1", "F2"] },
+  ],
+  interpretations: [{ statement: "The mismatch may be why new buyers struggle to place Nova Inc.", findingIds: ["D1"] }],
+  unknowns: ["Whether Nova Inc's own sales conversations show the same confusion."],
+  conflicts: [],
+  limitations: ["Retrieval was snippet-only; no page or image was inspected."],
+  opportunity: {
+    statement: "Nova Inc may have a story-versus-offering mismatch worth investigating -- unconfirmed.",
+    findingIds: ["D1"],
+    alternativeExplanations: ["The update may be a staged rollout whose positioning refresh is still in progress."],
+  },
+};
+
+test("buildCandidateReview: screening + candidate-specific + social become ONE source set with sequential ids, one id per url, and the candidate-search disclosure on the card", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const urlStr = String(url);
+    const body = String(init?.body ?? "");
+    if (urlStr.includes("api.tavily.com")) {
+      const request = JSON.parse(body);
+      const query = String(request.query ?? "");
+      const domainScoped = Array.isArray(request.include_domains);
+      if (domainScoped) {
+        return new Response(JSON.stringify({ results: [{ title: "Nova Inc | LinkedIn", url: "https://www.linkedin.com/company/nova-inc", content: "Company page for Nova Inc." }] }), { status: 200 });
+      }
+      if (query === '"Nova Inc"') {
+        // A duplicate of the screening url (dropped) plus one genuinely new result.
+        return new Response(
+          JSON.stringify({
+            results: [
+              { title: "Nova Inc positioning shift", url: SCREENING_RESULT.url, content: "Nova Inc original positioning language." },
+              { title: "Nova Inc product range page", url: "https://example.com/nova-range", content: "Nova Inc lists a wider range than its original site copy." },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (query.endsWith("official social media")) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      return new Response(JSON.stringify({ results: [{ title: SCREENING_RESULT.title, url: SCREENING_RESULT.url, content: SCREENING_RESULT.snippet }] }), { status: 200 });
+    }
+    if (urlStr.includes("/blocks/")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Acquisition Criteria: operating business; strategic/commercial problem signal." }] } }] }), { status: 200 });
+    }
+    if ((init?.method ?? "GET") === "GET" && urlStr.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(urlStr.split("/v1/pages/").pop()!.split("?")[0])) {
+      return new Response(JSON.stringify({ id: urlStr.split("/").pop(), url: urlStr, parent: { type: "page", page_id: "governance-root" }, properties: {} }), { status: 200 });
+    }
+    if (body.includes("Build ONE evidence-backed review")) {
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(OPPORTUNITY_REVIEW_JSON) } }] }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${urlStr.slice(0, 120)}`);
+  }) as typeof fetch;
+
+  const candidateEvidence = await gatherCandidateEvidence(envWithSearch(), "Nova Inc", discoveryCronContext(), [SCREENING_RESULT.url]);
+  const social = await gatherPublicSocialSignals(envWithSearch(), "Nova Inc", discoveryCronContext());
+  const review = await buildCandidateReview(fakeEnv(), "Nova Inc", SCREENING_RESULT, social, await lgsSkills(), candidateEvidence);
+
+  assert.strictEqual(review.status, "validated", review.blockedReason ?? "");
+  assert.deepStrictEqual(
+    review.sources.map((s) => s.id),
+    ["S1", "S2", "S3"],
+    "S1 is the screening result, S2 the candidate-specific result, S3 the social snippet -- ids are assigned across the COMBINED set",
+  );
+  assert.strictEqual(
+    review.sources[1].url,
+    "https://example.com/nova-range",
+    "the screening url returned again by the candidate-specific search was dropped rather than double-counted",
+  );
+  assert.strictEqual(review.facts.flatMap((f) => f.sourceIds).sort().join(","), "S1,S2", "facts may cite any retrieved stage, not only the screening result");
+
+  const text = renderCandidateReview("Nova Inc", review);
+  assert.ok(text.includes("*Candidate-specific evidence search*"), `the candidate-specific retrieval step is disclosed on the card: ${text}`);
+  assert.ok(text.includes("retrieved 1 result(s)"), "the disclosure says what that search actually retrieved");
+  assert.ok(text.includes("1 duplicate(s) of an already-retrieved url omitted"), "the omission of an already-held url is disclosed, not silent");
+  assert.ok(text.includes("*Opportunity hypothesis*") && text.includes("UNCONFIRMED"), "the validated hypothesis travels to the card, labelled unconfirmed");
+  assert.ok(text.includes("[supported by D1"), `the hypothesis names the findings behind it: ${text}`);
+  assert.ok(text.includes("*Alternative explanations*") && text.includes("staged rollout"), "the alternative explanation is retained on the card");
+});
+
+test("buildCandidateReview: a model that withholds a hypothesis records why, and the review stays validated-but-unsupported rather than inventing one", async (t) => {
+  routeAiAndGovernance(t, {
+    ...GOOD_REVIEW_JSON,
+    opportunity: null,
+    opportunityHoldReason: "the retrieved material is category commentary in which Nova Inc is mentioned in passing",
+  });
+  const social = await gatherPublicSocialSignals(fakeEnv(), "Nova Inc", discoveryCronContext());
+  const review = await buildCandidateReview(fakeEnv(), "Nova Inc", SCREENING_RESULT, social, await lgsSkills());
+
+  assert.strictEqual(review.status, "validated", "the review itself validated -- what is missing is a hypothesis, not a review");
+  assert.strictEqual(review.opportunity, null, "an explicitly withheld hypothesis is recorded as withheld");
+  assert.match(review.opportunityHoldReason ?? "", /mentioned in passing/, "the model's own reason is preserved for the hold");
+
+  const verdict = evaluateCandidateSynthesis("Nova Inc", review);
+  assert.strictEqual(verdict.ok, false, "no hypothesis means no presentation -- the candidate is held");
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /no company-specific opportunity hypothesis for Nova Inc/, verdict.reason);
+    assert.match(verdict.reason, /mentioned in passing/, "the hold discloses WHY, in the model's own words");
+  }
+
+  const text = renderCandidateReview("Nova Inc", review);
+  assert.ok(!text.includes("*Opportunity hypothesis*"), "an withheld hypothesis is never rendered as one");
+});
+
+test("validateCandidateReviewDraft: a hypothesis citation must be as real as any other -- unknown finding, empty statement, or no finding at all blocks the review", () => {
+  const sources = buildReviewSources("web_search_result", [SCREENING_RESULT]);
+  const context = `${SCREENING_RESULT.title} ${SCREENING_RESULT.url} ${SCREENING_RESULT.snippet}`;
+  const base = {
+    facts: [{ id: "F1", statement: "Nova Inc entered a new market segment.", sourceIds: ["S1"] }],
+    findings: [{ id: "D1", statement: "Its public description does not reflect the new segment.", evidenceIds: ["F1"] }],
+    interpretations: [{ statement: "A hypothesis.", findingIds: ["D1"] }],
+    unknowns: ["Unknown."],
+    conflicts: [],
+    limitations: ["Limitation."],
+  };
+
+  const fabricated = validateCandidateReviewDraft(
+    { ...base, opportunity: { statement: "Nova Inc may have a positioning gap -- unconfirmed.", findingIds: ["D9"] } },
+    sources,
+    context,
+  );
+  assert.strictEqual(fabricated.ok, false, "a hypothesis citing a finding that does not exist is a fabricated citation");
+  if (!fabricated.ok) assert.match(fabricated.reason, /finding "D9"/, fabricated.reason);
+
+  const emptyStatement = validateCandidateReviewDraft(
+    { ...base, opportunity: { statement: "  ", findingIds: ["D1"] } },
+    sources,
+    context,
+  );
+  assert.strictEqual(emptyStatement.ok, false, "a hypothesis with no statement is refused");
+
+  const noFinding = validateCandidateReviewDraft(
+    { ...base, opportunity: { statement: "Nova Inc may have a positioning gap -- unconfirmed.", findingIds: [] } },
+    sources,
+    context,
+  );
+  assert.strictEqual(noFinding.ok, false, "a hypothesis resting on no finding is refused");
+  if (!noFinding.ok) assert.match(noFinding.reason, /rests on no finding/, noFinding.reason);
+
+  const absent = validateCandidateReviewDraft(base, sources, context);
+  assert.strictEqual(absent.ok, true, "ABSENCE of a hypothesis is an honest outcome, not a validation failure -- the synthesis holds on it instead");
+
+  const nullHypothesis = validateCandidateReviewDraft({ ...base, opportunity: null, opportunityHoldReason: "the material shows nothing company-specific." }, sources, context);
+  assert.strictEqual(nullHypothesis.ok, true, "an explicitly withheld hypothesis validates");
+});
+
+/** A validated candidate-level review over one retrieved source that names Nova Inc, with an opportunity hypothesis chain through D1 -> F1 -> S1. */
+function synthesisFixture(overrides: Partial<CandidateReview> = {}): CandidateReview {
+  return {
+    status: "validated",
+    sources: buildReviewSources("web_search_result", [SCREENING_RESULT]),
+    facts: [
+      { id: "F1", statement: "Nova Inc describes its original offering while its product range has widened.", sourceIds: ["S1"] },
+    ],
+    findings: [{ id: "D1", statement: "Two aspects of Nova Inc's public story no longer line up.", evidenceIds: ["F1"] }],
+    interpretations: [],
+    unknowns: [],
+    conflicts: [],
+    limitations: [],
+    socialDisclosures: [],
+    visualAnalysis: buildVisualAnalysis([]),
+    opportunity: {
+      statement: "Nova Inc may have a story-versus-offering mismatch worth investigating -- unconfirmed.",
+      findingIds: ["D1"],
+      alternativeExplanations: ["The change may be a staged rollout."],
+    },
+    ...overrides,
+  };
+}
+
+test("evaluateCandidateSynthesis: a traceable hypothesis over KEYWORD-FREE observations passes -- no problem word is required anywhere", () => {
+  const review = synthesisFixture();
+  assert.strictEqual(
+    review.facts.some((fact) => evidenceStatesProblemOrOpportunity(fact.statement)),
+    false,
+    "the supporting observation deliberately carries no signal word, so passing it cannot be a keyword match in disguise",
+  );
+
+  const verdict = evaluateCandidateSynthesis("Nova Inc", review);
+  assert.strictEqual(verdict.ok, true, "several neutral, individually weak observations may jointly support a hypothesis");
+  if (verdict.ok) {
+    assert.deepStrictEqual(verdict.supportedByFactIds, ["F1"], "the verdict says which observations the hypothesis rests on");
+    assert.ok(/unconfirmed/i.test(verdict.hypothesis.statement), "the hypothesis itself declares itself unconfirmed");
+    assert.strictEqual(verdict.hypothesis.alternativeExplanations.length, 1, "the alternative explanation travels with the verdict");
+  }
+});
+
+test("evaluateCandidateSynthesis: a review that was never validated can never yield a presentation", () => {
+  const verdict = evaluateCandidateSynthesis("Nova Inc", synthesisFixture({ status: "blocked", blockedReason: "the review cites a source this run never retrieved: S9" }));
+  assert.strictEqual(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /was not validated/, verdict.reason);
+    assert.match(verdict.reason, /S9/, "the validation failure itself is disclosed as the hold reason");
+  }
+});
+
+test("evaluateCandidateSynthesis: a hypothesis resting on nothing -- absent, empty, or unlinked -- holds the candidate", () => {
+  const absent = evaluateCandidateSynthesis("Nova Inc", synthesisFixture({ opportunity: undefined }));
+  assert.strictEqual(absent.ok, false, "no hypothesis block at all can never be read as approval to present");
+
+  const withheld = evaluateCandidateSynthesis("Nova Inc", synthesisFixture({ opportunity: null, opportunityHoldReason: "nothing company-specific is established." }));
+  assert.strictEqual(withheld.ok, false);
+  if (!withheld.ok) assert.match(withheld.reason, /nothing company-specific is established/, withheld.reason);
+
+  const unlinked = evaluateCandidateSynthesis(
+    "Nova Inc",
+    synthesisFixture({ opportunity: { statement: "Nova Inc may have a positioning gap.", findingIds: [], alternativeExplanations: [] } }),
+  );
+  assert.strictEqual(unlinked.ok, false, "an unlinked hypothesis is traceable to no observation");
+  if (!unlinked.ok) assert.match(unlinked.reason, /rests on no finding/, unlinked.reason);
+
+  const missingFinding = evaluateCandidateSynthesis(
+    "Nova Inc",
+    synthesisFixture({ opportunity: { statement: "Nova Inc may have a positioning gap.", findingIds: ["D404"], alternativeExplanations: [] } }),
+  );
+  assert.strictEqual(missingFinding.ok, false, "a hypothesis pointing at a finding that does not exist is refused");
+  if (!missingFinding.ok) assert.match(missingFinding.reason, /"D404"/, missingFinding.reason);
+});
+
+test("evaluateCandidateSynthesis: contradictory retrieved sources hold the candidate -- contradiction is disclosed, never averaged into support", () => {
+  const verdict = evaluateCandidateSynthesis(
+    "Nova Inc",
+    synthesisFixture({
+      conflicts: [{ statement: "One source reports Nova Inc rebranded while another reports it did not.", sourceIds: ["S1"] }],
+    }),
+  );
+  assert.strictEqual(verdict.ok, false);
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /sources conflict/, verdict.reason);
+    assert.match(verdict.reason, /rebranded while another reports/, "the actual conflict is what gets disclosed");
+  }
+});
+
+test("evaluateCandidateSynthesis: a hypothesis restated as an observed fact is refused -- a hypothesis is never an established fact", () => {
+  const statement = "Nova Inc may have a story-versus-offering mismatch worth investigating -- unconfirmed.";
+  const verdict = evaluateCandidateSynthesis(
+    "Nova Inc",
+    synthesisFixture({
+      facts: [{ id: "F1", statement, sourceIds: ["S1"] }],
+      opportunity: { statement, findingIds: ["D1"], alternativeExplanations: [] },
+    }),
+  );
+  assert.strictEqual(verdict.ok, false, "dressing the hypothesis as a fact is caught deterministically");
+  if (!verdict.ok) assert.match(verdict.reason, /restated as an observed fact/, verdict.reason);
+});
+
+test("evaluateCandidateSynthesis: a general problem-category source cannot carry a company-specific hypothesis, no matter how many findings rest on it", () => {
+  const genericSource = buildReviewSources("web_search_result", [
+    {
+      title: "Why inconsistent brand messaging costs you customers",
+      url: "https://example.com/brand-messaging-guide",
+      snippet: "General advice: brands that mix their messaging confuse buyers.",
+      provider: "tavily",
+      retrieved_at: "2026-10-19T08:00:00.000Z",
+    },
+  ])[0];
+
+  const verdict = evaluateCandidateSynthesis(
+    "Nova Inc",
+    synthesisFixture({
+      // The fact NAMES the company (a passing mention) but the material behind
+      // it never says anything about it -- the 2026-10-19 failure shape.
+      sources: [genericSource],
+      facts: [{ id: "F1", statement: "Nova Inc is mentioned once in a guide about the problem category.", sourceIds: ["S1"] }],
+      opportunity: {
+        statement: "Nova Inc may have inconsistent brand messaging worth investigating -- unconfirmed.",
+        findingIds: ["D1"],
+        alternativeExplanations: [],
+      },
+    }),
+  );
+
+  assert.strictEqual(verdict.ok, false, "a category article is never evidence about the company it fails to describe");
+  if (!verdict.ok) {
+    assert.match(verdict.reason, /general article about the problem category/, verdict.reason);
+    assert.match(verdict.reason, /passing mention cannot establish a company-specific problem/, verdict.reason);
+  }
+});
+
+test("evaluateCandidateSynthesis: an observation that never names the organisation cannot ground the hypothesis", () => {
+  const verdict = evaluateCandidateSynthesis(
+    "Nova Inc",
+    synthesisFixture({
+      facts: [{ id: "F1", statement: "A public result discusses inconsistent messaging in the category generally.", sourceIds: ["S1"] }],
+    }),
+  );
+  assert.strictEqual(verdict.ok, false);
+  if (!verdict.ok) assert.match(verdict.reason, /no supporting observation for Nova Inc is grounded/, verdict.reason);
+});
+
+test("blockedCandidateReview: a review that could not be BUILT is blocked with its reason and renders nothing unvalidated", () => {
+  const review = blockedCandidateReview("the evidence step failed before it returned any output (boom)");
+  assert.strictEqual(review.status, "blocked");
+  assert.strictEqual(review.blockedReason, "the evidence step failed before it returned any output (boom)");
+  assert.strictEqual(review.facts.length, 0, "no facts are invented for a review that never ran");
+
+  const text = renderCandidateReview("Nova Inc", review);
+  assert.ok(text.includes("NOT PRODUCED"), text);
+  assert.ok(!text.includes("*Observed facts*"), "a blocked review renders no facts, findings, or hypothesis");
+  assert.ok(!text.includes("*Opportunity hypothesis*"), "and never an opportunity hypothesis");
+
+  const verdict = evaluateCandidateSynthesis("Nova Inc", review);
+  assert.strictEqual(verdict.ok, false, "a candidate-level review that could not be built always holds the candidate");
 });

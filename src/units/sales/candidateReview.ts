@@ -58,6 +58,26 @@ import { getLeadDiscoveryGovernance } from "./leadDiscovery";
  */
 
 // ---------------------------------------------------------------------------
+// Grounding.
+// ---------------------------------------------------------------------------
+
+/**
+ * Unicode-aware normalisation for grounding comparisons: lowercases and
+ * collapses every run of non-letter/digit characters to one space, so
+ * "Acme, Corp." and "acme corp" compare equal while non-Latin names
+ * (e.g. 株式会社サクラ) survive intact rather than normalising to nothing.
+ *
+ * Lives here because BOTH halves of the company-specific evidence boundary
+ * need it: the nomination gate in `leadGenerationDiscovery.ts` (does the
+ * retrieved result name the organisation?) and the candidate-level synthesis
+ * below (is a supporting observation grounded in material that names it?). One
+ * implementation, not two.
+ */
+export function normaliseForGrounding(text: string): string {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+// ---------------------------------------------------------------------------
 // Sources.
 // ---------------------------------------------------------------------------
 
@@ -219,6 +239,110 @@ export async function gatherPublicSocialSignals(env: Env, organisation: string, 
 }
 
 // ---------------------------------------------------------------------------
+// Candidate-specific evidence gathering (the candidate-level unit of assessment).
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound on the results kept from the ONE candidate-specific public
+ * search a nominated candidate gets. Discovery's own screening searches are
+ * already bounded (`MAX_RESULTS_PER_QUERY` in `leadGenerationDiscovery.ts`)
+ * and the social step is bounded by `MAX_SOCIAL_SIGNAL_SEARCHES` x
+ * `MAX_SOCIAL_SIGNAL_RESULTS_PER_SEARCH`; this is the third and last bounded
+ * search a single candidate may cause, so one run's search volume stays a
+ * small constant per candidate rather than a crawl.
+ */
+export const MAX_CANDIDATE_EVIDENCE_RESULTS = 4;
+
+export interface CandidateEvidenceGather {
+  /** Snippet sources this candidate's own search retrieved, minus any url already held. */
+  sources: SourceRecord[];
+  /**
+   * One line saying what the candidate-specific search actually did. The five
+   * SearchOutcome kinds stay distinguishable here exactly as they do for the
+   * social step: "searched, found nothing" and "the search never succeeded"
+   * are different facts, and neither is evidence about the organisation.
+   */
+  disclosures: string[];
+  /** How many snippet sources were actually retrieved. */
+  retrievedCount: number;
+}
+
+/**
+ * Gathers the bounded, candidate-specific evidence set for ONE nominated
+ * organisation through the same registered, Access-gated `search` Tool every
+ * other discovery read uses -- no second retrieval mechanism, no provider
+ * choice, no credentials.
+ *
+ * This is what changes the unit of assessment from a single snippet to the
+ * candidate: the screening result that NOMINATED the organisation is one
+ * observation, and this search supplies the rest of the bounded material the
+ * candidate-level review then weighs together (relevance, specificity,
+ * consistency, alternative explanations) instead of a keyword deciding alone.
+ *
+ * An Access denial is deliberately NOT caught (governance decision, throws);
+ * any other unexpected throw is caught and disclosed as a failure of this
+ * step, so one broken search can never read as "no public material exists".
+ */
+export async function gatherCandidateEvidence(
+  env: Env,
+  organisation: string,
+  access: AccessContext,
+  excludeUrls: readonly string[] = [],
+): Promise<CandidateEvidenceGather> {
+  const sources: SourceRecord[] = [];
+  const disclosures: string[] = [];
+  const seenUrls = new Set(excludeUrls.map((url) => url.trim()).filter(Boolean));
+  const query = redactIdentityTerms(`"${organisation}"`);
+
+  let outcome;
+  try {
+    outcome = await executeSearch(env, { query, max_results: MAX_CANDIDATE_EVIDENCE_RESULTS }, access);
+  } catch (err) {
+    if (err instanceof AccessDeniedError) throw err;
+    console.error(`Lead Discovery: candidate-specific evidence search failed for ${organisation}`, err);
+    disclosures.push(
+      `Candidate-specific search "${query}" failed before any result was returned. No conclusion about what is publicly retrievable for ${organisation} may be drawn from it -- an unsuccessful search is not an empty one.`,
+    );
+    return { sources, disclosures, retrievedCount: 0 };
+  }
+
+  switch (outcome.kind) {
+    case "success_with_results": {
+      // A url this review already holds (the screening result itself, or a
+      // duplicate inside one response) is not gathered twice: repeated
+      // retrieval of the same page must never multiply into apparent
+      // corroboration. Sequential, so the SECOND occurrence of one url in the
+      // same response is dropped too.
+      const fresh = outcome.results.filter((result) => {
+        const url = result.url?.trim();
+        if (!url || seenUrls.has(url)) return false;
+        seenUrls.add(url);
+        return true;
+      });
+      sources.push(...buildReviewSources("web_search_result", fresh));
+      disclosures.push(
+        `Candidate-specific search "${query}" retrieved ${fresh.length} result(s) as search-result snippets from the public index${fresh.length < outcome.results.length ? ` (${outcome.results.length - fresh.length} duplicate(s) of an already-retrieved url omitted)` : ""}.`,
+      );
+      break;
+    }
+    case "success_no_results":
+      disclosures.push(
+        `Candidate-specific search "${query}" completed and found no indexed result. This is NOT evidence that ${organisation} has no relevant public material.`,
+      );
+      break;
+    case "provider_unavailable":
+    case "provider_failure":
+    case "invalid_input":
+      disclosures.push(
+        `Candidate-specific search "${query}" did not complete (${outcome.kind}). No conclusion about ${organisation}'s public material may be drawn from it -- an unsuccessful search is not an empty one.`,
+      );
+      break;
+  }
+
+  return { sources, disclosures, retrievedCount: sources.length };
+}
+
+// ---------------------------------------------------------------------------
 // Fabricated-metric guard.
 // ---------------------------------------------------------------------------
 
@@ -309,6 +433,20 @@ interface ReviewConflictDraft {
   sourceIds: string[];
 }
 
+/**
+ * The candidate-level opportunity hypothesis the review may produce: a
+ * possible commercial challenge worth investigating, explicitly UNCONFIRMED.
+ * `findingIds` is what makes it traceable -- the hypothesis may only point at
+ * findings, which point at facts, which point at retrieved sources; it can
+ * never cite a source (or a number) of its own.
+ */
+interface ReviewOpportunityDraft {
+  statement: string;
+  findingIds: string[];
+  /** Reasonable readings that could weaken or change the hypothesis. Empty when none are material. */
+  alternativeExplanations?: string[];
+}
+
 /** Exactly what the model returns. Every reference is an id that must already exist. */
 export interface CandidateReviewDraft {
   facts: ReviewFactDraft[];
@@ -319,6 +457,16 @@ export interface CandidateReviewDraft {
   /** Where retrieved sources disagree. Must name the disagreeing sources; never silently resolved. */
   conflicts: ReviewConflictDraft[];
   limitations: string[];
+  /**
+   * The candidate-level opportunity hypothesis, or `null` when the combined
+   * material does not support one. `undefined` (an absent key) is the same
+   * outcome as `null` for the hold decision -- only the recorded reason
+   * differs -- so a model that simply omits it can never get a candidate
+   * presented.
+   */
+  opportunity?: ReviewOpportunityDraft | null;
+  /** Why the material does NOT support an opportunity hypothesis. Recorded, so a hold can say why. */
+  opportunityHoldReason?: string;
 }
 
 export interface ReviewConflict {
@@ -424,6 +572,36 @@ export function validateCandidateReviewDraft(draft: CandidateReviewDraft | null,
     if (!isNonEmptyString(limitation)) return { ok: false, reason: "the review contains an empty limitation" };
   }
 
+  // The candidate-level opportunity hypothesis, when one is offered. A
+  // hypothesis pointing at a finding that does not exist is a fabricated
+  // citation exactly like a fact pointing at a source that was never
+  // retrieved -- it fails here rather than reaching Martin as traceable.
+  // ABSENCE is deliberately not a validation failure: "the material does not
+  // support a hypothesis" is an honest outcome, and the candidate-level
+  // synthesis turns it into a disclosed hold (never a card).
+  if (draft.opportunity !== undefined && draft.opportunity !== null) {
+    const opportunity = draft.opportunity as ReviewOpportunityDraft;
+    if (typeof opportunity !== "object") return { ok: false, reason: "the opportunity hypothesis is not an object" };
+    if (!isNonEmptyString(opportunity.statement)) return { ok: false, reason: "the opportunity hypothesis carries no statement" };
+    if (!Array.isArray(opportunity.findingIds) || opportunity.findingIds.length === 0) {
+      return { ok: false, reason: "the opportunity hypothesis rests on no finding -- a hypothesis with no supporting finding is traceable to nothing" };
+    }
+    for (const id of opportunity.findingIds) {
+      if (!seenFindingIds.has(id)) return { ok: false, reason: `the opportunity hypothesis references finding "${String(id)}", which does not exist` };
+    }
+    if (opportunity.alternativeExplanations !== undefined) {
+      if (!Array.isArray(opportunity.alternativeExplanations)) {
+        return { ok: false, reason: "alternative explanations must be a list" };
+      }
+      for (const alternative of opportunity.alternativeExplanations) {
+        if (!isNonEmptyString(alternative)) return { ok: false, reason: "the review contains an empty alternative explanation" };
+      }
+    }
+  }
+  if (draft.opportunityHoldReason !== undefined && !isNonEmptyString(draft.opportunityHoldReason)) {
+    return { ok: false, reason: "the review records an empty reason for withholding an opportunity hypothesis" };
+  }
+
   const synthesis: EvidenceSynthesis = {
     sources: sources.map((source) => ({ ...source })),
     evidence: facts.map((fact) => ({ id: fact.id, statement: fact.statement, sourceIds: fact.sourceIds })),
@@ -450,6 +628,11 @@ export function validateCandidateReviewDraft(draft: CandidateReviewDraft | null,
     ...unknowns.map((u) => String(u)),
     ...conflicts.map((c) => c.statement),
     ...limitations.map((l) => String(l)),
+    // The hypothesis and its alternatives are rendered on Martin's card, so
+    // they carry the same no-invented-metric obligation as every other card
+    // statement. `opportunityHoldReason` is deliberately excluded: it is a
+    // logged hold reason, never a claim made to Martin.
+    ...(draft.opportunity && typeof draft.opportunity === "object" ? [String(draft.opportunity.statement), ...asArray(draft.opportunity.alternativeExplanations).map(String)] : []),
   ];
   const metricViolations = findUnsupportedMetricClaims(statements, suppliedContext);
   if (metricViolations.length > 0) {
@@ -649,7 +832,34 @@ export interface CandidateReview {
   conflicts: ReviewConflict[];
   limitations: string[];
   socialDisclosures: string[];
+  /**
+   * What the ONE bounded candidate-specific search did (retrieved / found
+   * nothing / did not complete). Kept apart from `socialDisclosures` because
+   * it is a different retrieval step with its own honest outcome -- never
+   * folded into the social one.
+   */
+  candidateDisclosures?: string[];
+  /**
+   * The candidate-level opportunity hypothesis: a possible commercial
+   * challenge worth investigating, explicitly UNCONFIRMED and traceable
+   * through its `findingIds` to facts and retrieved sources. `null` means the
+   * model assessed the combined material and found no support for one;
+   * `undefined` means no hypothesis block was produced at all. Either way the
+   * candidate-level synthesis holds the candidate -- see
+   * `evaluateCandidateSynthesis`. A hypothesis never appears here as an
+   * established fact.
+   */
+  opportunity?: CandidateOpportunityHypothesis | null;
+  /** The model's own reason for withholding a hypothesis. Disclosed when the candidate is held. */
+  opportunityHoldReason?: string;
   visualAnalysis: VisualAnalysisResult;
+}
+
+/** The opportunity hypothesis as carried on a review: statement, the findings behind it, and what else could be true. */
+export interface CandidateOpportunityHypothesis {
+  statement: string;
+  findingIds: string[];
+  alternativeExplanations: string[];
 }
 
 /** A standing limitation: what a `search` snippet does and does not prove. */
@@ -681,6 +891,8 @@ function reviewSituation(): string {
     "- facts: only what the retrieved passages literally state, each tied to a source id that appears in Context. Attribute the observation, never the cause. A snippet is not proof that the page or image behind it was inspected.",
     "- findings: what the facts jointly establish. A finding with no fact behind it is not a finding.",
     "- interpretations: your reading or a hypothesis, explicitly not established. Every one must rest on a finding. Never restate a hypothesis as a fact.",
+    "- opportunity: the CANDIDATE-LEVEL opportunity hypothesis built from this combined material -- an object {\"statement\":\"...\",\"findingIds\":[\"D1\"],\"alternativeExplanations\":[\"...\"]}, or null when the material does not support one (then put why in \"opportunityHoldReason\"). It is explicitly UNCONFIRMED: a possible commercial challenge worth investigating, NOT an established fact. findingIds names the findings whose linked observations support it -- that chain is what makes it traceable. alternativeExplanations lists reasonable alternative readings that could weaken or change it (an empty list when none are material).",
+    "- Judge the material AS A WHOLE -- relevance, specificity, consistency and what else could be true -- not by counting sources. Several individually neutral observations may together support a hypothesis when their combined context genuinely warrants it, and no source has to contain any particular keyword. But: a public educational article discussing a business problem never establishes that THIS organisation has it; a company mentioned in passing is not company-specific evidence; a keyword match with no supporting context proves nothing; and irrelevant or repetitive sources do not become persuasive through quantity. When the material is weak, contradictory, missing, or only about the category, return opportunity: null rather than a hypothesis you cannot ground.",
     "- unknowns: what is genuinely not known from this material. Do not fill them in.",
     "- conflicts: where retrieved sources disagree. Name the disagreeing sources; never resolve a conflict silently.",
     "- limitations: what this evidence cannot show -- thin coverage, snippet-only retrieval, missing publication dates, absent social signals.",
@@ -691,11 +903,15 @@ function reviewSituation(): string {
 }
 
 /**
- * Produces the review for one screened candidate:
+ * Produces the review for ONE nominated candidate over its BOUNDED,
+ * candidate-level evidence set:
  *
  * 1. fetch this Hat's governance live (no hard-coded persona -- a governance
  *    failure blocks the review, it never substitutes text of our own);
- * 2. build the sources in code from what was really retrieved;
+ * 2. build the sources in code from what was really retrieved: the screening
+ *    result that nominated the organisation, the candidate-specific search's
+ *    results, and the bounded public social snippets -- one url = one source
+ *    id, and a repeated retrieval never multiplies into corroboration;
  * 3. one bounded JSON call under the existing
  *    `lead.discovery_signal_evaluation` profile (public, source-attributed
  *    search-result content -- the same registered profile the screening call
@@ -705,7 +921,9 @@ function reviewSituation(): string {
  * 5. attach the deterministic limitations and the bounded visual step.
  *
  * A failure returns a `blocked` review with the reason. It never returns a
- * partially-validated review, and it never suppresses Martin's approval card.
+ * partially-validated review. Whether a `validated` review is enough to put
+ * the candidate in front of Martin is the separate candidate-level verdict in
+ * `evaluateCandidateSynthesis` -- this function only builds and validates.
  */
 export async function buildCandidateReview(
   env: Env,
@@ -713,17 +931,29 @@ export async function buildCandidateReview(
   screeningResult: SearchResult,
   social: SocialSignalGather,
   skills: ResolvedActionSkillSet,
+  candidateEvidence?: CandidateEvidenceGather,
 ): Promise<CandidateReview> {
   const visualAnalysis = buildVisualAnalysis([]);
-  // Ids are assigned across the COMBINED set: the screening result is S1 and
-  // the social snippets continue from it, so a cited id is always unique and
-  // always points at exactly one retrieved result.
-  const screeningSources = buildReviewSources("web_search_result", [screeningResult]);
-  const socialSources = social.sources.map((source, index) => ({
-    ...source,
-    id: `S${screeningSources.length + index + 1}`,
-  }));
-  const sources = [...screeningSources, ...socialSources];
+  // Ids are assigned across the COMBINED set, in retrieval order: the
+  // screening result that nominated the candidate is S1, the candidate-specific
+  // results follow, then the social snippets. A url already in the set is
+  // dropped rather than re-identified, so one url always means exactly one
+  // source id and a repeated retrieval can never inflate apparent support.
+  const orderedSources: Array<{ kind: ReviewSourceKind; record: SourceRecord }> = [
+    { kind: "web_search_result", record: buildReviewSources("web_search_result", [screeningResult])[0] },
+    ...(candidateEvidence?.sources ?? []).map((record) => ({ kind: "web_search_result" as ReviewSourceKind, record })),
+    ...social.sources.map((record) => ({ kind: "public_social_search_result" as ReviewSourceKind, record })),
+  ];
+  const seenUrls = new Set<string>();
+  const sources: SourceRecord[] = [];
+  for (const { kind, record } of orderedSources) {
+    const url = record.url?.trim();
+    if (url) {
+      if (seenUrls.has(url)) continue;
+      seenUrls.add(url);
+    }
+    sources.push({ ...record, id: `S${sources.length + 1}`, sourceType: reviewSourceType(kind) });
+  }
 
   const base: Omit<CandidateReview, "status"> = {
     sources,
@@ -734,6 +964,7 @@ export async function buildCandidateReview(
     conflicts: [],
     limitations: [],
     socialDisclosures: social.disclosures,
+    candidateDisclosures: candidateEvidence?.disclosures ?? [],
     visualAnalysis,
   };
 
@@ -800,6 +1031,182 @@ export async function buildCandidateReview(
     unknowns: (asArray(draft!.unknowns) as unknown[]).map((value) => String(value)),
     conflicts: (asArray(draft!.conflicts) as ReviewConflictDraft[]).map((conflict) => ({ statement: conflict.statement, sourceIds: conflict.sourceIds })),
     limitations: (asArray(draft!.limitations) as unknown[]).map((value) => String(value)),
+    ...mapOpportunity(draft!),
+  };
+}
+
+/**
+ * Carries the model's opportunity block onto the review. `null` and an absent
+ * key are kept distinguishable so a reader can tell "assessed and found
+ * unsupported" from "never produced" -- both HOLD the candidate (see
+ * `evaluateCandidateSynthesis`), and neither can ever reach the card.
+ */
+function mapOpportunity(draft: CandidateReviewDraft): { opportunity?: CandidateOpportunityHypothesis | null; opportunityHoldReason?: string } {
+  const holdReason = isNonEmptyString(draft.opportunityHoldReason) ? draft.opportunityHoldReason : undefined;
+  const raw = draft.opportunity;
+  if (raw === null) return { opportunity: null, ...(holdReason ? { opportunityHoldReason: holdReason } : {}) };
+  if (raw === undefined || typeof raw !== "object") return {};
+  return {
+    opportunity: {
+      statement: String(raw.statement),
+      findingIds: asArray(raw.findingIds).map(String),
+      alternativeExplanations: asArray(raw.alternativeExplanations).map(String),
+    },
+    ...(holdReason ? { opportunityHoldReason: holdReason } : {}),
+  };
+}
+
+/**
+ * The CandidateReview for a review that could not be BUILT at all (an
+ * unexpected failure outside the review call itself). Blocked, reason stated,
+ * no facts, no sources -- nothing unvalidated can be presented as a review,
+ * and `evaluateCandidateSynthesis` will hold the candidate on it.
+ */
+export function blockedCandidateReview(reason: string): CandidateReview {
+  return {
+    status: "blocked",
+    blockedReason: reason,
+    sources: [],
+    facts: [],
+    findings: [],
+    interpretations: [],
+    unknowns: [],
+    conflicts: [],
+    limitations: [],
+    socialDisclosures: [],
+    candidateDisclosures: [],
+    visualAnalysis: buildVisualAnalysis([]),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The candidate-level verdict: present a qualified hypothesis, or hold.
+// ---------------------------------------------------------------------------
+
+export type CandidateSynthesisVerdict =
+  | {
+      ok: true;
+      hypothesis: CandidateOpportunityHypothesis;
+      /** The fact ids the hypothesis is traceable to, in chain order. */
+      supportedByFactIds: string[];
+    }
+  | { ok: false; reason: string };
+
+/**
+ * The ONE decision that may put a nominated candidate in front of Martin:
+ * whether the candidate's BOUNDED, retrieved evidence set supports a
+ * company-specific opportunity hypothesis at all.
+ *
+ * This is where the unit of assessment stops being a single snippet. The
+ * screening gate only NOMINATES (does this result name the organisation?);
+ * nothing here looks for a keyword, and no wordlist can pass or hold a
+ * candidate. What decides is the validated review as a whole:
+ *
+ * 1. a review that was never validated holds (validation failure is never a
+ *    warning and never a pass);
+ * 2. no hypothesis -- or one the model explicitly found unsupported -- holds,
+ *    with the model's own reason disclosed;
+ * 3. a hypothesis that rests on no finding, or on a finding that does not
+ *    exist, holds (untraceable);
+ * 4. conflicting retrieved sources hold: contradiction is disclosed to Martin
+ *    as a hold, never resolved silently and never averaged into support;
+ * 5. a hypothesis restated as an observed fact holds: a hypothesis is never an
+ *    established fact;
+ * 6. the chain must reach at least one fact that names the organisation in
+ *    retrieved material that names it too -- a general article about the
+ *    problem category, an industry trend, or a passing mention of the company
+ *    can therefore never carry a company-specific hypothesis, no matter how
+ *    many sources are stacked behind it.
+ *
+ * A `false` verdict is a HOLD: the candidate is counted, the reason is logged,
+ * no card is sent, no Work is created, and nothing is remembered -- so a later
+ * run may try again with new evidence. It never becomes a Lead, which still
+ * requires Martin's explicit approval of a presented card.
+ *
+ * Known limitation, stated rather than hidden: steps 1-5 are structural and
+ * step 6 is literal grounding. Whether the observations are genuinely about
+ * RELEVANCE and not merely about the same words remains a judgement the model
+ * makes inside the validated review -- which is why the card labels the result
+ * a hypothesis, keeps every source labelled a snippet, and Martin's approval
+ * stays the bar.
+ */
+export function evaluateCandidateSynthesis(organisation: string, review: CandidateReview): CandidateSynthesisVerdict {
+  if (review.status !== "validated") {
+    return {
+      ok: false,
+      reason: `the candidate-level evidence review was not validated${review.blockedReason ? `: ${review.blockedReason}` : ""}`,
+    };
+  }
+
+  const opportunity = review.opportunity;
+  if (opportunity === undefined || opportunity === null) {
+    return {
+      ok: false,
+      reason: `the combined retrieved material supports no company-specific opportunity hypothesis for ${organisation}${review.opportunityHoldReason ? ` -- ${review.opportunityHoldReason}` : " (the review found nothing that warrants one)"}`,
+    };
+  }
+  if (!isNonEmptyString(opportunity.statement)) {
+    return { ok: false, reason: `the opportunity hypothesis for ${organisation} carries no statement` };
+  }
+
+  const findingIds = asArray(opportunity.findingIds).filter((id): id is string => isNonEmptyString(id));
+  if (findingIds.length === 0) {
+    return { ok: false, reason: `the opportunity hypothesis for ${organisation} rests on no finding -- an unlinked hypothesis is traceable to no observation` };
+  }
+
+  const findingsById = new Map(review.findings.map((finding) => [finding.id, finding]));
+  const factsById = new Map(review.facts.map((fact) => [fact.id, fact]));
+  const reachableFacts: Array<{ id: string; statement: string; sourceIds: string[] }> = [];
+  for (const findingId of findingIds) {
+    const finding = findingsById.get(findingId);
+    if (!finding) {
+      return { ok: false, reason: `the opportunity hypothesis references finding "${findingId}", which does not exist` };
+    }
+    for (const evidenceId of finding.evidenceIds) {
+      const fact = factsById.get(evidenceId);
+      if (fact) reachableFacts.push(fact);
+    }
+  }
+  if (reachableFacts.length === 0) {
+    return { ok: false, reason: `no observed fact supports the opportunity hypothesis for ${organisation} -- a hypothesis above the evidence is not a finding` };
+  }
+
+  if (review.conflicts.length > 0) {
+    return {
+      ok: false,
+      reason: `retrieved sources conflict, so the evidence for ${organisation} is contradictory rather than supportive -- "${review.conflicts[0].statement}"`,
+    };
+  }
+
+  const normalisedHypothesis = normaliseForGrounding(opportunity.statement);
+  if (review.facts.some((fact) => normaliseForGrounding(fact.statement) === normalisedHypothesis)) {
+    return { ok: false, reason: `the opportunity hypothesis for ${organisation} is restated as an observed fact -- a hypothesis is never an established fact` };
+  }
+
+  const normalisedOrganisation = normaliseForGrounding(organisation);
+  if (!normalisedOrganisation) {
+    return { ok: false, reason: `the organisation name "${organisation}" cannot be grounded in retrieved text` };
+  }
+  const grounded = reachableFacts.some(
+    (fact) =>
+      normaliseForGrounding(fact.statement).includes(normalisedOrganisation) &&
+      fact.sourceIds.some((sourceId) => {
+        const source = review.sources.find((candidate) => candidate.id === sourceId);
+        if (!source) return false;
+        return normaliseForGrounding(`${source.source} ${source.url ?? ""} ${source.passage}`).includes(normalisedOrganisation);
+      }),
+  );
+  if (!grounded) {
+    return {
+      ok: false,
+      reason: `no supporting observation for ${organisation} is grounded in retrieved material that names it -- a general article about the problem category, a generic industry trend, or a passing mention cannot establish a company-specific problem`,
+    };
+  }
+
+  return {
+    ok: true,
+    hypothesis: opportunity,
+    supportedByFactIds: [...new Set(reachableFacts.map((fact) => fact.id))],
   };
 }
 
@@ -851,6 +1258,11 @@ export function renderCandidateReview(organisation: string, review: CandidateRev
 
   if (review.status === "blocked") {
     const lines = [renderBlockedCandidateReview(organisation, review.blockedReason ?? "no reason recorded")];
+    const candidateDisclosures = review.candidateDisclosures ?? [];
+    if (candidateDisclosures.length > 0) {
+      lines.push("", "*Candidate-specific evidence search*:");
+      for (const disclosure of candidateDisclosures) lines.push(`- ${clip(disclosure, 300)}`);
+    }
     if (review.socialDisclosures.length > 0) {
       lines.push("", "*Public social engagement signals*:");
       for (const disclosure of review.socialDisclosures) lines.push(`- ${clip(disclosure, 300)}`);
@@ -871,6 +1283,14 @@ export function renderCandidateReview(organisation: string, review: CandidateRev
   if (review.interpretations.length > 0) {
     lines.push("", "*Interpretations / hypotheses* — NOT established:");
     for (const interpretation of review.interpretations) lines.push(`- ${clip(interpretation.statement, 300)} [from ${interpretation.findingIds.join(", ")}]`);
+  }
+  if (review.opportunity) {
+    lines.push("", "*Opportunity hypothesis* — UNCONFIRMED: a possible commercial challenge worth investigating, NOT an established fact:");
+    lines.push(`- ${clip(review.opportunity.statement, 300)} [supported by ${review.opportunity.findingIds.join(", ")}${review.opportunity.alternativeExplanations.length > 0 ? "; alternatives below" : ""}]`);
+    if (review.opportunity.alternativeExplanations.length > 0) {
+      lines.push("", "*Alternative explanations* — readings that could weaken or change the hypothesis:");
+      for (const alternative of review.opportunity.alternativeExplanations) lines.push(`- ${clip(String(alternative), 240)}`);
+    }
   }
   if (review.unknowns.length > 0) {
     lines.push("", "*Unknowns / open questions*:");
@@ -896,6 +1316,13 @@ export function renderCandidateReview(organisation: string, review: CandidateRev
 
 function renderSocialAndVisual(review: CandidateReview): string[] {
   const lines: string[] = [];
+  lines.push("", "*Candidate-specific evidence search*:");
+  const candidateDisclosures = review.candidateDisclosures ?? [];
+  if (candidateDisclosures.length > 0) {
+    for (const disclosure of candidateDisclosures) lines.push(`- ${clip(disclosure, 300)}`);
+  } else {
+    lines.push("- No candidate-specific search was run for this candidate.");
+  }
   lines.push("", "*Public social engagement signals*:");
   if (review.socialDisclosures.length > 0) {
     for (const disclosure of review.socialDisclosures) lines.push(`- ${clip(disclosure, 300)}`);
