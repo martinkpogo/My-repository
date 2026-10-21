@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { getPage, plainText, relationIds, uniqueId, type NotionPage, type NotionProperties } from "./notion";
 import type { AccessContext, GovernedSource } from "./access";
-import { resolveEntityMatterFromTokens, type ResolvedEntityMatterIdentity } from "./identityResolution";
+import { resolveEntityMatterFromTokens } from "./identityResolution";
 import { extractCallNotesReference, mentionsCallNotesReference, readApprovalRecord } from "./records/callNotes/callNotesReference";
 import { parseRecordApprovalMarker, type CallNotesApprovalRecord, type RecordApprovalAttestation } from "./records/callNotes/callNotesMarker";
 import { extractDocText, getValidGoogleAccessToken, getWatchedGoogleDoc, getWatchedGoogleSheet } from "./googleOAuth";
@@ -46,9 +46,11 @@ import { getSessionStub } from "./sessionRouting";
  * is one reviewable table rather than behaviour implied by code paths.
  * Per-type validation then runs: for `call_notes`, the canonical Call Notes
  * record's Entity/Matter relations must be exactly the pages this Handoff's
- * VALIDATED binding names (derived from its own `entities`/`matters`
- * sources when it declares them, otherwise resolved from its legacy token
- * properties as the compatibility path), its Status must be one that
+ * VALIDATED binding names (the binding is derived ONLY from the opaque
+ * token pair its own `Sources` payload declares, resolved through the
+ * authorized operational stores -- canonical `entities`/`matters` pages
+ * it also declares are cross-checked against that binding, never used to
+ * produce one), its Status must be one that
  * carries approved
  * current evidence, its registry fields must be readable, and its
  * `Approval Attestation` must re-parse against those exact fields (the
@@ -132,17 +134,92 @@ export type HandoffSourceType = GovernedSource | GoogleHandoffSourceType;
  * only its page id (its TYPE is never taken from the URL -- it is decided
  * from the page's real parent data source at resolution). A Google
  * reference carries the type its URL claims plus the exact file id; that
- * claim is verified against the Drive API at resolution.
+ * claim is verified against the Drive API at resolution. A token reference
+ * carries an OPAQUE operational Entity/Matter token -- the Handoff's
+ * identity transport since the token properties were retired -- never a
+ * page, never a title, never a lookup the runtime performs beyond the
+ * authorized operational stores (see `parseHandoffSourceToken`).
  */
 export type HandoffSourceRef =
   | { kind: "notion"; pageId: string }
-  | { kind: "google"; type: GoogleHandoffSourceType; fileId: string };
+  | { kind: "google"; type: GoogleHandoffSourceType; fileId: string }
+  | { kind: "token"; tokenKind: HandoffSourceTokenKind; token: string };
+
+/** Which operational record an opaque token names. */
+export type HandoffSourceTokenKind = "entity" | "matter";
+
+/**
+ * The exact syntax an opaque operational token must have to be accepted
+ * from a `Sources` payload: ENIG's own token shape (the same
+ * `PREFIX-NUMBER` form `resolveEntityMatterFromTokens` and every direct
+ * request path already require), validated here so a token entry can never
+ * smuggle free text, a title, or an identity-bearing value into the
+ * identity transport. The value is preserved EXACTLY; nothing is trimmed
+ * past the entry boundaries, case-folded, or re-spelled.
+ */
+export const HANDOFF_SOURCE_TOKEN_SHAPE = /^([A-Z]{1,6}-\d{1,6})$/;
+
+/**
+ * The `Sources` text prefix that marks one rich-text item as an opaque
+ * operational token rather than an artifact URL. It is what makes the two
+ * entry kinds distinguishable with NO fetch, NO title lookup, and NO
+ * inference: an artifact entry is always a link (or http(s) text) naming an
+ * exact page/file, a token entry is always this prefix plus one token, and
+ * anything else is refused as unusable rather than guessed at.
+ */
+export const HANDOFF_SOURCE_TOKEN_PREFIX = "token";
+
+/** The canonical `Sources` text for one opaque token entry, e.g. `token:entity:ENT-28`. */
+export function handoffSourceTokenText(kind: HandoffSourceTokenKind, token: string): string {
+  return `${HANDOFF_SOURCE_TOKEN_PREFIX}:${kind}:${token}`;
+}
+
+export type HandoffSourceTokenParse =
+  | { ok: true; tokenKind: HandoffSourceTokenKind; token: string }
+  | { ok: false; reason: string };
+
+/**
+ * Parses ONE `Sources` text item as an opaque token entry. Returns
+ * `{ ok: false }` with a precise reason for every shape that is not exactly
+ * `token:<entity|matter>:<TOKEN>` with a syntactically valid token. A caller
+ * uses this only for items it has already decided are token-shaped (the
+ * prefix is what decides that); it never guesses which kind a malformed
+ * entry was "meant" to be.
+ */
+export function parseHandoffSourceToken(raw: string): HandoffSourceTokenParse {
+  const value = (raw ?? "").trim();
+  const match = /^token:(entity|matter):(.+)$/.exec(value);
+  if (!match) {
+    return { ok: false, reason: `"${value.slice(0, 120)}" is not an opaque token entry (expected token:entity:<TOKEN> or token:matter:<TOKEN>).` };
+  }
+  const tokenKind = match[1] as HandoffSourceTokenKind;
+  const token = match[2].trim();
+  if (!HANDOFF_SOURCE_TOKEN_SHAPE.test(token)) {
+    return {
+      ok: false,
+      reason: `"${value.slice(0, 120)}" carries "${token.slice(0, 120)}", which is not a syntactically valid opaque ${tokenKind} token (expected PREFIX-NUMBER).`,
+    };
+  }
+  return { ok: true, tokenKind, token };
+}
 
 /**
  * A route contract: what may, must, and must not travel a Handoff route as
  * a `Sources` reference. Keyed by the Handoff's own recorded
  * `From Unit`/`To Unit` (a Handoff's destination is a fact, consumed as
  * established -- see checkHandoffs.ts's deriveHandoffDestination).
+ *
+ * **Token requirements and artifact requirements are separate, on purpose.**
+ * A route's operational identity (WHICH Entity/Matter this Handoff is about)
+ * is expressed by `requiresEntityToken`/`requiresMatterToken` and carried as
+ * opaque token entries in `Sources`. A route's evidence/artifact needs are
+ * expressed by `required`/`optional`/`prohibited`, which govern only
+ * canonical page and Google file references. The two are never conflated:
+ * a canonical `entities`/`matters` PAGE is an artifact reference that must
+ * agree with the token-derived binding, never the thing that ESTABLISHES
+ * identity merely by being present. That separation is what lets a route
+ * require identity without requiring any particular artifact page, and lets
+ * a declared generic route require neither.
  *
  * Required/optional/prohibited are kept explicit and separate on purpose:
  * a type that is neither required nor optional is refused even if it is not
@@ -151,11 +228,27 @@ export type HandoffSourceRef =
  * "why was my link refused" is answerable from this table alone.
  */
 export interface HandoffSourceRouteContract {
-  /** Source types that MUST be present on a Sources-enabled Handoff of this route. */
+  /**
+   * Whether this route REQUIRES an opaque Entity token entry in `Sources`.
+   * A Handoff on such a route that carries no Entity token is refused; one
+   * that carries two is refused as ambiguous. A route that does not require
+   * an Entity token REFUSES an Entity token entry outright: the route does
+   * not deal in Entity identity, so one arriving is a contract violation,
+   * never something to quietly ignore.
+   */
+  readonly requiresEntityToken: boolean;
+  /** The Matter-side counterpart of `requiresEntityToken`. */
+  readonly requiresMatterToken: boolean;
+  /**
+   * Artifact source types that MUST be present on a Sources-enabled
+   * Handoff of this route. Governed independently of the token
+   * requirements above: these are canonical evidence references, never the
+   * identity transport.
+   */
   readonly required: readonly HandoffSourceType[];
-  /** Source types that MAY be present (at most one reference of each type). */
+  /** Artifact source types that MAY be present (at most one reference of each type). */
   readonly optional: readonly HandoffSourceType[];
-  /** Source types that must NOT be present, even though they are recognizable canonical pages. */
+  /** Artifact source types that must NOT be present, even though they are recognizable canonical pages. */
   readonly prohibited: readonly HandoffSourceType[];
 }
 
@@ -168,46 +261,76 @@ export interface HandoffSourceRouteContract {
  *
  * - `Sales->Strategy` -- the commercial-diagnosis Handoff. This route needs
  *   an Entity and a Matter (the diagnosis is about one Matter of one
- *   Entity), so the contract PERMITS the canonical `entities` and `matters`
- *   sources explicitly and requires the relationship checks for them: when
- *   both are named, the Matter source's own `Entity` relation must be
- *   exactly the Entity source page. Present they define the Handoff's
- *   binding (see `resolveHandoffSources`); absent, the Handoff's binding
- *   comes from its legacy token properties as the compatibility check, and
- *   a Handoff with neither is refused. Its canonical evidence record (when
- *   it has one) is an approved Call Notes record, so `call_notes` is
- *   optional: present it must validate fully against that same binding;
- *   absent the Handoff carries narrative evidence as before. `handoffs` is
- *   prohibited: a Handoff is never evidence for another Handoff, and a
- *   self/cycle reference would make evidence unresolvable.
+ *   Entity), so both tokens are REQUIRED and carried as opaque `Sources`
+ *   token entries. `call_notes` is OPTIONAL: present it must validate fully
+ *   against the token-derived binding (its own Entity/Matter relations, its
+ *   lifecycle Status, its registry fields, and its re-parsed Approval
+ *   Attestation); absent the Handoff carries narrative evidence as before.
+ *   `entities`/`matters` PAGES are OPTIONAL artifact references here -- a
+ *   producer may additionally name the canonical pages, which are then
+ *   fetched and cross-checked against the token binding, but their absence
+ *   costs the route nothing because identity never depended on them.
+ *   `handoffs` is prohibited: a Handoff is never evidence for another
+ *   Handoff, and a self/cycle reference would make evidence unresolvable.
  *
  * - `Strategy->Finance` -- the value-based quote request Martin's approval
- *   of a Strategy intervention commits. This route is NOT generic and its
- *   Entity/Matter binding is required outright (`entities`, `matters` in
- *   `required`): the quote is priced for one Matter of one Entity, and a
- *   Sources-enabled Handoff of this route may never travel without
- *   establishing exactly which canonical pages those are -- resolution
- *   refuses one carrying either missing, and the binding is established
- *   from exactly those two pages (cross-checked against the Handoff's own
- *   tokens when those are present). `call_notes` is OPTIONAL and
+ *   of a Strategy intervention commits. This route is NOT generic and
+ *   requires both tokens outright: the quote is priced for one Matter of
+ *   one Entity, and a Sources-enabled Handoff of this route may never
+ *   travel without an opaque, syntactically valid Entity/Matter token pair
+ *   that resolves (through the authorized operational stores) to real,
+ *   correctly-related records -- resolution refuses one carrying either
+ *   missing, unresolvable, or contradictory. `call_notes` is OPTIONAL and
  *   carries the upstream Sales -> Strategy Handoff's own canonical Call
  *   Notes reference, forwarded by the Strategy producer when (and only
  *   when) that reference exists and re-validates on its own route -- the
- *   same exact canonical page, its URL rebuilt in bare-id form so no title
- *   slug (identity-bearing text) travels in a protected field --
- *   so Finance can resolve the same approved record the diagnosis was
- *   grounded in. Absent, the Handoff carries the Strategy boundary
- *   representation and the upstream commercial-value determination as
- *   before, and no Call Notes reference is ever fabricated to fill the gap.
- *   `handoffs` is prohibited for the same reason as on Sales->Strategy.
+ *   same exact canonical page -- so Finance can resolve the same approved
+ *   record the diagnosis was grounded in. Absent, the Handoff carries the
+ *   Strategy boundary representation and the upstream commercial-value
+ *   determination as before, and no Call Notes reference is ever fabricated
+ *   to fill the gap. `entities`/`matters` PAGES are OPTIONAL artifact
+ *   references, cross-checked against the token binding when present, never
+ *   required for identity. `handoffs` is prohibited for the same reason as
+ *   on Sales->Strategy.
  *
- * A route whose contract neither requires nor permits `entities`/`matters`
- * (see `handoffRouteRequiresEntityMatter`) is a declared GENERIC route:
- * Handoffs on it do not carry, and are never forced to acquire, an
- * Entity/Matter. No production route is declared generic today -- a
- * generic route is an explicit contract decision (a `contracts` table entry
- * naming one), never an absence of contract: an uncontracted route stays
- * what it always was, an Entity/Matter-bound route refused fail-closed.
+ * - `Finance->Sales` -- the approved-quote Draft Proposal request. Both
+ *   tokens are required for the same reason as Strategy->Finance: Sales
+ *   must know exactly which Matter and Entity the quote prices. No artifact
+ *   source is required or permitted today beyond the tokens, so the
+ *   contract permits no optional artifact type (a future producer that has
+ *   a canonical artifact to forward adds it here deliberately).
+ *
+ * - `Strategy->Marketing` / `Strategy->Sales` -- the Martin-approved routing
+ *   of a completed Strategy diagnosis to another Unit. Both tokens are
+ *   required for exactly the reason the retired `Entity_Token`/`Matter_Token`
+ *   writes on these two routes carried: a diagnosis is about one Matter of
+ *   one Entity, and both the receiving Unit's pickup and the Work created
+ *   from it need that binding. These entries exist so removing the retired
+ *   property writes costs these routes NOTHING -- the same identity, on the
+ *   one sanctioned transport, with the same discovery, pickup and binding
+ *   behaviour as before. No artifact source is declared for them today.
+ *
+ * A route whose contract requires neither token and neither requires nor
+ * permits `entities`/`matters` (see `handoffRouteRequiresEntityMatter`) is
+ * a declared GENERIC route: Handoffs on it do not carry, and are never
+ * forced to acquire, an Entity/Matter. No production route is declared
+ * generic today -- a generic route is an explicit contract decision (a
+ * `contracts` table entry naming one with both token flags false and no
+ * entity/matter artifact type), never an absence of contract: an
+ * uncontracted route stays what it always was, an Entity/Matter-bound
+ * route refused fail-closed. Genericity is read ONLY from the contract
+ * entry, never inferred from a payload whose fields happen to be absent.
+ *
+ * **Absence of `Sources` is a deliberate contract decision, never a
+ * fallback.** A Handoff on a route that requires tokens (or a required
+ * artifact) and declares no `Sources` property at all has established no
+ * operational reference and is refused -- it is never treated as "legacy"
+ * identity, because the separate `Entity_Token`/`Matter_Token` properties
+ * are no longer read or written anywhere and carry no authority. Only a
+ * route that requires neither (a declared generic route) accepts a
+ * Handoff with no `Sources`, and then it accepts it as carrying no
+ * binding at all -- not as carrying some identity this resolver chose to
+ * read from somewhere else.
  *
  * The Google source types (`google_doc`, `google_sheet`) have their full
  * per-type validation implemented in this module, but NO production route
@@ -220,13 +343,38 @@ export interface HandoffSourceRouteContract {
  */
 export const HANDOFF_SOURCE_ROUTE_CONTRACTS: Readonly<Record<string, HandoffSourceRouteContract>> = {
   "Sales->Strategy": {
+    requiresEntityToken: true,
+    requiresMatterToken: true,
     required: [],
     optional: ["call_notes", "entities", "matters"],
     prohibited: ["handoffs"],
   },
   "Strategy->Finance": {
-    required: ["entities", "matters"],
-    optional: ["call_notes"],
+    requiresEntityToken: true,
+    requiresMatterToken: true,
+    required: [],
+    optional: ["call_notes", "entities", "matters"],
+    prohibited: ["handoffs"],
+  },
+  "Finance->Sales": {
+    requiresEntityToken: true,
+    requiresMatterToken: true,
+    required: [],
+    optional: [],
+    prohibited: ["handoffs"],
+  },
+  "Strategy->Marketing": {
+    requiresEntityToken: true,
+    requiresMatterToken: true,
+    required: [],
+    optional: [],
+    prohibited: ["handoffs"],
+  },
+  "Strategy->Sales": {
+    requiresEntityToken: true,
+    requiresMatterToken: true,
+    required: [],
+    optional: [],
     prohibited: ["handoffs"],
   },
 };
@@ -236,21 +384,30 @@ export function handoffSourceRouteKey(fromUnit: string, toUnit: string): string 
   return `${fromUnit.trim()}->${toUnit.trim()}`;
 }
 
-export function handoffSourceRouteContract(fromUnit: string, toUnit: string): HandoffSourceRouteContract | undefined {
-  return HANDOFF_SOURCE_ROUTE_CONTRACTS[handoffSourceRouteKey(fromUnit, toUnit)];
+export function handoffSourceRouteContract(
+  fromUnit: string,
+  toUnit: string,
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
+): HandoffSourceRouteContract | undefined {
+  return (contracts ?? HANDOFF_SOURCE_ROUTE_CONTRACTS)[handoffSourceRouteKey(fromUnit, toUnit)];
+}
+
+/** The route key for a `{ fromUnit, toUnit }` route descriptor. */
+function routeKeyOf(route: { fromUnit: string; toUnit: string }): string {
+  return handoffSourceRouteKey(route.fromUnit, route.toUnit);
 }
 
 /**
  * Whether a Handoff travelling this route needs an Entity/Matter binding at
  * all -- the generic-route declaration, answered from the route's contract
- * alone: a route that neither requires nor permits an `entities` or a
- * `matters` source is a declared generic route (its workflow needs no
- * Entity/Matter, so no token property, no source reference, and no
- * discovered Work is ever forced to acquire one). An uncontracted route
- * returns true -- nothing has declared it generic, so today's behaviour
- * (Entity/Matter required) stands. This is the ONLY thing that makes a
- * Handoff generic; there is no inference from what a particular payload
- * happens to carry.
+ * alone: a route that requires neither token and neither requires nor
+ * permits an `entities` or a `matters` source is a declared generic route
+ * (its workflow needs no Entity/Matter, so no token entry, no source
+ * reference, and no discovered Work is ever forced to acquire one). An
+ * uncontracted route returns true -- nothing has declared it generic, so
+ * today's behaviour (Entity/Matter required) stands. This is the ONLY
+ * thing that makes a Handoff generic; there is no inference from what a
+ * particular payload happens to carry.
  */
 export function handoffRouteRequiresEntityMatter(
   fromUnit: string,
@@ -260,46 +417,44 @@ export function handoffRouteRequiresEntityMatter(
   const contract = (contracts ?? HANDOFF_SOURCE_ROUTE_CONTRACTS)[handoffSourceRouteKey(fromUnit, toUnit)];
   if (!contract) return true;
   const carries = (type: HandoffSourceType) => contract.required.includes(type) || contract.optional.includes(type);
-  return carries("entities") || carries("matters");
-}
-
-/**
- * The one sanctioned read of the legacy `Entity_Token` / `Matter_Token`
- * Handoff properties -- a DELIBERATE temporary compatibility read while the
- * live schema still carries both columns, never an identity authority of
- * its own. Consumers do not read those properties directly: they go through
- * this function (display/legacy-token needs) or through
- * `resolveHandoffContextBinding` (operational context), so there is one
- * place to retire when the migration completes. Never a lookup key, never a
- * fallback that overrides a validated `Sources` reference -- see
- * `resolveHandoffSources`, which treats the same two values as a
- * consistency check against sources and fails closed on a contradiction.
- */
-export function readLegacyHandoffTokens(properties: NotionProperties | undefined): { entityToken: string; matterToken: string } {
-  const props = (properties as Record<string, unknown> | undefined) ?? {};
-  return {
-    entityToken: plainText(props.Entity_Token).trim(),
-    matterToken: plainText(props.Matter_Token).trim(),
-  };
+  return contract.requiresEntityToken || contract.requiresMatterToken || carries("entities") || carries("matters");
 }
 
 /**
  * The canonical Entity/Matter binding a Handoff's operational context
  * resolves to: the exact page ids of the two canonical records, their
- * opaque operational tokens, and the Matter's lifecycle Status when a
- * source read it. Produced ONLY by this module's resolution -- from
- * validated `Sources` references (primary) or from the legacy token
- * properties (compatibility) -- and passed through the runtime context from
- * there, so no consumer re-resolves the Handoff's identity from record
- * properties it reads itself.
+ * opaque operational tokens, and the Matter's lifecycle Status. Produced
+ * ONLY by this module's resolution -- from the opaque token entries in the
+ * Handoff's own `Sources` payload, resolved through the authorized
+ * operational stores (`resolveEntityMatterFromTokens`, which reads the
+ * canonical Matters and Entities data sources and NEVER the Isolated Sales
+ * Identity Resolution Registry) -- and passed through the runtime context
+ * from there, so no consumer re-resolves the Handoff's identity from
+ * record properties it reads itself.
+ *
+ * The separate `Entity_Token`/`Matter_Token` Handoff properties are NOT
+ * read or written anywhere and are not an identity authority: a Handoff
+ * with no `Sources` payload has no binding, and nothing infers one.
  */
 export interface HandoffSourceBinding {
   entityId: string;
   matterId: string;
   entityToken: string;
   matterToken: string;
-  /** The Matter page's own lifecycle Status as read from the page; null when this binding came from the legacy path, which reads no pages. */
+  /** The Matter page's own lifecycle Status as read from the canonical Matter record during token resolution. */
   matterStatus: string | null;
+}
+
+/**
+ * The opaque Entity/Matter token pair a `Sources` payload declares, before
+ * any resolution. Both sides are optional here so extraction can report a
+ * half-declared pair precisely; `resolveHandoffSources` decides per route
+ * whether a missing side is a contract violation and refuses either way
+ * rather than resolving half a binding.
+ */
+export interface HandoffSourceTokenPair {
+  entityToken?: string;
+  matterToken?: string;
 }
 
 /** Extracts a Notion property's rich-text items in the shapes both the read (plain_text/href) and write (text.link) representations use. */
@@ -439,59 +594,133 @@ export function parseGoogleFileLink(raw: string): GoogleFileLink {
 }
 
 /**
- * The write shape for a `Sources` payload: one rich-text item per URL, each
- * carrying its `text.link.url`. The single sanctioned way a runtime producer
- * builds the property (the writer's extraction reads exactly this shape), so
- * no producer hand-assembles rich-text items and no reference can be written
- * as link-less plain text that the read side would then have to guess about.
+ * One entry a runtime producer may write into a `Sources` payload, before
+ * it is rendered to rich text. An `artifact` entry names one exact
+ * canonical page or Google file by URL. A `token` entry carries an opaque
+ * operational Entity/Matter token -- the identity transport -- never a page,
+ * never a title, never an identity-bearing value.
  */
-export function sourcesRichText(urls: readonly string[]): { rich_text: Array<{ type: "text"; text: { content: string; link: { url: string } } }> } {
+export type HandoffSourceWriteEntry =
+  | { kind: "artifact"; url: string }
+  | { kind: "token"; tokenKind: HandoffSourceTokenKind; token: string };
+
+/**
+ * The write shape for a `Sources` payload: one rich-text item per entry. An
+ * artifact entry carries its `text.link.url`; a token entry is link-less
+ * plain text in the exact `token:<kind>:<TOKEN>` form
+ * (`handoffSourceTokenText`). The single sanctioned way a runtime producer
+ * builds the property (the writer's extraction reads exactly these two
+ * shapes), so no producer hand-assembles rich-text items and no reference
+ * can be written as free text the read side would then have to guess
+ * about. The two entry kinds are distinguished on read by the presence of a
+ * link versus the token prefix -- deterministically, with no fetch, no title
+ * lookup, and no inference.
+ */
+export function sourcesRichText(entries: readonly HandoffSourceWriteEntry[]): {
+  rich_text: Array<{ type: "text"; text: { content: string; link?: { url: string } } }>;
+} {
   return {
-    rich_text: urls.map((url) => ({ type: "text" as const, text: { content: url, link: { url } } })),
+    rich_text: entries.map((entry) =>
+      entry.kind === "token"
+        ? { type: "text" as const, text: { content: handoffSourceTokenText(entry.tokenKind, entry.token) } }
+        : { type: "text" as const, text: { content: entry.url, link: { url: entry.url } } },
+    ),
   };
 }
 
 export type HandoffSourceExtraction =
   | { ok: true; mode: "legacy" }
-  | { ok: true; mode: "sources"; refs: HandoffSourceRef[] }
+  | { ok: true; mode: "sources"; refs: HandoffSourceRef[]; tokens: HandoffSourceTokenPair }
   | { ok: false; reason: string };
 
 /**
  * Reads the Handoff's own `Sources` property, if it has one.
  *
- * `legacy` (no fetches, no validation) is the compatibility seam: a
- * Handoff whose record carries no `Sources` property reads back legacy and
- * its consumers behave exactly as before. A PRESENT property turns the
- * Sources path on and must carry at least one direct link -- to an exact
- * Notion page or a recognized direct Google Docs/Sheets URL; anything else
- * is refused right here, before any fetch. Duplicate references to the same
- * page id or the same Google file id are refused the same way (a duplicate
- * is a conflicting reference by construction -- the same file named twice
- * through two URL shapes is still one reference written twice).
+ * `legacy` (no fetches, no validation) means the record declares NO
+ * `Sources` property at all -- and it establishes NOTHING: a Handoff with no
+ * `Sources` carries no operational reference, and whether its route accepts
+ * that is a route-contract decision made downstream (see
+ * `HANDOFF_SOURCE_ROUTE_CONTRACTS` and `resolveHandoffSources`), never a
+ * fallback to some other identity transport. The separate
+ * `Entity_Token`/`Matter_Token` properties are not consulted here or
+ * anywhere.
+ *
+ * A PRESENT property must carry at least one entry -- an opaque token, an
+ * exact Notion page link, or a recognized direct Google Docs/Sheets URL.
+ * Anything else is refused right here, before any fetch: a text item that
+ * is neither a valid token entry nor a valid artifact link is refused as
+ * unusable rather than silently dropped, so a malformed or
+ * identity-bearing entry can never be "treated as absent". Duplicate
+ * references to the same page id or the same Google file id are refused the
+ * same way (a duplicate is a conflicting reference by construction -- the
+ * same file named twice through two URL shapes is still one reference
+ * written twice), as is a second token of the same kind.
  */
 export function extractHandoffSources(properties: NotionProperties | undefined): HandoffSourceExtraction {
   const prop = (properties as Record<string, unknown> | undefined)?.[HANDOFF_SOURCES_PROPERTY];
   if (prop === undefined || prop === null) {
     return { ok: true, mode: "legacy" };
   }
-  const urls: string[] = [];
+  /**
+   * Each item resolves to exactly one raw entry: a linked URL (artifact), a
+   * `token:`-prefixed plain-text item (token), or an http(s) plain-text item
+   * (artifact, the read-side tolerance for a hand-written link). An item
+   * that resolves to none of those -- non-empty text that is neither -- is
+   * refused as unusable rather than skipped, so nothing a sender wrote is
+   * ever silently discarded into "absent".
+   */
+  const rawEntries: Array<{ kind: "url"; url: string } | { kind: "token"; text: string }> = [];
   for (const item of richTextItems(prop)) {
     const linked = (item.text?.link?.url ?? item.href) as unknown;
     if (typeof linked === "string" && linked.trim()) {
-      urls.push(linked.trim());
+      rawEntries.push({ kind: "url", url: linked.trim() });
       continue;
     }
-    const text = typeof item.plain_text === "string" ? item.plain_text.trim() : "";
-    if (/^https?:\/\//i.test(text)) urls.push(text);
-  }
-  if (urls.length === 0) {
+    const content = (item.text as { content?: unknown } | undefined)?.content;
+    const raw =
+      typeof item.plain_text === "string" && item.plain_text.trim()
+        ? item.plain_text
+        : typeof content === "string"
+          ? content
+          : "";
+    const text = raw.trim();
+    if (!text) continue; // an empty item carries nothing; nothing is inferred from it
+    if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
+      rawEntries.push({ kind: "token", text });
+      continue;
+    }
+    if (/^https?:\/\//i.test(text)) {
+      rawEntries.push({ kind: "url", url: text });
+      continue;
+    }
     return {
       ok: false,
-      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property is present but carries no link -- a Sources-enabled Handoff must reference at least one exact canonical artifact, and nothing is inferred to fill the gap.`,
+      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable entry: "${text.slice(0, 120)}" is neither an opaque token entry (${HANDOFF_SOURCE_TOKEN_PREFIX}:entity:<TOKEN> / ${HANDOFF_SOURCE_TOKEN_PREFIX}:matter:<TOKEN>) nor an http(s) link to an exact canonical artifact -- refused rather than silently treated as absent.`,
+    };
+  }
+  if (rawEntries.length === 0) {
+    return {
+      ok: false,
+      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property is present but carries no entry -- a Sources-enabled Handoff must reference at least one opaque token or exact canonical artifact, and nothing is inferred to fill the gap.`,
     };
   }
   const refs: HandoffSourceRef[] = [];
-  for (const url of urls) {
+  for (const entry of rawEntries) {
+    if (entry.kind === "token") {
+      const token = parseHandoffSourceToken(entry.text);
+      if (!token.ok) {
+        return { ok: false, reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries a malformed token entry: ${token.reason}` };
+      }
+      if (refs.some((r) => r.kind === "token" && r.tokenKind === token.tokenKind)) {
+        return {
+          ok: false,
+          reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries more than one ${token.tokenKind} token -- which token names the Handoff's ${token.tokenKind} is ambiguous, so none is accepted.`,
+        };
+      }
+      refs.push({ kind: "token", tokenKind: token.tokenKind, token: token.token });
+      continue;
+    }
+    const url = entry.url;
     const notion = parseNotionPageLink(url);
     if (notion.ok) {
       if (refs.some((r) => r.kind === "notion" && r.pageId === notion.pageId)) {
@@ -519,7 +748,30 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
       reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable reference: "${url.slice(0, 120)}" is neither an exact Notion page link (${notion.reason}) nor a recognized direct Google Docs/Sheets file link (${google.reason})`,
     };
   }
-  return { ok: true, mode: "sources", refs };
+  const tokens: HandoffSourceTokenPair = {};
+  for (const ref of refs) {
+    if (ref.kind !== "token") continue;
+    if (ref.tokenKind === "entity") tokens.entityToken = ref.token;
+    else tokens.matterToken = ref.token;
+  }
+  return { ok: true, mode: "sources", refs, tokens };
+}
+
+/**
+ * The opaque Entity/Matter token pair a Handoff's `Sources` payload declares,
+ * or an empty pair when it declares no usable payload. Deterministic and
+ * fetch-free -- it is the SAME `extractHandoffSources` every other runtime
+ * path uses, so there is one parser and no parallel reader. For display and
+ * for pre-resolution filtering only: never an identity authority. A token
+ * still has to resolve through `resolveHandoffContextBinding` (the
+ * authorized operational stores) before anything acts on it, and a
+ * contradictory or unverifiable payload refuses there rather than being
+ * smoothed over by this read.
+ */
+export function declaredHandoffTokens(properties: NotionProperties | undefined): HandoffSourceTokenPair {
+  const extraction = extractHandoffSources(properties);
+  if (!extraction.ok || extraction.mode !== "sources") return {};
+  return extraction.tokens;
 }
 
 /** A validated canonical Call Notes source: which approved record the link names, and the evidence of its approval. */
@@ -663,14 +915,14 @@ async function validateSourcePage(
       if (!matterToken || matterToken !== binding.matterToken) {
         return {
           ok: false,
-          reason: `Matter source ${page.id} carries Matter_ID "${matterToken || "(empty)"}" but this Handoff's Matter_Token is "${binding.matterToken}" -- the source is not this Handoff's Matter.`,
+          reason: `Matter source ${page.id} carries Matter_ID "${matterToken || "(empty)"}" but this Handoff's Matter token is "${binding.matterToken}" -- the source is not this Handoff's Matter.`,
         };
       }
       const entityRelations = relationIds(page.properties?.Entity);
       if (entityRelations.length !== 1 || entityRelations[0] !== binding.entityId) {
         return {
           ok: false,
-          reason: `Matter source ${page.id} is not related to the Entity page this Handoff's Entity_Token resolves to (${binding.entityId}).`,
+          reason: `Matter source ${page.id} is not related to the Entity page this Handoff's Entity token resolves to (${binding.entityId}).`,
         };
       }
       return { ok: true };
@@ -680,7 +932,7 @@ async function validateSourcePage(
       if (!entityToken || entityToken !== binding.entityToken) {
         return {
           ok: false,
-          reason: `Entity source ${page.id} carries Entity_ID "${entityToken || "(empty)"}" but this Handoff's Entity_Token is "${binding.entityToken}" -- the source is not this Handoff's Entity.`,
+          reason: `Entity source ${page.id} carries Entity_ID "${entityToken || "(empty)"}" but this Handoff's Entity token is "${binding.entityToken}" -- the source is not this Handoff's Entity.`,
         };
       }
       return { ok: true };
@@ -838,24 +1090,30 @@ function defaultReadBoundWorkState(env: Env): (workId: string) => Promise<BoundW
 }
 
 /**
- * The one resolution entry point. Reads the Handoff's own properties
- * (the `Sources` property, the recorded From/To Unit, and -- only as the
- * compatibility check below -- the legacy token properties) and resolves
- * every reference to an exactly-fetched, validated canonical artifact --
- * Notion pages by id, Google Docs through the registration binding chain
- * above -- or returns `legacy` when the property is absent, or a refusal.
+ * The one resolution entry point. Reads the Handoff's own `Sources`
+ * property and its recorded From/To Unit, and resolves every reference to
+ * an exactly-fetched, validated canonical artifact -- opaque tokens through
+ * the authorized operational stores, Notion pages by id, Google Docs
+ * through the registration binding chain above -- or returns `legacy` when
+ * the property is entirely absent (which establishes NO identity), or a
+ * refusal.
  *
- * **The Entity/Matter binding comes from the sources themselves.** When the
- * Handoff names canonical `entities`/`matters` sources, those exact pages
- * ARE the binding (their `Entity_ID`/`Matter_ID`, plus the relationship
- * proof that the Matter belongs to that Entity), and no token property is
- * required or consulted for it. When the Handoff also carries legacy
- * `Entity_Token`/`Matter_Token`, those are reconciled against what the
- * sources prove and any contradiction fails closed; when it carries ONLY
- * the legacy fields (no entity/matter sources), they resolve exactly as
- * they always have and every source must agree with them. What never
- * happens: a title search, a nearest-record lookup, or a fallback from a
- * failed canonical reference to a token property.
+ * **The Entity/Matter binding comes from the opaque token entries.** The
+ * Handoff's identity is the `token:entity:<TOKEN>` / `token:matter:<TOKEN>`
+ * entries its `Sources` payload declares. Each pair is resolved through
+ * `resolveEntityMatterFromTokens` -- the authorized operational stores
+ * (canonical Matters/Entities data sources), never the Isolated Sales
+ * Identity Resolution Registry and never any real-world identity mapping --
+ * and a pair that does not resolve to real, correctly-related records is
+ * refused. Any canonical `entities`/`matters` PAGE the Handoff also names
+ * is an artifact reference that must AGREE with that token-derived binding;
+ * it never establishes identity by being present, and its absence costs
+ * nothing on a route that does not require it.
+ *
+ * The separate `Entity_Token`/`Matter_Token` Handoff properties are NOT
+ * read here or anywhere: they are no longer an identity authority, so a
+ * Handoff that declares no `Sources` at all carries no binding, and nothing
+ * infers one from those columns.
  *
  * Consumers keep their own evidence/lifecycle semantics on top of this:
  * Sales's consume path still requires `Ready` before transitioning, and
@@ -868,14 +1126,12 @@ export async function resolveHandoffSources(
   input: {
     properties: NotionProperties;
     /**
-     * Optional: the legacy operational tokens to reconcile the validated
-     * sources against. Production callers OMIT this -- the Handoff's own
-     * `Entity_Token`/`Matter_Token` properties are read here instead
-     * (`readLegacyHandoffTokens`, the one sanctioned compatibility read) --
-     * and callers that already hold the values may pass them explicitly.
-     * Either way they are only ever a CONSISTENCY check against what the
-     * sources prove: never the binding's source when canonical sources are
-     * present, and never a fallback for a reference that failed.
+     * Optional: the operational tokens the CALLER already holds, reconciled
+     * against the tokens the `Sources` payload declares. Production callers
+     * OMIT this; when passed, a contradiction between the caller's tokens
+     * and the payload's tokens fails closed rather than letting one
+     * transport win. It is never a substitute for a missing payload token
+     * and never a fallback for one that failed to resolve.
      */
     tokens?: { entityToken: string; matterToken: string };
     route: { fromUnit: string; toUnit: string };
@@ -894,12 +1150,11 @@ export async function resolveHandoffSources(
      * `discoverPendingSalesHandoffsForUnit(declaration)` and
      * `unitsWithHandoffPickup(manifests)`: a contract table to resolve
      * against instead of the production one, so the generic route-contract
-     * machinery (required sources, per-type validation of `matters` /
-     * `entities` sources, and the Google source types no production route
-     * permits yet) can be exercised without a production route that
-     * permits those types. Production callers never pass it; omitting it
-     * resolves against `HANDOFF_SOURCE_ROUTE_CONTRACTS` exactly as
-     * production does.
+     * machinery (token requirements, required sources, per-type validation
+     * of `matters` / `entities` sources, and the Google source types no
+     * production route permits yet) can be exercised without a production
+     * route. Production callers never pass it; omitting it resolves against
+     * `HANDOFF_SOURCE_ROUTE_CONTRACTS` exactly as production does.
      */
     contracts?: Readonly<Record<string, HandoffSourceRouteContract>>;
   },
@@ -908,7 +1163,24 @@ export async function resolveHandoffSources(
 
   const extraction = extractHandoffSources(input.properties);
   if (!extraction.ok) return refuse(extraction.reason);
-  if (extraction.mode === "legacy") return { ok: true, mode: "legacy" };
+  if (extraction.mode === "legacy") {
+    /**
+     * No `Sources` property at all. This establishes NOTHING: whether the
+     * route accepts a Handoff that declares no operational reference is a
+     * contract decision, never a fallback to the retired token columns. A
+     * route that requires an Entity/Matter (uncontracted, or one whose
+     * contract names a token or an entity/matter artifact) refuses here; a
+     * declared generic route accepts it as carrying no binding, which is
+     * exactly what it does carry.
+     */
+    const routeRequires = handoffRouteRequiresEntityMatter(input.route.fromUnit, input.route.toUnit, input.contracts);
+    if (routeRequires) {
+      return refuse(
+        `the Handoff declares no "${HANDOFF_SOURCES_PROPERTY}" property, and route "${handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)}" requires an Entity/Matter binding -- the separate Entity_Token/Matter_Token properties are no longer read, so a Handoff with no Sources establishes no identity and nothing is inferred to fill the gap.`,
+      );
+    }
+    return { ok: true, mode: "legacy" };
+  }
 
   const contract = (input.contracts ?? HANDOFF_SOURCE_ROUTE_CONTRACTS)[handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)];
   if (!contract) {
@@ -917,40 +1189,56 @@ export async function resolveHandoffSources(
     );
   }
 
-  // ---- Compatibility/consistency input: the legacy token properties -------
-  // Read only when the record carries them (or the caller passed them).
-  // This is the deliberate temporary compatibility check the migration
-  // keeps, checked BEFORE any source page is fetched -- exactly as this
-  // resolver always has -- so a Handoff whose own identity fields do not
-  // resolve is refused with that fact, and when they DO resolve every
-  // source must agree with them below (a contradiction fails closed, never
-  // resolved by letting one transport win). A source-based Handoff with no
-  // legacy identity fields skips this entirely: its binding comes from its
-  // canonical sources, and no token property is required for it.
-  const legacy = input.tokens
-    ? { entityToken: input.tokens.entityToken.trim(), matterToken: input.tokens.matterToken.trim() }
-    : readLegacyHandoffTokens(input.properties);
-  let legacyResolved: ResolvedEntityMatterIdentity | null = null;
-  if (legacy.entityToken || legacy.matterToken) {
-    legacyResolved = await resolveEntityMatterFromTokens(env, legacy.entityToken, legacy.matterToken);
-    if (!legacyResolved) {
+  // ---- The opaque token entries: the Handoff's operational identity ------
+  // Extracted from the payload itself (deterministically, before any fetch),
+  // enforced against the route contract, and -- when the caller also passed
+  // tokens -- reconciled against those. A route that does not require a
+  // given token kind REFUSES that kind outright: the route does not deal in
+  // it, so one arriving is a contract violation, never something to ignore.
+  const tokenRefs = extraction.refs.filter((r): r is Extract<HandoffSourceRef, { kind: "token" }> => r.kind === "token");
+  const declaredEntityToken = tokenRefs.find((r) => r.tokenKind === "entity")?.token;
+  const declaredMatterToken = tokenRefs.find((r) => r.tokenKind === "matter")?.token;
+  if (declaredEntityToken && !contract.requiresEntityToken) {
+    return refuse(`the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an Entity token, but route ${routeKeyOf(input.route)} does not require one -- a route that does not deal in Entity identity refuses the token rather than ignoring it.`);
+  }
+  if (declaredMatterToken && !contract.requiresMatterToken) {
+    return refuse(`the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries a Matter token, but route ${routeKeyOf(input.route)} does not require one -- a route that does not deal in Matter identity refuses the token rather than ignoring it.`);
+  }
+  if (contract.requiresEntityToken && !declaredEntityToken) {
+    return refuse(`route ${routeKeyOf(input.route)} requires an opaque Entity token in the Handoff's ${HANDOFF_SOURCES_PROPERTY} property, and the Handoff carries none -- a required token is never substituted from a free-text reference, a title, or the retired token properties.`);
+  }
+  if (contract.requiresMatterToken && !declaredMatterToken) {
+    return refuse(`route ${routeKeyOf(input.route)} requires an opaque Matter token in the Handoff's ${HANDOFF_SOURCES_PROPERTY} property, and the Handoff carries none -- a required token is never substituted from a free-text reference, a title, or the retired token properties.`);
+  }
+  if (input.tokens) {
+    const callerEntity = input.tokens.entityToken.trim();
+    const callerMatter = input.tokens.matterToken.trim();
+    if (callerEntity && declaredEntityToken && callerEntity !== declaredEntityToken) {
       return refuse(
-        `the Handoff's Entity_Token "${legacy.entityToken || "(empty)"}" / Matter_Token "${legacy.matterToken || "(empty)"}" did not resolve to a real, related Entity/Matter record, so no source reference's bindings can be verified -- without that check any page would do.`,
+        `the caller's Entity token "${callerEntity}" contradicts the Entity token "${declaredEntityToken}" this Handoff's ${HANDOFF_SOURCES_PROPERTY} property declares -- contradictory bindings are refused rather than resolved by letting one transport win.`,
+      );
+    }
+    if (callerMatter && declaredMatterToken && callerMatter !== declaredMatterToken) {
+      return refuse(
+        `the caller's Matter token "${callerMatter}" contradicts the Matter token "${declaredMatterToken}" this Handoff's ${HANDOFF_SOURCES_PROPERTY} property declares -- contradictory bindings are refused rather than resolved by letting one transport win.`,
       );
     }
   }
 
-  // ---- Pass 1: fetch, type, and permit every reference (no binding yet) ---
-  const routeKey = handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit);
+  // ---- Pass 1: fetch, type, and permit every ARTIFACT reference ----------
+  const routeKey = routeKeyOf(input.route);
   const seenTypes = new Set<HandoffSourceType>();
 
+
   /**
-   * The route-contract permission check, shared by both reference kinds:
-   * prohibited is refused by name; a type the contract neither requires nor
-   * permits is refused (the table decides, never code-path accident); and
-   * one reference of each type -- the Handoff's Entity/Matter are singular,
-   * so two sources of one type cannot both be "the" reference -- they are
-   * conflicting references, refused rather than arbitrated.
+   * The route-contract permission check for ARTIFACT references: prohibited
+   * is refused by name; a type the contract neither requires nor permits is
+   * refused (the table decides, never code-path accident); and one
+   * reference of each type -- the Handoff's Entity/Matter are singular, so
+   * two sources of one type cannot both be "the" reference -- they are
+   * conflicting references, refused rather than arbitrated. Opaque token
+   * entries are governed by `requiresEntityToken`/`requiresMatterToken`
+   * above, never by this artifact check.
    */
   const permitType = (type: HandoffSourceType, describe: string): string | null => {
     if (contract.prohibited.includes(type)) {
@@ -972,6 +1260,7 @@ export async function resolveHandoffSources(
   const slots: SourceSlot[] = [];
 
   for (const ref of extraction.refs) {
+    if (ref.kind === "token") continue; // identity transport, handled above and in pass 2 -- never an artifact
     if (ref.kind === "google") {
       // Permission first (no network); the full binding/type chain runs in
       // pass 3, once the Entity/Matter binding exists to check it against.
@@ -1009,104 +1298,47 @@ export async function resolveHandoffSources(
   }
 
   // ---- Pass 2: the canonical Entity/Matter binding ------------------------
-  const entitySource = slots.find((s): s is Extract<SourceSlot, { kind: "page" }> => s.kind === "page" && s.type === "entities");
-  const matterSource = slots.find((s): s is Extract<SourceSlot, { kind: "page" }> => s.kind === "page" && s.type === "matters");
-
+  // The binding is established ONLY from the opaque token entries this
+  // payload declares, resolved through the authorized operational stores
+  // (`resolveEntityMatterFromTokens`: the canonical Matters and Entities
+  // data sources -- NEVER the Isolated Sales Identity Resolution Registry,
+  // never a real-world identity mapping, and never a title search). The
+  // canonical `entities`/`matters` PAGES never establish it: they are
+  // artifact references that pass 3 cross-checks against this binding, so a
+  // page can only ever be REFUSED for disagreeing with it -- never read as
+  // a substitute for a token, never used to derive one.
+  const bindingRequired = handoffRouteRequiresEntityMatter(input.route.fromUnit, input.route.toUnit, input.contracts);
   let binding: HandoffSourceBinding;
-  if (legacyResolved) {
-    // Compatibility path, unchanged: the Handoff's own identity fields
-    // resolve to real, related records, so they are the binding and every
-    // entity/matter source must AGREE with them (validateSourcePage's
-    // per-type refusals below name the exact disagreement).
-    binding = {
-      entityId: legacyResolved.entityId,
-      matterId: legacyResolved.matterId,
-      entityToken: legacy.entityToken,
-      matterToken: legacy.matterToken,
-      matterStatus: legacyResolved.matterStatus,
-    };
+  if (!declaredEntityToken && !declaredMatterToken) {
+    if (bindingRequired) {
+      return refuse(
+        `route ${routeKey} needs an Entity/Matter binding and this Handoff's ${HANDOFF_SOURCES_PROPERTY} property declares no opaque token pair to establish it -- a canonical Entity/Matter page is never read as a substitute for a token, no Handoff property is consulted for one, and nothing is searched, titled, or inferred to fill the gap.`,
+      );
+    }
+    // A declared GENERIC route: it carries no binding at all, which is
+    // exactly what such a Handoff is meant to carry. Nothing is invented,
+    // and genericity was read from the contract above, never inferred from
+    // this payload's emptiness.
+    binding = { entityId: "", matterId: "", entityToken: "", matterToken: "", matterStatus: null };
   } else {
-    // Canonical source-based path: the record carries no legacy identity
-    // fields, so the binding is derived from its own exact sources -- the
-    // entity source's `Entity_ID`, the matter source's `Matter_ID`, and the
-    // relationship proof that the Matter belongs to that Entity. Nothing is
-    // searched, titled, or inferred to fill either side of the pair.
-    if (!entitySource && !matterSource) {
+    if (!declaredEntityToken || !declaredMatterToken) {
       return refuse(
-        `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property declares no canonical Entity/Matter source, and the Handoff carries no legacy Entity_Token/Matter_Token to bind its other sources against -- a Sources-enabled Handoff must establish its Entity/Matter binding from exact canonical references, and nothing is inferred to fill the gap.`,
+        `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property declares ${declaredEntityToken ? "an Entity token but no Matter token" : "a Matter token but no Entity token"} -- a Handoff's operational binding is one Entity/Matter pair, so half a pair establishes nothing and is refused rather than bound to whatever else happens to be on the record.`,
       );
     }
-    let entityId = "";
-    let matterId = "";
-    let entityToken = "";
-    let matterToken = "";
-    let matterStatus: string | null = null;
-
-    if (entitySource) {
-      entityToken = uniqueId(entitySource.page.properties?.Entity_ID);
-      if (!entityToken) {
-        return refuse(`Entity source ${entitySource.page.id} carries no Entity_ID -- the page cannot be established as this Handoff's operational Entity record.`);
-      }
-      entityId = entitySource.page.id;
-    }
-    if (matterSource) {
-      matterToken = uniqueId(matterSource.page.properties?.Matter_ID);
-      if (!matterToken) {
-        return refuse(`Matter source ${matterSource.page.id} carries no Matter_ID -- the page cannot be established as this Handoff's operational Matter record.`);
-      }
-      matterId = matterSource.page.id;
-      matterStatus = matterSource.page.properties?.Status?.select?.name ?? null;
-
-      // The relationship proof: the Matter source's own canonical Entity
-      // relation must be exactly the Entity source (when the Handoff names
-      // one). With no entity source on the Handoff, that same relation is
-      // what supplies the Entity side -- fetched BY ID (never searched) to
-      // read its Entity_ID, so both sides still come from exact canonical
-      // records rather than from any lookup.
-      const relations = relationIds(matterSource.page.properties?.Entity);
-      if (entitySource) {
-        if (relations.length !== 1 || relations[0] !== entityId) {
-          return refuse(
-            `Matter source ${matterId} carries Entity relation [${relations.join(", ") || "none"}] but this Handoff's Entity source is page ${entityId} -- the Matter source does not belong to that Entity, so the two sources cannot both be this Handoff's binding.`,
-          );
-        }
-      } else if (relations.length !== 1 || !relations[0]) {
-        return refuse(
-          `Matter source ${matterId} carries no single Entity relation ([${relations.join(", ") || "none"}]) -- with no Entity source on this Handoff, the Matter's own canonical Entity relation is the only thing that can establish the Entity side of the binding.`,
-        );
-      } else {
-        let related: NotionPage;
-        try {
-          related = await getPage(env, relations[0], input.access);
-        } catch (err) {
-          return refuse(
-            `the Entity page ${relations[0]} this Matter source relates to could not be read (${err instanceof Error ? err.message : String(err)}) -- an unreadable relation target is refused, never approximated by another record.`,
-          );
-        }
-        if (related.archived || related.inTrash) {
-          return refuse(`the Entity page ${relations[0]} this Matter source relates to is archived or in the trash -- only a live canonical record may be part of a binding.`);
-        }
-        entityToken = uniqueId(related.properties?.Entity_ID);
-        if (!entityToken) {
-          return refuse(`the Entity page ${relations[0]} this Matter source relates to carries no Entity_ID -- the relation target cannot be established as an operational Entity record.`);
-        }
-        entityId = related.id;
-      }
-    }
-
-    const carriesMatter = contract.required.includes("matters") || contract.optional.includes("matters");
-    const carriesEntity = contract.required.includes("entities") || contract.optional.includes("entities");
-    if (carriesMatter && !matterId) {
+    const resolved = await resolveEntityMatterFromTokens(env, declaredEntityToken, declaredMatterToken);
+    if (!resolved) {
       return refuse(
-        `the Handoff declares canonical sources but no canonical Matter source, and carries no legacy Matter_Token -- route ${routeKey} needs a Matter binding, and no search is made for one.`,
+        `the opaque token pair ${declaredEntityToken} / ${declaredMatterToken} this Handoff's ${HANDOFF_SOURCES_PROPERTY} property declares does not resolve to real, correctly-related Entity/Matter records in ENIG's operational stores -- a Handoff whose identity cannot be established is refused rather than bound to some other record.`,
       );
     }
-    if (carriesEntity && !entityId) {
-      return refuse(
-        `the Handoff declares canonical sources but no canonical Entity source, and carries no legacy Entity_Token -- route ${routeKey} needs an Entity binding, and no search is made for one.`,
-      );
-    }
-    binding = { entityId, matterId, entityToken, matterToken, matterStatus };
+    binding = {
+      entityId: resolved.entityId,
+      matterId: resolved.matterId,
+      entityToken: declaredEntityToken,
+      matterToken: declaredMatterToken,
+      matterStatus: resolved.matterStatus,
+    };
   }
 
   // ---- Pass 3: per-type validation against that binding -------------------
@@ -1122,15 +1354,11 @@ export async function resolveHandoffSources(
       if (validated.googleDoc) googleDoc = validated.googleDoc;
       continue;
     }
-    if (!legacyResolved && (slot.type === "entities" || slot.type === "matters")) {
-      // Already established as (or as half of) the binding in pass 2: the
-      // exact page id, a present `Entity_ID`/`Matter_ID`, and -- for the
-      // Matter -- the proven relationship to that Entity. Validating it
-      // against the binding it helped define would only restate that check;
-      // the sources list still records it.
-      sources.push({ type: slot.type, id: slot.page.id });
-      continue;
-    }
+    // Every artifact -- including a canonical `entities`/`matters` page --
+    // is validated against the token-derived binding. A page that disagrees
+    // with it (wrong `Entity_ID`/`Matter_ID`, or a Matter belonging to a
+    // different Entity) is refused by name; it can never redefine the
+    // binding it is checked against.
     const validated = await validateSourcePage(slot.type, slot.page, binding);
     if (!validated.ok) return refuse(validated.reason);
     sources.push({ type: slot.type, id: slot.page.id });
@@ -1183,21 +1411,23 @@ export async function resolveHandoffSources(
 
 /**
  * The receiving consumer's entry point for a Handoff's operational identity
- * context -- the ONE place a Unit gets an Handoff's Entity/Matter binding
- * (or its recorded legacy token values) instead of reading the Handoff's
- * `Entity_Token`/`Matter_Token` properties itself.
+ * context -- the ONE place a Unit gets an Handoff's Entity/Matter binding,
+ * so no consumer reads record properties or re-resolves identity itself.
  *
- * - A Handoff with NO `Sources` property resolves `legacy` with no fetch at
- *   all: the two token values come back exactly as recorded
- *   (`readLegacyHandoffTokens`), so legacy consumers behave byte-identically
- *   to before -- the closed-context contract downstream still treats them as
- *   opaque references, never as lookup keys.
  * - A Sources-enabled Handoff is fully resolved through
- *   `resolveHandoffSources` (exact pages, route contract, the binding
- *   relationship proof, lifecycle and approval validation) and the PROVED
- *   binding is returned: its `entityToken`/`matterToken` are the values the
- *   canonical records themselves carry, so a consumer never re-derives the
- *   Handoff's identity from record properties it reads itself.
+ *   `resolveHandoffSources` (route contract, the opaque token entries, their
+ *   resolution through the authorized operational stores, the exact artifact
+ *   pages, the binding relationship proof, lifecycle and approval
+ *   validation) and the PROVED binding is returned: its
+ *   `entityToken`/`matterToken` are the values the canonical records
+ *   themselves carry, so a consumer never re-derives the Handoff's identity
+ *   from anything it reads itself.
+ * - A Handoff with NO `Sources` property resolves `legacy` with no fetch at
+ *   all -- and ONLY on a route declared generic by its contract (a route
+ *   needing an Entity/Matter refuses instead, see `resolveHandoffSources`).
+ *   It carries no binding, so it returns empty token values: nothing is
+ *   read from the retired `Entity_Token`/`Matter_Token` properties, and
+ *   nothing is inferred to fill the gap.
  * - Any failure is a refusal with a non-sensitive reason (fail closed),
  *   which consumers report through their own existing paths.
  */
@@ -1234,8 +1464,11 @@ export async function resolveHandoffContextBinding(
   });
   if (!resolution.ok) return { ok: false, reason: resolution.reason };
   if (resolution.mode === "legacy") {
-    const legacy = readLegacyHandoffTokens(input.properties);
-    return { ok: true, mode: "legacy", entityToken: legacy.entityToken, matterToken: legacy.matterToken };
+    // Reachable ONLY for a route declared generic by its contract (a route
+    // needing an Entity/Matter never gets here -- it refuses above). Such a
+    // Handoff carries no binding, so this reports exactly that: empty token
+    // values, never a value read from the retired Handoff token properties.
+    return { ok: true, mode: "legacy", entityToken: "", matterToken: "" };
   }
   return {
     ok: true,

@@ -9,7 +9,7 @@ import { setActiveWorkId } from "../../sessionRouting";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
-import { readLegacyHandoffTokens, resolveHandoffContextBinding } from "../../handoffSources";
+import { resolveHandoffContextBinding, sourcesRichText } from "../../handoffSources";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
@@ -241,7 +241,7 @@ function buildFinancePromptParts(hatDefinition: string, universalRoleContract: s
  * closed-context contract.
  *
  * Identity arrives as the operational reference the Handoff carries -- the
- * recorded Entity_Token / Matter_Token on a legacy Handoff, or -- when the
+ * opaque Entity/Matter tokens a legacy Handoff's Sources payload declares, or -- when the
  * record declares canonical `Sources` -- the tokens its VALIDATED sources
  * prove (src/handoffSources.ts's resolveHandoffContextBinding, the one
  * resolution every consumer goes through; on a legacy Handoff that resolves
@@ -952,24 +952,38 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   }
 
   if (!state.matterToken && state.handoffId) {
-    // state.matterToken was cached from the Handoff's Matter_Token at pickup
-    // time and may simply have been unset then (a data gap on the source
-    // Handoff, not something this Hat can invent) -- re-read the live
-    // record once before giving up, so correcting it in Notion and
+    // state.matterToken was cached from the upstream Handoff's own opaque
+    // token entries at pickup time and may simply have been unset then (a
+    // data gap on the source Handoff, not something this Hat can invent) --
+    // re-read the live record once before giving up, so correcting it and
     // re-approving actually is the working retry path the blocked message
-    // below describes, rather than a permanent dead end.
+    // below describes, rather than a permanent dead end. The value comes from
+    // the Handoff's declared `Sources` through the ONE binding entry point
+    // (`resolveHandoffContextBinding`); the retired `Matter_Token` Handoff
+    // property is read nowhere, and nothing else is consulted to fill the gap.
     const live = await getPage(env, state.handoffId, workSessionContext(state)).catch((err) => {
       console.error(`Finance handleQuoteApproval: re-fetch of Handoff ${state.handoffId} failed`, err);
       return null;
     });
-    const liveMatterToken = live ? readLegacyHandoffTokens(live.properties).matterToken : "";
+    const liveMatterToken = live
+      ? await resolveHandoffContextBinding(env, {
+          properties: live.properties,
+          route: { fromUnit: "Strategy", toUnit: "Finance" },
+          access: workSessionContext(state),
+        })
+          .then((resolved) => (resolved.ok ? resolved.matterToken : ""))
+          .catch((err) => {
+            console.error(`Finance handleQuoteApproval: binding re-read of Handoff ${state.handoffId} failed`, err);
+            return "";
+          })
+      : "";
     if (liveMatterToken) {
       state.matterToken = liveMatterToken;
       await logActivity(env, {
-        entry: `Matter_Token recovered on retry: ${state.entityToken ?? state.handoffId}`,
+        entry: `Matter token recovered on retry: ${state.entityToken ?? state.handoffId}`,
         type: "Decision",
         area: "Finance",
-        decisionRationale: "Matter_Token was missing at pickup time but present on the Handoff's live record now -- recovered without re-deriving it.",
+        decisionRationale: "The Matter token was missing at pickup time but is declared on the Handoff's live Sources payload now -- recovered through the one binding resolution, without re-deriving it.",
         outcome: "Active",
       });
     }
@@ -978,16 +992,16 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
   if (!state.matterToken) {
     console.error(`Finance handleQuoteApproval: state.matterToken missing for handoff ${state.handoffId}`);
     await logActivity(env, {
-      entry: `Quote approval blocked — no Matter_Token on record: ${state.entityToken ?? state.handoffId}`,
+      entry: `Quote approval blocked — no Matter token on record: ${state.entityToken ?? state.handoffId}`,
       type: "Blocker",
       area: "Finance",
-      decisionRationale: "This work item has no Matter_Token, so the Finance -> Sales follow-up Handoff can't identify which Matter it's for.",
+      decisionRationale: "This work item has no Matter token, so the Finance -> Sales follow-up Handoff can't identify which Matter it's for.",
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(
       env,
       { ...state, hat: "Value-Based Pricing Assessor" },
-      `Quote approved, but I can't route it to Sales — this work item has no Matter_Token on record. Please check the Handoff for *${state.entityToken ?? state.handoffId}*, add the correct Matter_Token there, then retry (Approve again).`,
+      `Quote approved, but I can't route it to Sales — this work item has no Matter token on record. Please check the Handoff for *${state.entityToken ?? state.handoffId}*, add the correct opaque Matter token to its *Sources* payload, then retry (Approve again).`,
     );
     return state;
   }
@@ -1048,8 +1062,12 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       Status: select("Pending"),
       Reason: richText(`Value-based quote approved by Martin for ${state.matterToken}; ready for Draft Proposal preparation.`),
       "Expected Output": richText("Complete Draft Proposal presented to Martin for review and authorization."),
-      Entity_Token: richText(state.entityToken ?? ""),
-      Matter_Token: richText(state.matterToken ?? ""),
+      "Sources": sourcesRichText(
+        [
+          ...(state.entityToken ? [{ kind: "token" as const, tokenKind: "entity" as const, token: state.entityToken }] : []),
+          ...(state.matterToken ? [{ kind: "token" as const, tokenKind: "matter" as const, token: state.matterToken }] : []),
+        ],
+      ),
       "Verified Facts & Sources": richTextLong(combinedVerifiedFactsAndSources),
     },
     { entityToken: state.entityToken ?? "", matterToken: state.matterToken ?? "" },

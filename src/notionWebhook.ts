@@ -2,7 +2,14 @@ import type { Env, Unit } from "./types";
 import { systemContext } from "./access";
 import { getPage, plainText } from "./notion";
 import { runCheckHandoffs, unitsWithHandoffPickup } from "./checkHandoffs";
-import { extractHandoffSources, handoffRouteRequiresEntityMatter, readLegacyHandoffTokens, type HandoffSourceRouteContract } from "./handoffSources";
+import {
+  HANDOFF_SOURCES_PROPERTY,
+  HANDOFF_SOURCE_ROUTE_CONTRACTS,
+  extractHandoffSources,
+  handoffRouteRequiresEntityMatter,
+  handoffSourceRouteKey,
+  type HandoffSourceRouteContract,
+} from "./handoffSources";
 import type { UnitManifest } from "./units/unitManifest";
 
 /**
@@ -122,10 +129,10 @@ function routableUnits(manifests?: Partial<Record<Unit, UnitManifest>>): Set<str
 
 export type HandoffWebhookFilterResult =
   /**
-   * entityToken/matterToken are echoed only when the record carries the
-   * legacy token properties; a source-based or declared-generic Handoff is
-   * equally detectable without them (its identity is established later, by
-   * the discovery engine's own resolution -- never here).
+   * entityToken/matterToken are echoed only when the record's `Sources`
+   * payload declares them; a declared-generic Handoff is equally detectable
+   * without them (its -- deliberately absent -- binding is a contract fact,
+   * established nowhere, by nothing).
    */
   | { relevant: true; toUnit: string; entityToken?: string; matterToken?: string }
   | { relevant: false; reason: string };
@@ -140,16 +147,18 @@ export type HandoffWebhookFilterResult =
  * applies claimPendingHandoff's own live-Status idempotency gate) -- this
  * function exists only to avoid waking that engine for events that are
  * obviously not a relevant Handoff. It performs no identity resolution:
- * whether the record's operational reference (legacy tokens or canonical
- * `Sources`) actually resolves to real, related records is the discovery
- * engine's own fail-closed resolution, never a wake-up decision.
+ * whether the record's operational reference actually resolves to real,
+ * related records is the discovery engine's own fail-closed resolution,
+ * never a wake-up decision.
  *
- * A Handoff is detectable when it carries the legacy opaque tokens, when it
- * carries a usable `Sources` payload (its binding is then established by
- * discovery, not here), or when its route is declared generic (identity
- * tokens are not that route's currency at all). Everything else -- a Pending
- * Work Handoff with no operational reference of any kind -- is still not
- * relevant, exactly as before.
+ * A Handoff is detectable when it carries a usable `Sources` payload whose
+ * opaque token entries satisfy this route's contract (its binding is then
+ * established by discovery, not here), or when its route is declared
+ * generic (an Entity/Matter is not that route's currency at all).
+ * Everything else -- a Pending Work Handoff with no operational reference
+ * of any kind, a malformed declared `Sources`, or a declared payload
+ * missing a token this route's contract requires -- is not relevant, and
+ * the separate `Entity_Token`/`Matter_Token` properties are read nowhere.
  *
  * `manifests` and `contracts` are TEST SEAMs (see routableUnits above and
  * handoffRouteRequiresEntityMatter); production callers never pass them.
@@ -178,24 +187,42 @@ export function evaluateHandoffPageForWebhook(
   if (!routableUnits(manifests).has(toUnit)) {
     return { relevant: false, reason: `"To Unit" ("${toUnit || "(empty)"}") is missing or does not declare Handoff pickup on its Unit manifest` };
   }
-  // Operational reference: legacy tokens, a usable Sources payload, or a
-  // declared-generic route. Malformed Sources (extraction not ok) counts as
-  // no operational reference when the legacy tokens are also absent -- this
-  // gate still only decides whether to wake discovery, which reports the
-  // detail fail-closed on its own side.
+  // Operational reference: a usable `Sources` payload whose opaque token
+  // entries satisfy this route's contract, or a route declared generic by
+  // that contract. The separate `Entity_Token`/`Matter_Token` properties are
+  // read nowhere -- they carry no authority. This gate only decides whether
+  // to wake discovery; whether the declared tokens actually resolve to real,
+  // related records is discovery's own fail-closed resolution.
+  const fromUnit = plainText(page.properties["From Unit"]);
   const extraction = extractHandoffSources(page.properties);
   const carriesSources = extraction.ok && extraction.mode === "sources";
-  const legacy = readLegacyHandoffTokens(page.properties);
-  const routeIsGeneric = !handoffRouteRequiresEntityMatter(plainText(page.properties["From Unit"]), toUnit, contracts);
+  const routeIsGeneric = !handoffRouteRequiresEntityMatter(fromUnit, toUnit, contracts);
   if (!carriesSources && !routeIsGeneric) {
-    if (!legacy.entityToken) {
-      return { relevant: false, reason: "missing Entity_Token" };
-    }
-    if (!legacy.matterToken) {
-      return { relevant: false, reason: "missing Matter_Token" };
-    }
+    return {
+      relevant: false,
+      reason: `missing an operational Entity/Matter reference: the Handoff declares no usable "${HANDOFF_SOURCES_PROPERTY}" payload and route "${handoffSourceRouteKey(fromUnit, toUnit)}" is not declared generic`,
+    };
   }
-  return { relevant: true, toUnit, entityToken: legacy.entityToken || undefined, matterToken: legacy.matterToken || undefined };
+  if (carriesSources) {
+    const contract = (contracts ?? HANDOFF_SOURCE_ROUTE_CONTRACTS)[handoffSourceRouteKey(fromUnit, toUnit)];
+    const tokens = extraction.tokens;
+    // Uncontracted routes state no token requirement here: discovery reports
+    // the missing contract fail-closed on its own side, through its own
+    // channel.
+    if (contract?.requiresEntityToken && !tokens.entityToken) {
+      return { relevant: false, reason: `missing the opaque Entity token this route's contract requires in "${HANDOFF_SOURCES_PROPERTY}"` };
+    }
+    if (contract?.requiresMatterToken && !tokens.matterToken) {
+      return { relevant: false, reason: `missing the opaque Matter token this route's contract requires in "${HANDOFF_SOURCES_PROPERTY}"` };
+    }
+    return {
+      relevant: true,
+      toUnit,
+      ...(tokens.entityToken ? { entityToken: tokens.entityToken } : {}),
+      ...(tokens.matterToken ? { matterToken: tokens.matterToken } : {}),
+    };
+  }
+  return { relevant: true, toUnit };
 }
 
 /**

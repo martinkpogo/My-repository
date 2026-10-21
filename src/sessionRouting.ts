@@ -41,7 +41,7 @@ export const SALES_DIRECT_ENTRY_PAUSED = true;
 // Handoffs are turned away regardless of this flag, LOG-987).
 // Unlike SALES_DIRECT_ENTRY_PAUSED above, this never
 // touches real client identity -- it only ever processes what's already
-// de-identified on a Handoff record (Entity_Token/Matter_Token, sanitized
+// de-identified on a Handoff record (Entity/Matter token, sanitized
 // context) -- so the AI-provider personal-data concern that keeps direct
 // entry paused does not apply here. Kept false (active) independently of
 // direct entry's pause state.

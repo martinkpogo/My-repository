@@ -27,7 +27,7 @@ import {
   updatePage,
 } from "../../notion";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
-import { resolveHandoffContextBinding } from "../../handoffSources";
+import { resolveHandoffContextBinding, sourcesRichText, type HandoffSourceRouteContract } from "../../handoffSources";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, sendOperationsMessage, withWorkspaceTypingIndicator } from "../../telegram";
@@ -448,7 +448,7 @@ export async function handleIncomingEnquiry(env: Env, state: WorkState, text: st
   // real-world identity (that is the isolated Sales Executive project's job).
   //
   // The only sanctioned way this Worker identifies an Entity is the
-  // token-safe mechanism in identityResolution.ts (Entity_Token/Matter_Token
+  // token-safe mechanism in identityResolution.ts (the opaque Entity/Matter
   // -> page IDs, deterministic, never a guess). A raw enquiry carries no
   // token, so there is nothing for that mechanism to resolve. Fail closed
   // here: no identity query, no Registry fallback, no invented record.
@@ -1051,7 +1051,12 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
  * HandoffContextContract's own rule, they are reference identifiers only,
  * never lookup keys into a controlled database.
  */
-export async function resolveCallNotesHandoffContext(env: Env, handoffId: string): Promise<HandoffContextEvaluationResult> {
+export async function resolveCallNotesHandoffContext(
+  env: Env,
+  handoffId: string,
+  /** The same test seam the call-notes consumption path takes; production callers omit it. */
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
+): Promise<HandoffContextEvaluationResult> {
   try {
     const handoff = await getPage(env, handoffId, workSessionReadContext());
     const sanitizedContext = plainText(handoff.properties["Verified Facts & Sources"]);
@@ -1059,6 +1064,7 @@ export async function resolveCallNotesHandoffContext(env: Env, handoffId: string
       properties: handoff.properties,
       route: { fromUnit: plainText(handoff.properties["From Unit"]), toUnit: plainText(handoff.properties["To Unit"]) },
       access: workSessionReadContext(),
+      ...(contracts ? { contracts } : {}),
     });
     if (!binding.ok) {
       return {
@@ -1103,7 +1109,7 @@ export async function resolveCallNotesHandoffContext(env: Env, handoffId: string
  * providers in this environment today (pre-existing, out of scope; see
  * this file's own test suite for that constraint's documentation) and so
  * cannot be driven through in a test. Resolves the Handoff's own
- * Entity_Token/Matter_Token to their real page IDs (now authorized, per
+ * opaque Entity/Matter tokens to their real page IDs (now authorized, per
  * the identity architecture decision recorded in Notion) and mirrors
  * handleCallNotes's own Qualified branch exactly -- entityName/matterName
  * are set to the tokens themselves, never a real name. A token that
@@ -1123,7 +1129,7 @@ export async function presentQualifiedCallNotesForApproval(
   if (!resolved) {
     await sendOperationsMessage(
       env,
-      `⚠️ Sales qualification Qualified for ${displayToken}, but Lead→Prospect approval couldn't be presented -- Entity_Token/Matter_Token did not resolve to a real, related Entity/Matter record. Needs manual handling.`,
+      `⚠️ Sales qualification Qualified for ${displayToken}, but Lead→Prospect approval couldn't be presented -- the Entity/Matter tokens did not resolve to a real, related Entity/Matter record. Needs manual handling.`,
     ).catch((err) => console.error("Failed to send Lead-to-Prospect-not-presented Operations notice", err));
     state.stage = "handoff_closed_qualification_complete";
     return state;
@@ -1179,7 +1185,7 @@ export async function presentQualifiedCallNotesForApproval(
  * handleCallNotes uses) rather than only writing the result back to the
  * Handoff for the isolated project to complete separately. Per the
  * identity architecture decision recorded in Notion (Sept 2026), Runtime
- * is authorized to resolve a Handoff's own Entity_Token/Matter_Token to
+ * is authorized to resolve a Handoff's own opaque Entity/Matter tokens to
  * their real operational page IDs directly (resolveEntityMatterFromTokens)
  * -- the premise that blocked this (no real Entity/Matter page access) no
  * longer holds. entityName/matterName are set to the tokens themselves,
@@ -1190,7 +1196,19 @@ export async function presentQualifiedCallNotesForApproval(
  *
  * Invoked only by checkHandoffs.ts's Sales discovery, never directly.
  */
-export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _skills: ResolvedActionSkillSet): Promise<WorkState> {
+export async function handleCallNotesHandoffPickup(
+  env: Env,
+  state: WorkState,
+  _skills: ResolvedActionSkillSet,
+  /**
+   * Test seam for the direct-page Sources path, mirroring
+   * `retrieveAndConsumeCallNotes`'s own: a route-contract table to resolve
+   * the Handoff against instead of the production one. Production callers
+   * (there is currently no production call site -- LOG-987 retires the
+   * Runtime call-notes pickup) never pass it.
+   */
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
+): Promise<WorkState> {
   const claim = await claimPendingHandoff(env, state.handoffId!, workSessionContext(state));
   if (!claim.claimed) {
     console.error(`Sales call-notes pickup: refused -- ${claim.reason}`);
@@ -1220,7 +1238,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
   state.entryType = "handoff_pickup";
 
   await startWorkStatus(env, state, CALL_NOTES_STATUS_HAT, workStatusHeader(CALL_NOTES_STATUS_HAT, state, "picking up call notes"), "Reading the call-notes Handoff");
-  const evalResult = await resolveCallNotesHandoffContext(env, state.handoffId!);
+  const evalResult = await resolveCallNotesHandoffContext(env, state.handoffId!, contracts);
   if (!evalResult.success) {
     console.error(`Sales call-notes pickup: context evaluation failed for handoff ${state.handoffId}: ${evalResult.insufficientContext.reason}`);
     await finishWorkStatus(env, state, "⛔ Held -- the reason was sent to Operations.", "failed");
@@ -1267,6 +1285,7 @@ export async function handleCallNotesHandoffPickup(env: Env, state: WorkState, _
     state.handoffId!,
     { entityToken: contract.entityToken, matterToken: contract.matterToken ?? "" },
     workSessionContext(state),
+    contracts,
   );
   if (!consumption.ok) {
     console.error(`Sales call-notes pickup: ${consumption.reason}`);
@@ -1613,8 +1632,10 @@ export async function handleInterventionText(env: Env, state: WorkState, text: s
       "Acceptance Criteria": richText(
         "A diagnosis following Symptom -> Problem -> Cause -> Constraint -> Consequence, with either a defensible proposed intervention or an explicit Held status naming the specific blocker.",
       ),
-      Entity_Token: richText(identityTokens.entityToken),
-      Matter_Token: richText(identityTokens.matterToken),
+      "Sources": sourcesRichText([
+        { kind: "token", tokenKind: "entity", token: identityTokens.entityToken },
+        { kind: "token", tokenKind: "matter", token: identityTokens.matterToken },
+      ]),
       Assumptions: richText(
         "No disclosed budget or willingness-to-pay figure has been provided, and none should be used as a pricing input downstream.",
       ),

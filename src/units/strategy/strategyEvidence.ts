@@ -5,7 +5,7 @@ import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { callNotesEvidenceText, extractCallNotesReference, readApprovalRecord } from "../../records/callNotes/callNotesRecord";
 import { stripCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { parseRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
-import { resolveHandoffSources, readGoogleDocSourceContent, type ResolvedCallNotesSource, type ResolvedGoogleDocSource } from "../../handoffSources";
+import { type HandoffSourceRouteContract, resolveHandoffSources, readGoogleDocSourceContent, type ResolvedCallNotesSource, type ResolvedGoogleDocSource } from "../../handoffSources";
 
 /**
  * Strategy's evidence-retrieval order (ENIG Core Structure v3.0) and its
@@ -197,6 +197,12 @@ export async function readApprovedCallNotesEvidence(
   handoffProperties: Record<string, any>,
   tokens: { entityToken: string; matterToken: string },
   access: AccessContext,
+  /**
+   * Test seam for the direct-page Sources path, mirroring every other entry
+   * into resolveHandoffSources: a route-contract table to resolve against
+   * instead of the production one. Production callers omit it.
+   */
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
 ): Promise<StrategyCallNotesEvidence> {
   const refuse = (detail: string): StrategyCallNotesEvidence => ({ ok: false, reason: detail });
 
@@ -222,6 +228,7 @@ export async function readApprovedCallNotesEvidence(
       toUnit: plainText(handoffProperties["To Unit"]),
     },
     access,
+    ...(contracts ? { contracts } : {}),
   });
   if (!sources.ok) return refuse(sources.reason);
 
@@ -243,7 +250,7 @@ export async function readApprovedCallNotesEvidence(
   const resolved = await resolveEntityMatterFromTokens(env, tokens.entityToken, tokens.matterToken);
   if (!resolved) {
     return refuse(
-      `the Handoff's Entity_Token "${tokens.entityToken || "(empty)"}" / Matter_Token "${tokens.matterToken || "(empty)"}" did not resolve to a real, related Entity/Matter record, so the Call Notes record's Entity and Matter relations cannot be verified -- without that check any record would do.`,
+      `the Handoff's Entity token "${tokens.entityToken || "(empty)"}" / Matter token "${tokens.matterToken || "(empty)"}" did not resolve to a real, related Entity/Matter record, so the Call Notes record's Entity and Matter relations cannot be verified -- without that check any record would do.`,
     );
   }
 

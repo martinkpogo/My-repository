@@ -19,7 +19,15 @@ import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, w
 import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, readCallNotesSourceEvidence, readGoogleDocSourceEvidence, strategyClarificationReason } from "./strategyEvidence";
-import { extractHandoffSources, resolveHandoffContextBinding, resolveHandoffSources, sourcesRichText, type HandoffSourceBinding, type HandoffSourcesResolution } from "../../handoffSources";
+import {
+  extractHandoffSources,
+  resolveHandoffContextBinding,
+  resolveHandoffSources,
+  sourcesRichText,
+  type HandoffSourceBinding,
+  type HandoffSourceWriteEntry,
+  type HandoffSourcesResolution,
+} from "../../handoffSources";
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
@@ -169,7 +177,7 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
  * closed-context contract Finance uses -- following the governed evidence
  * order (Handoff evidence, then approved Call Notes read-only, then
  * Clarification Needed for a fact still unresolved; see
- * strategyEvidence.ts). Identity is read as the Entity_Token / Matter_Token
+ * strategyEvidence.ts). Identity is read as the opaque Entity/Matter token
  * the sending Unit embedded on the Handoff, never a real Name -- this Hat
  * never resolves those tokens by traversing or discovering unrelated
  * records.
@@ -220,11 +228,17 @@ export async function resolveStrategyHandoffContext(
 
     // ---- Step 0: the Handoff's identity binding + direct-page Sources -----
     // The Handoff's operational identity comes from ONE resolution -- never
-    // from this Unit reading the `Entity_Token`/`Matter_Token` properties for
-    // itself. A Handoff with no `Sources` property resolves `legacy` with no
-    // fetch at all: the recorded token values, exactly as the compatibility
-    // read (src/handoffSources.ts's readLegacyHandoffTokens) returns them,
-    // and the evidence order below runs exactly as it always has. A
+    // from this Unit reading the retired `Entity_Token`/`Matter_Token`
+    // properties (deleted from the live schema; written and read nowhere).
+    // That resolution takes the opaque token entries from the Handoff's own
+    // `Sources` payload and resolves them through the authorized operational
+    // stores, so a pair that cannot be established is refused rather than
+    // inferred. A Handoff with no `Sources` property establishes nothing: it
+    // resolves `legacy` only if its route contract declares the route
+    // generic, in which case it carries no Entity/Matter binding at all and
+    // nothing is invented to fill that gap -- while the evidence order below
+    // runs exactly as it always has for the free-text reference it still
+    // declares. A
     // SOURCES-ENABLED Handoff has every reference resolved and validated
     // here FIRST -- the exact page fetched by id (never a database search),
     // its real parent database, the route contract, the Entity/Matter
@@ -956,7 +970,7 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
       resolvedMatterId = resolved.matterId;
       matterStatus = resolved.matterStatus;
     } else {
-      pickupDefects.push(`Matter_Token '${state.matterToken}' does not resolve to a related Matter`);
+      pickupDefects.push(`the Matter token '${state.matterToken}' does not resolve to a related Matter`);
     }
   }
   if (pickupDefects.length > 0) {
@@ -1453,8 +1467,10 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
         "Required Next Action": richText(pending.requiredNextAction),
         "Expected Output": richText(pending.expectedOutput),
         "Acceptance Criteria": richText(pending.acceptanceCriteria),
-        Entity_Token: richText(state.entityToken ?? ""),
-        Matter_Token: richText(state.matterToken ?? ""),
+        "Sources": sourcesRichText([
+          ...(state.entityToken ? [{ kind: "token" as const, tokenKind: "entity" as const, token: state.entityToken }] : []),
+          ...(state.matterToken ? [{ kind: "token" as const, tokenKind: "matter" as const, token: state.matterToken }] : []),
+        ]),
         Assumptions: richText(pending.assumptions.slice(0, 1900)),
         "Open Questions": richText(pending.openQuestions.slice(0, 1900)),
         "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
@@ -2158,49 +2174,55 @@ async function reviseStrategyProposal(
 
 /**
  * The canonical `Sources` payload for the Strategy -> Finance Handoff that
- * Martin's approval commits: the exact canonical Entity and Matter pages
- * this Handoff's identity travels on, plus -- when the originating Sales ->
- * Strategy Handoff declares one -- the SAME canonical Call Notes reference,
- * forwarded.
+ * Martin's approval commits: the two OPAQUE operational Entity/Matter tokens
+ * this Work operates under -- the Handoff's identity transport -- plus, when
+ * the originating Sales -> Strategy Handoff declares one, the SAME canonical
+ * Call Notes reference, forwarded.
  *
- * Every URL here is an exact direct-page link built from a resolved page
- * id, never a title, a slug, or any other identifying detail (the
- * identity-write boundary: real identity may be read while preparing a
- * Handoff, but only tokens or canonical page references may be written to
- * one). The Entity/Matter pages come from `resolveEntityMatterFromTokens`
- * -- the approved token-to-canonical-record resolution this Unit already
- * performs at pickup -- and the forwarded Call Notes reference is the
- * upstream Handoff's own declared page, re-validated through
- * `resolveHandoffSources` on its own route before it travels. Nothing is
- * copied from the Call Notes record's CONTENT, and no reference is
+ * The tokens travel verbatim and are never resolved to canonical
+ * Entity/Matter pages here: nothing derives a token from a page link, and no
+ * Entity/Matter page is required merely to transport one. Resolution (through
+ * ENIG's authorized operational stores) is the receiving side's job, at
+ * pickup, in `resolveHandoffSources` -- a pair that does not resolve to real,
+ * correctly-related records is refused there, fail-closed, with no consumer
+ * ever acting on it. A token pair this Work does not have throws HERE instead
+ * of writing a Handoff with no identity at all.
+ *
+ * The forwarded Call Notes URL is an exact direct-page link built from the
+ * validated page id, never a title, a slug, or any other identifying detail
+ * (the identity-write boundary: real identity may be read while preparing a
+ * Handoff, but only opaque tokens or canonical page references may be written
+ * to one). It is the upstream Handoff's own declared page, re-validated
+ * through `resolveHandoffSources` on its own route before it travels.
+ * Nothing is copied from the Call Notes record's CONTENT, and no reference is
  * fabricated, inferred, or resolved by title.
  *
- * Fails closed deliberately: an unresolvable token pair, or an upstream
- * `Sources` declaration that cannot be extracted or re-validated, THROWS --
- * the approval's existing catch turns that into the established safe
- * failure ("Couldn't create the Handoff to Finance -- please try approving
- * again.") with no Handoff written, rather than committing one whose
- * canonical identity or evidence reference could not be established. A
- * legacy upstream Handoff (no `Sources` property) simply carries no Call
- * Notes reference: its free-text convention remains its own transport and
- * is never upgraded into a canonical link here.
+ * Fails closed deliberately: an upstream `Sources` declaration that cannot be
+ * extracted or re-validated THROWS -- the approval's existing catch turns
+ * that into the established safe failure ("Couldn't create the Handoff to
+ * Finance -- please try approving again.") with no Handoff written, so a
+ * downstream Handoff is never created when a required upstream reference is
+ * invalid or unverifiable. A legacy upstream Handoff (no `Sources` property)
+ * simply carries no Call Notes reference: its free-text convention remains
+ * its own transport and is never upgraded into a canonical link here.
  *
- * Exported for its own tests only (the same pattern as
- * `readLegacyHandoffTokens`); no other module calls it.
+ * Exported for its own tests only; no other module calls it.
  */
-export async function buildStrategyFinanceHandoffSources(env: Env, state: WorkState): Promise<string[]> {
+export async function buildStrategyFinanceHandoffSources(env: Env, state: WorkState): Promise<HandoffSourceWriteEntry[]> {
   const entityToken = state.entityToken ?? "";
   const matterToken = state.matterToken ?? "";
-  const binding = await resolveEntityMatterFromTokens(env, entityToken, matterToken);
-  if (!binding) {
+  if (!entityToken || !matterToken) {
     throw new Error(
-      `the Handoff's Entity/Matter tokens (${entityToken || "(none)"}/${matterToken || "(none)"}) do not resolve to their canonical records -- a Finance Handoff is never written without an established canonical identity`,
+      `this Work carries ${entityToken ? "an Entity" : "no Entity"} token and ${matterToken ? "a Matter" : "no Matter"} token -- a Finance Handoff is never written without an established operational identity`,
     );
   }
-  const sources = [canonicalPageUrl(binding.entityId), canonicalPageUrl(binding.matterId)];
+  const sources: HandoffSourceWriteEntry[] = [
+    { kind: "token", tokenKind: "entity", token: entityToken },
+    { kind: "token", tokenKind: "matter", token: matterToken },
+  ];
   if (state.handoffId) {
     const callNotesUrl = await resolveUpstreamCallNotesSourceUrl(env, state, { entityToken, matterToken });
-    if (callNotesUrl) sources.push(callNotesUrl);
+    if (callNotesUrl) sources.push({ kind: "artifact", url: callNotesUrl });
   }
   return sources;
 }
@@ -2398,15 +2420,13 @@ export async function handleInterventionApproval(
     const verifiedFactsForFinance = upstreamCommercialValueEvidence
       ? `${strategyBoundaryBlock}\n\n${upstreamCommercialValueEvidence}`
       : strategyBoundaryBlock;
-    // Canonical identity references for the Finance Handoff (LOG-1140): the
-    // exact Entity/Matter pages this Handoff's tokens resolve to, plus the
-    // upstream Sales -> Strategy Handoff's own canonical Call Notes
-    // reference when it carries a validated one -- resolved BEFORE the
-    // write and failing closed, so no Handoff is ever committed whose
-    // canonical identity or evidence reference could not be established.
-    // The token properties below are still written alongside: Sources is
-    // the canonical reference, the tokens remain the compatibility
-    // transport, and both must agree (checked fail-closed at pickup).
+    // Operational identity for the Finance Handoff (LOG-1149): the two
+    // opaque Entity/Matter tokens travel as `Sources` token entries -- the
+    // one identity transport now -- alongside the upstream Sales -> Strategy
+    // Handoff's own canonical Call Notes reference when it carries a
+    // validated one. The upstream declaration is re-validated BEFORE the
+    // write and fails closed, so no Handoff is committed whose evidence
+    // reference could not be established.
     const financeHandoffSources = await buildStrategyFinanceHandoffSources(env, state);
     const { page: handoff } = await createHandoff(
       env,
@@ -2428,9 +2448,7 @@ export async function handleInterventionApproval(
         "Acceptance Criteria": richText(
           "Approved intervention preserved; approved scope preserved; approved timeline considered; value-based pricing applied; budget/WTP not used as pricing basis; no strategic redesign; no material substitution; pricing assumptions explicit; currency correct.",
         ),
-        Entity_Token: richText(state.entityToken ?? ""),
-        Matter_Token: richText(state.matterToken ?? ""),
-        Sources: sourcesRichText(financeHandoffSources),
+        "Sources": sourcesRichText(financeHandoffSources),
         Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
         "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
         "Verified Facts & Sources": richTextLong(verifiedFactsForFinance),

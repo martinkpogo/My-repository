@@ -60,7 +60,7 @@ export interface ResolvedEntityMatterIdentity {
 
 /**
  * Resolves the real Entity/Matter page IDs behind a Handoff's own
- * Entity_Token/Matter_Token. Authorized by the identity architecture
+ * Entity/Matter token. Authorized by the identity architecture
  * decision recorded in Notion (Sept 2026): real-world identity now lives
  * exclusively in the separate Identity Resolution Registry, which Runtime
  * never touches; the operational Entity/Matter records themselves no

@@ -118,7 +118,7 @@ export function extractCallNotesReference(
 /**
  * Reads the located Call Notes record's own registry fields for validation.
  *
- * `entity`/`matter` carry the Handoff's `Entity_Token`/`Matter_Token`, which
+ * `entity`/`matter` carry the Handoff's opaque Entity/Matter tokens, which
  * is what the binding gate established the record's relations ARE: the
  * relations were compared to the pages those tokens resolve to, so the tokens
  * are this record's own Entity and Matter references by that check, and they

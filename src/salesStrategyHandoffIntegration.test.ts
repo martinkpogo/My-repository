@@ -475,8 +475,11 @@ test("Sales -> Strategy seam: the real writer's Handoff record is claimed and re
   assert.equal(selectName(createdProps["From Unit"]), "Sales");
   assert.equal(selectName(createdProps["To Unit"]), "Strategy");
   assert.equal(selectName(createdProps.Status), "Pending", "a new Handoff must be Pending");
-  assert.equal(plainJoined(createdProps.Entity_Token), "E-47", "the writer must embed the Entity token");
-  assert.equal(plainJoined(createdProps.Matter_Token), "M-12", "the writer must embed the Matter token");
+  const sourceContents = (createdProps.Sources?.rich_text ?? []).map((item: any) => item.text?.content ?? item.plain_text ?? "");
+  assert.ok(sourceContents.includes("token:entity:E-47"), "the writer must embed the Entity token as a link-less token entry in Sources");
+  assert.ok(sourceContents.includes("token:matter:M-12"), "the writer must embed the Matter token as a link-less token entry in Sources");
+  assert.equal(createdProps.Entity_Token, undefined, "the retired Entity_Token Handoff property is written nowhere");
+  assert.equal(createdProps.Matter_Token, undefined, "the retired Matter_Token Handoff property is written nowhere");
   assert.equal(afterSales.handoffId, CREATED_HANDOFF_ID, "the Work must track the created Handoff");
   assert.equal(afterSales.stage, "awaiting_strategy");
   assert.equal(afterSales.pendingHandoffAutoCheck, true, "the existing queue continuation must be armed");

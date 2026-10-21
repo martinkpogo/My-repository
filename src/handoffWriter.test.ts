@@ -121,8 +121,8 @@ function validProperties(overrides: Record<string, unknown> = {}) {
     "To Unit": select("Finance"),
     Status: select("Pending"),
     Reason: richText("Approved intervention ready for pricing."),
-    Entity_Token: richText("E-20"),
-    Matter_Token: richText("MAT-20"),
+    // No Entity_Token/Matter_Token: those Handoff properties no longer
+    // exist, and no fixture writes what production reads nowhere.
     "Verified Facts & Sources": richText("Sanitized business context only."),
     ...overrides,
   };
@@ -130,13 +130,25 @@ function validProperties(overrides: Record<string, unknown> = {}) {
 
 // --- Valid cases ---------------------------------------------------------
 
-test("createHandoff: a token-only Handoff succeeds", async (t) => {
+test("createHandoff: a token-only Handoff succeeds -- the pair travels in Sources, never as a Handoff property", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  const { page, sourceBoundaryAttestation } = await createHandoff(env, validProperties(), baseIdentity, createAccess(env));
+  const { page, sourceBoundaryAttestation } = await createHandoff(
+    env,
+    validProperties({ Sources: sourcesProperty([]) }),
+    baseIdentity,
+    createAccess(env),
+  );
   assert.strictEqual(page.id, "page-1");
   assert.strictEqual(calls.length, 1);
-  assert.strictEqual(calls[0].body.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
+  const written = calls[0].body.properties;
+  assert.strictEqual(
+    written.Sources.rich_text.map((item: any) => item.text.content).join("\n"),
+    "token:entity:E-20\ntoken:matter:MAT-20",
+    "the opaque pair is the whole payload, as link-less rich text",
+  );
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(written, "Entity_Token"), false, "no token property is written");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(written, "Matter_Token"), false);
   assert.strictEqual(sourceBoundaryAttestation.handoffId, "page-1");
   assert.strictEqual(sourceBoundaryAttestation.checked, true);
   assert.deepStrictEqual(sourceBoundaryAttestation.identityFieldsChecked, []);
@@ -453,6 +465,37 @@ test("parseSourceBoundaryMarker: missing, Failed, incomplete, malformed, and unb
   assert.strictEqual(parseSourceBoundaryMarker(passedMarker, { ...expected, matterToken: "MAT-99" }).ok, false);
 });
 
+test("buildSourceBoundaryMarker: canonical sources with NO identity tokens bind the marker to those sources and carry only the content checks -- a receiver that resolved different sources refuses it", () => {
+  const marker = buildSourceBoundaryMarker(
+    { entityToken: "", matterToken: "" },
+    "Passed",
+    [],
+    { sourceIds: [CN_SOURCES_PAGE_ID, ENTITY_SOURCES_PAGE_ID] },
+  );
+  assert.ok(!/entity=/.test(marker), "no identity binding is invented for a write that carried none");
+  assert.ok(!/matter=/.test(marker), "no identity binding is invented for a write that carried none");
+  assert.ok(
+    marker.includes(`refs=${[CN_SOURCES_PAGE_ID, ENTITY_SOURCES_PAGE_ID].sort().join(",")}`),
+    "the marker binds to the exact canonical references",
+  );
+  const parsed = parseSourceBoundaryMarker(`Reason text before it. ${marker}`, {
+    handoffId: "page-1",
+    sourceIds: [ENTITY_SOURCES_PAGE_ID, CN_SOURCES_PAGE_ID],
+  });
+  if (!parsed.ok) assert.fail(`the receiver's refs-form parse must accept this marker: ${parsed.reason}`);
+  assert.deepStrictEqual([...parsed.attestation.checks].sort(), [...CONTENT_CHECKS_ONLY].sort());
+  assert.strictEqual(
+    parseSourceBoundaryMarker(marker, { handoffId: "page-1", sourceIds: [CN_SOURCES_PAGE_ID] }).ok,
+    false,
+    "a marker bound to other references than this receiver validated is unbound evidence",
+  );
+  assert.strictEqual(
+    parseSourceBoundaryMarker(marker, { handoffId: "page-1", entityToken: "E-20", matterToken: "MAT-20" }).ok,
+    false,
+    "a refs-form marker is never accepted by a receiver that presents tokens instead of the same references",
+  );
+});
+
 // --- The Sources property (Phase 2: writable, fail-closed validation) ------
 //
 // The live Handoffs database carries Sources as rich text (the schema change
@@ -465,8 +508,13 @@ test("parseSourceBoundaryMarker: missing, Failed, incomplete, malformed, and unb
 // read-side in resolveHandoffSources, fail-closed at pickup.
 
 const SOURCES_URL = `https://www.notion.so/Call-Notes-CN-007-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`;
+/** A Sources payload: the opaque token pair the route requires, plus its artifacts. */
 const SOURCES_PROPERTY = {
-  rich_text: [{ type: "text", text: { content: SOURCES_URL, link: { url: SOURCES_URL } } }],
+  rich_text: [
+    { type: "text", text: { content: "token:entity:E-20", link: null } },
+    { type: "text", text: { content: "token:matter:MAT-20", link: null } },
+    { type: "text", text: { content: SOURCES_URL, link: { url: SOURCES_URL } } },
+  ],
 };
 
 test("createHandoff (Sales -> Strategy): a valid Sources payload is written -- the sent payload carries the Sources property with its link", async (t) => {
@@ -475,8 +523,13 @@ test("createHandoff (Sales -> Strategy): a valid Sources payload is written -- t
   const { page } = await createHandoff(env, salesToStrategyProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env));
   assert.strictEqual(page.id, "page-1");
   assert.strictEqual(calls.length, 1);
-  const written = calls[0].body.properties.Sources?.rich_text?.[0];
+  const written = calls[0].body.properties.Sources?.rich_text?.find((item: any) => item.text?.link?.url);
   assert.strictEqual(written?.text?.link?.url, SOURCES_URL, "the Sources reference travels verbatim with its link");
+  assert.strictEqual(
+    calls[0].body.properties.Sources.rich_text.map((item: any) => item.text.content).slice(0, 2).join(","),
+    "token:entity:E-20,token:matter:MAT-20",
+    "the opaque pair travels with it",
+  );
 });
 
 test("updateHandoff: a lifecycle update may carry Sources -- but only with its contracted route recorded on the payload", async (t) => {
@@ -485,22 +538,25 @@ test("updateHandoff: a lifecycle update may carry Sources -- but only with its c
   await updateHandoff(env, "page-1", salesToStrategyProperties({ Sources: SOURCES_PROPERTY }), lifecycleAccess("page-1"));
   assert.ok(calls.length >= 1);
   const update = calls.find((c) => c.method === "PATCH");
-  assert.strictEqual(update?.body?.properties?.Sources?.rich_text?.[0]?.text?.link?.url, SOURCES_URL);
+  assert.strictEqual(
+    update?.body?.properties?.Sources?.rich_text?.find((item: any) => item.text?.link?.url)?.text?.link?.url,
+    SOURCES_URL,
+  );
 });
 
 test("createHandoff: Sources on an uncontracted route is refused outright -- zero Notion calls", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  // A Finance -> Sales payload: a real route, but one with no Handoff
+  // A Finance -> Strategy payload: a real route, but one with no Handoff
   // source route contract -- which routes carry sources is an explicit
-  // contract decision, never guessed. (Strategy -> Finance WAS this case
-  // until LOG-1140 contracted it; an uncontracted route is exercised on
-  // one that still has no contract.)
+  // contract decision, never guessed. (Finance -> Sales WAS this case until
+  // its identity requirement was added; an uncontracted route is exercised
+  // on one that still has no contract.)
   await assert.rejects(
     () =>
       createHandoff(
         env,
-        validProperties({ "From Unit": select("Finance"), "To Unit": select("Sales"), Sources: SOURCES_PROPERTY }),
+        validProperties({ "From Unit": select("Finance"), "To Unit": select("Strategy"), Sources: SOURCES_PROPERTY }),
         baseIdentity,
         createAccess(env),
       ),
@@ -526,10 +582,11 @@ test("createHandoff (Strategy -> Finance): the contracted Sources payload is wri
   assert.strictEqual(page.id, "page-1");
   const create = calls.find((c) => c.method === "POST" && c.body?.properties?.Sources);
   assert.ok(create, "the Handoff must be created with its Sources payload");
-  const written = create.body.properties.Sources.rich_text.map((item: any) => item.text.link.url);
-  assert.deepStrictEqual(written, [entityUrl, matterUrl, callNotesUrl], "every canonical reference travels verbatim with its link");
-  assert.strictEqual(create.body.properties.Entity_Token.rich_text[0].text.content, "E-20", "the legacy token transport is retained alongside Sources");
-  assert.strictEqual(create.body.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
+  const entries = create.body.properties.Sources.rich_text.map((item: any) => item.text.content);
+  assert.deepStrictEqual(entries, ["token:entity:E-20", "token:matter:MAT-20", entityUrl, matterUrl, callNotesUrl],
+    "the opaque pair rides first, and every canonical reference travels verbatim with its link");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(create.body.properties, "Entity_Token"), false, "the retired property is written nowhere");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(create.body.properties, "Matter_Token"), false);
   // Tokens were supplied, so this write honestly attests all five checks.
   assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
 });
@@ -579,7 +636,7 @@ test("createHandoff: malformed Sources references are refused outright -- zero N
     const env = fakeEnv();
     await assert.rejects(
       () => createHandoff(env, salesToStrategyProperties({ Sources: { rich_text: [] } }), baseIdentity, createAccess(env)),
-      (err: unknown) => err instanceof HandoffWriteViolationError && /carries no link/.test((err as Error).message),
+      (err: unknown) => err instanceof HandoffWriteViolationError && /carries no entry/.test((err as Error).message),
     );
     assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
   });
@@ -594,7 +651,13 @@ test("createHandoff: real identity inside a Sources URL is refused -- the URL te
       createHandoff(
         env,
         salesToStrategyProperties({
-          Sources: { rich_text: [{ type: "text", text: { content: urlWithIdentity, link: { url: urlWithIdentity } } }] },
+          Sources: {
+            rich_text: [
+              { type: "text", text: { content: "token:entity:E-20", link: null } },
+              { type: "text", text: { content: "token:matter:MAT-20", link: null } },
+              { type: "text", text: { content: urlWithIdentity, link: { url: urlWithIdentity } } },
+            ],
+          },
         }),
         { ...baseIdentity, email: "comfort@meridianfoods.com" },
         createAccess(env),
@@ -635,8 +698,20 @@ const CONTENT_CHECKS_ONLY = SOURCE_BOUNDARY_CHECKS.filter(
   (c) => c !== "operational_entity_reference_present" && c !== "operational_matter_reference_present",
 );
 
-function sourcesProperty(urls: string[]) {
-  return { rich_text: urls.map((url) => ({ type: "text", text: { content: url, link: { url } } })) };
+/**
+ * A `Sources` payload: the opaque token pair the commercial routes require,
+ * followed by its artifacts. Pass `{ tokens: false }` only for a route whose
+ * contract requires neither token.
+ */
+function sourcesProperty(urls: string[], opts: { tokens?: boolean } = {}) {
+  const entries = opts.tokens === false ? urls : ["token:entity:E-20", "token:matter:MAT-20", ...urls];
+  return {
+    rich_text: entries.map((entry) =>
+      entry.startsWith("token:")
+        ? { type: "text", text: { content: entry, link: null } }
+        : { type: "text", text: { content: entry, link: { url: entry } } },
+    ),
+  };
 }
 
 /** A Sales -> Strategy payload with NO token properties -- the migration's source-based shape. */
@@ -647,7 +722,7 @@ function tokenlessSalesToStrategyProperties(overrides: Record<string, unknown> =
   return props;
 }
 
-test("createHandoff (Sales -> Strategy): a Sources-carrying Handoff with NO identity tokens writes no token properties -- the marker binds to the canonical references, and only the content checks are attested", async (t) => {
+test("createHandoff (Sales -> Strategy): a Sources-carrying Handoff writes no token properties -- the marker binds to the opaque pair its own payload declares, and nothing else", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
   const properties = tokenlessSalesToStrategyProperties({
@@ -655,6 +730,8 @@ test("createHandoff (Sales -> Strategy): a Sources-carrying Handoff with NO iden
     Sources: sourcesProperty([ENTITY_SOURCES_URL, MATTER_SOURCES_URL, CN_SOURCES_URL]),
   });
 
+  // The caller supplies no tokens of its own: the pair comes entirely from
+  // the payload, which is what the record will carry.
   const { sourceBoundaryAttestation } = await createHandoff(env, properties, {}, createAccess(env));
 
   const create = calls.find((c) => c.method === "POST" && c.body?.properties?.Reason);
@@ -662,47 +739,49 @@ test("createHandoff (Sales -> Strategy): a Sources-carrying Handoff with NO iden
   assert.strictEqual(
     Object.prototype.hasOwnProperty.call(create.body.properties, "Entity_Token"),
     false,
-    "no token property is invented to fill a gap the canonical Sources already close",
+    "no token property is invented -- Sources is the only carrier",
   );
   assert.strictEqual(Object.prototype.hasOwnProperty.call(create.body.properties, "Matter_Token"), false);
+  assert.strictEqual(
+    create.body.properties.Sources.rich_text.map((item: any) => item.text.content).slice(0, 2).join(","),
+    "token:entity:E-20,token:matter:MAT-20",
+    "the opaque pair the marker binds to is what the payload actually declares",
+  );
 
-  // The marker is the SOURCES form: bound to the exact references this
-  // payload declared, never to identity tokens this write never carried.
+  // The marker is bound to that declared pair -- the reference this write
+  // really carries -- and to nothing it did not establish.
   const reason = propertyText(create.body.properties.Reason);
   const marker = /\[source_boundary_check [^\]]*\]/.exec(reason)?.[0] ?? "";
   assert.ok(marker, `the durable attestation marker must be in the Handoff's Reason: ${reason}`);
   assert.match(marker, /result=Passed/);
-  assert.ok(!/entity=/.test(marker), "no identity-token binding this write never established");
-  assert.ok(!/matter=/.test(marker), "no identity-token binding this write never established");
-  for (const id of [ENTITY_SOURCES_PAGE_ID, MATTER_SOURCES_PAGE_ID, CN_SOURCES_PAGE_ID]) {
-    assert.ok(marker.includes(id), `marker must bind to the declared reference ${id}`);
+  assert.ok(marker.includes("entity=E-20"), "marker must bind to the operational Entity reference");
+  assert.ok(marker.includes("matter=MAT-20"), "marker must bind to the operational Matter reference");
+  for (const check of SOURCE_BOUNDARY_CHECKS) {
+    assert.ok(marker.includes(check), `marker must evidence ${check}`);
   }
+  assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
 
-  // The receiver's side of the same channel: the marker parses only against
-  // the source ids ITS OWN resolution validated, never against tokens.
+  // The receiver's side of the same channel: it accepts the marker only
+  // when its OWN resolution produced those same references.
   const parsed = parseSourceBoundaryMarker(reason, {
     handoffId: "page-1",
-    sourceIds: [ENTITY_SOURCES_PAGE_ID, MATTER_SOURCES_PAGE_ID, CN_SOURCES_PAGE_ID],
+    entityToken: "E-20",
+    matterToken: "MAT-20",
   });
-  if (!parsed.ok) assert.fail(`the receiver's refs-form parse must accept this marker: ${parsed.reason}`);
-  assert.strictEqual(parsed.attestation.result, "Passed");
-  assert.deepStrictEqual([...parsed.attestation.checks].sort(), [...CONTENT_CHECKS_ONLY].sort());
+  if (!parsed.ok) assert.fail(`the receiver's identity-form parse must accept this marker: ${parsed.reason}`);
   assert.strictEqual(
-    parseSourceBoundaryMarker(reason, { handoffId: "page-1", sourceIds: [ENTITY_SOURCES_PAGE_ID] }).ok,
+    parseSourceBoundaryMarker(reason, { handoffId: "page-1", entityToken: "E-20", matterToken: "MAT-99" }).ok,
     false,
-    "a marker bound to other references than this receiver validated is unbound evidence",
+    "a marker bound to other references than this receiver resolved is unbound evidence",
   );
   assert.strictEqual(
-    parseSourceBoundaryMarker(reason, { handoffId: "page-1", entityToken: "E-20", matterToken: "MAT-20" }).ok,
+    parseSourceBoundaryMarker(reason, {
+      handoffId: "page-1",
+      sourceIds: [ENTITY_SOURCES_PAGE_ID, MATTER_SOURCES_PAGE_ID, CN_SOURCES_PAGE_ID],
+    }).ok,
     false,
-    "a refs-form marker is never accepted by a receiver that resolved sources differently",
+    "an identity-form marker is never accepted by a receiver presenting refs instead of the same identity",
   );
-
-  // Only the checks this write actually established are attested: the three
-  // content checks. Checks 1 & 2 (operational reference) are established by
-  // the receiver's own resolution of these sources, never claimed here.
-  assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...CONTENT_CHECKS_ONLY].sort());
-  assert.strictEqual(sourceBoundaryAttestation.result, "Passed");
 });
 
 test("createHandoff: a payload with NEITHER tokens nor Sources on a route that needs an Entity/Matter is refused -- zero Notion calls", async (t) => {
@@ -719,7 +798,7 @@ test("createHandoff: a route declared generic writes a Handoff with neither iden
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
   const contracts: Readonly<Record<string, HandoffSourceRouteContract>> = {
-    "BD->Strategy": { required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
+    "BD->Strategy": { requiresEntityToken: false, requiresMatterToken: false, required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
   };
   const properties = validProperties({
     "From Unit": select("BD"),

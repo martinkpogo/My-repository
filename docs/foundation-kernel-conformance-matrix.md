@@ -74,7 +74,7 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 
 | | |
 | --- | --- |
-| **Contract** | Every Handoff field that becomes another Unit's AI input may identify only by `Entity_Token`/`Matter_Token`; writes go through `handoffWriter`; fail-closed. |
+| **Contract** | Every Handoff field that becomes another Unit's AI input may identify only by the opaque token entries its own `Sources` payload carries (the retired `Entity_Token`/`Matter_Token` properties no longer exist); writes go through `handoffWriter`; fail-closed. |
 | **Code** | `src/handoffWriter.ts:10-14` (boundary statement), `:143` (protected-identity-field violation), `:191/194` (tokens required, non-empty), `:266` (read-back equality); token-safe vs identity-bearing separation `src/dataBoundary/policy.ts` |
 | **Tests** | `src/handoffWriter.test.ts`, `src/handoffContracts/unitBoundary.test.ts` (also runs in `npm test` and PR Validation) |
 | **Note** | No change made; no Notion write of any kind was performed in this task. |

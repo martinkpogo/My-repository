@@ -108,6 +108,8 @@ function mockFetch(
   const verifiedFacts = opts.verifiedFacts ?? `${FAKE_STRATEGY_BOUNDARY_BLOCK}\n\nProposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.`;
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
+  const entityMatch = entityToken.match(/^([A-Z]{1,6})-(\d{1,6})$/);
+  const matterMatch = matterToken.match(/^([A-Z]{1,6})-(\d{1,6})$/);
   const requiredNextAction = opts.requiredNextAction ?? "";
 
   globalThis.fetch = (async (url: string, init?: any) => {
@@ -130,8 +132,21 @@ function mockFetch(
             Status: { select: { name: opts.initialStatus ?? "Pending" } },
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
             "Required Next Action": { rich_text: [{ plain_text: requiredNextAction }] },
-            Entity_Token: { rich_text: [{ plain_text: entityToken }] },
-            Matter_Token: { rich_text: [{ plain_text: matterToken }] },
+            "From Unit": { select: { name: "Strategy" } },
+            "To Unit": { select: { name: "Finance" } },
+            // Identity travels ONLY as the opaque pair inside Sources. The
+            // retired Entity_Token/Matter_Token Handoff properties are
+            // written by no fixture and read by no code path.
+            Sources: {
+              rich_text: [
+                ...(entityToken
+                  ? [{ type: "text", text: { content: "token:entity:" + entityToken, link: null }, plain_text: "token:entity:" + entityToken, href: null }]
+                  : []),
+                ...(matterToken
+                  ? [{ type: "text", text: { content: "token:matter:" + matterToken, link: null }, plain_text: "token:matter:" + matterToken, href: null }]
+                  : []),
+              ],
+            },
           },
         }),
         { status: 200 },
@@ -140,6 +155,57 @@ function mockFetch(
     if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") {
       log.handoffPatchBodies.push(JSON.parse(init.body));
       return new Response(JSON.stringify({ id: "handoff-1", url: "https://notion.so/handoff-1", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
+    }
+    // The ONE authorized identity resolution: the Matter token's unique-id
+    // query, the Matter page's Entity relation, then the Entity page. The
+    // mock serves exactly the records this fixture's tokens name.
+    if (urlStr.endsWith("/data_sources/matters-ds/query") && method === "POST") {
+      if (!matterMatch) return new Response(JSON.stringify({ results: [] }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              id: "matter-page-1",
+              url: "https://notion.so/matter-page-1",
+              parent: { type: "data_source_id", data_source_id: "matters-ds" },
+              properties: {
+                Matter_ID: { unique_id: { prefix: matterMatch[1], number: Number(matterMatch[2]) } },
+                Entity: { relation: [{ id: "entity-page-1" }] },
+                Status: { select: { name: "Commercial Development" } },
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "entity-page-1",
+          url: "https://notion.so/entity-page-1",
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
+          properties: {
+            Entity_ID: entityMatch ? { unique_id: { prefix: entityMatch[1], number: Number(entityMatch[2]) } } : { unique_id: { prefix: "", number: 0 } },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith("/pages/matter-page-1") && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: "matter-page-1",
+          url: "https://notion.so/matter-page-1",
+          parent: { type: "data_source_id", data_source_id: "matters-ds" },
+          properties: {
+            Matter_ID: matterMatch ? { unique_id: { prefix: matterMatch[1], number: Number(matterMatch[2]) } } : { unique_id: { prefix: "", number: 0 } },
+            Entity: { relation: [{ id: "entity-page-1" }] },
+            Status: { select: { name: "Commercial Development" } },
+          },
+        }),
+        { status: 200 },
+      );
     }
     if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
       return new Response(
@@ -553,10 +619,14 @@ test("handleQuoteApproval: proceeds normally and creates the Finance -> Sales Ha
   assert.strictEqual(result.stage, "quote_approved");
   assert.ok(log.handoffCreateBody, "the Finance -> Sales Handoff must be created");
   assert.strictEqual(log.handoffCreateBody.properties["To Unit"].select.name, "Sales");
-  assert.strictEqual(log.handoffCreateBody.properties.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.deepStrictEqual(
+    log.handoffCreateBody.properties.Sources.rich_text.map((item: any) => item.text.content),
+    ["token:entity:E-47", "token:matter:M-12"],
+    "the Finance -> Sales Handoff carries its identity as the opaque pair inside Sources",
+  );
 });
 
-test("19. Finance -> Sales creates a token-only Handoff -- the title and Reason never expose the Matter name, only Matter_Token", async (t) => {
+test("19. Finance -> Sales creates a token-only Handoff -- the title and Reason never expose the Matter name, only the opaque Matter token in Sources", async (t) => {
   const log = mockFetch(t);
   const env = fakeEnv();
   const state = fakeState({
@@ -569,14 +639,19 @@ test("19. Finance -> Sales creates a token-only Handoff -- the title and Reason 
   const result = await handleQuoteApproval(env, state, true);
 
   const props = log.handoffCreateBody.properties;
-  assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
-  assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.deepStrictEqual(
+    props.Sources.rich_text.map((item: any) => item.text.content),
+    ["token:entity:E-47", "token:matter:M-12"],
+    "Sources is the identity carrier, and nothing else travels",
+  );
+  assert.strictEqual(props.Entity_Token, undefined, "the retired Entity_Token Handoff property is written nowhere");
+  assert.strictEqual(props.Matter_Token, undefined, "the retired Matter_Token Handoff property is written nowhere");
   assert.match(props.Handoff.title[0].text.content, /M-12/);
   assert.match(props.Reason.rich_text[0].text.content, /M-12/);
   assert.strictEqual(result.pendingHandoffAutoCheck, true, "successful Finance -> Sales Handoff creation must automatically invoke the existing /checkhandoffs path");
 });
 
-test("Finance -> Sales: quote approval blocked on a missing Matter_Token must not invoke the /checkhandoffs continuation", async (t) => {
+test("Finance -> Sales: quote approval blocked on a missing Matter token must not invoke the /checkhandoffs continuation", async (t) => {
   const env = fakeEnv();
   const state = fakeState({
     stage: "awaiting_quote_approval",
@@ -588,10 +663,10 @@ test("Finance -> Sales: quote approval blocked on a missing Matter_Token must no
 
   const result = await handleQuoteApproval(env, state, true);
 
-  assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "no Handoff was queued (still blocked on Matter_Token), so the continuation must not be invoked");
+  assert.notStrictEqual(result.pendingHandoffAutoCheck, true, "no Handoff was queued (still blocked on the Matter token), so the continuation must not be invoked");
 });
 
-test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion after pickup, and completes the retry", async (t) => {
+test("handleQuoteApproval: recovers a Matter token that was corrected in Notion after pickup, and completes the retry", async (t) => {
   // Reproduces the live incident: the ORIGINATING Handoff's Matter_Token was
   // empty at Finance pickup time (state.matterName cached as undefined), so
   // the first Approve attempt blocked. Martin then corrects Matter_Token on
@@ -612,12 +687,15 @@ test("handleQuoteApproval: recovers a Matter_Token that was corrected in Notion 
 
   const result = await handleQuoteApproval(env, state, true);
 
-  assert.strictEqual(result.stage, "quote_approved", "the retry must succeed once Matter_Token is present on the live record");
+  assert.strictEqual(result.stage, "quote_approved", "the retry must succeed once the Matter token is present on the live record");
   assert.ok(log.handoffCreateBody, "the Finance -> Sales Handoff must be created once recovered");
-  assert.strictEqual(log.handoffCreateBody.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
+  assert.ok(
+    log.handoffCreateBody.properties.Sources.rich_text.some((item: any) => item.text.content === "token:matter:MAT-20"),
+    "the recovered Matter token travels as a link-less token entry in Sources",
+  );
 });
 
-test("handleQuoteApproval: stays blocked (not a silent failure) when Matter_Token is still missing on re-check", async (t) => {
+test("handleQuoteApproval: stays blocked (not a silent failure) when the Matter token is still missing on re-check", async (t) => {
   const log = mockFetch(t, { matterToken: "" });
   const env = fakeEnv();
   const state = fakeState({
@@ -630,8 +708,8 @@ test("handleQuoteApproval: stays blocked (not a silent failure) when Matter_Toke
   const result = await handleQuoteApproval(env, state, true);
 
   assert.strictEqual(result.stage, "awaiting_quote_approval", "stage must not silently advance when still blocked");
-  assert.strictEqual(log.handoffCreateBody, null, "no Finance -> Sales Handoff may be created without a Matter_Token");
-  assert.ok(log.sentTexts.some((t) => /no Matter_Token on record/i.test(t)));
+  assert.strictEqual(log.handoffCreateBody, null, "no Finance -> Sales Handoff may be created without a Matter token");
+  assert.ok(log.sentTexts.some((t) => /no Matter token on record/i.test(t)));
 });
 
 // ---------------------------------------------------------------------------

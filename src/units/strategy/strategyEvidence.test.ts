@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readApprovedCallNotesEvidence, readCallNotesNoteProperty, readGoogleDocSourceEvidence } from "./strategyEvidence";
+import type { HandoffSourceRouteContract } from "../../handoffSources";
 import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
 import { workSessionContext } from "../../access";
 import type { Env, WorkState } from "../../types";
@@ -91,11 +92,49 @@ function properties(overrides: Record<string, any> = {}): Record<string, any> {
   };
 }
 
+/**
+ * The production shape of a Sources-enabled Handoff's payload: the opaque
+ * token pair first, then the canonical artifact pages. Identity and evidence
+ * are separate questions, and both are answered in the one sanctioned place.
+ */
 function sourcesProperty(urls: string[]) {
   return {
-    rich_text: urls.map((url) => ({ type: "text", text: { content: url, link: { url } }, plain_text: url, href: url })),
+    rich_text: [
+      { type: "text", text: { content: "token:entity:E-47", link: null }, plain_text: "token:entity:E-47", href: null },
+      { type: "text", text: { content: "token:matter:M-12", link: null }, plain_text: "token:matter:M-12", href: null },
+      ...urls.map((url) => ({ type: "text", text: { content: url, link: { url } }, plain_text: url, href: url })),
+    ],
   };
 }
+
+/** The Sales -> Strategy contract as production declares it: identity required, artifacts governed per type. */
+const TOKEN_CONTRACT: Readonly<Record<string, HandoffSourceRouteContract>> = {
+  "Sales->Strategy": {
+    requiresEntityToken: true,
+    requiresMatterToken: true,
+    required: [],
+    optional: ["call_notes", "entities", "matters"],
+    prohibited: ["handoffs"],
+  },
+};
+
+/**
+ * A route DECLARED generic -- both token flags false, no entity/matter
+ * artifact type -- which is the only thing that permits a Handoff with no
+ * Sources payload at all. Production declares no generic route; this table
+ * exists solely to exercise the legacy free-text transport through the
+ * resolver's injected-contract seam, exactly as it was reachable before
+ * Sources became the identity carrier.
+ */
+const GENERIC_CONTRACT: Readonly<Record<string, HandoffSourceRouteContract>> = {
+  "Sales->Strategy": {
+    requiresEntityToken: false,
+    requiresMatterToken: false,
+    required: [],
+    optional: ["call_notes"],
+    prohibited: ["handoffs", "entities", "matters"],
+  },
+};
 
 interface MockLog {
   /** Every request, as `METHOD url`. */
@@ -225,8 +264,14 @@ function mockEvidenceFetch(
   return log;
 }
 
-function readEvidence(props: Record<string, any>) {
-  return readApprovedCallNotesEvidence(fakeEnv(), props as any, { entityToken: "E-47", matterToken: "M-12" }, strategyContext());
+function readEvidence(props: Record<string, any>, contracts: Readonly<Record<string, HandoffSourceRouteContract>> = TOKEN_CONTRACT) {
+  return readApprovedCallNotesEvidence(
+    fakeEnv(),
+    props as any,
+    { entityToken: "E-47", matterToken: "M-12" },
+    strategyContext(),
+    contracts,
+  );
 }
 
 async function expectRefused(
@@ -234,9 +279,10 @@ async function expectRefused(
   props: Record<string, any>,
   matcher: RegExp,
   opts: Parameters<typeof mockEvidenceFetch>[1] = {},
+  contracts: Readonly<Record<string, HandoffSourceRouteContract>> = TOKEN_CONTRACT,
 ) {
   const log = mockEvidenceFetch(t, opts);
-  const result = await readEvidence(props);
+  const result = await readEvidence(props, contracts);
   assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
   if (result.ok) return log;
   assert.match(result.reason, matcher, "the refusal must say exactly what stopped it");
@@ -278,7 +324,7 @@ test("note reader: the three defects -- absent, wrong-typed, empty -- are each t
 
 test("legacy: a Handoff with no Sources property resolves through the free-text reference -- one exact query, the Note read after attestation and never the page body", async (t) => {
   const log = mockEvidenceFetch(t, { queryRecord: await recordFixture("cn-page-1") });
-  const result = await readEvidence(properties());
+  const result = await readEvidence(properties(), GENERIC_CONTRACT);
 
   assert.equal(result.ok, true, result.ok ? "" : result.reason);
   if (!result.ok) return;
@@ -302,6 +348,8 @@ test("legacy: a missing free-text reference is refused -- nothing is inferred fr
     t,
     properties({ Reason: rich("Call notes for commercial qualification.") }),
     /carries no Call_Notes_ID reference/,
+    {},
+    GENERIC_CONTRACT,
   );
   assert.equal(log.callNotesQueries.length, 0, "no lookup without a reference");
   assert.deepEqual(log.blockReads, [], "no body is read");
@@ -313,6 +361,7 @@ test("legacy: a record whose page body carries text but whose Note is absent nev
     properties(),
     /carries no Note property/,
     { queryRecord: await recordFixture("cn-page-1", { Note: undefined }), body: NOTE },
+    GENERIC_CONTRACT,
   );
   assert.equal(log.callNotesQueries.length, 1, "the record itself was located and every gate ahead of the Note passed");
   assert.deepEqual(log.blockReads, [], "the substantive-looking page body is never fetched as a fallback");

@@ -91,7 +91,7 @@ export function diffWords(before: string, after: string): DiffSegment[] {
 
 /** A numbered ALL-CAPS section heading exactly as buildProposalContent emits them (e.g. "12. ASSUMPTIONS, DEPENDENCIES, RISKS AND EXCLUSIONS"). */
 const SECTION_HEADING_LINE = /^\d{1,3}\. [A-Z0-9][A-Z0-9 ,/()&'.\u2014-]*$/;
-/** A "Label: value" line -- the label run (indent excluded, colon included) is bolded; digits and underscores are part of real labels ("Entity_Token", "Workstream 1"). */
+/** A "Label: value" line -- the label run (indent excluded, colon included) is bolded; digits and underscores are part of real labels ("Call_Notes_ID", "Workstream 1"). */
 const LABEL_LINE = /^(\s{0,2})([A-Za-z][A-Za-z0-9_ &/()'’.\u2014-]{1,60}):(?=\s|$)/;
 
 /**

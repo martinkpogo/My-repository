@@ -10,6 +10,25 @@ import {
   presentQualifiedCallNotesForApproval,
 } from "./salesExecutive";
 import { SOURCE_BOUNDARY_CHECKS } from "../../handoffWriter";
+import type { HandoffSourceRouteContract } from "../../handoffSources";
+
+/**
+ * The route contract the call-notes pickup tests resolve against. Production
+ * has NO contract for "Sales->Sales" -- LOG-987 retires the Runtime
+ * call-notes pickup, so a production call-notes Handoff is refused
+ * fail-closed at the identity gate. This table exists only to exercise the
+ * legacy free-text reference path through the resolver's injected-contract
+ * seam; production callers never pass one.
+ */
+const CALL_NOTES_ROUTE_CONTRACTS: Readonly<Record<string, HandoffSourceRouteContract>> = {
+  "Sales->Sales": {
+    requiresEntityToken: true,
+    requiresMatterToken: true,
+    required: [],
+    optional: ["call_notes"],
+    prohibited: ["handoffs", "entities", "matters"],
+  },
+};
 import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "../../records/callNotes/callNotesMarker";
 import type { WorkState, Env } from "../../types";
 
@@ -180,8 +199,13 @@ test("1. Inbound enquiry -> valid Sales -> Strategy Handoff via the existing que
   assert.strictEqual(props.Type.select.name, "Work");
   assert.strictEqual(props.Status.select.name, "Pending");
   assert.match(richTextValue(props.Reason), /inbound_enquiry/);
-  assert.ok(props.Entity_Token, "Entity_Token must be present");
-  assert.ok(props.Matter_Token, "Matter_Token must be present");
+  assert.deepStrictEqual(
+    props.Sources.rich_text.map((item: any) => item.text.content),
+    ["token:entity:E-47", "token:matter:M-12"],
+    "Sources is the identity carrier: the opaque pair, and nothing else",
+  );
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(props, "Entity_Token"), false, "the retired Handoff property is written nowhere");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(props, "Matter_Token"), false);
   assert.ok(props["Required Next Action"], "Required Next Action must be carried");
   assert.match(richTextValue(props["Required Next Action"]), /diagnose/i);
   assert.ok(props["Acceptance Criteria"], "Acceptance Criteria must be carried");
@@ -200,8 +224,9 @@ test("17. Sales -> Strategy creates a token-only Handoff -- the real Entity/Matt
   const result = await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
   const props = handoffProps(log);
-  assert.strictEqual(richTextValue(props.Entity_Token), "E-47");
-  assert.strictEqual(richTextValue(props.Matter_Token), "M-12");
+  const tokenEntries17 = props.Sources.rich_text.map((item: any) => item.text.content);
+  assert.ok(tokenEntries17.includes("token:entity:E-47"), "the opaque Entity token travels in Sources");
+  assert.ok(tokenEntries17.includes("token:matter:M-12"), "the opaque Matter token travels in Sources");
   assert.strictEqual(result.entityToken, "E-47");
   assert.strictEqual(result.matterToken, "M-12");
   const serialized = JSON.stringify(props);
@@ -384,14 +409,14 @@ test("6. Disclosed budget/willingness-to-pay is never transferred as a downstrea
   }
 });
 
-test("7. Entity_Token/Matter_Token remain opaque -- no real Entity/Matter name crosses the boundary", async (t) => {
+test("7. The opaque Entity/Matter tokens remain opaque -- no real Entity/Matter name crosses the boundary", async (t) => {
   const log = mockFetch(t, { entityUniqueId: 47, matterUniqueId: 12 });
   const state = fakeState();
 
   await handleInterventionText(fakeEnv(), state, "Rebrand the storefront and packaging.");
 
   const props = handoffProps(log);
-  // The opaque token boundary is Entity_Token/Matter_Token specifically --
+  // The opaque token boundary is the pair carried in `Sources` specifically --
   // these are what the receiving Unit's own automated/AI logic consumes
   // (see dataBoundary/policy.ts's evaluateHandoffContext), so they must be
   // the Notion Unique ID token, never the real Entity/Matter name. The
@@ -400,10 +425,10 @@ test("7. Entity_Token/Matter_Token remain opaque -- no real Entity/Matter name c
   // Handoff-creation site in this codebase, may legitimately carry the
   // Matter's own human-readable title -- that's not an identity leak across
   // the automated-processing boundary this requirement protects.
-  assert.strictEqual(richTextValue(props.Entity_Token), "E-47");
-  assert.strictEqual(richTextValue(props.Matter_Token), "M-12");
-  assert.ok(!richTextValue(props.Entity_Token).includes("Acme"), "Entity_Token must be the opaque unique-ID token, never the real Entity name");
-  assert.ok(!richTextValue(props.Matter_Token).includes("Acme"), "Matter_Token must be the opaque unique-ID token, never the real Entity name");
+  const tokenEntries7 = props.Sources.rich_text.map((item: any) => item.text.content);
+  assert.ok(tokenEntries7.includes("token:entity:E-47"), "the opaque Entity token travels in Sources");
+  assert.ok(tokenEntries7.includes("token:matter:M-12"), "the opaque Matter token travels in Sources");
+  assert.ok(!tokenEntries7.some((entry: string) => entry.includes("Acme")), "a token is the opaque unique-ID token, never the real Entity/Matter name");
 });
 
 test("8. Finance processes the Handoff through the existing queue mechanism (handoff_workitem KV mapping, no direct invocation)", async (t) => {
@@ -736,7 +761,7 @@ test("Handoff evidence formatting keeps investment tolerance in a clearly separa
   assert.ok(text.indexOf("CONTEXT ONLY") > text.indexOf("pricing basis"));
 });
 
-test("S. Opaque-token boundary holds even with commercial evidence attached -- Handoff still carries only Entity_Token/Matter_Token, never real names", async (t) => {
+test("S. Opaque-token boundary holds even with commercial evidence attached -- the Handoff still carries only the opaque token pair in Sources, never real names", async (t) => {
   const log = mockFetch(t, { entityUniqueId: 47, matterUniqueId: 12 });
   const state = fakeState({
     commercialEvidence: {
@@ -748,8 +773,9 @@ test("S. Opaque-token boundary holds even with commercial evidence attached -- H
   await handleInterventionText(fakeEnv(), state, "Diagnostic engagement to identify positioning gaps.");
 
   const props = handoffProps(log);
-  assert.strictEqual(richTextValue(props.Entity_Token), "E-47");
-  assert.strictEqual(richTextValue(props.Matter_Token), "M-12");
+  const tokenEntriesS = props.Sources.rich_text.map((item: any) => item.text.content);
+  assert.ok(tokenEntriesS.includes("token:entity:E-47"), "the opaque Entity token travels in Sources");
+  assert.ok(tokenEntriesS.includes("token:matter:M-12"), "the opaque Matter token travels in Sources");
   const factsText = richTextValue(props["Verified Facts & Sources"]);
   assert.match(factsText, /Commercial-value evidence/);
   assert.match(factsText, /Investment tolerance/);
@@ -1036,6 +1062,12 @@ test("Runtime Sales identity boundary: rejecting a drafted Entity still routes t
 // provenance gate, while an origin that was never proven stays fail-closed.
 // ---------------------------------------------------------------------------
 
+/**
+ * The canonical Call Notes page the pickup fixture's Sources names -- an
+ * id-shaped Notion page id, the only form parseNotionPageLink accepts.
+ */
+const CALL_NOTES_PAGE_ID = "c0111111-1111-4111-8111-111111111111";
+
 function mockPickupFetch(t: any, opts: {
   handoffStatus?: string;
   verifiedFacts?: string;
@@ -1076,8 +1108,8 @@ function mockPickupFetch(t: any, opts: {
     };
     const attestation = await buildRecordApprovalMarker(registry, "Approved");
     record = {
-      id: "call-notes-1",
-      url: "https://notion.so/call-notes-1",
+      id: CALL_NOTES_PAGE_ID,
+      url: "https://notion.so/" + CALL_NOTES_PAGE_ID,
       parent: { type: "data_source_id", data_source_id: "call-notes-ds" },
       properties: {
         "Call Notes ID": { title: [{ plain_text: "CN-007", text: { content: "CN-007" } }] },
@@ -1121,8 +1153,25 @@ function mockPickupFetch(t: any, opts: {
             // Real Notion rich_text items carry both `text.content` and
             // `plain_text`; the mock must provide both or plainText() reads "".
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts, text: { content: verifiedFacts } }] },
-            Entity_Token: { rich_text: [{ plain_text: "E-47", text: { content: "E-47" } }] },
-            Matter_Token: { rich_text: [{ plain_text: "M-12", text: { content: "M-12" } }] },
+            // No Entity_Token/Matter_Token: those Handoff properties no
+            // longer exist, and the Work's own tokens are read from its
+            // canonical pages instead.
+            "From Unit": { select: { name: "Sales" } },
+            "To Unit": { select: { name: "Sales" } },
+            Sources: {
+              rich_text: [
+                { type: "text", text: { content: "token:entity:E-47", link: null }, plain_text: "token:entity:E-47", href: null },
+                { type: "text", text: { content: "token:matter:M-12", link: null }, plain_text: "token:matter:M-12", href: null },
+                ...(handoffReason.includes("Call_Notes_ID")
+                  ? [{
+                      type: "text",
+                      text: { content: "https://www.notion.so/" + CALL_NOTES_PAGE_ID, link: { url: "https://www.notion.so/" + CALL_NOTES_PAGE_ID } },
+                      plain_text: "https://www.notion.so/" + CALL_NOTES_PAGE_ID,
+                      href: "https://www.notion.so/" + CALL_NOTES_PAGE_ID,
+                    }]
+                  : []),
+              ],
+            },
             Reason: { rich_text: [{ plain_text: handoffReason, text: { content: handoffReason } }] },
             Handoff: { title: [{ plain_text: handoffTitle, text: { content: handoffTitle } }] },
           },
@@ -1176,27 +1225,36 @@ function mockPickupFetch(t: any, opts: {
         { status: 200 },
       );
     }
-    // The exact-match Call Notes lookup (gate 3).
+    // The exact-match Call Notes lookup (gate 3), kept for the legacy
+    // free-text reference transport; the Sources path reads the page below.
     if (urlStr.endsWith("/data_sources/call-notes-ds/query") && method === "POST") {
       return new Response(JSON.stringify({ results: (await locatedCallNotes()) ?? [] }), { status: 200 });
     }
-    // The lifecycle's compare-current-status read, and its Ready -> Consumed write.
-    if (urlStr.endsWith("/pages/call-notes-1") && method === "GET") {
+    // The canonical page the Handoff's Sources names: its own properties,
+    // honouring whatever fixture override the case is exercising. A missing
+    // record is a 404 -- the miss the resolver refuses rather than searches
+    // around.
+    if (urlStr.includes("/pages/" + CALL_NOTES_PAGE_ID) && method === "GET") {
+      if (opts.callNotesProperties === null) {
+        return new Response(JSON.stringify({ object: "error", status: 404, message: "Could not find page" }), { status: 404 });
+      }
       const healthy = await healthyCallNotesRecord();
+      const properties = { ...healthy.properties, ...(opts.callNotesProperties ?? {}) };
       return new Response(
         JSON.stringify({
           ...healthy,
-          properties: { ...healthy.properties, Status: { select: { name: live.callNotesStatus } } },
+          properties: { ...properties, Status: { select: { name: live.callNotesStatus } } },
         }),
         { status: 200 },
       );
     }
-    if (urlStr.endsWith("/pages/call-notes-1") && method === "PATCH") {
+    // The lifecycle's compare-current-status read, and its Ready -> Consumed write.
+    if (urlStr.includes("/pages/" + CALL_NOTES_PAGE_ID) && method === "PATCH") {
       patches.push(String(init.body));
       const body = JSON.parse(String(init.body));
       if (body.properties?.Status?.select?.name) live.callNotesStatus = body.properties.Status.select.name;
       return new Response(
-        JSON.stringify({ id: "call-notes-1", url: "https://notion.so/call-notes-1", parent: { type: "data_source_id", data_source_id: "call-notes-ds" }, properties: {} }),
+        JSON.stringify({ id: CALL_NOTES_PAGE_ID, url: "https://notion.so/" + CALL_NOTES_PAGE_ID, parent: { type: "data_source_id", data_source_id: "call-notes-ds" }, properties: {} }),
         { status: 200 },
       );
     }
@@ -1251,7 +1309,7 @@ test("Pickup-origin provenance: claiming a real call-notes Handoff records hando
   // Seed a provenance value that would be WRONG for this origin: the recorded
   // value must come from the successful claim itself, never from whatever the
   // caller-supplied state already carried.
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState({ entryType: "inbound_enquiry" }), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState({ entryType: "inbound_enquiry" }), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.entryType, "handoff_pickup", "the successful claim is the provenance fact and must be recorded");
   assert.ok(patches.some((p) => p.includes("Picked-up")), "the claim must still have happened before provenance was recorded");
@@ -1260,7 +1318,7 @@ test("Pickup-origin provenance: claiming a real call-notes Handoff records hando
 test("Governed Call Notes consumption: the consumed record's registry fields -- not the Handoff's narrative -- become the session business context", async (t) => {
   mockPickupFetch(t);
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(
     result.callNotes,
@@ -1283,7 +1341,7 @@ test("Governed Call Notes consumption: the consumed record's registry fields -- 
 test("Pickup-origin provenance: a refused claim persists no context either -- nothing unsanitized or unproven reaches the session", async (t) => {
   mockPickupFetch(t, { handoffStatus: "Picked-up" });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.callNotes, undefined, "an unclaimed Handoff's context must not be read into the session");
 });
@@ -1291,7 +1349,7 @@ test("Pickup-origin provenance: a refused claim persists no context either -- no
 test("Pickup-origin provenance: a refused claim records no provenance -- an origin that was never proven stays fail-closed", async (t) => {
   mockPickupFetch(t, { handoffStatus: "Picked-up" });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.entryType, undefined, "a Handoff that was never claimed must not confer provenance");
   assert.notStrictEqual(result.stage, "awaiting_qualification_approval", "a non-Pending Handoff must not be processed");
@@ -1343,7 +1401,7 @@ test("Pickup provenance: an empty sanitized context never becomes session contex
   // persisted -- the continuation guard must not launder it either.
   mockPickupFetch(t, { verifiedFacts: "   " });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.stage, "handoff_held", "an empty sanitized context must still fail closed at the claim");
   assert.strictEqual(result.callNotes, undefined, "an empty sanitized context must not be persisted as the session's value context");
@@ -1366,6 +1424,7 @@ test("Gate 3 continuation end to end: the consumed Call Notes record's fields ar
       matterName: "Acme Co — Positioning",
     }),
     NO_ACTION_SKILLS,
+    CALL_NOTES_ROUTE_CONTRACTS,
   );
 
   assert.strictEqual(pickedUp.entryType, "handoff_pickup");
@@ -1403,7 +1462,7 @@ test("Governed Call Notes consumption: a Handoff carrying no Call_Notes_ID refer
     handoffReason: "Call notes for commercial qualification. requiredCategory: call_notes",
   });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.stage, "handoff_held", "a Handoff that names no governed record must be held rather than qualified");
   assert.strictEqual(result.callNotes, undefined, "the Handoff's own narrative must not stand in as Call Notes evidence when no reference is present");
@@ -1418,7 +1477,7 @@ test("Governed Call Notes consumption: a Handoff carrying no Call_Notes_ID refer
 test("Governed Call Notes consumption: an exact-match miss on Call_Notes_ID prevents qualification and leaves the record untouched", async (t) => {
   const { live } = mockPickupFetch(t, { callNotesProperties: null });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.stage, "handoff_held", "no matching governed record must hold the Handoff");
   assert.strictEqual(result.callNotes, undefined, "nothing may be qualified when the referenced record cannot be read");
@@ -1430,7 +1489,7 @@ test("Governed Call Notes consumption: a record with no approval attestation pre
     callNotesProperties: { "Approval Attestation": { rich_text: [] } },
   });
 
-  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  const result = await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(result.stage, "handoff_held", "an unattested record must never be consumed");
   assert.strictEqual(result.callNotes, undefined, "an unattested record's fields must not reach the qualification path");
@@ -1444,11 +1503,11 @@ test("Governed Call Notes consumption: replaying the pickup does not consume the
   const LIFECYCLE_WRITE = '{"properties":{"Status":{"select":{"name":"Consumed"}}}}';
   const consumeWrites = () => patches.filter((p) => p === LIFECYCLE_WRITE);
 
-  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
   assert.strictEqual(live.callNotesStatus, "Consumed", "the first pickup must advance the record Ready -> Consumed");
   assert.strictEqual(consumeWrites().length, 1, "exactly one lifecycle write for the first pickup");
 
-  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   assert.strictEqual(live.callNotesStatus, "Consumed", "the record stays Consumed -- no second transition to it exists");
   assert.strictEqual(consumeWrites().length, 1, "a replay must not issue a second Ready -> Consumed write");
@@ -1489,7 +1548,7 @@ test("Status: the call-notes pickup shows reading and consuming the approved Cal
 
   // This harness serves no governance pages, so the run genuinely stops at
   // governance -- the status must show exactly that step as where it stopped.
-  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS);
+  await handleCallNotesHandoffPickup(fakeEnv(), freshPickupState(), NO_ACTION_SKILLS, CALL_NOTES_ROUTE_CONTRACTS);
 
   const final = sentTexts.filter((s) => s.startsWith("Hat: Sales Executive.\n\n🧭")).at(-1)!;
   let at = -1;

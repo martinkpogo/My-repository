@@ -1,5 +1,5 @@
 import { plainText } from "../../notion";
-import { readLegacyHandoffTokens } from "../../handoffSources";
+import { declaredHandoffTokens } from "../../handoffSources";
 import { sendOperationsMessage } from "../../telegram";
 import { kvGet, kvPut } from "../../kvStore";
 import type { Env } from "../../types";
@@ -17,11 +17,24 @@ import { handleProposalHandoffPickup } from "./tokenSafeProposal";
 type DiscoveredHandoff = { id: string; properties?: Record<string, any> };
 
 /**
+ * The opaque Matter token this Handoff's own `Sources` payload declares --
+ * display only, for the two Operations notices below. Read through the shared
+ * `declaredHandoffTokens` extraction every other runtime path uses (the
+ * retired `Matter_Token` Handoff property is read nowhere): no fetch, no
+ * lookup, no inference, and "(unknown)" whenever the payload declares no
+ * such token or cannot be used.
+ */
+function declaredMatterToken(handoff: DiscoveredHandoff): string {
+  return declaredHandoffTokens(handoff.properties).matterToken || "(unknown)";
+}
+
+/**
  * Sends the Operations-topic "a Sales Handoff needs a human to activate
  * the Sales Claude Project" notification -- fired the first time a given
  * Pending Sales Handoff is detected while Sales Executive's own automated
  * pickup stays paused (see SALES_EXECUTIVE_PAUSED). Deliberately carries
- * only opaque identifiers (Matter_Token, the Handoff's own Notion page id)
+ * only opaque identifiers (the Matter token its `Sources` payload declares,
+ * the Handoff's own Notion page id)
  * -- never a real Entity/company name, matching the Operations security
  * contract every other cross-Unit summary already follows. Deduped
  * per-Handoff via a plain KV flag: this is a notification-noise
@@ -48,7 +61,7 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
 async function notifyRetiredCallNotesHandoff(env: Env, handoff: DiscoveredHandoff): Promise<void> {
   const key = `sales_callnotes_retired_notice:${handoff.id}`;
   if (await kvGet(env, key)) return;
-  const matterToken = readLegacyHandoffTokens(handoff.properties).matterToken || "(unknown)";
+  const matterToken = declaredMatterToken(handoff);
   await sendOperationsMessage(
     env,
     `⛔ Call-notes Handoff for ${matterToken} was not picked up by Runtime Sales.\n\nRuntime Sales no longer qualifies or progresses Leads (LOG-987). Run *sales-fit-assessment*, then *sales-progression*, in Isolated Sales for this Matter. The Handoff was left as it is.`,
@@ -107,7 +120,7 @@ export function salesHandoffPickup(paused: boolean = SALES_EXECUTIVE_PAUSED): Ha
     },
     async hold(env, handoff) {
       if (!paused) return false;
-      const matterToken = readLegacyHandoffTokens(handoff.properties).matterToken || "(unknown)";
+      const matterToken = declaredMatterToken(handoff);
       await notifySalesHandoffReady(env, handoff, matterToken).catch((err) =>
         console.error(`Failed to send Sales Handoff ready notification for ${handoff.id}`, err),
       );
