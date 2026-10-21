@@ -867,7 +867,7 @@ test("sources: the canonical Call Notes id itself travels as the page's own regi
   assert.ok(!log.requests.some((r) => r.includes("call-notes-ds")), "no title-based lookup anywhere");
 });
 
-test("sources: the production route table permits exactly the documented types on Sales->Strategy", () => {
+test("sources: the production route table permits exactly the documented types on each contracted route", () => {
   assert.deepEqual(handoffSourceRouteContract("Sales", "Strategy"), {
     required: [],
     // The commercial route needs an Entity and a Matter, so the canonical
@@ -876,12 +876,78 @@ test("sources: the production route table permits exactly the documented types o
     optional: ["call_notes", "entities", "matters"],
     prohibited: ["handoffs"],
   });
-  assert.equal(handoffSourceRouteContract("Strategy", "Finance"), undefined, "any other route has no contract until one is declared");
-  // Genericity is a declared contract fact, never an absence of one: this
-  // route needs an Entity/Matter, and an uncontracted route needs them too
-  // (nothing has declared it generic), exactly as before the migration.
+  // Strategy -> Finance is contracted EXPLICITLY (LOG-1140), not reached by
+  // any fallback: its Entity/Matter binding is required outright (the quote
+  // is priced for one Matter of one Entity), the upstream Handoff's
+  // canonical Call Notes reference may ride alongside, and a Handoff is
+  // never evidence for another Handoff.
+  assert.deepEqual(handoffSourceRouteContract("Strategy", "Finance"), {
+    required: ["entities", "matters"],
+    optional: ["call_notes"],
+    prohibited: ["handoffs"],
+  });
+  // An uncontracted route still has NO contract -- nothing is granted by
+  // fallback or inference, exactly as before.
+  assert.equal(handoffSourceRouteContract("Finance", "Sales"), undefined, "an uncontracted route has no contract until one is declared");
+  // Genericity is a declared contract fact, never an absence of one: both
+  // contracted routes need an Entity/Matter, and an uncontracted route
+  // needs them too (nothing has declared it generic), exactly as before.
   assert.equal(handoffRouteRequiresEntityMatter("Sales", "Strategy"), true);
-  assert.equal(handoffRouteRequiresEntityMatter("Strategy", "Finance"), true, "no contract means no generic declaration -- Entity/Matter stays required");
+  assert.equal(handoffRouteRequiresEntityMatter("Strategy", "Finance"), true, "the Strategy -> Finance contract declares its own Entity/Matter requirement -- it is not generic");
+  assert.equal(handoffRouteRequiresEntityMatter("Finance", "Sales"), true, "no contract means no generic declaration -- Entity/Matter stays required");
+});
+
+test("sources: a Sources-enabled Strategy -> Finance Handoff resolves -- its required Entity/Matter references establish the binding, and the forwarded Call Notes reference validates against it", async (t) => {
+  const log = mockSourcesFetch(t, {
+    pages: {
+      [CN_PAGE_ID]: await callNotesPageFixture({
+        Entity: { relation: [{ id: ENTITY_PAGE_ID }] },
+        Matter: { relation: [{ id: MATTER_PAGE_ID }] },
+      }),
+      [MATTER_PAGE_ID]: matterPageFixture({ Entity: { relation: [{ id: ENTITY_PAGE_ID }] } }),
+      [ENTITY_PAGE_ID]: entityPageFixture(),
+    },
+  });
+  const result = await resolve(
+    handoffProperties({
+      Reason: rich("Martin-approved Strategic Intervention Proposal ready for value-based pricing."),
+      "From Unit": { select: { name: "Strategy" } },
+      "To Unit": { select: { name: "Finance" } },
+      Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`, `https://www.notion.so/${MATTER_HEX}`, CN_PAGE_URL]),
+    }),
+    // The shape Strategy's producer writes for a tokenless upstream: no
+    // legacy token properties, identity entirely in the canonical sources.
+    { fromUnit: "Strategy", toUnit: "Finance", tokens: { entityToken: "", matterToken: "" } },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok || result.mode !== "sources") return;
+  assert.deepEqual(
+    result.sources.map((s) => s.type),
+    ["entities", "matters", "call_notes"],
+  );
+  assert.equal(result.binding.entityId, ENTITY_PAGE_ID);
+  assert.equal(result.binding.matterId, MATTER_PAGE_ID);
+  assert.equal(result.binding.entityToken, "E-47", "the operational token comes from the canonical record itself, never invented");
+  assert.equal(result.callNotes?.callNotesId, "CN-007", "the forwarded Call Notes reference validates against this Handoff's binding");
+  assert.equal(log.writes.length, 0, "resolution never writes");
+});
+
+test("sources: the Strategy -> Finance Entity/Matter requirement is enforced at resolution -- a Sources-enabled Handoff of that route missing the Entity reference is refused, never substituted or treated as legacy", async (t) => {
+  await expectRefused(
+    t,
+    {
+      [CN_PAGE_ID]: await callNotesPageFixture({ Matter: { relation: [{ id: MATTER_PAGE_ID }] } }),
+      [MATTER_PAGE_ID]: matterPageFixture(),
+    },
+    handoffProperties({
+      Reason: rich("Martin-approved Strategic Intervention Proposal ready for value-based pricing."),
+      "From Unit": { select: { name: "Strategy" } },
+      "To Unit": { select: { name: "Finance" } },
+      Sources: sourcesReadShape([`https://www.notion.so/${MATTER_HEX}`, CN_PAGE_URL]),
+    }),
+    /requires a entities source/,
+    { fromUnit: "Strategy", toUnit: "Finance", tokens: { entityToken: "", matterToken: "" } },
+  );
 });
 
 // ---------------------------------------------------------------------------

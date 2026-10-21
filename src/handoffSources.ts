@@ -181,6 +181,26 @@ export interface HandoffSourceRouteContract {
  *   prohibited: a Handoff is never evidence for another Handoff, and a
  *   self/cycle reference would make evidence unresolvable.
  *
+ * - `Strategy->Finance` -- the value-based quote request Martin's approval
+ *   of a Strategy intervention commits. This route is NOT generic and its
+ *   Entity/Matter binding is required outright (`entities`, `matters` in
+ *   `required`): the quote is priced for one Matter of one Entity, and a
+ *   Sources-enabled Handoff of this route may never travel without
+ *   establishing exactly which canonical pages those are -- resolution
+ *   refuses one carrying either missing, and the binding is established
+ *   from exactly those two pages (cross-checked against the Handoff's own
+ *   tokens when those are present). `call_notes` is OPTIONAL and
+ *   carries the upstream Sales -> Strategy Handoff's own canonical Call
+ *   Notes reference, forwarded by the Strategy producer when (and only
+ *   when) that reference exists and re-validates on its own route -- the
+ *   same exact canonical page, its URL rebuilt in bare-id form so no title
+ *   slug (identity-bearing text) travels in a protected field --
+ *   so Finance can resolve the same approved record the diagnosis was
+ *   grounded in. Absent, the Handoff carries the Strategy boundary
+ *   representation and the upstream commercial-value determination as
+ *   before, and no Call Notes reference is ever fabricated to fill the gap.
+ *   `handoffs` is prohibited for the same reason as on Sales->Strategy.
+ *
  * A route whose contract neither requires nor permits `entities`/`matters`
  * (see `handoffRouteRequiresEntityMatter`) is a declared GENERIC route:
  * Handoffs on it do not carry, and are never forced to acquire, an
@@ -202,6 +222,11 @@ export const HANDOFF_SOURCE_ROUTE_CONTRACTS: Readonly<Record<string, HandoffSour
   "Sales->Strategy": {
     required: [],
     optional: ["call_notes", "entities", "matters"],
+    prohibited: ["handoffs"],
+  },
+  "Strategy->Finance": {
+    required: ["entities", "matters"],
+    optional: ["call_notes"],
     prohibited: ["handoffs"],
   },
 };

@@ -19,7 +19,7 @@ import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, w
 import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, readCallNotesSourceEvidence, readGoogleDocSourceEvidence, strategyClarificationReason } from "./strategyEvidence";
-import { extractHandoffSources, resolveHandoffContextBinding, type HandoffSourceBinding, type HandoffSourcesResolution } from "../../handoffSources";
+import { extractHandoffSources, resolveHandoffContextBinding, resolveHandoffSources, sourcesRichText, type HandoffSourceBinding, type HandoffSourcesResolution } from "../../handoffSources";
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
@@ -2157,6 +2157,100 @@ async function reviseStrategyProposal(
  */
 
 /**
+ * The canonical `Sources` payload for the Strategy -> Finance Handoff that
+ * Martin's approval commits: the exact canonical Entity and Matter pages
+ * this Handoff's identity travels on, plus -- when the originating Sales ->
+ * Strategy Handoff declares one -- the SAME canonical Call Notes reference,
+ * forwarded.
+ *
+ * Every URL here is an exact direct-page link built from a resolved page
+ * id, never a title, a slug, or any other identifying detail (the
+ * identity-write boundary: real identity may be read while preparing a
+ * Handoff, but only tokens or canonical page references may be written to
+ * one). The Entity/Matter pages come from `resolveEntityMatterFromTokens`
+ * -- the approved token-to-canonical-record resolution this Unit already
+ * performs at pickup -- and the forwarded Call Notes reference is the
+ * upstream Handoff's own declared page, re-validated through
+ * `resolveHandoffSources` on its own route before it travels. Nothing is
+ * copied from the Call Notes record's CONTENT, and no reference is
+ * fabricated, inferred, or resolved by title.
+ *
+ * Fails closed deliberately: an unresolvable token pair, or an upstream
+ * `Sources` declaration that cannot be extracted or re-validated, THROWS --
+ * the approval's existing catch turns that into the established safe
+ * failure ("Couldn't create the Handoff to Finance -- please try approving
+ * again.") with no Handoff written, rather than committing one whose
+ * canonical identity or evidence reference could not be established. A
+ * legacy upstream Handoff (no `Sources` property) simply carries no Call
+ * Notes reference: its free-text convention remains its own transport and
+ * is never upgraded into a canonical link here.
+ *
+ * Exported for its own tests only (the same pattern as
+ * `readLegacyHandoffTokens`); no other module calls it.
+ */
+export async function buildStrategyFinanceHandoffSources(env: Env, state: WorkState): Promise<string[]> {
+  const entityToken = state.entityToken ?? "";
+  const matterToken = state.matterToken ?? "";
+  const binding = await resolveEntityMatterFromTokens(env, entityToken, matterToken);
+  if (!binding) {
+    throw new Error(
+      `the Handoff's Entity/Matter tokens (${entityToken || "(none)"}/${matterToken || "(none)"}) do not resolve to their canonical records -- a Finance Handoff is never written without an established canonical identity`,
+    );
+  }
+  const sources = [canonicalPageUrl(binding.entityId), canonicalPageUrl(binding.matterId)];
+  if (state.handoffId) {
+    const callNotesUrl = await resolveUpstreamCallNotesSourceUrl(env, state, { entityToken, matterToken });
+    if (callNotesUrl) sources.push(callNotesUrl);
+  }
+  return sources;
+}
+
+/**
+ * The canonical URL text for one exact Notion page id: a bare-id link, the
+ * form `parseNotionPageLink` accepts deterministically. A page's own `url`
+ * carries a title-derived slug, so it is NEVER used -- slug text is
+ * identity-bearing content and `Sources` is a protected Handoff field.
+ */
+function canonicalPageUrl(pageId: string): string {
+  return `https://www.notion.so/${pageId.replace(/-/g, "").replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5")}`;
+}
+
+/**
+ * The originating Sales -> Strategy Handoff's canonical Call Notes
+ * reference, forwarded only when it EXISTS and is VALID: the upstream
+ * Handoff must itself be Sources-enabled, and its declared sources must
+ * resolve and validate fail-closed on their own route (exact page, real
+ * parent, type permitted, Entity/Matter binding, Status, registry fields,
+ * re-validated Approval Attestation -- the same resolution the pickup
+ * performed). The forwarded URL names exactly that validated page. A legacy
+ * upstream Handoff returns undefined: nothing declared, nothing forwarded,
+ * and a free-text reference is never promoted into a canonical one.
+ */
+async function resolveUpstreamCallNotesSourceUrl(
+  env: Env,
+  state: WorkState,
+  tokens: { entityToken: string; matterToken: string },
+): Promise<string | undefined> {
+  const access = strategyAnalystAccess(state);
+  const upstream = await getPage(env, state.handoffId!, access);
+  const extraction = extractHandoffSources(upstream.properties);
+  if (!extraction.ok || extraction.mode !== "sources") return undefined;
+  const resolution = await resolveHandoffSources(env, {
+    properties: upstream.properties,
+    tokens,
+    route: { fromUnit: "Sales", toUnit: "Strategy" },
+    access,
+  });
+  if (!resolution.ok) {
+    throw new Error(
+      `the originating Sales -> Strategy Handoff's Sources could not be validated (${resolution.reason}) -- refusing to forward an unverifiable Call Notes reference to Finance`,
+    );
+  }
+  if (resolution.mode !== "sources" || !resolution.callNotes) return undefined;
+  return canonicalPageUrl(resolution.callNotes.pageId);
+}
+
+/**
  * Martin's Approve/Refine/Reject decision on the current Strategy Proposal.
  * Verifies, before mutating anything: strategyApprovalState is exactly
  * AWAITING_INTERVENTION_APPROVAL, pendingStrategyApproval exists, and its
@@ -2304,6 +2398,16 @@ export async function handleInterventionApproval(
     const verifiedFactsForFinance = upstreamCommercialValueEvidence
       ? `${strategyBoundaryBlock}\n\n${upstreamCommercialValueEvidence}`
       : strategyBoundaryBlock;
+    // Canonical identity references for the Finance Handoff (LOG-1140): the
+    // exact Entity/Matter pages this Handoff's tokens resolve to, plus the
+    // upstream Sales -> Strategy Handoff's own canonical Call Notes
+    // reference when it carries a validated one -- resolved BEFORE the
+    // write and failing closed, so no Handoff is ever committed whose
+    // canonical identity or evidence reference could not be established.
+    // The token properties below are still written alongside: Sources is
+    // the canonical reference, the tokens remain the compatibility
+    // transport, and both must agree (checked fail-closed at pickup).
+    const financeHandoffSources = await buildStrategyFinanceHandoffSources(env, state);
     const { page: handoff } = await createHandoff(
       env,
       {
@@ -2326,6 +2430,7 @@ export async function handleInterventionApproval(
         ),
         Entity_Token: richText(state.entityToken ?? ""),
         Matter_Token: richText(state.matterToken ?? ""),
+        Sources: sourcesRichText(financeHandoffSources),
         Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
         "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
         "Verified Facts & Sources": richTextLong(verifiedFactsForFinance),

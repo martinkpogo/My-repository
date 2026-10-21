@@ -491,14 +491,47 @@ test("updateHandoff: a lifecycle update may carry Sources -- but only with its c
 test("createHandoff: Sources on an uncontracted route is refused outright -- zero Notion calls", async (t) => {
   const calls = mockNotionFetch(t);
   const env = fakeEnv();
-  // validProperties() is Strategy -> Finance: a real route, but one with no
-  // Handoff source route contract -- which routes carry sources is an
-  // explicit contract decision, never guessed.
+  // A Finance -> Sales payload: a real route, but one with no Handoff
+  // source route contract -- which routes carry sources is an explicit
+  // contract decision, never guessed. (Strategy -> Finance WAS this case
+  // until LOG-1140 contracted it; an uncontracted route is exercised on
+  // one that still has no contract.)
   await assert.rejects(
-    () => createHandoff(env, validProperties({ Sources: SOURCES_PROPERTY }), baseIdentity, createAccess(env)),
+    () =>
+      createHandoff(
+        env,
+        validProperties({ "From Unit": select("Finance"), "To Unit": select("Sales"), Sources: SOURCES_PROPERTY }),
+        baseIdentity,
+        createAccess(env),
+      ),
     (err: unknown) => err instanceof HandoffWriteViolationError && /has no Handoff source route contract/.test((err as Error).message),
   );
   assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
+});
+
+test("createHandoff (Strategy -> Finance): the contracted Sources payload is written -- canonical Entity/Matter references plus the upstream Call Notes reference, tokens retained", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  // The exact shape Strategy's producer writes (buildStrategyFinanceHandoffSources):
+  // bare-id canonical links, never title slugs, alongside the legacy tokens.
+  const entityUrl = "https://www.notion.so/eeee6666-dddd-7777-cccc-8888bbbb4444";
+  const matterUrl = "https://www.notion.so/ffff5555-eeee-6666-dddd-7777cccc8888";
+  const callNotesUrl = "https://www.notion.so/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const { page, sourceBoundaryAttestation } = await createHandoff(
+    env,
+    validProperties({ Sources: sourcesProperty([entityUrl, matterUrl, callNotesUrl]) }),
+    baseIdentity,
+    createAccess(env),
+  );
+  assert.strictEqual(page.id, "page-1");
+  const create = calls.find((c) => c.method === "POST" && c.body?.properties?.Sources);
+  assert.ok(create, "the Handoff must be created with its Sources payload");
+  const written = create.body.properties.Sources.rich_text.map((item: any) => item.text.link.url);
+  assert.deepStrictEqual(written, [entityUrl, matterUrl, callNotesUrl], "every canonical reference travels verbatim with its link");
+  assert.strictEqual(create.body.properties.Entity_Token.rich_text[0].text.content, "E-20", "the legacy token transport is retained alongside Sources");
+  assert.strictEqual(create.body.properties.Matter_Token.rich_text[0].text.content, "MAT-20");
+  // Tokens were supplied, so this write honestly attests all five checks.
+  assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...SOURCE_BOUNDARY_CHECKS].sort());
 });
 
 test("createHandoff: a Google reference on a route whose contract does not permit its type is refused outright -- zero Notion calls", async (t) => {
