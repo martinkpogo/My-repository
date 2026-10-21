@@ -86,6 +86,20 @@ export class HandoffWriteViolationError extends Error {
  * recorded route must have a source route contract, every artifact
  * reference's type must be one that contract permits, and the opaque token
  * entries must satisfy exactly that contract's separate token requirements.
+ * A payload that OMITS `Sources` is answered for its route's identity
+ * requirements too, and that is the whole point of this gate: omitting the
+ * property is exactly the shape that used to bypass them. A caller's own
+ * tokens are not a transport the record carries -- the retired token
+ * properties are written nowhere -- so an identity-required route written
+ * without `Sources` would arrive at pickup with nothing to bind to and be
+ * refused there. Refusing before the write instead of after it means no
+ * doomed record is ever created. Only a CREATE is held to this: an UPDATE
+ * patches the fields it is changing (typically the lifecycle's Status
+ * transition) and carries neither the route nor the unchanged `Sources`,
+ * and forcing it to resubmit immutable source data it does not touch would
+ * be a second mechanism over data the receiver already validated on the way
+ * in.
+ *
  * Identity-safety of the URL/token text itself is covered by
  * `Sources` membership in PROTECTED_HANDOFF_FIELDS below (the primary
  * identity control runs over it on every create and update). The FULL
@@ -107,17 +121,30 @@ function validateHandoffSourcesWrite(
   operation: string,
   contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
 ): void {
+  const fromUnit = selectName(properties["From Unit"]) ?? "";
+  const toUnit = selectName(properties["To Unit"]) ?? "";
+  const routeKey = `${fromUnit || "(none)"}->${toUnit || "(none)"}`;
+  const contract = handoffSourceRouteContract(fromUnit, toUnit, contracts);
   const raw = (properties as Record<string, unknown>)[HANDOFF_SOURCES_PROPERTY];
-  if (raw === undefined || raw === null) return;
+  if (raw === undefined || raw === null) {
+    // No `Sources` payload at all. A route declared GENERIC may omit
+    // identity -- that is precisely what declaring it generic means -- and a
+    // route with no contract at all is refused for carrying a payload (just
+    // below) and refused again by every consumer, so nothing here opens a
+    // new acceptance path for either. An identity-required route is refused,
+    // because there is nowhere else for its identity to live.
+    if (operation === "create" && contract && (contract.requiresEntityToken || contract.requiresMatterToken)) {
+      throw new HandoffWriteViolationError(
+        `the Handoff ${operation} payload carries no "${HANDOFF_SOURCES_PROPERTY}" property, and route "${routeKey}" requires its opaque Entity/Matter tokens there -- the caller's own tokens are not a transport the record carries (the retired Handoff token properties are written nowhere), so this Handoff would arrive at pickup with nothing to bind to; it is refused before the write rather than after it.`,
+      );
+    }
+    return;
+  }
   const extraction = extractHandoffSources(properties);
   if (!extraction.ok) {
     throw new HandoffWriteViolationError(`the Handoff ${operation} payload carries an unusable "${HANDOFF_SOURCES_PROPERTY}" property: ${extraction.reason}`);
   }
   if (extraction.mode !== "sources") return; // unreachable: a present property extracts as "sources" or refuses
-  const fromUnit = selectName(properties["From Unit"]) ?? "";
-  const toUnit = selectName(properties["To Unit"]) ?? "";
-  const routeKey = `${fromUnit || "(none)"}->${toUnit || "(none)"}`;
-  const contract = handoffSourceRouteContract(fromUnit, toUnit, contracts);
   if (!contract) {
     throw new HandoffWriteViolationError(
       `the Handoff ${operation} payload carries "${HANDOFF_SOURCES_PROPERTY}", but route "${routeKey}" has no Handoff source route contract -- which sources may travel a route is an explicit contract decision, so an uncontracted route is refused rather than guessed.`,
@@ -312,14 +339,20 @@ export function validateHandoffProperties(properties: NotionProperties, identity
 
 /**
  * The write's operational-reference gate: a Handoff must name HOW its
- * Entity/Matter identity travels -- identity tokens, a contracted
- * `Sources` payload (fully validated at pickup), or a route declared
- * generic -- and is refused outright when it names none of them. This is
- * exactly the protection the old unconditional token requirement gave,
- * expressed in terms of what actually identifies a Handoff now: nothing
- * about "is there real identity in this record" is weakened, because a
- * `Sources` payload still names the canonical records by exact page id and
- * is validated fail-closed before any consumer acts on it.
+ * Entity/Matter identity travels -- a contracted `Sources` payload (fully
+ * validated at pickup), the caller's own identity tokens, or a route
+ * declared generic -- and is refused outright when it names none of them.
+ * This is exactly the protection the old unconditional token requirement
+ * gave, expressed in terms of what actually identifies a Handoff now:
+ * nothing about "is there real identity in this record" is weakened,
+ * because a `Sources` payload still names the canonical records by exact
+ * page id and is validated fail-closed before any consumer acts on it.
+ *
+ * Caller tokens alone are NOT sufficient on a route whose contract requires
+ * identity tokens in `Sources`: the retired token properties are written
+ * nowhere, so those arguments are never a transport the record carries.
+ * `validateHandoffSourcesWrite` refuses that shape before this gate ever
+ * runs -- see its doc comment.
  */
 function assertOperationalReference(input: { operation: string; identity: HandoffIdentity; carriesSources: boolean; routeIsGeneric: boolean; routeKey: string }): void {
   if (input.identity.entityToken?.trim() && input.identity.matterToken?.trim()) return;
