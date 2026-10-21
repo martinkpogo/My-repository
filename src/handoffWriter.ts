@@ -3,20 +3,41 @@ import type { NotionProperties, NotionPage } from "./notion";
 import { createPage, richText, updatePage } from "./notion";
 import type { AccessContext } from "./access";
 import { buildMarker, markerFieldEntries, markerPattern, type MarkerEvidence } from "./markerChannel";
-import { HANDOFF_SOURCES_PROPERTY, extractHandoffSources, handoffSourceRouteContract } from "./handoffSources";
+import {
+  HANDOFF_SOURCES_PROPERTY,
+  extractHandoffSources,
+  handoffRouteRequiresEntityMatter,
+  handoffSourceRouteContract,
+  type HandoffSourceRouteContract,
+} from "./handoffSources";
 
 /**
  * Single runtime enforcement point for the canonical Handoff identity-write
  * boundary: every Handoff field that becomes another Unit's AI input
- * context may identify the Entity/Matter ONLY by its opaque Entity_Token /
- * Matter_Token -- never a real Entity/company name, a real contact name, an
+ * context may identify the Entity/Matter ONLY by an opaque operational
+ * reference -- the `Entity_Token`/`Matter_Token` values or, on a contracted
+ * route, the exact canonical page references in `Sources` -- never a real
+ * Entity/company name, a real contact name, an
  * email address, a phone number, or any other detail that identifies who
  * they actually are. Real identity may be read while preparing a Handoff;
- * it must be resolved to tokens before anything is WRITTEN to one. See
+ * it must be resolved to tokens (or to exact canonical page references)
+ * before anything is WRITTEN to one. See
  * handoff-writing-rules.yaml (the manual-operator equivalent of this rule)
  * and the HO-58 incident it documents -- this module is the same rule
  * enforced in code for every runtime write path, so it no longer depends on
  * every producer applying the discipline by hand.
+ *
+ * **The two token values are no longer universally required.** A write must
+ * still establish HOW this Handoff's identity travels (never nothing at
+ * all), but it may do so three ways: with operational identity tokens (the
+ * legacy transport, unchanged); with a `Sources` payload on a route whose
+ * contract permits it, whose full binding validation then runs fail-closed
+ * at pickup in `resolveHandoffSources`; or, for a route declared generic
+ * (its contract requires and permits neither `entities` nor `matters`), with
+ * no Entity/Matter at all. What never changes: no protected field may carry
+ * real identity, the checks that were performed are the only ones recorded
+ * as performed, and a Handoff with no operational reference of any kind is
+ * refused before any Notion call.
  *
  * Every Unit that creates or updates a Handoff must go through
  * createHandoff/updateHandoff below rather than calling notion.ts's
@@ -97,16 +118,22 @@ function validateHandoffSourcesWrite(properties: NotionProperties, operation: st
 
 /**
  * The identity this write is being validated against. entityToken/
- * matterToken are required on creation (see createHandoff). The display-
- * name/contact fields are supplied only when the calling Unit actually
+ * matterToken are the caller's operational reference for checks 1 & 2 of
+ * the source-boundary contract; they are OPTIONAL here because the write
+ * path no longer universally requires them (see the module header): a
+ * caller with no tokens passes none, and the write is then accepted only
+ * if the payload itself carries a contracted `Sources` reference or the
+ * route is declared generic -- never if there is no operational reference
+ * of any kind. The display-name/contact fields are supplied only when the
+ * calling Unit actually
  * knows them (e.g. Sales, which resolves real identity earlier in its own
  * flow) -- a Unit that operates purely on tokens (Strategy, Finance)
  * has nothing to pass here, and correctly so: it never learned a real name
  * to begin with, per the closed-context contract in dataBoundary/policy.ts.
  */
 export interface HandoffIdentity {
-  entityToken: string;
-  matterToken: string;
+  entityToken?: string;
+  matterToken?: string;
   entityName?: string;
   matterName?: string;
   contactName?: string;
@@ -238,13 +265,23 @@ export function validateHandoffProperties(properties: NotionProperties, identity
   }
 }
 
-function assertTokensPresent(identity: HandoffIdentity): void {
-  if (!identity.entityToken?.trim()) {
-    throw new HandoffWriteViolationError("Entity_Token is required to create a Handoff and cannot be empty.");
-  }
-  if (!identity.matterToken?.trim()) {
-    throw new HandoffWriteViolationError("Matter_Token is required to create a Handoff and cannot be empty.");
-  }
+/**
+ * The write's operational-reference gate: a Handoff must name HOW its
+ * Entity/Matter identity travels -- identity tokens, a contracted
+ * `Sources` payload (fully validated at pickup), or a route declared
+ * generic -- and is refused outright when it names none of them. This is
+ * exactly the protection the old unconditional token requirement gave,
+ * expressed in terms of what actually identifies a Handoff now: nothing
+ * about "is there real identity in this record" is weakened, because a
+ * `Sources` payload still names the canonical records by exact page id and
+ * is validated fail-closed before any consumer acts on it.
+ */
+function assertOperationalReference(input: { operation: string; identity: HandoffIdentity; carriesSources: boolean; routeIsGeneric: boolean; routeKey: string }): void {
+  if (input.identity.entityToken?.trim() && input.identity.matterToken?.trim()) return;
+  if (input.carriesSources || input.routeIsGeneric) return;
+  throw new HandoffWriteViolationError(
+    `the Handoff ${input.operation} payload carries no operational Entity/Matter reference: neither identity tokens were supplied nor a "${HANDOFF_SOURCES_PROPERTY}" payload, and route "${input.routeKey}" is not declared generic -- refusing to write a Handoff with nothing to bind its context to.`,
+  );
 }
 
 /**
@@ -262,6 +299,20 @@ export const SOURCE_BOUNDARY_CHECKS = [
 ] as const;
 
 export type SourceBoundaryCheckName = (typeof SOURCE_BOUNDARY_CHECKS)[number];
+
+/**
+ * The two checks that attest an operational Entity/Matter reference, and
+ * the three content checks every write path establishes. A write carries
+ * identity tokens -> all five are established and recorded (the legacy
+ * shape, unchanged). A write with NO identity tokens records only the
+ * content checks: checks 1 & 2 are then established on the receiving side
+ * by its own resolution of the Handoff's canonical `Sources`
+ * (`resolveHandoffSources`), which is a stricter check than the sender's
+ * assertion -- never claimed here for a check this write did not perform.
+ */
+const REFERENCE_CHECKS: readonly SourceBoundaryCheckName[] = ["operational_entity_reference_present", "operational_matter_reference_present"];
+
+const CONTENT_CHECKS: readonly SourceBoundaryCheckName[] = SOURCE_BOUNDARY_CHECKS.filter((c) => !(REFERENCE_CHECKS as readonly string[]).includes(c));
 
 /** The explicit source-boundary result -- never a generic boolean such as `identitySafe: true`. */
 export type SourceBoundaryResult = "Passed" | "Failed";
@@ -297,10 +348,15 @@ export interface HandoffSourceBoundaryAttestation {
    */
   result: SourceBoundaryResult;
   /**
-   * The five named checks this result covers. Empty only for the
-   * direct_request exemption (no Sales -> Strategy Handoff exists, so there
-   * is nothing for the five checks to attest to -- represented honestly as
-   * no checks, never as a fabricated five-check Passed).
+   * The named checks this result covers -- exactly the checks this write
+   * established (see REFERENCE_CHECKS/CONTENT_CHECKS): all five when the
+   * write carried operational identity tokens, the three content checks
+   * when it carried none (checks 1 & 2 are then established by the
+   * receiving execution's own resolution of the Handoff's canonical
+   * `Sources`, never claimed by a sender that performed no such check).
+   * Empty for the direct_request exemption (no Sales -> Strategy Handoff
+   * exists, so there is nothing for the checks to attest to -- represented
+   * honestly as no checks, never as a fabricated Passed).
    */
   checks: SourceBoundaryCheckName[];
   identityFieldsChecked: KnownIdentityField[];
@@ -314,11 +370,26 @@ export interface HandoffSourceBoundaryAttestation {
  * schema change, no second record, and no new subsystem. The marker is
  * written as part of the Handoff creation payload itself (a single atomic
  * create), which is what binds it to this Handoff: it exists on exactly the
- * record it was computed for, and its operational Entity/Matter references
- * must equal that record's own Entity_Token / Matter_Token when read back.
+ * record it was computed for, and it must agree with that record's own
+ * operational binding when read back. Two binding forms, both durable:
+ *
+ *   - **Identity form** (the Handoff's write carried operational
+ *     identity tokens): `entity=<token> matter=<token>`, bound at pickup to
+ *     the operational Entity/Matter references the receiving execution
+ *     resolved for this Handoff -- from its canonical `Sources` when it is
+ *     a source-based Handoff, from its legacy token fields otherwise. The
+ *     properties themselves are never what binds it.
+ *   - **Sources form** (a source-based write with no identity tokens):
+ *     `refs=<page/file ids>`, bound at pickup to the EXACT ids the
+ *     receiving execution's own resolution validated, so the marker travels
+ *     with the very references it was computed for.
+ *
  * It carries no real-world identity: only the result, the binding
- * references, the five named checks, and which known-identity FIELDS were
- * compared (field names, never values).
+ * references, the named checks actually established by this write (all five
+ * when identity tokens bound it; the three content checks when the
+ * references bind it, since checks 1 & 2 are then established by the
+ * receiver's resolution rather than by the sender), and which
+ * known-identity FIELDS were compared (field names, never values).
  *
  * The grammar itself (bracket group, `key=value` pairs) is shared with the
  * Call Notes `record_approval` marker and lives in `src/markerChannel.ts`;
@@ -330,19 +401,47 @@ const SOURCE_BOUNDARY_MARKER_PATTERN = markerPattern(SOURCE_BOUNDARY_MARKER_NAME
 /** Parse-time whitelist for the marker's `fields=` list -- names only, see KnownIdentityField. */
 const KNOWN_IDENTITY_FIELD_NAMES: readonly KnownIdentityField[] = ["entityName", "matterName", "contactName", "email", "phone"];
 
-/** Builds the explicit, machine-readable source-boundary marker written into a Handoff's Reason at creation. */
+/**
+ * Builds the explicit, machine-readable source-boundary marker written into
+ * a Handoff's Reason at creation, in whichever binding form that write can
+ * honestly establish (forms described above): both operational identity
+ * tokens (identity form, all five checks), neither -- in which case the
+ * exact canonical source references the payload declares (sources form,
+ * content checks only, checks 1 & 2 established by the receiver's own
+ * resolution), or -- only reachable when a caller outside createHandoff
+ * builds a marker by hand, since createHandoff refuses a partially tokened
+ * write before it gets here, and a source-based write carries sourceIds --
+ * a partial identity form recorded as exactly what it is, which the
+ * receiver refuses fail-closed at binding. Throws rather than writing a
+ * marker bound to nothing at all.
+ */
 export function buildSourceBoundaryMarker(
   identity: HandoffIdentity,
   result: SourceBoundaryResult,
   identityFieldsChecked: KnownIdentityField[],
+  sourceBinding?: { sourceIds: readonly string[] },
 ): string {
-  return buildMarker(SOURCE_BOUNDARY_MARKER_NAME, [
-    ["result", result],
-    ["entity", identity.entityToken.trim()],
-    ["matter", identity.matterToken.trim()],
-    ["checks", SOURCE_BOUNDARY_CHECKS.join(",")],
-    ["fields", identityFieldsChecked.join(",")],
-  ]);
+  const entityToken = identity.entityToken?.trim() ?? "";
+  const matterToken = identity.matterToken?.trim() ?? "";
+  const ids = (sourceBinding?.sourceIds ?? []).map((id) => id.trim()).filter(Boolean);
+  const entries: Array<[string, string]> = [["result", result]];
+  let checks: SourceBoundaryCheckName[];
+  if (entityToken && matterToken) {
+    entries.push(["entity", entityToken], ["matter", matterToken]);
+    checks = [...SOURCE_BOUNDARY_CHECKS];
+  } else if (ids.length > 0) {
+    entries.push(["refs", [...ids].sort().join(",")]);
+    checks = [...CONTENT_CHECKS];
+  } else if (entityToken || matterToken) {
+    entries.push(["entity", entityToken], ["matter", matterToken]);
+    checks = [...CONTENT_CHECKS];
+  } else {
+    throw new HandoffWriteViolationError(
+      "a source-boundary marker must be bound to something this Handoff's receiver can verify -- neither operational identity tokens nor canonical source references are present, so no attestation is written.",
+    );
+  }
+  entries.push(["checks", checks.join(",")], ["fields", identityFieldsChecked.join(",")]);
+  return buildMarker(SOURCE_BOUNDARY_MARKER_NAME, entries);
 }
 
 /** The outcome of reading a Handoff's recorded source-boundary evidence. */
@@ -357,11 +456,18 @@ export type SourceBoundaryEvidence = MarkerEvidence<HandoffSourceBoundaryAttesta
  * { ok: false } with a non-sensitive reason so the caller can fail closed;
  * absence of identity-bearing content is never treated as proof the check
  * happened. `expected` binds the marker to the Handoff being read: its own
- * id and its own operational Entity/Matter references.
+ * id plus whichever binding this execution established for it -- the
+ * operational Entity/Matter references it resolved (`entityToken`/
+ * `matterToken`, the identity form) and/or the exact source references its
+ * own resolution validated (`sourceIds`, the sources form). A marker is
+ * accepted only when its recorded checks are the ones its binding form can
+ * evidence: an identity form must carry all five, a sources form the three
+ * content checks (the receiver establishes checks 1 & 2 itself, from the
+ * same resolution that produced `sourceIds`).
  */
 export function parseSourceBoundaryMarker(
   reasonText: string,
-  expected: { handoffId: string; entityToken: string; matterToken: string },
+  expected: { handoffId: string; entityToken?: string; matterToken?: string; sourceIds?: readonly string[] },
 ): SourceBoundaryEvidence {
   const match = SOURCE_BOUNDARY_MARKER_PATTERN.exec(reasonText ?? "");
   if (!match) {
@@ -377,14 +483,32 @@ export function parseSourceBoundaryMarker(
   }
   const entity = fields.get("entity") ?? "";
   const matter = fields.get("matter") ?? "";
-  if (!entity || !matter) {
+  const refs = fields.get("refs") ?? "";
+  let requiredChecks: readonly SourceBoundaryCheckName[] = SOURCE_BOUNDARY_CHECKS;
+  if (entity || matter) {
+    // Identity form: bound to operational Entity/Matter references.
+    if (!entity || !matter) {
+      return { ok: false, reason: "the recorded attestation carries no operational Entity/Matter reference" };
+    }
+    if (entity !== expected.entityToken || matter !== expected.matterToken) {
+      return { ok: false, reason: "the recorded attestation is not bound to this Handoff's operational Entity/Matter references" };
+    }
+  } else if (refs) {
+    // Sources form: bound to the exact references this execution resolved.
+    const recorded = refs.split(",").filter(Boolean).sort();
+    const resolved = (expected.sourceIds ?? []).map((id) => id.trim()).filter(Boolean).sort();
+    if (resolved.length === 0) {
+      return { ok: false, reason: "the recorded attestation binds to canonical source references this execution did not resolve" };
+    }
+    if (recorded.join(",") !== resolved.join(",")) {
+      return { ok: false, reason: "the recorded attestation is not bound to this Handoff's canonical source references" };
+    }
+    requiredChecks = CONTENT_CHECKS;
+  } else {
     return { ok: false, reason: "the recorded attestation carries no operational Entity/Matter reference" };
   }
-  if (entity !== expected.entityToken || matter !== expected.matterToken) {
-    return { ok: false, reason: "the recorded attestation is not bound to this Handoff's operational Entity/Matter references" };
-  }
   const recordedChecks = (fields.get("checks") ?? "").split(",").filter(Boolean);
-  const missingChecks = SOURCE_BOUNDARY_CHECKS.filter((c) => !recordedChecks.includes(c));
+  const missingChecks = requiredChecks.filter((c) => !recordedChecks.includes(c));
   if (missingChecks.length > 0) {
     return { ok: false, reason: `the recorded attestation does not evidence the required check(s): ${missingChecks.join(", ")}` };
   }
@@ -399,7 +523,7 @@ export function parseSourceBoundaryMarker(
       handoffId: expected.handoffId,
       checked: true,
       result: "Passed",
-      checks: [...SOURCE_BOUNDARY_CHECKS],
+      checks: [...requiredChecks],
       identityFieldsChecked: identityFields as KnownIdentityField[],
     },
   };
@@ -413,37 +537,72 @@ function selectName(value: unknown): string | undefined {
 
 /**
  * The single production path for creating a Handoff. Validates the
- * identity boundary (tokens required, no prohibited identity in any
- * protected field) BEFORE calling notion.ts's createPage -- atomic from the
- * application's perspective: validate, then create, never create-then-
- * repair. Throws HandoffWriteViolationError on any violation; callers must
- * treat that as a fail-closed refusal to write, not something to catch and
- * silently work around.
+ * identity boundary -- an operational Entity/Matter reference of some
+ * sanctioned kind, and no prohibited identity in any protected field --
+ * BEFORE calling notion.ts's createPage -- atomic from the application's
+ * perspective: validate, then create, never create-then-repair. Throws
+ * HandoffWriteViolationError on any violation; callers must treat that as a
+ * fail-closed refusal to write, not something to catch and silently work
+ * around.
+ *
+ * The operational reference is no longer ALWAYS the two token values: a
+ * payload carrying a contracted `Sources` reference, or travelling a route
+ * declared generic, writes without them (see the module header). The
+ * source-boundary attestation records exactly the checks this write
+ * established, and the returned `checks` list says the same -- a subset is
+ * never dressed up as five.
  *
  * Returns both the created page and the source-boundary attestation for
  * exactly the identity this call validated against -- computed once, here,
  * rather than each calling Unit re-deriving identityFieldsPresent(identity)
  * by hand (previously only salesExecutive.ts did this, duplicating logic
  * that belongs with the check itself).
+ *
+ * `contracts` is a TEST SEAM (the same one `resolveHandoffSources` takes)
+ * so a test can exercise the generic-route write path against a route
+ * declared generic without editing the production contract table. Production
+ * callers never pass it; omitting it resolves against
+ * `HANDOFF_SOURCE_ROUTE_CONTRACTS` exactly as production does.
  */
 export async function createHandoff(
   env: Env,
   properties: NotionProperties,
   identity: HandoffIdentity,
   access: AccessContext,
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
 ): Promise<{ page: NotionPage; sourceBoundaryAttestation: HandoffSourceBoundaryAttestation }> {
   // A `Sources` payload is validated first, fail-closed: exact direct
   // references on a contracted route whose contract permits each Google
   // reference's type -- refused before anything else, so no write attempt
   // ever reaches Notion with a payload the pickup would refuse anyway.
   validateHandoffSourcesWrite(properties, "create");
+  const fromUnit = selectName(properties["From Unit"]) ?? "";
+  const toUnit = selectName(properties["To Unit"]) ?? "";
+  const routeKey = `${fromUnit || "(none)"}->${toUnit || "(none)"}`;
+  const sourcesExtraction = extractHandoffSources(properties);
+  const carriesSources = sourcesExtraction.ok && sourcesExtraction.mode === "sources";
+  const sourceIds = carriesSources
+    ? sourcesExtraction.refs.map((ref) => (ref.kind === "notion" ? ref.pageId : ref.fileId))
+    : [];
+  const routeIsGeneric = !handoffRouteRequiresEntityMatter(fromUnit, toUnit, contracts);
+
   // Source-boundary checks 1 & 2 -- established first, fail closed: a
   // Handoff with no operational Entity/Matter reference never reaches
-  // createPage. Not weakened; this IS the basis for both checks.
-  assertTokensPresent(identity);
+  // createPage. Tokens are still the basis for both checks when supplied;
+  // when they are not, a contracted `Sources` payload (validated in full at
+  // pickup, where the receiving side establishes checks 1 & 2 from that
+  // resolution) or a declared-generic route is the sanctioned reference
+  // instead. Nothing about the refusal for a payload carrying NEITHER is
+  // relaxed.
+  assertOperationalReference({ operation: "create", identity, carriesSources, routeIsGeneric, routeKey });
+  const entityToken = identity.entityToken?.trim() ?? "";
+  const matterToken = identity.matterToken?.trim() ?? "";
+  const hasIdentityTokens = Boolean(entityToken && matterToken);
   const established = new Set<SourceBoundaryCheckName>();
-  if (identity.entityToken.trim()) established.add("operational_entity_reference_present");
-  if (identity.matterToken.trim()) established.add("operational_matter_reference_present");
+  if (hasIdentityTokens) {
+    established.add("operational_entity_reference_present");
+    established.add("operational_matter_reference_present");
+  }
 
   // Check 4 -- canonical structural guarantee, NOT a scan: this write path
   // performs no identity resolution of any kind. The only identity input is
@@ -461,17 +620,23 @@ export async function createHandoff(
   established.add("identity_bearing_content_removed");
   const identityFieldsChecked = identityFieldsPresent(identity);
 
-  const isSalesToStrategy =
-    selectName(properties["From Unit"]) === "Sales" && selectName(properties["To Unit"]) === "Strategy";
+  // What THIS write's attestation may claim: the content checks always,
+  // the reference checks only when identity tokens were supplied (see
+  // REFERENCE_CHECKS).
+  const attestedChecks: SourceBoundaryCheckName[] = hasIdentityTokens ? [...SOURCE_BOUNDARY_CHECKS] : [...CONTENT_CHECKS];
+
+  const isSalesToStrategy = fromUnit === "Sales" && toUnit === "Strategy";
   if (isSalesToStrategy) {
     // Durable evidence, part of THIS creation event: the explicit Passed
     // attestation travels inside the Handoff record itself, in Reason (the
     // sanctioned free-text marker channel -- same convention as
     // requiredCategory), so a receiving Strategy execution in a fresh
     // session reads evidence instead of inferring it. Bound to this
-    // Handoff by its operational Entity/Matter references; no real-world
-    // identity: result, binding, and the five named checks only.
-    const marker = buildSourceBoundaryMarker(identity, "Passed", identityFieldsChecked);
+    // Handoff by its operational Entity/Matter references (or, with no
+    // identity tokens, by the exact canonical source references the payload
+    // declares); no real-world identity: result, binding, and the named
+    // checks only.
+    const marker = buildSourceBoundaryMarker(identity, "Passed", identityFieldsChecked, { sourceIds });
     const existingReason = extractPropertyText(properties.Reason).trim();
     properties.Reason = richText(existingReason ? `${existingReason} ${marker}` : marker);
     // Check 5 -- the full Handoff context (now including the marker text
@@ -484,10 +649,14 @@ export async function createHandoff(
   }
   established.add("handoff_context_identity_safe");
 
-  // Fail-closed default: if ANY required check cannot be established, no
-  // Handoff is written at all -- in particular, no Pending Sales -> Strategy
-  // Handoff without an explicitly established Passed result.
-  const unestablished = SOURCE_BOUNDARY_CHECKS.filter((c) => !established.has(c));
+  // Fail-closed default: if ANY check this attestation claims cannot be
+  // established, no Handoff is written at all -- in particular, no Pending
+  // Sales -> Strategy Handoff without an explicitly established Passed
+  // result. Checks 1 & 2 make an unestablished pair only when identity
+  // tokens were absent, and then they are deliberately NOT among the
+  // claimed checks (the receiver establishes them from its own resolution
+  // of this payload's sources instead).
+  const unestablished = attestedChecks.filter((c) => !established.has(c));
   if (unestablished.length > 0) {
     throw new HandoffWriteViolationError(
       `source-boundary check(s) could not be established before write: ${unestablished.join(", ")} -- refusing to create the Handoff.`,
@@ -507,7 +676,7 @@ export async function createHandoff(
       handoffId: page.id,
       checked: true,
       result: "Passed",
-      checks: [...SOURCE_BOUNDARY_CHECKS],
+      checks: attestedChecks.filter((c) => established.has(c)),
       identityFieldsChecked,
     },
   };

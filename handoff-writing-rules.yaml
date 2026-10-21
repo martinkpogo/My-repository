@@ -10,7 +10,10 @@
 # createHandoff/updateHandoff. Every Unit that creates or updates a
 # Handoff (Sales, Strategy, Finance, Marketing)
 # calls into that module rather than writing to the Handoffs database
-# directly -- it requires Entity_Token/Matter_Token, and rejects (fails
+# directly -- it requires an operational Entity/Matter reference (the
+# Entity_Token/Matter_Token properties, or -- for a source-based Handoff --
+# the exact canonical pages its Sources property names, or a route
+# explicitly declared generic), and rejects (fails
 # closed, never silently redacts) any protected field that contains a
 # real Entity/Matter name, a known contact's name, an email address, or a
 # phone number. It builds on resolveIdentityTokens
@@ -30,7 +33,9 @@ opaque_token_boundary:
     (Handoff title, Reason, Sources, Required Next Action, Expected Output,
     Acceptance Criteria, Assumptions, Open Questions, Verified Facts &
     Sources, Work Completed) must identify the Entity/Matter ONLY by its
-    Entity_Token and Matter_Token (e.g. "E-20", "MAT-20") -- never by the
+    Entity_Token and Matter_Token (e.g. "E-20", "MAT-20") or, for a
+    source-based Handoff, by the exact canonical page references in its
+    Sources property -- never by the
     real Entity/company name, a real contact's name, an email address, a
     phone number, or any other detail that identifies who they actually
     are. Sources URLs are included deliberately: a Notion pretty-URL slug
@@ -160,16 +165,28 @@ sales_to_strategy_source_boundary_attestation:
 
   marker:
     channel: Reason free text (the same channel the runtime writes)
-    format: "[source_boundary_check result=Passed entity=<Entity_Token> matter=<Matter_Token> checks=operational_entity_reference_present,operational_matter_reference_present,identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared, e.g. entityName,matterName -- names only, never values>]"
+    identity_form: "[source_boundary_check result=Passed entity=<Entity_Token> matter=<Matter_Token> checks=operational_entity_reference_present,operational_matter_reference_present,identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared, e.g. entityName,matterName -- names only, never values>]"
+    sources_form: "[source_boundary_check result=Passed refs=<comma-joined sorted exact source page ids the Handoff's Sources declares> checks=identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared>]"
+    form_selection: >
+      A write that carried Entity_Token/Matter_Token records the identity
+      form with all five checks. A write whose operational identity is its
+      canonical Sources (no token properties) records the sources form
+      with only the three content checks -- checks 1 and 2 (operational
+      Entity/Matter reference) are established by the RECEIVER's own
+      resolution of those exact sources, never claimed by the sender.
     binding: >
-      entity= and matter= must be exactly this Handoff's own Entity_Token /
-      Matter_Token values -- that is what binds the attestation to this
-      record. The receiving Strategy execution rejects a marker whose
-      references do not match the Handoff it was read from.
+      The identity form's entity= and matter= must be exactly this
+      Handoff's own Entity_Token / Matter_Token values. The sources form's
+      refs= must be exactly the set of source page ids the receiver's own
+      resolution validated for this Handoff. Either way that is what binds
+      the attestation to this record: the receiving Strategy execution
+      rejects a marker whose references do not match the Handoff it was
+      read from, in whichever form it resolves that Handoff.
     contains_no_identity: >
-      The marker carries tokens, the result, the five check names, and
-      known-identity FIELD names only -- never a real name, email address,
-      phone number, or any other identifying value.
+      The marker carries tokens or exact page ids, the result, the check
+      names actually established, and known-identity FIELD names only --
+      never a real name, email address, phone number, or any other
+      identifying value.
 
   distinction: >
     A runtime-created Handoff's marker is produced by enforced code (the

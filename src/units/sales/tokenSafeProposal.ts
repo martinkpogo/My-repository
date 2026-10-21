@@ -34,6 +34,7 @@ import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
+import { readLegacyHandoffTokens } from "../../handoffSources";
 
 import { salesOf } from "./salesState";
 /**
@@ -929,8 +930,7 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   }
 
   await advanceWorkStatus(env, state, "Checking the Handoff's tokens, context and Finance judgment block");
-  const entityToken = plainText(hp.Entity_Token).trim();
-  const matterToken = plainText(hp.Matter_Token).trim();
+  const { entityToken, matterToken } = readLegacyHandoffTokens(hp);
   if (state.workStatus && matterToken) state.workStatus.header = workStatusHeader(HAT, { matterToken, entityToken }, "picking up a quote");
   if (!TOKEN_PATTERN.test(entityToken) || !TOKEN_PATTERN.test(matterToken)) {
     return failClosed(env, state, "the Handoff's Entity_Token and/or Matter_Token is missing or not an opaque token.", { holdHandoffId: handoffId });

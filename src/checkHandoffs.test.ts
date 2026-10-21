@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingHandoffsForUnit } from "./checkHandoffs";
+import { runCheckHandoffs, maybeAutoContinueCheckHandoffs, discoverPendingHandoffsForUnit, resolveHandoffWorkIdentity } from "./checkHandoffs";
 import { salesHandoffPickup } from "./units/sales/handoffIntake";
 
 // Thin test conveniences over the ONE generic discovery loop: Sales with its
@@ -11,6 +11,7 @@ import { salesHandoffPickup } from "./units/sales/handoffIntake";
 const discoverPendingSalesHandoffs = (env: any, paused?: boolean) => discoverPendingHandoffsForUnit(env, "Sales", salesHandoffPickup(paused));
 const discoverPendingStrategyHandoffs = (env: any) => discoverPendingHandoffsForUnit(env, "Strategy");
 import { ensureMatterIdentity, isTerminalWorkStage, matterCurrentWorkKey, syncMatterContinuationPointer } from "./matterContinuation";
+import type { HandoffSourceRouteContract } from "./handoffSources";
 import type { Env, WorkState } from "./types";
 
 /** Canonical Matter page ids the mocks resolve their Handoff's Matter_Token to (32-hex, as real Notion page ids are). */
@@ -918,4 +919,217 @@ test("F. same-Work Handoff pickup is unchanged -- an existing handoff_workitem m
   assert.strictEqual(await env.STATE_KV.get("handoff_workitem:handoff-sales-1"), "existing-work-9", "the Handoff association is untouched");
   assert.strictEqual(mattersQueries.length, 0, "Matter resolution is consulted only where a new Work would be created");
   assert.deepStrictEqual(pointerKeys(env), [], "the boundary writes no pointer for a continuing Work");
+});
+
+// ---------------------------------------------------------------------------
+// The same ONE Work-identity boundary, for the migration's canonical
+// reference: a Handoff whose identity is its validated `Sources` rather than
+// its token properties -- and for a route declared generic, whose currency
+// is neither.
+// ---------------------------------------------------------------------------
+
+const SOURCES_ENTITY_PAGE_ID = "eeee2222-eeee-2222-eeee-2222eeee2222";
+const SOURCES_MATTER_PAGE_ID = "ffff3333-ffff-3333-ffff-3333ffff3333";
+
+function sourcesSalesHandoff(extraProperties: Record<string, any> = {}) {
+  return {
+    id: "handoff-sources-1",
+    url: "https://notion.so/handoff-sources-1",
+    properties: {
+      "From Unit": { select: { name: "Sales" } },
+      "To Unit": { select: { name: "Strategy" } },
+      "To Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] },
+      // No Entity_Token / Matter_Token at all: this Handoff's identity is
+      // exactly what its Sources property references.
+      Sources: {
+        rich_text: [
+          `https://www.notion.so/Acme-Entity-${SOURCES_ENTITY_PAGE_ID}`,
+          `https://www.notion.so/Acme-Matter-${SOURCES_MATTER_PAGE_ID}`,
+        ].map((url) => ({ type: "text", text: { content: url, link: { url } }, plain_text: url, href: url })),
+      },
+      ...extraProperties,
+    },
+    archived: false,
+  };
+}
+
+/**
+ * Discovery + governed page reads for a Sources-mode Sales Handoff: the
+ * pending Handoff (tokenless), its exact canonical Entity/Matter pages, and
+ * Telegram. `matterRelatedEntity` breaks the relationship proof on purpose
+ * (anything other than the entity page the Handoff also names).
+ */
+function mockSourcesHandoffFetch(t: any, opts: { matterRelatedEntity?: string } = {}) {
+  const originalFetch = globalThis.fetch;
+  const operationsMessages: string[] = [];
+  const mattersQueries: string[] = [];
+  const handoff = sourcesSalesHandoff();
+  globalThis.fetch = (async (url: any, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.includes("/data_sources/handoffs-ds/query")) {
+      const body = JSON.parse(init.body);
+      const toUnit = body.filter?.and?.find((f: any) => f.property === "To Unit")?.select?.equals;
+      return new Response(JSON.stringify({ results: toUnit === "Strategy" ? [handoff] : [] }), { status: 200 });
+    }
+    if (urlStr.includes("/data_sources/matters-ds/query")) {
+      // Sources mode never resolves identity through the token lookup --
+      // counted so a test can prove it.
+      mattersQueries.push(urlStr);
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if ((!init?.method || init.method === "GET") && urlStr.endsWith(`/v1/pages/${SOURCES_ENTITY_PAGE_ID}`)) {
+      return new Response(
+        JSON.stringify({
+          id: SOURCES_ENTITY_PAGE_ID,
+          url: `https://notion.so/${SOURCES_ENTITY_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
+          properties: { Entity_ID: { unique_id: { prefix: "E", number: 20 } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if ((!init?.method || init.method === "GET") && urlStr.endsWith(`/v1/pages/${SOURCES_MATTER_PAGE_ID}`)) {
+      return new Response(
+        JSON.stringify({
+          id: SOURCES_MATTER_PAGE_ID,
+          url: `https://notion.so/${SOURCES_MATTER_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "matters-ds" },
+          properties: {
+            Matter_ID: { unique_id: { prefix: "MAT", number: 20 } },
+            Entity: { relation: [{ id: opts.matterRelatedEntity ?? SOURCES_ENTITY_PAGE_ID }] },
+            Status: { select: { name: "Qualified" } },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      if (body.text) operationsMessages.push(body.text);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in test: ${urlStr}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return { operationsMessages, mattersQueries };
+}
+
+test("G. a Sources-mode Handoff's Work identity comes from its validated sources -- the canonical Matter page id, never a token property", async (t) => {
+  const log = mockSourcesHandoffFetch(t);
+  const env = fakeEnv();
+
+  const identity = await resolveHandoffWorkIdentity(env, sourcesSalesHandoff());
+
+  assert.deepStrictEqual(identity, { matterId: SOURCES_MATTER_PAGE_ID, matterToken: "MAT-20" });
+  assert.strictEqual(log.mattersQueries.length, 0, "no token lookup is needed -- the exact sources ARE the reference");
+});
+
+test("H. a Sources-mode Handoff whose sources fail the relationship proof gets NO Work identity -- discovery notifies through the existing channel and the Handoff stays Pending", async (t) => {
+  const log = mockSourcesHandoffFetch(t, { matterRelatedEntity: "some-other-entity" });
+  const env = fakeEnv();
+
+  const identity = await resolveHandoffWorkIdentity(env, sourcesSalesHandoff());
+
+  assert.strictEqual(
+    identity,
+    null,
+    "no Work identity means the discovery loop creates no Work, no handoff_workitem mapping, no claim -- and leaves the Handoff Pending",
+  );
+  assert.ok(
+    log.operationsMessages.some((m) => /Automated pickup failed for Handoff handoff-sources-1/.test(m)),
+    "the failure is reported through the existing discovery failure channel, never silent",
+  );
+  assert.ok(
+    !log.operationsMessages.some((m) => m.includes("some-other-entity") || m.includes("ffff3333")),
+    "the diagnostic stays non-sensitive -- record-level detail travels only to the log",
+  );
+});
+
+test("H2. a Sources-mode Handoff with no canonical Matter source gets NO Work identity -- no search is made to fill the gap", async (t) => {
+  const log = mockSourcesHandoffFetch(t);
+  const env = fakeEnv();
+  const handoff = sourcesSalesHandoff();
+  handoff.properties.Sources = {
+    rich_text: [`https://www.notion.so/Acme-Entity-${SOURCES_ENTITY_PAGE_ID}`].map((url) => ({
+      type: "text",
+      text: { content: url, link: { url } },
+      plain_text: url,
+      href: url,
+    })),
+  };
+
+  const identity = await resolveHandoffWorkIdentity(env, handoff);
+
+  assert.strictEqual(identity, null);
+  assert.ok(log.operationsMessages.some((m) => /Automated pickup failed/.test(m)));
+});
+
+test("I. a legacy Handoff with no Matter_Token on an uncontracted route still fails closed -- genericity is never inferred from an absent token", async (t) => {
+  mockSourcesHandoffFetch(t);
+  const env = fakeEnv();
+
+  const identity = await resolveHandoffWorkIdentity(env, {
+    id: "handoff-legacy-1",
+    properties: { "From Unit": { select: { name: "BD" } }, "To Unit": { select: { name: "Sales" } } },
+  });
+
+  assert.strictEqual(identity, null, "no contract means no generic declaration -- the Handoff stays Pending");
+});
+
+test("J. a route declared generic registers the Work WITHOUT a Matter binding (contracts seam) -- nothing invented, nothing required", async (t) => {
+  mockSourcesHandoffFetch(t);
+  const env = fakeEnv();
+  const contracts: Readonly<Record<string, HandoffSourceRouteContract>> = {
+    "BD->Sales": { required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
+  };
+
+  const identity = await resolveHandoffWorkIdentity(
+    env,
+    { id: "handoff-generic-1", properties: { "From Unit": { select: { name: "BD" } }, "To Unit": { select: { name: "Sales" } } } },
+    contracts,
+  );
+
+  assert.deepStrictEqual(identity, {}, "Work without matterId/matterToken -- WorkSession.init's optional fields stay optional");
+});
+
+test("K. end to end: a Sources-mode Handoff whose sources cannot be validated is left Pending -- no Work, no mapping, no claim, and the Handoff is untouched", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const log = mockSourcesHandoffFetch(t, { matterRelatedEntity: "some-other-entity" });
+
+  const scheduled = await discoverPendingStrategyHandoffs(env);
+
+  assert.strictEqual(scheduled, 0, "nothing is scheduled for a Handoff with no resolvable identity");
+  assert.strictEqual(calls.init.length, 0, "no Work is created");
+  assert.strictEqual(
+    await env.STATE_KV.get("handoff_workitem:handoff-sources-1"),
+    null,
+    "no handoff_workitem mapping is recorded -- the Handoff is left exactly as found",
+  );
+  assert.strictEqual(calls.schedulePickup.length, 0, "no pickup is scheduled");
+  assert.ok(log.operationsMessages.some((m) => /Automated pickup failed/.test(m)), "and the failure is reported, never silent");
+  assert.strictEqual(log.mattersQueries.length, 0, "identity never falls back to the legacy token lookup");
+});
+
+test("L. end to end: a VALID Sources-mode Handoff creates the Work already carrying its canonical Matter identity", async (t) => {
+  const { workSession, calls } = createMockWorkSession();
+  const env = fakeEnv();
+  (env as any).WORK_SESSION = workSession;
+  const log = mockSourcesHandoffFetch(t);
+
+  const scheduled = await discoverPendingStrategyHandoffs(env);
+
+  assert.strictEqual(scheduled, 1, "a successfully scheduled pickup counts exactly as before -- once per Handoff");
+  assert.strictEqual(calls.init.length, 1, "one Work is created for the externally-created Handoff");
+  const [, , initUnit, initHat, , initExtra] = calls.init[0];
+  assert.strictEqual(initUnit, "Strategy");
+  assert.strictEqual(initHat, "Strategy Analyst");
+  assert.strictEqual(initExtra?.handoffId, "handoff-sources-1");
+  assert.strictEqual(initExtra?.matterId, SOURCES_MATTER_PAGE_ID, "the canonical Matter page id the Handoff's own sources proved");
+  assert.strictEqual(initExtra?.matterToken, "MAT-20");
+  assert.ok(await env.STATE_KV.get("handoff_workitem:handoff-sources-1"), "the mapping is recorded before scheduling, exactly as before");
+  assert.strictEqual(log.mattersQueries.length, 0, "and no legacy token lookup was involved anywhere");
 });

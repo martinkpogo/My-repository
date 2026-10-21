@@ -6,8 +6,10 @@ import {
   parseGoogleFileLink,
   extractHandoffSources,
   resolveHandoffSources,
+  resolveHandoffContextBinding,
   readGoogleDocSourceContent,
   handoffSourceRouteContract,
+  handoffRouteRequiresEntityMatter,
   type HandoffSourceRouteContract,
 } from "./handoffSources";
 import { buildRecordApprovalMarker, type CallNotesApprovalRecord } from "./records/callNotes/callNotesMarker";
@@ -868,10 +870,18 @@ test("sources: the canonical Call Notes id itself travels as the page's own regi
 test("sources: the production route table permits exactly the documented types on Sales->Strategy", () => {
   assert.deepEqual(handoffSourceRouteContract("Sales", "Strategy"), {
     required: [],
-    optional: ["call_notes"],
+    // The commercial route needs an Entity and a Matter, so the canonical
+    // pages that carry them are permitted references whose relationship is
+    // checked -- alongside its approved Call Notes evidence record.
+    optional: ["call_notes", "entities", "matters"],
     prohibited: ["handoffs"],
   });
   assert.equal(handoffSourceRouteContract("Strategy", "Finance"), undefined, "any other route has no contract until one is declared");
+  // Genericity is a declared contract fact, never an absence of one: this
+  // route needs an Entity/Matter, and an uncontracted route needs them too
+  // (nothing has declared it generic), exactly as before the migration.
+  assert.equal(handoffRouteRequiresEntityMatter("Sales", "Strategy"), true);
+  assert.equal(handoffRouteRequiresEntityMatter("Strategy", "Finance"), true, "no contract means no generic declaration -- Entity/Matter stays required");
 });
 
 // ---------------------------------------------------------------------------
@@ -1225,4 +1235,236 @@ test("readGoogleDocSourceContent: a failed Docs read surfaces its HTTP status", 
   assert.equal(read.ok, false);
   if (read.ok) return;
   assert.match(read.reason, /HTTP 404/);
+});
+
+// ---------------------------------------------------------------------------
+// Source-based identity: the binding a tokenless Handoff's own canonical
+// sources establish (the migration's canonical reference), and the consumer
+// entry point every Unit goes through.
+// ---------------------------------------------------------------------------
+
+test("sources: a Sources-only Handoff with NO token properties derives its binding from its exact Entity and Matter sources -- relationship proved, Call Notes validated against that binding", async (t) => {
+  const log = mockSourcesFetch(t, {
+    pages: {
+      [ENTITY_PAGE_ID]: entityPageFixture(),
+      [MATTER_PAGE_ID]: matterPageFixture({ Entity: { relation: [{ id: ENTITY_PAGE_ID }] } }),
+      [CN_PAGE_ID]: await callNotesPageFixture({
+        Entity: { relation: [{ id: ENTITY_PAGE_ID }] },
+        Matter: { relation: [{ id: MATTER_PAGE_ID }] },
+      }),
+    },
+  });
+  // The record carries no Entity_Token/Matter_Token at all, and the caller
+  // (every production consumer passes what it read) supplies none.
+  const result = await resolve(
+    handoffProperties({
+      Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`, `https://www.notion.so/${MATTER_HEX}`, CN_PAGE_URL]),
+    }),
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok || result.mode !== "sources") return;
+  assert.deepEqual(result.binding, {
+    entityId: ENTITY_PAGE_ID,
+    matterId: MATTER_PAGE_ID,
+    entityToken: "E-47",
+    matterToken: "M-12",
+    matterStatus: null,
+  });
+  assert.deepEqual(
+    result.sources.map((s) => s.id).sort(),
+    [ENTITY_PAGE_ID, MATTER_PAGE_ID, CN_PAGE_ID].sort(),
+    "every declared reference is recorded, including the ones that form the binding",
+  );
+  assert.equal(result.callNotes?.callNotesId, "CN-007", "the Call Notes source is validated against the source-derived binding");
+  assert.equal(log.callNotesQueries.length, 0, "no title-based lookup anywhere");
+  assert.equal(log.writes.length, 0, "resolution is read-only");
+});
+
+test("sources: a matter-only tokenless Handoff derives its Entity side from the Matter's own canonical Entity relation -- fetched by id, never searched", async (t) => {
+  const log = mockSourcesFetch(t, { pages: { [MATTER_PAGE_ID]: matterPageFixture() } });
+  const result = await resolve(
+    handoffProperties({ Reason: rich("Commercial fit approved."), Sources: sourcesReadShape([`https://www.notion.so/${MATTER_HEX}`]) }),
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok || result.mode !== "sources") return;
+  assert.equal(result.binding.entityId, "entity-page-1", "the related Entity page supplies the Entity side");
+  assert.equal(result.binding.entityToken, "E-47", "its own Entity_ID supplies the operational token");
+  assert.equal(result.binding.matterId, MATTER_PAGE_ID);
+  assert.equal(result.binding.matterToken, "M-12");
+  assert.ok(
+    log.requests.includes("GET https://api.notion.com/v1/pages/entity-page-1"),
+    "the relation target is fetched by its exact page id",
+  );
+  assert.ok(!log.requests.some((r) => r.includes("/query")), "no database query is issued to find either side of the binding");
+});
+
+test("sources: a tokenless Sources Handoff whose sources establish no Entity/Matter binding is refused -- nothing is inferred to fill the gap", async (t) => {
+  await expectRefused(
+    t,
+    { [CN_PAGE_ID]: await callNotesPageFixture() },
+    handoffProperties({ Sources: sourcesReadShape([CN_PAGE_URL]) }),
+    /declares no canonical Entity\/Matter source/,
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+});
+
+test("sources: a tokenless Sources Handoff with no canonical Matter source is refused on the commercial route -- no search is made for one", async (t) => {
+  await expectRefused(
+    t,
+    { [ENTITY_PAGE_ID]: entityPageFixture() },
+    handoffProperties({ Reason: rich("Commercial fit approved."), Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`]) }),
+    /no canonical Matter source/,
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+});
+
+test("sources: a tokenless Sources Handoff whose Matter source belongs to a DIFFERENT Entity is refused -- the relationship proof is the binding", async (t) => {
+  await expectRefused(
+    t,
+    {
+      [ENTITY_PAGE_ID]: entityPageFixture(),
+      [MATTER_PAGE_ID]: matterPageFixture({ Entity: { relation: [{ id: "some-other-entity" }] } }),
+    },
+    handoffProperties({
+      Reason: rich("Commercial fit approved."),
+      Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`, `https://www.notion.so/${MATTER_HEX}`]),
+    }),
+    /does not belong to that Entity/,
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+});
+
+test("sources: lifecycle validation runs on the source-derived binding too -- a non-current Call Notes Status is refused", async (t) => {
+  await expectRefused(
+    t,
+    {
+      [ENTITY_PAGE_ID]: entityPageFixture(),
+      [MATTER_PAGE_ID]: matterPageFixture({ Entity: { relation: [{ id: ENTITY_PAGE_ID }] } }),
+      [CN_PAGE_ID]: await callNotesPageFixture({
+        Status: { select: { name: "Draft" } },
+        Entity: { relation: [{ id: ENTITY_PAGE_ID }] },
+        Matter: { relation: [{ id: MATTER_PAGE_ID }] },
+      }),
+    },
+    handoffProperties({
+      Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`, `https://www.notion.so/${MATTER_HEX}`, CN_PAGE_URL]),
+    }),
+    /only Ready or Consumed carries current approved evidence/,
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+});
+
+test("sources: approval validation runs on the source-derived binding too -- an unverifiable attestation is refused", async (t) => {
+  await expectRefused(
+    t,
+    {
+      [ENTITY_PAGE_ID]: entityPageFixture(),
+      [MATTER_PAGE_ID]: matterPageFixture({ Entity: { relation: [{ id: ENTITY_PAGE_ID }] } }),
+      [CN_PAGE_ID]: await callNotesPageFixture({
+        "Approval Attestation": rich("record_approval result=Approved"),
+        Entity: { relation: [{ id: ENTITY_PAGE_ID }] },
+        Matter: { relation: [{ id: MATTER_PAGE_ID }] },
+      }),
+    },
+    handoffProperties({
+      Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`, `https://www.notion.so/${MATTER_HEX}`, CN_PAGE_URL]),
+    }),
+    /does not carry a valid recorded approval attestation/,
+    { tokens: { entityToken: "", matterToken: "" } },
+  );
+});
+
+test("resolveHandoffContextBinding: a legacy Handoff resolves with NO fetch at all -- the recorded token values, exactly as before", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  const binding = await resolveHandoffContextBinding(fakeEnv(), {
+    properties: {
+      ...handoffProperties(),
+      Entity_Token: rich("E-47"),
+      Matter_Token: rich("M-12"),
+    },
+    route: { fromUnit: "Sales", toUnit: "Strategy" },
+    access: pickupContext(),
+  });
+  assert.equal(binding.ok, true, binding.ok ? "" : binding.reason);
+  if (!binding.ok || binding.mode !== "legacy") return;
+  assert.equal(binding.entityToken, "E-47");
+  assert.equal(binding.matterToken, "M-12");
+  assert.equal(log.requests.length, 0, "the compatibility read performs no fetch");
+});
+
+test("resolveHandoffContextBinding: a Sources-enabled Handoff returns the PROVED binding its canonical sources established", async (t) => {
+  mockSourcesFetch(t, {
+    pages: {
+      [ENTITY_PAGE_ID]: entityPageFixture(),
+      [MATTER_PAGE_ID]: matterPageFixture({ Entity: { relation: [{ id: ENTITY_PAGE_ID }] }, Status: { select: { name: "Qualified" } } }),
+    },
+  });
+  const binding = await resolveHandoffContextBinding(fakeEnv(), {
+    properties: handoffProperties({
+      Reason: rich("Commercial fit approved."),
+      Sources: sourcesReadShape([`https://www.notion.so/${ENTITY_HEX}`, `https://www.notion.so/${MATTER_HEX}`]),
+    }),
+    route: { fromUnit: "Sales", toUnit: "Strategy" },
+    access: pickupContext(),
+  });
+  assert.equal(binding.ok, true, binding.ok ? "" : binding.reason);
+  if (!binding.ok || binding.mode !== "sources") return;
+  assert.equal(binding.entityToken, "E-47");
+  assert.equal(binding.matterToken, "M-12");
+  assert.equal(binding.binding.matterId, MATTER_PAGE_ID);
+  assert.equal(binding.binding.matterStatus, "Qualified", "the Matter's live Status travels with the binding");
+});
+
+test("resolveHandoffContextBinding: legacy tokens that CONTRADICT the Handoff's own sources fail closed -- neither transport silently wins", async (t) => {
+  mockSourcesFetch(t, {
+    pages: { [MATTER_PAGE_ID]: matterPageFixture({ Matter_ID: { unique_id: { prefix: "M", number: 99 } } }) },
+  });
+  const binding = await resolveHandoffContextBinding(fakeEnv(), {
+    properties: {
+      ...handoffProperties({ Sources: sourcesReadShape([`https://www.notion.so/${MATTER_HEX}`]) }),
+      Entity_Token: rich("E-47"),
+      Matter_Token: rich("M-12"),
+    },
+    route: { fromUnit: "Sales", toUnit: "Strategy" },
+    access: pickupContext(),
+  });
+  assert.equal(binding.ok, false, "a source that disagrees with the Handoff's own tokens must refuse");
+  if (binding.ok) return;
+  assert.match(binding.reason, /is not this Handoff's Matter/);
+});
+
+test("resolveHandoffContextBinding: a route declared generic resolves a Handoff carrying neither sources nor tokens -- no fetch, no requirement", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  const contracts = routeContracts({
+    ...HANDOFF_SOURCE_ROUTE_CONTRACTS,
+    "BD->Strategy": { required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
+  });
+  const binding = await resolveHandoffContextBinding(fakeEnv(), {
+    properties: handoffProperties({ "From Unit": { select: { name: "BD" } }, Reason: rich("Fit approved.") }),
+    route: { fromUnit: "BD", toUnit: "Strategy" },
+    access: pickupContext(),
+    contracts,
+  });
+  assert.equal(binding.ok, true, binding.ok ? "" : binding.reason);
+  if (!binding.ok || binding.mode !== "legacy") return;
+  assert.equal(binding.entityToken, "", "a generic Handoff carries no Entity identity, and none is invented");
+  assert.equal(binding.matterToken, "", "a generic Handoff carries no Matter identity, and none is invented");
+  assert.equal(log.requests.length, 0, "nothing is fetched to fill an identity this route does not use");
+});
+
+test("resolveHandoffContextBinding: an UNCONTRACTED route with sources is refused -- genericity is declared, never inferred from an absent contract", async () => {
+  const binding = await resolveHandoffContextBinding(fakeEnv(), {
+    properties: handoffProperties({
+      Reason: rich("Fit approved."),
+      "From Unit": { select: { name: "BD" } },
+      Sources: sourcesReadShape([CN_PAGE_URL]),
+    }),
+    route: { fromUnit: "BD", toUnit: "Strategy" },
+    access: pickupContext(),
+  });
+  assert.equal(binding.ok, false, "no contract means no generic declaration -- an uncontracted route stays bound");
+  if (binding.ok) return;
+  assert.match(binding.reason, /has no Handoff source route contract/);
 });

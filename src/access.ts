@@ -12,7 +12,7 @@
  *       -> src/ai/identityRedaction.ts, src/runtime/research/safeContext.ts
  *   - how a Handoff payload/schema is validated
  *       -> src/handoffWriter.ts (validateHandoffProperties,
- *          assertTokensPresent, protected-field/token checks)
+ *          assertOperationalReference, protected-field/token checks)
  *   - which AI provider/task may execute
  *       -> src/ai/policy.ts, src/ai/outboundGate.ts
  *   - which Hat owns work / how work is routed

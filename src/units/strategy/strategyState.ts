@@ -118,8 +118,8 @@ export interface StrategyWorkState {
   /**
    * The result of the Sales-side source-boundary check performed when the
    * Sales -> Strategy Handoff was created (createHandoff already runs
-   * assertTokensPresent + findViolation against the authoritative identity
-   * Sales supplied -- see handoffWriter.ts's HandoffSourceBoundaryAttestation
+   * assertOperationalReference + findViolation against the authoritative
+   * identity Sales supplied -- see handoffWriter.ts's HandoffSourceBoundaryAttestation
    * for the explicit `result` (Passed/Failed) and the five named checks).
    * This records WHICH known-identity fields were actually available and
    * checked at that moment -- never the values themselves -- so a later

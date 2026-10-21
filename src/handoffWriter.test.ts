@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHandoff, updateHandoff, validateHandoffProperties, HandoffWriteViolationError, SOURCE_BOUNDARY_CHECKS, buildSourceBoundaryMarker, parseSourceBoundaryMarker } from "./handoffWriter";
 import { richText, select, title } from "./notion";
+import type { HandoffSourceRouteContract } from "./handoffSources";
 import type { Env } from "./types";
 import { mintApprovalProof, type AccessContext } from "./access";
 
@@ -581,4 +582,166 @@ test("createHandoff: the compatibility seam is exact -- a payload with NO Source
     false,
     "legacy payloads (no Sources property) are byte-identical to what the writer always sent",
   );
+});
+
+// --- Source-based identity at the write boundary --------------------------
+//
+// A Handoff whose operational identity is its canonical `Sources`, not the
+// token properties: the write carries no Entity_Token/Matter_Token, the
+// marker binds to the exact references the payload declares, and only the
+// checks this write actually established are attested. A declared-generic
+// route carries no Entity/Matter identity at all, and none is invented.
+
+const ENTITY_SOURCES_URL = `https://www.notion.so/Acme-Entity-eeee6666-dddd-7777-cccc-8888bbbb4444`;
+const MATTER_SOURCES_URL = `https://www.notion.so/Acme-Matter-ffff5555-eeee-6666-dddd-7777cccc8888`;
+const CN_SOURCES_URL = `https://www.notion.so/Call-Notes-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`;
+const ENTITY_SOURCES_PAGE_ID = "eeee6666-dddd-7777-cccc-8888bbbb4444";
+const MATTER_SOURCES_PAGE_ID = "ffff5555-eeee-6666-dddd-7777cccc8888";
+const CN_SOURCES_PAGE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const CONTENT_CHECKS_ONLY = SOURCE_BOUNDARY_CHECKS.filter(
+  (c) => c !== "operational_entity_reference_present" && c !== "operational_matter_reference_present",
+);
+
+function sourcesProperty(urls: string[]) {
+  return { rich_text: urls.map((url) => ({ type: "text", text: { content: url, link: { url } } })) };
+}
+
+/** A Sales -> Strategy payload with NO token properties -- the migration's source-based shape. */
+function tokenlessSalesToStrategyProperties(overrides: Record<string, unknown> = {}): Record<string, any> {
+  const props: Record<string, any> = salesToStrategyProperties(overrides);
+  delete props.Entity_Token;
+  delete props.Matter_Token;
+  return props;
+}
+
+test("createHandoff (Sales -> Strategy): a Sources-carrying Handoff with NO identity tokens writes no token properties -- the marker binds to the canonical references, and only the content checks are attested", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const properties = tokenlessSalesToStrategyProperties({
+    Reason: richText("Commercial fit/progression approved. Entry type: inbound_enquiry."),
+    Sources: sourcesProperty([ENTITY_SOURCES_URL, MATTER_SOURCES_URL, CN_SOURCES_URL]),
+  });
+
+  const { sourceBoundaryAttestation } = await createHandoff(env, properties, {}, createAccess(env));
+
+  const create = calls.find((c) => c.method === "POST" && c.body?.properties?.Reason);
+  assert.ok(create, "the Handoff must be created");
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(create.body.properties, "Entity_Token"),
+    false,
+    "no token property is invented to fill a gap the canonical Sources already close",
+  );
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(create.body.properties, "Matter_Token"), false);
+
+  // The marker is the SOURCES form: bound to the exact references this
+  // payload declared, never to identity tokens this write never carried.
+  const reason = propertyText(create.body.properties.Reason);
+  const marker = /\[source_boundary_check [^\]]*\]/.exec(reason)?.[0] ?? "";
+  assert.ok(marker, `the durable attestation marker must be in the Handoff's Reason: ${reason}`);
+  assert.match(marker, /result=Passed/);
+  assert.ok(!/entity=/.test(marker), "no identity-token binding this write never established");
+  assert.ok(!/matter=/.test(marker), "no identity-token binding this write never established");
+  for (const id of [ENTITY_SOURCES_PAGE_ID, MATTER_SOURCES_PAGE_ID, CN_SOURCES_PAGE_ID]) {
+    assert.ok(marker.includes(id), `marker must bind to the declared reference ${id}`);
+  }
+
+  // The receiver's side of the same channel: the marker parses only against
+  // the source ids ITS OWN resolution validated, never against tokens.
+  const parsed = parseSourceBoundaryMarker(reason, {
+    handoffId: "page-1",
+    sourceIds: [ENTITY_SOURCES_PAGE_ID, MATTER_SOURCES_PAGE_ID, CN_SOURCES_PAGE_ID],
+  });
+  if (!parsed.ok) assert.fail(`the receiver's refs-form parse must accept this marker: ${parsed.reason}`);
+  assert.strictEqual(parsed.attestation.result, "Passed");
+  assert.deepStrictEqual([...parsed.attestation.checks].sort(), [...CONTENT_CHECKS_ONLY].sort());
+  assert.strictEqual(
+    parseSourceBoundaryMarker(reason, { handoffId: "page-1", sourceIds: [ENTITY_SOURCES_PAGE_ID] }).ok,
+    false,
+    "a marker bound to other references than this receiver validated is unbound evidence",
+  );
+  assert.strictEqual(
+    parseSourceBoundaryMarker(reason, { handoffId: "page-1", entityToken: "E-20", matterToken: "MAT-20" }).ok,
+    false,
+    "a refs-form marker is never accepted by a receiver that resolved sources differently",
+  );
+
+  // Only the checks this write actually established are attested: the three
+  // content checks. Checks 1 & 2 (operational reference) are established by
+  // the receiver's own resolution of these sources, never claimed here.
+  assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...CONTENT_CHECKS_ONLY].sort());
+  assert.strictEqual(sourceBoundaryAttestation.result, "Passed");
+});
+
+test("createHandoff: a payload with NEITHER tokens nor Sources on a route that needs an Entity/Matter is refused -- zero Notion calls", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  await assert.rejects(
+    () => createHandoff(env, tokenlessSalesToStrategyProperties(), {}, createAccess(env)),
+    (err: unknown) => err instanceof HandoffWriteViolationError && /carries no operational Entity\/Matter reference/.test((err as Error).message),
+  );
+  assert.strictEqual(calls.length, 0, "refused before ANY Notion call");
+});
+
+test("createHandoff: a route declared generic writes a Handoff with neither identity tokens nor Sources -- nothing invented, and no Sales -> Strategy marker", async (t) => {
+  const calls = mockNotionFetch(t);
+  const env = fakeEnv();
+  const contracts: Readonly<Record<string, HandoffSourceRouteContract>> = {
+    "BD->Strategy": { required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
+  };
+  const properties = validProperties({
+    "From Unit": select("BD"),
+    "To Unit": select("Strategy"),
+    Handoff: title("Weekly operations digest"),
+    Reason: richText("No Entity or Matter is this route's currency."),
+  });
+  delete (properties as Record<string, unknown>).Entity_Token;
+  delete (properties as Record<string, unknown>).Matter_Token;
+
+  const { sourceBoundaryAttestation } = await createHandoff(env, properties, {}, createAccess(env), contracts);
+
+  const create = calls.find((c) => c.method === "POST" && c.body?.properties?.Reason);
+  assert.ok(create, "the Handoff must be created");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(create.body.properties, "Entity_Token"), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(create.body.properties, "Matter_Token"), false);
+  const reason = propertyText(create.body.properties.Reason);
+  assert.ok(
+    !/\[source_boundary_check/.test(reason),
+    "the source-boundary marker is a Sales -> Strategy contract, and this route is not it",
+  );
+  // The returned attestation is honest: the content checks this write DID
+  // establish, and nothing it did not (this is not a Sales -> Strategy write).
+  assert.deepStrictEqual([...sourceBoundaryAttestation.checks].sort(), [...CONTENT_CHECKS_ONLY].sort());
+});
+
+test("createHandoff: an identity-bearing URL in an ordinary Handoff field is refused -- URL text is protected content, not an escape hatch", async (t) => {
+  const cases: Array<{ name: string; reason: string; expected: RegExp }> = [
+    {
+      name: "an email address inside a CRM link",
+      reason: "Lead detail at https://crm.example.com/leads/detail?email=comfort@meridianfoods.com",
+      expected: /email/,
+    },
+    {
+      name: "a phone number inside a call-recording link",
+      reason: "Call recording at https://calls.example.com/rec/+233 24 412 3456",
+      expected: /phone/,
+    },
+  ];
+  for (const c of cases) {
+    await t.test(c.name, async (t) => {
+      const calls = mockNotionFetch(t);
+      const env = fakeEnv();
+      await assert.rejects(
+        () =>
+          createHandoff(
+            env,
+            salesToStrategyProperties({ Reason: richText(c.reason) }),
+            { ...baseIdentity, email: "comfort@meridianfoods.com", phone: "+233 24 412 3456" },
+            createAccess(env),
+          ),
+        (err: unknown) => err instanceof HandoffWriteViolationError && c.expected.test((err as Error).message),
+        c.name,
+      );
+      assert.strictEqual(calls.length, 0, "a failed identity check must never produce a Handoff write");
+    });
+  }
 });

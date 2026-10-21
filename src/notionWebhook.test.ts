@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { handleNotionWebhookRequest, verifyNotionSignature, evaluateHandoffPageForWebhook } from "./notionWebhook";
 import { unitsWithHandoffPickup } from "./checkHandoffs";
 import { buildUnitRegistry, getUnitManifests } from "./units/registry";
+import type { HandoffSourceRouteContract } from "./handoffSources";
 import { financeManifest } from "./units/finance/financeManifest";
 import type { UnitManifest } from "./units/unitManifest";
 import { readFileSync } from "node:fs";
@@ -670,4 +671,66 @@ test("20. Webhook detection response carries only opaque identifiers, never full
   const text = await res.text();
   assert.ok(!text.includes("Real Company Name"), "the webhook response must never echo real Handoff title/identity content");
   assert.match(text, /MAT-20/);
+});
+
+// --- Operational reference: legacy tokens, canonical Sources, generic routes -
+
+function tokenlessSourcesPage(overrides: Record<string, any> = {}) {
+  const url = "https://www.notion.so/Acme-Entity-eeee6666-dddd-7777-cccc-8888bbbb4444";
+  const page = pendingWorkHandoffPage({
+    "From Unit": { select: { name: "Sales" } },
+    "To Unit": { select: { name: "Strategy" } },
+    Sources: { rich_text: [{ type: "text", text: { content: url, link: { url } }, plain_text: url, href: url }] },
+    ...overrides,
+  });
+  delete page.properties.Entity_Token;
+  delete page.properties.Matter_Token;
+  return page;
+}
+
+test("15. A Sources-carrying Pending Work Handoff with NO token properties is detected -- the webhook is a detector, and never resolves identity itself", () => {
+  const env = fakeEnv();
+  const result = evaluateHandoffPageForWebhook(env, tokenlessSourcesPage());
+  assert.strictEqual(result.relevant, true, result.relevant ? "" : result.reason);
+  if (!result.relevant) return;
+  assert.strictEqual(result.toUnit, "Strategy");
+  assert.strictEqual(result.entityToken, undefined, "no token is echoed -- the record carries none");
+  assert.strictEqual(result.matterToken, undefined);
+});
+
+test("16. A Pending Work Handoff with no operational reference at all (no tokens, no Sources) is still not relevant -- unchanged", () => {
+  const env = fakeEnv();
+  const page = tokenlessSourcesPage();
+  delete (page.properties as Record<string, any>).Sources;
+  const result = evaluateHandoffPageForWebhook(env, page);
+  assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing Entity_Token/);
+});
+
+test("17. A Handoff whose Sources is unusable and carries no tokens is not relevant -- a malformed declaration never wakes discovery", () => {
+  const env = fakeEnv();
+  const page = tokenlessSourcesPage({ Sources: { rich_text: [{ plain_text: "not a url at all" }] } });
+  const result = evaluateHandoffPageForWebhook(env, page);
+  assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing Entity_Token/);
+});
+
+test("19. A declared-generic route's Pending Work Handoff is detected without tokens (contracts seam) -- genericity is read from the contract, never inferred", () => {
+  const env = fakeEnv();
+  const page = pendingWorkHandoffPage({
+    "From Unit": { select: { name: "BD" } },
+    "To Unit": { select: { name: "Strategy" } },
+  });
+  delete page.properties.Entity_Token;
+  delete page.properties.Matter_Token;
+  const contracts: Readonly<Record<string, HandoffSourceRouteContract>> = {
+    "BD->Strategy": { required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
+  };
+  const result = evaluateHandoffPageForWebhook(env, page, undefined, contracts);
+  assert.strictEqual(result.relevant, true, result.relevant ? "" : result.reason);
+  // The SAME Handoff without the contract declaration is refused: nothing
+  // is generic by accident.
+  const withoutContract = evaluateHandoffPageForWebhook(env, page);
+  assert.strictEqual(withoutContract.relevant, false);
+  if (!withoutContract.relevant) assert.match(withoutContract.reason, /missing Entity_Token/);
 });

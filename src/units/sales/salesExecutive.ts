@@ -27,6 +27,7 @@ import {
   updatePage,
 } from "../../notion";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
+import { resolveHandoffContextBinding } from "../../handoffSources";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, sendOperationsMessage, withWorkspaceTypingIndicator } from "../../telegram";
@@ -1037,12 +1038,16 @@ export async function handleCallNotes(env: Env, state: WorkState, notes: string)
 /**
  * Resolves a call-notes Handoff's token-safe business context, mirroring
  * Finance's resolveHandoffBusinessContext (valueBasedPricingAssessor.ts)
- * exactly -- reads Entity_Token/Matter_Token and the de-identified
- * narrative the isolated Sales Executive Claude project wrote to
+ * exactly -- obtains the Handoff's operational identity through the ONE
+ * shared resolution (src/handoffSources.ts's resolveHandoffContextBinding:
+ * the recorded tokens on a legacy Handoff, read with no fetch at all; the
+ * PROVED binding of a Sources-enabled Handoff's canonical pages, validated
+ * fail-closed) plus the de-identified narrative the isolated Sales
+ * Executive Claude project wrote to
  * "Verified Facts & Sources" (per this project's Section 6A Handoff-to-
  * Runtime-Sales-Executive procedure), and validates it through the same
  * closed-context contract every other Handoff pickup uses. Never resolves
- * entityToken/matterToken to a real Notion page -- per
+ * entityToken/matterToken to a real Notion page by itself -- per
  * HandoffContextContract's own rule, they are reference identifiers only,
  * never lookup keys into a controlled database.
  */
@@ -1050,14 +1055,27 @@ export async function resolveCallNotesHandoffContext(env: Env, handoffId: string
   try {
     const handoff = await getPage(env, handoffId, workSessionReadContext());
     const sanitizedContext = plainText(handoff.properties["Verified Facts & Sources"]);
-    const entityToken = plainText(handoff.properties.Entity_Token);
-    const matterToken = plainText(handoff.properties.Matter_Token);
+    const binding = await resolveHandoffContextBinding(env, {
+      properties: handoff.properties,
+      route: { fromUnit: plainText(handoff.properties["From Unit"]), toUnit: plainText(handoff.properties["To Unit"]) },
+      access: workSessionReadContext(),
+    });
+    if (!binding.ok) {
+      return {
+        success: false,
+        insufficientContext: {
+          isInsufficient: true,
+          category: "unresolved material fact",
+          reason: `Insufficient execution context: ${binding.reason}`,
+        },
+      };
+    }
 
     return evaluateHandoffContext(
       {
         handoffId,
-        entityToken,
-        matterToken,
+        entityToken: binding.entityToken,
+        matterToken: binding.matterToken,
         sanitizedContext,
         provenance: `notion:handoff:${handoffId}`,
         requiredCategory: "de-identified call notes for commercial qualification",

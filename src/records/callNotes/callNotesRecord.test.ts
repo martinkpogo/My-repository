@@ -148,6 +148,8 @@ interface MockOptions {
    * Absent = the legacy free-text `Call_Notes_ID` transport.
    */
   sourcesUrls?: string[];
+  /** Omit the Handoff's Entity_Token/Matter_Token properties entirely -- the source-based Handoff shape. */
+  omitTokenProperties?: boolean;
   /** The canonical page the Sources URLs point at; defaults to a valid Ready, correctly bound, attested record. */
   sourcesRecord?: any;
   /** The route recorded on the Handoff (`From Unit`/`To Unit`), which the Sources resolver reads for its contract lookup. */
@@ -191,8 +193,11 @@ function mockConsumeFetch(t: any, opts: MockOptions = {}): MockLog {
           properties: {
             Status: { select: { name: "Pending" } },
             "Verified Facts & Sources": rich(verifiedFacts),
-            Entity_Token: rich("E-47"),
-            Matter_Token: rich("M-12"),
+            // The migration's canonical shape: a Handoff whose identity is
+            // its Sources, carrying no token properties at all.
+            ...(opts.omitTokenProperties
+              ? {}
+              : { Entity_Token: rich("E-47"), Matter_Token: rich("M-12") }),
             Reason: rich(reason),
             Handoff: { title: [{ plain_text: title, text: { content: title } }] },
             ...(opts.sourcesUrls
@@ -240,6 +245,37 @@ function mockConsumeFetch(t: any, opts: MockOptions = {}): MockLog {
           url: "https://notion.so/entity-page-1",
           parent: { type: "data_source_id", data_source_id: "entity-ds" },
           properties: { Entity_ID: { unique_id: { number: 47, prefix: "E" } } },
+        }),
+        { status: 200 },
+      );
+    }
+
+    // The exact canonical Entity/Matter pages a tokenless Sources-enabled
+    // Handoff names (hex ids, the only thing a Sources URL may carry): the
+    // source-derived binding reads its tokens and relationship from these,
+    // fetched by id -- never from the Handoff's token properties, and never
+    // through the matters-ds query below.
+    if (urlStr.endsWith(`/pages/${TOKENLESS_ENTITY_PAGE_ID}`)) {
+      return new Response(
+        JSON.stringify({
+          id: TOKENLESS_ENTITY_PAGE_ID,
+          url: `https://notion.so/${TOKENLESS_ENTITY_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
+          properties: { Entity_ID: { unique_id: { number: 47, prefix: "E" } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.endsWith(`/pages/${TOKENLESS_MATTER_PAGE_ID}`)) {
+      return new Response(
+        JSON.stringify({
+          id: TOKENLESS_MATTER_PAGE_ID,
+          url: `https://notion.so/${TOKENLESS_MATTER_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "matters-ds" },
+          properties: {
+            Matter_ID: { unique_id: { number: 12, prefix: "M" } },
+            Entity: { relation: [{ id: TOKENLESS_ENTITY_PAGE_ID }] },
+          },
         }),
         { status: 200 },
       );
@@ -559,6 +595,10 @@ test("consumption: a Superseded record is refused with no write", async (t) => {
 const SOURCES_PAGE_ID = "aaaa1111-bbbb-2222-cccc-3333dddd4444";
 const SOURCES_PAGE_URL = `https://www.notion.so/Acme-Call-Notes-aaaa1111-bbbb-2222-cccc-3333dddd4444`;
 
+/** The canonical Entity/Matter pages a tokenless Sources-enabled Handoff names. */
+const TOKENLESS_ENTITY_PAGE_ID = "bbbb2222-bbbb-2222-bbbb-2222bbbb2222";
+const TOKENLESS_MATTER_PAGE_ID = "cccc3333-cccc-3333-cccc-3333cccc3333";
+
 /**
  * A synthetic contract for the route a call-notes Handoff travels. NO
  * production contract exists for it (the `From Unit` the isolated Sales
@@ -693,4 +733,131 @@ test("sources: a Sources-enabled call-notes Handoff on a route with no declared 
     !log.requests.some((r) => r.includes("call-notes-ds/query")),
     "the DEFAULT_REASON's Call_Notes_ID: CN-007 is NEVER consulted as a fallback for a Handoff whose Sources path could not be validated",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The source-based Handoff at this boundary: identity from the canonical
+// sources, never from token properties the record no longer carries.
+// ---------------------------------------------------------------------------
+
+const TOKENLESS_CONTRACT: Readonly<Record<string, HandoffSourceRouteContract>> = {
+  "Sales->Sales": { required: ["call_notes"], optional: ["entities", "matters"], prohibited: ["handoffs"] },
+};
+
+const TOKENLESS_SOURCES_URLS = [
+  `https://www.notion.so/Acme-Entity-${TOKENLESS_ENTITY_PAGE_ID}`,
+  `https://www.notion.so/Acme-Matter-${TOKENLESS_MATTER_PAGE_ID}`,
+  SOURCES_PAGE_URL,
+];
+
+function consumeTokenless() {
+  return retrieveAndConsumeCallNotes(
+    fakeEnv(),
+    "handoff-1",
+    { entityToken: "", matterToken: "" },
+    pickupContext(),
+    TOKENLESS_CONTRACT,
+  );
+}
+
+test("sources: a Call Notes Handoff with NO token properties consumes its canonical record -- the binding is derived from the Handoff's own Entity/Matter sources", async (t) => {
+  const log = mockConsumeFetch(t, {
+    sourcesUrls: TOKENLESS_SOURCES_URLS,
+    omitTokenProperties: true,
+    fromUnit: "Sales",
+    toUnit: "Sales",
+    sourcesRecord: await callNotesPage(REGISTRY, {
+      Entity: { relation: [{ id: TOKENLESS_ENTITY_PAGE_ID }] },
+      Matter: { relation: [{ id: TOKENLESS_MATTER_PAGE_ID }] },
+    }, SOURCES_PAGE_ID),
+  });
+
+  const result = await consumeTokenless();
+
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok) return;
+  assert.equal(result.pageId, SOURCES_PAGE_ID, "the consumed record is the one the link named");
+  assert.equal(result.evidenceText, REGISTRY_EVIDENCE, "identical registry evidence -- only HOW the record was located and bound changed");
+  assert.equal(log.liveStatus, "Consumed", "the canonical record advances Ready -> Consumed exactly as before");
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${TOKENLESS_ENTITY_PAGE_ID}`),
+    "the Entity source is fetched by its exact page id",
+  );
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${TOKENLESS_MATTER_PAGE_ID}`),
+    "the Matter source is fetched by its exact page id",
+  );
+  assert.ok(
+    !log.requests.some((r) => r.includes("matters-ds/query")),
+    "identity is never resolved through the legacy token lookup when the record carries none",
+  );
+  assert.ok(
+    !log.requests.some((r) => r.includes("call-notes-ds/query")),
+    "the exact-title search is never issued -- the direct page id IS the reference",
+  );
+});
+
+test("sources: a tokenless Call Notes Handoff whose sources establish no Entity/Matter binding is refused with no write -- nothing is inferred, and the narrative is never a fallback", async (t) => {
+  const log = mockConsumeFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    omitTokenProperties: true,
+    fromUnit: "Sales",
+    toUnit: "Sales",
+  });
+
+  const result = await consumeTokenless();
+
+  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
+  if (result.ok) return;
+  assert.match(result.reason, /declares no canonical Entity\/Matter source/);
+  assert.equal(log.writes.length, 0, "a refusal issues no write");
+  assert.equal(log.liveStatus, "Ready", "a refusal never advances the record");
+  assert.ok(
+    !log.requests.some((r) => r.includes("call-notes-ds/query")),
+    "no search is made to fill a binding the Handoff never declared",
+  );
+});
+
+test("sources: a tokenless Call Notes Handoff whose Matter source belongs to a different Entity is refused with no write", async (t) => {
+  const log = mockConsumeFetch(t, {
+    sourcesUrls: TOKENLESS_SOURCES_URLS,
+    omitTokenProperties: true,
+    fromUnit: "Sales",
+    toUnit: "Sales",
+    sourcesRecord: await callNotesPage(REGISTRY, {
+      Entity: { relation: [{ id: TOKENLESS_ENTITY_PAGE_ID }] },
+      Matter: { relation: [{ id: TOKENLESS_MATTER_PAGE_ID }] },
+    }, SOURCES_PAGE_ID),
+  });
+  // Break the relationship proof at the MATTER source the Handoff names:
+  // its Entity relation points somewhere else entirely.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init?: any) => {
+    const urlStr = String(url);
+    if (urlStr.endsWith(`/pages/${TOKENLESS_MATTER_PAGE_ID}`)) {
+      return new Response(
+        JSON.stringify({
+          id: TOKENLESS_MATTER_PAGE_ID,
+          url: `https://notion.so/${TOKENLESS_MATTER_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "matters-ds" },
+          properties: {
+            Matter_ID: { unique_id: { number: 12, prefix: "M" } },
+            Entity: { relation: [{ id: "some-other-entity" }] },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return (originalFetch as any)(url, init);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await consumeTokenless();
+
+  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
+  if (result.ok) return;
+  assert.match(result.reason, /does not belong to that Entity/);
+  assert.equal(log.writes.length, 0, "a refusal issues no write");
 });

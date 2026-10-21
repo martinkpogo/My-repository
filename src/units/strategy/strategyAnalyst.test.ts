@@ -340,6 +340,13 @@ const DEFAULT_CALL_NOTES_NOTE =
 const SOURCES_PAGE_ID = "aaaa1111-bbbb-2222-cccc-3333dddd4444";
 const SOURCES_PAGE_URL = `https://www.notion.so/Acme-Call-Notes-${SOURCES_PAGE_ID}`;
 
+/** The canonical Entity/Matter pages a TOKENLESS (source-based) Sales -> Strategy Handoff names -- its binding comes from these, never from token properties. */
+const SOURCE_BINDING_ENTITY_PAGE_ID = "eeee1111-eeee-1111-eeee-1111eeee1111";
+const SOURCE_BINDING_MATTER_PAGE_ID = "ffff1111-ffff-1111-ffff-1111ffff1111";
+const SOURCE_BINDING_ENTITY_URL = `https://www.notion.so/Acme-Entity-${SOURCE_BINDING_ENTITY_PAGE_ID}`;
+const SOURCE_BINDING_MATTER_URL = `https://www.notion.so/Acme-Matter-${SOURCE_BINDING_MATTER_PAGE_ID}`;
+const DASHED_PAGE_ID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
 function mockFetch(
   t: any,
   opts: {
@@ -414,6 +421,13 @@ function mockFetch(
      */
     sourcesUrls?: string[];
     /**
+     * Omit the Handoff's Entity_Token/Matter_Token properties entirely --
+     * the migration's source-based Handoff shape. The default marker then
+     * becomes the refs form, bound to exactly the source ids the fixture's
+     * `sourcesUrls` declares (production's shape for a tokenless write).
+     */
+    omitTokenProperties?: boolean;
+    /**
      * The `Call_Notes_ID` written into the Reason, decoupled from the
      * record's own registry id, so a test can make the two transports
      * disagree on purpose.
@@ -444,7 +458,14 @@ function mockFetch(
     opts.sourceBoundaryMarker === null
       ? null
       : (opts.sourceBoundaryMarker ??
-        buildSourceBoundaryMarker({ entityToken, matterToken }, "Passed", ["entityName", "matterName"]));
+        (opts.omitTokenProperties
+          ? buildSourceBoundaryMarker(
+              {},
+              "Passed",
+              ["entityName", "matterName"],
+              { sourceIds: (opts.sourcesUrls ?? []).map((u) => u.match(DASHED_PAGE_ID_PATTERN)?.[0] ?? "") },
+            )
+          : buildSourceBoundaryMarker({ entityToken, matterToken }, "Passed", ["entityName", "matterName"])));
   const reasonCallNotesId = opts.reasonCallNotesId ?? opts.callNotesId;
   const reason = `Commercial fit/progression approved for ${matterToken}. Entry type: inbound_enquiry.${
     reasonCallNotesId ? `\nCall_Notes_ID: ${reasonCallNotesId}` : ""
@@ -512,8 +533,12 @@ function mockFetch(
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
             "Required Next Action": { rich_text: [{ plain_text: requiredNextAction }] },
             Reason: { rich_text: [{ plain_text: reason }] },
-            Entity_Token: { rich_text: [{ plain_text: entityToken }] },
-            Matter_Token: { rich_text: [{ plain_text: matterToken }] },
+            ...(opts.omitTokenProperties
+              ? {}
+              : {
+                  Entity_Token: { rich_text: [{ plain_text: entityToken }] },
+                  Matter_Token: { rich_text: [{ plain_text: matterToken }] },
+                }),
             ...(opts.sourcesUrls
               ? {
                   Sources: {
@@ -679,6 +704,45 @@ function mockFetch(
     if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
       log.matterPatchBodies.push(JSON.parse(init.body));
       return new Response(JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: {} }), { status: 200 });
+    }
+    // The exact canonical Entity/Matter pages a tokenless (source-based)
+    // Sales -> Strategy Handoff names: fetched by id for the binding
+    // derivation, and the Matter page is also the target of the guarded
+    // status advance (GET before PATCH, exactly as the legacy path).
+    if (urlStr.includes(`/pages/${SOURCE_BINDING_ENTITY_PAGE_ID}`) && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: SOURCE_BINDING_ENTITY_PAGE_ID,
+          url: `https://notion.so/${SOURCE_BINDING_ENTITY_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
+          properties: { Entity_ID: { unique_id: { prefix: "E", number: 47 } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes(`/pages/${SOURCE_BINDING_MATTER_PAGE_ID}`) && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: SOURCE_BINDING_MATTER_PAGE_ID,
+          url: `https://notion.so/${SOURCE_BINDING_MATTER_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "matters-ds" },
+          properties: {
+            Matter_ID: { unique_id: { prefix: "M", number: 12 } },
+            Entity: { relation: [{ id: SOURCE_BINDING_ENTITY_PAGE_ID }] },
+            // The Matter's own operational Status -- the source-derived
+            // binding carries it out of this very read.
+            Status: { select: { name: matterStatus } },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes(`/pages/${SOURCE_BINDING_MATTER_PAGE_ID}`) && method === "PATCH") {
+      log.matterPatchBodies.push(JSON.parse(init.body));
+      return new Response(
+        JSON.stringify({ id: SOURCE_BINDING_MATTER_PAGE_ID, url: `https://notion.so/${SOURCE_BINDING_MATTER_PAGE_ID}`, parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: {} }),
+        { status: 200 },
+      );
     }
     if (method === "GET" && /\/pages\/[0-9a-f-]{32,36}$/i.test(new URL(urlStr).pathname)) {
       // A standalone governance page (Hat Definition, Universal Role
@@ -4469,4 +4533,70 @@ test("Sources: a Handoff already claimed for another Work is refused before any 
     !log.requests.some((request) => request.includes(SOURCES_PAGE_ID)),
     "the claim boundary holds BEFORE the Sources path runs -- no canonical page is even fetched",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The source-based Handoff end to end at this boundary: a Sales -> Strategy
+// Handoff whose operational identity is its canonical Sources, not token
+// properties. The binding, the Matter Status and the source-boundary marker
+// all come from the ONE context resolution; no second lookup path exists.
+// ---------------------------------------------------------------------------
+
+test("Sources-based pickup: a Sales -> Strategy Handoff with NO token properties carries its identity in Sources -- binding, marker and Matter Status all come from the canonical pages, and the proposal reaches the approval preview", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    callNotesAttestation: attestation,
+    omitTokenProperties: true,
+    sourcesUrls: [SOURCE_BINDING_ENTITY_URL, SOURCE_BINDING_MATTER_URL, SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesEntityRelation: SOURCE_BINDING_ENTITY_PAGE_ID,
+    callNotesMatterRelation: SOURCE_BINDING_MATTER_PAGE_ID,
+  });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(SUFFICIENT_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(
+    result.strategy?.approvalState,
+    "AWAITING_INTERVENTION_APPROVAL",
+    "pickup must reach the approval preview on the identity its sources establish -- no token property exists anywhere on the record",
+  );
+  assert.ok(log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "the proposal is presented -- identity never required the token properties");
+  const prompt = prompts.find((p) => p.includes("E-47"));
+  assert.ok(prompt, "the prompt carries the operational Entity token the canonical Entity source carries");
+  assert.ok(prompt!.includes("M-12"), "the prompt carries the operational Matter token the canonical Matter source carries");
+  assert.ok(
+    !log.requests.some((r) => r.includes("matters-ds/query")),
+    "the pickup never performs a second Matter lookup -- the binding travelled out of the ONE context resolution, exactly as the legacy path's zero-fetch shape",
+  );
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${SOURCE_BINDING_ENTITY_PAGE_ID}`),
+    "the Entity source is fetched by its exact page id during that ONE resolution",
+  );
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${SOURCE_BINDING_MATTER_PAGE_ID}`),
+    "the Matter source is fetched by its exact page id during that ONE resolution",
+  );
+});
+
+test("Sources-based pickup: a source-boundary marker bound to OTHER references than this pickup validated is unbound evidence -- the pickup fails closed before any AI call", async (t) => {
+  const log = mockFetch(t, {
+    omitTokenProperties: true,
+    sourcesUrls: [SOURCE_BINDING_ENTITY_URL, SOURCE_BINDING_MATTER_URL],
+    // The write claims a source-boundary check over a reference this
+    // pickup's own resolution never validated.
+    sourceBoundaryMarker: buildSourceBoundaryMarker({}, "Passed", ["entityName", "matterName"], { sourceIds: ["11111111-1111-1111-1111-111111111111"] }),
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation, undefined, "unbound evidence is never accepted as a recorded check");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /source-boundary attestation is not usable/, "the defect stops the pickup through the existing handleBlocked path");
+  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented to Martin");
 });

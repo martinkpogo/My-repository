@@ -2,6 +2,7 @@ import type { Env, Unit } from "./types";
 import { systemContext } from "./access";
 import { getPage, plainText } from "./notion";
 import { runCheckHandoffs, unitsWithHandoffPickup } from "./checkHandoffs";
+import { extractHandoffSources, handoffRouteRequiresEntityMatter, readLegacyHandoffTokens, type HandoffSourceRouteContract } from "./handoffSources";
 import type { UnitManifest } from "./units/unitManifest";
 
 /**
@@ -120,24 +121,44 @@ function routableUnits(manifests?: Partial<Record<Unit, UnitManifest>>): Set<str
 }
 
 export type HandoffWebhookFilterResult =
-  | { relevant: true; toUnit: string; entityToken: string; matterToken: string }
+  /**
+   * entityToken/matterToken are echoed only when the record carries the
+   * legacy token properties; a source-based or declared-generic Handoff is
+   * equally detectable without them (its identity is established later, by
+   * the discovery engine's own resolution -- never here).
+   */
+  | { relevant: true; toUnit: string; entityToken?: string; matterToken?: string }
   | { relevant: false; reason: string };
 
 /**
  * The filtering gate described in the architecture's "HANDOFF FILTERING"
  * section -- confirms the webhook-referenced page is genuinely a live,
- * actionable, opaque-token-bearing Pending Work Handoff before the
- * discovery engine is woken up for it at all. This is a smart filter, not
- * a second processing path: the actual claim/pickup decision remains
- * entirely inside runCheckHandoffs's existing discovery functions (each of
- * which re-queries Notion itself and applies claimPendingHandoff's own
- * live-Status idempotency gate) -- this function exists only to avoid
- * waking that engine for events that are obviously not a relevant Handoff.
+ * actionable Pending Work Handoff before the discovery engine is woken up
+ * for it at all. This is a smart filter, not a second processing path: the
+ * actual claim/pickup decision remains entirely inside runCheckHandoffs's
+ * existing discovery functions (each of which re-queries Notion itself and
+ * applies claimPendingHandoff's own live-Status idempotency gate) -- this
+ * function exists only to avoid waking that engine for events that are
+ * obviously not a relevant Handoff. It performs no identity resolution:
+ * whether the record's operational reference (legacy tokens or canonical
+ * `Sources`) actually resolves to real, related records is the discovery
+ * engine's own fail-closed resolution, never a wake-up decision.
+ *
+ * A Handoff is detectable when it carries the legacy opaque tokens, when it
+ * carries a usable `Sources` payload (its binding is then established by
+ * discovery, not here), or when its route is declared generic (identity
+ * tokens are not that route's currency at all). Everything else -- a Pending
+ * Work Handoff with no operational reference of any kind -- is still not
+ * relevant, exactly as before.
+ *
+ * `manifests` and `contracts` are TEST SEAMs (see routableUnits above and
+ * handoffRouteRequiresEntityMatter); production callers never pass them.
  */
 export function evaluateHandoffPageForWebhook(
   env: Env,
   page: { properties: Record<string, any>; parent?: { data_source_id?: string }; archived?: boolean; inTrash?: boolean },
   manifests?: Partial<Record<Unit, UnitManifest>>,
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
 ): HandoffWebhookFilterResult {
   if (page.archived || page.inTrash) {
     return { relevant: false, reason: "page is archived/trashed" };
@@ -157,15 +178,24 @@ export function evaluateHandoffPageForWebhook(
   if (!routableUnits(manifests).has(toUnit)) {
     return { relevant: false, reason: `"To Unit" ("${toUnit || "(empty)"}") is missing or does not declare Handoff pickup on its Unit manifest` };
   }
-  const entityToken = plainText(page.properties.Entity_Token).trim();
-  if (!entityToken) {
-    return { relevant: false, reason: "missing Entity_Token" };
+  // Operational reference: legacy tokens, a usable Sources payload, or a
+  // declared-generic route. Malformed Sources (extraction not ok) counts as
+  // no operational reference when the legacy tokens are also absent -- this
+  // gate still only decides whether to wake discovery, which reports the
+  // detail fail-closed on its own side.
+  const extraction = extractHandoffSources(page.properties);
+  const carriesSources = extraction.ok && extraction.mode === "sources";
+  const legacy = readLegacyHandoffTokens(page.properties);
+  const routeIsGeneric = !handoffRouteRequiresEntityMatter(plainText(page.properties["From Unit"]), toUnit, contracts);
+  if (!carriesSources && !routeIsGeneric) {
+    if (!legacy.entityToken) {
+      return { relevant: false, reason: "missing Entity_Token" };
+    }
+    if (!legacy.matterToken) {
+      return { relevant: false, reason: "missing Matter_Token" };
+    }
   }
-  const matterToken = plainText(page.properties.Matter_Token).trim();
-  if (!matterToken) {
-    return { relevant: false, reason: "missing Matter_Token" };
-  }
-  return { relevant: true, toUnit, entityToken, matterToken };
+  return { relevant: true, toUnit, entityToken: legacy.entityToken || undefined, matterToken: legacy.matterToken || undefined };
 }
 
 /**
@@ -249,14 +279,18 @@ export async function handleNotionWebhookRequest(request: Request, env: Env, ctx
     return new Response(JSON.stringify({ ok: true, ignored: filter.reason }), { status: 200, headers: { "content-type": "application/json" } });
   }
 
-  // A genuinely relevant Pending Work Handoff, with both opaque tokens
-  // present. Wake the existing discovery/pickup engine -- Martin's own DM
+  // A genuinely relevant Pending Work Handoff: one whose operational
+  // reference (legacy opaque tokens, canonical Sources, or a declared-
+  // generic route) makes it worth waking discovery for. Wake the existing
+  // discovery/pickup engine -- Martin's own DM
   // is the same default front door every other externally-created Handoff
   // (Finance/Marketing/Strategy, and now Sales) already registers
   // against when no live Telegram session exists yet (see
   // discoverPendingHandoffsForUnit). The engine re-queries Notion
   // and re-applies its own claim/pickup gates itself -- this handler's own
-  // filter above is only a wake-up decision, never the authority.
+  // filter above is only a wake-up decision, never the authority, and it
+  // resolves no identity: source-based Handoffs get their binding (or their
+  // fail-closed refusal) from discovery's own resolution.
   const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
   ctx.waitUntil(
     runCheckHandoffs(env, chatId, undefined, { source: "notion_webhook" }).catch((err) =>

@@ -9,6 +9,7 @@ import { setActiveWorkId } from "../../sessionRouting";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
+import { readLegacyHandoffTokens, resolveHandoffContextBinding } from "../../handoffSources";
 import { claimPendingHandoff } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
@@ -239,12 +240,18 @@ function buildFinancePromptParts(hatDefinition: string, universalRoleContract: s
  * Handoff's own canonical Notion record, evaluated through the data boundary
  * closed-context contract.
  *
- * Identity is read as the Entity_Token / Matter_Token the creating Unit
- * embedded directly on the Handoff, never a real Name/title — this Hat
- * never reads the Entity or Matter page (and, per the data-boundary
- * redesign, may not even have Notion access to the Entity database). The
- * real name never enters this Hat's context, an AI prompt, or a Telegram
- * message it sends.
+ * Identity arrives as the operational reference the Handoff carries -- the
+ * recorded Entity_Token / Matter_Token on a legacy Handoff, or -- when the
+ * record declares canonical `Sources` -- the tokens its VALIDATED sources
+ * prove (src/handoffSources.ts's resolveHandoffContextBinding, the one
+ * resolution every consumer goes through; on a legacy Handoff that resolves
+ * with no fetch at all, so this Hat still never reads the Entity or Matter
+ * page for one). Never a real Name/title — and, per the data-boundary
+ * redesign, this Hat may not even have Notion access to the Entity
+ * database. The real name never enters this Hat's context, an AI prompt, or
+ * a Telegram message it sends. A Handoff whose sources cannot be validated
+ * is refused fail-closed with its exact (non-sensitive) reason rather than
+ * evaluated with a guessed identity.
  */
 /**
  * Reads the Handoff this Work item was picked up from, and evaluates whether
@@ -270,14 +277,27 @@ export async function resolveHandoffBusinessContext(
     // written there actually reaches the pricing judgment.
     const requiredNextAction = plainText(handoff.properties["Required Next Action"]);
     const judgmentContext = requiredNextAction ? `${verifiedFacts}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : verifiedFacts;
-    const entityToken = plainText(handoff.properties.Entity_Token);
-    const matterToken = plainText(handoff.properties.Matter_Token);
+    const binding = await resolveHandoffContextBinding(env, {
+      properties: handoff.properties,
+      route: { fromUnit: plainText(handoff.properties["From Unit"]), toUnit: plainText(handoff.properties["To Unit"]) },
+      access,
+    });
+    if (!binding.ok) {
+      return {
+        success: false,
+        insufficientContext: {
+          isInsufficient: true,
+          category: "unresolved material fact",
+          reason: `Insufficient execution context: ${binding.reason}`,
+        },
+      };
+    }
 
     return evaluateHandoffContext(
       {
         handoffId,
-        entityToken,
-        matterToken,
+        entityToken: binding.entityToken,
+        matterToken: binding.matterToken,
         sanitizedContext: judgmentContext,
         provenance: `notion:handoff:${handoffId}`,
         requiredCategory: "historical business-impact range for value-based pricing",
@@ -942,7 +962,7 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
       console.error(`Finance handleQuoteApproval: re-fetch of Handoff ${state.handoffId} failed`, err);
       return null;
     });
-    const liveMatterToken = live ? plainText(live.properties.Matter_Token) : "";
+    const liveMatterToken = live ? readLegacyHandoffTokens(live.properties).matterToken : "";
     if (liveMatterToken) {
       state.matterToken = liveMatterToken;
       await logActivity(env, {

@@ -1,4 +1,5 @@
 import { plainText } from "../../notion";
+import { readLegacyHandoffTokens } from "../../handoffSources";
 import { sendOperationsMessage } from "../../telegram";
 import { kvGet, kvPut } from "../../kvStore";
 import type { Env } from "../../types";
@@ -47,7 +48,7 @@ async function notifySalesHandoffReady(env: Env, handoff: { id: string }, matter
 async function notifyRetiredCallNotesHandoff(env: Env, handoff: DiscoveredHandoff): Promise<void> {
   const key = `sales_callnotes_retired_notice:${handoff.id}`;
   if (await kvGet(env, key)) return;
-  const matterToken = plainText(handoff.properties?.Matter_Token) || "(unknown)";
+  const matterToken = readLegacyHandoffTokens(handoff.properties).matterToken || "(unknown)";
   await sendOperationsMessage(
     env,
     `⛔ Call-notes Handoff for ${matterToken} was not picked up by Runtime Sales.\n\nRuntime Sales no longer qualifies or progresses Leads (LOG-987). Run *sales-fit-assessment*, then *sales-progression*, in Isolated Sales for this Matter. The Handoff was left as it is.`,
@@ -106,7 +107,7 @@ export function salesHandoffPickup(paused: boolean = SALES_EXECUTIVE_PAUSED): Ha
     },
     async hold(env, handoff) {
       if (!paused) return false;
-      const matterToken = plainText(handoff.properties?.Matter_Token) || "(unknown)";
+      const matterToken = readLegacyHandoffTokens(handoff.properties).matterToken || "(unknown)";
       await notifySalesHandoffReady(env, handoff, matterToken).catch((err) =>
         console.error(`Failed to send Sales Handoff ready notification for ${handoff.id}`, err),
       );
