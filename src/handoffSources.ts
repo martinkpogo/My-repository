@@ -27,15 +27,26 @@ import { getSessionStub } from "./sessionRouting";
  *
  * **Compatibility seam (activation by property presence).** The path is
  * activated per-Handoff by the PRESENCE of the property on the record:
- * `extractHandoffSources` returns `legacy` when the property is absent,
- * and every existing consumer keeps behaving exactly as before (the
- * free-text `Call_Notes_ID` reference convention in
- * `src/records/callNotes/callNotesRecord.ts`). When the property IS
- * present, this resolver governs and the legacy free-text reference is
- * never a fallback -- a Sources-enabled Handoff whose references do not
- * validate is refused outright. Nothing here writes to Notion: the single
- * governed writer (src/handoffWriter.ts, Phase 2) owns the write side,
- * and the resolver reads whatever the record actually carries.
+ * `extractHandoffSources` returns `legacy` when the property is absent.
+ * Absent `Sources` is NOT a blanket licence for consumers to keep going as
+ * before: `resolveHandoffSources` applies the route contract to that case
+ * first, and a route that requires an Entity/Matter -- an uncontracted
+ * route, or one whose contract requires a token or lists an
+ * `entities`/`matters` artifact as required or optional -- refuses it
+ * outright, with no fetch. Only a route whose contract declares generic
+ * handling accepts a Handoff with no `Sources`, and accepting it
+ * establishes NO identity: the binding is the empty pair, nothing is read
+ * from the retired `Entity_Token`/`Matter_Token` columns, and nothing is
+ * inferred to fill the gap. On such a route a consumer's existing
+ * behaviour is unchanged -- `src/records/callNotes/callNotesRecord.ts`
+ * still runs the free-text `Call_Notes_ID` reference convention exactly as
+ * it always did. When the property IS present, this resolver governs and
+ * the legacy free-text reference is never a fallback -- a Sources-enabled
+ * Handoff whose references do not validate, or whose binding cannot be
+ * established, is refused outright rather than resolved half-way. Nothing
+ * here writes to Notion: the single governed writer (src/handoffWriter.ts,
+ * Phase 2) owns the write side, and the resolver reads whatever the record
+ * actually carries.
  *
  * **What is validated, and where.** Source types come from the page's REAL
  * parent database (read back from Notion by `getPage`, never from the URL's
@@ -103,9 +114,13 @@ import { getSessionStub } from "./sessionRouting";
  * never re-performed here. What DOES come from here is the attestation's
  * operational Entity/Matter binding on the receiving side: the tokens
  * `parseSourceBoundaryMarker` binds a recorded marker to are the ones this
- * resolution proved (from the canonical sources, or from the legacy fields
- * on the compatibility path), never a value a consumer read off the record
- * for itself.
+ * resolution proved from the payload's own declared token entries, never a
+ * value a consumer read off the record for itself, never one taken from a
+ * canonical page, and never one taken from a retired Handoff token
+ * property (those no longer exist). A Handoff on the compatibility path --
+ * no `Sources`, and only where its route contract permits that -- proves
+ * no binding at all, so it carries empty token values rather than a
+ * substitute.
  *
  * **Fail closed, always.** Every failure mode returns
  * `{ ok: false, reason }` with a non-sensitive reason. There is no partial
@@ -819,12 +834,24 @@ export type HandoffSourcesResolution =
       mode: "sources";
       sources: ResolvedHandoffSourceRef[];
       /**
-       * The Entity/Matter binding this resolution PROVED: derived from the
-       * Handoff's own canonical `entities`/`matters` sources (with the
-       * Matter->Entity relationship check), cross-checked against the
-       * Handoff's legacy token properties when those are present. Always
-       * established -- a Sources-enabled Handoff whose binding cannot be
-       * established is refused rather than resolved half-way.
+       * The Entity/Matter binding this resolution PROVED: established
+       * ONLY from the opaque `token:entity:`/`token:matter:` entries this
+       * payload declares, resolved through `resolveEntityMatterFromTokens`
+       * -- the canonical Matters and Entities data sources, never the
+       * Isolated Sales Identity Resolution Registry -- which is also what
+       * enforces the Matter->Entity relationship proof this binding
+       * carries. Canonical `entities`/`matters` PAGE references the same
+       * payload declares are cross-checks against that binding: they can
+       * only REFUSE it for disagreeing, never establish one, stand in for
+       * a missing token, or supply a token -- and no separate Handoff
+       * token property is consulted, because those properties no longer
+       * exist. Established means established: on a route requiring a
+       * binding, a missing, half or unresolvable pair fails the whole
+       * resolution closed rather than resolving half-way. The only payload
+       * reaching `mode: "sources"` with an empty binding is one on a route
+       * its contract declares generic, where the empty pair is the
+       * deliberate, contract-permitted result -- never a gap to be filled
+       * from a page link or from a retired column.
        */
       binding: HandoffSourceBinding;
       /** The one validated canonical Call Notes source, when the Handoff carries one. */
