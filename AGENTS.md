@@ -2,6 +2,15 @@
 
 This document establishes the ENIG operating model and execution contracts for Claude Code and Jules. The architectural, governance, security, provider, data-boundary, fail-closed, evidence, and documentation rules bind every implementation agent.
 
+## Work from the tracker
+
+GitHub issues in this repository are the single tracker for ENIG build work (approved by Martin, 2026-10-22). `docs/build-tracking.md` describes statuses, rules, roles and rhythm.
+
+- Work only from an issue Martin has approved (`status: ready`). If the work has no issue, stop and ask for one; Architect or a coding agent may draft it, and Martin approves it.
+- Use the issue number everywhere: branch `enig-<number>-<short-name>`, pull request body `Closes #<number>`, and the final evidence report.
+- At most two issues are in progress at once. Set `status: in progress` when starting and `status: in review` when handing in; close an issue only after Martin signs it off with evidence linked.
+- Each issue's finish line includes its modularity check: touch only what that check allows.
+
 ## Governing reasoning boundary
 
 ENIG uses two coding agents with the same architectural reasoning boundary but different execution ceilings. **Architect/Martin owns**:
@@ -43,7 +52,7 @@ Every production Handoff write goes through `src/handoffWriter.ts`'s `createHand
 
 ## ENIG Runtime Architecture — mandatory reading
 
-`docs/enig-operating-model.md` is the authoritative, binding description of ENIG Runtime's architecture (Units/Hats/Actions, the Action Registry, the Unit Manifest pattern, and Chat/Cowork dispatch semantics), not a proposal or background reading. Before creating or modifying a Unit, Hat, or Action, or touching `src/router.ts`, `src/units/dispatch.ts`, `src/units/unitManifest.ts`, `src/hats/actionRegistry.ts`, or dispatch/Handoff-adjacent code in `src/session.ts`, read that document.
+The canonical architecture is ENIG HQ in Notion (Kernel › Core Structure and the module pages). `docs/enig-operating-model.md` is the binding detailed reference for how this repository implements it (Units/Hats/Actions, the Action Registry, the Unit Manifest pattern, and Chat/Cowork dispatch semantics), not a proposal or background reading. Where the two disagree, Notion wins: stop and report the discrepancy to Martin. Before creating or modifying a Unit, Hat, or Action, or touching `src/router.ts`, `src/units/dispatch.ts`, `src/units/unitManifest.ts`, `src/hats/actionRegistry.ts`, or dispatch/Handoff-adjacent code in `src/session.ts`, read that document.
 
 - Never hardcode persona/governance content a Hat could instead load live from Notion. `src/governance.ts`'s `getGovernance` (live-fetched, cached, fail-closed) is the established pattern.
 - Never add a second mechanism for how a capability gets triggered. The Unit Manifest / Action Registry (`src/hats/actionRegistry.ts`, `src/units/unitManifest.ts`, `src/units/dispatch.ts`) is the only sanctioned mechanism. `src/actions/registry.ts`'s `ActionCapability` mechanism has been retired; do not reintroduce it under any name.
