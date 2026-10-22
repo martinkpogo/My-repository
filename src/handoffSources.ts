@@ -34,7 +34,11 @@ import { getSessionStub } from "./sessionRouting";
  * route, or one whose contract requires a token or lists an
  * `entities`/`matters` artifact as required or optional -- refuses it
  * outright, with no fetch. Only a route whose contract declares generic
- * handling accepts a Handoff with no `Sources`, and accepting it
+ * handling AND requires no source artifact accepts a Handoff with no
+ * `Sources`: a `required` entry can only be supplied from inside the
+ * property, so an absent property never bypasses one, and such a route's
+ * required-artifact check refuses instead of returning legacy mode. When
+ * it is accepted it
  * establishes NO identity: the binding is the empty pair, nothing is read
  * from the retired `Entity_Token`/`Matter_Token` columns, and nothing is
  * inferred to fill the gap. On such a route a consumer's existing
@@ -1196,14 +1200,30 @@ export async function resolveHandoffSources(
      * route accepts a Handoff that declares no operational reference is a
      * contract decision, never a fallback to the retired token columns. A
      * route that requires an Entity/Matter (uncontracted, or one whose
-     * contract names a token or an entity/matter artifact) refuses here; a
-     * declared generic route accepts it as carrying no binding, which is
-     * exactly what it does carry.
+     * contract names a token or an entity/matter artifact) refuses here. A
+     * declared generic route is accepted ONLY when its contract also
+     * requires no source artifact: a `required` entry can only be supplied
+     * from inside `Sources`, so an absent property would silently bypass it
+     * -- that case refuses too, rather than returning a legacy mode that
+     * skips the contract's requirement. A generic route with no required
+     * artifact accepts the Handoff as carrying no binding, which is exactly
+     * what it does carry.
      */
     const routeRequires = handoffRouteRequiresEntityMatter(input.route.fromUnit, input.route.toUnit, input.contracts);
     if (routeRequires) {
       return refuse(
         `the Handoff declares no "${HANDOFF_SOURCES_PROPERTY}" property, and route "${handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)}" requires an Entity/Matter binding -- the separate Entity_Token/Matter_Token properties are no longer read, so a Handoff with no Sources establishes no identity and nothing is inferred to fill the gap.`,
+      );
+    }
+    const legacyContract = (input.contracts ?? HANDOFF_SOURCE_ROUTE_CONTRACTS)[handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)];
+    if (legacyContract && legacyContract.required.length > 0) {
+      // `routeRequires` is false only for a declared generic route, so a
+      // contract here exists (an uncontracted route refused above). Its
+      // required artifacts are the check that must not be skipped: they can
+      // only travel inside Sources, so a Handoff carrying none of the
+      // property cannot satisfy them.
+      return refuse(
+        `the Handoff declares no "${HANDOFF_SOURCES_PROPERTY}" property, and route "${handoffSourceRouteKey(input.route.fromUnit, input.route.toUnit)}" requires a ${legacyContract.required.join(", ")} source -- a required artifact can only travel inside Sources, so an absent property is refused rather than the contract's requirement skipped.`,
       );
     }
     return { ok: true, mode: "legacy" };

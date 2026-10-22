@@ -1556,6 +1556,68 @@ test("sources: a Handoff with no Sources at all is refused on a route that requi
   assert.equal(log.requests.length, 0, "the refusal performs no fetch -- nothing is read to fill the gap");
 });
 
+// ---------------------------------------------------------------------------
+// Missing `Sources` on a declared-generic route: the contract's REQUIRED
+// artifacts are enforced in the same decision as its identity requirements.
+// A required artifact can only travel inside Sources, so an absent property
+// that would silently bypass a `required` entry must refuse -- while a
+// generic route with no required artifact keeps its legitimate compatibility
+// path (no fetch, no invented identity).
+// ---------------------------------------------------------------------------
+
+const GENERIC_ROUTE_REQUIRING_CALL_NOTES = routeContracts({
+  ...HANDOFF_SOURCE_ROUTE_CONTRACTS,
+  "BD->Strategy": {
+    requiresEntityToken: false,
+    requiresMatterToken: false,
+    required: ["call_notes"],
+    optional: [],
+    prohibited: ["handoffs", "entities", "matters"],
+  },
+});
+
+test("missing Sources: a declared-generic route with NO required artifact accepts an absent Sources -- the legitimate compatibility case, with no fetch", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  const result = await resolve(handoffProperties({ Reason: rich("Fit approved.") }), {
+    fromUnit: "BD",
+    toUnit: "Strategy",
+    contracts: GENERIC_ROUTE_CONTRACTS,
+  });
+  assert.equal(result.ok, true, result.ok ? "" : result.reason);
+  if (!result.ok) return;
+  assert.equal(result.mode, "legacy", "a generic route with no required artifact keeps the legacy compatibility mode");
+  assert.equal(log.requests.length, 0, "nothing is fetched to fill a binding this route does not use");
+});
+
+test("missing Sources: a declared-generic route that still REQUIRES an artifact refuses an absent Sources -- a required source is never bypassed by the missing property", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  const result = await resolve(handoffProperties({ Reason: rich("Fit approved.") }), {
+    fromUnit: "BD",
+    toUnit: "Strategy",
+    contracts: GENERIC_ROUTE_REQUIRING_CALL_NOTES,
+  });
+  assert.equal(result.ok, false, "a required artifact cannot be supplied without Sources, so the absence must refuse, not pass through as legacy");
+  if (result.ok) return;
+  assert.match(result.reason, /requires a call_notes source/, "the refusal names the exact artifact whose requirement was bypassed");
+  assert.match(result.reason, /absent property is refused rather than the contract's requirement skipped/);
+  assert.equal(log.requests.length, 0, "the refusal performs no fetch -- the contract alone decides");
+  assert.equal(log.writes.length, 0, "a refusal issues no write");
+});
+
+test("missing Sources: the required-artifact refusal surfaces through resolveHandoffContextBinding too -- consumers share the one contract", async (t) => {
+  const log = mockSourcesFetch(t, {});
+  const binding = await resolveHandoffContextBinding(fakeEnv(), {
+    properties: handoffProperties({ Reason: rich("Fit approved.") }),
+    route: { fromUnit: "BD", toUnit: "Strategy" },
+    access: pickupContext(),
+    contracts: GENERIC_ROUTE_REQUIRING_CALL_NOTES,
+  });
+  assert.equal(binding.ok, false, "a consumer must not receive an empty legacy binding that skipped a required artifact");
+  if (binding.ok) return;
+  assert.match(binding.reason, /requires a call_notes source/);
+  assert.equal(log.requests.length, 0, "the refusal performs no fetch");
+});
+
 test("sources: a caller-supplied token that CONTRADICTS the token the Sources payload declares fails closed", async (t) => {
   const log = mockSourcesFetch(t, { pages: { [MATTER_PAGE_ID]: matterPageFixture() } });
   const result = await resolve(
