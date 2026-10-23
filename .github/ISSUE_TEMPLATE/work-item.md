@@ -2,7 +2,7 @@
 name: ENIG work item
 about: One step of ENIG build work. Every build change starts from an issue like this.
 title: "[step] "
-labels: ""
+labels: []
 ---
 
 **Plan step** in the approved build plan: <!-- e.g. S3.2, or "new" -->
