@@ -432,6 +432,78 @@ test("parse: an empty entry is refused", () => {
   assert.match(result.reason, /empty Sources entry/);
 });
 
+// --- app.notion.com canonical host (Issue #322) ----------------------------
+// Notion's canonical page links increasingly use the exact host
+// app.notion.com. The parser accepts that one host alongside notion.so and
+// its subdomains -- and only that host, so no notion.com subdomain wildcard
+// is opened and every existing rejection case still fails closed.
+
+test("parse: an app.notion.com canonical page URL (/p/<32-hex>) resolves to the exact dashed page id", () => {
+  assert.deepEqual(parseNotionPageLink(`https://app.notion.com/p/${CN_HEX}`), { ok: true, pageId: CN_PAGE_ID });
+});
+
+test("parse: an app.notion.com URL with a name slug and uppercase id still resolves to the exact page", () => {
+  const result = parseNotionPageLink(`https://app.notion.com/Acme-Case-Notes-${CN_HEX.toUpperCase()}`);
+  assert.deepEqual(result, { ok: true, pageId: CN_PAGE_ID });
+});
+
+test("parse: an app.notion.com URL carrying a workspace path segment still resolves", () => {
+  assert.deepEqual(parseNotionPageLink(`https://app.notion.com/acme/${CN_PAGE_ID}`), { ok: true, pageId: CN_PAGE_ID });
+});
+
+test("parse: a notion.so subdomain (www.notion.so) still resolves -- subdomain support is preserved", () => {
+  assert.deepEqual(parseNotionPageLink(`https://www.notion.so/${CN_HEX}`), { ok: true, pageId: CN_PAGE_ID });
+});
+
+test("parse: an arbitrary notion.com subdomain is refused -- app.notion.com is exact, never a wildcard", () => {
+  const result = parseNotionPageLink(`https://evil.notion.com/${CN_HEX}`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not a notion\.so page link/);
+});
+
+test("parse: a lookalike app.notion.com subdomain is refused -- only the exact host is accepted", () => {
+  const result = parseNotionPageLink(`https://evil.app.notion.com/p/${CN_HEX}`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not a notion\.so page link/);
+});
+
+test("parse: the bare notion.com apex host is refused", () => {
+  const result = parseNotionPageLink(`https://www.notion.com/${CN_HEX}`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /not a notion\.so page link/);
+});
+
+test("parse: an app.notion.com database path link is refused -- a database is not a page", () => {
+  const result = parseNotionPageLink(`https://app.notion.com/acme/database/${CN_HEX}`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /database\/data-source\/view link/);
+});
+
+test("parse: an app.notion.com data-source path link is refused", () => {
+  const result = parseNotionPageLink(`https://app.notion.com/acme/data_source/${CN_HEX}`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /database\/data-source\/view link/);
+});
+
+test("parse: an app.notion.com ?v= database-view parameter is refused -- it names a view, not a page", () => {
+  const result = parseNotionPageLink(`https://app.notion.com/acme/${CN_HEX}?v=0123456789abcdef0123456789abcdef`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /database-view parameter/);
+});
+
+test("parse: an app.notion.com URL with no page id anywhere is refused", () => {
+  const result = parseNotionPageLink("https://app.notion.com/Acme-Case-Notes");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.reason, /no Notion page id/);
+});
+
 // ---------------------------------------------------------------------------
 // Extraction: the compatibility seam, and the shapes a present property can take.
 // ---------------------------------------------------------------------------
@@ -493,6 +565,22 @@ test("extraction: token entries and artifact URLs coexist in one payload and sta
       { kind: "token", tokenKind: "entity", token: "E-47" },
       { kind: "token", tokenKind: "matter", token: "M-12" },
       { kind: "notion", pageId: MATTER_PAGE_ID },
+      { kind: "notion", pageId: CN_PAGE_ID },
+    ],
+    tokens: { entityToken: "E-47", matterToken: "M-12" },
+  });
+});
+
+test("extraction: an app.notion.com canonical page link in Sources resolves to the exact page id (Issue #322)", () => {
+  const result = extractHandoffSources(
+    handoffProperties({ Sources: sourcesReadShape([`https://app.notion.com/p/${CN_HEX}`]) }),
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    mode: "sources",
+    refs: [
+      { kind: "token", tokenKind: "entity", token: "E-47" },
+      { kind: "token", tokenKind: "matter", token: "M-12" },
       { kind: "notion", pageId: CN_PAGE_ID },
     ],
     tokens: { entityToken: "E-47", matterToken: "M-12" },
