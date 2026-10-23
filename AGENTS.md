@@ -7,7 +7,7 @@ This document establishes the ENIG operating model and execution contracts for C
 GitHub issues in this repository are the single tracker for ENIG build work (approved by Martin, 2026-10-22). `docs/build-tracking.md` describes statuses, rules, roles and rhythm.
 
 - Work only from an issue Martin has approved (`status: ready`). If the work has no issue, stop and ask for one; Architect or a coding agent may draft it, and Martin approves it.
-- Use the issue number everywhere: branch `enig-<number>-<short-name>`, pull request body `Closes #<number>`, and the final evidence report.
+- Use the issue number everywhere: branch `enig-<number>-<short-name>`, pull request body `Refs #<number>`, and the final evidence report. Never write `Closes #<number>` (or any GitHub closing keyword) in a pull request: merging must not auto-close the tracked issue — the sign-off rule below is the only way an issue closes.
 - At most two issues are in progress at once. Set `status: in progress` when starting and `status: in review` when handing in; close an issue only after Martin signs it off with evidence linked.
 - Each issue's finish line includes its modularity check: touch only what that check allows.
 

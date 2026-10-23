@@ -23,7 +23,7 @@ The approved build plan runs in dependency order: Stage 0 → Stage 1 → Stage 
 ## Rules
 
 1. **Work only from an issue.** If it is not in the tracker, it is not being worked on.
-2. **One ID everywhere.** The issue number appears in the branch name (`enig-<number>-<short-name>`), the pull request (`Closes #<number>`), the builder instruction and the evidence.
+2. **One ID everywhere.** The issue number appears in the branch name (`enig-<number>-<short-name>`), the pull request (`Refs #<number>` — never a GitHub closing keyword such as `Closes #<number>`, so merging never auto-closes the issue; an issue closes only under rule 7), the builder instruction and the evidence.
 3. **Every issue has a finish line before it starts.**
 4. **Small items.** One builder session and one pull request each; split anything bigger.
 5. **At most two items in progress at once:** one with a builder, one with Martin.
