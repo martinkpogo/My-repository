@@ -496,7 +496,8 @@ function formatPageId(hex: string): string {
  *
  * Fail closed on every shape that is not an exact page link:
  *
- *   - not a URL at all, or a non-Notion host;
+ *   - not a URL at all, or a host outside the accepted set (notion.so, any
+ *     notion.so subdomain, or the exact host app.notion.com);
  *   - a database/data-source/view link (`/database/...`, `/data_source/...`,
  *     or the `?v=` database-view parameter) -- a database link is not a page
  *     link, and accepting one would re-open exactly the "which record did
@@ -520,8 +521,18 @@ export function parseNotionPageLink(raw: string): NotionPageLink {
     return { ok: false, reason: `"${value.slice(0, 120)}" is not an http(s) Notion page link.` };
   }
   const host = parsed.hostname.toLowerCase();
-  if (host !== "notion.so" && !host.endsWith(".notion.so")) {
-    return { ok: false, reason: `"${value.slice(0, 120)}" is not a notion.so page link -- only exact canonical Notion pages may be sources.` };
+  /**
+   * Accepted hosts: `notion.so` and its subdomains (the long-standing
+   * canonical form), plus the exact host `app.notion.com`. Notion's
+   * canonical page links increasingly use `app.notion.com`, and a Handoff
+   * whose `Sources` names one was refused purely for its hostname even
+   * though it is the same exact-page reference. `app.notion.com` is added
+   * as one EXACT host only -- no `notion.com` subdomain wildcard -- so the
+   * accepted set stays closed and a lookalike host (`evil.app.notion.com`,
+   * `notion.com` itself, or any other subdomain) is still refused fail-closed.
+   */
+  if (host !== "notion.so" && !host.endsWith(".notion.so") && host !== "app.notion.com") {
+    return { ok: false, reason: `"${value.slice(0, 120)}" is not a notion.so page link (nor an app.notion.com one) -- only exact canonical Notion pages may be sources.` };
   }
   const path = parsed.pathname;
   if (/(^|\/)(database|data_source|view)(\/|$)/i.test(path)) {
