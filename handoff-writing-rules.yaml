@@ -10,7 +10,9 @@
 # createHandoff/updateHandoff. Every Unit that creates or updates a
 # Handoff (Sales, Strategy, Finance, Marketing)
 # calls into that module rather than writing to the Handoffs database
-# directly -- it requires Entity_Token/Matter_Token, and rejects (fails
+# directly -- it requires an operational Entity/Matter reference (the
+# opaque token entries the Sources payload itself must carry, or a route
+# explicitly declared generic), and rejects (fails
 # closed, never silently redacts) any protected field that contains a
 # real Entity/Matter name, a known contact's name, an email address, or a
 # phone number. It builds on resolveIdentityTokens
@@ -29,8 +31,11 @@ opaque_token_boundary:
     Every Handoff field that becomes another Unit's AI input context
     (Handoff title, Reason, Sources, Required Next Action, Expected Output,
     Acceptance Criteria, Assumptions, Open Questions, Verified Facts &
-    Sources, Work Completed) must identify the Entity/Matter ONLY by its
-    Entity_Token and Matter_Token (e.g. "E-20", "MAT-20") -- never by the
+    Sources, Work Completed) must identify the Entity/Matter ONLY by the
+    opaque token entries its own Sources payload carries (the link-less
+    rich-text entries "token:entity:E-20" and "token:matter:MAT-20") or,
+    additionally, by exact canonical page references in that same
+    property -- never by the
     real Entity/company name, a real contact's name, an email address, a
     phone number, or any other detail that identifies who they actually
     are. Sources URLs are included deliberately: a Notion pretty-URL slug
@@ -45,8 +50,13 @@ opaque_token_boundary:
     - Any other detail that could identify the Entity outside its token
 
   always_write:
-    - Entity_Token -- from the Entity page's "Entity ID" unique_id property
-    - Matter_Token -- from the Matter page's "Matter_ID" unique_id property
+    - token:entity:<token> entry in Sources -- the Entity page's "Entity ID"
+      unique_id value (e.g. "E-20"), as link-less rich text (no page link)
+    - token:matter:<token> entry in Sources -- the Matter page's "Matter_ID"
+      unique_id value (e.g. "MAT-20"), as link-less rich text (no page link)
+    # The separate Entity_Token / Matter_Token Handoff properties no longer
+    # exist in the live schema: no record writes them and no code path reads
+    # them. A Handoff must not carry them in any form.
 
   reading_real_identity_is_fine:
     note: >
@@ -102,8 +112,16 @@ sources_property:
       Google Sheet source is parsed but refused by the runtime today --
       no trusted binding exists for spreadsheets; do not write one)
     - At least one reference; no duplicates of the same page/file
+    - The opaque token pair, as token:entity:/token:matter: entries, on
+      every route whose contract requires identity (today:
+      Sales->Strategy, Strategy->Finance, Finance->Sales,
+      Strategy->Marketing, Strategy->Sales -- all five require BOTH
+      tokens)
     - Only on a route whose contract permits the types involved
-      (today: Sales->Strategy, call_notes optional)
+      (today: Sales->Strategy and Strategy->Finance allow call_notes;
+      Sales->Strategy and Strategy->Finance also allow canonical
+      entities/matters page references; the other three carry the tokens
+      and no artifact type)
 
   never_write:
     - Title-matched, searched, or guessed references
@@ -152,24 +170,42 @@ sales_to_strategy_source_boundary_attestation:
     other than an explicit Passed marker bound to the Handoff.
 
   checks:
-    - operational_entity_reference_present   # Entity_Token filled in from the operational Entity ID -- never empty, never a real name
-    - operational_matter_reference_present   # Matter_Token filled in from the operational Matter ID
+    - operational_entity_reference_present   # the Entity token entry (token:entity:<token>) is present in Sources, from the operational Entity ID -- never empty, never a real name
+    - operational_matter_reference_present   # the Matter token entry (token:matter:<token>) is present in Sources, from the operational Matter ID
     - identity_bearing_content_removed       # every protected field re-read: no real Entity/Matter/contact name, email address, or phone number (see opaque_token_boundary above)
     - identity_resolution_registry_data_not_transferred   # no Identity Resolution Registry data was read into or copied into this Handoff
     - handoff_context_identity_safe          # the final payload, re-read as a whole, contains only identity-safe content
 
   marker:
     channel: Reason free text (the same channel the runtime writes)
-    format: "[source_boundary_check result=Passed entity=<Entity_Token> matter=<Matter_Token> checks=operational_entity_reference_present,operational_matter_reference_present,identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared, e.g. entityName,matterName -- names only, never values>]"
+    identity_form: "[source_boundary_check result=Passed entity=<entity_token> matter=<matter_token> checks=operational_entity_reference_present,operational_matter_reference_present,identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared, e.g. entityName,matterName -- names only, never values>]"
+    sources_form: "[source_boundary_check result=Passed refs=<comma-joined sorted exact source page ids the Handoff's Sources declares> checks=identity_bearing_content_removed,identity_resolution_registry_data_not_transferred,handoff_context_identity_safe fields=<comma-separated known-identity field names actually compared>]"
+    form_selection: >
+      A write whose operational identity is an opaque token pair records
+      the identity form with all five checks: checks 1 and 2 are
+      established because the write's OWN declared tokens are present in
+      its Sources payload, and a contradiction between a caller's identity
+      tokens and the payload's declared tokens is refused rather than
+      silently reconciled. A write whose operational identity is not a
+      token pair (a route explicitly declared generic) records the sources
+      form with only the three content checks -- checks 1 and 2 (operational
+      Entity/Matter reference) are established by the RECEIVER's own
+      resolution of those exact sources, never claimed by the sender.
     binding: >
-      entity= and matter= must be exactly this Handoff's own Entity_Token /
-      Matter_Token values -- that is what binds the attestation to this
-      record. The receiving Strategy execution rejects a marker whose
-      references do not match the Handoff it was read from.
+      The identity form's entity= and matter= must be exactly the opaque
+      tokens this Handoff's own Sources payload declares. The sources
+      form's refs= must be exactly the set of source page ids the
+      receiver's own resolution validated for this Handoff. Either way that
+      is what binds the attestation to this record: the receiving Strategy
+      execution rejects a marker whose references do not match the Handoff
+      it was read from, in whichever form it resolves that Handoff. A
+      marker records only checks that were actually performed and can never
+      substitute for the receiver's own validation.
     contains_no_identity: >
-      The marker carries tokens, the result, the five check names, and
-      known-identity FIELD names only -- never a real name, email address,
-      phone number, or any other identifying value.
+      The marker carries tokens or exact page ids, the result, the check
+      names actually established, and known-identity FIELD names only --
+      never a real name, email address, phone number, or any other
+      identifying value.
 
   distinction: >
     A runtime-created Handoff's marker is produced by enforced code (the

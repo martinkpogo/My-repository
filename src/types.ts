@@ -539,7 +539,7 @@ export interface WorkState {
   /** Human-readable Matter name -- only ever populated by a Unit that has legitimately resolved the real identity (Sales). Never overload this with a token. */
   matterName?: string;
   /**
-   * The opaque Entity_Token (e.g. "ENT-28") this work item operates under.
+   * The opaque Entity token (e.g. "ENT-28") this work item operates under.
    * Units that operate on Handoffs only (Strategy, Finance) never
    * learn a real Entity name at all, per the closed-context contract in
    * dataBoundary/policy.ts -- this is the identity they actually have, and
@@ -549,7 +549,7 @@ export interface WorkState {
    * token -- see the centralized Handoff writer (src/handoffWriter.ts).
    */
   entityToken?: string;
-  /** The opaque Matter_Token (e.g. "MAT-20") this work item operates under. See entityToken's doc comment -- same semantics, Matter side. */
+  /** The opaque Matter token (e.g. "MAT-20") this work item operates under. See entityToken's doc comment -- same semantics, Matter side. */
   matterToken?: string;
   handoffId?: string;
   callNotes?: string;

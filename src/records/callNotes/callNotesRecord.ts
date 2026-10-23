@@ -30,7 +30,7 @@ import { resolveHandoffSources, type HandoffSourceRouteContract } from "../../ha
  *      read from the same reference convention `isCallNotesHandoff`
  *      (`src/checkHandoffs.ts`) already uses. No new Handoff property, no new
  *      transport, and never inferred from Entity/Matter.
- *   2. **Identity binding targets** -- the Handoff's `Entity_Token`/`Matter_Token`
+ *   2. **Identity binding targets** -- the Handoff's opaque Entity/Matter
  *      resolved to their real operational page IDs by the existing
  *      `resolveEntityMatterFromTokens`, so the record's relations have something
  *      to be checked against.
@@ -208,7 +208,7 @@ export async function retrieveAndConsumeCallNotes(
   const resolved = await resolveEntityMatterFromTokens(env, tokens.entityToken, tokens.matterToken);
   if (!resolved) {
     return refuse(
-      `the Handoff's Entity_Token "${tokens.entityToken || "(empty)"}" / Matter_Token "${tokens.matterToken || "(empty)"}" did not resolve to a real, related Entity/Matter record, so the Call Notes record's Entity and Matter relations cannot be verified -- without that check any record would do.`,
+      `the Handoff's Entity token "${tokens.entityToken || "(empty)"}" / Matter token "${tokens.matterToken || "(empty)"}" did not resolve to a real, related Entity/Matter record, so the Call Notes record's Entity and Matter relations cannot be verified -- without that check any record would do.`,
     );
   }
 

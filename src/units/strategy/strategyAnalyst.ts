@@ -19,7 +19,15 @@ import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, w
 import type { ApprovalProof } from "../../types";
 import { describeAiFailure, findingsText, runStrategySkillCycle, type StrategySkillFinding } from "./strategySkillCycle";
 import { hasSubstantiveEvidence, readApprovedCallNotesEvidence, readCallNotesSourceEvidence, readGoogleDocSourceEvidence, strategyClarificationReason } from "./strategyEvidence";
-import { extractHandoffSources, resolveHandoffSources, type HandoffSourcesResolution } from "../../handoffSources";
+import {
+  extractHandoffSources,
+  resolveHandoffContextBinding,
+  resolveHandoffSources,
+  sourcesRichText,
+  type HandoffSourceBinding,
+  type HandoffSourceWriteEntry,
+  type HandoffSourcesResolution,
+} from "../../handoffSources";
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
@@ -169,7 +177,7 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
  * closed-context contract Finance uses -- following the governed evidence
  * order (Handoff evidence, then approved Call Notes read-only, then
  * Clarification Needed for a fact still unresolved; see
- * strategyEvidence.ts). Identity is read as the Entity_Token / Matter_Token
+ * strategyEvidence.ts). Identity is read as the opaque Entity/Matter token
  * the sending Unit embedded on the Handoff, never a real Name -- this Hat
  * never resolves those tokens by traversing or discovering unrelated
  * records.
@@ -182,12 +190,28 @@ type RawStrategyProposal = Omit<StrategyProposal, "proposalId" | "proposalVersio
  * a read performed on behalf of the Work, not a registered operation of its
  * own, and the Work's recorded Action is what permits (or refuses) it.
  */
+/**
+ * What resolveStrategyHandoffContext returns: the shared context-evaluation
+ * result plus -- for a Sources-enabled Handoff only -- the binding its own
+ * canonical sources proved (page ids, operational tokens, Matter Status) and
+ * the exact source ids that proof validated. handlePickup consumes those two
+ * fields so the pickup never performs a SECOND identity lookup to learn the
+ * Matter's page id/Status, nor reads the Handoff's token properties to bind
+ * the source-boundary attestation marker: this resolution is the only
+ * identity resolution the pickup makes. Legacy Handoffs carry neither field
+ * and behave exactly as before.
+ */
+export type StrategyHandoffContextResult = HandoffContextEvaluationResult & {
+  sourceBinding?: HandoffSourceBinding;
+  sourceRefIds?: string[];
+};
+
 export async function resolveStrategyHandoffContext(
   env: Env,
   handoffId: string,
   access: AccessContext,
   progress?: { advance(step: string): Promise<void>; note(step: string): void },
-): Promise<HandoffContextEvaluationResult> {
+): Promise<StrategyHandoffContextResult> {
   try {
     const handoff = await getPage(env, handoffId, access);
     const handoffEvidence = plainText(handoff.properties["Verified Facts & Sources"]) || plainText(handoff.properties.Reason);
@@ -201,26 +225,33 @@ export async function resolveStrategyHandoffContext(
     // reproduced the identical Held outcome. Always folded in here so
     // guidance reaches the diagnosis regardless of which path supplied it.
     const requiredNextAction = plainText(handoff.properties["Required Next Action"]);
-    const entityToken = plainText(handoff.properties.Entity_Token);
-    const matterToken = plainText(handoff.properties.Matter_Token);
 
-    // ---- Step 0: the Handoff's direct-page Sources property, if it has one -
-    // Compatibility seam (src/handoffSources.ts): a Handoff with no
-    // `Sources` property resolves `legacy` here with no fetch at all, and
-    // the evidence order below runs exactly as it always has. A
+    // ---- Step 0: the Handoff's identity binding + direct-page Sources -----
+    // The Handoff's operational identity comes from ONE resolution -- never
+    // from this Unit reading the retired `Entity_Token`/`Matter_Token`
+    // properties (deleted from the live schema; written and read nowhere).
+    // That resolution takes the opaque token entries from the Handoff's own
+    // `Sources` payload and resolves them through the authorized operational
+    // stores, so a pair that cannot be established is refused rather than
+    // inferred. A Handoff with no `Sources` property establishes nothing: it
+    // resolves `legacy` only if its route contract declares the route
+    // generic, in which case it carries no Entity/Matter binding at all and
+    // nothing is invented to fill that gap -- while the evidence order below
+    // runs exactly as it always has for the free-text reference it still
+    // declares. A
     // SOURCES-ENABLED Handoff has every reference resolved and validated
     // here FIRST -- the exact page fetched by id (never a database search),
-    // its real parent database, the route contract, its Entity/Matter
-    // binding to this Handoff's tokens, its Status, its registry fields and
-    // its recorded Approval Attestation -- and when that resolution names a
-    // canonical Call Notes page, THAT page is this Handoff's authoritative
-    // evidence (step 1a below; the producer declares its evidence lives on
-    // the canonical record and deliberately does not duplicate it into the
-    // Handoff). A defective, unverifiable or uncontracted declaration stops
-    // the pickup with the exact reason through the existing Clarification
-    // path -- never a fallback to narrative, and the free-text
-    // Call_Notes_ID reference is never consulted as a fallback for a
-    // canonical page.
+    // its real parent database, the route contract, the Entity/Matter
+    // relationship proof for its binding, its Status, its registry fields
+    // and its recorded Approval Attestation -- and when that resolution
+    // names a canonical Call Notes page, THAT page is this Handoff's
+    // authoritative evidence (step 1a below; the producer declares its
+    // evidence lives on the canonical record and deliberately does not
+    // duplicate it into the Handoff). A defective, unverifiable or
+    // uncontracted declaration stops the pickup with the exact reason
+    // through the existing Clarification path -- never a fallback to
+    // narrative, and the free-text Call_Notes_ID reference is never
+    // consulted as a fallback for a canonical page.
     const sourcesExtraction = extractHandoffSources(handoff.properties);
     if (!sourcesExtraction.ok) {
       return {
@@ -232,29 +263,37 @@ export async function resolveStrategyHandoffContext(
         },
       };
     }
-    let resolvedSources: HandoffSourcesResolution | null = null;
     if (sourcesExtraction.mode === "sources") {
       await progress?.advance("The Handoff declares direct-page sources -- resolving the canonical pages it names");
-      resolvedSources = await resolveHandoffSources(env, {
-        properties: handoff.properties,
-        tokens: { entityToken, matterToken },
-        route: {
-          fromUnit: plainText(handoff.properties["From Unit"]),
-          toUnit: plainText(handoff.properties["To Unit"]),
-        },
-        access,
-      });
-      if (!resolvedSources.ok) {
-        return {
-          success: false,
-          insufficientContext: {
-            isInsufficient: true,
-            category: "unresolved material fact",
-            reason: strategyClarificationReason(handoffEvidence, resolvedSources.reason),
-          },
-        };
-      }
     }
+    const binding = await resolveHandoffContextBinding(env, {
+      properties: handoff.properties,
+      route: {
+        fromUnit: plainText(handoff.properties["From Unit"]),
+        toUnit: plainText(handoff.properties["To Unit"]),
+      },
+      access,
+    });
+    if (!binding.ok) {
+      return {
+        success: false,
+        insufficientContext: {
+          isInsufficient: true,
+          category: "unresolved material fact",
+          reason: strategyClarificationReason(handoffEvidence, binding.reason),
+        },
+      };
+    }
+    // The binding is what everything downstream acts on: for a Sources-
+    // enabled Handoff these are the values the canonical records THEMSELVES
+    // carry (proved, not read off this record), and -- carried out of this
+    // resolution into the Work -- what handlePickup binds the source-boundary
+    // attestation marker to, so no second identity lookup path exists.
+    const entityToken = binding.entityToken;
+    const matterToken = binding.matterToken;
+    const resolvedSources: HandoffSourcesResolution | null = binding.mode === "sources" ? binding.sources : null;
+    const sourceBinding = binding.mode === "sources" ? binding.binding : null;
+    const sourceRefIds = binding.mode === "sources" ? binding.sources.sources.map((s) => s.id) : null;
 
     // ---- Evidence order 0 -> 1a -> 1a' -> 1 -> 2 -> 3 -> 4 ----------------
     // 1a. A canonical Call Notes page named in the Handoff's Sources
@@ -383,7 +422,7 @@ export async function resolveStrategyHandoffContext(
 
     const sanitizedContext = requiredNextAction ? `${evidenceBase}\n\n=== Required Next Action (from the Handoff record) ===\n${requiredNextAction}` : evidenceBase;
 
-    return evaluateHandoffContext(
+    const result: StrategyHandoffContextResult = evaluateHandoffContext(
       {
         handoffId,
         entityToken,
@@ -394,6 +433,15 @@ export async function resolveStrategyHandoffContext(
       },
       "strategy.diagnosis",
     );
+    if (sourceBinding) {
+      // Source-based Handoff: carry the proved binding out of this single
+      // resolution (see StrategyHandoffContextResult) so handlePickup binds
+      // its Matter/Status facts and the source-boundary marker to the very
+      // records this resolution validated -- no second lookup.
+      result.sourceBinding = sourceBinding;
+      result.sourceRefIds = sourceRefIds ?? undefined;
+    }
+    return result;
   } catch (err) {
     console.error(`Strategy Handoff context reconstruction failed for ${handoffId}`, err);
     return {
@@ -411,10 +459,16 @@ export async function resolveStrategyHandoffContext(
  * Reads the durable source-boundary attestation the SENDING execution
  * recorded on the Handoff itself at creation (handoffWriter's marker
  * channel) and validates that it is an explicitly recorded Passed result
- * BOUND to this Handoff's own operational Entity/Matter references.
+ * BOUND to this Handoff's own operational identity: the entityToken/
+ * matterToken this execution resolved for it (from its canonical Sources
+ * when it is a source-based Handoff, from the legacy fields otherwise) and,
+ * for a source-based Handoff, the exact source ids this execution's own
+ * resolution validated (the marker's sources form). A marker bound to
+ * anything else -- other tokens, other sources, none of this execution's --
+ * is unbound evidence and fails closed.
  *
  * This is consumption of recorded evidence, not a re-performance of the
- * Sales boundary check: Strategy never re-runs the five checks, never
+ * Sales boundary check: Strategy never re-runs the checks, never
  * scans content for identity, and never queries the Identity Resolution
  * Registry. Missing, malformed, Failed, or unbound evidence returns
  * { ok: false } so the pickup fails closed -- absence of identity-bearing
@@ -423,7 +477,7 @@ export async function resolveStrategyHandoffContext(
 async function readSourceBoundaryEvidence(
   env: Env,
   handoffId: string,
-  tokens: { entityToken: string; matterToken: string },
+  tokens: { entityToken: string; matterToken: string; sourceRefIds?: string[] },
   access: AccessContext,
 ): Promise<SourceBoundaryEvidence> {
   try {
@@ -432,6 +486,7 @@ async function readSourceBoundaryEvidence(
       handoffId,
       entityToken: tokens.entityToken,
       matterToken: tokens.matterToken,
+      ...(tokens.sourceRefIds ? { sourceIds: tokens.sourceRefIds } : {}),
     });
   } catch (err) {
     console.error(`Strategy: source-boundary evidence read failed for handoff ${handoffId}`, err);
@@ -830,7 +885,14 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   const sourceBoundaryEvidence = await readSourceBoundaryEvidence(
     env,
     state.handoffId!,
-    { entityToken: state.entityToken, matterToken: state.matterToken },
+    {
+      entityToken: state.entityToken,
+      matterToken: state.matterToken,
+      // Source-based Handoffs: bind the marker to this execution's own
+      // resolution (the exact ids it validated), never to a re-read of the
+      // record's properties.
+      ...(evalResult.sourceRefIds ? { sourceRefIds: evalResult.sourceRefIds } : {}),
+    },
     strategyAnalystAccess(state),
   );
   strategyOf(state).sourceBoundaryAttestation = sourceBoundaryEvidence.ok ? sourceBoundaryEvidence.attestation : undefined;
@@ -888,15 +950,27 @@ export async function handlePickup(env: Env, state: WorkState, skills: ResolvedA
   }
   // Resolved ONCE here so the fail-fast check and the guarded Matter
   // status advance below see the same result (and the same Status read).
+  // A Sources-enabled Handoff's binding already IS that resolution --
+  // resolveStrategyHandoffContext derived it from the Handoff's own
+  // canonical sources (exact pages, relationship proof, Status read), so it
+  // is taken as given here and NO second lookup is made. A legacy Handoff
+  // keeps the exact token resolution below, unchanged.
   let resolvedMatterId: string | null = null;
   let matterStatus: string | null = null;
-  if (state.entityToken && state.matterToken) {
+  if (evalResult.sourceBinding) {
+    const binding = evalResult.sourceBinding;
+    resolvedMatterId = binding.matterId || null;
+    matterStatus = binding.matterStatus;
+    if (!binding.matterId || !binding.matterToken) {
+      pickupDefects.push("the Handoff's canonical sources establish no canonical Matter -- no pickup continues without one");
+    }
+  } else if (state.entityToken && state.matterToken) {
     const resolved = await resolveEntityMatterFromTokens(env, state.entityToken, state.matterToken);
     if (resolved) {
       resolvedMatterId = resolved.matterId;
       matterStatus = resolved.matterStatus;
     } else {
-      pickupDefects.push(`Matter_Token '${state.matterToken}' does not resolve to a related Matter`);
+      pickupDefects.push(`the Matter token '${state.matterToken}' does not resolve to a related Matter`);
     }
   }
   if (pickupDefects.length > 0) {
@@ -1393,8 +1467,10 @@ export async function handleStrategyHandoffApproval(env: Env, state: WorkState, 
         "Required Next Action": richText(pending.requiredNextAction),
         "Expected Output": richText(pending.expectedOutput),
         "Acceptance Criteria": richText(pending.acceptanceCriteria),
-        Entity_Token: richText(state.entityToken ?? ""),
-        Matter_Token: richText(state.matterToken ?? ""),
+        "Sources": sourcesRichText([
+          ...(state.entityToken ? [{ kind: "token" as const, tokenKind: "entity" as const, token: state.entityToken }] : []),
+          ...(state.matterToken ? [{ kind: "token" as const, tokenKind: "matter" as const, token: state.matterToken }] : []),
+        ]),
         Assumptions: richText(pending.assumptions.slice(0, 1900)),
         "Open Questions": richText(pending.openQuestions.slice(0, 1900)),
         "Verified Facts & Sources": richText(pending.verifiedFactsAndSources),
@@ -2097,6 +2173,106 @@ async function reviseStrategyProposal(
  */
 
 /**
+ * The canonical `Sources` payload for the Strategy -> Finance Handoff that
+ * Martin's approval commits: the two OPAQUE operational Entity/Matter tokens
+ * this Work operates under -- the Handoff's identity transport -- plus, when
+ * the originating Sales -> Strategy Handoff declares one, the SAME canonical
+ * Call Notes reference, forwarded.
+ *
+ * The tokens travel verbatim and are never resolved to canonical
+ * Entity/Matter pages here: nothing derives a token from a page link, and no
+ * Entity/Matter page is required merely to transport one. Resolution (through
+ * ENIG's authorized operational stores) is the receiving side's job, at
+ * pickup, in `resolveHandoffSources` -- a pair that does not resolve to real,
+ * correctly-related records is refused there, fail-closed, with no consumer
+ * ever acting on it. A token pair this Work does not have throws HERE instead
+ * of writing a Handoff with no identity at all.
+ *
+ * The forwarded Call Notes URL is an exact direct-page link built from the
+ * validated page id, never a title, a slug, or any other identifying detail
+ * (the identity-write boundary: real identity may be read while preparing a
+ * Handoff, but only opaque tokens or canonical page references may be written
+ * to one). It is the upstream Handoff's own declared page, re-validated
+ * through `resolveHandoffSources` on its own route before it travels.
+ * Nothing is copied from the Call Notes record's CONTENT, and no reference is
+ * fabricated, inferred, or resolved by title.
+ *
+ * Fails closed deliberately: an upstream `Sources` declaration that cannot be
+ * extracted or re-validated THROWS -- the approval's existing catch turns
+ * that into the established safe failure ("Couldn't create the Handoff to
+ * Finance -- please try approving again.") with no Handoff written, so a
+ * downstream Handoff is never created when a required upstream reference is
+ * invalid or unverifiable. A legacy upstream Handoff (no `Sources` property)
+ * simply carries no Call Notes reference: its free-text convention remains
+ * its own transport and is never upgraded into a canonical link here.
+ *
+ * Exported for its own tests only; no other module calls it.
+ */
+export async function buildStrategyFinanceHandoffSources(env: Env, state: WorkState): Promise<HandoffSourceWriteEntry[]> {
+  const entityToken = state.entityToken ?? "";
+  const matterToken = state.matterToken ?? "";
+  if (!entityToken || !matterToken) {
+    throw new Error(
+      `this Work carries ${entityToken ? "an Entity" : "no Entity"} token and ${matterToken ? "a Matter" : "no Matter"} token -- a Finance Handoff is never written without an established operational identity`,
+    );
+  }
+  const sources: HandoffSourceWriteEntry[] = [
+    { kind: "token", tokenKind: "entity", token: entityToken },
+    { kind: "token", tokenKind: "matter", token: matterToken },
+  ];
+  if (state.handoffId) {
+    const callNotesUrl = await resolveUpstreamCallNotesSourceUrl(env, state, { entityToken, matterToken });
+    if (callNotesUrl) sources.push({ kind: "artifact", url: callNotesUrl });
+  }
+  return sources;
+}
+
+/**
+ * The canonical URL text for one exact Notion page id: a bare-id link, the
+ * form `parseNotionPageLink` accepts deterministically. A page's own `url`
+ * carries a title-derived slug, so it is NEVER used -- slug text is
+ * identity-bearing content and `Sources` is a protected Handoff field.
+ */
+function canonicalPageUrl(pageId: string): string {
+  return `https://www.notion.so/${pageId.replace(/-/g, "").replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5")}`;
+}
+
+/**
+ * The originating Sales -> Strategy Handoff's canonical Call Notes
+ * reference, forwarded only when it EXISTS and is VALID: the upstream
+ * Handoff must itself be Sources-enabled, and its declared sources must
+ * resolve and validate fail-closed on their own route (exact page, real
+ * parent, type permitted, Entity/Matter binding, Status, registry fields,
+ * re-validated Approval Attestation -- the same resolution the pickup
+ * performed). The forwarded URL names exactly that validated page. A legacy
+ * upstream Handoff returns undefined: nothing declared, nothing forwarded,
+ * and a free-text reference is never promoted into a canonical one.
+ */
+async function resolveUpstreamCallNotesSourceUrl(
+  env: Env,
+  state: WorkState,
+  tokens: { entityToken: string; matterToken: string },
+): Promise<string | undefined> {
+  const access = strategyAnalystAccess(state);
+  const upstream = await getPage(env, state.handoffId!, access);
+  const extraction = extractHandoffSources(upstream.properties);
+  if (!extraction.ok || extraction.mode !== "sources") return undefined;
+  const resolution = await resolveHandoffSources(env, {
+    properties: upstream.properties,
+    tokens,
+    route: { fromUnit: "Sales", toUnit: "Strategy" },
+    access,
+  });
+  if (!resolution.ok) {
+    throw new Error(
+      `the originating Sales -> Strategy Handoff's Sources could not be validated (${resolution.reason}) -- refusing to forward an unverifiable Call Notes reference to Finance`,
+    );
+  }
+  if (resolution.mode !== "sources" || !resolution.callNotes) return undefined;
+  return canonicalPageUrl(resolution.callNotes.pageId);
+}
+
+/**
  * Martin's Approve/Refine/Reject decision on the current Strategy Proposal.
  * Verifies, before mutating anything: strategyApprovalState is exactly
  * AWAITING_INTERVENTION_APPROVAL, pendingStrategyApproval exists, and its
@@ -2244,6 +2420,14 @@ export async function handleInterventionApproval(
     const verifiedFactsForFinance = upstreamCommercialValueEvidence
       ? `${strategyBoundaryBlock}\n\n${upstreamCommercialValueEvidence}`
       : strategyBoundaryBlock;
+    // Operational identity for the Finance Handoff (LOG-1149): the two
+    // opaque Entity/Matter tokens travel as `Sources` token entries -- the
+    // one identity transport now -- alongside the upstream Sales -> Strategy
+    // Handoff's own canonical Call Notes reference when it carries a
+    // validated one. The upstream declaration is re-validated BEFORE the
+    // write and fails closed, so no Handoff is committed whose evidence
+    // reference could not be established.
+    const financeHandoffSources = await buildStrategyFinanceHandoffSources(env, state);
     const { page: handoff } = await createHandoff(
       env,
       {
@@ -2264,8 +2448,7 @@ export async function handleInterventionApproval(
         "Acceptance Criteria": richText(
           "Approved intervention preserved; approved scope preserved; approved timeline considered; value-based pricing applied; budget/WTP not used as pricing basis; no strategic redesign; no material substitution; pricing assumptions explicit; currency correct.",
         ),
-        Entity_Token: richText(state.entityToken ?? ""),
-        Matter_Token: richText(state.matterToken ?? ""),
+        "Sources": sourcesRichText(financeHandoffSources),
         Assumptions: richText(proposal!.assumptions.map((a) => `${a.assumption} (${a.basis}; materiality: ${a.materiality})`).join("\n").slice(0, 1900)),
         "Open Questions": richText(proposal!.expectedBusinessEffect.limitations.join("\n").slice(0, 1900)),
         "Verified Facts & Sources": richTextLong(verifiedFactsForFinance),

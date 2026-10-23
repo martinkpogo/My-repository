@@ -45,19 +45,25 @@ must never leave this project.** Concretely:
     any other field.
   - Identify the Entity and Matter **only** by their Notion Unique ID token —
     the same value Notion's own `Entity ID` / `Matter_ID` auto-increment
-    property displays (e.g. `E-47`, `M-12`). Write these into the Handoff's
-    own `Entity_Token` and `Matter_Token` text fields.
+    property displays (e.g. `E-47`, `M-12`). Carry them as the Handoff's
+    `Sources` rich-text entries `token:entity:E-47` and `token:matter:M-12`
+    (plain text, never a page link). The separate `Entity_Token` /
+    `Matter_Token` Handoff properties no longer exist in the live schema:
+    writing them is impossible, and reading them is not how the receiver
+    establishes identity.
   - Describe the business situation in sanitized, general terms: the
     proposed intervention, the value/impact rationale, the scope — never the
     client's name or identifying specifics woven into that narrative. If you
     catch yourself about to type the client's real name into a Handoff field,
     stop and rewrite the sentence around the token instead.
 - The receiving side (Finance's `resolveHandoffBusinessContext`, and its
-  `evaluateHandoffContext` closed-context check) reads `Entity_Token` and
-  `Matter_Token` directly off the Handoff and never resolves them back to a
-  real record. Nothing on their side can de-anonymize a token — so a token you
-  fail to attach, or a real name you leak instead, isn't a inconvenience they
-  can work around; it's a boundary failure only you can prevent.
+  `evaluateHandoffContext` closed-context check) takes those tokens from the
+  Handoff's own `Sources` payload and keeps them opaque: the one governed
+  lookup ENIG performs on a token maps it to canonical record ids for binding
+  only, and a real name never comes back into the Handoff or its narrative.
+  So a token you fail to attach, or a real name you leak instead, isn't an
+  inconvenience they can work around; it's a boundary failure only you can
+  prevent.
 - Detokenization happens **only here**, and only for genuinely client-facing
   output this project itself produces (the Draft Proposal narrative, an
   email reply to the client). Never reintroduce a real name into anything
@@ -105,8 +111,9 @@ Role Contract's Hat-selection rule.
    approval.
 7. **Request Finance's quote.** Create the Handoff (`To Unit: Finance`,
    `To Hat: Value-Based Pricing Assessor`) per §1's token-only contract —
-   `Entity_Token`, `Matter_Token`, sanitized value context, no disclosed
-   budget/willingness-to-pay figure.
+   `Sources` carrying `token:entity:<token>` and `token:matter:<token>`
+   entries, sanitized value context, no disclosed budget/willingness-to-pay
+   figure.
 8. **Receive the authoritative quote** back on Finance's return Handoff
    (`To Unit: SM&BD`). Preserve the price and rationale exactly — you have no
    authority to alter, convert, or reinterpret it.
@@ -142,8 +149,8 @@ Role Contract's Hat-selection rule.
 - Never write a real name, email, phone number, or other identifying detail
   into any Handoff field, or into anything else outside this project's
   exclusive Notion access.
-- Never create a Handoff to another Unit without both `Entity_Token` and
-  `Matter_Token` populated.
+- Never create a Handoff to another Unit without both opaque tokens present as
+  `Sources` entries (`token:entity:<token>` and `token:matter:<token>`).
 - Never auto-select an Entity match — ambiguity always goes to Martin.
 - Never alter, convert, or reinterpret Finance's authoritative quoted price.
 - Never treat presentation of a draft, or a request for changes, as

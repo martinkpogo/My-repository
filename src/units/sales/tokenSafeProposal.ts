@@ -34,6 +34,7 @@ import { invokeTool } from "../../runtime/toolRegistry";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
+import { declaredHandoffTokens, resolveHandoffContextBinding } from "../../handoffSources";
 
 import { salesOf } from "./salesState";
 /**
@@ -47,8 +48,8 @@ import { salesOf } from "./salesState";
  * Entity/Matters databases no longer carry any real-world identity fields
  * at all -- real identity lives exclusively in the separate Identity
  * Resolution Registry, which this module still never touches -- so on
- * approval this module now resolves the Handoff's own Entity_Token/
- * Matter_Token to their real operational page IDs directly and advances
+ * approval this module now resolves the Handoff's own opaque Entity/Matter
+ * tokens to their real operational page IDs directly and advances
  * the Matter's operational Status itself, rather than leaving that for
  * the isolated Identity & Artifact environment to do manually. Artifact
  * Status still moves to Pending Identity Resolution: producing the actual
@@ -444,8 +445,8 @@ export function buildProposalContent(
   add("PROPOSAL IDENTIFICATION", [
     `Proposal ID: ${identity.proposalId}`,
     `Version: ${versionLabel(identity.version)}`,
-    `Entity_Token: ${facts.entityToken}`,
-    `Matter_Token: ${facts.matterToken}`,
+    `Entity token: ${facts.entityToken}`,
+    `Matter token: ${facts.matterToken}`,
   ]);
   add("EXECUTIVE SUMMARY / CONTEXT", [
     field("Business situation", es.businessSituation),
@@ -643,7 +644,7 @@ async function failClosed(env: Env, state: WorkState, reason: string, opts: Fail
 /**
  * Finds the one canonical Proposal for this Handoff, if it already exists.
  * Returns an error string when the association is ambiguous -- more than one
- * record linked to the Handoff, or a Proposal for the same Matter_Token that
+ * record linked to the Handoff, or a Proposal for the same Matter token that
  * is not linked to this Handoff.
  */
 async function findExistingProposal(
@@ -850,8 +851,8 @@ async function resolveFacts(
   if ("error" in strategyResult) {
     missing.push(`the Strategy boundary representation from the Finance -> Sales Handoff (${strategyResult.error})`);
   } else {
-    if (state.entityToken && state.entityToken !== tokens.entityToken) missing.push(`a consistent Entity_Token (work item ${state.entityToken} vs Handoff ${tokens.entityToken})`);
-    if (state.matterToken && state.matterToken !== tokens.matterToken) missing.push(`a consistent Matter_Token (work item ${state.matterToken} vs Handoff ${tokens.matterToken})`);
+    if (state.entityToken && state.entityToken !== tokens.entityToken) missing.push(`a consistent Entity token (work item ${state.entityToken} vs Handoff ${tokens.entityToken})`);
+    if (state.matterToken && state.matterToken !== tokens.matterToken) missing.push(`a consistent Matter token (work item ${state.matterToken} vs Handoff ${tokens.matterToken})`);
   }
   if (missing.length) return { missing };
   const strategy = (strategyResult as { representation: StrategyBoundaryRepresentation }).representation;
@@ -865,16 +866,23 @@ async function resolveFacts(
     // one Sales -> Strategy Handoff for this Matter. Never required, and no
     // other text from that record is used.
     try {
+      // The retired `Matter_Token` Handoff property is read nowhere, so the
+      // Matter is not a query filter: the query selects the two Unit fields
+      // (real schema properties) and the SAME `Sources` extraction every
+      // other runtime path uses picks the one record that declares this
+      // Matter's opaque token -- deterministic, fetch-free, no title match,
+      // no inference, and an ambiguous or absent match simply omits the
+      // optional context.
       const salesToStrategy = await queryDataSource(env, env.HANDOFFS_DATA_SOURCE_ID, workSessionReadContext(),  {
         and: [
-          { property: "Matter_Token", rich_text: { equals: tokens.matterToken } },
           { property: "From Unit", select: { equals: "Sales" } },
           { property: "To Unit", select: { equals: "Strategy" } },
         ],
       });
-      if (salesToStrategy.length === 1) {
-        const range = extractInvestmentTolerance(plainText(salesToStrategy[0].properties["Verified Facts & Sources"]));
-        const ref = uniqueId(salesToStrategy[0].properties["Handoff ID"]) || salesToStrategy[0].id;
+      const forThisMatter = salesToStrategy.filter((page) => declaredHandoffTokens(page.properties).matterToken === tokens.matterToken);
+      if (forThisMatter.length === 1) {
+        const range = extractInvestmentTolerance(plainText(forThisMatter[0].properties["Verified Facts & Sources"]));
+        const ref = uniqueId(forThisMatter[0].properties["Handoff ID"]) || forThisMatter[0].id;
         if (range) investmentTolerance = { ...range, source: `client-disclosed, recorded on ${ref}` };
       }
     } catch (err) {
@@ -929,11 +937,40 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
   }
 
   await advanceWorkStatus(env, state, "Checking the Handoff's tokens, context and Finance judgment block");
-  const entityToken = plainText(hp.Entity_Token).trim();
-  const matterToken = plainText(hp.Matter_Token).trim();
+  // The Handoff's operational identity comes from its OWN `Sources` payload
+  // through the one binding entry point every other runtime path uses: the
+  // opaque token entries, resolved through ENIG's authorized operational
+  // stores and validated against the Finance -> Sales route contract. The
+  // retired `Entity_Token`/`Matter_Token` Handoff properties are read
+  // nowhere, and no failure here falls back to another source -- fail closed.
+  let entityToken = "";
+  let matterToken = "";
+  let bindingFailure = "";
+  try {
+    const binding = await resolveHandoffContextBinding(env, {
+      properties: hp,
+      route: { fromUnit: FINANCE_FROM_UNIT, toUnit: "Sales" },
+      access: workSessionContext(state),
+    });
+    if (binding.ok) {
+      entityToken = binding.entityToken;
+      matterToken = binding.matterToken;
+    } else {
+      bindingFailure = binding.reason;
+    }
+  } catch (err) {
+    bindingFailure = err instanceof Error ? err.message : String(err);
+  }
   if (state.workStatus && matterToken) state.workStatus.header = workStatusHeader(HAT, { matterToken, entityToken }, "picking up a quote");
-  if (!TOKEN_PATTERN.test(entityToken) || !TOKEN_PATTERN.test(matterToken)) {
-    return failClosed(env, state, "the Handoff's Entity_Token and/or Matter_Token is missing or not an opaque token.", { holdHandoffId: handoffId });
+  if (bindingFailure || !TOKEN_PATTERN.test(entityToken) || !TOKEN_PATTERN.test(matterToken)) {
+    return failClosed(
+      env,
+      state,
+      bindingFailure
+        ? `the Handoff's operational identity could not be established from its "Sources" payload (${bindingFailure}).`
+        : "the Handoff's Sources payload carries no opaque Entity and/or Matter token.",
+      { holdHandoffId: handoffId },
+    );
   }
   const tokens = { entityToken, matterToken };
   const identity = knownIdentity(state, entityToken, matterToken);
@@ -1476,7 +1513,7 @@ async function applyProposalApprovalWrite(
     matterStatusNote = "Matter status NOT advanced -- tokens did not resolve to a real, related record; needs manual handling.";
     await sendOperationsMessage(
       env,
-      `⚠️ ${sp.proposalId} ${versionLabel(version)} approved, but Matter status could not be advanced -- Entity_Token/Matter_Token (${sp.entityToken}/${sp.matterToken}) did not resolve to a real, related Entity/Matter record.`,
+      `⚠️ ${sp.proposalId} ${versionLabel(version)} approved, but Matter status could not be advanced -- the Entity/Matter tokens (${sp.entityToken}/${sp.matterToken}) did not resolve to a real, related Entity/Matter record.`,
     ).catch((err) => console.error("Failed to send Matter-status-not-advanced Operations notice", err));
   }
 

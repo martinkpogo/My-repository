@@ -24,7 +24,7 @@ import type {
  * explicitly extracts raw contact details (name/email/phone) from an
  * enquiry. business_sensitive marks ENIG's own internal-operations tasks
  * (its own marketing planning) and finance.quote_judgment specifically --
- * lower than its sales.* siblings because the Entity_Token/Matter_Token
+ * lower than its sales.* siblings because the Entity/Matter token
  * data-boundary redesign made this call's context provably identity-free
  * (opaque tokens + sanitized business text only, never a real name).
  *
@@ -75,7 +75,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // variants are used only by handleCallNotesHandoffPickup, fed
   // exclusively by the isolated Sales Executive project's already
   // de-identified call notes (Section 6A) -- same rationale as
-  // finance.quote_judgment: the Entity_Token/Matter_Token data-boundary
+  // finance.quote_judgment: the Entity/Matter token data-boundary
   // redesign makes this call's context provably identity-free.
   "sales.commercial_evidence_extraction_handoff": "business_sensitive",
   "sales.call_qualification_handoff": "business_sensitive",
@@ -83,17 +83,17 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "sales.proposal_revision": "client_confidential",
   "finance.quote_judgment": "business_sensitive",
   // Same rationale as finance.quote_judgment -- Strategy operates on
-  // Entity_Token/Matter_Token and the Handoff's own sanitized text, never
+  // Entity/Matter token and the Handoff's own sanitized text, never
   // a real client identity.
   "strategy.diagnosis": "business_sensitive",
   "strategy.handoff_routing": "business_sensitive",
   // Same rationale -- operates only on the diagnosis already produced by
-  // strategy.diagnosis (Entity_Token/Matter_Token + sanitized text), never
+  // strategy.diagnosis (Entity/Matter token + sanitized text), never
   // a real client identity.
   "strategy.proposal_drafting": "business_sensitive",
   // Same rationale again -- Discuss reads only what the Strategy Work
   // already holds for the drafting call above (the sanitized
-  // Entity_Token/Matter_Token-bound strategyContext, Skill findings,
+  // Entity/Matter token-bound strategyContext, Skill findings,
   // diagnosis and proposal) plus Martin's own question, never a real client
   // identity. Registered per Martin's explicit approval (2026-10-08).
   "strategy.proposal_discussion": "business_sensitive",
@@ -104,7 +104,7 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // rationale as strategy.diagnosis/handoff_routing/proposal_drafting above
   // to a structurally identical payload -- every one of the five receives
   // only the same already-sanitized state.strategyContext
-  // (Entity_Token/Matter_Token-bound, already governed by
+  // (Entity/Matter token-bound, already governed by
   // evaluateHandoffContext/resolveStrategyHandoffContext) or a Strategy
   // Skill's own already-produced bounded finding derived from it
   // (strategy.specialist_synthesis) -- never a real client identity. No new
@@ -387,14 +387,14 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * sales.commercial_evidence_extraction_handoff / sales.call_qualification_
  * handoff: used only by handleCallNotesHandoffPickup -- the isolated Sales
  * Executive project's already de-identified call notes (Section 6A),
- * carrying only Entity_Token/Matter_Token and sanitized narrative text.
+ * carrying only Entity/Matter token and sanitized narrative text.
  * Their raw-text siblings (sales.commercial_evidence_extraction / sales.
  * call_qualification, still used by handleCallNotes's live-chat path)
  * remain client_confidential and unresolved below -- see that entry.
  *
  * strategy.diagnosis / strategy.handoff_routing / strategy.proposal_drafting,
  * finance.quote_judgment, sales.proposal_drafting / sales.proposal_revision:
- * per the Entity_Token/Matter_Token data-boundary redesign, these operate
+ * per the Entity/Matter token data-boundary redesign, these operate
  * on opaque tokens and sanitized Handoff/Proposal text, never a real client
  * identity -- the current expected posture for this Outbound Data Gate
  * task. strategy.specialist_selection / strategy.business_diagnosis /
@@ -407,7 +407,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * sales.proposal_drafting now runs exclusively through
  * tokenSafeProposal.ts's handleProposalHandoffPickup (see
  * checkHandoffs.ts's generic discovery -> Sales's declared handoffPickup),
- * which reads Entity_Token/Matter_Token straight off the Handoff record and
+ * which reads the opaque Entity/Matter token pair straight off the Handoff record (through the ONE Sources resolution) and
  * never touches real identity, with or without a continuing WorkSession --
  * the older salesExecutive.ts handleQuoteReceived path this replaced (which
  * interpolated state.entityName into its AI prompt and required a
@@ -418,7 +418,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  *
  * research.context_relevance / research.protocol_selection /
  * research.plan_generation / research.synthesis: the research runtime
- * operates on Entity_Token/Matter_Token, Martin's own direct chat
+ * operates on Entity/Matter token, Martin's own direct chat
  * requests, or already-sanitized supplied context -- never a real client
  * identity (no existing governance rule requires otherwise for any of the
  * four).
@@ -435,7 +435,7 @@ export const PRODUCTION_PROVIDER_ELIGIBILITY: Readonly<Partial<Record<ProviderId
  * publicly-discoverable organisation (that's what "organisation": "<name
  * if identifiable>" in its own response schema means). This is a real
  * organisation name, but not ENIG's own confidential client/contact
- * identity -- the Entity_Token/Matter_Token boundary this gate otherwise
+ * identity -- the Entity/Matter token boundary this gate otherwise
  * protects has no token for a company ENIG hasn't engaged. Email/phone/
  * address/person-name detectors still apply in full -- a discovered
  * person's direct contact detail is never let through.
@@ -600,7 +600,7 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   // Strategy's composable-Skills diagnosis (ENIG Core Structure
   // v3.0) -- same rationale as strategy.diagnosis/handoff_routing/
   // proposal_drafting directly above: every one of these five operates on
-  // the same already-sanitized Entity_Token/Matter_Token-bound
+  // the same already-sanitized Entity/Matter token-bound
   // state.strategyContext or a Strategy Skill's own bounded finding derived
   // from it, never a real client identity. Classified per Martin's explicit
   // direction so the Skills composition can actually run in production.

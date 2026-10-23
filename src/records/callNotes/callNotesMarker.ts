@@ -89,7 +89,7 @@ export type CallNotesApprovalField = (typeof CALL_NOTES_APPROVAL_FIELDS)[number]
  * from the record itself.
  *
  * `entity` and `matter` are deliberately opaque strings: this module does not
- * decide whether an Entity/Matter reference is an `Entity_Token` or a Notion
+ * decide whether an Entity/Matter reference is an opaque Entity/Matter token or a Notion
  * relation id. Whatever representation the writer hashed and the reader
  * supplies must be the same one, or `fields_hash` fails closed. Resolving
  * which representation Call Notes uses is an open contract question, not

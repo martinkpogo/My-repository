@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { handleNotionWebhookRequest, verifyNotionSignature, evaluateHandoffPageForWebhook } from "./notionWebhook";
 import { unitsWithHandoffPickup } from "./checkHandoffs";
 import { buildUnitRegistry, getUnitManifests } from "./units/registry";
+import type { HandoffSourceRouteContract } from "./handoffSources";
 import { financeManifest } from "./units/finance/financeManifest";
 import type { UnitManifest } from "./units/unitManifest";
 import { readFileSync } from "node:fs";
@@ -109,9 +110,17 @@ function pendingWorkHandoffPage(overrides: Record<string, any> = {}): {
     properties: {
       Type: { select: { name: "Work" } },
       Status: { select: { name: "Pending" } },
+      "From Unit": { select: { name: "Finance" } },
       "To Unit": { select: { name: "Sales" } },
-      Entity_Token: { rich_text: [{ plain_text: "E-20" }] },
-      Matter_Token: { rich_text: [{ plain_text: "MAT-20" }] },
+      // Identity travels ONLY as the opaque pair inside `Sources`. The
+      // retired Entity_Token/Matter_Token Handoff properties are read
+      // nowhere, so no fixture writes them.
+      Sources: {
+        rich_text: [
+          { type: "text", text: { content: "token:entity:E-20", link: null }, plain_text: "token:entity:E-20", href: null },
+          { type: "text", text: { content: "token:matter:MAT-20", link: null }, plain_text: "token:matter:MAT-20", href: null },
+        ],
+      },
       ...overrides,
     },
     parent: { type: "data_source_id", data_source_id: "handoffs-ds" },
@@ -354,7 +363,7 @@ test("7. Event for a Pending non-Work Handoff (e.g. Type=Info) is ignored", asyn
   assert.ok(!json.detected);
 });
 
-test("8. Pending Work Handoff with valid Entity_Token and Matter_Token is detected", () => {
+test("8. Pending Work Handoff carrying the opaque token pair in Sources is detected", () => {
   const env = fakeEnv();
   const result = evaluateHandoffPageForWebhook(env, pendingWorkHandoffPage());
   assert.strictEqual(result.relevant, true);
@@ -365,20 +374,24 @@ test("8. Pending Work Handoff with valid Entity_Token and Matter_Token is detect
   }
 });
 
-test("9. Missing Entity_Token fails closed", () => {
+test("9. A Sources payload missing the Entity token this route requires fails closed", () => {
   const env = fakeEnv();
-  const page = pendingWorkHandoffPage();
-  page.properties.Entity_Token = { rich_text: [] };
+  const page = pendingWorkHandoffPage({
+    Sources: { rich_text: [{ type: "text", text: { content: "token:matter:MAT-20", link: null }, plain_text: "token:matter:MAT-20", href: null }] },
+  });
   const result = evaluateHandoffPageForWebhook(env, page);
   assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing the opaque Entity token/);
 });
 
-test("10. Missing Matter_Token fails closed", () => {
+test("10. A Sources payload missing the Matter token this route requires fails closed", () => {
   const env = fakeEnv();
-  const page = pendingWorkHandoffPage();
-  page.properties.Matter_Token = { rich_text: [] };
+  const page = pendingWorkHandoffPage({
+    Sources: { rich_text: [{ type: "text", text: { content: "token:entity:E-20", link: null }, plain_text: "token:entity:E-20", href: null }] },
+  });
   const result = evaluateHandoffPageForWebhook(env, page);
   assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing the opaque Matter token/);
 });
 
 // --- "To Unit" routing is registry-driven, never a private Unit list --------
@@ -572,10 +585,17 @@ test("Webhook handler returns without awaiting any Unit pickup -- the background
     id: "handoff-strategy-1",
     url: "https://notion.so/handoff-strategy-1",
     properties: {
+      "From Unit": { select: { name: "Sales" } },
       "To Unit": { select: { name: "Strategy" } },
       "To Hat": { rich_text: [{ plain_text: "Strategy Analyst" }] },
-      Matter_Token: { rich_text: [{ plain_text: "MAT-30" }] },
-      Entity_Token: { rich_text: [{ plain_text: "E-30" }] },
+      // Identity is the opaque pair inside Sources; the retired token
+      // properties are written nowhere, in a fixture or in production.
+      Sources: {
+        rich_text: [
+          { type: "text", text: { content: "token:entity:E-30", link: null }, plain_text: "token:entity:E-30", href: null },
+          { type: "text", text: { content: "token:matter:MAT-30", link: null }, plain_text: "token:matter:MAT-30", href: null },
+        ],
+      },
     },
     archived: false,
   };
@@ -595,7 +615,8 @@ test("Webhook handler returns without awaiting any Unit pickup -- the background
                 url: "https://notion.so/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                 properties: {
                   Matter_ID: { unique_id: { prefix: "MAT", number: 30 } },
-                  Entity: { relation: [{ id: "entity-page-1" }] },
+                  Entity: { relation: [{ id: "dddddddddddddddddddddddddddddddd" }] },
+                  Status: { select: { name: "Qualified" } },
                 },
               },
             ],
@@ -608,6 +629,19 @@ test("Webhook handler returns without awaiting any Unit pickup -- the background
         return new Response(JSON.stringify({ results: [strategyHandoff] }), { status: 200 });
       }
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    }
+    if (urlStr.endsWith("/v1/pages/dddddddddddddddddddddddddddddddd")) {
+      // The Entity page MAT-30's own relation points at, fetched by its
+      // exact page id so the token pair can resolve.
+      return new Response(
+        JSON.stringify({
+          id: "dddddddddddddddddddddddddddddddd",
+          url: "https://notion.so/dddddddddddddddddddddddddddddddd",
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
+          properties: { Entity_ID: { unique_id: { prefix: "E", number: 30 } } },
+        }),
+        { status: 200 },
+      );
     }
     if (urlStr.match(/\/pages\/[^/]+$/)) {
       // The handler's own awaited page retrieval (evaluation only).
@@ -670,4 +704,60 @@ test("20. Webhook detection response carries only opaque identifiers, never full
   const text = await res.text();
   assert.ok(!text.includes("Real Company Name"), "the webhook response must never echo real Handoff title/identity content");
   assert.match(text, /MAT-20/);
+});
+
+// --- Operational reference: legacy tokens, canonical Sources, generic routes -
+
+function sourcesHandoffPage(overrides: Record<string, any> = {}) {
+  return pendingWorkHandoffPage({
+    "From Unit": { select: { name: "Sales" } },
+    "To Unit": { select: { name: "Strategy" } },
+    ...overrides,
+  });
+}
+
+test("15. A Sources-carrying Pending Work Handoff is detected, and its OWN declared tokens are echoed -- the webhook is a detector, and never resolves identity itself", () => {
+  const env = fakeEnv();
+  const result = evaluateHandoffPageForWebhook(env, sourcesHandoffPage());
+  assert.strictEqual(result.relevant, true, result.relevant ? "" : result.reason);
+  if (!result.relevant) return;
+  assert.strictEqual(result.toUnit, "Strategy");
+  assert.strictEqual(result.entityToken, "E-20", "what is echoed is what the payload declared -- resolved by nothing here");
+  assert.strictEqual(result.matterToken, "MAT-20");
+});
+
+test("16. A Pending Work Handoff with no operational reference at all (no Sources) is still not relevant -- unchanged", () => {
+  const env = fakeEnv();
+  const page = sourcesHandoffPage();
+  delete (page.properties as Record<string, any>).Sources;
+  const result = evaluateHandoffPageForWebhook(env, page);
+  assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing an operational Entity\/Matter reference/);
+});
+
+test("17. A Handoff whose Sources is unusable is not relevant -- a malformed declaration never wakes discovery", () => {
+  const env = fakeEnv();
+  const page = sourcesHandoffPage({ Sources: { rich_text: [{ plain_text: "not a url at all" }] } });
+  const result = evaluateHandoffPageForWebhook(env, page);
+  assert.strictEqual(result.relevant, false);
+  if (!result.relevant) assert.match(result.reason, /missing an operational Entity\/Matter reference/);
+});
+
+test("19. A declared-generic route's Pending Work Handoff is detected without tokens (contracts seam) -- genericity is read from the contract, never inferred", () => {
+  const env = fakeEnv();
+  const page = pendingWorkHandoffPage({
+    "From Unit": { select: { name: "BD" } },
+    "To Unit": { select: { name: "Strategy" } },
+  });
+  delete page.properties.Sources;
+  const contracts: Readonly<Record<string, HandoffSourceRouteContract>> = {
+    "BD->Strategy": { requiresEntityToken: false, requiresMatterToken: false, required: [], optional: ["call_notes"], prohibited: ["handoffs", "entities", "matters"] },
+  };
+  const result = evaluateHandoffPageForWebhook(env, page, undefined, contracts);
+  assert.strictEqual(result.relevant, true, result.relevant ? "" : result.reason);
+  // The SAME Handoff without the contract declaration is refused: nothing
+  // is generic by accident.
+  const withoutContract = evaluateHandoffPageForWebhook(env, page);
+  assert.strictEqual(withoutContract.relevant, false);
+  if (!withoutContract.relevant) assert.match(withoutContract.reason, /missing an operational Entity\/Matter reference/);
 });

@@ -227,8 +227,15 @@ function ho64Props(overrides: Props = {}): Props {
     "To Hat": rt("Sales Executive"),
     Type: { select: { name: "Work" } },
     Status: { select: { name: "Pending" } },
-    Entity_Token: rt("E-20"),
-    Matter_Token: rt("MAT-20"),
+    // Identity travels ONLY as the opaque pair inside Sources. The retired
+    // Entity_Token/Matter_Token Handoff properties are written by no fixture
+    // and read by no code path.
+    Sources: {
+      rich_text: [
+        { type: "text", text: { content: "token:entity:E-20", link: null }, plain_text: "token:entity:E-20", href: null },
+        { type: "text", text: { content: "token:matter:MAT-20", link: null }, plain_text: "token:matter:MAT-20", href: null },
+      ],
+    },
     "Verified Facts & Sources": rt(combinedHo64Facts()),
     ...overrides,
   };
@@ -239,7 +246,12 @@ function ho62Props(): Props {
     "Handoff ID": { unique_id: { prefix: "HO", number: 62 } },
     "From Unit": { select: { name: "Sales" } },
     "To Unit": { select: { name: "Strategy" } },
-    Matter_Token: rt("MAT-20"),
+    Sources: {
+      rich_text: [
+        { type: "text", text: { content: "token:entity:E-20", link: null }, plain_text: "token:entity:E-20", href: null },
+        { type: "text", text: { content: "token:matter:MAT-20", link: null }, plain_text: "token:matter:MAT-20", href: null },
+      ],
+    },
     "Verified Facts & Sources": rt("...\nInvestment boundary (context only, not pricing basis): GHS 30,000-60,000 initial planning range, open to more if evidence/scope justifies it.\n..."),
   };
 }
@@ -258,6 +270,26 @@ function matches(props: Props, filter: any): boolean {
 function installWorld(t: any, opts: { ho64?: Props; withHo62?: boolean; proposalPrefix?: string | null; stripProposalId?: boolean } = {}): World {
   const world: World = { pages: new Map(), fetches: [], telegram: [], blockAppends: [], versionPages: [], logs: [], handoffCreates: [], nextProposalNumber: 7 };
   world.pages.set(HO64_ID, { id: HO64_ID, url: "https://notion.so/ho64", parent: "handoffs-ds", properties: opts.ho64 ?? ho64Props() });
+  // The canonical records the fixture's opaque token pair resolves to, in the
+  // ONLY stores the runtime is allowed to consult for identity: the Matters
+  // and Entities data sources (never the Isolated Sales Identity Resolution
+  // Registry).
+  world.pages.set("matter-mat-20", {
+    id: "matter-mat-20",
+    url: "https://notion.so/matter-mat-20",
+    parent: "matters-ds",
+    properties: {
+      Matter_ID: { unique_id: { prefix: "MAT", number: 20 } },
+      Entity: { relation: [{ id: "entity-e-20" }] },
+      Status: { select: { name: "Commercial Development" } },
+    },
+  });
+  world.pages.set("entity-e-20", {
+    id: "entity-e-20",
+    url: "https://notion.so/entity-e-20",
+    parent: "entity-ds",
+    properties: { Entity_ID: { unique_id: { prefix: "E", number: 20 } } },
+  });
   if (opts.withHo62 !== false) world.pages.set(HO62_ID, { id: HO62_ID, url: "https://notion.so/ho62", parent: "handoffs-ds", properties: ho62Props() });
   const prefix = opts.proposalPrefix === undefined ? "PROP" : opts.proposalPrefix;
 
@@ -452,8 +484,8 @@ test("3. Proposal carries E-20 and MAT-20 as tokens and no Entity/Matter relatio
   assert.strictEqual(rec.Entity, undefined, "no relation to the identity-bearing Entity page");
   assert.strictEqual(rec.Matter, undefined, "no relation to the identity-bearing Matter page");
   const content = text(rec["Proposal Content"]);
-  assert.match(content, /Entity_Token: E-20/);
-  assert.match(content, /Matter_Token: MAT-20/);
+  assert.match(content, /Entity token: E-20/);
+  assert.match(content, /Matter token: MAT-20/);
 });
 
 test("4. A real client identity cannot enter the Runtime Proposal -- fails closed before any record is written", async (t) => {
@@ -474,21 +506,18 @@ test("4b. Contact details (email / phone) cannot enter the Runtime Proposal even
   assert.match(state.blockedReason ?? "", /identity-bearing value/);
 });
 
-test("16. On approval, Runtime resolves Entity_Token/Matter_Token to their real page IDs and advances the Matter to Proposal status -- no Drive/Gmail access, no identity read outside Entity/Matters", async (t) => {
+test("16. On approval, Runtime resolves the opaque token pair to their real page IDs and advances the Matter to Proposal status -- no Drive/Gmail access, no identity read outside Entity/Matters", async (t) => {
   const { world, env, state } = await createV1(t);
-  const entityPage = { id: "entity-page-20", url: "https://notion.so/entity-page-20", parent: "entity-ds", properties: { Entity_ID: { unique_id: { prefix: "E", number: 20 } } } };
-  world.pages.set(entityPage.id, entityPage);
-  world.pages.set("matter-page-20", {
-    id: "matter-page-20",
-    url: "https://notion.so/matter-page-20",
-    parent: "matters-ds",
-    properties: { Matter_ID: { unique_id: { prefix: "MAT", number: 20 } }, Entity: { relation: [{ id: entityPage.id }] } },
-  });
+  // The canonical records this Handoff's Sources-declared token pair already
+  // resolved to at pickup: MAT-20 -> matter-mat-20 -> Entity relation ->
+  // entity-e-20. Approval re-resolves the SAME pair through the SAME single
+  // authorized path.
+  const entityPage = world.pages.get("entity-e-20")!;
 
   const ready = await handleSalesProposalDecision(env, state, 7, 1, "approve");
 
   assert.strictEqual(ready.sales?.proposal?.approvalStatus, "Approved");
-  assert.strictEqual(text(world.pages.get("matter-page-20")!.properties.Status), "Proposal", "the Matter's operational Status must advance on approval");
+  assert.strictEqual(text(world.pages.get("matter-mat-20")!.properties.Status), "Proposal", "the Matter's operational Status must advance on approval");
   for (const f of world.fetches) {
     assert.ok(!/googleapis|gmail|drive/i.test(f.url), `no Google access: ${f.url}`);
     assert.ok(!f.url.includes("/search"), `no Notion search: ${f.url}`);
@@ -502,14 +531,17 @@ test("16. On approval, Runtime resolves Entity_Token/Matter_Token to their real 
   // Matter still fails here, which is what "no identity read outside
   // Entity/Matters" is guarding.
   assert.ok(
-    pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds") || id === entityPage.id || id === "matter-page-20"),
+    pageReads.every((id) => id === HO64_ID || id.startsWith("proposals-ds") || id === entityPage.id || id === "matter-mat-20"),
     `only the Handoff, the Proposal, and the resolved Entity/Matter pages are read: ${pageReads}`,
   );
 });
 
-test("16b. On approval, an Entity_Token/Matter_Token that doesn't resolve fails to advance the Matter status without undoing the approval", async (t) => {
+test("16b. On approval, an Entity/Matter token pair that doesn't resolve fails to advance the Matter status without undoing the approval", async (t) => {
   const { world, env, state } = await createV1(t);
-  // No Matter/Entity pages seeded -- tokens do not resolve.
+  // The Matter the pair resolved to at pickup no longer exists at approval
+  // time -- the pair resolves to nothing, and nothing else is searched to
+  // fill the gap.
+  world.pages.delete("matter-mat-20");
   const ready = await handleSalesProposalDecision(env, state, 7, 1, "approve");
 
   assert.strictEqual(ready.sales?.proposal?.approvalStatus, "Approved", "Martin's approval itself still applies even when the Matter status can't be advanced");
@@ -811,10 +843,20 @@ test("18b. A missing or ambiguous Finance quote fails closed and holds the Hando
 });
 
 test("18c. Missing token fields fail closed", async (t) => {
-  const world = installWorld(t, { ho64: ho64Props({ Matter_Token: rt("") }) });
+  // The Matter token simply missing from the Sources payload: no half pair is
+  // ever completed from anywhere else.
+  const world = installWorld(t, {
+    ho64: ho64Props({
+      Sources: {
+        rich_text: [
+          { type: "text", text: { content: "token:entity:E-20", link: null }, plain_text: "token:entity:E-20", href: null },
+        ],
+      },
+    }),
+  });
   const state = await handleProposalHandoffPickup(fakeEnv(), fakeState(), NO_ACTION_SKILLS);
   assert.strictEqual(proposals(world).length, 0);
-  assert.match(state.blockedReason ?? "", /Matter_Token/);
+  assert.match(state.blockedReason ?? "", /Matter token/);
 });
 
 test("18d. Missing required Proposal facts fail closed and name exactly what is missing", async (t) => {
@@ -857,7 +899,7 @@ test("18e-4. A Finance -> Sales Handoff with no Finance commercial judgment bloc
 test("18f. A token mismatch between the work item and HO-64 fails closed", async (t) => {
   const { world, state } = await createV1(t, { matterToken: "MAT-21" });
   assert.strictEqual(proposals(world).length, 0);
-  assert.match(state.blockedReason ?? "", /consistent Matter_Token/);
+  assert.match(state.blockedReason ?? "", /consistent Matter token/);
 });
 
 test("18g. A Proposal record without a Proposal ID fails closed -- it stays Draft and is never presented", async (t) => {
@@ -1056,8 +1098,12 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
       "To Hat": rt("Value-Based Pricing Assessor"),
       Type: { select: { name: "Work" } },
       Status: { select: { name: "Pending" } },
-      Entity_Token: rt("E-20"),
-      Matter_Token: rt("MAT-20"),
+      Sources: {
+        rich_text: [
+          { type: "text", text: { content: "token:entity:E-20", link: null }, plain_text: "token:entity:E-20", href: null },
+          { type: "text", text: { content: "token:matter:MAT-20", link: null }, plain_text: "token:matter:MAT-20", href: null },
+        ],
+      },
       "Verified Facts & Sources": rt(`${strategyBlock(approvedStrategyProposal())}\n\nProposed intervention: Diagnostic. Value context: GHS 8M-12M opportunity.`),
     },
   });
@@ -1138,8 +1184,8 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   assert.match(text(rec["Quote Rationale"]), /^Currency: GHS\./, "currency exactly as Finance quoted");
   assert.match(text(rec["Quote Rationale"]), /value at stake/);
   assert.match(section(content, "COMMERCIAL TERMS"), /Currency: GHS/, "currency carried into the Proposal content");
-  assert.match(content, /Entity_Token: E-20/);
-  assert.match(content, /Matter_Token: MAT-20/);
+  assert.match(content, /Entity token: E-20/);
+  assert.match(content, /Matter token: MAT-20/);
   assert.match(content, /\nInvestment: GHS 420,000\n/, "Investment section carries the exact amount");
   assert.strictEqual(section(content, "BASIS FOR THE INVESTMENT"), rationale, "rationale verbatim, no added justification");
 

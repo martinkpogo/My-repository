@@ -9,6 +9,7 @@ import {
   handleDirectRequestClarification,
   handleStrategyHandoffApproval,
   handleInterventionApproval,
+  buildStrategyFinanceHandoffSources,
   handleStrategyClarification,
   handleStrategyRefinement,
   handleStrategyDiscussion,
@@ -340,6 +341,26 @@ const DEFAULT_CALL_NOTES_NOTE =
 const SOURCES_PAGE_ID = "aaaa1111-bbbb-2222-cccc-3333dddd4444";
 const SOURCES_PAGE_URL = `https://www.notion.so/Acme-Call-Notes-${SOURCES_PAGE_ID}`;
 
+/** Canonical Entity/Matter pages a Sources-enabled Sales -> Strategy Handoff names whose own ids disagree with the tokens it declares -- the cross-check fixture. */
+const SOURCE_BINDING_ENTITY_PAGE_ID = "eeee1111-eeee-1111-eeee-1111eeee1111";
+const SOURCE_BINDING_MATTER_PAGE_ID = "ffff1111-ffff-1111-ffff-1111ffff1111";
+const SOURCE_BINDING_ENTITY_URL = `https://www.notion.so/Acme-Entity-${SOURCE_BINDING_ENTITY_PAGE_ID}`;
+const SOURCE_BINDING_MATTER_URL = `https://www.notion.so/Acme-Matter-${SOURCE_BINDING_MATTER_PAGE_ID}`;
+
+/**
+ * The canonical Entity/Matter pages the shared mock serves for the fixture
+ * tokens (E-47/M-12) -- 32-hex, like every real Notion page id, because the
+ * Strategy -> Finance producer resolves those tokens to their canonical
+ * pages and writes them into the Handoff's `Sources` as exact page
+ * references (a non-hex id would be refused by the governed writer, exactly
+ * as it would be in production).
+ */
+const ENTITY_PAGE_ID = "1111aaaa-22bb-33cc-44dd-556677889900";
+const MATTER_PAGE_ID = "9999eeee-88ff-77aa-66bb-554433221100";
+/** What the producer writes for those two pages: bare-id canonical links, never title slugs. */
+const ENTITY_SOURCE_URL = `https://www.notion.so/${ENTITY_PAGE_ID}`;
+const MATTER_SOURCE_URL = `https://www.notion.so/${MATTER_PAGE_ID}`;
+
 function mockFetch(
   t: any,
   opts: {
@@ -414,6 +435,13 @@ function mockFetch(
      */
     sourcesUrls?: string[];
     /**
+     * Leave the opaque token entries OUT of the `Sources` payload -- the
+     * shape a Handoff that declares no identity at all would have. No mock
+     * here writes an Entity_Token/Matter_Token Handoff property: those
+     * properties no longer exist, and production reads them nowhere.
+     */
+    omitTokenEntries?: boolean;
+    /**
      * The `Call_Notes_ID` written into the Reason, decoupled from the
      * record's own registry id, so a test can make the two transports
      * disagree on purpose.
@@ -435,6 +463,11 @@ function mockFetch(
       // its absence deliberately.
       ? `Call_Notes_ID: ${opts.callNotesId}\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`
       : `Sales call notes: recurring client complaints about late delivery over the last two quarters, tied to a named warehouse capacity constraint.\n\n${DEFAULT_COMMERCIAL_VALUE_EVIDENCE_BLOCK}`);
+  // A Handoff that names a Call_Notes_ID in its free text MUST also name the
+  // canonical Call Notes page in Sources -- the two transports are refused
+  // when they disagree, and the page is the authority. Default the artifact
+  // in so every evidence-order fixture is the production shape.
+  const sourcesUrls = opts.sourcesUrls ?? (opts.callNotesId ? [SOURCES_PAGE_URL] : undefined);
   const entityToken = opts.entityToken ?? "E-47";
   const matterToken = opts.matterToken ?? "M-12";
   const matterStatus = opts.matterStatus ?? "Qualified";
@@ -473,8 +506,8 @@ function mockFetch(
       "Call Date": { date: { start: "2026-09-01" } },
       "Call Type": { select: { name: "Discovery" } },
       ...(noteProperty === null ? {} : { Note: noteProperty }),
-      Entity: { relation: [{ id: opts.callNotesEntityRelation ?? "entity-page-1" }] },
-      Matter: { relation: [{ id: opts.callNotesMatterRelation ?? "matter-page-1" }] },
+      Entity: { relation: [{ id: opts.callNotesEntityRelation ?? ENTITY_PAGE_ID }] },
+      Matter: { relation: [{ id: opts.callNotesMatterRelation ?? MATTER_PAGE_ID }] },
       "Approval Attestation": { rich_text: [{ plain_text: opts.callNotesAttestation ?? "" }] },
     },
   });
@@ -512,22 +545,31 @@ function mockFetch(
             "Verified Facts & Sources": { rich_text: [{ plain_text: verifiedFacts }] },
             "Required Next Action": { rich_text: [{ plain_text: requiredNextAction }] },
             Reason: { rich_text: [{ plain_text: reason }] },
-            Entity_Token: { rich_text: [{ plain_text: entityToken }] },
-            Matter_Token: { rich_text: [{ plain_text: matterToken }] },
-            ...(opts.sourcesUrls
-              ? {
-                  Sources: {
-                    rich_text: opts.sourcesUrls.map((url) => ({
-                      type: "text",
-                      text: { content: url, link: { url } },
-                      plain_text: url,
-                      href: url,
-                    })),
-                  },
-                  "From Unit": { select: { name: "Sales" } },
-                  "To Unit": { select: { name: "Strategy" } },
-                }
-              : {}),
+            // Identity travels ONLY as the opaque pair inside `Sources`.
+            // The retired Entity_Token/Matter_Token Handoff properties are
+            // written by no fixture and read by no code path.
+            Sources: {
+              rich_text: [
+                ...(opts.omitTokenEntries
+                  ? []
+                  : [
+                      ...(entityToken
+                        ? [{ type: "text", text: { content: `token:entity:${entityToken}`, link: null }, plain_text: `token:entity:${entityToken}`, href: null }]
+                        : []),
+                      ...(matterToken
+                        ? [{ type: "text", text: { content: `token:matter:${matterToken}`, link: null }, plain_text: `token:matter:${matterToken}`, href: null }]
+                        : []),
+                    ]),
+                ...(sourcesUrls ?? []).map((url) => ({
+                  type: "text",
+                  text: { content: url, link: { url } },
+                  plain_text: url,
+                  href: url,
+                })),
+              ],
+            },
+            "From Unit": { select: { name: "Sales" } },
+            "To Unit": { select: { name: "Strategy" } },
           },
         }),
         { status: 200 },
@@ -561,6 +603,10 @@ function mockFetch(
       // EXACT id -- the only way a Sources-mode fixture serves a record.
       // Any PATCH/PUT against it falls through to the throw at the bottom of
       // this mock, which is itself the proof that Strategy never writes.
+      if (opts.callNotesMatches === 0) {
+        // The page id the Handoff names does not resolve to a record.
+        return new Response(JSON.stringify({ object: "error", status: 404, message: "Could not find page" }), { status: 404 });
+      }
       const page = buildCallNotesRecord(0);
       return new Response(
         JSON.stringify({ ...page, id: SOURCES_PAGE_ID, url: `https://notion.so/${SOURCES_PAGE_ID}` }),
@@ -625,12 +671,12 @@ function mockFetch(
         JSON.stringify({
           results: [
             {
-              id: "matter-page-1",
-              url: "https://notion.so/matter-page-1",
+              id: MATTER_PAGE_ID,
+              url: `https://notion.so/${MATTER_PAGE_ID}`,
               parent: { type: "data_source_id", data_source_id: "matters-ds" },
               properties: {
                 Matter_ID: { unique_id: { prefix: matterShape[1], number: Number(matterShape[2]) } },
-                Entity: { relation: [{ id: "entity-page-1" }] },
+                Entity: { relation: [{ id: ENTITY_PAGE_ID }] },
                 // The Matter's own operational Status -- production shape:
                 // resolveEntityMatterFromTokens reads it in this same query
                 // so the pickup can gate its Status advance on it.
@@ -642,19 +688,19 @@ function mockFetch(
         { status: 200 },
       );
     }
-    if (urlStr.endsWith("/pages/entity-page-1") && method === "GET") {
+    if (urlStr.endsWith(`/pages/${ENTITY_PAGE_ID}`) && method === "GET") {
       const entityShape = /^([A-Z]{1,6})-(\d{1,6})$/.exec(entityToken);
       return new Response(
         JSON.stringify({
-          id: "entity-page-1",
-          url: "https://notion.so/entity-page-1",
+          id: ENTITY_PAGE_ID,
+          url: `https://notion.so/${ENTITY_PAGE_ID}`,
           parent: { type: "data_source_id", data_source_id: "entity-ds" },
           properties: entityShape ? { Entity_ID: { unique_id: { prefix: entityShape[1], number: Number(entityShape[2]) } } } : {},
         }),
         { status: 200 },
       );
     }
-    if (urlStr.endsWith("/pages/matter-page-1") && method === "GET") {
+    if (urlStr.endsWith(`/pages/${MATTER_PAGE_ID}`) && method === "GET") {
       // The Matter page must be readable as well as writable: updatePage
       // resolves a page's target AUTHORITATIVELY from its real parent before
       // dispatching, so a governed write is preceded by a GET of the page
@@ -665,20 +711,61 @@ function mockFetch(
       const shape = /^([A-Z]{1,6})-(\d{1,6})$/.exec(matterToken);
       return new Response(
         JSON.stringify({
-          id: "matter-page-1",
-          url: "https://notion.so/matter-page-1",
+          id: MATTER_PAGE_ID,
+          url: `https://notion.so/${MATTER_PAGE_ID}`,
           parent: { type: "data_source_id", data_source_id: "matters-ds" },
           properties: {
             Matter_ID: { unique_id: { prefix: shape?.[1] ?? "M", number: Number(shape?.[2] ?? 1) } },
-            Entity: { relation: [{ id: "entity-page-1" }] },
+            Entity: { relation: [{ id: ENTITY_PAGE_ID }] },
           },
         }),
         { status: 200 },
       );
     }
-    if (urlStr.endsWith("/pages/matter-page-1") && method === "PATCH") {
+    if (urlStr.endsWith(`/pages/${MATTER_PAGE_ID}`) && method === "PATCH") {
       log.matterPatchBodies.push(JSON.parse(init.body));
-      return new Response(JSON.stringify({ id: "matter-page-1", url: "https://notion.so/matter-page-1", parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: {} }), { status: 200 });
+      return new Response(JSON.stringify({ id: MATTER_PAGE_ID, url: `https://notion.so/${MATTER_PAGE_ID}`, parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: {} }), { status: 200 });
+    }
+    // The exact canonical Entity/Matter pages a tokenless (source-based)
+    // Sales -> Strategy Handoff names: fetched by id for the binding
+    // derivation, and the Matter page is also the target of the guarded
+    // status advance (GET before PATCH, exactly as the legacy path).
+    if (urlStr.includes(`/pages/${SOURCE_BINDING_ENTITY_PAGE_ID}`) && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: SOURCE_BINDING_ENTITY_PAGE_ID,
+          url: `https://notion.so/${SOURCE_BINDING_ENTITY_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "entity-ds" },
+          properties: { Entity_ID: { unique_id: { prefix: "E", number: 47 } } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes(`/pages/${SOURCE_BINDING_MATTER_PAGE_ID}`) && method === "GET") {
+      return new Response(
+        JSON.stringify({
+          id: SOURCE_BINDING_MATTER_PAGE_ID,
+          url: `https://notion.so/${SOURCE_BINDING_MATTER_PAGE_ID}`,
+          parent: { type: "data_source_id", data_source_id: "matters-ds" },
+          properties: {
+            // A DIFFERENT Matter than the Handoff's opaque token names --
+            // the cross-check a token-derived binding runs over every
+            // canonical `matters` artifact in Sources.
+            Matter_ID: { unique_id: { prefix: "M", number: 99 } },
+            Entity: { relation: [{ id: SOURCE_BINDING_ENTITY_PAGE_ID }] },
+            // The Matter's own operational Status.
+            Status: { select: { name: matterStatus } },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (urlStr.includes(`/pages/${SOURCE_BINDING_MATTER_PAGE_ID}`) && method === "PATCH") {
+      log.matterPatchBodies.push(JSON.parse(init.body));
+      return new Response(
+        JSON.stringify({ id: SOURCE_BINDING_MATTER_PAGE_ID, url: `https://notion.so/${SOURCE_BINDING_MATTER_PAGE_ID}`, parent: { type: "data_source_id", data_source_id: "matters-ds" }, properties: {} }),
+        { status: 200 },
+      );
     }
     if (method === "GET" && /\/pages\/[0-9a-f-]{32,36}$/i.test(new URL(urlStr).pathname)) {
       // A standalone governance page (Hat Definition, Universal Role
@@ -843,9 +930,10 @@ test("WP4b. A Matter at 'Open' makes NO write, reports the exact Operations noti
   );
 });
 
-test("3c. Handoff pickup BLOCKS when the Handoff's tokens don't resolve to a real Matter -- the defect is named, the Handoff is Held, and no AI call happens", async (t) => {
+test("3c. Handoff pickup BLOCKS when the Handoff's opaque token pair doesn't resolve to a real Matter -- the defect is named, the Handoff is left Pending, and no AI call happens", async (t) => {
   const originalFetch = globalThis.fetch;
   const telegramMessages: string[] = [];
+  const telegramPatches: any[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
     const urlStr = String(url);
     const method = init?.method ?? "GET";
@@ -877,14 +965,25 @@ test("3c. Handoff pickup BLOCKS when the Handoff's tokens don't resolve to a rea
                 },
               ],
             },
-            Entity_Token: { rich_text: [{ plain_text: "E-47" }] },
-            Matter_Token: { rich_text: [{ plain_text: "M-12" }] },
+            // Identity is the opaque pair inside Sources; the retired
+            // token properties are written nowhere.
+            Sources: {
+              rich_text: [
+                { type: "text", text: { content: "token:entity:E-47", link: null }, plain_text: "token:entity:E-47", href: null },
+                { type: "text", text: { content: "token:matter:M-12", link: null }, plain_text: "token:matter:M-12", href: null },
+              ],
+            },
+            "From Unit": { select: { name: "Sales" } },
+            "To Unit": { select: { name: "Strategy" } },
           },
         }),
         { status: 200 },
       );
     }
-    if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") return new Response(JSON.stringify({ id: "handoff-1", url: "x", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
+    if (urlStr.endsWith("/pages/handoff-1") && method === "PATCH") {
+      telegramPatches.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ id: "handoff-1", url: "x", parent: { type: "data_source_id", data_source_id: "handoffs-ds" }, properties: {} }), { status: 200 });
+    }
     if (urlStr.includes("/blocks/") && urlStr.includes("/children") && method === "GET") {
       return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Gov." }] } }] }), { status: 200 });
     }
@@ -932,8 +1031,20 @@ test("3c. Handoff pickup BLOCKS when the Handoff's tokens don't resolve to a rea
   assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
   assert.strictEqual(aiCalls, 0, "zero AI calls on the fail-fast path");
   const message = telegramMessages.join("\n");
-  assert.match(message, /Matter_Token 'M-12' does not resolve to a related Matter/, "the reason names the exact defect, on its own line");
-  assert.match(message, /Strategy diagnosis held/, "the stop is the existing held-diagnosis path, not a new mechanism");
+  assert.match(
+    message,
+    /the opaque token pair E-47 \/ M-12 this Handoff's Sources property declares does not resolve to real, correctly-related Entity\/Matter records/,
+    "the reason names the exact defect, on its own line",
+  );
+  // The identity gate moved into the ONE context resolution, so an
+  // unresolvable token pair now surfaces as Clarification Needed rather
+  // than as a Held write -- still fail-closed, still no write, and still
+  // the existing blocked path rather than a new mechanism.
+  assert.match(message, /Clarification needed/, "the stop is the existing blocked path, not a new mechanism");
+  assert.ok(
+    !telegramPatches.some((patch) => ["Closed", "Delivered", "Approved"].includes(patch?.properties?.Status?.select?.name)),
+    "an identity that cannot be established never advances the Handoff past its blocked state",
+  );
 });
 
 // --- WP2: fail fast on known Handoff defects, before any AI call -----------
@@ -1551,7 +1662,7 @@ test("Missing operational Entity/Matter reference fails closed -- the Proposal i
   assert.strictEqual(result.strategy?.proposal, undefined);
   assert.strictEqual(result.strategy?.proposalTokenSafety, undefined);
   assert.strictEqual(result.stage, "strategy_blocked");
-  assert.ok(log.sentTexts.some((t) => /no operational Entity\/Matter reference/.test(t)));
+  assert.ok(log.sentTexts.some((t) => /requires an opaque Matter token/.test(t)), "the missing token is named, and nothing is inferred to fill it");
   assert.ok(!log.sentTexts.some((t) => /Strategy Proposal Ready for Review/i.test(t)), "never presented to Martin");
 });
 
@@ -1778,7 +1889,7 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   assert.strictEqual(afterApproval.pendingHandoffAutoCheck, true, "successful Strategy -> Finance Handoff creation must automatically invoke the existing /checkhandoffs path");
 });
 
-test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matter_Token carry exactly what the originating Handoff supplied, never a real name", async (t) => {
+test("18. Strategy -> Finance carries the originating Handoff's tokens AND its canonical Sources -- the Entity/Matter pages those tokens resolve to, never a real name", async (t) => {
   const log = mockFetch(t, { entityToken: "E-47", matterToken: "M-12" });
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
@@ -1791,8 +1902,105 @@ test("18. Strategy -> Finance creates a token-only Handoff -- Entity_Token/Matte
   await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
 
   const props = log.handoffCreateBody.properties;
-  assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
-  assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(props, "Entity_Token"),
+    false,
+    "the retired Handoff property is written nowhere",
+  );
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(props, "Matter_Token"), false);
+  // Identity travels as the opaque pair INSIDE Sources, followed by the
+  // canonical Entity/Matter pages those tokens resolve to -- bare-id links
+  // (never title slugs; slug text is identity-bearing and `Sources` is a
+  // protected field). This upstream Handoff carried no canonical Call Notes
+  // reference, so none is invented to fill the optional slot.
+  const entries = props.Sources.rich_text;
+  assert.strictEqual(entries[0].text.content, "token:entity:E-47");
+  assert.ok(!entries[0].text.link, "a token entry is link-less rich text, never a page link");
+  assert.strictEqual(entries[1].text.content, "token:matter:M-12");
+  assert.ok(!entries[1].text.link);
+  // The canonical Entity/Matter pages those tokens resolve to are NOT
+  // rewritten as page links: the tokens themselves are the durable
+  // transport, and every re-derivation would be a second reference to
+  // disagree with the first.
+  assert.deepStrictEqual(
+    entries.slice(2),
+    [],
+    "nothing but the opaque pair travels -- a Finance Handoff identity is never restated as a page link",
+  );
+});
+
+test("Sources forwarding: a Sources-enabled upstream Handoff's canonical Call Notes reference rides on to Finance -- the same exact page, re-validated first, and never its content", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+  });
+  const env = fakeEnv();
+  env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
+
+  const afterPickup = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+  await handleInterventionApproval(env, afterPickup, afterPickup.strategy!.pendingApproval!.proposalVersion, "approve");
+
+  const props = log.handoffCreateBody?.properties;
+  assert.ok(props, "the Finance Handoff must be created");
+  assert.deepStrictEqual(
+    props.Sources.rich_text.map((item: any) => item.text.content),
+    [
+      "token:entity:E-47",
+      "token:matter:M-12",
+      // The SAME canonical Call Notes page the upstream Handoff declared --
+      // same exact page id, rebuilt in bare-id form so no title slug
+      // (identity-bearing text, and `Sources` is a protected field) is
+      // copied into this Handoff.
+      `https://www.notion.so/${SOURCES_PAGE_ID}`,
+    ],
+    "the opaque pair, then the upstream Handoff's own validated Call Notes reference, forwarded",
+  );
+  assert.ok(
+    props.Sources.rich_text.slice(0, 2).every((item: any) => !item.text.link),
+    "the tokens travel as link-less rich text -- a token is never a page reference",
+  );
+  assert.ok(
+    !props.Sources.rich_text.some((item: any) => item.text.link?.url?.startsWith("https://www.notion.so/token")),
+    "no token is ever written as a canonical page link",
+  );
+  // Forwarded as a REFERENCE only: the canonical record's content never
+  // travels into the Handoff, and the free-text Call_Notes_ID convention is
+  // not duplicated beside the structural transport.
+  const handoffText = [props.Reason, props["Verified Facts & Sources"], props["Required Next Action"]]
+    .map((p: any) => p.rich_text.map((i: any) => i.text.content).join(""))
+    .join("\n");
+  assert.ok(!handoffText.includes(DEFAULT_CALL_NOTES_NOTE), "the Call Notes record's Note is never copied into the Handoff");
+  assert.ok(!handoffText.includes("Call_Notes_ID"), "no free-text reference is written beside the canonical Sources reference");
+});
+
+test("buildStrategyFinanceHandoffSources: tokens that resolve to no canonical records throw -- a Finance Handoff identity is never fabricated", async (t) => {
+  const log = mockFetch(t);
+  const env = fakeEnv();
+  await assert.rejects(
+    () => buildStrategyFinanceHandoffSources(env, fakeState({ entityToken: "", matterToken: "" })),
+    /a Finance Handoff is never written without an established operational identity/,
+  );
+  assert.strictEqual(log.handoffCreateBody, null, "no Handoff is written when the canonical identity cannot be established");
+});
+
+test("buildStrategyFinanceHandoffSources: an upstream Sources declaration that fails re-validation throws -- an unverifiable Call Notes reference is never forwarded", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    sourcesUrls: [SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+    callNotesAttestation: attestation,
+    // The canonical record is no longer in a readable lifecycle state, so
+    // re-validation on the upstream route must refuse it.
+    callNotesStatus: "Draft",
+  });
+  const env = fakeEnv();
+  await assert.rejects(
+    () => buildStrategyFinanceHandoffSources(env, fakeState({ entityToken: "E-47", matterToken: "M-12" })),
+    /could not be validated/,
+  );
+  assert.strictEqual(log.handoffCreateBody, null, "no Handoff is written when the upstream reference cannot be re-validated");
 });
 
 test("26-29. Strategy -> Finance carries the complete curated Strategy boundary representation -- timeline, deliverables, scope, not merely a bare conclusion", async (t) => {
@@ -2415,8 +2623,13 @@ test("Marketing-specific work is routed to Marketing when there is no recommenda
   const afterApproval = await handleStrategyHandoffApproval(env, afterPickup, true);
   const props = log.handoffCreateBody.properties;
   assert.strictEqual(props["To Unit"].select.name, "Marketing");
-  assert.strictEqual(props.Entity_Token.rich_text[0].text.content, "E-47");
-  assert.strictEqual(props.Matter_Token.rich_text[0].text.content, "M-12");
+  assert.deepStrictEqual(
+    props.Sources.rich_text.map((item: any) => item.text.content),
+    ["token:entity:E-47", "token:matter:M-12"],
+    "the downstream Handoff's identity is the opaque pair inside its Sources -- no token property is written",
+  );
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(props, "Entity_Token"), false, "the retired Handoff property is written nowhere");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(props, "Matter_Token"), false);
   assert.strictEqual(afterApproval.pendingHandoffAutoCheck, true, "successful Strategy -> downstream Handoff creation must automatically invoke the existing /checkhandoffs path");
 });
 
@@ -2542,8 +2755,15 @@ test("Material events use the existing logActivity mechanism", async (t) => {
                 },
               ],
             },
-            Entity_Token: { rich_text: [{ plain_text: "E-1" }] },
-            Matter_Token: { rich_text: [{ plain_text: "M-1" }] },
+            // Identity is the opaque pair inside Sources.
+            Sources: {
+              rich_text: [
+                { type: "text", text: { content: "token:entity:E-1", link: null }, plain_text: "token:entity:E-1", href: null },
+                { type: "text", text: { content: "token:matter:M-1", link: null }, plain_text: "token:matter:M-1", href: null },
+              ],
+            },
+            "From Unit": { select: { name: "Sales" } },
+            "To Unit": { select: { name: "Strategy" } },
           },
         }),
         { status: 200 },
@@ -3348,14 +3568,18 @@ test("Evidence order: a reference-only Handoff falls through to the approved Cal
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.strictEqual(log.callNotesQueryBodies.length, 1, "exactly one exact-match lookup -- no nearest-record pass, and never inferred from Entity/Matter");
-  assert.strictEqual(log.callNotesQueryBodies[0].filter?.title?.equals, "CN-007", "the lookup is the Handoff's own reference, matched exactly");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "the exact page id replaces the title search entirely -- no nearest-record pass, and never inferred from Entity/Matter");
+  assert.strictEqual(
+    log.requests.filter((r) => r.includes(`GET https://api.notion.com/v1/pages/${SOURCES_PAGE_ID}`)).length,
+    1,
+    "exactly one exact page fetch -- the canonical page the Handoff itself names",
+  );
   assert.ok(
     prompts.some((p) => p.includes("Call_Notes_ID: CN-007") && p.includes("Call Date: 2026-09-01")),
     "the diagnosis is actually grounded in the governed record's registry fields, not in a bare reference",
   );
   assert.ok(
-    prompts.some((p) => p.includes("order 2 -- the Handoff held no substantive evidence of its own")),
+    prompts.some((p) => p.includes("canonical page named in the Handoff's Sources property")),
     "the provenance of the evidence is stated to the diagnosis rather than passed off as the Handoff's own narrative",
   );
   assert.strictEqual(result.stage, "delivered", "the existing core-diagnosis gate still decides sufficiency on top of the retrieved evidence");
@@ -3370,7 +3594,11 @@ test("Evidence order: an already-Consumed Call Notes record is still readable --
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   assert.strictEqual(result.stage, "delivered", "a Consumed record still carries approved evidence; Strategy's Held -> Pending -> re-pickup loop must be able to re-read it every attempt");
-  assert.strictEqual(log.callNotesQueryBodies.length, 1);
+  assert.strictEqual(
+    log.requests.filter((r) => r.includes(`GET https://api.notion.com/v1/pages/${SOURCES_PAGE_ID}`)).length,
+    1,
+    "read once, by its exact page id",
+  );
 });
 
 test("Evidence order: a Superseded Call Notes record is refused -- there is no approved current evidence to diagnose from", async (t) => {
@@ -3482,7 +3710,12 @@ test("KoraGrid: the case progresses from an approved Call Notes Handoff all the 
 
   const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
-  assert.strictEqual(log.callNotesQueryBodies.length, 1, "the approved Call Notes record is read once, read-only");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "no title search is issued -- the canonical page id is the whole reference");
+  assert.strictEqual(
+    log.requests.filter((r) => r.includes(`GET https://api.notion.com/v1/pages/${SOURCES_PAGE_ID}`)).length,
+    1,
+    "the approved Call Notes record is read once, read-only",
+  );
   assert.ok(
     prompts.some((p) => p.includes("Call_Notes_ID: CN-007")),
     "the diagnosis ran on the retrieved evidence rather than on a bare reference",
@@ -3586,12 +3819,12 @@ test("Evidence order: every gate ahead of the note read fails closed WITHOUT rea
     {
       name: "wrong Entity relation",
       opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesEntityRelation: "some-other-entity-page" },
-      match: /not bound to this Work's Entity/,
+      match: /not bound to this Handoff's Entity/,
     },
     {
       name: "wrong Matter relation",
       opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesMatterRelation: "some-other-matter-page" },
-      match: /not bound to this Work's Matter/,
+      match: /not bound to this Handoff's Matter/,
     },
     {
       name: "invalid Status",
@@ -3604,14 +3837,17 @@ test("Evidence order: every gate ahead of the note read fails closed WITHOUT rea
       match: /fields_hash does not match/,
     },
     {
-      name: "zero exact matches",
+      // The canonical page the Handoff names resolves to no record at all.
+      name: "the canonical page is unavailable",
       opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesMatches: 0 },
-      match: /no Call Notes record has Call_Notes_ID "CN-007"/,
+      match: /Call Notes/,
     },
     {
-      name: "multiple exact matches",
-      opts: { callNotesId: "CN-007", callNotesAttestation: attestation, callNotesMatches: 2 },
-      match: /2 Call Notes records carry Call_Notes_ID "CN-007"/,
+      // Two transports naming two different records is a conflict, and a
+      // conflict is refused rather than silently resolved.
+      name: "the free text names a different record than the canonical page",
+      opts: { callNotesId: "CN-007", reasonCallNotesId: "CN-999", callNotesAttestation: attestation },
+      match: /conflicting references/,
     },
   ];
 
@@ -3626,7 +3862,11 @@ test("Evidence order: every gate ahead of the note read fails closed WITHOUT rea
       assert.strictEqual(result.stage, "strategy_blocked", "the gate refuses rather than proceeding");
       assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis runs on an unproven record");
       assert.ok(!log.blockReads.includes("cn-page-1"), "the page body was never read -- the refusal came first, and nothing was fetched for it (the Note is never even parsed into a refusal)");
-      assert.strictEqual(log.callNotesQueryBodies.length, 1, "exactly one exact lookup, as before");
+      assert.strictEqual(log.callNotesQueryBodies.length, 0, "no title search is issued at all");
+      assert.ok(
+        log.requests.some((r) => r.includes(`GET https://api.notion.com/v1/pages/${SOURCES_PAGE_ID}`)),
+        "exactly one exact page fetch, as before",
+      );
       const message = log.sentTexts.join("\n");
       assert.match(message, /Clarification needed/);
       assert.match(message, entry.match, "the refusal names the exact unresolved fact");
@@ -3687,7 +3927,12 @@ test("Evidence order: repeated Strategy pickup re-reads the same Note read-only 
 
   assert.strictEqual(first.stage, "delivered");
   assert.strictEqual(second.stage, "delivered", "the Held -> Pending -> re-pickup loop re-reads the same approved evidence every attempt");
-  assert.strictEqual(log.callNotesQueryBodies.length, 2, "one exact lookup per pickup");
+  assert.strictEqual(log.callNotesQueryBodies.length, 0, "no title search is issued on either attempt");
+  assert.strictEqual(
+    log.requests.filter((r) => r.includes(`GET https://api.notion.com/v1/pages/${SOURCES_PAGE_ID}`)).length,
+    2,
+    "one exact page fetch per pickup",
+  );
   assert.deepStrictEqual(
     log.blockReads.filter((id) => id === "cn-page-1"),
     [],
@@ -3702,8 +3947,8 @@ test("Evidence order: repeated Strategy pickup re-reads the same Note read-only 
     `the Call Notes record is only ever read (requests made: ${log.callNotesRequests.join(" | ")}) -- a Status transition would be a PATCH, and the mock has no write route for this store`,
   );
   assert.ok(
-    log.callNotesRequests.some((request) => request.startsWith("POST ") && request.includes("/data_sources/call-notes-ds/query")),
-    "the exact-title lookup is the only query issued against the store",
+    log.callNotesRequests.every((request) => request.startsWith("GET ")),
+    "every Call Notes request is a read of the exact canonical page the Handoff itself names -- no store query is issued at all",
   );
 });
 
@@ -3862,7 +4107,7 @@ test("failure observability: a hold costs exactly one plan call and one call per
   );
   const notionReads = log.requests.filter((r) => r.startsWith("GET ") && r.includes("api.notion.com"));
   assert.ok(
-    notionReads.every((r) => /\/pages\/(handoff-1|entity-page-1|matter-page-1)$/.test(r)),
+    notionReads.every((r) => new RegExp(`/pages/(handoff-1|${ENTITY_PAGE_ID}|${MATTER_PAGE_ID})$`).test(r)),
     `the only Notion reads are the pre-existing pickup lookups -- no governance page, no Call Notes record and no page body is read to build the summary (got: ${notionReads.join(" | ")})`,
   );
   assert.deepStrictEqual(
@@ -4232,7 +4477,7 @@ test("Status 2. Reading approved Call Notes shows as its own step, naming only t
   await handlePickup(env, fakeState(), STRATEGY_SKILLS);
 
   const final = log.sentTexts.filter((s) => s.startsWith("Hat: Strategy Analyst.\n\n🧭")).at(-1)!;
-  assert.match(final, /✓ Read approved Call Notes CN-007 \(read-only, attestation re-verified\)/);
+  assert.match(final, /✓ Read approved Call Notes CN-007 \(direct-page Sources, read-only, attestation re-verified\)/);
   assert.match(final, /✅ Diagnosis ready below/);
   assert.ok(!final.includes("20 staff hours"), "the Call Notes body never appears in the status");
 });
@@ -4469,4 +4714,86 @@ test("Sources: a Handoff already claimed for another Work is refused before any 
     !log.requests.some((request) => request.includes(SOURCES_PAGE_ID)),
     "the claim boundary holds BEFORE the Sources path runs -- no canonical page is even fetched",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The source-based Handoff end to end at this boundary: a Sales -> Strategy
+// Handoff whose operational identity is the opaque token pair INSIDE its
+// Sources. The binding, the Matter Status and the source-boundary marker all
+// come from the ONE context resolution; the canonical pages the payload also
+// names are cross-checked against it and can only ever refuse, never bind.
+// ---------------------------------------------------------------------------
+
+test("Sources-based pickup: a Sales -> Strategy Handoff carrying the opaque pair in Sources (and no token properties at all) -- binding, marker and Matter Status all come from the ONE resolution, and the proposal reaches the approval preview", async (t) => {
+  const attestation = await buildRecordApprovalMarker(CALL_NOTES_APPROVAL_RECORD, "Approved");
+  const log = mockFetch(t, {
+    callNotesAttestation: attestation,
+    sourcesUrls: [ENTITY_SOURCE_URL, MATTER_SOURCE_URL, SOURCES_PAGE_URL],
+    callNotesId: "CN-007",
+  });
+  const env = fakeEnv();
+  const prompts: string[] = [];
+  env.AI = recordAi(fakeAi(SUFFICIENT_DIAGNOSIS), prompts);
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(
+    result.strategy?.approvalState,
+    "AWAITING_INTERVENTION_APPROVAL",
+    "pickup must reach the approval preview on the identity its Sources establish -- no token property exists anywhere on the record",
+  );
+  assert.ok(log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "the proposal is presented -- identity never required a token property");
+  const prompt = prompts.find((p) => p.includes("E-47"));
+  assert.ok(prompt, "the prompt carries the operational Entity token the Sources declared");
+  assert.ok(prompt!.includes("M-12"), "the prompt carries the operational Matter token the Sources declared");
+  assert.strictEqual(
+    log.requests.filter((r) => r.includes("matters-ds/query")).length,
+    1,
+    "the token pair resolves through exactly ONE authorized operational-store lookup, and nothing is searched twice",
+  );
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${ENTITY_PAGE_ID}`),
+    "the canonical Entity artifact is fetched by its exact page id, and cross-checked against that binding",
+  );
+  assert.ok(
+    log.requests.includes(`GET https://api.notion.com/v1/pages/${MATTER_PAGE_ID}`),
+    "the canonical Matter artifact is fetched by its exact page id, and cross-checked against that binding",
+  );
+});
+
+test("Sources-based pickup: a canonical Matter source whose Matter_ID disagrees with the Handoff's Matter token is refused -- a page can only ever refuse the binding, never substitute for the token", async (t) => {
+  const log = mockFetch(t, { sourcesUrls: [SOURCE_BINDING_ENTITY_URL, SOURCE_BINDING_MATTER_URL] });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategy?.diagnosis, undefined, "no diagnosis is produced");
+  const message = log.sentTexts.join("\n");
+  assert.match(
+    message,
+    /carries Matter_ID "M-99" but this Handoff's Matter token is "M-12" -- the source is not this Handoff's Matter/,
+    "the refusal names the exact page and the exact contradiction",
+  );
+  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented to Martin");
+});
+
+test("Sources-based pickup: a source-boundary marker bound to OTHER identity tokens than this pickup resolved is unbound evidence -- the pickup fails closed before any AI call", async (t) => {
+  const log = mockFetch(t, {
+    sourcesUrls: [ENTITY_SOURCE_URL, MATTER_SOURCE_URL],
+    // The write claims a source-boundary check over an operational identity
+    // this pickup's own token resolution never produced.
+    sourceBoundaryMarker: buildSourceBoundaryMarker({ entityToken: "E-999", matterToken: "M-999" }, "Passed", ["entityName", "matterName"]),
+  });
+  const env = fakeEnv();
+  env.AI = forbiddenAi();
+
+  const result = await handlePickup(env, fakeState(), STRATEGY_SKILLS);
+
+  assert.strictEqual(result.stage, "strategy_blocked");
+  assert.strictEqual(result.strategy?.sourceBoundaryAttestation, undefined, "unbound evidence is never accepted as a recorded check");
+  const message = log.sentTexts.join("\n");
+  assert.match(message, /source-boundary attestation is not usable/, "the defect stops the pickup through the existing handleBlocked path");
+  assert.ok(!log.sentTexts.some((m) => /Strategy Proposal Ready for Review/i.test(m)), "never presented to Martin");
 });

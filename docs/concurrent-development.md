@@ -145,7 +145,10 @@ These are not negotiable in the name of speed:
 - **Access and approval rules**, Work ownership, Handoff routing, and lifecycle
   semantics do not change to make a feature fit. Architect/Martin owns them.
 - **Handoff identity tokens.** Any Handoff field that becomes another Unit's AI
-  input identifies the Entity/Matter only by `Entity_Token`/`Matter_Token`.
+  input identifies the Entity/Matter only by the opaque token entries its own
+  `Sources` payload carries (`token:entity:<token>` / `token:matter:<token>`),
+  never by a real name; the retired `Entity_Token`/`Matter_Token` Handoff
+  properties no longer exist and are read/written nowhere.
   Production Handoff writes go through `src/handoffWriter.ts`'s
   `createHandoff`/`updateHandoff`, fail-closed.
 - **Fail-closed stays.** A missing manifest entry, unknown action, or unresolved

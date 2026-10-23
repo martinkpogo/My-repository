@@ -8,7 +8,7 @@ import type { HandoffPickupDeclaration, UnitManifest } from "./units/unitManifes
 import { resolveOrganization } from "./runtime/organization";
 import { resolveActionExecution } from "./runtime/actionResolution";
 import { workContractForRequest, type WorkRequest } from "./runtime/workContract";
-import { resolveMatterIdFromToken } from "./matterContinuation";
+import { extractHandoffSources, resolveHandoffContextBinding, type HandoffSourceRouteContract } from "./handoffSources";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvPut, kvPutHeartbeat } from "./kvStore";
 
 /**
@@ -145,48 +145,97 @@ async function resolveHandoffEntry(
 /**
  * Matter identity at the ONE boundary where a Handoff creates a new Work.
  *
- * `Matter_Token` is a fact the Handoff already carries, so the new Work is
- * born with the canonical Matter page id it will be indexed and pointed at
- * by, instead of waiting for a later business action to discover it (the
- * gap that left a Work's persisted state with no `matterId`, so Matter
- * Continue had nothing to match against).
+ * A Handoff may carry its canonical Matter reference two sanctioned ways,
+ * and this function resolves whichever it actually carries -- never a
+ * second, parallel lookup path:
  *
- * Resolution is the existing canonical mechanism -- `resolveMatterIdFromToken`
- * in src/matterContinuation.ts, the same lookup WorkSession.save's
- * `ensureMatterIdentity` and Matter Continue use (exact unique_id match plus
- * the required Entity relation). No second Matter lookup is introduced here,
- * and identity is never inferred from a label, a title, Entity data, Handoff
- * ordering or AI output. A read: nothing is written to Notion.
+ *   - **Sources mode** (the record has a `Sources` property): the binding
+ *     comes from `resolveHandoffContextBinding`, i.e. from the opaque
+ *     Entity/Matter token entries that payload declares, resolved through
+ *     ENIG's authorized operational stores (`resolveEntityMatterFromTokens`
+ *     -- the canonical Matters and Entities data sources, never the
+ *     Isolated Sales Identity Resolution Registry) and then validated
+ *     fail-closed against the route contract and every declared artifact
+ *     (exact page, real parent data source, Entity/Matter relationship
+ *     proof, lifecycle and approval where applicable). The canonical Matter
+ *     page id that resolution proves is what the new Work is born carrying.
+ *     A refusal here -- an unusable payload, an uncontracted route, tokens
+ *     that do not resolve, an artifact that disagrees with the binding,
+ *     unestablishable identity -- creates NO Work, NO `handoff_workitem`
+ *     mapping, and leaves the Handoff Pending.
  *
- * Returns null when the Handoff names no token or the token does not resolve
- * -- reported through the same discovery failure channel `resolveHandoffEntry`
- * uses. The calling loop then creates NO Work and NO `handoff_workitem`
- * mapping and leaves the Handoff Pending: failing closed beats a Work that is
- * falsely associated with a Matter.
+ *   - **Declared-generic route** (no `Sources` property, and the route's
+ *     contract requires neither token nor any `entities`/`matters`
+ *     source): that route's currency is not an Entity/Matter at all, so the
+ *     Work is registered without one (undefined matterId/matterToken --
+ *     WorkSession.init's existing optional fields). The genericity is read
+ *     from the route contract, never inferred from the payload's emptiness:
+ *     an uncontracted route, or any route that does need an Entity/Matter,
+ *     still demands one exactly as before -- and with the retired
+ *     `Entity_Token`/`Matter_Token` properties read nowhere, a Handoff on
+ *     such a route that declares no `Sources` establishes nothing and is
+ *     refused rather than bound to some other field.
+ *
+ * Every failure is reported through the same discovery failure channel
+ * `resolveHandoffEntry` uses (log + the existing generic Telegram notice --
+ * no identity detail travels out of the log), and returns null: failing
+ * closed beats a Work that is falsely associated with a Matter.
  *
  * Consulted ONLY where a new Work is about to be created. A Handoff that
  * already has a `handoff_workitem` mapping continues its existing Work and
  * never reaches this function, so same-Work Handoff continuity is untouched.
+ *
+ * Exported so focused tests can exercise the sources/generic branches
+ * directly; production callers go through discoverPendingHandoffsForUnit.
+ * `contracts` is the same route-contract TEST SEAM `resolveHandoffSources`
+ * takes -- production callers never pass it.
  */
-async function resolveHandoffMatterIdentity(
+export async function resolveHandoffWorkIdentity(
   env: Env,
   handoff: { id: string; properties?: Record<string, any> },
-): Promise<{ matterId: string; matterToken: string } | null> {
-  const matterToken = plainText(handoff.properties?.Matter_Token).trim();
-  if (!matterToken) {
+  contracts?: Readonly<Record<string, HandoffSourceRouteContract>>,
+): Promise<{ matterId?: string; matterToken?: string } | null> {
+  const extraction = extractHandoffSources(handoff.properties);
+  if (!extraction.ok) {
     await notifyMartinOfDiscoveryFailure(
       env,
       handoff.id,
-      new Error("Handoff Matter resolution failed: the Handoff carries no Matter_Token -- no Work was created without a canonical Matter"),
+      new Error(`Handoff Matter resolution failed: its Sources property cannot be used (${extraction.reason}) -- no Work was created`),
     );
     return null;
   }
-  const matterId = await resolveMatterIdFromToken(env, matterToken);
-  if (!matterId) {
+
+  // Both modes go through the ONE binding entry point: sources mode resolves
+  // and validates the Handoff's own payload, legacy mode (reachable only for
+  // a route declared generic by its contract) reports that there is no
+  // binding. There is no second lookup here, and no read of the retired
+  // Handoff token properties anywhere on either path.
+  const binding = await resolveHandoffContextBinding(env, {
+    properties: handoff.properties ?? {},
+    route: { fromUnit: plainText(handoff.properties?.["From Unit"]), toUnit: plainText(handoff.properties?.["To Unit"]) },
+    access: discoveryCronContext(),
+    ...(contracts ? { contracts } : {}),
+  });
+  if (!binding.ok) {
     await notifyMartinOfDiscoveryFailure(
       env,
       handoff.id,
-      new Error(`Handoff Matter resolution failed: Matter_Token "${matterToken}" does not resolve to an existing Matter -- no Work was created`),
+      new Error(`Handoff Matter resolution failed: ${binding.reason} -- no Work was created without a canonical Matter`),
+    );
+    return null;
+  }
+  if (binding.mode === "legacy") {
+    // A route declared generic by its contract: nothing to resolve, and
+    // nothing this function could fail on. Genericity was read from the
+    // contract inside the resolver, never inferred from this payload.
+    return {};
+  }
+  const { matterId, matterToken } = binding.binding;
+  if (!matterId || !matterToken) {
+    await notifyMartinOfDiscoveryFailure(
+      env,
+      handoff.id,
+      new Error("Handoff Matter resolution failed: its validated sources establish no canonical Matter -- no Work was created"),
     );
     return null;
   }
@@ -250,11 +299,15 @@ export async function discoverPendingHandoffsForUnit(
       // a guessed Hat/Action.
       const entry = await resolveHandoffEntry(env, handoff, unit);
       if (!entry) continue;
-      // Matter identity is resolved BEFORE the Work exists (the Handoff's own
-      // Matter_Token fact -> canonical page id), so the new Work is created
-      // already carrying it. A token that does not resolve stops here: no
-      // Work, no handoff_workitem mapping, Handoff stays Pending.
-      const matter = await resolveHandoffMatterIdentity(env, handoff);
+      // Matter identity is resolved BEFORE the Work exists -- from the
+      // Handoff's own validated `Sources` binding when it has one, otherwise
+      // from the opaque Matter token its Sources declares -> canonical page id -- so the new Work
+      // is created already carrying it. A refusal (no Matter on a route that
+      // needs one, unresolvable token, failed source validation) stops here:
+      // no Work, no handoff_workitem mapping, Handoff stays Pending. A
+      // declared-generic route instead registers the Work without a Matter
+      // binding (undefined), never a placeholder.
+      const matter = await resolveHandoffWorkIdentity(env, handoff);
       if (!matter) continue;
       try {
         workId = newWorkId();

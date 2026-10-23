@@ -138,8 +138,8 @@ export type SemanticTaskId =
   // retired). The Strategy Analyst remains the single actor; the specialist
   // domains are now Skills a single plan may name. Payload for all
   // five is the same category as the already-classified
-  // strategy.diagnosis/handoff_routing/proposal_drafting: Entity_Token/
-  // Matter_Token-bound sanitized situation text (strategy.specialist_selection,
+  // strategy.diagnosis/handoff_routing/proposal_drafting: Entity/Matter
+  // token-bound sanitized situation text (strategy.specialist_selection,
   // strategy.business_diagnosis, strategy.brand_diagnosis,
   // strategy.communication_diagnosis all receive the same sanitized
   // state.strategyContext already governed by evaluateHandoffContext/
@@ -186,7 +186,7 @@ export type SensitivityLevel =
  * policy in dataBoundary/policy.ts's PRODUCTION_OUTBOUND_POLICY.
  *
  * TOKEN_SAFE_RUNTIME: the task's outbound payload must contain only
- * Entity_Token/Matter_Token-shaped opaque identifiers, sanitized business
+ * Entity/Matter token-shaped opaque identifiers, sanitized business
  * context, and ordinary business language -- never a real organisation/
  * person name, email, phone, physical address, or other direct identity/
  * contact information. The gate inspects the actual payload for this; a
