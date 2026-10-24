@@ -4,11 +4,11 @@ Sources: Project Instruction, Operating Specification, Static Reference (provide
 
 | Requirement | Coverage | SKILL.md instruction / gap |
 |---|---|---|
-| Identify purpose/context of call | Full | "Identify the purpose and context of the call." |
-| Use only provided/accessible evidence | Full | "using only evidence and source material actually provided or legitimately accessible" |
-| Separate facts/assumptions/hypotheses/unknowns | Full | "Distinguish verified facts from client-reported claims, assumptions, hypotheses, and unresolved questions" |
-| Preserve traceable source references | Full | "Preserve traceable source references" |
-| Identify gaps and useful questions | Full | "Identify gaps and useful questions" |
-| Avoid inventing client history/qualification/investment | Full | "Avoid inventing client history, qualification outcomes, investment ranges, approvals, or record state" |
-| No governed writes/external actions | Full | "Make no governed writes and take no external action" |
-| CVE/Call Notes/Handoff safeguards | Pending (#362) | Not implemented in this skill; deferred to #362. BD-5 note included in skill text for awareness, but implementation deferred. |
+| Identify purpose/context of call | Full | "## Purpose" and "1. Call purpose and context" — identifies purpose, attendees/roles if provided, expected outcome, context. |
+| Use only provided/accessible evidence | Full | "## Inputs (use only provided/accessible evidence)" and "Do not pull history from memory or infer from prior conversations." |
+| Separate facts/assumptions/hypotheses/unknowns | Full | "## Rules" and sections "2. Verified facts", "4. Assumptions", "5. Hypotheses", "6. Unknowns, evidence gaps, unresolved questions". |
+| Preserve traceable source references | Full | "2. Verified facts — ... include a source reference" and "Preserve traceable source references for all items you include." |
+| Identify gaps and useful questions | Full | "6. Unknowns, evidence gaps, unresolved questions" and "7. Useful questions to ask". |
+| Avoid inventing client history/qualification/investment | Full | "## Rules" — explicitly requires saying "unknown / needs confirmation" if missing. |
+| No governed writes/external actions | Full | "## Rules" — "Make no governed writes and take no external action." |
+| CVE/Call Notes/Handoff safeguards | Pending (#362) | BD-5 noted in Rules; implementation deferred to #362. |
