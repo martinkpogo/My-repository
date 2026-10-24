@@ -754,6 +754,10 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
     const normalized = raw.replace(/\\:/g, ":");
     const text = normalized.trim();
     if (!text) continue;
+    if (text.includes("\n")) {
+      textBuffer.push(normalized);
+      continue;
+    }
     if (isStandaloneEntry(text)) {
       const flushed = flushTextBuffer();
       if (flushed && !flushed.ok) return flushed;

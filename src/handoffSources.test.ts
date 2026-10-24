@@ -520,6 +520,34 @@ test("extraction: null Sources property is legacy too", () => {
   assert.deepEqual(extractHandoffSources(handoffProperties({ Sources: null })), { ok: true, mode: "legacy" });
 });
 
+test("extraction: escaped-colon fragmented rich text reconstructs token entries", () => {
+  const escaped = {
+    rich_text: [
+      { type: "text", text: { content: "token\\:entity\\:ENT-30\ntoken\\:matter\\:MAT-31\n", link: null }, plain_text: "token\\:entity\\:ENT-30\ntoken\\:matter\\:MAT-31\n", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: escaped }));
+  assert.deepEqual(result, {
+    ok: true,
+    mode: "sources",
+    refs: [
+      { kind: "token", tokenKind: "entity", token: "ENT-30" },
+      { kind: "token", tokenKind: "matter", token: "MAT-31" },
+    ],
+    tokens: { entityToken: "ENT-30", matterToken: "MAT-31" },
+  });
+});
+
+test("extraction: incomplete escaped token prefix fails closed", () => {
+  const bad = {
+    rich_text: [
+      { type: "text", text: { content: "token\\", link: null }, plain_text: "token\\", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: bad }));
+  assert.equal(result.ok, false);
+});
+
 test("extraction: fragmented rich text reconstructs token entries (HO-93 shape)", () => {
   const ho93 = {
     rich_text: [
