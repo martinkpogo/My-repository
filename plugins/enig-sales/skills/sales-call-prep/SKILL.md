@@ -5,28 +5,31 @@ description: Prepare for a sales call using governed evidence. Separate facts, a
 # sales-call-prep
 
 ## Purpose
-Identify the purpose and context of the call. Determine why the call is taking place, who it involves, and what outcome is expected based on provided evidence only.
+Identify the purpose and context of the call. State why it is taking place, who is involved (if provided), and the expected outcome (if known). If any of these are missing, say "unknown / needs confirmation".
 
-## Inputs (use only provided/accessible evidence)
-- Call details (if provided), related materials, and any approved sources shared for this call.
-- Do **not** pull history from memory or infer from prior conversations.
+## Required inputs (use only provided/accessible evidence)
+Only use evidence and source material actually provided or legitimately accessible for this call. Do **not** pull history from memory or infer from prior conversations.
 
-## Call brief structure (produce this)
-1. **Call purpose and context** — Stated purpose, attendees/roles if provided, expected outcome, time/context if provided.
-2. **Verified facts** — Only facts supported by traceable sources. For each, include a source reference (document/page/record identifier as provided).
-3. **Client-reported claims** — Statements attributed to the client, clearly labeled "Client-reported (unverified)" with source if provided.
-4. **Assumptions** — Reasonable inferences explicitly labeled "Assumption"; state why minimal if needed. Do not treat as facts.
-5. **Hypotheses** — Possible explanations/testable ideas labeled "Hypothesis". Do not treat as conclusions.
-6. **Unknowns, evidence gaps, unresolved questions** — Specific gaps with what evidence would close them.
-7. **Useful questions to ask** — Concrete questions tied to unknowns/gaps, phrased to confirm rather than assume.
-8. **Preparation priorities/cautions** — Prioritized items supported by evidence, with cautions about what not to assume.
+## Call brief template (output in this order)
+Produce a brief with the following sections:
+
+1. **Purpose and context** — Purpose, attendees/roles (if provided), expected outcome (if provided), call type/time/context (if provided). Mark missing items as unknown.
+2. **Verified facts** — List only facts supported by traceable sources. For each item include: `Fact: ... | Source: <identifier/path>` (use identifiers provided in the evidence).
+3. **Client-reported claims** — List statements attributed to the client, each labeled `Client-reported (unverified): ... | Source: <if provided>`. Do not convert to facts.
+4. **Assumptions** — Explicitly labeled `Assumption: ... | Rationale: ...`. State minimal rationale; do not present as fact.
+5. **Hypotheses** — Explicitly labeled `Hypothesis: ... | Test idea: ...`. Do not present as conclusions.
+6. **Unknowns, evidence gaps, unresolved questions** — List specific gaps. For each, say what evidence would close it (e.g., "Need: ... from source ...").
+7. **Useful questions to ask during the call** — Concrete, confirmatory questions tied to items in (6). Avoid yes/no questions that assume a fact.
+8. **Preparation priorities and cautions** — Prioritized actions supported by evidence. Include cautions (e.g., "Do not assume X; confirm Y."). Do not invent values.
 
 ## Rules
-- Distinguish verified facts from client-reported claims, assumptions, hypotheses, and unresolved questions.
-- Preserve traceable source references for all items you include.
-- Identify gaps and useful questions.
-- Avoid inventing client history, qualification outcomes, investment ranges, approvals, or record state. If missing, say "unknown / needs confirmation".
+- Separate facts, client-reported claims, assumptions, hypotheses, and unknowns. Never blend them.
+- Preserve traceable source references for verified facts and any items you cite.
+- If information is missing, say "unknown / needs confirmation" rather than fabricating it.
+- Avoid inventing client history, qualification outcomes, investment ranges, approvals, or record state.
 - Make no governed writes and take no external action.
-- Follow BD-5: approved Call Notes Note is canonical; Handoff CVE copy is temporary compatibility only. CVE/Call Notes/Handoff safeguards are pending Issue #362 and not implemented here.
+- Written instructions provide guidance only; they do not create technical enforcement.
+- BD-5: approved Call Notes Note is canonical; Handoff CVE copy is temporary compatibility only during approved migration.
+- CVE/Call Notes/Handoff implementation remains pending Issue #362; do not expand scope to implement them here.
 
 Source basis: Isolated Sales Project Instruction and Static Reference (provided by Martin).
