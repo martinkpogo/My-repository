@@ -207,7 +207,11 @@ export type HandoffSourceTokenParse =
  */
 export function parseHandoffSourceToken(raw: string): HandoffSourceTokenParse {
   const value = (raw ?? "").trim();
-  const match = /^token:(entity|matter):(.+)$/.exec(value);
+
+  // Normalize by removing backslashes - handles both escaped and unescaped tokens
+  const normalizedValue = value.replace(/\\:/g, ':');
+
+  const match = /^token:(entity|matter):(.+)$/.exec(normalizedValue);
   if (!match) {
     return { ok: false, reason: `"${value.slice(0, 120)}" is not an opaque token entry (expected token:entity:<TOKEN> or token:matter:<TOKEN>).` };
   }
@@ -523,14 +527,14 @@ export function parseNotionPageLink(raw: string): NotionPageLink {
   const host = parsed.hostname.toLowerCase();
   /**
    * Accepted hosts: `notion.so` and its subdomains (the long-standing
-   * canonical form), plus the exact host `app.notion.com`. Notion's
-   * canonical page links increasingly use `app.notion.com`, and a Handoff
-   * whose `Sources` names one was refused purely for its hostname even
-   * though it is the same exact-page reference. `app.notion.com` is added
-   * as one EXACT host only -- no `notion.com` subdomain wildcard -- so the
-   * accepted set stays closed and a lookalike host (`evil.app.notion.com`,
-   * `notion.com` itself, or any other subdomain) is still refused fail-closed.
-   */
+ * canonical form), plus the exact host `app.notion.com`. Notion's
+ * canonical page links increasingly use `app.notion.com`, and a Handoff
+ * whose `Sources` names one was refused purely for its hostname even
+ * though it is the same exact-page reference. `app.notion.com` is added
+ * as one EXACT host only -- no `notion.com` subdomain wildcard -- so the
+ * accepted set stays closed and a lookalike host (`evil.app.notion.com`,
+ * `notion.com` itself, or any other subdomain) is still refused fail-closed.
+ */
   if (host !== "notion.so" && !host.endsWith(".notion.so") && host !== "app.notion.com") {
     return { ok: false, reason: `"${value.slice(0, 120)}" is not a notion.so page link (nor an app.notion.com one) -- only exact canonical Notion pages may be sources.` };
   }
@@ -692,42 +696,102 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
     return { ok: true, mode: "legacy" };
   }
   /**
-   * Each item resolves to exactly one raw entry: a linked URL (artifact), a
-   * `token:`-prefixed plain-text item (token), or an http(s) plain-text item
-   * (artifact, the read-side tolerance for a hand-written link). An item
-   * that resolves to none of those -- non-empty text that is neither -- is
-   * refused as unusable rather than skipped, so nothing a sender wrote is
-   * ever silently discarded into "absent".
+   * Logical entries are reconstructed from Notion's rich-text representation
+   * BEFORE classification -- one entry is not necessarily one rich-text item.
+   * Notion may split a single logical entry across several adjacent unlinked
+   * plain-text items, and it carries a page mention as its own item.
+   *
+   * - An item's text is its `plain_text` when that is a non-empty, usable
+   *   string, and otherwise its `text.content` when THAT is usable; an item
+   *   carrying no usable text contributes nothing.
+   * - Adjacent unlinked text fragments are concatenated and then split at
+   *   newline boundaries, so every recovered line must be either a
+   *   `token:`-prefixed opaque token entry or an http(s) link (the read-side
+   *   tolerance for a hand-written link).
+   * - A linked item or a page mention stays its own entry: it flushes the
+   *   pending text buffer first and is never absorbed into an adjacent text
+   *   run, so mentions and tokens never merge.
+   * - A token-prefixed line is a COMPLETE entry only when its full syntax
+   *   and token value validate; the prefix alone never proves completeness,
+   *   because Notion can split one token across adjacent unlinked items
+   *   (e.g. `token:entity:` then `ENT-30`). An incomplete token-prefixed
+   *   line is buffered as a fragment for reconstruction instead.
+   * - A recovered line that is neither -- non-empty text of any other shape
+   *   -- is refused as unusable rather than skipped, so nothing a sender
+   *   wrote is ever silently discarded into "absent".
    */
   const rawEntries: Array<{ kind: "url"; url: string } | { kind: "token"; text: string }> = [];
+  const textBuffer: string[] = [];
+  // A text line is a COMPLETE standalone entry only when it is fully valid on
+  // its own: an http(s) link, or a token entry whose full syntax AND token
+  // value parse. A `token:`-prefixed line that does NOT fully parse is a
+  // partial fragment (Notion may split one token across adjacent unlinked
+  // items), so it is buffered for reconstruction; if no continuation ever
+  // arrives it is refused as unusable rather than accepted or silently split.
+  const isCompleteTokenEntry = (text: string): boolean =>
+    text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`) && parseHandoffSourceToken(text).ok;
+  const isStandaloneEntry = (text: string): boolean =>
+    isCompleteTokenEntry(text) || /^https?:\/\//i.test(text);
+  const flushTextBuffer = (): HandoffSourceExtraction | undefined => {
+    const combined = textBuffer.join("");
+    textBuffer.length = 0;
+    for (const line of combined.split(/\n/)) {
+      const text = line.trim();
+      if (!text) continue;
+      if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
+        rawEntries.push({ kind: "token", text });
+        continue;
+      }
+      if (/^https?:\/\//i.test(text)) {
+        rawEntries.push({ kind: "url", url: text });
+        continue;
+      }
+      return { ok: false, reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable entry: "${text.slice(0, 120)}" is neither an opaque token entry (${HANDOFF_SOURCE_TOKEN_PREFIX}:entity:<TOKEN> / ${HANDOFF_SOURCE_TOKEN_PREFIX}:matter:<TOKEN>) nor an http(s) link to an exact canonical artifact -- refused rather than silently treated as absent.` };
+    }
+  };
   for (const item of richTextItems(prop)) {
     const linked = (item.text?.link?.url ?? item.href) as unknown;
     if (typeof linked === "string" && linked.trim()) {
+      const flushed = flushTextBuffer();
+      if (flushed && !flushed.ok) return flushed;
       rawEntries.push({ kind: "url", url: linked.trim() });
       continue;
     }
     const content = (item.text as { content?: unknown } | undefined)?.content;
+    // Text-extraction fallback, deliberately preserved: `plain_text` wins only
+    // when it is a non-empty, usable string; otherwise `text.content` is used
+    // when IT is usable. An item whose values are both unusable (absent,
+    // non-string, empty, or whitespace-only) contributes nothing.
     const raw =
       typeof item.plain_text === "string" && item.plain_text.trim()
         ? item.plain_text
-        : typeof content === "string"
+        : typeof content === "string" && content.trim()
           ? content
           : "";
-    const text = raw.trim();
-    if (!text) continue; // an empty item carries nothing; nothing is inferred from it
-    if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
-      rawEntries.push({ kind: "token", text });
+    // Normalize escaped colons consistently here, before classification, so
+    // an escaped token prefix is not rejected as a fragment. parseHandoffSourceToken
+    // performs the same normalization on its input (idempotent).
+    const normalized = raw.replace(/\\:/g, ":");
+    const text = normalized.trim();
+    if (!text) continue;
+    if (text.includes("\n")) {
+      textBuffer.push(normalized);
       continue;
     }
-    if (/^https?:\/\//i.test(text)) {
-      rawEntries.push({ kind: "url", url: text });
+    if (isStandaloneEntry(text)) {
+      const flushed = flushTextBuffer();
+      if (flushed && !flushed.ok) return flushed;
+      if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
+        rawEntries.push({ kind: "token", text });
+      } else {
+        rawEntries.push({ kind: "url", url: text });
+      }
       continue;
     }
-    return {
-      ok: false,
-      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable entry: "${text.slice(0, 120)}" is neither an opaque token entry (${HANDOFF_SOURCE_TOKEN_PREFIX}:entity:<TOKEN> / ${HANDOFF_SOURCE_TOKEN_PREFIX}:matter:<TOKEN>) nor an http(s) link to an exact canonical artifact -- refused rather than silently treated as absent.`,
-    };
+    textBuffer.push(normalized);
   }
+  const flushed = flushTextBuffer();
+  if (flushed && !flushed.ok) return flushed;
   if (rawEntries.length === 0) {
     return {
       ok: false,
