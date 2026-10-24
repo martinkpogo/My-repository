@@ -574,6 +574,36 @@ test("extraction: fragmented rich text reconstructs token entries (HO-93 shape)"
   });
 });
 
+test("extraction: an empty or whitespace-only plain_text falls back to the item's text.content", () => {
+  const drifted = {
+    rich_text: [
+      { type: "text", text: { content: "token:entity:ENT-30", link: null }, plain_text: "", href: null },
+      { type: "text", text: { content: "token:matter:MAT-31", link: null }, plain_text: "   ", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: drifted }));
+  assert.deepEqual(result, {
+    ok: true,
+    mode: "sources",
+    refs: [
+      { kind: "token", tokenKind: "entity", token: "ENT-30" },
+      { kind: "token", tokenKind: "matter", token: "MAT-31" },
+    ],
+    tokens: { entityToken: "ENT-30", matterToken: "MAT-31" },
+  });
+});
+
+test("extraction: an item carrying no usable text in either field is ignored, and a Sources property with nothing usable still fails closed", () => {
+  const unusable = {
+    rich_text: [
+      { type: "text", text: { content: "   ", link: null }, plain_text: "", href: null },
+      { type: "text", text: { link: null }, plain_text: null, href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: unusable }));
+  assert.equal(result.ok, false);
+});
+
 test("extraction: a present property with one link resolves its exact page id (read shape)", () => {
   const result = extractHandoffSources(handoffProperties({ Sources: sourcesReadShape([CN_PAGE_URL], { tokens: false }) }));
   assert.deepEqual(result, { ok: true, mode: "sources", refs: [{ kind: "notion", pageId: CN_PAGE_ID }], tokens: {} });

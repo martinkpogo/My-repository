@@ -696,21 +696,24 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
     return { ok: true, mode: "legacy" };
   }
   /**
-   * Each item resolves to exactly one raw entry: a linked URL (artifact), a
-   * `token:`-prefixed plain-text item (token), or an http(s) plain-text item
-   * (artifact, the read-side tolerance for a hand-written link). An item
-   * that resolves to none of those -- non-empty text that is neither -- is
-   * refused as unusable rather than skipped, so nothing a sender wrote is
-   * ever silently discarded into "absent".
-   */
-  /**
-   * Reconstruct entries from Notion's rich-text representation before
-   * classification. Notion may split a single logical entry across several
-   * adjacent plain-text rich-text items (and may interleave page mentions as
-   * their own items), so adjacent unlinked text fragments are concatenated
-   * and then split on embedded newlines to recover the intended entries.
-   * Linked items and mentions stay distinct entries and are never absorbed
-   * into an adjacent text run.
+   * Logical entries are reconstructed from Notion's rich-text representation
+   * BEFORE classification -- one entry is not necessarily one rich-text item.
+   * Notion may split a single logical entry across several adjacent unlinked
+   * plain-text items, and it carries a page mention as its own item.
+   *
+   * - An item's text is its `plain_text` when that is a non-empty, usable
+   *   string, and otherwise its `text.content` when THAT is usable; an item
+   *   carrying no usable text contributes nothing.
+   * - Adjacent unlinked text fragments are concatenated and then split at
+   *   newline boundaries, so every recovered line must be either a
+   *   `token:`-prefixed opaque token entry or an http(s) link (the read-side
+   *   tolerance for a hand-written link).
+   * - A linked item or a page mention stays its own entry: it flushes the
+   *   pending text buffer first and is never absorbed into an adjacent text
+   *   run, so mentions and tokens never merge.
+   * - A recovered line that is neither -- non-empty text of any other shape
+   *   -- is refused as unusable rather than skipped, so nothing a sender
+   *   wrote is ever silently discarded into "absent".
    */
   const rawEntries: Array<{ kind: "url"; url: string } | { kind: "token"; text: string }> = [];
   const textBuffer: string[] = [];
@@ -742,10 +745,14 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
       continue;
     }
     const content = (item.text as { content?: unknown } | undefined)?.content;
+    // Text-extraction fallback, deliberately preserved: `plain_text` wins only
+    // when it is a non-empty, usable string; otherwise `text.content` is used
+    // when IT is usable. An item whose values are both unusable (absent,
+    // non-string, empty, or whitespace-only) contributes nothing.
     const raw =
-      typeof item.plain_text === "string"
+      typeof item.plain_text === "string" && item.plain_text.trim()
         ? item.plain_text
-        : typeof content === "string"
+        : typeof content === "string" && content.trim()
           ? content
           : "";
     // Normalize escaped colons consistently here, before classification, so
