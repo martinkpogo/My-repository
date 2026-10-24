@@ -9,6 +9,9 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             full = os.path.join(dirpath, fn)
             if os.path.abspath(full) == os.path.abspath(out):
                 continue
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            if rel == ".gitignore" or rel.startswith("dist/"):
+                continue
             arc = os.path.relpath(full, root)
             z.write(full, arc)
 # validate
