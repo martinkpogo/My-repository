@@ -207,7 +207,11 @@ export type HandoffSourceTokenParse =
  */
 export function parseHandoffSourceToken(raw: string): HandoffSourceTokenParse {
   const value = (raw ?? "").trim();
-  const match = /^token:(entity|matter):(.+)$/.exec(value);
+
+  // Normalize by removing backslashes - handles both escaped and unescaped tokens
+  const normalizedValue = value.replace(/\\:/g, ':');
+
+  const match = /^token:(entity|matter):(.+)$/.exec(normalizedValue);
   if (!match) {
     return { ok: false, reason: `"${value.slice(0, 120)}" is not an opaque token entry (expected token:entity:<TOKEN> or token:matter:<TOKEN>).` };
   }
@@ -523,14 +527,14 @@ export function parseNotionPageLink(raw: string): NotionPageLink {
   const host = parsed.hostname.toLowerCase();
   /**
    * Accepted hosts: `notion.so` and its subdomains (the long-standing
-   * canonical form), plus the exact host `app.notion.com`. Notion's
-   * canonical page links increasingly use `app.notion.com`, and a Handoff
-   * whose `Sources` names one was refused purely for its hostname even
-   * though it is the same exact-page reference. `app.notion.com` is added
-   * as one EXACT host only -- no `notion.com` subdomain wildcard -- so the
-   * accepted set stays closed and a lookalike host (`evil.app.notion.com`,
-   * `notion.com` itself, or any other subdomain) is still refused fail-closed.
-   */
+ * canonical form), plus the exact host `app.notion.com`. Notion's
+ * canonical page links increasingly use `app.notion.com`, and a Handoff
+ * whose `Sources` names one was refused purely for its hostname even
+ * though it is the same exact-page reference. `app.notion.com` is added
+ * as one EXACT host only -- no `notion.com` subdomain wildcard -- so the
+ * accepted set stays closed and a lookalike host (`evil.app.notion.com`,
+ * `notion.com` itself, or any other subdomain) is still refused fail-closed.
+ */
   if (host !== "notion.so" && !host.endsWith(".notion.so") && host !== "app.notion.com") {
     return { ok: false, reason: `"${value.slice(0, 120)}" is not a notion.so page link (nor an app.notion.com one) -- only exact canonical Notion pages may be sources.` };
   }
@@ -699,10 +703,41 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
    * refused as unusable rather than skipped, so nothing a sender wrote is
    * ever silently discarded into "absent".
    */
+  /**
+   * Reconstruct entries from Notion's rich-text representation before
+   * classification. Notion may split a single logical entry across several
+   * adjacent plain-text rich-text items (and may interleave page mentions as
+   * their own items), so adjacent unlinked text fragments are concatenated
+   * and then split on embedded newlines to recover the intended entries.
+   * Linked items and mentions stay distinct entries and are never absorbed
+   * into an adjacent text run.
+   */
   const rawEntries: Array<{ kind: "url"; url: string } | { kind: "token"; text: string }> = [];
+  const textBuffer: string[] = [];
+  const isStandaloneEntry = (text: string): boolean =>
+    text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`) || /^https?:\/\//i.test(text);
+  const flushTextBuffer = (): HandoffSourceExtraction | undefined => {
+    const combined = textBuffer.join("");
+    textBuffer.length = 0;
+    for (const line of combined.split(/\n/)) {
+      const text = line.trim();
+      if (!text) continue;
+      if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
+        rawEntries.push({ kind: "token", text });
+        continue;
+      }
+      if (/^https?:\/\//i.test(text)) {
+        rawEntries.push({ kind: "url", url: text });
+        continue;
+      }
+      return { ok: false, reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable entry: "${text.slice(0, 120)}" is neither an opaque token entry (${HANDOFF_SOURCE_TOKEN_PREFIX}:entity:<TOKEN> / ${HANDOFF_SOURCE_TOKEN_PREFIX}:matter:<TOKEN>) nor an http(s) link to an exact canonical artifact -- refused rather than silently treated as absent.` };
+    }
+  };
   for (const item of richTextItems(prop)) {
     const linked = (item.text?.link?.url ?? item.href) as unknown;
     if (typeof linked === "string" && linked.trim()) {
+      const flushed = flushTextBuffer();
+      if (flushed && !flushed.ok) return flushed;
       rawEntries.push({ kind: "url", url: linked.trim() });
       continue;
     }
@@ -714,20 +749,21 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
           ? content
           : "";
     const text = raw.trim();
-    if (!text) continue; // an empty item carries nothing; nothing is inferred from it
-    if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
-      rawEntries.push({ kind: "token", text });
+    if (!text) continue;
+    if (isStandaloneEntry(text)) {
+      const flushed = flushTextBuffer();
+      if (flushed && !flushed.ok) return flushed;
+      if (text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`)) {
+        rawEntries.push({ kind: "token", text });
+      } else {
+        rawEntries.push({ kind: "url", url: text });
+      }
       continue;
     }
-    if (/^https?:\/\//i.test(text)) {
-      rawEntries.push({ kind: "url", url: text });
-      continue;
-    }
-    return {
-      ok: false,
-      reason: `the Handoff's ${HANDOFF_SOURCES_PROPERTY} property carries an unusable entry: "${text.slice(0, 120)}" is neither an opaque token entry (${HANDOFF_SOURCE_TOKEN_PREFIX}:entity:<TOKEN> / ${HANDOFF_SOURCE_TOKEN_PREFIX}:matter:<TOKEN>) nor an http(s) link to an exact canonical artifact -- refused rather than silently treated as absent.`,
-    };
+    textBuffer.push(raw);
   }
+  const flushed = flushTextBuffer();
+  if (flushed && !flushed.ok) return flushed;
   if (rawEntries.length === 0) {
     return {
       ok: false,
