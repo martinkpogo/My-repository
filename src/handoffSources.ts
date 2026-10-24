@@ -711,14 +711,27 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
    * - A linked item or a page mention stays its own entry: it flushes the
    *   pending text buffer first and is never absorbed into an adjacent text
    *   run, so mentions and tokens never merge.
+   * - A token-prefixed line is a COMPLETE entry only when its full syntax
+   *   and token value validate; the prefix alone never proves completeness,
+   *   because Notion can split one token across adjacent unlinked items
+   *   (e.g. `token:entity:` then `ENT-30`). An incomplete token-prefixed
+   *   line is buffered as a fragment for reconstruction instead.
    * - A recovered line that is neither -- non-empty text of any other shape
    *   -- is refused as unusable rather than skipped, so nothing a sender
    *   wrote is ever silently discarded into "absent".
    */
   const rawEntries: Array<{ kind: "url"; url: string } | { kind: "token"; text: string }> = [];
   const textBuffer: string[] = [];
+  // A text line is a COMPLETE standalone entry only when it is fully valid on
+  // its own: an http(s) link, or a token entry whose full syntax AND token
+  // value parse. A `token:`-prefixed line that does NOT fully parse is a
+  // partial fragment (Notion may split one token across adjacent unlinked
+  // items), so it is buffered for reconstruction; if no continuation ever
+  // arrives it is refused as unusable rather than accepted or silently split.
+  const isCompleteTokenEntry = (text: string): boolean =>
+    text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`) && parseHandoffSourceToken(text).ok;
   const isStandaloneEntry = (text: string): boolean =>
-    text.toLowerCase().startsWith(`${HANDOFF_SOURCE_TOKEN_PREFIX}:`) || /^https?:\/\//i.test(text);
+    isCompleteTokenEntry(text) || /^https?:\/\//i.test(text);
   const flushTextBuffer = (): HandoffSourceExtraction | undefined => {
     const combined = textBuffer.join("");
     textBuffer.length = 0;

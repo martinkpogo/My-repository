@@ -604,6 +604,59 @@ test("extraction: an item carrying no usable text in either field is ignored, an
   assert.equal(result.ok, false);
 });
 
+test("extraction: an entity token split after its kind prefix is reconstructed from the adjacent fragment", () => {
+  const split = {
+    rich_text: [
+      { type: "text", text: { content: "token:entity:", link: null }, plain_text: "token:entity:", href: null },
+      { type: "text", text: { content: "ENT-30", link: null }, plain_text: "ENT-30", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: split }));
+  assert.deepEqual(result, {
+    ok: true,
+    mode: "sources",
+    refs: [{ kind: "token", tokenKind: "entity", token: "ENT-30" }],
+    tokens: { entityToken: "ENT-30" },
+  });
+});
+
+test("extraction: a matter token split after its kind prefix is reconstructed from the adjacent fragment", () => {
+  const split = {
+    rich_text: [
+      { type: "text", text: { content: "token:matter:", link: null }, plain_text: "token:matter:", href: null },
+      { type: "text", text: { content: "MAT-31", link: null }, plain_text: "MAT-31", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: split }));
+  assert.deepEqual(result, {
+    ok: true,
+    mode: "sources",
+    refs: [{ kind: "token", tokenKind: "matter", token: "MAT-31" }],
+    tokens: { matterToken: "MAT-31" },
+  });
+});
+
+test("extraction: an incomplete token with no continuation fails closed", () => {
+  const incomplete = {
+    rich_text: [
+      { type: "text", text: { content: "token:entity:", link: null }, plain_text: "token:entity:", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: incomplete }));
+  assert.equal(result.ok, false);
+});
+
+test("extraction: a reconstructed token that is malformed fails closed", () => {
+  const malformed = {
+    rich_text: [
+      { type: "text", text: { content: "token:entity:", link: null }, plain_text: "token:entity:", href: null },
+      { type: "text", text: { content: "not-a-valid-token", link: null }, plain_text: "not-a-valid-token", href: null },
+    ],
+  };
+  const result = extractHandoffSources(handoffProperties({ Sources: malformed }));
+  assert.equal(result.ok, false);
+});
+
 test("extraction: a present property with one link resolves its exact page id (read shape)", () => {
   const result = extractHandoffSources(handoffProperties({ Sources: sourcesReadShape([CN_PAGE_URL], { tokens: false }) }));
   assert.deepEqual(result, { ok: true, mode: "sources", refs: [{ kind: "notion", pageId: CN_PAGE_ID }], tokens: {} });
