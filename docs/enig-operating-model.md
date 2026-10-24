@@ -23,7 +23,7 @@ Every section below describes that model. Where a section describes this reposit
 
 ## Binding, not aspirational
 
-This document is the binding detailed reference for how this repository implements ENIG's architecture and governance model; ENIG HQ in Notion is the canonical architecture, and where the two disagree Notion wins and the discrepancy is reported to Martin (decision of 2026-10-22). It is not a proposal, not a suggestion a session is free to skip under time pressure. `AGENTS.md` points every session here before touching Units/Hats/Actions/routing/dispatch, precisely because a `docs/` file only gets read if someone happens to open it; this line is what makes that pointer mean something.
+This document is the authoritative description of ENIG's architecture and governance model -- not a proposal, not a suggestion a session is free to skip under time pressure. `AGENTS.md` points every session here before touching Units/Hats/Actions/routing/dispatch, precisely because a `docs/` file only gets read if someone happens to open it; this line is what makes that pointer mean something.
 
 Two rules follow directly:
 
