@@ -743,12 +743,16 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
     }
     const content = (item.text as { content?: unknown } | undefined)?.content;
     const raw =
-      typeof item.plain_text === "string" && item.plain_text.trim()
+      typeof item.plain_text === "string"
         ? item.plain_text
         : typeof content === "string"
           ? content
           : "";
-    const text = raw.trim();
+    // Normalize escaped colons consistently here, before classification, so
+    // an escaped token prefix is not rejected as a fragment. parseHandoffSourceToken
+    // performs the same normalization on its input (idempotent).
+    const normalized = raw.replace(/\\:/g, ":");
+    const text = normalized.trim();
     if (!text) continue;
     if (isStandaloneEntry(text)) {
       const flushed = flushTextBuffer();
@@ -760,7 +764,7 @@ export function extractHandoffSources(properties: NotionProperties | undefined):
       }
       continue;
     }
-    textBuffer.push(raw);
+    textBuffer.push(normalized);
   }
   const flushed = flushTextBuffer();
   if (flushed && !flushed.ok) return flushed;
