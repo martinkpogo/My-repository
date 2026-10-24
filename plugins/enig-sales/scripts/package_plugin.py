@@ -1,8 +1,16 @@
 import os, sys, zipfile, hashlib
+
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 dist = os.path.join(root, "dist")
 os.makedirs(dist, exist_ok=True)
 out = os.path.join(dist, "enig-sales.plugin")
+
+ALLOWED = {
+    ".claude-plugin/plugin.json",
+    "README.md",
+    "skills/sales-call-prep/SKILL.md",
+}
+
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for dirpath, _, files in os.walk(root):
         for fn in files:
@@ -10,14 +18,23 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             if os.path.abspath(full) == os.path.abspath(out):
                 continue
             rel = os.path.relpath(full, root).replace(os.sep, "/")
-            if rel == ".gitignore" or rel.startswith("dist/"):
+            if rel.startswith("dist/"):
                 continue
-            arc = os.path.relpath(full, root)
+            if rel == ".gitignore":
+                continue
+            if rel == "REQUIREMENTS-MAPPING.md":
+                continue
+            if rel.startswith("scripts/"):
+                continue
+            arc = rel  # files at plugin root layout
+            if arc not in ALLOWED:
+                raise SystemExit(f"unexpected file in package allowlist: {arc}")
             z.write(full, arc)
+
 # validate
 with zipfile.ZipFile(out) as z:
     names = z.namelist()
-    assert ".claude-plugin/plugin.json" in names, "manifest missing"
-    assert "skills/sales-call-prep/SKILL.md" in names, "skill missing"
+    for r in sorted(ALLOWED):
+        assert r in names, f"manifest/required missing: {r}"
 print("packaged:", out)
 print("sha256:", hashlib.sha256(open(out,"rb").read()).hexdigest())

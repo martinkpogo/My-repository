@@ -11,4 +11,4 @@ Sources: Project Instruction, Operating Specification, Static Reference (provide
 | Identify gaps and useful questions | Full | "Identify gaps and useful questions" |
 | Avoid inventing client history/qualification/investment | Full | "Avoid inventing client history, qualification outcomes, investment ranges, approvals, or record state" |
 | No governed writes/external actions | Full | "Make no governed writes and take no external action" |
-| CVE/Call Notes/Handoff safeguards | Pending (#362) | Not implemented in this skill; deferred to #362 |
+| CVE/Call Notes/Handoff safeguards | Pending (#362) | Not implemented in this skill; deferred to #362. BD-5 note included in skill text for awareness, but implementation deferred. |
