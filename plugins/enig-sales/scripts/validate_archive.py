@@ -9,6 +9,7 @@ ALLOWED = {
     ".claude-plugin/plugin.json",
     "README.md",
     "skills/sales-call-prep/SKILL.md",
+    "skills/sales-call-evidence/SKILL.md",
 }
 
 with zipfile.ZipFile(path) as z:

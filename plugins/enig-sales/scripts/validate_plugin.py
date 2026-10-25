@@ -8,8 +8,9 @@ with open(manifest_path) as f:
 for k in ("name","version","description"):
     if k not in m:
         print("missing field", k); sys.exit(1)
-skill = os.path.join(root, "skills", "sales-call-prep", "SKILL.md")
-if not os.path.isfile(skill):
-    print("missing SKILL.md"); sys.exit(1)
+for skill_name in ("sales-call-prep", "sales-call-evidence"):
+    skill = os.path.join(root, "skills", skill_name, "SKILL.md")
+    if not os.path.isfile(skill):
+        print("missing SKILL.md for", skill_name); sys.exit(1)
 print("OK")
 sys.exit(0)
