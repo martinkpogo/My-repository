@@ -98,7 +98,7 @@ export function matterCurrentWorkKey(matterId: string): string {
  * can never drift apart.
  */
 export function isTerminalWorkStage(stage: string): boolean {
-  return stage === "complete" || stage === "closed_not_qualified" || stage === "cancelled" || stage === "result_review_blocked";
+  return stage === "complete" || stage === "closed_not_qualified" || stage === "cancelled";
 }
 
 /** A Matter lookup that could not decide -- the caller refuses, never guesses. */

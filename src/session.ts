@@ -512,6 +512,17 @@ export class WorkSession extends DurableObject<Env> {
     if (!review) {
       return { allowed: false, reason: "Result review contract required for successful closure" };
     }
+    // Require expected Result and completion criteria
+    if (!review.expectedResult || !review.expectedResult.trim()) {
+      review.gateStatus = "blocked";
+      review.blockReason = "Result contract missing: expected Result required";
+      return { allowed: false, reason: review.blockReason };
+    }
+    if (!review.completionCriteria || review.completionCriteria.length === 0) {
+      review.gateStatus = "blocked";
+      review.blockReason = "Result contract missing: completion criteria required";
+      return { allowed: false, reason: review.blockReason };
+    }
     if (review.expectedResult && (!review.completionCriteria || review.completionCriteria.length === 0)) {
       review.gateStatus = "blocked";
       review.blockReason = "Result criteria missing";
@@ -528,6 +539,16 @@ export class WorkSession extends DurableObject<Env> {
         review.blockReason = "Checker must be independent of the performer";
         return { allowed: false, reason: review.blockReason };
       }
+      if (!review.checker.checkerId || review.checker.checkerId === state.actionName) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Checker identity must be independent and verified";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.checker.checkedAt) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Checker verification must be recorded with timestamp";
+        return { allowed: false, reason: review.blockReason };
+      }
       if (!review.resultApproval) {
         review.gateStatus = "blocked";
         review.blockReason = "Martin's Result approval required";
@@ -541,6 +562,11 @@ export class WorkSession extends DurableObject<Env> {
       if (!review.resultApproval.approvedAt) {
         review.gateStatus = "blocked";
         review.blockReason = "Result approval not properly recorded";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.resultApproval.approvalId && !review.resultApproval.approvalProofRef) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Result approval must be backed by a trusted approval record";
         return { allowed: false, reason: review.blockReason };
       }
     }
