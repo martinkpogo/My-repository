@@ -22,7 +22,7 @@ Only use evidence and source material actually provided or legitimately accessib
 
 ## Commercial Value Evidence (CVE) determination
 
-Apply the approved evaluator rule exactly. It mirrors the Runtime deterministic evaluator; Martin attests the determination when he approves the record.
+Apply the approved rule exactly as written in the Static Reference's Commercial Value Evidence determination and BD-5. Martin attests the determination when he approves the record.
 
 - **`Satisfied`** — a **numerical value at stake or cost of inaction** has a **non-assumption evidence type**, an **attributable source**, and a **period** the value applies to. All elements must be present and traceable.
 - **`Not Satisfied`** — the available evidence **contradicts** the condition. State the contradiction and its sources. Missing or incomplete evidence is never `Not Satisfied`.

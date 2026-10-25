@@ -9,7 +9,8 @@ import { readFileSync } from 'node:fs';
  * carries the canonical requirements from the Isolated Sales Operating
  * Specification (Project Instruction §§4/7/8), the Static Reference (Evidence
  * classes, Qualification conditions, Call Notes, Handoffs) and BD-5, and they
- * pin representative decision cases from the approved CVE evaluator rule.
+ * pin representative decision cases from the approved written CVE rule
+ * (Static Reference "Commercial Value Evidence determination" + BD-5).
  *
  * They are instruction-level checks of written skill content plus a reference
  * decision table — they are NOT technical enforcement of the skill at runtime.
@@ -33,22 +34,67 @@ const validatorScript = readFileSync(
 );
 
 // ---------------------------------------------------------------------------
-// Reference CVE decision table — encodes the approved evaluator rule
-// (Static Reference: "Satisfied when a numerical value at stake or cost of
-// inaction has a non-assumption evidence type, an attributable source and a
-// period; otherwise Insufficient Evidence (or Not Satisfied when the evidence
-// contradicts it)"; BD-5 items 2–3).
+// Reference CVE decision table -- encodes ONLY the approved written rule from
+// the Static Reference ("Commercial Value Evidence determination": Satisfied
+// when a numerical value at stake or cost of inaction has a non-assumption
+// evidence type, an attributable source and a period; otherwise Insufficient
+// Evidence -- or Not Satisfied when the evidence contradicts it) and BD-5
+// items 2-3. It deliberately makes NO claim about the Runtime evaluator's
+// implementation; parity has not been demonstrated (see
+// REQUIREMENTS-MAPPING-362.md, Uncovered/limitations).
+//
+// Class permissibility is taken strictly from canonical sources; nothing is
+// inferred and no allowed-class list is invented beyond what they resolve:
+//   CF         permitted -- Call Notes contract evidence_rules: "Information
+//              directly established by permitted source evidence"; labelling
+//              table: independently checked, cited with a locator.
+//   CS         permitted -- Call Notes contract evidence_rules: "Information
+//              explicitly stated during the call"; client-given numbers are
+//              recorded as VE class CS (CV&POM 3 recognises client-estimated
+//              value as a legitimate value-at-stake category).
+//   VE         permitted -- the canonical value-evidence form carrying figure,
+//              unit, period, source, class and uncertainty (Static Reference
+//              evidence classes), i.e. exactly the rule's four elements.
+//   INF        prohibited -- labelling rules: "A conclusion you drew -- never
+//              enough to make a condition Supported"; CV&POM 2: missing
+//              numerical evidence "must not be filled by inference".
+//   HYP        prohibited -- labelling rules: hypothesis "To test", and
+//              "Never ... treat pipeline or hoped-for sales as value at
+//              stake"; value must be "stated or evidenced" (Call Notes
+//              contract value_evidence rule).
+//   UQ         prohibited -- labelling rules: "Something that matters but was
+//              not stated" -- by definition it supplies no figure, source or
+//              period.
+//   assumption prohibited -- Static Reference rule requires a "non-assumption
+//              evidence type"; assumption-only evidence cannot satisfy the
+//              condition on its own.
+//   SO         UNRESOLVED in canonical sources: no fetched canonical text says
+//              whether a Sales observation may independently carry value at
+//              stake (Call Notes contract calls it "Sales interpretation
+//              explicitly attributed as an observation"; the labelling table
+//              never assigns figures to SO). Per the task's stop rule this is
+//              NOT decided here: it fails closed to Insufficient Evidence
+//              pending Architect review -- see the dedicated SO test below.
 // ---------------------------------------------------------------------------
+
+type EvidenceClass = 'CF' | 'CS' | 'SO' | 'INF' | 'HYP' | 'UQ' | 'VE';
+
+const CANONICALLY_PERMITTED_CLASSES: readonly EvidenceClass[] = ['CF', 'CS', 'VE'];
+const CANONICALLY_PROHIBITED_CLASSES: readonly EvidenceClass[] = ['INF', 'HYP', 'UQ'];
 
 type CveEvidence = {
   /** Numeric value at stake or cost of inaction; absent when unknown. */
   valueAtStake?: number | string;
   /** Period the value applies to. */
   period?: string;
-  /** Evidence type: canonical class other than an assumption, or 'assumption'. */
-  evidenceType?: 'CF' | 'CS' | 'SO' | 'INF' | 'HYP' | 'UQ' | 'VE' | 'assumption';
   /** Attributable source reference. */
   source?: string;
+  /**
+   * Canonical evidence class recorded for the figure, or the literal
+   * 'assumption' evidence type named by the Static Reference rule, or absent
+   * when the basis was never established.
+   */
+  evidenceClass?: EvidenceClass | 'assumption';
   /** True only when the available evidence contradicts the condition. */
   contradictsCondition?: boolean;
 };
@@ -59,21 +105,42 @@ function determineCveOutcome(e: CveEvidence): CveOutcome {
   if (e.contradictsCondition === true) return 'Not Satisfied';
   const hasValue =
     e.valueAtStake !== undefined && e.valueAtStake !== null && e.valueAtStake !== '';
-  const hasPeriod = typeof e.period === 'string' && e.period.length > 0;
-  const hasSource = typeof e.source === 'string' && e.source.length > 0;
-  const nonAssumptionEvidence = e.evidenceType !== undefined && e.evidenceType !== 'assumption';
-  if (hasValue && nonAssumptionEvidence && hasSource && hasPeriod) return 'Satisfied';
-  return 'Insufficient Evidence';
+  if (!hasValue) return 'Insufficient Evidence';
+  const cls = e.evidenceClass;
+  if (cls === undefined) return 'Insufficient Evidence'; // basis never established
+  if (cls === 'assumption') return 'Insufficient Evidence'; // SR: non-assumption evidence type
+  if (CANONICALLY_PROHIBITED_CLASSES.includes(cls)) return 'Insufficient Evidence';
+  // Fail closed on anything not affirmatively permitted -- including the
+  // canonically UNRESOLVED 'SO' basis (reported for Architect review).
+  if (!CANONICALLY_PERMITTED_CLASSES.includes(cls)) return 'Insufficient Evidence';
+  if (typeof e.source !== 'string' || e.source.length === 0) return 'Insufficient Evidence';
+  if (typeof e.period !== 'string' || e.period.length === 0) return 'Insufficient Evidence';
+  return 'Satisfied';
 }
 
-test('CVE representative case: complete evidence is Satisfied', () => {
+const completeFigure = {
+  valueAtStake: 180000,
+  period: 'per year',
+  source: 'Call Notes Note, verified from client-supplied figure',
+} as const;
+
+test('CVE representative case: complete CF-classed figure is Satisfied', () => {
   assert.strictEqual(
-    determineCveOutcome({
-      valueAtStake: 180000,
-      period: 'per year',
-      evidenceType: 'CF',
-      source: 'Call Notes Note, verified from client-supplied figure',
-    }),
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'CF' }),
+    'Satisfied',
+  );
+});
+
+test('CVE representative case: complete CS-classed figure (client-estimated) is Satisfied', () => {
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'CS' }),
+    'Satisfied',
+  );
+});
+
+test('CVE representative case: complete VE-classed value evidence is Satisfied', () => {
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'VE' }),
     'Satisfied',
   );
 });
@@ -81,10 +148,8 @@ test('CVE representative case: complete evidence is Satisfied', () => {
 test('CVE representative case: contradictory evidence is Not Satisfied', () => {
   assert.strictEqual(
     determineCveOutcome({
-      valueAtStake: 180000,
-      period: 'per year',
-      evidenceType: 'CF',
-      source: 'client call',
+      ...completeFigure,
+      evidenceClass: 'CS',
       contradictsCondition: true,
     }),
     'Not Satisfied',
@@ -93,39 +158,73 @@ test('CVE representative case: contradictory evidence is Not Satisfied', () => {
 
 test('CVE boundary: missing period is Insufficient Evidence, never Not Satisfied', () => {
   assert.strictEqual(
-    determineCveOutcome({ valueAtStake: 180000, evidenceType: 'CF', source: 'client call' }),
+    determineCveOutcome({ valueAtStake: 180000, source: 'client call', evidenceClass: 'CS' }),
     'Insufficient Evidence',
   );
 });
 
 test('CVE boundary: missing numerical value is Insufficient Evidence, never Not Satisfied', () => {
   assert.strictEqual(
-    determineCveOutcome({ period: 'per year', evidenceType: 'CF', source: 'client call' }),
-    'Insufficient Evidence',
-  );
-});
-
-test('CVE boundary: assumption-only evidence can never be Satisfied', () => {
-  assert.strictEqual(
-    determineCveOutcome({
-      valueAtStake: 180000,
-      period: 'per year',
-      evidenceType: 'assumption',
-      source: 'sales guess',
-    }),
+    determineCveOutcome({ period: 'per year', source: 'client call', evidenceClass: 'CS' }),
     'Insufficient Evidence',
   );
 });
 
 test('CVE boundary: no attributable source is Insufficient Evidence', () => {
   assert.strictEqual(
-    determineCveOutcome({ valueAtStake: 180000, period: 'per year', evidenceType: 'CF' }),
+    determineCveOutcome({ valueAtStake: 180000, period: 'per year', evidenceClass: 'CS' }),
     'Insufficient Evidence',
   );
 });
 
 test('CVE boundary: wholly absent evidence is Insufficient Evidence, not Not Satisfied', () => {
   assert.strictEqual(determineCveOutcome({}), 'Insufficient Evidence');
+});
+
+test('CVE boundary: an unestablished evidence basis is Insufficient Evidence', () => {
+  assert.strictEqual(
+    determineCveOutcome({ valueAtStake: 180000, period: 'per year', source: 'client call' }),
+    'Insufficient Evidence',
+  );
+});
+
+test('CVE negative: assumption-classed evidence can never be Satisfied', () => {
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'assumption' }),
+    'Insufficient Evidence',
+  );
+});
+
+test('CVE negative: INF can never be Satisfied ("never enough to make a condition Supported")', () => {
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'INF' }),
+    'Insufficient Evidence',
+  );
+});
+
+test('CVE negative: HYP can never be Satisfied (a hypothesis is to test, not stated or evidenced value)', () => {
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'HYP' }),
+    'Insufficient Evidence',
+  );
+});
+
+test('CVE negative: UQ can never be Satisfied (nothing was stated, so no figure/source/period exists)', () => {
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'UQ' }),
+    'Insufficient Evidence',
+  );
+});
+
+test('CVE negative (UNRESOLVED -- pending Architect): SO fails closed to Insufficient Evidence', () => {
+  // Canonical sources do not say whether a Sales observation may independently
+  // carry value at stake. The task's stop rule forbids deciding it here, so
+  // the reference table fails closed. If Architect rules that SO is permitted,
+  // this expectation and CANONICALLY_PERMITTED_CLASSES change together.
+  assert.strictEqual(
+    determineCveOutcome({ ...completeFigure, evidenceClass: 'SO' }),
+    'Insufficient Evidence',
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -180,9 +279,11 @@ test('skill forbids CVE outcomes from bypassing qualification conditions or prog
   assert.match(skill, /must not bypass the other qualification conditions or Martin's progression approval/);
 });
 
-test('skill pins the determination to the evaluator rule and Martin attestation', () => {
-  assert.match(skill, /mirrors the Runtime deterministic evaluator/);
+test('skill attributes the CVE rule to the approved written sources and makes no Runtime-parity claim', () => {
+  assert.match(skill, /approved rule exactly as written in the Static Reference's Commercial Value Evidence determination and BD-5/);
   assert.match(skill, /Martin attests the determination when he approves the record/);
+  assert.doesNotMatch(skill, /mirrors the Runtime/i);
+  assert.doesNotMatch(skill, /Runtime deterministic evaluator/);
 });
 
 test('skill requires Martin explicit approval for Call Notes record creation', () => {
