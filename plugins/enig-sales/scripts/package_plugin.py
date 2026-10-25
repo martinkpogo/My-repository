@@ -9,6 +9,7 @@ ALLOWED = {
     ".claude-plugin/plugin.json",
     "README.md",
     "skills/sales-call-prep/SKILL.md",
+    "skills/sales-call-evidence/SKILL.md",
 }
 
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -22,7 +23,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
                 continue
             if rel == ".gitignore":
                 continue
-            if rel == "REQUIREMENTS-MAPPING.md":
+            if rel.startswith("REQUIREMENTS-MAPPING"):
                 continue
             if rel.startswith("scripts/"):
                 continue
