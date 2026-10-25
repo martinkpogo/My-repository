@@ -674,6 +674,14 @@ export interface WorkState {
    * this exact call, queued a Handoff."
    */
   pendingHandoffAutoCheck?: boolean;
+
+  /**
+   * Result review lifecycle state (BD-8). Work owns generic enforcement;
+   * Actions declare criteria. Production and legitimate Handoffs must not
+   * wait for final review. Successful closure requires criteria satisfied,
+   * independent Checker verification, and Martin's separate approval.
+   */
+  resultReview?: ResultReviewState;
 }
 
 /**
@@ -730,4 +738,45 @@ export interface SessionSummary {
   entityToken?: string;
   /** The Work's canonical Matter token (e.g. "MAT-20") -- same semantics as entityToken, Matter side. */
   matterToken?: string;
+
+  /**
+   * Result review lifecycle state (BD-8). Work owns generic enforcement;
+   * Actions declare criteria. Production and legitimate Handoffs must not
+   * wait for final review. Successful closure requires criteria satisfied,
+   * independent Checker verification, and Martin's separate approval.
+   */
+  resultReview?: ResultReviewState;
+}
+
+export interface ResultReviewEvidenceRef {
+  kind: string;
+  ref: string;
+  note?: string;
+}
+
+export interface ResultReviewCheckerVerdict {
+  checkerId: string;
+  outcome: "pending" | "passed" | "failed";
+  reason?: string;
+  checkedAt?: string;
+  independent: boolean;
+}
+
+export interface ResultReviewApproval {
+  approver: "martin";
+  approvalId?: string;
+  approvalProofRef?: string;
+  approvedAt: string;
+  criteriaHash?: string;
+  checkerVerdictRef?: string;
+}
+
+export interface ResultReviewState {
+  expectedResult?: string;
+  completionCriteria?: readonly string[];
+  evidenceRefs?: readonly ResultReviewEvidenceRef[];
+  checker?: ResultReviewCheckerVerdict;
+  resultApproval?: ResultReviewApproval;
+  gateStatus: "pending" | "blocked" | "passed";
+  blockReason?: string;
 }
