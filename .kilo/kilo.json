@@ -6,7 +6,7 @@
       "command": ["npx", "-y", "@notionhq/notion-mcp-server"],
       "enabled": true,
       "environment": {
-        "NOTION_TOKEN": "PASTE_YOUR_NOTION_TOKEN_HERE"
+        "NOTION_TOKEN": "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"
       }
     }
   }
