@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import { getPage, plainText, richText, select } from "./notion";
 import { updateHandoff } from "./handoffWriter";
 import type { AccessContext } from "./access";
+import type { ResultReviewState } from "./types";
 
 /**
  * Shared Handoff pickup-idempotency guard, used by every Unit pickup that
@@ -57,4 +58,19 @@ export async function closeHandoffIfOpen(env: Env, handoffId: string, reason: st
     },
     access,
   );
+}
+
+export function isResultReviewSatisfied(review?: ResultReviewState): boolean {
+  if (!review) return false;
+  if (!review.expectedResult || !review.expectedResult.trim()) return false;
+  if (!review.completionCriteria || review.completionCriteria.length === 0) return false;
+  if (!review.checker || review.checker.outcome !== "passed") return false;
+  if (!review.checker.independent) return false;
+  if (!review.checker.checkerId) return false;
+  if (!review.checker.checkedAt) return false;
+  if (!review.resultApproval) return false;
+  if (review.resultApproval.approver !== "martin") return false;
+  if (!review.resultApproval.approvedAt) return false;
+  if (!review.resultApproval.approvalId && !review.resultApproval.approvalProofRef) return false;
+  return true;
 }
