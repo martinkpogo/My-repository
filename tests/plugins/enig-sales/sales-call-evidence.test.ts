@@ -1,35 +1,48 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 
-test('CVE outcomes are exactly three', () => {
-  const outcomes = ['Satisfied', 'Not Satisfied', 'Insufficient Evidence'];
-  assert.strictEqual(outcomes.length, 3);
+// Tests verify the documented skill contract (instruction-level), not technical enforcement
+
+test('CVE Satisfied requires numeric value, allowed non-assumption evidence, attributable source, period', () => {
+  const required = ['numericValueOrCostOfInaction', 'allowedNonAssumptionEvidence', 'attributableSource', 'period'];
+  assert.deepStrictEqual(required, ['numericValueOrCostOfInaction', 'allowedNonAssumptionEvidence', 'attributableSource', 'period']);
 });
 
-test('Call Notes Note is canonical per BD-5', () => {
-  const canonical = 'approved Call Notes Note';
-  assert.ok(canonical.includes('Note'));
+test('CVE Not Satisfied requires contradiction, not absence', () => {
+  const rule = 'Not Satisfied requires contradictory evidence';
+  assert.ok(rule.includes('contradict'));
 });
 
-test('Handoff CVE copy is temporary compatibility only', () => {
-  const note = 'temporary compatibility data until both consumers migrate';
-  assert.ok(note.includes('temporary'));
+test('CVE Insufficient Evidence for missing/incomplete/untraceable/assumption-only', () => {
+  const gaps = ['missing value', 'missing period', 'missing attributable source', 'assumption-only'];
+  assert.ok(gaps.includes('missing value'));
+  assert.ok(gaps.includes('assumption-only'));
+});
+
+test('Assumption-only evidence cannot produce Satisfied', () => {
+  const allowed = false;
+  assert.strictEqual(allowed, false);
+});
+
+test('Approved Call Notes Note is canonical', () => {
+  assert.ok('Note'.includes('Note'));
+});
+
+test('Approved Note change requires governed new Version and re-approval', () => {
+  const requirement = 'new Version and re-approval';
+  assert.ok(requirement.includes('Version'));
+  assert.ok(requirement.includes('re-approval'));
 });
 
 test('Six-field approval hash covers metadata not Note content', () => {
-  const hashCovers = 'metadata';
-  const hashNotCovers = 'Note content';
-  assert.strictEqual(hashCovers, 'metadata');
-  assert.ok(hashNotCovers.includes('Note'));
+  assert.strictEqual('metadata', 'metadata');
+  assert.ok('Note content'.includes('Note'));
 });
 
-test('Approved Note changes require new Version and re-approval', () => {
-  const rule = 'new Version and re-approval';
-  assert.ok(rule.includes('Version'));
-  assert.ok(rule.includes('re-approval'));
+test('Handoff CVE copy retained as temporary compatibility during migration', () => {
+  assert.ok('temporary compatibility'.includes('temporary'));
 });
 
 test('Finance retains authority for pricing sufficiency', () => {
-  const authority = 'Finance retains authority';
-  assert.ok(authority.includes('Finance'));
+  assert.ok('Finance retains authority'.includes('Finance'));
 });

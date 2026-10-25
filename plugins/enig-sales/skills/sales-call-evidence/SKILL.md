@@ -12,15 +12,16 @@ Only use evidence and source material actually provided or legitimately accessib
 
 ## Evidence classification and attribution
 For each item:
-1. **Source attribution** — Record source identifier/path and provenance.
+1. **Source attribution** — Record source identifier/path and provenance. Every verified fact must have an attributable source.
 2. **Classification** — Classify as Verified fact | Client-reported (unverified) | Assumption | Hypothesis | Unknown.
-3. **Traceability** — Every verified fact must have traceable source reference; unverified items must not be promoted to facts.
+3. **Traceability** — Every verified fact must have traceable source reference; unverified items must not be promoted to facts. An assumption alone is not sufficient as allowed evidence for Satisfied.
 
 ## Commercial Value Evidence (CVE) determination
-Determine one of:
-- **Satisfied** — Required evidence elements present with traceable sources per canonical requirements.
-- **Not Satisfied** — Required elements missing or contradicted such that CVE cannot be satisfied.
-- **Insufficient Evidence** — Evidence provided is incomplete; specific gaps listed with what would close them.
+Apply the approved rule exactly:
+
+- **Satisfied** — All required evidence elements are present, including **(a) a numeric value at stake or cost of inaction**, **(b) an allowed evidence type other than an assumption** (e.g., a verified/documented fact or approved source per canonical categories), **(c) an attributable source**, and **(d) a period** (timeframe the value applies to). All elements must be traceable.
+- **Not Satisfied** — Available evidence **contradicts** the requirement (not merely missing). State the contradiction and sources.
+- **Insufficient Evidence** — Evidence is missing, incomplete, untraceable, or does not establish whether the requirement is met. **This is the correct outcome when required elements are absent.** State the specific gaps and what evidence would resolve them (e.g., missing numeric value, missing period, missing attributable source, assumption-only). Do not default to Not Satisfied for absence.
 
 Do not fabricate values. If information missing, mark Insufficient Evidence and list gaps.
 
@@ -34,7 +35,7 @@ Do not fabricate values. If information missing, mark Insufficient Evidence and 
 
 ## Rules
 - No governed writes or external actions.
-- Distinguish instruction-level guidance from technical enforcement.
+- Distinguish instruction-level guidance from technical enforcement. Written instructions do not provide technical enforcement.
 - If a safeguard cannot be reliably enforced within Claude.ai chat, state the limitation explicitly.
 - CVE/Call Notes/Handoff implementation details beyond this scope remain pending; do not expand scope.
 - Preserve existing plugin structure and tests.
