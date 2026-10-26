@@ -236,7 +236,7 @@ export async function generate(env: Env, options: BaseGenerateOptions & { mode: 
   if (options.history) {
     return aiChat(env, options.taskId, system, options.history, situation, options.maxTokens ?? 800, options.sensitivity, undefined, operationContext);
   }
-  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens });
+  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens }, undefined, operationContext);
 }
 
 /**
