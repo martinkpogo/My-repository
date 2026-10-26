@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { reportOperationOutcome, type OperationContext } from "./runtime/activityReporter";
 import { evaluateAccess, NON_GOVERNED_PAGE_TARGET, type AccessContext } from "./access";
 
 const API = "https://api.notion.com/v1";
@@ -24,7 +25,7 @@ export interface NotionPage {
   inTrash?: boolean;
 }
 
-async function notionFetch(env: Env, path: string, init: RequestInit = {}): Promise<any> {
+async function notionFetch(env: Env, path: string, init: RequestInit = {}, operationContext?: OperationContext): Promise<any> {
   const res = await fetch(`${API}${path}`, {
     ...init,
     headers: {
@@ -36,9 +37,14 @@ async function notionFetch(env: Env, path: string, init: RequestInit = {}): Prom
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Notion API ${path} failed: ${res.status} ${body}`);
+    void body;
+    const outcome = (res.status === 401 || res.status === 403) ? "denied" : "failed";
+    if (operationContext) await reportOperationOutcome(env, operationContext, outcome);
+    throw new Error(`Notion API  failed:  `);
   }
-  return res.json();
+  const data = await res.json();
+  if (operationContext) await reportOperationOutcome(env, operationContext, "succeeded");
+  return data;
 }
 
 export function title(text: string): NotionPropertyValue {

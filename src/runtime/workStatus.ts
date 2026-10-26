@@ -19,14 +19,30 @@ import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../telegram";
  * The holder is a WorkState, or -- for a run with no Work (a scheduled
  * sweep) -- any object carrying the same two fields plus a chatId.
  */
+export type OperationOutcome = "succeeded" | "failed" | "partially_completed" | "unverified" | "denied";
+
+export interface OperationEntry {
+  operationId: string;
+  label: string;
+  startedAt: number;
+  outcome?: OperationOutcome;
+  completedAt?: number;
+}
+
 export interface WorkStatus {
   /** The Hat the status bubble is labelled with ("Hat: <name>."). */
   hat: string;
   header: string;
   done: string[];
   current?: string;
+  /** In-progress operations with start-time markers (truthful concurrency). */
+  running?: OperationEntry[];
+  /** Completed operations in actual completion order. */
+  completed?: OperationEntry[];
   /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
   edits?: number;
+  finalEditAttempted?: boolean;
+  finalEditDelivered?: boolean;
 }
 
 /**
@@ -61,13 +77,15 @@ export function renderWorkStatus(status: WorkStatus, ending?: { line: string; cu
   const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
   const lines = [`🧭 ${status.header}`, ...status.done.map((d) => `✓ ${step(d)}`)];
   if (status.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(status.current)}`);
+  for (const r of status.running ?? []) lines.push(`⏳ ${step(r.label)} (started ${new Date(r.startedAt).toISOString()})`);
+  for (const c of status.completed ?? []) lines.push(`${c.outcome === "succeeded" ? "✓" : c.outcome === "denied" ? "⛔" : c.outcome === "failed" ? "✗" : "•"} ${step(c.label)} [${c.outcome}]`);
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
 
 /** Sends a fresh status message for a new run, with `firstStep` running. */
 export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: string, header: string, firstStep: string): Promise<void> {
-  holder.workStatus = { hat, header, done: [], current: firstStep, edits: 0 };
+  holder.workStatus = { hat, header, done: [], current: firstStep, running: [], completed: [], edits: 0 };
   holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
@@ -106,11 +124,11 @@ export function noteWorkStatus(holder: WorkStatusHolder, step: string): void {
  * that was running ✗, so the message shows exactly where it stopped. Clears
  * the run, so a later run never edits a finished message.
  */
-export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line: string, outcome: "succeeded" | "failed"): Promise<void> {
+export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line: string, outcome: "succeeded" | "failed" | "partially_completed" | "unverified" | "denied"): Promise<void> {
   const status = holder.workStatus;
   const messageId = holder.workStatusMessageId;
   holder.workStatus = undefined;
   holder.workStatusMessageId = undefined;
   if (messageId === undefined || !status) return;
-  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
+  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" || outcome === "denied" })));
 }
