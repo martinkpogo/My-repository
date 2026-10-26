@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { claimPendingHandoff, closeHandoffIfOpen } from "./handoffLifecycle";
+import { claimPendingHandoff, closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
+import { ensureResultReviewContract, recordCheckerVerdict, resolveResultReviewApprovalDecision, stageResultReviewApproval } from "./resultReview";
 import { workSessionContext, type AccessContext } from "./access";
 import type { Env, WorkState } from "./types";
 
@@ -137,4 +138,123 @@ test("closeHandoffIfOpen: does not reopen or rewrite an already-Closed Handoff",
   const log = mockFetch(t, "Closed");
   await closeHandoffIfOpen(fakeEnv(), "handoff-1", "Cancelled.", lifecycleAccess("handoff-1"));
   assert.strictEqual(log.patchBodies.length, 0, "a Closed Handoff must not be touched again");
+});
+
+/**
+ * BD-8: `closeHandoffOnResult` is the ONE point where Work closes a
+ * Handoff SUCCESSFULLY. The Result review gate is evaluated BEFORE any
+ * Notion call: a refusal must leave the Handoff exactly as it is (no PATCH
+ * at all), and only a fully satisfied review (declared contract + independent
+ * bound Checker verdict + Martin's bound Result approval) may close it.
+ */
+
+function reviewState(handoffId: string): WorkState {
+  return {
+    workId: "work-result-gate",
+    unit: "Sales",
+    hat: "Sales Executive",
+    actionName: "proposal_draft",
+    stage: "awaiting_pickup",
+    handoffId,
+  } as WorkState;
+}
+
+const CONTRACT = {
+  expectedResult: "A verified Proposal recorded.",
+  completionCriteria: ["Proposal record exists with its Version.", "The canonical Doc verified as that Version."],
+} as const;
+
+/** The sanctioned path to a satisfied review: contract -> passing verdict -> staged approval -> recorded decision. */
+async function satisfiedReview(handoffId: string): Promise<WorkState> {
+  const state = reviewState(handoffId);
+  ensureResultReviewContract(state, CONTRACT);
+  const verdict = await recordCheckerVerdict(state, {
+    checkerId: "independent-checker",
+    outcome: "passed",
+    evidenceRefs: [{ kind: "proposal", ref: "PP-1", note: "version + doc hash" }],
+  });
+  assert.ok(verdict.ok, `verdict should record: ${!verdict.ok ? verdict.reason : ""}`);
+  const staged = await stageResultReviewApproval(state);
+  assert.ok(staged.ok, `staging should succeed: ${!staged.ok ? staged.reason : ""}`);
+  const decision = await resolveResultReviewApprovalDecision(state, { approved: true, token: staged.pending.token });
+  assert.ok(decision.ok, `decision should record: ${!decision.ok ? decision.reason : ""}`);
+  return state;
+}
+
+test("closeHandoffOnResult: refuses a Work with no Result contract -- NO Notion write happens", async (t) => {
+  const log = mockFetch(t, "Picked-up");
+  const state = reviewState("handoff-1");
+  const result = await closeHandoffOnResult(fakeEnv(), state, "handoff-1", "Done.", workSessionContext(state));
+  assert.strictEqual(result.closed, false);
+  if (!result.closed) assert.match(result.reason, /declares no expected Result or completion criteria/);
+  assert.strictEqual(log.patchBodies.length, 0, "the gate must refuse BEFORE any Notion call");
+});
+
+test("closeHandoffOnResult: refuses while the Checker verification or Martin's approval is missing -- NO Notion write", async (t) => {
+  const log = mockFetch(t, "Picked-up");
+  const declaredOnly = reviewState("handoff-1");
+  ensureResultReviewContract(declaredOnly, CONTRACT);
+  const r1 = await closeHandoffOnResult(fakeEnv(), declaredOnly, "handoff-1", "Done.", workSessionContext(declaredOnly));
+  assert.strictEqual(r1.closed, false);
+  if (!r1.closed) assert.match(r1.reason, /no Checker verdict is recorded/);
+  assert.strictEqual(log.patchBodies.length, 0, "a missing verdict must leave the Handoff untouched");
+
+  // Verdict recorded but Martin has not approved: still refused, still no write.
+  await recordCheckerVerdict(declaredOnly, {
+    checkerId: "independent-checker",
+    outcome: "passed",
+    evidenceRefs: [{ kind: "proposal", ref: "PP-1" }],
+  });
+  const r2 = await closeHandoffOnResult(fakeEnv(), declaredOnly, "handoff-1", "Done.", workSessionContext(declaredOnly));
+  assert.strictEqual(r2.closed, false);
+  if (!r2.closed) assert.match(r2.reason, /no Result approval is recorded/);
+  assert.strictEqual(log.patchBodies.length, 0, "an unapproved Result must leave the Handoff untouched");
+});
+
+test("closeHandoffOnResult: refuses when the verdict was rendered against a different snapshot of the Work -- NO Notion write", async (t) => {
+  const log = mockFetch(t, "Picked-up");
+  const state = await satisfiedReview("handoff-1");
+  // The completion criteria changed after the verdict+approval were bound:
+  // both hashes now recompute differently, so the review no longer binds.
+  state.resultReview!.completionCriteria = ["A criterion nobody checked."];
+  const result = await closeHandoffOnResult(fakeEnv(), state, "handoff-1", "Done.", workSessionContext(state));
+  assert.strictEqual(result.closed, false);
+  if (!result.closed) assert.match(result.reason, /bound to a different|bound to a different Work, Result, completion criteria or Checker verdict/);
+  assert.strictEqual(log.patchBodies.length, 0, "a stale review must leave the Handoff untouched");
+});
+
+test("closeHandoffOnResult: a fully satisfied review closes the Handoff with the Work Completed reason", async (t) => {
+  const log = mockFetch(t, "Picked-up");
+  const state = await satisfiedReview("handoff-1");
+  const result = await closeHandoffOnResult(fakeEnv(), state, "handoff-1", "Proposal PP-1 recorded and verified.", workSessionContext(state));
+  assert.strictEqual(result.closed, true);
+  assert.strictEqual(log.patchBodies.length, 1, "the one legitimate closure must write exactly once");
+  assert.strictEqual(log.patchBodies[0].properties.Status.select.name, "Closed");
+  assert.match(log.patchBodies[0].properties["Work Completed"].rich_text[0].text.content, /PP-1 recorded and verified/);
+});
+
+test("resumption: a Handoff left open by a refusal closes once the review is later satisfied", async (t) => {
+  const log = mockFetch(t, "Picked-up");
+  const state = reviewState("handoff-1");
+  ensureResultReviewContract(state, CONTRACT);
+  const refused = await closeHandoffOnResult(fakeEnv(), state, "handoff-1", "Done.", workSessionContext(state));
+  assert.strictEqual(refused.closed, false);
+  assert.strictEqual(log.patchBodies.length, 0);
+
+  // The sanctioned flow completes: verdict, then Martin's approval.
+  const verdict = await recordCheckerVerdict(state, {
+    checkerId: "independent-checker",
+    outcome: "passed",
+    evidenceRefs: [{ kind: "proposal", ref: "PP-1" }],
+  });
+  assert.ok(verdict.ok);
+  const staged = await stageResultReviewApproval(state);
+  assert.ok(staged.ok);
+  const decision = await resolveResultReviewApprovalDecision(state, { approved: true, token: staged.pending.token });
+  assert.ok(decision.ok);
+
+  const closed = await closeHandoffOnResult(fakeEnv(), state, "handoff-1", "Done after review.", workSessionContext(state));
+  assert.strictEqual(closed.closed, true, "the same Handoff must close once the review is satisfied");
+  assert.strictEqual(log.patchBodies.length, 1);
+  assert.strictEqual(log.patchBodies[0].properties.Status.select.name, "Closed");
 });

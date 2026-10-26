@@ -1,8 +1,8 @@
-import type { Env } from "./types";
+import type { Env, WorkState } from "./types";
 import { getPage, plainText, richText, select } from "./notion";
-import { updateHandoff } from "./handoffWriter";
+import { updateHandoff, type HandoffIdentity } from "./handoffWriter";
 import type { AccessContext } from "./access";
-import type { ResultReviewState } from "./types";
+import { evaluateResultReviewGate } from "./resultReview";
 
 /**
  * Shared Handoff pickup-idempotency guard, used by every Unit pickup that
@@ -60,17 +60,47 @@ export async function closeHandoffIfOpen(env: Env, handoffId: string, reason: st
   );
 }
 
-export function isResultReviewSatisfied(review?: ResultReviewState): boolean {
-  if (!review) return false;
-  if (!review.expectedResult || !review.expectedResult.trim()) return false;
-  if (!review.completionCriteria || review.completionCriteria.length === 0) return false;
-  if (!review.checker || review.checker.outcome !== "passed") return false;
-  if (!review.checker.independent) return false;
-  if (!review.checker.checkerId) return false;
-  if (!review.checker.checkedAt) return false;
-  if (!review.resultApproval) return false;
-  if (review.resultApproval.approver !== "martin") return false;
-  if (!review.resultApproval.approvedAt) return false;
-  if (!review.resultApproval.approvalId && !review.resultApproval.approvalProofRef) return false;
-  return true;
+/**
+ * THE point where Work closes a Handoff SUCCESSFULLY (BD-8): the generic
+ * gate in front of every `Status: Closed` + `Work Completed` write a Unit's
+ * handler performs when its Work's Result is complete. The Result review gate
+ * is evaluated BEFORE any Notion call; while it refuses, the Handoff is left
+ * exactly as it is (Picked-up/Held) and the refusal reason is returned so the
+ * caller can record it -- the Handoff never closes unchecked.
+ *
+ * Generic by construction: it takes no Unit, no Hat and no Action, and every
+ * Unit's successful closure routes through it (the enforcement lives here,
+ * not in any Unit). Cancellation and explicit NON-success closure keep their
+ * existing routes (`closeHandoffIfOpen` and each handler's own explicit
+ * write) and are deliberately untouched -- this helper is never used for
+ * them.
+ *
+ * A refusal is a return value, not an exception: ignoring it only ever leaves
+ * the Handoff open (the safe direction), never closed. Durable Object
+ * serialization still applies on top, and `WorkSession.save` re-evaluates
+ * the same gate as defence in depth.
+ */
+export async function closeHandoffOnResult(
+  env: Env,
+  state: WorkState,
+  handoffId: string,
+  reason: string,
+  access: AccessContext,
+  identity?: HandoffIdentity,
+): Promise<{ closed: true } | { closed: false; reason: string }> {
+  const gate = await evaluateResultReviewGate(state);
+  if (!gate.allowed) {
+    return { closed: false, reason: gate.reason ?? "Result review gate refused successful Handoff closure." };
+  }
+  await updateHandoff(
+    env,
+    handoffId,
+    {
+      Status: select("Closed"),
+      "Work Completed": richText(reason.slice(0, 1900)),
+    },
+    access,
+    identity,
+  );
+  return { closed: true };
 }

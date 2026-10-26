@@ -26,7 +26,15 @@ import {
 } from "./googleOAuth";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
-import type { ResultReviewState } from "./types";
+import {
+  RESULT_REVIEW_BLOCKED_STAGE,
+  ensureResultReviewContract,
+  evaluateResultReviewGate,
+  isSuccessfulResultStage,
+  resolveResultReviewApprovalDecision,
+  stageResultReviewApproval,
+} from "./resultReview";
+import type { InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
@@ -171,8 +179,6 @@ export class WorkSession extends DurableObject<Env> {
       return bindExecutionSkills(execution.skills, declaredAction).then(
         (skills) => {
           recordWorkAction(state, actionName);
-          // Initialize result review contract from Action declaration (BD-8)
-          this.ensureResultReviewState(state, execution);
           return hat.entryHandler(this.env, state, actionName, text, skills);
         },
         (err) => {
@@ -445,6 +451,35 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
+        case "resultreview": {
+          // Kernel-owned Work lifecycle, same class as the three
+          // infrastructure prefixes above: Martin's Result-review decision
+          // (BD-8 condition 3) returns through this verified callback, never
+          // through free text. The value carries the staged card's own token
+          // plus the decision; resolveResultReviewApprovalDecision consumes
+          // the staged approval as it records the decision, so a replayed
+          // button finds nothing left to consume.
+          const [token, decision] = value.split(":");
+          if (decision !== "approve" && decision !== "reject") {
+            return sendMessage(this.env, state.chatId, "That Result review button is malformed -- nothing was recorded.", undefined, state.threadId).then(() => state);
+          }
+          return resolveResultReviewApprovalDecision(state, { approved: decision === "approve", token }).then(
+            (outcome) => {
+              if (!outcome.ok) {
+                return sendMessage(this.env, state.chatId, `This Result review decision was already resolved or does not match the current card -- nothing was recorded. (${outcome.reason})`, undefined, state.threadId).then(() => state);
+              }
+              state.pendingActionSummary = undefined;
+              const reply = outcome.approval
+                ? "✅ Result approved. The approval is recorded against this exact Result, criteria and Checker verdict; the Work may close once saved."
+                : "❌ Result rejected. The rejection is recorded and the Work stays open with the reason visible.";
+              return sendMessage(this.env, state.chatId, reply, undefined, state.threadId).then(() => state);
+            },
+            (err) => {
+              console.error(`WorkSession ${state.workId}: resultreview callback failed`, err);
+              return sendMessage(this.env, state.chatId, "The Result review decision could not be recorded -- nothing was changed.", undefined, state.threadId).then(() => state);
+            },
+          );
+        }
         default: {
           // Generic manifest lookup for an approval-callback prefix a Hat
           // has migrated onto HatManifest.callbackHandlers -- checked only
@@ -480,98 +515,6 @@ export class WorkSession extends DurableObject<Env> {
         }
       }
     });
-  }
-
-  private isSuccessResultStage(stage: string): boolean {
-    if (stage === "cancelled" || stage === "closed_not_qualified") return false;
-    if (stage === "delivered" || stage === "complete") return true;
-    return false;
-  }
-
-  private ensureResultReviewState(state: WorkState, execution?: any): ResultReviewState {
-    if (!state.resultReview) {
-      state.resultReview = {
-        expectedResult: execution?.expected_result ?? undefined,
-        completionCriteria: execution?.completion_criteria ?? undefined,
-        evidenceRefs: [],
-        gateStatus: "pending",
-      };
-    } else {
-      if (!state.resultReview.expectedResult && execution?.expected_result) {
-        state.resultReview.expectedResult = execution.expected_result;
-      }
-      if (!state.resultReview.completionCriteria && execution?.completion_criteria) {
-        state.resultReview.completionCriteria = execution.completion_criteria as readonly string[];
-      }
-    }
-    return state.resultReview;
-  }
-
-  private evaluateResultReviewGate(state: WorkState): { allowed: boolean; reason?: string } {
-    const review = state.resultReview;
-    if (!review) {
-      return { allowed: false, reason: "Result review contract required for successful closure" };
-    }
-    // Require expected Result and completion criteria
-    if (!review.expectedResult || !review.expectedResult.trim()) {
-      review.gateStatus = "blocked";
-      review.blockReason = "Result contract missing: expected Result required";
-      return { allowed: false, reason: review.blockReason };
-    }
-    if (!review.completionCriteria || review.completionCriteria.length === 0) {
-      review.gateStatus = "blocked";
-      review.blockReason = "Result contract missing: completion criteria required";
-      return { allowed: false, reason: review.blockReason };
-    }
-    if (review.expectedResult && (!review.completionCriteria || review.completionCriteria.length === 0)) {
-      review.gateStatus = "blocked";
-      review.blockReason = "Result criteria missing";
-      return { allowed: false, reason: review.blockReason };
-    }
-    if (review.completionCriteria && review.completionCriteria.length > 0) {
-      if (!review.checker || review.checker.outcome !== "passed") {
-        review.gateStatus = "blocked";
-        review.blockReason = review.checker?.reason || "Independent Checker verification required";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (!review.checker.independent) {
-        review.gateStatus = "blocked";
-        review.blockReason = "Checker must be independent of the performer";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (!review.checker.checkerId || review.checker.checkerId === state.actionName) {
-        review.gateStatus = "blocked";
-        review.blockReason = "Checker identity must be independent and verified";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (!review.checker.checkedAt) {
-        review.gateStatus = "blocked";
-        review.blockReason = "Checker verification must be recorded with timestamp";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (!review.resultApproval) {
-        review.gateStatus = "blocked";
-        review.blockReason = "Martin's Result approval required";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (review.resultApproval.approver !== "martin") {
-        review.gateStatus = "blocked";
-        review.blockReason = "Result approval must be from authorized Martin";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (!review.resultApproval.approvedAt) {
-        review.gateStatus = "blocked";
-        review.blockReason = "Result approval not properly recorded";
-        return { allowed: false, reason: review.blockReason };
-      }
-      if (!review.resultApproval.approvalId && !review.resultApproval.approvalProofRef) {
-        review.gateStatus = "blocked";
-        review.blockReason = "Result approval must be backed by a trusted approval record";
-        return { allowed: false, reason: review.blockReason };
-      }
-    }
-    review.gateStatus = "passed";
-    return { allowed: true };
   }
 
   private async require(): Promise<WorkState> {
@@ -619,6 +562,19 @@ export class WorkSession extends DurableObject<Env> {
     return outcome.result;
   }
 
+  /**
+   * The Result contract (BD-8) the Work's OWN recorded Action declares, read
+   * live from the registered manifest -- never hard-coded, never asserted by
+   * the caller. Returns undefined for a Work that records no registered
+   * Action; the gate then refuses its successful closure with that reason.
+   */
+  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[] } | undefined {
+    if (!state.unit || !state.hat || !state.actionName) return undefined;
+    const manifest = findUnitManifest(state.unit);
+    const hat = manifest ? manifest.hats[state.hat] : undefined;
+    return hat?.actions.find((a) => a.name === state.actionName);
+  }
+
   private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
     const state = await this.require();
     // Reset every call -- see WorkState.pendingHandoffAutoCheck's doc
@@ -626,6 +582,11 @@ export class WorkSession extends DurableObject<Env> {
     // this true again, so a caller inspecting the returned state never
     // sees a stale signal left over from an earlier, unrelated call.
     state.pendingHandoffAutoCheck = false;
+    // Result review contract (BD-8): loaded once per mutation cycle, from
+    // the Work's OWN recorded Action as registered on its Unit's manifest --
+    // so dispatch entries and adopted Handoff pickups are covered by one
+    // mechanism, and the contract can never be hand-written onto state.
+    ensureResultReviewContract(state, this.recordedActionResult(state));
     // Durable operation persistence for THIS Work and THIS call only (see
     // src/runtime/workPersistence.ts): the Tool Registry persists its
     // execution intent and outcome into `state.externalOperations` and
@@ -658,22 +619,22 @@ export class WorkSession extends DurableObject<Env> {
 
   private async save(state: WorkState): Promise<WorkState> {
     state.updatedAt = new Date().toISOString();
-    // Enforce Result review gate for successful closure (BD-8)
-    if (this.isSuccessResultStage(state.stage)) {
-      const gate = this.evaluateResultReviewGate(state);
+    // Result review gate (BD-8): a Work may not REMAIN recorded as
+    // successfully closed while its Result review is unsatisfied. This is
+    // defence in depth behind closeHandoffOnResult (the point where the
+    // Handoff itself is closed) -- here the Work's own stage is refused into
+    // `result_review_blocked` with the reason kept visible, and Martin is
+    // told once per transition: either that the Work awaits independent
+    // verification, or (when a passing bound verdict exists) the staged
+    // Result approval card with its Approve/Reject buttons.
+    if (isSuccessfulResultStage(state.stage)) {
+      const wasBlocked = state.resultReview?.gateStatus === "blocked";
+      const gate = await evaluateResultReviewGate(state);
       if (!gate.allowed) {
-        // Do not allow successful closure if gate fails; preserve unresolved state
-        if (state.stage === "complete") {
-          state.stage = "result_review_blocked";
-        } else if (state.stage === "delivered") {
-          state.stage = "result_review_blocked";
-        }
-        if (!state.blockedReason) {
-          state.blockedReason = state.resultReview?.blockReason || gate.reason || "Result review gate failed";
-        }
-        if (state.resultReview && !state.resultReview.blockReason) {
-          state.resultReview.blockReason = state.blockedReason;
-        }
+        state.stage = RESULT_REVIEW_BLOCKED_STAGE;
+        if (!state.blockedReason) state.blockedReason = gate.reason ?? "Result review gate failed";
+        if (state.resultReview && !state.resultReview.blockReason) state.resultReview.blockReason = state.blockedReason;
+        if (!wasBlocked) await this.reportResultReviewBlocked(state, gate.reason);
       }
     }
     // Derive this Work's canonical Matter identity (its page id) from its
@@ -685,6 +646,55 @@ export class WorkSession extends DurableObject<Env> {
     await this.ctx.storage.put("state", state);
     await this.updateRegistry(state);
     return state;
+  }
+
+  /**
+   * One-shot operational visibility when a Work transitions into
+   * `result_review_blocked` (BD-8: "the unresolved state and reason remain
+   * visible"). Either the Work awaits an independent Checker verification
+   * and says so with the exact reason, or a passing bound verdict already
+   * exists and Martin's Result approval card is staged -- its Approve and
+   * Reject buttons bound to this exact staged card by token, resolved only
+   * through the `resultreview` callback (never free text), with the staged
+   * approval consumed on the first decision so a replay finds nothing.
+   * Never throws: a failed notification must not fail the Work's save.
+   */
+  private async reportResultReviewBlocked(state: WorkState, reason?: string): Promise<void> {
+    try {
+      const review = state.resultReview;
+      const verdictPassed = review?.checker?.outcome === "passed";
+      if (verdictPassed && !review?.approval && !review?.pendingApproval) {
+        const staged = await stageResultReviewApproval(state);
+        if (staged.ok) {
+          const message =
+            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result and carries a passing independent Checker verdict against its completion criteria. BD-8 requires your separate Result approval before the Work may close.\n\nApprove or Reject below; the decision is bound to this exact Result, criteria and verdict.`;
+          const buttons: InlineButton[][] = [
+            [
+              { text: "✅ Approve Result", callback_data: `resultreview:${staged.pending.token}:approve` },
+              { text: "❌ Reject", callback_data: `resultreview:${staged.pending.token}:reject` },
+            ],
+          ];
+          await sendMessage(this.env, state.chatId, message, buttons, state.threadId);
+          state.pendingActionSummary = {
+            label: "Result review: awaiting Martin's Result approval",
+            message,
+            buttons,
+            createdAt: staged.pending.createdAt,
+          };
+          return;
+        }
+        console.error(`WorkSession ${state.workId}: could not stage the Result approval card -- ${staged.reason}`);
+      }
+      await sendMessage(
+        this.env,
+        state.chatId,
+        `⛔ *Work ${state.workId} cannot close yet* (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}).\n\n${reason ?? "The Result review gate refused successful closure."}\n\nThe Work stays open with the reason recorded; it keeps running and cancellation is unaffected. Successful closure (and the Handoff's own close) resumes once an independent Checker verdict and your Result approval are recorded against this exact Result.`,
+        undefined,
+        state.threadId,
+      );
+    } catch (err) {
+      console.error(`WorkSession ${state.workId}: failed to report the Result review block`, err);
+    }
   }
 
   private async updateRegistry(state: WorkState): Promise<void> {

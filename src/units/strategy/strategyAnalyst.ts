@@ -9,7 +9,7 @@ import { classifyOutboundText } from "../../ai/outboundGate";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
-import { claimPendingHandoff, closeHandoffIfOpen } from "../../handoffLifecycle";
+import { claimPendingHandoff, closeHandoffIfOpen, closeHandoffOnResult } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff, textContainsIdentityValue, parseSourceBoundaryMarker, type KnownIdentityField, type SourceBoundaryEvidence } from "../../handoffWriter";
 import { resolveMatterFromText, resolveEntityMatterFromTokens } from "../../identityResolution";
 import type { AccessContext } from "../../access";
@@ -1302,10 +1302,19 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
   }
 
   if (state.handoffId) {
-    await updateHandoff(env, state.handoffId, {
-      Status: select("Closed"),
-      "Work Completed": richText(formatDiagnosisForHandoff(result).slice(0, 1900)),
-    }, strategyAnalystAccess(state));
+    // BD-8: this Work's successful closure of its own inbound Handoff routes
+    // through the one generic Result review gate. A refusal leaves the
+    // Handoff exactly as it is and is surfaced below.
+    const closure = await closeHandoffOnResult(
+      env,
+      state,
+      state.handoffId,
+      formatDiagnosisForHandoff(result).slice(0, 1900),
+      strategyAnalystAccess(state),
+    );
+    if (!closure.closed) {
+      console.error(`Strategy: diagnosis Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+    }
   }
   await logActivity(env, {
     entry: `Strategy diagnosis completed: ${state.matterToken || state.entityToken || state.workId}`,
@@ -2469,10 +2478,19 @@ export async function handleInterventionApproval(
     // canonical flow, this is deferred until here (not at proposal-
     // development time), and only after the Finance Handoff actually exists.
     if (state.handoffId) {
-      await updateHandoff(env, state.handoffId, {
-        Status: select("Closed"),
-        "Work Completed": richText(`Proposal v${proposal!.proposalVersion} approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900)),
-      }, strategyAnalystAccess(state)).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
+      // BD-8: the successful closure of the originating Handoff routes
+      // through the one generic Result review gate, keeping the existing
+      // .catch -- a refusal (or a Notion error) only ever leaves the
+      // Handoff open, and the refusal reason is surfaced below.
+      await closeHandoffOnResult(
+        env,
+        state,
+        state.handoffId,
+        `Proposal v${proposal!.proposalVersion} approved by Martin and handed off to Finance (Handoff ${handoff.id}): ${proposal!.proposedIntervention.interventionName}`.slice(0, 1900),
+        strategyAnalystAccess(state),
+      ).then((closure) => {
+        if (!closure.closed) console.error(`Strategy: originating Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+      }).catch((err) => console.error(`Strategy: failed to close originating Handoff ${state.handoffId}`, err));
     }
 
     await kvPut(env, `handoff_workitem:${handoff.id}`, state.workId);

@@ -191,6 +191,19 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     },
     description:
       "Create the Lead record for one screened discovery candidate Martin approved in Telegram. The Lead exists only because he approved that specific candidate, so committing it is his approved governed effect.",
+    // BD-8: the expected Result and completion criteria this Action declares
+    // BEFORE execution. Work loads them live from this manifest
+    // (src/resultReview.ts ensureResultReviewContract) and the Result review
+    // gate refuses this Work's successful closure until an independent
+    // Checker verifies the evidence against these criteria and Martin
+    // approves that exact Result.
+    expectedResult:
+      "A Lead record committed in Notion for the ONE screened discovery candidate Martin approved, carrying that candidate's screening evidence and opaque Entity/Matter tokens -- and nothing else.",
+    completionCriteria: [
+      "A Lead record exists in the Leads data source for the exact candidate Martin approved (no other candidate).",
+      "The commit is traceable to Martin's approval of that specific candidate (the leadopportunity approval callback), not to an unapproved screen result.",
+      "The committed Lead carries the candidate's screening evidence and opaque tokens, and no real name, contact detail or other identity-bearing value.",
+    ],
   },
 ];
 
@@ -262,6 +275,22 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     },
     description:
       "Process an incoming business enquiry: match or create the Entity, identify or create the Matter, prepare for the sales call, qualify, and route onward -- with each privileged step inside the flow (entity/matter creation, proposal approval, Finance's quote approval) performed as its own approval-gated Action.",
+    // BD-8: expected Result and completion criteria declared BEFORE
+    // execution, loaded live from this manifest by the Result review gate
+    // (src/resultReview.ts). The flow's successful Handoff closure (the
+    // call-notes qualification write-back) routes through
+    // closeHandoffOnResult, so it cannot complete until an independent
+    // Checker verifies the evidence against these criteria and Martin
+    // approves that exact Result. Cancellation and the Held/closed-not-
+    // qualified paths are non-success closures and are deliberately not
+    // gated.
+    expectedResult:
+      "The enquiry carried end to end against its evidence: Entity and Matter identified or created through their own approval-gated Actions, call preparation done from the approved Call Notes record, and a qualification decision written back -- every privileged step performed as its own governed Action, nothing privileged performed under this Action's name.",
+    completionCriteria: [
+      "The Entity and Matter for the enquiry are identified (or committed through their own approval-gated create Actions) and their opaque tokens are recorded on the Work.",
+      "Any qualification decision written back rests on evidence actually supplied or consumed (the approved Call Notes record), not on assumed facts.",
+      "Every privileged effect inside the flow was performed under its own recorded approval-gated Action with the approval Martin gave for that exact effect.",
+    ],
   },
   {
     name: "create_entity",
@@ -365,6 +394,23 @@ const salesExecutiveActions: ActionDefinition<SalesExecutiveAction>[] = [
     },
     description:
       "Create or refresh the canonical token-safe Runtime Proposal record and its first Version. Staging only -- the Proposal is Draft, never presented and never approvable until its content is written, so drafting it requires no approval.",
+    // BD-8: expected Result and completion criteria declared BEFORE
+    // execution, loaded live from this manifest by the Result review gate
+    // (src/resultReview.ts). Both of this Action's SUCCESSFUL Handoff
+    // closures (the idempotent reprocess and the initial Doc-verified
+    // creation) route through closeHandoffOnResult, so they cannot complete
+    // until an independent Checker verifies the evidence against these
+    // criteria and Martin approves that exact Result. The Doc-FAILURE
+    // closure is an explicit non-success closure and is deliberately not
+    // gated (it never claims a completed Result).
+    expectedResult:
+      "The canonical token-safe Runtime Proposal record for the Finance -> Sales Handoff, with its first Version written, the canonical Google Doc verified as that exact Version, and no identity-bearing value anywhere in it.",
+    completionCriteria: [
+      "A canonical Runtime Proposal record exists in the Proposals data source for THIS Handoff, with Version 1 recorded and its content hash recorded.",
+      "The canonical Google Doc for that Version was created and read back as the exact Version content (Doc verified) before any Approved state was claimed.",
+      "The composed Proposal content passed the token-safety check: no real name, contact detail or other identity-bearing value entered the record.",
+      "The quote carried through (currency, price, rationale) matches the Finance judgment block on the Handoff's Verified Facts & Sources.",
+    ],
   },
   {
     name: "proposal_submit",
