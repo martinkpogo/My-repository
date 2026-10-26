@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import { reportOperationOutcome, type OperationContext } from "../../runtime/activityReporter";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
@@ -289,11 +290,12 @@ function normalizeTavilyResults(raw: TavilyResponse["results"], retrievedAt: str
  * 5. success_with_results / success_no_results only for a successful
  *    provider response, with results normalized to the contract shape.
  */
-export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
+export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext, operationContext?: OperationContext): Promise<SearchOutcome> {
   const invalidReason = validateSearchRequest(request, TAVILY_ADAPTER);
-  if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
+  if (invalidReason) { if (operationContext) await reportOperationOutcome(env, operationContext, "failed"); return { kind: "invalid_input", reason: invalidReason }; }
 
   if (!env.TAVILY_API_KEY) {
+    if (operationContext) await reportOperationOutcome(env, operationContext, "failed");
     return { kind: "provider_unavailable", reason: "no search provider is configured (TAVILY_API_KEY is unset)" };
   }
 
@@ -307,15 +309,19 @@ export async function executeSearch(env: Env, request: SearchRequest, access: Ac
     data = await TAVILY_ADAPTER.fetchResults(env, request, maxResults);
   } catch (err) {
     console.error("Search provider request failed", err instanceof Error ? err.message : err);
+    if (operationContext) await reportOperationOutcome(env, operationContext, "failed");
     return { kind: "provider_failure", reason: "the search provider request failed (network or provider execution error)" };
   }
 
   if (!data || typeof data !== "object" || !Array.isArray(data.results)) {
     console.error("Search provider returned a malformed response");
+    if (operationContext) await reportOperationOutcome(env, operationContext, "failed");
     return { kind: "provider_failure", reason: "the search provider returned a malformed response" };
   }
 
   const results = normalizeTavilyResults(data.results, retrievedAt, maxResults);
+  const outcome = "succeeded";
+  if (operationContext) await reportOperationOutcome(env, operationContext, outcome);
   return results.length > 0 ? { kind: "success_with_results", results } : { kind: "success_no_results" };
 }
 
