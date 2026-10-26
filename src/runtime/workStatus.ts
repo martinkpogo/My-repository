@@ -62,7 +62,7 @@ export const MAX_INTERMEDIATE_EDITS = 6;
  * first call instead of being rejected and retried as plain text (two
  * subrequests instead of one).
  */
-function escapeTelegramMarkdown(text: string): string {
+export function escapeTelegramMarkdown(text: string): string {
   return text.replace(/([_*`\[])/g, "\\$1");
 }
 

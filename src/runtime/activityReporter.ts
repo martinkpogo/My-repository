@@ -1,6 +1,11 @@
 import type { Env } from "../types";
 import type { WorkStatusHolder } from "./workStatus";
-import { advanceWorkStatus, MAX_INTERMEDIATE_EDITS } from "./workStatus";
+import {
+  MAX_INTERMEDIATE_EDITS,
+  renderWorkStatus,
+  escapeTelegramMarkdown,
+} from "./workStatus";
+import { editWorkspaceHatMessage } from "../telegram";
 
 export type OperationOutcome = "succeeded" | "failed" | "partially_completed" | "unverified" | "denied";
 
@@ -11,10 +16,6 @@ export interface OperationContext {
   label: string;
   startedAt: number;
   parentOperationId?: string;
-}
-
-export interface OperationStartResult {
-  context: OperationContext;
 }
 
 export function startOperation(
@@ -40,6 +41,19 @@ export function startOperation(
   return ctx;
 }
 
+async function tryEdit(holder: WorkStatusHolder, env: Env): Promise<void> {
+  const status = holder.workStatus;
+  const messageId = holder.workStatusMessageId;
+  if (!status || messageId === undefined) return;
+  if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
+  try {
+    status.edits = (status.edits ?? 0) + 1;
+    await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status)));
+  } catch {
+    // reporting failures must not change underlying result
+  }
+}
+
 export async function finishOperation(
   env: Env,
   ctx: OperationContext,
@@ -51,11 +65,7 @@ export async function finishOperation(
     status.completed = status.completed ?? [];
     status.completed.push({ operationId: ctx.operationId, label: ctx.label, startedAt: ctx.startedAt, outcome, completedAt: Date.now() });
   }
-  try {
-    await advanceWorkStatus(env, ctx.holder, ctx.label);
-  } catch {
-    // reporting failures must not change underlying result
-  }
+  await tryEdit(ctx.holder, env);
 }
 
 export async function reportOperationOutcome(
@@ -65,5 +75,3 @@ export async function reportOperationOutcome(
 ): Promise<void> {
   await finishOperation(env, ctx, outcome);
 }
-
-export { MAX_INTERMEDIATE_EDITS };
