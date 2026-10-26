@@ -367,11 +367,12 @@ function mockActionAi(env: Partial<Env>, action: string | null) {
 
 test("T0a. Chat mode dispatches a confidently-resolved read action directly, using tryResolveUnitAction's own reply target, and no WorkSession is created", async (t) => {
   const originalFetch = globalThis.fetch;
-  const sent: { chatId: number; threadId?: number; text: string }[] = [];
+  const sent: { chatId: number; threadId?: number; text: string; method?: string }[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
     if (String(url).includes("api.telegram.org")) {
       const body = JSON.parse(init?.body ?? "{}");
-      sent.push({ chatId: body.chat_id, threadId: body.message_thread_id, text: body.text ?? "" });
+      const method = String(url).match(/\/bot[^/]+\/([A-Za-z0-9_]+)(?:\?|$)/)?.[1];
+      sent.push({ chatId: body.chat_id, threadId: body.message_thread_id, text: body.text ?? "", method });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
     return new Response(JSON.stringify({}), { status: 200 });
@@ -396,10 +397,16 @@ test("T0a. Chat mode dispatches a confidently-resolved read action directly, usi
   });
 
   assert.strictEqual(calls.init.length, 0, "a read action must never create a WorkSession");
-  assert.strictEqual(sent.length, 1);
-  assert.strictEqual(sent[0].chatId, -1004435157576);
-  assert.strictEqual(sent[0].threadId, 604);
-  assert.match(sent[0].text, /toy-reply:check_status/);
+  // A chat read now carries progress feedback (typing indicator before
+  // classification, a status bubble, then the reply) in the originating chat.
+  // The reply is the last text-bearing message; the indicator carries no text.
+  const textMessages = sent.filter((m) => m.text && m.text.length > 0);
+  assert.ok(textMessages.length >= 1, "at least the reply must be sent");
+  const reply = textMessages[textMessages.length - 1];
+  assert.strictEqual(reply.chatId, -1004435157576);
+  assert.strictEqual(reply.threadId, 604);
+  assert.match(reply.text, /toy-reply:check_status/);
+  assert.ok(sent.every((m) => m.chatId === -1004435157576 && (m.threadId === 604 || m.threadId === undefined)), "everything stays in the originating chat");
 });
 
 test("T0b. Chat mode dispatches a confidently-resolved write action into a real WorkSession via handleUnitAction, same as Cowork's manifest dispatch", async (t) => {

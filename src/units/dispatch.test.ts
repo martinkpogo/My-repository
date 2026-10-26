@@ -64,8 +64,37 @@ function mockTelegramFetch(t: any) {
   globalThis.fetch = (async (url: string, init?: any) => {
     if (String(url).includes("api.telegram.org")) {
       const body = JSON.parse(init?.body ?? "{}");
+      // The Telegram client names each call in its URL path
+      // (api.telegram.org/bot<token>/<method>), not in the body. sendChatAction
+      // carries no text and is the typing indicator -- it is NOT a reply, so
+      // this mock records only text-bearing messages and leaves the indicator
+      // to mockTelegramFetchWithMethod.
+      const method = String(url).match(/\/bot[^/]+\/([A-Za-z0-9_]+)(?:\?|$)/)?.[1];
+      if (method === "sendChatAction") {
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+      }
       sent.push({ chatId: body.chat_id, threadId: body.message_thread_id, text: body.text ?? "" });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return sent;
+}
+
+/** Like mockTelegramFetch, but records the Telegram METHOD used, so a chat
+ * action (sendChatAction, no text) is distinguishable from a text message. */
+function mockTelegramFetchWithMethod(t: any) {
+  const originalFetch = globalThis.fetch;
+  const sent: { method?: string; chatId?: number; threadId?: number; text?: string }[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(init?.body ?? "{}");
+      const method = String(url).match(/\/bot[^/]+\/([A-Za-z0-9_]+)(?:\?|$)/)?.[1];
+      sent.push({ method, chatId: body.chat_id, threadId: body.message_thread_id, text: body.text });
+      return new Response(JSON.stringify({ ok: true, result: method === "sendChatAction" ? true : { message_id: 1 } }), { status: 200 });
     }
     return new Response(JSON.stringify({}), { status: 404 });
   }) as any;
@@ -88,10 +117,14 @@ test("tryResolveUnitAction: a confidently-resolved read action replies directly 
   const result = await tryResolveUnitAction(env, manifest, { chatId: 12345, threadId: 777 }, "what's the status?");
 
   assert.deepStrictEqual(result, { kind: "handled" });
-  assert.strictEqual(sent.length, 1);
-  assert.strictEqual(sent[0].chatId, 12345, "must reply to the DM/topic the message actually came from");
-  assert.strictEqual(sent[0].threadId, 777);
-  assert.match(sent[0].text, /handled:check_status/);
+  // A chat read now carries a status bubble before its reply; the typing
+  // indicator is filtered out by this mock. The reply is the last text message.
+  assert.ok(sent.length >= 1, "at least the reply must be sent");
+  const reply = sent[sent.length - 1];
+  assert.strictEqual(reply.chatId, 12345, "must reply to the DM/topic the message actually came from");
+  assert.strictEqual(reply.threadId, 777);
+  assert.match(reply.text, /handled:check_status/);
+  assert.ok(!sent.some((m) => m.chatId === -999), "nothing must be sent to the Workspace stream");
 });
 
 test("tryResolveUnitAction: an internal/write action resolves to 'continue', with no reply sent yet", async (t) => {
@@ -213,7 +246,9 @@ test("a read Action's declared Skill is resolved by the Registry and handed to i
   assert.strictEqual(received.skills.length, 1);
   assert.deepStrictEqual(received.skills[0].declared, ["research_signal"]);
   assert.strictEqual(received.skills[0].get("research_signal").content, resolveSkill("research_signal").content);
-  assert.match(sent[0].text, /skills:research_signal/);
+  // A chat read now carries a status bubble before its reply; the reply is the
+  // last text message, so index the tail rather than position 0.
+  assert.match(sent[sent.length - 1].text, /skills:research_signal/);
   assert.throws(() => received.skills[0].get("opportunity_qualification_gate"), /not declared/);
 });
 
@@ -253,15 +288,15 @@ test("a write Action's execution context carries its resolved Skill content to t
 // ---------------------------------------------------------------------------
 
 test("resolveUnitRequest: a Cowork read Action reports a status run in the Workspace stream, ending before its answer", async (t) => {
-  const sent = mockTelegramFetch(t);
+  const sent = mockTelegramFetchWithMethod(t);
   const env = mockAi({ TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" }, [{ action: "check_status" }]);
 
   const result = await resolveUnitRequest(env, toyManifest(), { chatId: -999, threadId: 604 }, "what's the status?");
 
   assert.deepStrictEqual(result, { kind: "handled" });
-  assert.ok(sent.some((m) => m.text === ""), "the typing indicator (a text-less chat action) ran during the read");
+  assert.ok(sent.some((m) => m.method === "sendChatAction" && m.chatId === -999 && m.threadId === 604), "the typing indicator (a text-less chat action) ran during the read, in the Workspace stream");
   assert.deepStrictEqual(
-    sent.filter((m) => m.text !== "").map((m) => m.text),
+    sent.filter((m) => m.text && m.text.length > 0).map((m) => m.text),
     [
       // Markdown-escaped, so Telegram accepts it on the first call.
       "Hat: Toy Hat.\n\n🧭 Toy Hat — check\\_status\n⏳ Running check status",
@@ -270,4 +305,66 @@ test("resolveUnitRequest: a Cowork read Action reports a status run in the Works
     ],
   );
   assert.ok(sent.every((m) => m.chatId === -999 && (m.threadId === 604 || m.threadId === undefined)), "everything goes to the Workspace stream");
+});
+
+// ---------------------------------------------------------------------------
+// Chat progress feedback (the fix this change is about). Ordinary chat
+// requests used to make two to four AI calls during classification with
+// nothing to show in between; now the originating chat gets a typing
+// indicator before classification and a status bubble for a read Action.
+// ---------------------------------------------------------------------------
+
+test("tryResolveUnitAction: a chat read Action signals the originating chat with a typing indicator before classification and a status bubble, not the Workspace stream", async (t) => {
+  const sent = mockTelegramFetchWithMethod(t);
+  const env = mockAi(
+    { TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" }, // Workspace stream configured but must NOT receive this
+    [{ action: "check_status" }],
+  );
+
+  const result = await tryResolveUnitAction(env, toyManifest(), { chatId: 12345, threadId: 777 }, "what's the status?");
+
+  assert.deepStrictEqual(result, { kind: "handled" });
+  // A sendChatAction (typing) ran before the first AI call, in the originating chat.
+  assert.ok(sent.some((m) => m.method === "sendChatAction" && m.chatId === 12345 && m.threadId === 777), "a typing indicator must be sent to the originating chat before classification");
+  // The status bubble is sent to the originating chat, never the Workspace stream.
+  const textMessages = sent.filter((m) => m.text && m.text.length > 0);
+  assert.ok(textMessages.some((m) => m.chatId === 12345 && m.threadId === 777 && m.text?.includes("Running check status")), "a status bubble must be sent to the originating chat");
+  assert.ok(!textMessages.some((m) => m.chatId === -999), "nothing must be sent to the Workspace stream in chat mode");
+  assert.ok(textMessages.some((m) => m.text?.includes("handled:check_status")), "the final reply still goes out, one reply as before");
+});
+
+test("tryResolveUnitAction: a chat read Action that produces an empty reply still closes its status bubble cleanly", async (t) => {
+  const sent = mockTelegramFetchWithMethod(t);
+  const manifest = toyManifest({
+    readHandler: async () => "", // handler already sent its own message(s); nothing further
+  });
+  const env = mockAi({ TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" }, [{ action: "check_status" }]);
+
+  await tryResolveUnitAction(env, manifest, { chatId: 12345, threadId: 777 }, "what's the status?");
+
+  // The status bubble is closed with the "no answer below" line, so the
+  // bubble never stays open and never leaks a misleading state.
+  assert.ok(sent.some((m) => m.text?.includes("✅ Done.") && m.chatId === 12345), "the status bubble must be closed even when the handler sent nothing");
+});
+
+test("tryResolveUnitAction: chat classification failure sends no status bubble and no reply", async (t) => {
+  const sent = mockTelegramFetchWithMethod(t);
+  const env = mockAi({ TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" }, [{ candidates: [] }]); // no Hat matches
+
+  const result = await tryResolveUnitAction(env, toyManifest(), { chatId: 12345, threadId: 777 }, "just chatting, nothing specific");
+
+  assert.strictEqual(result.kind, "ambiguous");
+  // The typing indicator may have run, but no status bubble and no reply were sent.
+  assert.ok(!sent.some((m) => m.text && m.text.length > 0), "no status bubble or reply may be sent on an ambiguous chat request");
+});
+
+test("tryResolveUnitAction: a chat write Action gets only the typing indicator, no status bubble and no reply", async (t) => {
+  const sent = mockTelegramFetchWithMethod(t);
+  const env = mockAi({}, [{ action: "update_price" }]); // single-Hat manifest -- Stage 1 skipped
+
+  const result = await tryResolveUnitAction(env, toyManifest(), { chatId: 1, threadId: 2 }, "set the price to 500");
+
+  assert.strictEqual(result.kind, "continue");
+  assert.ok(sent.some((m) => m.method === "sendChatAction"), "the typing indicator still runs for a write action's classification");
+  assert.ok(!sent.some((m) => m.text && m.text.length > 0), "a write action must not send a status bubble or a reply here -- its own entryHandler decides");
 });

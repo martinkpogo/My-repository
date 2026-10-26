@@ -2,8 +2,8 @@ import type { Env, Unit, WorkState } from "../types";
 import type { HatManifest, UnitManifest } from "./unitManifest";
 import { classifyCandidateHats, classifyAction } from "../hats/intakeClassification";
 import { dispatchAction } from "../hats/actionRegistry";
-import { sendWorkspaceHatMessage, sendHatMessage, withWorkspaceTypingIndicator } from "../telegram";
-import { finishWorkStatus, startWorkStatus, type WorkStatusHolder } from "../runtime/workStatus";
+import { sendWorkspaceHatMessage, sendHatMessage, withWorkspaceTypingIndicator, withChatTypingIndicator, type HatMessageTarget } from "../telegram";
+import { finishWorkStatusAt, startWorkStatus, startWorkStatusAt, type WorkStatus } from "../runtime/workStatus";
 import { logActivity } from "../log";
 import { findUnitManifest } from "./registry";
 import { findManifestAction } from "./unitManifest";
@@ -297,25 +297,39 @@ async function dispatchResolvedAction(
     }
   }
   // A read Action runs to completion right here -- for every read declared
-  // today, a research or search run -- so in Cowork mode it reports live
-  // work status (one step: the Action itself) with the typing indicator.
-  // Unit-agnostic: the Hat and Action names come from the manifest. There is
-  // no Work yet, so the status lives on a local holder. Chat mode is left
-  // exactly as it was: its contract is one reply, to wherever the message
-  // came from, and the status/typing would go to the Workspace stream.
-  const isRead = declaredAction?.consequence === "read" && mode !== "chat";
-  const readStatus: WorkStatusHolder = { chatId: target.chatId };
-  if (isRead) await startWorkStatus(env, readStatus, hatName, `${hatName} — ${actionName}`, `Running ${actionName.replace(/_/g, " ")}`);
+  // today, a research or search run -- so it reports live work status (one
+  // step: the Action itself) with the typing indicator. Unit-agnostic: the
+  // Hat and Action names come from the manifest. There is no Work yet, so the
+  // status lives on a local holder.
+  //
+  // The status bubble goes wherever the reply goes: the Workspace stream in
+  // Cowork mode (the existing behaviour, untouched), and the originating chat
+  // in Chat mode -- a chat message's progress ack belongs in the conversation
+  // that started it, not in the shared Workspace topic.
+  const isRead = declaredAction?.consequence === "read";
+  const chatTarget: HatMessageTarget = { chatId: target.chatId, threadId: target.threadId, hat: hatName };
+  let readStatus: { status: WorkStatus; messageId: number | undefined } | undefined;
+  if (isRead) {
+    const header = `${hatName} — ${actionName}`;
+    const firstStep = `Running ${actionName.replace(/_/g, " ")}`;
+    const messageId = mode === "chat"
+      ? await startWorkStatusAt(env, chatTarget, hatName, header, firstStep)
+      : await startWorkStatus(env, { chatId: target.chatId }, hatName, header, firstStep);
+    readStatus = { status: { hat: hatName, header, done: [], current: firstStep, edits: 0 }, messageId: messageId ?? undefined };
+  }
   let dispatchResult: Awaited<ReturnType<typeof dispatchAction>>;
   try {
     const run = () => dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t, skills));
-    dispatchResult = isRead ? await withWorkspaceTypingIndicator(env, run) : await run();
+    dispatchResult = isRead
+      ? (mode === "chat" ? await withChatTypingIndicator(env, chatTarget, run) : await withWorkspaceTypingIndicator(env, run))
+      : await run();
   } catch (err) {
-    await finishWorkStatus(env, readStatus, "⛔ Failed.", "failed");
+    if (readStatus) await finishWorkStatusAt(env, chatTarget, readStatus.status, readStatus.messageId ?? 0, "⛔ Failed.", "failed");
     throw err;
   }
-  if (isRead) {
-    await finishWorkStatus(env, readStatus, dispatchResult?.kind === "read" && dispatchResult.reply.trim() ? "✅ Done -- the answer is below." : "✅ Done.", "succeeded");
+  if (isRead && readStatus) {
+    const doneLine = dispatchResult?.kind === "read" && dispatchResult.reply.trim() ? "✅ Done -- the answer is below." : "✅ Done.";
+    await finishWorkStatusAt(env, chatTarget, readStatus.status, readStatus.messageId ?? 0, doneLine, "succeeded");
   }
   if (!dispatchResult) {
     // Unreachable: Resolution only ever returns manifest-exposed Actions.
@@ -440,7 +454,28 @@ export async function tryResolveUnitAction(
   text: string,
   priorHat?: string,
 ): Promise<UnitDispatchResult> {
-  const interpretation = await interpretHat(env, manifest, text, priorHat);
+  // Chat's classification (Stage 1 Hat, Stage 2 Action) is two AI calls with
+  // nothing to show in between. Signal the originating chat once, before the
+  // first call, so the user sees the bot is working rather than waiting on a
+  // silent hang. Cowork is untouched: it signals the Workspace stream itself.
+  const classify = async (): Promise<{ interpretation: Awaited<ReturnType<typeof interpretHat>>; stage2: Awaited<ReturnType<typeof classifyAction>> | null }> => {
+    const interpretation = await interpretHat(env, manifest, text, priorHat);
+    const contract = contractForRequest(text, "chat", manifest, priorHat, interpretation);
+    const organization = resolveOrganization(contract, manifest);
+    if (organization.kind === "failed") {
+      return { interpretation, stage2: null };
+    }
+    const org = organization.organization;
+    const hat = manifest.hats[org.hat]!;
+    const stage2 = await classifyAction(
+      env,
+      { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${org.hat} Hat.` },
+      hat.actions,
+      text,
+    );
+    return { interpretation, stage2 };
+  };
+  const { interpretation, stage2 } = await withChatTypingIndicator(env, target, classify);
   const contract = contractForRequest(text, "chat", manifest, priorHat, interpretation);
   const organization = resolveOrganization(contract, manifest);
   if (organization.kind === "failed") {
@@ -449,19 +484,13 @@ export async function tryResolveUnitAction(
   const org = organization.organization;
   const hat = manifest.hats[org.hat]!; // resolveOrganization only returns a Hat this manifest declares
 
-  const stage2 = await classifyAction(
-    env,
-    { taskId: manifest.actionClassificationTaskId, introLine: `You decide which action this request needs, within ${manifest.unit}'s ${org.hat} Hat.` },
-    hat.actions,
-    text,
-  );
   if (!stage2?.action) {
     // Chat's classification gate: no interpretation, no governed Work --
     // fall open to conversation (unchanged from before Resolution).
     return { kind: "ambiguous" };
   }
 
-  const resolution = await resolveActionExecution(manifest, org, withRequestedAction(contract, stage2.action));
+  const resolution = await resolveActionExecution(manifest, org, withRequestedAction(contract, stage2.action ?? null));
   if (resolution.kind !== "resolved" || resolution.execution.action.action_id !== stage2.action) {
     return { kind: "ambiguous" };
   }

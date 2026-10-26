@@ -1,5 +1,6 @@
 import type { Env, WorkState } from "../types";
-import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../telegram";
+import { editWorkspaceHatMessage, sendWorkspaceHatMessage, editHatMessage, sendHatMessage } from "../telegram";
+import type { HatMessageTarget } from "../telegram";
 
 /**
  * Live work status -- a Runtime Service any Unit's Hat uses to show Martin
@@ -71,6 +72,22 @@ export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: s
   holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
+/**
+ * Like startWorkStatus, but the status bubble is sent to an explicit target
+ * instead of the Workspace stream -- used for ordinary chat, where the
+ * progress ack belongs in the conversation that started it.
+ */
+export async function startWorkStatusAt(
+  env: Env,
+  target: HatMessageTarget,
+  hat: string,
+  header: string,
+  firstStep: string,
+): Promise<number | undefined> {
+  const status: WorkStatus = { hat, header, done: [], current: firstStep, edits: 0 };
+  return sendHatMessage(env, target, escapeTelegramMarkdown(renderWorkStatus(status)));
+}
+
 /** Marks the running step done and shows `step` as running. A no-op when no run is being reported. */
 export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step: string): Promise<void> {
   const status = holder.workStatus;
@@ -80,6 +97,25 @@ export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
   status.edits = (status.edits ?? 0) + 1;
   await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, escapeTelegramMarkdown(renderWorkStatus(status)));
+}
+
+/**
+ * Like advanceWorkStatus, but edits a status message at an explicit target.
+ * Carries the same status object so the caller can keep one holder across
+ * start/advance/finish regardless of which chat the bubble lives in.
+ */
+export async function advanceWorkStatusAt(
+  env: Env,
+  target: HatMessageTarget,
+  status: WorkStatus,
+  messageId: number,
+  step: string,
+): Promise<void> {
+  if (status.current) status.done.push(status.current);
+  status.current = step;
+  if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
+  status.edits = (status.edits ?? 0) + 1;
+  await editHatMessage(env, target, messageId, escapeTelegramMarkdown(renderWorkStatus(status)));
 }
 
 /**
@@ -113,4 +149,19 @@ export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line:
   holder.workStatusMessageId = undefined;
   if (messageId === undefined || !status) return;
   await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
+}
+
+/**
+ * Like finishWorkStatus, but edits a status message at an explicit target.
+ * Clears the status object so a later run never edits a finished message.
+ */
+export async function finishWorkStatusAt(
+  env: Env,
+  target: HatMessageTarget,
+  status: WorkStatus,
+  messageId: number,
+  line: string,
+  outcome: "succeeded" | "failed",
+): Promise<void> {
+  await editHatMessage(env, target, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
 }

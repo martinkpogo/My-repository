@@ -373,6 +373,24 @@ async function sendHatMessageCore(
 }
 
 /**
+ * Shows "<bot> is typing..." in one specific chat. Purely cosmetic:
+ * unconfigured streams and Telegram failures are logged, never thrown, so
+ * an indicator can never block the work it accompanies.
+ *
+ * Takes an explicit chat/thread rather than resolving a stream, so a chat
+ * message's own progress can be signalled back to the conversation that
+ * started it instead of the shared Workspace topic.
+ */
+export async function sendChatTypingAction(env: Env, chatId: number, threadId?: number): Promise<void> {
+  try {
+    const res = await call(env, "sendChatAction", { chat_id: chatId, message_thread_id: threadId, action: "typing" });
+    if (!res.ok) console.error("telegram sendChatAction failed", await res.text());
+  } catch (err) {
+    console.error("telegram sendChatAction failed", err);
+  }
+}
+
+/**
  * Shows "<bot> is typing..." in the Workspace topic. Purely cosmetic:
  * unconfigured streams and Telegram failures are logged, never thrown, so
  * an indicator can never block the work it accompanies.
@@ -380,12 +398,7 @@ async function sendHatMessageCore(
 export async function sendWorkspaceTypingAction(env: Env): Promise<void> {
   const target = getWorkspaceTarget(env);
   if (!target) return;
-  try {
-    const res = await call(env, "sendChatAction", { chat_id: target.chatId, message_thread_id: target.threadId, action: "typing" });
-    if (!res.ok) console.error("telegram sendChatAction failed", await res.text());
-  } catch (err) {
-    console.error("telegram sendChatAction failed", err);
-  }
+  await sendChatTypingAction(env, target.chatId, target.threadId);
 }
 
 /**
@@ -400,6 +413,24 @@ export async function sendWorkspaceTypingAction(env: Env): Promise<void> {
  */
 export async function withWorkspaceTypingIndicator<T>(env: Env, work: () => Promise<T>): Promise<T> {
   await sendWorkspaceTypingAction(env);
+  return work();
+}
+
+/**
+ * Chat-mode counterpart to withWorkspaceTypingIndicator: shows "<bot> is
+ * typing..." in the chat the message actually came from, then runs `work`.
+ * Never changes what `work` returns or throws, and never sends a refresh
+ * loop (same subrequest-budget reasoning as withWorkspaceTypingIndicator).
+ *
+ * Used for ordinary chat classification, where there is no Workspace stream
+ * to signal on and the user is waiting on the same conversation.
+ */
+export async function withChatTypingIndicator<T>(
+  env: Env,
+  target: { chatId: number; threadId?: number },
+  work: () => Promise<T>,
+): Promise<T> {
+  await sendChatTypingAction(env, target.chatId, target.threadId);
   return work();
 }
 
