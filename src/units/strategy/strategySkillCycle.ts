@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import type { OperationMetadata } from "../../runtime/activityReporter";
 import { generate, generateWithOutcome, type AiFailureCause } from "../../ai";
 import type { SemanticTaskId } from "../../dataBoundary/types";
 import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegistry";
@@ -176,6 +177,8 @@ export interface StrategySkillCycleParams {
   skills: ResolvedActionSkillSet;
   /** Progress narration for the in-progress message, if the caller wants one. */
   onProgress?: (message: string) => Promise<void>;
+  /** Optional activity metadata propagated explicitly from the caller. */
+  operationMetadata?: OperationMetadata;
 }
 
 export function findingsText(findings: readonly StrategySkillFinding[]): string {
@@ -230,6 +233,7 @@ async function planStrategySkills(
     availableSkills: readonly StrategyDomainSkillId[];
     strategyAnalysisContent: string;
   },
+  operationMetadata?: OperationMetadata,
 ): Promise<{ plan: StrategySkillPlanEntry[] | null; cause?: AiFailureCause }> {
   try {
     const outcome = await generateWithOutcome<{ interpretation?: string; plan?: unknown; rationale?: string }>(env, {
@@ -268,7 +272,7 @@ async function planStrategySkills(
         ].join("\n"),
       },
       light: true,
-    });
+     }, undefined, operationMetadata);
 
     if (!outcome.ok) {
       // The documented degradation is unchanged (the caller proceeds to
@@ -307,6 +311,7 @@ async function runDomainSkill(
   skillId: StrategyDomainSkillId,
   question: string,
   input: { strategyQuestion: string; strategyContext: string; skillContent: string },
+  operationMetadata?: OperationMetadata,
 ): Promise<StrategySkillFinding> {
   const profile = DOMAIN_PROFILES[skillId];
   try {
@@ -351,7 +356,7 @@ async function runDomainSkill(
         ].join("\n"),
       },
       light: true,
-    });
+    }, operationMetadata);
 
     if (!result || result.sufficient !== true) {
       return { skillId, status: "failed", failureReason: result?.blockedReason ?? "Could not produce a defensible finding from the supplied evidence." };
@@ -387,6 +392,7 @@ async function runDomainSkill(
 async function synthesizeStrategyFindings(
   env: Env,
   input: { strategyQuestion: string; strategyContext: string; findings: StrategySkillFinding[]; strategyAnalysisContent: string },
+  operationMetadata?: OperationMetadata,
 ): Promise<{
   synthesis: StrategySynthesisResult | null;
   aiFailure?: { cause: AiFailureCause; gateReasons: string[] };
@@ -422,7 +428,7 @@ async function synthesizeStrategyFindings(
       },
       light: true,
       maxTokens: 2000,
-    });
+     }, undefined, operationMetadata);
     if (!outcome.ok) {
       return { synthesis: null, aiFailure: { cause: outcome.cause, gateReasons: outcome.gateReasons } };
     }
@@ -449,7 +455,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   const availableSkills = STRATEGY_DOMAIN_SKILL_IDS.filter((id) => skills.declared.includes(id));
 
   await onProgress?.("Planning which Strategy Skills (if any) this diagnosis needs...");
-  const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content });
+  const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content }, params.operationMetadata);
   if (planOutcome.plan === null) {
     // Unchanged degradation: proceed to core diagnosis, only the CAUSE is
     // additionally carried for the caller's log and WorkState.
@@ -498,7 +504,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   }
 
   await onProgress?.("Reconciling Strategy Skill findings...");
-  const synthesisOutcome = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content });
+  const synthesisOutcome = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content }, params.operationMetadata);
   if (synthesisOutcome.synthesis === null) {
     if (synthesisOutcome.aiFailure) {
       // A failed synthesis call is phrased by cause (gate refusal vs
