@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import { reportOperationOutcome, type OperationContext } from "../runtime/activityReporter";
+import type { OperationMetadata } from "../runtime/activityReporter";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
 import { isSemanticTaskId } from "../dataBoundary/registry";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
@@ -102,9 +102,9 @@ export class AiPolicyExecutor {
   public async executeTask(
     env: Env,
     task: AiTask,
-    operationContext?: OperationContext,
+    _operationMetadata?: OperationMetadata,
   ): Promise<CommonAiResponse | null> {
-    const outcome = await this.executeTaskWithOutcome(env, task, operationContext);
+    const outcome = await this.executeTaskWithOutcome(env, task, _operationMetadata);
     return outcome.ok ? outcome.response : null;
   }
 
@@ -131,18 +131,16 @@ export class AiPolicyExecutor {
   public async executeTaskWithOutcome(
     env: Env,
     task: AiTask,
-    operationContext?: OperationContext,
+    _operationMetadata?: OperationMetadata,
   ): Promise<AiCallOutcome> {
     if (!task || !task.taskId || !isSemanticTaskId(task.taskId) || !task.boundaryContext) {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
-      if (operationContext) await reportOperationOutcome(env, operationContext, "unverified");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
 
     const eligible = this.providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
       console.error("AiPolicyExecutor: No eligible AI provider available");
-      if (operationContext) await reportOperationOutcome(env, operationContext, "unverified");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
 
@@ -266,7 +264,6 @@ export class AiPolicyExecutor {
           malformed++;
           continue;
         }
-        if (operationContext) await reportOperationOutcome(env, operationContext, "succeeded");
         return { ok: true, response: result.response };
       }
 
@@ -293,14 +290,11 @@ export class AiPolicyExecutor {
     }
     const reasons = [...gateReasons];
     if (gateBlocked > 0 && gateBlocked === processed) {
-      if (operationContext) await reportOperationOutcome(env, operationContext, "denied");
       return { ok: false, cause: "outbound_gate_blocked", gateReasons: reasons };
     }
     if (malformed > 0 && infraFailures === 0) {
-      if (operationContext) await reportOperationOutcome(env, operationContext, "failed");
       return { ok: false, cause: "unparseable", gateReasons: reasons };
     }
-    if (operationContext) await reportOperationOutcome(env, operationContext, "unverified");
     return { ok: false, cause: "providers_exhausted", gateReasons: reasons };
   }
 }

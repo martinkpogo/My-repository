@@ -9,6 +9,13 @@ import { editWorkspaceHatMessage } from "../telegram";
 
 export type OperationOutcome = "succeeded" | "failed" | "partially_completed" | "unverified" | "denied";
 
+export interface OperationMetadata {
+  runId?: string;
+  holder?: WorkStatusHolder;
+  label?: string;
+  parentOperationId?: string;
+}
+
 export interface OperationContext {
   runId: string;
   holder: WorkStatusHolder;

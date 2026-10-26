@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import type { OperationContext } from "./runtime/activityReporter";
+import type { OperationMetadata } from "./runtime/activityReporter";
 import { defaultPolicyExecutor, AiPolicyExecutor, type AiFailureCause } from "./ai/policy";
 import type { AiTask } from "./ai/types";
 import type { SemanticTaskId, ContextSegment, SensitivityLevel } from "./dataBoundary/types";
@@ -75,7 +75,7 @@ export async function aiJson<T = Record<string, unknown>>(
   env: Env,
   opts: AiJsonOptions,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationContext,
+  operationContext?: OperationMetadata,
 ): Promise<T | null> {
   const response = await executor.executeTask(env, buildJsonTask(opts), operationContext);
   if (!response) {
@@ -99,9 +99,9 @@ export async function aiText(
   taskId: SemanticTaskId,
   system: string,
   user: string,
-   options: AiTextOptions = {},
+  options: AiTextOptions = {},
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationContext,
+  operationContext?: OperationMetadata,
 ): Promise<string> {
   const segments: ContextSegment[] = [
     { type: "system", content: system, provenance: `${taskId}:system` },
@@ -146,7 +146,7 @@ export async function aiChat(
   maxTokens = 800,
   sensitivity?: SensitivityLevel,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationContext,
+  operationContext?: OperationMetadata,
 ): Promise<string> {
   const segments: ContextSegment[] = [
     { type: "system", content: system, provenance: `${taskId}:system`, sensitivity },
@@ -225,9 +225,9 @@ function assembleSystemPrompt(parts: GeneratePromptParts): string {
  * treatment, so TypeScript overloads keep this one exported function name
  * while still typing each call site's return correctly.
  */
-export async function generate<T = Record<string, unknown>>(env: Env, options: BaseGenerateOptions & { mode: "json" }): Promise<T | null>;
-export async function generate(env: Env, options: BaseGenerateOptions & { mode: "text" }): Promise<string>;
-export async function generate(env: Env, options: BaseGenerateOptions & { mode: "json" | "text" }, operationContext?: OperationContext): Promise<unknown> {
+export async function generate<T = Record<string, unknown>>(env: Env, options: BaseGenerateOptions & { mode: "json" }, operationMetadata?: OperationMetadata): Promise<T | null>;
+export async function generate(env: Env, options: BaseGenerateOptions & { mode: "text" }, operationMetadata?: OperationMetadata): Promise<string>;
+export async function generate(env: Env, options: BaseGenerateOptions & { mode: "json" | "text" }, operationContext?: OperationMetadata): Promise<unknown> {
   const system = assembleSystemPrompt(options.parts);
   const situation = options.parts.situation;
   if (options.mode === "json") {
@@ -266,7 +266,7 @@ export async function generateWithOutcome<T = Record<string, unknown>>(
   env: Env,
   options: BaseGenerateOptions,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationContext,
+  operationContext?: OperationMetadata,
 ): Promise<AiJsonOutcome<T>> {
   const system = assembleSystemPrompt(options.parts);
   const outcome = await executor.executeTaskWithOutcome(env, buildJsonTask({

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { generate } from "./ai";
+import { generate, generateWithOutcome } from "./ai";
 import type { Env } from "./types";
 
 /**
@@ -79,4 +79,31 @@ test("generate: omitting optional prompt parts (no behavior/skillContent/context
   });
   await generate(env, { taskId: "chat.data_lookup", mode: "text", parts: { persona: "You are the Toy Hat.", situation: "Hello" } });
   assert.strictEqual(capturedSystem.trim(), "You are the Toy Hat.");
+});
+
+test("generateWithOutcome: forwards optional operation metadata to the policy executor", async () => {
+  const env = fakeEnv({ AI: { run: async () => ({ response: "{}" }) } as any });
+  let captured: any;
+  const executor: any = {
+    executeTaskWithOutcome: async (_env: any, _task: any, meta: any) => {
+      captured = meta;
+      return { ok: true, response: { rawText: "{}" } };
+    },
+  };
+  const metadata = { runId: "r1", label: "op" } as any;
+  await generateWithOutcome(env, { taskId: "chat.data_lookup", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" } }, executor, metadata);
+  assert.deepStrictEqual(captured, metadata);
+});
+
+test("generateWithOutcome: omitted metadata leaves existing behavior unchanged", async () => {
+  const env = fakeEnv({ AI: { run: async () => ({ response: "{}" }) } as any });
+  let captured: any = "unset";
+  const executor: any = {
+    executeTaskWithOutcome: async (_env: any, _task: any, meta: any) => {
+      captured = meta;
+      return { ok: true, response: { rawText: "{}" } };
+    },
+  };
+  await generateWithOutcome(env, { taskId: "chat.data_lookup", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" } }, executor);
+  assert.equal(captured, undefined);
 });
