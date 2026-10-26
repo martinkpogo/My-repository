@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import { generate, generateWithOutcome } from "./ai";
+import { defaultPolicyExecutor } from "./ai/policy";
 import type { Env } from "./types";
 
 /**
@@ -106,4 +107,71 @@ test("generateWithOutcome: omitted metadata leaves existing behavior unchanged",
   };
   await generateWithOutcome(env, { taskId: "chat.data_lookup", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" } }, executor);
   assert.equal(captured, undefined);
+});
+
+test("generate: json mode forwards OperationMetadata to executeTask", async () => {
+  const original = defaultPolicyExecutor.executeTask;
+  let captured: any;
+  (defaultPolicyExecutor as any).executeTask = async (_env: any, _task: any, meta: any) => {
+    captured = meta;
+    return { rawText: "{}" } as any;
+  };
+  try {
+    const env = fakeEnv({ AI: { run: async () => ({ response: "{}" }) } as any });
+    const metadata = { runId: "r", label: "op" } as any;
+    await generate(env, { taskId: "chat.data_lookup", mode: "json", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" } }, metadata);
+    assert.deepStrictEqual(captured, metadata);
+  } finally {
+    (defaultPolicyExecutor as any).executeTask = original;
+  }
+});
+
+test("generate: conversation-history mode forwards OperationMetadata to executeTask", async () => {
+  const original = defaultPolicyExecutor.executeTask;
+  let captured: any;
+  (defaultPolicyExecutor as any).executeTask = async (_env: any, _task: any, meta: any) => {
+    captured = meta;
+    return { rawText: "ok" } as any;
+  };
+  try {
+    const env = fakeEnv({ AI: { run: async () => ({ response: "ok" }) } as any });
+    const metadata = { runId: "r2", label: "op2" } as any;
+    await generate(env, { taskId: "chat.data_lookup", mode: "text", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" }, history: [{ role: "user", content: "hi" }] }, metadata);
+    assert.deepStrictEqual(captured, metadata);
+  } finally {
+    (defaultPolicyExecutor as any).executeTask = original;
+  }
+});
+
+test("generate: plain-text mode forwards OperationMetadata to executeTask", async () => {
+  const original = defaultPolicyExecutor.executeTask;
+  let captured: any;
+  (defaultPolicyExecutor as any).executeTask = async (_env: any, _task: any, meta: any) => {
+    captured = meta;
+    return { rawText: "ok" } as any;
+  };
+  try {
+    const env = fakeEnv({ AI: { run: async () => ({ response: "ok" }) } as any });
+    const metadata = { runId: "r3", label: "op3" } as any;
+    await generate(env, { taskId: "chat.data_lookup", mode: "text", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" } }, metadata);
+    assert.deepStrictEqual(captured, metadata);
+  } finally {
+    (defaultPolicyExecutor as any).executeTask = original;
+  }
+});
+
+test("generate: omitted metadata remains backward-compatible", async () => {
+  const original = defaultPolicyExecutor.executeTask;
+  let captured: any = "unset";
+  (defaultPolicyExecutor as any).executeTask = async (_env: any, _task: any, meta: any) => {
+    captured = meta;
+    return { rawText: "ok" } as any;
+  };
+  try {
+    const env = fakeEnv({ AI: { run: async () => ({ response: "ok" }) } as any });
+    await generate(env, { taskId: "chat.data_lookup", mode: "text", parts: { persona: "p", behavior: "b", skillContent: "", context: "", situation: "s" } });
+    assert.equal(captured, undefined);
+  } finally {
+    (defaultPolicyExecutor as any).executeTask = original;
+  }
 });
