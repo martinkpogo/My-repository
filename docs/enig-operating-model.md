@@ -736,7 +736,9 @@ Infrastructure must not be presented as business or organizational concepts. A D
 * **Sales** -- the Finance -> Sales Proposal pickup (Handoff, tokens and Finance block, existing Proposal, token-safety checks, facts, writing v1), and the call-notes pickup (Handoff, consuming the approved Call Notes record by ID, governance, qualification).
 * **Marketing** -- every Hat run (governance, the draft / route / clarify decision).
 * **Business Development** -- the AI-judged Actions (qualify_*, develop_*, determine_next_move) and the qualification evidence resume; the deterministic handoff proposals report none.
-* **Read Actions** (BD research and Lead Generation's `discover_leads`) -- one step, the Action itself, reported generically by `dispatchResolvedAction` in **Cowork mode only**: Chat mode's contract is one reply to wherever the message came from, so it is left unchanged.
+* **Read Actions** (BD research and Lead Generation's `discover_leads`) -- one step, the Action itself, reported generically by `dispatchResolvedAction`. In **Cowork mode** the bubble goes to the Workspace stream; in **Chat mode** it goes to the originating chat, so a chat message's progress ack belongs in the conversation that started it rather than the shared Workspace topic. Chat's contract is still one reply, to wherever the message came from -- the status bubble is closed before that reply is sent.
+
+Chat classification (Stage 1 Hat, Stage 2 Action) is two AI calls with nothing to show in between, so the originating chat gets Telegram's typing indicator once before the first call. Cowork is untouched: it signals the Workspace stream itself.
 
 Not reported: the scheduled autonomous lead-discovery sweep (no Work; it runs in the background and reports its own summary), and the AI layer's per-call detail (which provider was tried, gate refusals) -- deliberately left out of the shared AI path.
 
