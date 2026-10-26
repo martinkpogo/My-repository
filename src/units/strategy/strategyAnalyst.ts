@@ -1079,6 +1079,7 @@ async function runDiagnosisSteps(env: Env, state: WorkState, skills: ResolvedAct
     strategyContext,
     skills,
     onProgress: (message) => advanceWorkStatus(env, state, message),
+    operationMetadata: { runId: state.workId, holder: state, label: "strategy.skill_cycle" },
   });
 
   if (cycle.status === "unavailable") {

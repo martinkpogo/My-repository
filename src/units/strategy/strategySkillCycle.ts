@@ -272,7 +272,7 @@ async function planStrategySkills(
         ].join("\n"),
       },
       light: true,
-     }, undefined, operationMetadata);
+     }, undefined, operationMetadata ? { ...operationMetadata, label: "strategy.skill_plan" } : undefined);
 
     if (!outcome.ok) {
       // The documented degradation is unchanged (the caller proceeds to
@@ -356,7 +356,7 @@ async function runDomainSkill(
         ].join("\n"),
       },
       light: true,
-    }, operationMetadata);
+    }, operationMetadata ? { ...operationMetadata, label: "strategy.skill." + skillId } : undefined);
 
     if (!result || result.sufficient !== true) {
       return { skillId, status: "failed", failureReason: result?.blockedReason ?? "Could not produce a defensible finding from the supplied evidence." };
@@ -428,7 +428,7 @@ async function synthesizeStrategyFindings(
       },
       light: true,
       maxTokens: 2000,
-     }, undefined, operationMetadata);
+     }, undefined, operationMetadata ? { ...operationMetadata, label: "strategy.skill_synthesis" } : undefined);
     if (!outcome.ok) {
       return { synthesis: null, aiFailure: { cause: outcome.cause, gateReasons: outcome.gateReasons } };
     }
