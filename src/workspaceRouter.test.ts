@@ -399,7 +399,9 @@ test("T0a. Chat mode dispatches a confidently-resolved read action directly, usi
   assert.strictEqual(calls.init.length, 0, "a read action must never create a WorkSession");
   // A chat read now carries progress feedback (typing indicator before
   // classification, a status bubble, then the reply) in the originating chat.
-  // The reply is the last text-bearing message; the indicator carries no text.
+  // The indicator is sent exactly once; the reply is the last text message.
+  const typing = sent.filter((m) => m.method === "sendChatAction" && m.chatId === -1004435157576);
+  assert.strictEqual(typing.length, 1, "exactly one typing indicator for a chat read");
   const textMessages = sent.filter((m) => m.text && m.text.length > 0);
   assert.ok(textMessages.length >= 1, "at least the reply must be sent");
   const reply = textMessages[textMessages.length - 1];

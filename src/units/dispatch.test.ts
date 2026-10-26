@@ -324,8 +324,9 @@ test("tryResolveUnitAction: a chat read Action signals the originating chat with
   const result = await tryResolveUnitAction(env, toyManifest(), { chatId: 12345, threadId: 777 }, "what's the status?");
 
   assert.deepStrictEqual(result, { kind: "handled" });
-  // A sendChatAction (typing) ran before the first AI call, in the originating chat.
-  assert.ok(sent.some((m) => m.method === "sendChatAction" && m.chatId === 12345 && m.threadId === 777), "a typing indicator must be sent to the originating chat before classification");
+  // A sendChatAction (typing) ran exactly once before the first AI call, in the originating chat. (The exact-count assertion is the dedicated test below; this one also guards the destination.)
+  const typing = sent.filter((m) => m.method === "sendChatAction" && m.chatId === 12345 && m.threadId === 777);
+  assert.strictEqual(typing.length, 1, "exactly one typing indicator must be sent to the originating chat before classification");
   // The status bubble is sent to the originating chat, never the Workspace stream.
   const textMessages = sent.filter((m) => m.text && m.text.length > 0);
   assert.ok(textMessages.some((m) => m.chatId === 12345 && m.threadId === 777 && m.text?.includes("Running check status")), "a status bubble must be sent to the originating chat");
@@ -367,4 +368,64 @@ test("tryResolveUnitAction: a chat write Action gets only the typing indicator, 
   assert.strictEqual(result.kind, "continue");
   assert.ok(sent.some((m) => m.method === "sendChatAction"), "the typing indicator still runs for a write action's classification");
   assert.ok(!sent.some((m) => m.text && m.text.length > 0), "a write action must not send a status bubble or a reply here -- its own entryHandler decides");
+});
+
+/**
+ * A chat read must signal the originating chat exactly ONCE. Classification
+ * sends the typing indicator; dispatchResolvedAction must not send a second
+ * one for the same read, or the user sees two "typing" bubbles.
+ */
+test("tryResolveUnitAction: a chat read signals the originating chat exactly once, with no duplicate typing indicator", async (t) => {
+  const sent = mockTelegramFetchWithMethod(t);
+  const env = mockAi(
+    { TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" },
+    [{ action: "check_status" }],
+  );
+
+  await tryResolveUnitAction(env, toyManifest(), { chatId: 12345, threadId: 777 }, "what's the status?");
+
+  const typing = sent.filter((m) => m.method === "sendChatAction" && m.chatId === 12345 && m.threadId === 777);
+  assert.strictEqual(typing.length, 1, "exactly one typing indicator must be sent to the originating chat for a chat read");
+});
+
+/**
+ * If the status-message send fails (no message id), the caller must not fall
+ * back to editing message 0, and the original Action's reply must still go
+ * out. A failed status send is best-effort and never blocks the work.
+ */
+test("tryResolveUnitAction: a failed status-message send does not edit message 0 and the reply still goes out", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sent: { method?: string; chatId?: number; threadId?: number; text?: string }[] = [];
+  let textMessageCount = 0;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      const body = JSON.parse(init?.body ?? "{}");
+      const method = String(url).match(/\/bot[^/]+\/([A-Za-z0-9_]+)(?:\?|$)/)?.[1];
+      sent.push({ method, chatId: body.chat_id, threadId: body.message_thread_id, text: body.text });
+      if (method === "sendMessage") {
+        // The status bubble's send produces no message id; the reply's send
+        // still does. This simulates a status send that yielded nothing.
+        textMessageCount += 1;
+        const messageId = textMessageCount === 1 ? undefined : 1;
+        return new Response(JSON.stringify({ ok: true, result: messageId ? { message_id: messageId } : null }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, result: true }), { status: 200 });
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  }) as any;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const env = mockAi(
+    { TELEGRAM_GROUP_CHAT_ID: "-999", WORKSPACE_TOPIC_ID: "604" },
+    [{ action: "check_status" }],
+  );
+
+  await tryResolveUnitAction(env, toyManifest(), { chatId: 12345, threadId: 777 }, "what's the status?");
+
+  // No editMessageText call may have targeted message 0 (or any non-positive id).
+  const edits = sent.filter((m) => m.method === "editMessageText");
+  assert.strictEqual(edits.length, 0, "a failed status send must not produce any editMessageText call, and in particular not one aimed at message 0");
+  // The original Action's reply still goes out.
+  assert.ok(sent.some((m) => m.method === "sendMessage" && m.text?.includes("handled:check_status")), "the reply must still be sent even when the status send failed");
 });

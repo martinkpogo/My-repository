@@ -3,7 +3,7 @@ import type { HatManifest, UnitManifest } from "./unitManifest";
 import { classifyCandidateHats, classifyAction } from "../hats/intakeClassification";
 import { dispatchAction } from "../hats/actionRegistry";
 import { sendWorkspaceHatMessage, sendHatMessage, withWorkspaceTypingIndicator, withChatTypingIndicator, type HatMessageTarget } from "../telegram";
-import { finishWorkStatusAt, startWorkStatus, startWorkStatusAt, type WorkStatus } from "../runtime/workStatus";
+import { finishWorkStatusAt, startWorkStatus, startWorkStatusAt, type WorkStatus, type WorkStatusHolder } from "../runtime/workStatus";
 import { logActivity } from "../log";
 import { findUnitManifest } from "./registry";
 import { findManifestAction } from "./unitManifest";
@@ -312,24 +312,31 @@ async function dispatchResolvedAction(
   if (isRead) {
     const header = `${hatName} — ${actionName}`;
     const firstStep = `Running ${actionName.replace(/_/g, " ")}`;
-    const messageId = mode === "chat"
-      ? await startWorkStatusAt(env, chatTarget, hatName, header, firstStep)
-      : await startWorkStatus(env, { chatId: target.chatId }, hatName, header, firstStep);
-    readStatus = { status: { hat: hatName, header, done: [], current: firstStep, edits: 0 }, messageId: messageId ?? undefined };
+    if (mode === "chat") {
+      const messageId = await startWorkStatusAt(env, chatTarget, hatName, header, firstStep);
+      readStatus = { status: { hat: hatName, header, done: [], current: firstStep, edits: 0 }, messageId };
+    } else {
+      const holder: WorkStatusHolder = { chatId: target.chatId };
+      await startWorkStatus(env, holder, hatName, header, firstStep);
+      readStatus = { status: holder.workStatus!, messageId: holder.workStatusMessageId };
+    }
   }
   let dispatchResult: Awaited<ReturnType<typeof dispatchAction>>;
   try {
     const run = () => dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t, skills));
-    dispatchResult = isRead
-      ? (mode === "chat" ? await withChatTypingIndicator(env, chatTarget, run) : await withWorkspaceTypingIndicator(env, run))
+    // Chat mode already signalled the originating chat once, before
+    // classification, so the read run itself needs no second indicator.
+    // Cowork has no such prior signal and keeps its own.
+    dispatchResult = isRead && mode !== "chat"
+      ? await withWorkspaceTypingIndicator(env, run)
       : await run();
   } catch (err) {
-    if (readStatus) await finishWorkStatusAt(env, chatTarget, readStatus.status, readStatus.messageId ?? 0, "⛔ Failed.", "failed");
+    if (readStatus) await finishWorkStatusAt(env, chatTarget, readStatus.status, readStatus.messageId, "⛔ Failed.", "failed");
     throw err;
   }
   if (isRead && readStatus) {
     const doneLine = dispatchResult?.kind === "read" && dispatchResult.reply.trim() ? "✅ Done -- the answer is below." : "✅ Done.";
-    await finishWorkStatusAt(env, chatTarget, readStatus.status, readStatus.messageId ?? 0, doneLine, "succeeded");
+    await finishWorkStatusAt(env, chatTarget, readStatus.status, readStatus.messageId, doneLine, "succeeded");
   }
   if (!dispatchResult) {
     // Unreachable: Resolution only ever returns manifest-exposed Actions.

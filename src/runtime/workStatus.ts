@@ -108,9 +108,10 @@ export async function advanceWorkStatusAt(
   env: Env,
   target: HatMessageTarget,
   status: WorkStatus,
-  messageId: number,
+  messageId: number | undefined,
   step: string,
 ): Promise<void> {
+  if (messageId === undefined || !Number.isFinite(messageId) || messageId <= 0) return;
   if (status.current) status.done.push(status.current);
   status.current = step;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
@@ -154,14 +155,19 @@ export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line:
 /**
  * Like finishWorkStatus, but edits a status message at an explicit target.
  * Clears the status object so a later run never edits a finished message.
+ *
+ * A missing or invalid messageId is a no-op, never an edit of message 0: a
+ * failed status send must not turn into a spurious Telegram edit, and it
+ * must never block the Action or reply that the status was reporting on.
  */
 export async function finishWorkStatusAt(
   env: Env,
   target: HatMessageTarget,
   status: WorkStatus,
-  messageId: number,
+  messageId: number | undefined,
   line: string,
   outcome: "succeeded" | "failed",
 ): Promise<void> {
+  if (messageId === undefined || !Number.isFinite(messageId) || messageId <= 0) return;
   await editHatMessage(env, target, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
 }
