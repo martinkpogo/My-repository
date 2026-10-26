@@ -26,6 +26,7 @@ import {
 } from "./googleOAuth";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
+import type { ResultReviewState } from "./types";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
@@ -170,6 +171,8 @@ export class WorkSession extends DurableObject<Env> {
       return bindExecutionSkills(execution.skills, declaredAction).then(
         (skills) => {
           recordWorkAction(state, actionName);
+          // Initialize result review contract from Action declaration (BD-8)
+          this.ensureResultReviewState(state, execution);
           return hat.entryHandler(this.env, state, actionName, text, skills);
         },
         (err) => {
@@ -479,6 +482,98 @@ export class WorkSession extends DurableObject<Env> {
     });
   }
 
+  private isSuccessResultStage(stage: string): boolean {
+    if (stage === "cancelled" || stage === "closed_not_qualified") return false;
+    if (stage === "delivered" || stage === "complete") return true;
+    return false;
+  }
+
+  private ensureResultReviewState(state: WorkState, execution?: any): ResultReviewState {
+    if (!state.resultReview) {
+      state.resultReview = {
+        expectedResult: execution?.expected_result ?? undefined,
+        completionCriteria: execution?.completion_criteria ?? undefined,
+        evidenceRefs: [],
+        gateStatus: "pending",
+      };
+    } else {
+      if (!state.resultReview.expectedResult && execution?.expected_result) {
+        state.resultReview.expectedResult = execution.expected_result;
+      }
+      if (!state.resultReview.completionCriteria && execution?.completion_criteria) {
+        state.resultReview.completionCriteria = execution.completion_criteria as readonly string[];
+      }
+    }
+    return state.resultReview;
+  }
+
+  private evaluateResultReviewGate(state: WorkState): { allowed: boolean; reason?: string } {
+    const review = state.resultReview;
+    if (!review) {
+      return { allowed: false, reason: "Result review contract required for successful closure" };
+    }
+    // Require expected Result and completion criteria
+    if (!review.expectedResult || !review.expectedResult.trim()) {
+      review.gateStatus = "blocked";
+      review.blockReason = "Result contract missing: expected Result required";
+      return { allowed: false, reason: review.blockReason };
+    }
+    if (!review.completionCriteria || review.completionCriteria.length === 0) {
+      review.gateStatus = "blocked";
+      review.blockReason = "Result contract missing: completion criteria required";
+      return { allowed: false, reason: review.blockReason };
+    }
+    if (review.expectedResult && (!review.completionCriteria || review.completionCriteria.length === 0)) {
+      review.gateStatus = "blocked";
+      review.blockReason = "Result criteria missing";
+      return { allowed: false, reason: review.blockReason };
+    }
+    if (review.completionCriteria && review.completionCriteria.length > 0) {
+      if (!review.checker || review.checker.outcome !== "passed") {
+        review.gateStatus = "blocked";
+        review.blockReason = review.checker?.reason || "Independent Checker verification required";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.checker.independent) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Checker must be independent of the performer";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.checker.checkerId || review.checker.checkerId === state.actionName) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Checker identity must be independent and verified";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.checker.checkedAt) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Checker verification must be recorded with timestamp";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.resultApproval) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Martin's Result approval required";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (review.resultApproval.approver !== "martin") {
+        review.gateStatus = "blocked";
+        review.blockReason = "Result approval must be from authorized Martin";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.resultApproval.approvedAt) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Result approval not properly recorded";
+        return { allowed: false, reason: review.blockReason };
+      }
+      if (!review.resultApproval.approvalId && !review.resultApproval.approvalProofRef) {
+        review.gateStatus = "blocked";
+        review.blockReason = "Result approval must be backed by a trusted approval record";
+        return { allowed: false, reason: review.blockReason };
+      }
+    }
+    review.gateStatus = "passed";
+    return { allowed: true };
+  }
+
   private async require(): Promise<WorkState> {
     const state = await this.getState();
     if (!state) throw new Error("Work session state missing");
@@ -563,6 +658,24 @@ export class WorkSession extends DurableObject<Env> {
 
   private async save(state: WorkState): Promise<WorkState> {
     state.updatedAt = new Date().toISOString();
+    // Enforce Result review gate for successful closure (BD-8)
+    if (this.isSuccessResultStage(state.stage)) {
+      const gate = this.evaluateResultReviewGate(state);
+      if (!gate.allowed) {
+        // Do not allow successful closure if gate fails; preserve unresolved state
+        if (state.stage === "complete") {
+          state.stage = "result_review_blocked";
+        } else if (state.stage === "delivered") {
+          state.stage = "result_review_blocked";
+        }
+        if (!state.blockedReason) {
+          state.blockedReason = state.resultReview?.blockReason || gate.reason || "Result review gate failed";
+        }
+        if (state.resultReview && !state.resultReview.blockReason) {
+          state.resultReview.blockReason = state.blockedReason;
+        }
+      }
+    }
     // Derive this Work's canonical Matter identity (its page id) from its
     // token before it is persisted, so the Matter -> current Work pointer
     // can be keyed the same way no matter which Unit learned the Matter
