@@ -491,7 +491,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
         strategyQuestion,
         strategyContext,
         skillContent: skills.get(skillId as SkillId).content,
-      }),
+      }, params.operationMetadata),
     ),
   );
 
