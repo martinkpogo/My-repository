@@ -102,8 +102,9 @@ export class AiPolicyExecutor {
   public async executeTask(
     env: Env,
     task: AiTask,
+    operationContext?: OperationContext,
   ): Promise<CommonAiResponse | null> {
-    const outcome = await this.executeTaskWithOutcome(env, task);
+    const outcome = await this.executeTaskWithOutcome(env, task, operationContext);
     return outcome.ok ? outcome.response : null;
   }
 
