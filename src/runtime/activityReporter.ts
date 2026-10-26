@@ -45,6 +45,7 @@ async function tryEdit(holder: WorkStatusHolder, env: Env): Promise<void> {
   const status = holder.workStatus;
   const messageId = holder.workStatusMessageId;
   if (!status || messageId === undefined) return;
+  if (!Number.isFinite(messageId) || messageId <= 0) return;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
   try {
     status.edits = (status.edits ?? 0) + 1;
