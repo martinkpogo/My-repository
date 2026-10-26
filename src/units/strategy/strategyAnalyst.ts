@@ -1160,7 +1160,7 @@ async function runCoreDiagnosis(env: Env, state: WorkState): Promise<WorkState> 
     taskId: "strategy.diagnosis",
     parts: { ...buildDiagnosisPromptParts(governance.hatDefinition, governance.universalRoleContract), situation: state.strategy?.context ?? "" },
     maxTokens: 3000,
-  });
+  }, undefined, { runId: state.workId, holder: state, label: "strategy.diagnosis" });
   if (!outcome.ok) {
     // A failed AI call is never reported as an evidence judgement: the
     // hold reason states the actual cause (gate refusal with its codes,
@@ -2823,7 +2823,7 @@ export async function handleStrategyDiscussion(env: Env, state: WorkState, text:
       taskId: "strategy.proposal_discussion",
       parts: { ...buildProposalDiscussionPromptParts(governance.hatDefinition, governance.universalRoleContract, state, proposal, discussion.turns), situation: question },
       maxTokens: 1200,
-    }),
+    }, undefined, { runId: state.workId, holder: state, label: "strategy.proposal_discussion" })
   );
   const answer = outcome.ok && typeof outcome.json.answer === "string" ? outcome.json.answer.trim() : "";
   if (!outcome.ok || !answer) {
