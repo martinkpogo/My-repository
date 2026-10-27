@@ -361,7 +361,7 @@ const read = (rel: string) => fs.readFileSync(path.join(import.meta.dirname, rel
 
 test("WorkSession.save delegates successful-closure enforcement to evaluateResultReviewGate and flips to the blocked stage", () => {
   const src = read("session.ts");
-  assert.match(src, /if \(isSuccessfulResultStage\(state\.stage\)\)/, "save() must gate every success stage");
+  assert.match(src, /if \(isSuccessfulResultStage\(state\.stage\) \&\& state\.resultReview\)/, "save() must gate every success stage when a Result contract is declared");
   assert.match(src, /await evaluateResultReviewGate\(state\)/, "save() must evaluate the shared gate, not a private copy");
   assert.match(src, /state\.stage = RESULT_REVIEW_BLOCKED_STAGE/, "a refused success stage must flip to result_review_blocked");
   assert.match(src, /private async reportResultReviewBlocked/, "the unresolved state and reason must be reported visibly, once per transition");
@@ -433,4 +433,36 @@ test("the closure-owning Actions declare their Result contract on their own Unit
       assert.ok(found, `${manifest.unit} must declare ${name} somewhere so its contract exists`);
     }
   }
+});
+
+test("WorkSession.save only evaluates the gate when a Result contract is declared (no contract = no gate)", () => {
+  const src = read("session.ts");
+  // The gate is only evaluated when resultReview exists -- Works whose Action
+  // declares no Result contract pass through save() unblocked.
+  assert.match(src, /if \(isSuccessfulResultStage\(state\.stage\) \&\& state\.resultReview\)/, "save() must only gate when a Result contract is declared");
+  // closeHandoffOnResult still calls the gate directly (fail-closed for direct calls).
+  assert.match(read("handoffLifecycle.ts"), /await evaluateResultReviewGate\(state\)/, "closeHandoffOnResult still calls the shared gate directly");
+});
+
+test("result production continues while review is pending: gate blocks closure but not stage advancement", async () => {
+  const state = baseState();
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  // No verdict, no approval: the gate refuses closure.
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /no Checker verdict is recorded/);
+  // But the Work's stage can still advance -- the gate does not freeze the Work.
+  state.stage = "delivered";
+  assert.strictEqual(state.stage, "delivered");
+  // gateStatus reflects the block but the Work is not terminal.
+  assert.strictEqual(state.resultReview?.gateStatus, "blocked");
+});
+
+test("legitimate Handoff creation is not gated by Result review", () => {
+  // createHandoff (src/handoffWriter.ts) performs no Result review check:
+  // a Handoff can be created while a Work's review is pending. The gate
+  // only applies at successful closure (closeHandoffOnResult) and at save().
+  const src = read("handoffWriter.ts");
+  assert.doesNotMatch(src, /evaluateResultReviewGate/, "createHandoff must not call the Result review gate");
+  assert.doesNotMatch(src, /isResultReviewSatisfied/, "createHandoff must not call any Result review helper");
 });

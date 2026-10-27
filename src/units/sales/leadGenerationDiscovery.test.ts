@@ -2087,7 +2087,7 @@ test("handleLeadOpportunityApproval: rejecting remembers the organisation for 18
   const memory = (env as any).__kv.get(leadCandidateMemoryKey(SAMPLE_OPPORTUNITY.organisation));
   assert.ok(memory, "the rejection is remembered");
   assert.strictEqual(JSON.parse(memory).status, "rejected");
-  assert.strictEqual(updated.stage, "complete");
+  assert.strictEqual(updated.stage, "cancelled");
 });
 
 test("handleLeadOpportunityApproval: a card whose Work does not record record_lead can never create a Lead (fails closed, nothing written)", async (t) => {

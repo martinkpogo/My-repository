@@ -627,8 +627,8 @@ export class WorkSession extends DurableObject<Env> {
     // told once per transition: either that the Work awaits independent
     // verification, or (when a passing bound verdict exists) the staged
     // Result approval card with its Approve/Reject buttons.
-    if (isSuccessfulResultStage(state.stage)) {
-      const wasBlocked = state.resultReview?.gateStatus === "blocked";
+    if (isSuccessfulResultStage(state.stage) && state.resultReview) {
+      const wasBlocked = state.resultReview.gateStatus === "blocked";
       const gate = await evaluateResultReviewGate(state);
       if (!gate.allowed) {
         state.stage = RESULT_REVIEW_BLOCKED_STAGE;
