@@ -10,7 +10,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { resolveHandoffContextBinding, sourcesRichText } from "../../handoffSources";
-import { claimPendingHandoff } from "../../handoffLifecycle";
+import { claimPendingHandoff, closeHandoffOnResult } from "../../handoffLifecycle";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
@@ -691,15 +691,20 @@ async function judgeQuote(
   const rationale = judgement!.rationale ?? "";
 
   if (state.handoffId) {
-    await updateHandoff(env, state.handoffId, {
-      Status: select("Closed"),
-      "Work Completed": richText(
-        `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
-          0,
-          1900,
-        ),
-      ),
-    }, financeAccess(state));
+    // BD-8: the successful closure of this Work's own inbound Handoff routes
+    // through the one generic Result review gate. A refusal leaves the
+    // Handoff exactly as it is and is surfaced below -- the quote write-back
+    // below still happens, but the Handoff is never closed unchecked.
+    const closure = await closeHandoffOnResult(
+      env,
+      state,
+      state.handoffId,
+      `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(0, 1900),
+      financeAccess(state),
+    );
+    if (!closure.closed) {
+      console.error(`Finance: quote Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+    }
   }
   await logActivity(env, {
     entry: `Quote judged: ${currency} ${price} — ${matterToken}`,

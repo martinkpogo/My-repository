@@ -600,7 +600,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
   };
 
   if (!approved) {
-    state.stage = "complete";
+    state.stage = "cancelled";
     // Remembered so later discovery runs do not propose the same
     // organisation again. Best-effort: a failed write only means it may be
     // proposed again later, never that anything is created.
@@ -635,7 +635,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
     return state;
   }
   if (duplicates.length > 0) {
-    state.stage = "complete";
+    state.stage = "cancelled";
     await logActivity(env, {
       entry: `Opportunity approval blocked -- possible duplicate: ${opportunity.organisation}`,
       type: "Discovery",

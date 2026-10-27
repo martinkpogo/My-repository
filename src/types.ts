@@ -674,6 +674,19 @@ export interface WorkState {
    * this exact call, queued a Handoff."
    */
   pendingHandoffAutoCheck?: boolean;
+
+  /**
+   * Result review lifecycle state (BD-8). Work owns generic enforcement;
+   * Actions declare their expected Result and completion criteria on their
+   * own manifests (loaded live from the registered Action, never
+   * hard-coded). A SUCCESSFUL closure requires the declared contract, a
+   * hash-bound independent Checker verdict over the exact evidence, and
+   * Martin's separate hash-bound Result approval -- and is refused, with
+   * the reason kept visible, until all three hold. Work itself is not
+   * paused meanwhile: execution continues and cancellation (`/cancel`) and
+   * explicit non-success closure are unaffected.
+   */
+  resultReview?: ResultReviewState;
 }
 
 /**
@@ -730,4 +743,94 @@ export interface SessionSummary {
   entityToken?: string;
   /** The Work's canonical Matter token (e.g. "MAT-20") -- same semantics as entityToken, Matter side. */
   matterToken?: string;
+}
+
+/**
+ * One reference to the evidence a Result rests on. The evidence SET is
+ * carried inside the Checker verdict and hashed into it (src/resultReview.ts),
+ * so a verdict can never be reinterpreted as covering a different set.
+ */
+export interface ResultReviewEvidenceRef {
+  kind: string;
+  ref: string;
+  note?: string;
+}
+
+/**
+ * A Checker verdict over one exact Result-review snapshot (BD-8 condition 2).
+ *
+ * `verdictHash` is a SHA-256 over the canonical text of THIS Work's id, its
+ * declared expected Result, its completion criteria, this exact evidence set,
+ * the outcome and the reason (src/resultReview.ts recomputes it at gate time).
+ * A verdict whose hash no longer matches the current snapshot -- because the
+ * Work, the Result, the criteria or the evidence changed after it was
+ * recorded -- is refused fail-closed; it is bound to what was checked and to
+ * nothing else.
+ *
+ * `checkerId` is the recorded identity of who performed the check. The gate
+ * enforces it be distinct from the Work's recorded performer (Action and Hat)
+ * as the minimum mechanical check; it is NOT proof of organizational
+ * independence, which remains an unresolved governance rule (see
+ * docs/enig-operating-model.md, Open questions).
+ */
+export interface ResultReviewCheckerVerdict {
+  checkerId: string;
+  outcome: "passed" | "failed";
+  reason?: string;
+  checkedAt: string;
+  evidenceRefs: readonly ResultReviewEvidenceRef[];
+  verdictHash: string;
+}
+
+/**
+ * Martin's Result approval (BD-8 condition 3), recorded only by the verified
+ * staged-approval consumption path (src/resultReview.ts) -- never by a field
+ * a caller wrote by hand.
+ *
+ * `reviewHash` is a SHA-256 over the exact snapshot Martin approved: this
+ * Work's id, its declared expected Result, its completion criteria, and the
+ * verdictHash of the Checker verdict in force at that moment. The gate
+ * recomputes it at closure time, so an approval never survives a change to
+ * what was approved. Like the Call Notes `record_approval` attestation, this
+ * is procedural assurance (a bound claim recorded through the sanctioned
+ * path), not cryptographic proof of the human approval event.
+ *
+ * `token` identifies this approval for the audit trail; the replay barrier is
+ * the consumption of the staged approval it was minted from, exactly as for
+ * ApprovalProof -- the same discipline, never a nonce store.
+ */
+export interface ResultReviewApproval {
+  approver: "martin";
+  token: string;
+  approvedAt: string;
+  reviewHash: string;
+}
+
+/**
+ * A Result approval staged for Martin's decision, presented with the exact
+ * snapshot under review. Consumed (cleared) the moment the verified
+ * `resultreview` callback records the decision, so a replayed button finds
+ * nothing left to consume. `token` binds the button to THIS staged card.
+ */
+export interface PendingResultReviewApproval {
+  token: string;
+  reviewHash: string;
+  createdAt: string;
+}
+
+/**
+ * Result review lifecycle state (BD-8), owned and enforced generically by
+ * Work (src/resultReview.ts). The contract fields are loaded live from the
+ * Work's registered Action (never hand-written here); the checker verdict and
+ * the approval are recorded only through the sanctioned recorders, and both
+ * are hash-bound to this exact Work, Result, criteria and evidence.
+ */
+export interface ResultReviewState {
+  expectedResult?: string;
+  completionCriteria?: readonly string[];
+  checker?: ResultReviewCheckerVerdict;
+  approval?: ResultReviewApproval;
+  pendingApproval?: PendingResultReviewApproval;
+  gateStatus: "pending" | "blocked" | "passed";
+  blockReason?: string;
 }

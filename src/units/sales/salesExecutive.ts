@@ -35,7 +35,7 @@ import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, w
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
-import { claimPendingHandoff } from "../../handoffLifecycle";
+import { claimPendingHandoff, closeHandoffOnResult } from "../../handoffLifecycle";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { retrieveAndConsumeCallNotes } from "../../records/callNotes/callNotesRecord";
 import { serializeCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
@@ -1374,10 +1374,20 @@ export async function handleCallNotesHandoffPickup(
 
   const { qualification, evidenceText } = result;
 
-  await updateHandoff(env, state.handoffId!, {
-    Status: select("Closed"),
-    "Work Completed": richText(`Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, 1900)),
-  }, workSessionContext(state));
+  // BD-8: the successful closure of this Work's own inbound Handoff routes
+  // through the one generic Result review gate (closeHandoffOnResult). A
+  // refusal leaves the Handoff exactly as it is (Picked-up) and is surfaced
+  // below -- never written and never hidden.
+  const closure = await closeHandoffOnResult(
+    env,
+    state,
+    state.handoffId!,
+    `Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, 1900),
+    workSessionContext(state),
+  );
+  if (!closure.closed) {
+    console.error(`Sales: call-notes Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+  }
   await logActivity(env, {
     entry: `Call-notes Handoff closed — Qualification: ${qualification.overall}: ${displayToken}`,
     type: "Activity",
