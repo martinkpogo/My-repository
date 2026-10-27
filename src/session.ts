@@ -27,10 +27,8 @@ import {
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen } from "./handoffLifecycle";
 import {
-  RESULT_REVIEW_BLOCKED_STAGE,
+  applyResultReviewGate,
   ensureResultReviewContract,
-  evaluateResultReviewGate,
-  isSuccessfulResultStage,
   resolveResultReviewApprovalDecision,
   stageResultReviewApproval,
 } from "./resultReview";
@@ -627,16 +625,7 @@ export class WorkSession extends DurableObject<Env> {
     // told once per transition: either that the Work awaits independent
     // verification, or (when a passing bound verdict exists) the staged
     // Result approval card with its Approve/Reject buttons.
-    if (isSuccessfulResultStage(state.stage) && state.resultReview) {
-      const wasBlocked = state.resultReview.gateStatus === "blocked";
-      const gate = await evaluateResultReviewGate(state);
-      if (!gate.allowed) {
-        state.stage = RESULT_REVIEW_BLOCKED_STAGE;
-        if (!state.blockedReason) state.blockedReason = gate.reason ?? "Result review gate failed";
-        if (state.resultReview && !state.resultReview.blockReason) state.resultReview.blockReason = state.blockedReason;
-        if (!wasBlocked) await this.reportResultReviewBlocked(state, gate.reason);
-      }
-    }
+    await applyResultReviewGate(state, (s, reason) => this.reportResultReviewBlocked(s, reason));
     // Derive this Work's canonical Matter identity (its page id) from its
     // token before it is persisted, so the Matter -> current Work pointer
     // can be keyed the same way no matter which Unit learned the Matter

@@ -407,3 +407,37 @@ export async function evaluateResultReviewGate(state: WorkState): Promise<{ allo
   review.blockReason = undefined;
   return { allowed: true };
 }
+
+/**
+ * Applies the Result review gate to a WorkState during save(), exactly as
+ * WorkSession.save() does. Extracted so the gate logic can be exercised
+ * without importing the Durable Object (which cannot be loaded under the
+ * Node test runner).
+ *
+ * Behavior-preserving: save() calls this with its own reportBlocked
+ * callback, so the same mutation, stage flip, and blockedReason retention
+ * happen in production and in tests.
+ *
+ * Returns { blocked: true, reason } when a successful closure was refused
+ * (stage flipped to result_review_blocked, blockedReason retained), or
+ * { blocked: false } when the Work passes through unblocked (no contract,
+ * or gate allowed).
+ */
+export async function applyResultReviewGate(
+  state: WorkState,
+  reportBlocked: (state: WorkState, reason?: string) => Promise<void>
+): Promise<{ blocked: boolean; reason?: string }> {
+  if (!isSuccessfulResultStage(state.stage) || !state.resultReview) {
+    return { blocked: false };
+  }
+  const wasBlocked = state.resultReview.gateStatus === "blocked";
+  const gate = await evaluateResultReviewGate(state);
+  if (!gate.allowed) {
+    state.stage = RESULT_REVIEW_BLOCKED_STAGE;
+    if (!state.blockedReason) state.blockedReason = gate.reason ?? "Result review gate failed";
+    if (state.resultReview && !state.resultReview.blockReason) state.resultReview.blockReason = state.blockedReason;
+    if (!wasBlocked) await reportBlocked(state, gate.reason);
+    return { blocked: true, reason: gate.reason };
+  }
+  return { blocked: false };
+}

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   RESULT_REVIEW_BLOCKED_STAGE,
+  applyResultReviewGate,
   ensureResultReviewContract,
   evaluateResultReviewGate,
   hashResultReviewApproval,
@@ -359,11 +360,9 @@ test("hashes: canonical texts are order-stable and snapshot-specific", async () 
 
 const read = (rel: string) => fs.readFileSync(path.join(import.meta.dirname, rel), "utf8");
 
-test("WorkSession.save delegates successful-closure enforcement to evaluateResultReviewGate and flips to the blocked stage", () => {
+test("WorkSession.save delegates successful-closure enforcement to applyResultReviewGate and flips to the blocked stage", () => {
   const src = read("session.ts");
-  assert.match(src, /if \(isSuccessfulResultStage\(state\.stage\) \&\& state\.resultReview\)/, "save() must gate every success stage when a Result contract is declared");
-  assert.match(src, /await evaluateResultReviewGate\(state\)/, "save() must evaluate the shared gate, not a private copy");
-  assert.match(src, /state\.stage = RESULT_REVIEW_BLOCKED_STAGE/, "a refused success stage must flip to result_review_blocked");
+  assert.match(src, /await applyResultReviewGate\(state,/, "save() must delegate the gate to applyResultReviewGate");
   assert.match(src, /private async reportResultReviewBlocked/, "the unresolved state and reason must be reported visibly, once per transition");
   assert.match(src, /case \"resultreview\":/, "Martin's decision returns through the verified callback, never free text");
   assert.doesNotMatch(src, /private evaluateResultReviewGate/, "the old private gate copy must be gone -- one gate, not two");
@@ -437,25 +436,96 @@ test("the closure-owning Actions declare their Result contract on their own Unit
 
 test("WorkSession.save only evaluates the gate when a Result contract is declared (no contract = no gate)", () => {
   const src = read("session.ts");
-  // The gate is only evaluated when resultReview exists -- Works whose Action
-  // declares no Result contract pass through save() unblocked.
-  assert.match(src, /if \(isSuccessfulResultStage\(state\.stage\) \&\& state\.resultReview\)/, "save() must only gate when a Result contract is declared");
+  // save() delegates to applyResultReviewGate, which internally checks
+  // state.resultReview before firing -- Works whose Action declares no
+  // Result contract pass through save() unblocked.
+  assert.match(src, /await applyResultReviewGate\(state,/, "save() must delegate the gate to applyResultReviewGate");
+  // applyResultReviewGate (in resultReview.ts) checks state.resultReview
+  // before evaluating the gate -- no contract = no gate.
+  const rrSrc = read("resultReview.ts");
+  assert.match(rrSrc, /if \(!isSuccessfulResultStage\(state\.stage\) \|\| !state\.resultReview\)/, "applyResultReviewGate must return unblocked when there is no contract");
   // closeHandoffOnResult still calls the gate directly (fail-closed for direct calls).
   assert.match(read("handoffLifecycle.ts"), /await evaluateResultReviewGate\(state\)/, "closeHandoffOnResult still calls the shared gate directly");
 });
 
-test("result production continues while review is pending: gate blocks closure but not stage advancement", async () => {
-  const state = baseState();
+test("applyResultReviewGate: successful Work without a declared Result contract is not blocked", async () => {
+  const state = baseState({ stage: "delivered" });
+  // No resultReview at all: the Action declares no Result contract, so the
+  // gate must not fire and the Work passes through save() unblocked.
+  const result = await applyResultReviewGate(state, async (_s, _reason) => {
+    throw new Error("reportBlocked must not be called when there is no contract");
+  });
+  assert.strictEqual(result.blocked, false, "a Work without a Result contract must not be blocked");
+  assert.strictEqual(state.stage, "delivered", "the stage must remain unchanged when there is no contract");
+  assert.strictEqual(state.blockedReason, undefined, "blockedReason must not be set when there is no contract");
+});
+
+test("applyResultReviewGate: successful Work with an unsatisfied review is blocked with blockedReason retained", async () => {
+  const state = baseState({ stage: "delivered" });
   ensureResultReviewContract(state, DECLARED_CONTRACT);
-  // No verdict, no approval: the gate refuses closure.
-  const gate = await evaluateResultReviewGate(state);
-  assert.strictEqual(gate.allowed, false);
-  assert.match(gate.reason ?? "", /no Checker verdict is recorded/);
-  // But the Work's stage can still advance -- the gate does not freeze the Work.
+  // Contract declared but no Checker verdict and no Martin approval: gate refuses.
+  let reportCalled = false;
+  const result = await applyResultReviewGate(state, async (_s, reason) => {
+    reportCalled = true;
+    assert.match(reason ?? "", /no Checker verdict is recorded/, "the report must name the missing verdict");
+  });
+  assert.strictEqual(result.blocked, true, "a successful Work with an unsatisfied review must be blocked");
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "the stage must be flipped to result_review_blocked");
+  assert.match(state.blockedReason ?? "", /no Checker verdict is recorded/, "blockedReason must be retained");
+  assert.strictEqual(reportCalled, true, "reportBlocked must be called on the first transition into blocked");
+});
+
+test("applyResultReviewGate: already-blocked Work stays blocked, not re-reported", async () => {
+  const state = baseState({ stage: "delivered" });
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  // First call: blocks, flips stage, reports once.
+  let reportCount = 0;
+  const r1 = await applyResultReviewGate(state, async () => {
+    reportCount++;
+  });
+  assert.strictEqual(r1.blocked, true);
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "stage flipped to result_review_blocked");
+  assert.strictEqual(reportCount, 1, "reportBlocked called once on first block");
+  // Second call: result_review_blocked is not a success stage, so the gate
+  // does not re-fire and reportBlocked is not called again.
+  const r2 = await applyResultReviewGate(state, async () => {
+    reportCount++;
+  });
+  assert.strictEqual(r2.blocked, false, "a blocked-stage Work is not re-evaluated by the gate");
+  assert.strictEqual(reportCount, 1, "reportBlocked must NOT be called again");
+});
+
+test("applyResultReviewGate: Result production continues while review is pending -- non-success stages pass through", async () => {
+  const state = baseState({ stage: "in_progress" });
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  // A non-terminal stage (Result production in progress) is not a success
+  // stage, so the gate does not fire and production continues unblocked.
+  let reportCalled = false;
+  const result = await applyResultReviewGate(state, async () => {
+    reportCalled = true;
+  });
+  assert.strictEqual(result.blocked, false, "Result production must not be blocked while review is pending");
+  assert.strictEqual(state.stage, "in_progress", "the stage must remain unchanged for non-success stages");
+  assert.strictEqual(reportCalled, false, "reportBlocked must not be called for non-success stages");
+
+  // But advancing to a success stage while the review is still unsatisfied
+  // gets blocked -- closure waits, production does not.
   state.stage = "delivered";
-  assert.strictEqual(state.stage, "delivered");
-  // gateStatus reflects the block but the Work is not terminal.
-  assert.strictEqual(state.resultReview?.gateStatus, "blocked");
+  const blocked = await applyResultReviewGate(state, async () => {});
+  assert.strictEqual(blocked.blocked, true, "successful closure must be blocked while review is unsatisfied");
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "the delivered stage must be flipped to blocked");
+});
+
+test("applyResultReviewGate: satisfied review allows successful closure", async () => {
+  const state = await satisfiedState();
+  state.stage = "delivered";
+  let reportCalled = false;
+  const result = await applyResultReviewGate(state, async () => {
+    reportCalled = true;
+  });
+  assert.strictEqual(result.blocked, false, "a satisfied review must allow successful closure");
+  assert.strictEqual(state.stage, "delivered", "the stage must remain delivered when the gate passes");
+  assert.strictEqual(reportCalled, false, "reportBlocked must not be called when the gate passes");
 });
 
 test("legitimate Handoff creation is not gated by Result review", () => {
