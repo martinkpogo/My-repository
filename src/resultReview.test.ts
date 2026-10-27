@@ -495,25 +495,28 @@ test("applyResultReviewGate: already-blocked Work stays blocked, not re-reported
   assert.strictEqual(reportCount, 1, "reportBlocked must NOT be called again");
 });
 
-test("applyResultReviewGate: Result production continues while review is pending -- non-success stages pass through", async () => {
+test("applyResultReviewGate: non-success stages pass through while success stages are blocked (helper-level stage treatment)", async () => {
   const state = baseState({ stage: "in_progress" });
   ensureResultReviewContract(state, DECLARED_CONTRACT);
   // A non-terminal stage (Result production in progress) is not a success
-  // stage, so the gate does not fire and production continues unblocked.
+  // stage, so the gate does not fire and the Work passes through unblocked.
+  // This tests how applyResultReviewGate treats supplied stages; it does not
+  // by itself prove full Work lifecycle progression (WorkSession extends the
+  // cloudflare:workers DurableObject and cannot be imported under Node).
   let reportCalled = false;
   const result = await applyResultReviewGate(state, async () => {
     reportCalled = true;
   });
-  assert.strictEqual(result.blocked, false, "Result production must not be blocked while review is pending");
+  assert.strictEqual(result.blocked, false, "a non-success stage must pass through the gate while review is pending");
   assert.strictEqual(state.stage, "in_progress", "the stage must remain unchanged for non-success stages");
   assert.strictEqual(reportCalled, false, "reportBlocked must not be called for non-success stages");
 
-  // But advancing to a success stage while the review is still unsatisfied
-  // gets blocked -- closure waits, production does not.
+  // But supplying a success stage while the review is still unsatisfied gets
+  // blocked -- the gate refuses successful closure, not production.
   state.stage = "delivered";
   const blocked = await applyResultReviewGate(state, async () => {});
-  assert.strictEqual(blocked.blocked, true, "successful closure must be blocked while review is unsatisfied");
-  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "the delivered stage must be flipped to blocked");
+  assert.strictEqual(blocked.blocked, true, "a supplied success stage must be blocked while review is unsatisfied");
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "the supplied delivered stage must be flipped to blocked");
 });
 
 test("applyResultReviewGate: satisfied review allows successful closure", async () => {
