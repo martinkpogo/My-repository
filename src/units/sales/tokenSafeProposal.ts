@@ -25,6 +25,7 @@ import {
 import { mintApprovalProofForWork, workSessionContext, workSessionReadContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
+import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
@@ -1011,13 +1012,21 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     }
     salesOf(state).proposal = sp;
     if (status !== "Closed") {
-      await updateHandoff(
+      // BD-8: this idempotent reprocess's successful closure routes through
+      // the one generic Result review gate. A refusal leaves the Handoff
+      // exactly as it is (it is not Closed), so a later reprocess simply
+      // retries -- and the refusal reason is surfaced below.
+      const closure = await closeHandoffOnResult(
         env,
+        state,
         handoffId,
-        { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} recorded (${sp.approvalStatus}).`) },
+        `Token-safe Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} recorded (${sp.approvalStatus}).`,
         workSessionContext(state),
         tokens,
       );
+      if (!closure.closed) {
+        console.error(`Runtime Sales Proposal: Handoff ${handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+      }
     }
     await logActivity(env, {
       entry: `Runtime Sales Proposal reprocessed — no new record: ${sp.proposalId} ${versionLabel(sp.currentVersion)}`,
@@ -1187,13 +1196,22 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     );
   }
 
-  await updateHandoff(
+  // BD-8: this SUCCESSFUL closure (Doc verified, Proposal created) routes
+  // through the one generic Result review gate. A refusal leaves the Handoff
+  // exactly as it is and is surfaced below; the non-success Doc-failure
+  // closure above keeps its own direct write -- it never claims a completed
+  // Result and is deliberately not gated.
+  const successClosure = await closeHandoffOnResult(
     env,
+    state,
     handoffId,
-    { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${proposalId} ${versionLabel(1)} created, Doc verified, and auto-approved.`) },
+    `Token-safe Proposal ${proposalId} ${versionLabel(1)} created, Doc verified, and auto-approved.`,
     workSessionContext(state),
     tokens,
   );
+  if (!successClosure.closed) {
+    console.error(`Runtime Sales Proposal: Handoff ${handoffId} NOT closed -- Result review gate refused: ${successClosure.reason}`);
+  }
   await logActivity(env, {
     entry: `Runtime Sales Proposal created: ${proposalId} ${versionLabel(1)} — ${matterToken}`,
     type: "Activity",

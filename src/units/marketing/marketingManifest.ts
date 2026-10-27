@@ -16,8 +16,7 @@ import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
-import { richText, select } from "../../notion";
-import { updateHandoff } from "../../handoffWriter";
+import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { handleHandoffPickup } from "../../hats/executionEngine";
 import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
 
@@ -469,15 +468,19 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     // ungated because closing the Handoff THIS work item was picked up from is
     // execution bookkeeping on a record it already owns -- not the operation
     // handle_request's approval governs (producing Marketing's own output).
-    await updateHandoff(
+    // BD-8: that successful closure still routes through the one generic
+    // Result review gate, keeping the existing .catch -- a refusal (or a
+    // Notion error) only ever leaves the Handoff open, and the refusal
+    // reason is surfaced below.
+    await closeHandoffOnResult(
       env,
+      state,
       state.handoffId,
-      {
-        Status: select("Closed"),
-        "Work Completed": richText((state.marketing?.draft ?? "").slice(0, 1900)),
-      },
+      (state.marketing?.draft ?? "").slice(0, 1900),
       workSessionContext(state),
-    ).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
+    ).then((closure) => {
+      if (!closure.closed) console.error(`Marketing: Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+    }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
   }
 
   await logActivity(env, {
@@ -632,6 +635,26 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       },
       description:
         "Decide whether to draft an output within this Hat's ownership, propose a transition to a better-suited Hat, or ask for clarification -- always gated on Martin's explicit approval (or, for Digital Marketer, explicit spend approval) before anything is treated as done.",
+      // BD-8: expected Result and completion criteria declared BEFORE
+      // execution, loaded live from this manifest by the Result review gate
+      // (src/resultReview.ts). This Action reaches success stages
+      // ("complete" after Martin's draft approval, and after a paid-media
+      // spend approval) and its Handoff-pickup flow closes the inbound
+      // Handoff -- both are gated: the closure through
+      // closeHandoffOnResult, the stage through WorkSession.save. Neither
+      // can complete until an independent Checker verifies the evidence
+      // against these criteria and Martin approves that exact Result. The
+      // output-approval buttons are Martin's approval of the DRAFT -- that
+      // gate is unchanged; this contract is the separate Result review BD-8
+      // requires behind it. Rejection, clarification and transition paths
+      // are non-success outcomes and are deliberately not gated.
+      expectedResult:
+        "A Marketing output drafted within this Hat's ownership and approved by Martin (or a paid-media action approved with explicit spend approval) -- produced under this Hat's governance, never produced before approval, and never claimed done under a better-suited Hat's authority.",
+      completionCriteria: [
+        "The output (or paid-media action) was produced within THIS Hat's declared ownership and produced nothing outside it.",
+        "Martin's explicit approval (or explicit spend approval for Digital Marketer) is recorded for this exact output before it was treated as done.",
+        "Anything the output asserts about the client or market traces to supplied or verifiable evidence, not to invented facts.",
+      ],
     },
   ];
 
