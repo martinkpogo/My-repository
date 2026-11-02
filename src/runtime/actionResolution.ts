@@ -121,10 +121,10 @@ export interface ActionExecutionContext {
   preconditions: null;
   /** Resolved from the Action definition: whether this Action's effect needs Martin's sign-off. Clearance itself stays with Access/approval. */
   approval_state: { required: boolean };
-  /** Not declared by any Action yet. */
-  expected_result: null;
-  /** Not declared by any Action yet. */
-  completion_criteria: null;
+  /** Result contract (BD-8): declared on the Action, passed through by Resolution. */
+  expected_result: string | null;
+  /** Result contract (BD-8): declared on the Action, passed through by Resolution. */
+  completion_criteria: readonly string[] | null;
   /** Data Boundary classification is resolved per AI task at execution time (src/dataBoundary/policy.ts), not per Action. */
   data_context: null;
   /**
@@ -348,8 +348,8 @@ async function finalize(
       },
       preconditions: null,
       approval_state: { required: action.requiresApproval },
-      expected_result: null,
-      completion_criteria: null,
+      expected_result: action.expectedResult ?? null,
+      completion_criteria: action.completionCriteria ?? null,
       data_context: null,
       tool_context:
         action.tool_operations && action.tool_operations.length > 0

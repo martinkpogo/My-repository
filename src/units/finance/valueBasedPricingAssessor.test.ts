@@ -24,6 +24,9 @@ import {
 // contract" test below. (The production dependency already runs the same way:
 // tokenSafeProposal.ts imports these markers FROM this module.)
 import { parseFinanceJudgmentBlock } from "../sales/tokenSafeProposal";
+import { installSatisfiedResultReview } from "../../testSupport/satisfiedResultReview";
+import { declaredResultContract } from "../../testSupport/declaredResultContract";
+import { financeManifest } from "./financeManifest";
 import type { WorkState, Env } from "../../types";
 
 /**
@@ -1142,6 +1145,13 @@ test("Valid non-assumption evidence stays priceable under the existing validator
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_JUDGEMENT);
   const state = fakeState();
+  // BD-8: this flow's quote write-back CLOSES the inbound Handoff, so it now
+  // routes through the generic Result review gate. Install the satisfied
+  // review (declared contract -> independent bound verdict -> Martin's bound
+  // approval) so this test keeps asserting the Unit behaviour it is about --
+  // the gate's own fail-closed refusal cases are tested in
+  // resultReview.test.ts / handoffLifecycle.test.ts.
+  await installSatisfiedResultReview(state, declaredResultContract(financeManifest, "price"));
 
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 

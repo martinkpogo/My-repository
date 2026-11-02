@@ -26,6 +26,9 @@ import type { StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { buildStrategyBoundaryRepresentation, serializeStrategyBoundaryRepresentation, STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
 import { handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
+import { installSatisfiedResultReview } from "../../testSupport/satisfiedResultReview";
+import { declaredResultContract } from "../../testSupport/declaredResultContract";
+import { salesManifest } from "./salesManifest";
 
 // ---------------------------------------------------------------------------
 // Fixtures: the live MAT-20 slice (HO-64, E-20/MAT-20, GHS 420,000).
@@ -1162,6 +1165,13 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
     handoffId: fsHandoff!.id,
   };
   assert.strictEqual((freshSales as any).entityToken, undefined, "the fresh Work carries no Finance identity");
+  // BD-8: the pickup's SUCCESSFUL Handoff closure routes through the generic
+  // Result review gate, so the fixture carries a fully satisfied review (the
+  // live manifest contract -> independent bound verdict -> Martin's bound
+  // approval). The test keeps asserting the real end-to-end behaviour it is
+  // about -- the consumed Handoff -- while the gate's refusal cases live in
+  // resultReview.test.ts / handoffLifecycle.test.ts.
+  await installSatisfiedResultReview(freshSales, declaredResultContract(salesManifest, "proposal_draft"));
 
   const salesState = await handleProposalHandoffPickup(env, freshSales, NO_ACTION_SKILLS);
   assert.ok(!salesState.blockedReason, `pickup must succeed: ${salesState.blockedReason}`);

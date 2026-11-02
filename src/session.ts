@@ -25,7 +25,17 @@ import {
   handleGoogleActionApproval,
 } from "./googleOAuth";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
-import { closeHandoffIfOpen } from "./handoffLifecycle";
+import { closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
+import {
+  applyResultReviewGate,
+  ensureResultReviewContract,
+  isSuccessfulResultStage,
+  resolveResultReviewApprovalDecision,
+  RESULT_REVIEW_BLOCKED_STAGE,
+  stageResultReviewApproval,
+} from "./resultReview";
+import { needsResultVerification, resultVerificationDeps, runMachineryResultVerification } from "./runtime/resultVerification";
+import type { InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
@@ -442,6 +452,54 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
+        case "resultreview": {
+          // Kernel-owned Work lifecycle, same class as the three
+          // infrastructure prefixes above: Martin's Result-review decision
+          // (BD-8 condition 3) returns through this verified callback, never
+          // through free text. The value carries the staged card's own token
+          // plus the decision; resolveResultReviewApprovalDecision consumes
+          // the staged approval as it records the decision, so a replayed
+          // button finds nothing left to consume.
+          const [token, decision] = value.split(":");
+          if (decision !== "approve" && decision !== "reject") {
+            return sendMessage(this.env, state.chatId, "That Result review button is malformed -- nothing was recorded.", undefined, state.threadId).then(() => state);
+          }
+          return resolveResultReviewApprovalDecision(state, { approved: decision === "approve", token }).then(
+            (outcome) => {
+              if (!outcome.ok) {
+                return sendMessage(this.env, state.chatId, `This Result review decision was already resolved or does not match the current card -- nothing was recorded. (${outcome.reason})`, undefined, state.threadId).then(() => state);
+              }
+              state.pendingActionSummary = undefined;
+              if (outcome.approval) {
+                // BD-8/BD-13 recovery: a Work refused into
+                // `result_review_blocked` remembered the success stage it was
+                // refused FROM (preBlockStage, recorded by
+                // applyResultReviewGate). Martin's recorded Result approval
+                // is what restores it -- a blocked stage is deliberately not
+                // a success stage, so without this the gate would never look
+                // at the Work again after the one refusal and the refused
+                // Handoff closure (pendingClosure) would never be retried.
+                // The restored stage flows into save(), which re-evaluates
+                // the gate (now satisfied) and completes the pending
+                // closure.
+                const review = state.resultReview;
+                if (review?.preBlockStage && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
+                  state.stage = review.preBlockStage;
+                  review.preBlockStage = undefined;
+                  state.blockedReason = undefined;
+                }
+              }
+              const reply = outcome.approval
+                ? "✅ Result approved. The approval is recorded against this exact Result, criteria and Checker verdict; the Work may close once saved."
+                : "❌ Result rejected. The rejection is recorded and the Work stays open with the reason visible.";
+              return sendMessage(this.env, state.chatId, reply, undefined, state.threadId).then(() => state);
+            },
+            (err) => {
+              console.error(`WorkSession ${state.workId}: resultreview callback failed`, err);
+              return sendMessage(this.env, state.chatId, "The Result review decision could not be recorded -- nothing was changed.", undefined, state.threadId).then(() => state);
+            },
+          );
+        }
         default: {
           // Generic manifest lookup for an approval-callback prefix a Hat
           // has migrated onto HatManifest.callbackHandlers -- checked only
@@ -524,6 +582,19 @@ export class WorkSession extends DurableObject<Env> {
     return outcome.result;
   }
 
+  /**
+   * The Result contract (BD-8) the Work's OWN recorded Action declares, read
+   * live from the registered manifest -- never hard-coded, never asserted by
+   * the caller. Returns undefined for a Work that records no registered
+   * Action; the gate then refuses its successful closure with that reason.
+   */
+  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[] } | undefined {
+    if (!state.unit || !state.hat || !state.actionName) return undefined;
+    const manifest = findUnitManifest(state.unit);
+    const hat = manifest ? manifest.hats[state.hat] : undefined;
+    return hat?.actions.find((a) => a.name === state.actionName);
+  }
+
   private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
     const state = await this.require();
     // Reset every call -- see WorkState.pendingHandoffAutoCheck's doc
@@ -531,6 +602,11 @@ export class WorkSession extends DurableObject<Env> {
     // this true again, so a caller inspecting the returned state never
     // sees a stale signal left over from an earlier, unrelated call.
     state.pendingHandoffAutoCheck = false;
+    // Result review contract (BD-8): loaded once per mutation cycle, from
+    // the Work's OWN recorded Action as registered on its Unit's manifest --
+    // so dispatch entries and adopted Handoff pickups are covered by one
+    // mechanism, and the contract can never be hand-written onto state.
+    ensureResultReviewContract(state, this.recordedActionResult(state));
     // Durable operation persistence for THIS Work and THIS call only (see
     // src/runtime/workPersistence.ts): the Tool Registry persists its
     // execution intent and outcome into `state.externalOperations` and
@@ -563,6 +639,74 @@ export class WorkSession extends DurableObject<Env> {
 
   private async save(state: WorkState): Promise<WorkState> {
     state.updatedAt = new Date().toISOString();
+    // Machinery Worker Result verification (BD-13): before the gate is
+    // evaluated, the Work lifecycle invokes the independent verification
+    // exactly when the verdict in force no longer covers the Work's current
+    // snapshot (no verdict, changed evidence refs, or a stale verdict hash --
+    // needsResultVerification; an unchanged snapshot is a no-op, which is
+    // what keeps re-verification loop-free). Runs BEFORE the gate so the
+    // block message either names the FAIL reason or stages the approval card
+    // immediately, instead of "awaiting verification" one save later. Every
+    // failure path is fail-closed and quiet (console only): an unavailable
+    // verification leaves no verdict, and the gate below refuses with its
+    // own exact reason -- never a substitute verdict, never a silent PASS.
+    if (
+      state.resultReview &&
+      (isSuccessfulResultStage(state.stage) || state.stage === RESULT_REVIEW_BLOCKED_STAGE) &&
+      (await needsResultVerification(state))
+    ) {
+      const verification = await runMachineryResultVerification(state, resultVerificationDeps(this.env)).catch((err) => {
+        console.error(`WorkSession ${state.workId}: Machinery Worker Result verification failed to run`, err);
+        return { recorded: false as const, unavailableReason: err instanceof Error ? err.message : String(err) };
+      });
+      if (!verification.recorded) {
+        console.error(`WorkSession ${state.workId}: Result verification unavailable -- ${verification.unavailableReason}`);
+      } else if (verification.outcome === "failed" && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
+        // A fresh FAIL on an already-blocked Work: keep the visible reason
+        // accurate (recordCheckerVerdict set the review-level blockReason;
+        // the persisted state.blockedReason still held the earlier one).
+        state.blockedReason = state.resultReview.blockReason ?? state.blockedReason;
+      }
+      // A PASS landing on an ALREADY-blocked Work: the gate below will not
+      // re-fire reportResultReviewBlocked (a blocked stage is deliberately
+      // not a success stage), so Martin's Result approval card must be
+      // staged here instead -- otherwise the passing verdict would sit
+      // un-surfaced until some later transition.
+      if (
+        verification.recorded &&
+        verification.outcome === "passed" &&
+        state.stage === RESULT_REVIEW_BLOCKED_STAGE &&
+        !state.resultReview.approval &&
+        !state.resultReview.pendingApproval
+      ) {
+        await this.reportResultReviewBlocked(state, state.resultReview.blockReason);
+      }
+    }
+    // Result review gate (BD-8): a Work may not REMAIN recorded as
+    // successfully closed while its Result review is unsatisfied. This is
+    // defence in depth behind closeHandoffOnResult (the point where the
+    // Handoff itself is closed) -- here the Work's own stage is refused into
+    // `result_review_blocked` with the reason kept visible, and Martin is
+    // told once per transition: either that the Work awaits independent
+    // verification, or (when a passing bound verdict exists) the staged
+    // Result approval card with its Approve/Reject buttons.
+    const gateResult = await applyResultReviewGate(state, (s, reason) => this.reportResultReviewBlocked(s, reason));
+    // BD-8 resumption: a successful Handoff closure the gate refused is kept
+    // on the review (pendingClosure, recorded by closeHandoffOnResult) and
+    // retried HERE the moment the review is actually satisfied -- a refusal
+    // is delay, never silent loss of the Unit's own completion write. Only
+    // when the gate just PASSED (gateStatus "passed" recomputed on this
+    // save's snapshot), so an unsatisfied review never re-attempts the
+    // closure; closeHandoffOnResult itself re-evaluates the gate before any
+    // Notion call and manages pendingClosure (cleared on success, refreshed
+    // on a fresh refusal).
+    if (!gateResult.blocked && state.resultReview?.gateStatus === "passed" && state.resultReview.pendingClosure) {
+      const pending = state.resultReview.pendingClosure;
+      const closure = await closeHandoffOnResult(this.env, state, pending.handoffId, pending.resultNote, workSessionContext(state));
+      if (!closure.closed) {
+        console.error(`WorkSession ${state.workId}: pending Handoff closure ${pending.handoffId} still refused after review satisfaction: ${closure.reason}`);
+      }
+    }
     // Derive this Work's canonical Matter identity (its page id) from its
     // token before it is persisted, so the Matter -> current Work pointer
     // can be keyed the same way no matter which Unit learned the Matter
@@ -572,6 +716,55 @@ export class WorkSession extends DurableObject<Env> {
     await this.ctx.storage.put("state", state);
     await this.updateRegistry(state);
     return state;
+  }
+
+  /**
+   * One-shot operational visibility when a Work transitions into
+   * `result_review_blocked` (BD-8: "the unresolved state and reason remain
+   * visible"). Either the Work awaits an independent Checker verification
+   * and says so with the exact reason, or a passing bound verdict already
+   * exists and Martin's Result approval card is staged -- its Approve and
+   * Reject buttons bound to this exact staged card by token, resolved only
+   * through the `resultreview` callback (never free text), with the staged
+   * approval consumed on the first decision so a replay finds nothing.
+   * Never throws: a failed notification must not fail the Work's save.
+   */
+  private async reportResultReviewBlocked(state: WorkState, reason?: string): Promise<void> {
+    try {
+      const review = state.resultReview;
+      const verdictPassed = review?.checker?.outcome === "passed";
+      if (verdictPassed && !review?.approval && !review?.pendingApproval) {
+        const staged = await stageResultReviewApproval(state);
+        if (staged.ok) {
+          const message =
+            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result and carries a passing independent Checker verdict against its completion criteria. BD-8 requires your separate Result approval before the Work may close.\n\nApprove or Reject below; the decision is bound to this exact Result, criteria and verdict.`;
+          const buttons: InlineButton[][] = [
+            [
+              { text: "✅ Approve Result", callback_data: `resultreview:${staged.pending.token}:approve` },
+              { text: "❌ Reject", callback_data: `resultreview:${staged.pending.token}:reject` },
+            ],
+          ];
+          await sendMessage(this.env, state.chatId, message, buttons, state.threadId);
+          state.pendingActionSummary = {
+            label: "Result review: awaiting Martin's Result approval",
+            message,
+            buttons,
+            createdAt: staged.pending.createdAt,
+          };
+          return;
+        }
+        console.error(`WorkSession ${state.workId}: could not stage the Result approval card -- ${staged.reason}`);
+      }
+      await sendMessage(
+        this.env,
+        state.chatId,
+        `⛔ *Work ${state.workId} cannot close yet* (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}).\n\n${reason ?? "The Result review gate refused successful closure."}\n\nThe Work stays open with the reason recorded; it keeps running and cancellation is unaffected. Successful closure (and the Handoff's own close) resumes once an independent Checker verdict and your Result approval are recorded against this exact Result.`,
+        undefined,
+        state.threadId,
+      );
+    } catch (err) {
+      console.error(`WorkSession ${state.workId}: failed to report the Result review block`, err);
+    }
   }
 
   private async updateRegistry(state: WorkState): Promise<void> {

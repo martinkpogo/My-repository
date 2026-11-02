@@ -76,6 +76,23 @@ const valueBasedPricingAssessorActions: ActionDefinition<FinanceAction>[] = [
     },
     description:
       "Assess value-at-stake and produce a governed price judgment for a Matter, grounded only in verifiable evidence -- always gated on Martin's explicit approval before any quote is treated as final.",
+    // BD-8: expected Result and completion criteria declared BEFORE
+    // execution, loaded live from this manifest by the Result review gate
+    // (src/resultReview.ts). Finance's successful inbound-Handoff closure
+    // (the quote write-back) routes through closeHandoffOnResult, so it
+    // cannot complete until an independent Checker verifies the evidence
+    // against these criteria and Martin approves that exact Result. The
+    // outbound Finance -> Sales Handoff create keeps its existing Martin
+    // quote-approval gate -- this contract adds no second approval mechanism
+    // to it, and the Held paths are non-success closures, deliberately not
+    // gated.
+    expectedResult:
+      "A governed price judgment for the Matter -- price, currency and rationale grounded only in evidence actually supplied or verifiable -- written back to the inbound Handoff, with no invented value figure or evidence source and no quote treated as final before Martin's explicit approval.",
+    completionCriteria: [
+      "The price, currency and rationale are present and every one of them traces to evidence actually supplied for this Matter -- nothing invented or assumed.",
+      "The inbound Handoff's Work Completed write-back records the quote and its evidence-quality assessment, so the result is verifiable from the record alone.",
+      "No quote was treated as final: Martin's explicit quote approval remains its own gate before Sales may build a proposal on it.",
+    ],
   },
 ];
 

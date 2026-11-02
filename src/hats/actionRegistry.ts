@@ -125,6 +125,13 @@ export interface ActionDefinition<A extends string> {
    */
   requiresApproval: boolean;
   /**
+   * Result contract (BD-8): the intended Result this Action produces and
+   * explicit completion criteria that must be satisfied before successful
+   * closure. Work owns generic enforcement of the review lifecycle.
+   */
+  expectedResult?: string;
+  completionCriteria?: readonly string[];
+  /**
    * Exact Skills the Worker must follow while performing this Action.
    *
    * Optional: a simple Action may require no Skill, and none is forced. When

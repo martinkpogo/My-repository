@@ -157,7 +157,22 @@ export type SemanticTaskId =
   | "strategy.business_diagnosis"
   | "strategy.brand_diagnosis"
   | "strategy.communication_diagnosis"
-  | "strategy.specialist_synthesis";
+  | "strategy.specialist_synthesis"
+  // BD-13 Machinery Worker Result verification (src/runtime/
+  // resultVerification.ts): the Work lifecycle's own independent check of
+  // the declared Result contract against the recorded evidence, invoked at
+  // the Result verification gate. Payload is the token-safe Work snapshot
+  // (canonical Work/unit/hat/action ids, stage, the declared expected
+  // Result and completion criteria, and the producing Unit's own recorded
+  // Result evidence content) -- the same already-sanitized, identity-free
+  // category as finance.quote_judgment/strategy.diagnosis: Entity/Matter
+  // token-bound operational state, never raw enquiry text. Classified
+  // business_sensitive/TOKEN_SAFE_RUNTIME in PRODUCTION_TASK_SENSITIVITY/
+  // PRODUCTION_OUTBOUND_POLICY per the exact same already-approved
+  // rationale as those tasks (see those tables' own doc comments); the
+  // Outbound Data Gate still inspects the actual payload and blocks any
+  // content it cannot establish as safe.
+  | "work.result_verification";
 
 /**
  * public_sourced marks data Lead Discovery can attribute to a genuinely

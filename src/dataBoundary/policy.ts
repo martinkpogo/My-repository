@@ -116,6 +116,17 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "strategy.brand_diagnosis": "business_sensitive",
   "strategy.communication_diagnosis": "business_sensitive",
   "strategy.specialist_synthesis": "business_sensitive",
+  // BD-13 Machinery Worker Result verification -- payload is the token-safe
+  // Work snapshot (canonical Work/unit/hat/action ids, stage, the declared
+  // expected Result and completion criteria, and the producing Unit's own
+  // recorded Result evidence content), never raw enquiry text or
+  // identity-bearing state slices: same already-sanitized,
+  // Entity/Matter-token-bound operational category as
+  // finance.quote_judgment/strategy.diagnosis, and the same rationale as
+  // those entries applies unchanged. The Outbound Data Gate still inspects
+  // the actual payload per call and blocks anything it cannot establish as
+  // safe -- this entry is necessary but never sufficient on its own.
+  "work.result_verification": "business_sensitive",
   // public_sourced, not business_sensitive -- Lead Discovery's evidence
   // originates from the open web, not from ENIG's own internal
   // operations. Never sees the discovered identity/contact itself (see
@@ -609,6 +620,12 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "strategy.brand_diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.communication_diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.specialist_synthesis": "TOKEN_SAFE_RUNTIME",
+  // BD-13 Machinery Worker Result verification -- token-safe Work snapshot
+  // only (same payload category as strategy.specialist_synthesis directly
+  // above): the gate inspects the actual prompt and blocks any content it
+  // cannot establish as identity-free, degrading the check to fail-closed
+  // "unavailable" rather than ever widening what may cross the boundary.
+  "work.result_verification": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_classification": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_signal_evaluation": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_relevance": "TOKEN_SAFE_RUNTIME",

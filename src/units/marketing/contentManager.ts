@@ -26,7 +26,7 @@ export const CONTENT_MANAGER: MarketingHatDefinition = {
   ],
   doesNotOwn: [
     "Marketing strategy (Marketing Strategist)",
-    "Brand/messaging strategy (Brand & Communications Strategist)",
+    "Brand/messaging strategy (Strategy — Brand Strategist and Communication Strategist)",
     "Content strategy (Content Strategist)",
     "Digital marketing execution (Digital Marketer)",
     "Human visual production (Martin)",

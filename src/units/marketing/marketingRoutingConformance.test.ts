@@ -141,14 +141,14 @@ test("the registered Marketing manifest declares the registered relationships by
 // --- Cowork generic path (resolveUnitRequest) ---------------------------------
 
 test("resolveUnitRequest: several Stage 1 candidates resolve through the unconditional registered relationship -- one Stage 1 call, no Stage 2", async (t) => {
-  const h = makeHarness(t, [json({ candidates: ["Marketing Strategist", "Brand & Communications Strategist"], establishing: false, reason: "translating positioning" })]);
+  const h = makeHarness(t, [json({ candidates: ["Marketing Strategist", "Campaign & Marketing Communications Manager"], establishing: false, reason: "translating positioning" })]);
 
   const result = await resolveUnitRequest(h.env, marketingManifest, { chatId: WORKSPACE_CHAT, threadId: WORKSPACE_THREAD }, "Translate our positioning into communications guidance.");
 
   const next = continuation(result);
-  assert.strictEqual(next.hat, "Brand & Communications Strategist");
+  assert.strictEqual(next.hat, "Campaign & Marketing Communications Manager");
   assert.strictEqual(next.actionName, "handle_request");
-  assert.strictEqual(next.execution.organization.hat, "Brand & Communications Strategist");
+  assert.strictEqual(next.execution.organization.hat, "Campaign & Marketing Communications Manager");
   assert.strictEqual(next.execution.action.requires_approval, true, "the approval gate is unchanged: handle_request stays privileged");
   assert.strictEqual(next.execution.action.definition_source, "unit_manifest");
   assert.strictEqual(h.aiCalls.length, 1, "the action must resolve structurally from the Work's origin -- only Stage 1 may run");
@@ -203,7 +203,7 @@ test("resolveUnitRequest: a conditional relationship with no establishing value 
 });
 
 test("resolveUnitRequest: candidates with no registered relationship between them still fail closed", async (t) => {
-  const h = makeHarness(t, [json({ candidates: ["Brand & Communications Strategist", "Digital Marketer"], establishing: true, reason: "spans two Hats" })]);
+  const h = makeHarness(t, [json({ candidates: ["Campaign & Marketing Communications Manager", "Digital Marketer"], establishing: true, reason: "spans two Hats" })]);
 
   const result = await resolveUnitRequest(h.env, marketingManifest, { chatId: WORKSPACE_CHAT, threadId: WORKSPACE_THREAD }, "An unclear request spanning two unrelated Hats.");
 
@@ -216,14 +216,14 @@ test("resolveUnitRequest: candidates with no registered relationship between the
 
 test("tryResolveUnitAction: several candidates resolve through the relationship, and Chat's Stage 2 names the resolved Hat's declared action", async (t) => {
   const h = makeHarness(t, [
-    json({ candidates: ["Marketing Strategist", "Brand & Communications Strategist"], establishing: false, reason: "translating positioning" }),
+    json({ candidates: ["Marketing Strategist", "Campaign & Marketing Communications Manager"], establishing: false, reason: "translating positioning" }),
     json({ action: "handle_request", reason: "the Hat's only action" }),
   ]);
 
   const result = await tryResolveUnitAction(h.env, marketingManifest, { chatId: 12345, threadId: 777 }, "Translate our positioning into communications guidance.");
 
   const next = continuation(result);
-  assert.strictEqual(next.hat, "Brand & Communications Strategist");
+  assert.strictEqual(next.hat, "Campaign & Marketing Communications Manager");
   assert.strictEqual(next.actionName, "handle_request");
   assert.strictEqual(next.execution.action.requires_approval, true);
   assert.strictEqual(h.aiCalls.length, 2, "Chat runs Stage 1 (Hat) and Stage 2 (action) -- both read from this manifest");

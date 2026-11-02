@@ -1,5 +1,7 @@
 import test from "node:test";
 import { strategyManifest } from "./strategyManifest";
+import { installSatisfiedResultReview } from "../../testSupport/satisfiedResultReview";
+import { declaredResultContract } from "../../testSupport/declaredResultContract";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 import { createResolvedActionSkillSet, resolveSkill } from "../../platform/skillRegistry";
 import assert from "node:assert/strict";
@@ -1866,6 +1868,13 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   const env = fakeEnv();
   env.AI = fakeAi(SUFFICIENT_DIAGNOSIS);
   const state = fakeState();
+  // BD-8: closing the originating Handoff now routes through the generic
+  // Result review gate, so the fixture carries a fully satisfied review
+  // (the live manifest contract -> independent bound verdict -> Martin's
+  // bound approval) and the test keeps asserting what it is about: the
+  // closure happens once the approved proposal is transferred. The gate's
+  // refusal cases live in resultReview.test.ts / handoffLifecycle.test.ts.
+  await installSatisfiedResultReview(state, declaredResultContract(strategyManifest, "commit_diagnosis"));
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.strategy?.pendingApproval!;
