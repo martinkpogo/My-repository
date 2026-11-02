@@ -26,6 +26,7 @@ import { mintApprovalProofForWork, workSessionContext, workSessionReadContext } 
 import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
@@ -1012,6 +1013,19 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     }
     salesOf(state).proposal = sp;
     if (status !== "Closed") {
+      // BD-13: record the Result evidence before the closure -- the
+      // independent Machinery Worker verification judges the declared
+      // criteria against exactly this set.
+      await recordResultEvidence(state, [
+        {
+          kind: "proposal_record",
+          ref: sp.proposalId,
+          note: "the canonical token-safe Proposal this Result delivers (idempotent reprocess)",
+          content: `Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} (${sp.approvalStatus}). Handoff ${sp.handoffRef}.${sp.facts ? ` Quote ${formatMoney(sp.facts.quote.currency, sp.facts.quote.price)}.` : ""}`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+        },
+      ]).then((rec) => {
+        if (!rec.ok) console.error(`Runtime Sales Proposal: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+      });
       // BD-8: this idempotent reprocess's successful closure routes through
       // the one generic Result review gate. A refusal leaves the Handoff
       // exactly as it is (it is not Closed), so a later reprocess simply
@@ -1195,6 +1209,21 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
       `the initial Proposal content was written but its canonical Google Doc could not be written and verified (${outcome.error}); ${proposalId} ${versionLabel(1)} is left Pending Approval and is NOT approved. Reprocess this Handoff once the Doc step succeeds -- approval is never claimed before the Doc verifies.`,
     );
   }
+
+  // BD-13: record the Result evidence before the closure -- the independent
+  // Machinery Worker verification judges the declared criteria against
+  // exactly this set (the canonical Doc verified as this exact Version is
+  // the load-bearing evidence).
+  await recordResultEvidence(state, [
+    {
+      kind: "proposal_record",
+      ref: proposalId,
+      note: "the created, Doc-verified, auto-approved token-safe Proposal this Result delivers",
+      content: `Proposal ${proposalId} ${versionLabel(1)}, Doc verified: ${outcome.url}. Content SHA-256 ${contentHash}. Handoff ${facts.handoffRef}. Quote ${formatMoney(facts.quote.currency, facts.quote.price)}.`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+    },
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Runtime Sales Proposal: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
 
   // BD-8: this SUCCESSFUL closure (Doc verified, Proposal created) routes
   // through the one generic Result review gate. A refusal leaves the Handoff

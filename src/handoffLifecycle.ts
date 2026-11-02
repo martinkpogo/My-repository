@@ -90,8 +90,15 @@ export async function closeHandoffOnResult(
 ): Promise<{ closed: true } | { closed: false; reason: string }> {
   const gate = await evaluateResultReviewGate(state);
   if (!gate.allowed) {
+    // Keep the exact refused closure on the review (BD-8 resumption): the
+    // lifecycle retries it the moment the review is satisfied, so a refusal
+    // is delay, never silent loss of the Unit's own completion write.
+    if (state.resultReview) {
+      state.resultReview.pendingClosure = { handoffId, resultNote: reason };
+    }
     return { closed: false, reason: gate.reason ?? "Result review gate refused successful Handoff closure." };
   }
+  if (state.resultReview) state.resultReview.pendingClosure = undefined;
   await updateHandoff(
     env,
     handoffId,

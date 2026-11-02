@@ -828,9 +828,56 @@ export interface PendingResultReviewApproval {
 export interface ResultReviewState {
   expectedResult?: string;
   completionCriteria?: readonly string[];
+  /**
+   * Evidence the producing Unit recorded for THIS Result at the moment it
+   * produced it (src/resultReview.ts's `recordResultEvidence` -- the only
+   * sanctioned way evidence enters WorkState). The Machinery Worker
+   * verification (src/runtime/resultVerification.ts) judges the declared
+   * criteria against exactly this set; the set is hashed into the verdict,
+   * so evidence recorded after a verdict cannot silently backfill it.
+   */
+  evidence?: readonly ResultReviewEvidenceItem[];
   checker?: ResultReviewCheckerVerdict;
   approval?: ResultReviewApproval;
   pendingApproval?: PendingResultReviewApproval;
   gateStatus: "pending" | "blocked" | "passed";
   blockReason?: string;
+  /**
+   * The success stage this Work was refused FROM when the gate flipped it
+   * into `result_review_blocked`, remembered so Martin's recorded Result
+   * approval can restore it (the stage a Work closes at is a success stage,
+   * and a blocked stage is deliberately not one -- see
+   * RESULT_REVIEW_BLOCKED_STAGE in src/resultReview.ts).
+   */
+  preBlockStage?: string;
+  /**
+   * A successful Handoff closure the Result review gate refused, kept with
+   * the exact payload the Unit's handler supplied so the lifecycle can
+   * complete it the moment the review is satisfied (recorded by
+   * closeHandoffOnResult; retried by WorkSession.save). Never invented --
+   * it exists only when a real closure was actually refused.
+   */
+  pendingClosure?: { handoffId: string; resultNote: string };
+  /**
+   * The most recent Machinery Worker verification attempt (BD-13), recorded
+   * for audit visibility: which exact snapshot it judged, what it recorded,
+   * or why nothing could be recorded (fail closed). Procedural record, not
+   * authority -- the verdict itself is what the gate consumes.
+   */
+  verificationAttempt?: { snapshotKey: string; outcome: "passed" | "failed" | "unavailable"; reason?: string; at: string };
+}
+
+/**
+ * One piece of identifiable evidence a producing Unit recorded for its
+ * Result (see ResultReviewState.evidence). `content` is the bounded
+ * evidence text the Machinery Worker verification judges the declared
+ * completion criteria against; `kind`/`ref`/`note` are what the verdict
+ * hashes (src/resultReview.ts), so the recorded verdict can never be
+ * reinterpreted as covering a different evidence set.
+ */
+export interface ResultReviewEvidenceItem {
+  kind: string;
+  ref: string;
+  note?: string;
+  content: string;
 }

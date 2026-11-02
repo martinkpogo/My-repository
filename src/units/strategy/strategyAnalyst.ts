@@ -10,6 +10,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { claimPendingHandoff, closeHandoffIfOpen, closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { createHandoff, updateHandoff, textContainsIdentityValue, parseSourceBoundaryMarker, type KnownIdentityField, type SourceBoundaryEvidence } from "../../handoffWriter";
 import { resolveMatterFromText, resolveEntityMatterFromTokens } from "../../identityResolution";
 import type { AccessContext } from "../../access";
@@ -1302,6 +1303,20 @@ async function deliverDiagnosis(env: Env, state: WorkState, result: StrategyDiag
   }
 
   if (state.handoffId) {
+    // BD-13: record the Result evidence before the closure -- the
+    // independent Machinery Worker verification judges the declared
+    // criteria against exactly this set (captured before any transient
+    // result copy is discarded).
+    await recordResultEvidence(state, [
+      {
+        kind: "strategy_diagnosis",
+        ref: `${state.workId}-diagnosis`,
+        note: "the completed Strategy diagnosis this Result delivers",
+        content: formatDiagnosisForHandoff(result).slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+      },
+    ]).then((rec) => {
+      if (!rec.ok) console.error(`Strategy: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+    });
     // BD-8: this Work's successful closure of its own inbound Handoff routes
     // through the one generic Result review gate. A refusal leaves the
     // Handoff exactly as it is and is surfaced below.
@@ -2478,6 +2493,19 @@ export async function handleInterventionApproval(
     // canonical flow, this is deferred until here (not at proposal-
     // development time), and only after the Finance Handoff actually exists.
     if (state.handoffId) {
+      // BD-13: record the Result evidence before the closure -- the
+      // independent Machinery Worker verification judges the declared
+      // criteria against exactly this set.
+      await recordResultEvidence(state, [
+        {
+          kind: "strategy_proposal",
+          ref: `${state.workId}-proposal-v${proposal!.proposalVersion}`,
+          note: "the Martin-approved Strategic Intervention Proposal this Result delivers (handed to Finance)",
+          content: `Proposal v${proposal!.proposalVersion}: ${proposal!.proposedIntervention.interventionName}\nFinance Handoff ${handoff.id}\n${proposal!.proposedIntervention.interventionSummary ?? ""}`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+        },
+      ]).then((rec) => {
+        if (!rec.ok) console.error(`Strategy: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+      });
       // BD-8: the successful closure of the originating Handoff routes
       // through the one generic Result review gate, keeping the existing
       // .catch -- a refusal (or a Notion error) only ever leaves the

@@ -17,6 +17,7 @@ import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../tel
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { handleHandoffPickup } from "../../hats/executionEngine";
 import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
 
@@ -463,6 +464,21 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   // If this work item arrived via a Handoff (e.g. Strategy's approved
   // routing to Marketing Strategist), close it out as the
   // completion signal -- same pattern Finance/Sales already use.
+  // BD-13: record the Result evidence BEFORE the closure (and before the
+  // draft is cleared below) -- the independent Machinery Worker
+  // verification judges the declared criteria against exactly this set.
+  // Recorded unconditionally: this approval is the Result production point
+  // whether or not an inbound Handoff exists to close.
+  await recordResultEvidence(state, [
+    {
+      kind: "marketing_output",
+      ref: `${state.workId}-draft`,
+      note: "the Martin-approved Marketing draft this Result delivers",
+      content: (state.marketing?.draft ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+    },
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
   if (state.handoffId) {
     // Authorized as a `write`-consequence Action (handle_request), and
     // ungated because closing the Handoff THIS work item was picked up from is
@@ -539,6 +555,21 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
     decisions: state.marketing?.pendingPaidMediaAction?.description.slice(0, 500) ?? "",
     decisionRationale: "Budget/spend approved by Martin.",
     outcome: "Complete",
+  });
+  // BD-13: this approval is this path's Result production point (stage
+  // reaches `complete`, a success stage WorkSession.save gates) -- record
+  // the Result evidence before the transient copy is cleared, so the
+  // independent Machinery Worker verification has the exact approved spend
+  // action to judge the declared criteria against.
+  await recordResultEvidence(state, [
+    {
+      kind: "paid_media_action",
+      ref: `${state.workId}-paid-media`,
+      note: "the Martin-approved paid-media action this Result delivers",
+      content: (state.marketing?.pendingPaidMediaAction?.description ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+    },
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
   });
   await sendWorkspaceHatMessage(env, state, `Spend approved.`);
   marketingOf(state).pendingPaidMediaAction = undefined;

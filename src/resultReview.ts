@@ -55,6 +55,7 @@
 import type {
   ResultReviewApproval,
   ResultReviewCheckerVerdict,
+  ResultReviewEvidenceItem,
   ResultReviewEvidenceRef,
   ResultReviewState,
   WorkState,
@@ -65,6 +66,16 @@ import { hashContent } from "./contentHash";
 export function isSuccessfulResultStage(stage: string): boolean {
   return stage === "delivered" || stage === "complete";
 }
+
+/**
+ * Bounds on recorded Result evidence (BD-8/BD-13): a bounded set of
+ * identifiable items, each with bounded content, so a Verdict -- and the
+ * verification prompt it feeds -- can never be inflated by an unbounded
+ * dump. A recorder call exceeding either bound is refused fail-closed,
+ * never silently truncated.
+ */
+export const MAX_RESULT_EVIDENCE_ITEMS = 12;
+export const MAX_RESULT_EVIDENCE_CONTENT_CHARS = 4000;
 
 /** The stage a successful closure is refused into, with the reason kept visible. */
 export const RESULT_REVIEW_BLOCKED_STAGE = "result_review_blocked";
@@ -246,6 +257,46 @@ export async function recordCheckerVerdict(
 }
 
 /**
+ * Records the evidence THIS Result rests on -- the only sanctioned way
+ * Result evidence enters WorkState (BD-8 condition 2 / BD-13 section 4:
+ * a Checker verifies "the available evidence", so the producing side must
+ * first make that evidence identifiable and durable). Called by a Unit's
+ * own handler at the moment it produces its Result (before it discards any
+ * transient working copy), never from text parsing, never from AI output.
+ *
+ * Refresh semantics: re-recording replaces the whole set (the set is the
+ * Work's current evidence claim, not an append-only log), and the set is
+ * hashed into the verdict -- so a changed evidence set makes an earlier
+ * verdict stale exactly as changed criteria do. Refuses an empty set or a
+ * malformed item, and refuses content beyond the documented bounds.
+ */
+export async function recordResultEvidence(
+  state: WorkState,
+  items: readonly ResultReviewEvidenceItem[],
+): Promise<ResultReviewRecorderRefusal> {
+  const review = state.resultReview;
+  if (!review) {
+    return { ok: false, reason: "cannot record Result evidence: this Work declares no Result contract (no review state exists)." };
+  }
+  if (!items.length) {
+    return { ok: false, reason: "cannot record Result evidence over an empty set -- a Result with no identifiable evidence must fail closed, not be recorded as evidenced." };
+  }
+  if (items.length > MAX_RESULT_EVIDENCE_ITEMS) {
+    return { ok: false, reason: `cannot record Result evidence: ${items.length} items exceeds the ${MAX_RESULT_EVIDENCE_ITEMS}-item bound.` };
+  }
+  for (const item of items) {
+    if (!item.kind.trim() || !item.ref.trim()) {
+      return { ok: false, reason: "cannot record a malformed Result evidence item (kind and ref are both required)." };
+    }
+    if (item.content.length > MAX_RESULT_EVIDENCE_CONTENT_CHARS) {
+      return { ok: false, reason: `cannot record Result evidence item "${item.kind}/${item.ref}": its content exceeds the ${MAX_RESULT_EVIDENCE_CONTENT_CHARS}-character bound.` };
+    }
+  }
+  review.evidence = items.map((i) => ({ kind: i.kind.trim(), ref: i.ref.trim(), ...(i.note ? { note: i.note } : {}), content: i.content }));
+  return { ok: true };
+}
+
+/**
  * Stages Martin's Result decision on the exact current snapshot -- the only
  * sanctioned way a pending Result approval enters WorkState. Refuses unless
  * a PASSING, currently-bound verdict already exists (there is nothing to
@@ -326,8 +377,8 @@ export async function resolveResultReviewApprovalDecision(
 // The gate.
 // ---------------------------------------------------------------------------
 
-/** Returns the stale-reason when the recorded verdict no longer binds to the current snapshot; null when it binds. */
-async function verdictStaleReason(state: WorkState): Promise<string | null> {
+/** Returns the stale-reason when the recorded verdict no longer binds to the current snapshot; null when it binds. Exported for the Machinery Worker verification trigger (src/runtime/resultVerification.ts), which must re-verify exactly when the verdict in force no longer covers the Work's current snapshot. */
+export async function verdictStaleReason(state: WorkState): Promise<string | null> {
   const review = state.resultReview!;
   const verdict = review.checker!;
   if (!verdict.checkedAt?.trim()) return "the Checker verification carries no timestamp.";
@@ -433,6 +484,13 @@ export async function applyResultReviewGate(
   const wasBlocked = state.resultReview.gateStatus === "blocked";
   const gate = await evaluateResultReviewGate(state);
   if (!gate.allowed) {
+    if (state.stage !== RESULT_REVIEW_BLOCKED_STAGE && isSuccessfulResultStage(state.stage)) {
+      // Remember the success stage this Work is refused FROM, so Martin's
+      // recorded Result approval can restore it (a blocked stage is
+      // deliberately not a success stage, so the gate would otherwise never
+      // look at this Work again after the one refusal).
+      state.resultReview.preBlockStage = state.stage;
+    }
     state.stage = RESULT_REVIEW_BLOCKED_STAGE;
     if (!state.blockedReason) state.blockedReason = gate.reason ?? "Result review gate failed";
     if (state.resultReview && !state.resultReview.blockReason) state.resultReview.blockReason = state.blockedReason;

@@ -332,6 +332,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Strategy Analysis Synthesis",
     description: "Reconciles the bounded Strategy Skill findings into a single synthesized context for the Strategy Analyst's diagnosis -- distinguishes evidence from inference, identifies agreement/disagreement and cross-domain relationships, and determines whether the findings are sufficient to proceed.",
   },
+  "work.result_verification": {
+    id: "work.result_verification",
+    name: "Work Result Verification (Machinery Worker)",
+    description:
+      "Independently verifies a Work's recorded Result evidence against its declared Expected Result and completion criteria at the Result verification gate (BD-13). A Machinery Worker granted verify_work_result by Martin in the canonical Organization model; the verdict it records is verification, never Martin's Result approval.",
+  },
 };
 
 export function isSemanticTaskId(id: unknown): id is SemanticTaskId {
