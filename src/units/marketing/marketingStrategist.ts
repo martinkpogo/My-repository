@@ -23,10 +23,10 @@ export const MARKETING_STRATEGIST: MarketingHatDefinition = {
     "Marketing performance review and strategic adjustments",
   ],
   doesNotOwn: [
-    "Brand messaging, tone, or communication standards (Brand & Communications Strategist)",
+    "Brand messaging, tone, or communication standards (Strategy — Brand Strategist and Communication Strategist)",
     "Content pillars, editorial direction, content briefs, or content strategy (Content Strategist)",
     "Content production/publication workflow (Content Manager)",
     "Digital distribution, paid advertising, channel operations, or digital optimization (Digital Marketer)",
   ],
-  routesTo: ["Content Strategist", "Brand & Communications Strategist", "Digital Marketer"],
+  routesTo: ["Content Strategist", "Campaign & Marketing Communications Manager", "Digital Marketer"],
 };

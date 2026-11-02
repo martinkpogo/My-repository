@@ -626,7 +626,7 @@ async function marketingReadHandler(_env: Env, actionName: MarketingAction, _tex
  */
 const MARKETING_RESPONSIBILITY_IDS: Record<MarketingHatName, string> = {
   "Marketing Strategist": "own_marketing_strategy",
-  "Brand & Communications Strategist": "own_brand_and_communications",
+  "Campaign & Marketing Communications Manager": "coordinate_campaigns_and_marketing_communications",
   "Content Strategist": "own_content_strategy",
   "Content Manager": "produce_content",
   "Digital Marketer": "own_digital_demand",

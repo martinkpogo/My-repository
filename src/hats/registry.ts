@@ -1,6 +1,6 @@
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
 import { MARKETING_STRATEGIST } from "../units/marketing/marketingStrategist";
-import { BRAND_COMMUNICATIONS_STRATEGIST } from "../units/marketing/brandCommunicationsStrategist";
+import { CAMPAIGN_MARKETING_COMMUNICATIONS_MANAGER } from "../units/marketing/campaignMarketingCommunicationsManager";
 import { CONTENT_STRATEGIST } from "../units/marketing/contentStrategist";
 import { CONTENT_MANAGER } from "../units/marketing/contentManager";
 import { DIGITAL_MARKETER } from "../units/marketing/digitalMarketer";
@@ -80,7 +80,7 @@ export const BD_GROWTH_MARKET_DEVELOPMENT: HatIdentity = {
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {
   "Marketing Strategist": MARKETING_STRATEGIST,
-  "Brand & Communications Strategist": BRAND_COMMUNICATIONS_STRATEGIST,
+  "Campaign & Marketing Communications Manager": CAMPAIGN_MARKETING_COMMUNICATIONS_MANAGER,
   "Content Strategist": CONTENT_STRATEGIST,
   "Content Manager": CONTENT_MANAGER,
   "Digital Marketer": DIGITAL_MARKETER,

@@ -27,11 +27,11 @@ export const DIGITAL_MARKETER: MarketingHatDefinition = {
   doesNotOwn: [
     "Overall marketing strategy (Marketing Strategist)",
     "Redefining the strategic channel mix (Marketing Strategist)",
-    "Brand/messaging strategy (Brand & Communications Strategist)",
+    "Brand/messaging strategy (Strategy — Brand Strategist and Communication Strategist)",
     "Content strategy (Content Strategist)",
     "Content workflow (Content Manager)",
     "Human visual production (Martin)",
     "Material spend without the required human approval",
   ],
-  routesTo: ["Marketing Strategist", "Content Strategist", "Brand & Communications Strategist"],
+  routesTo: ["Marketing Strategist", "Content Strategist", "Campaign & Marketing Communications Manager"],
 };

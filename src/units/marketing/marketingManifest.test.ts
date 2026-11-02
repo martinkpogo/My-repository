@@ -86,7 +86,7 @@ test("marketingManifest: declares all five Marketing Hats", () => {
   assert.strictEqual(marketingManifest.unit, "Marketing");
   assert.deepStrictEqual(
     new Set(Object.keys(marketingManifest.hats)),
-    new Set(["Marketing Strategist", "Brand & Communications Strategist", "Content Strategist", "Content Manager", "Digital Marketer"]),
+    new Set(["Marketing Strategist", "Campaign & Marketing Communications Manager", "Content Strategist", "Content Manager", "Digital Marketer"]),
   );
 });
 
