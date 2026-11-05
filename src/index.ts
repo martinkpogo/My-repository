@@ -32,6 +32,7 @@ import { pollGoogleDocComments } from "./googleDocComments";
 import { pollGoogleSheetComments } from "./googleSheetComments";
 import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
+import { handleResultGateSmokeRequest } from "./resultGateSmokeRoute";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
@@ -198,6 +199,22 @@ export default {
           headers: { "content-type": "application/json" },
         });
       }
+    }
+
+    // Isolated live Result Gate smoke harness (ENIG issue #370): drives ONE
+    // synthetic Work with the dedicated `result-gate-smoke-` id and the
+    // test-only Action through the normal WorkSession execute/save
+    // lifecycle, so the deployed Result Gate's Machinery Worker
+    // verification, block and Martin's separate Result approval card are
+    // all observed exactly as production runs them. The handler validates
+    // admin key and required query parameters before any Durable Object
+    // exists, and the harness refuses before creating a Work when Martin's
+    // destination or the in-process Action preflight (Unit manifest +
+    // Resolution, no Notion fetch of its own) is unusable.
+    // Deliberately NOT invoked by any repository test: the live run is
+    // authorized separately, after Architect review.
+    if (url.pathname === "/admin/smoke-result-gate" && request.method === "GET") {
+      return handleResultGateSmokeRequest(request, env);
     }
 
     // One-time setup helper: registers this Worker's own /telegram/webhook URL
