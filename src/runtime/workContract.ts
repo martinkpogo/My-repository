@@ -74,7 +74,7 @@ export type WorkMode = "chat" | "cowork";
  * HOW the Work was entered -- the origin Action Resolution evaluates.
  * Distinct from `WorkState.entryType`, which is domain-authored text.
  */
-export type WorkOrigin = "direct_request" | "handoff_pickup" | "lifecycle_transition";
+export type WorkOrigin = "direct_request" | "handoff_pickup" | "lifecycle_transition" | "result_gate_smoke";
 
 /** Facts about the Handoff a Work was entered from, when there is one. */
 export interface WorkHandoffContext {

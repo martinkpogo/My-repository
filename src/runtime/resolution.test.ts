@@ -746,3 +746,32 @@ test("resolveActionExecution: a declared Tool operation is recorded verbatim in 
     permitted_operations: [{ tool_id: "google_docs", operation_id: "google_docs.create_and_verify", required: false }],
   });
 });
+
+
+test("result_gate_smoke_test: normal origins cannot resolve the test-only Action", async () => {
+  const manifest = findUnitManifest("Business Development");
+  const organization = { business_function: null, unit: "Business Development", specialization: null, hat: "Business Development Manager", responsibility: "develop_opportunities" } as any;
+  for (const origin of ["direct_request", "handoff_pickup", "lifecycle_transition"]) {
+    const contract = workContractForRequest({
+      requested_outcome: "result gate smoke",
+      current_context: { mode: "cowork", origin: origin as any, addressed_unit: "Business Development", requested_action: "result_gate_smoke_test" },
+    });
+    const result = await resolveActionExecution(manifest, organization, contract);
+    assert.notEqual(result.kind, "resolved", `${origin} must not resolve the test Action`);
+  }
+});
+
+test("result_gate_smoke_test: special origin resolves only the exact intended Action", async () => {
+  const manifest = findUnitManifest("Business Development");
+  const organization = { business_function: null, unit: "Business Development", specialization: null, hat: "Business Development Manager", responsibility: "develop_opportunities" } as any;
+  const contract = workContractForRequest({
+    requested_outcome: "result gate smoke",
+    current_context: { mode: "cowork", origin: "result_gate_smoke", addressed_unit: "Business Development", requested_action: "result_gate_smoke_test" },
+  });
+  const result = await resolveActionExecution(manifest, organization, contract);
+  assert.equal(result.kind, "resolved");
+  if (result.kind === "resolved") {
+    assert.equal(result.execution.action.action_id, "result_gate_smoke_test");
+    assert.equal(result.execution.action.responsibility, "develop_opportunities");
+  }
+});

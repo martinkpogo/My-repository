@@ -35,6 +35,12 @@ import {
   stageResultReviewApproval,
 } from "./resultReview";
 import { needsResultVerification, resultVerificationDeps, runMachineryResultVerification } from "./runtime/resultVerification";
+import {
+  isResultGateSmokeWorkId,
+  runResultGateSmoke,
+  RESULT_GATE_SMOKE_TARGET,
+  type ResultGateSmokeReport,
+} from "./runtime/resultGateSmoke";
 import type { InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
@@ -327,6 +333,51 @@ export class WorkSession extends DurableObject<Env> {
       },
       closeGovernedWork: async () => {
         await this.cancel();
+      },
+    });
+  }
+
+  /**
+   * Isolated live Result Gate smoke harness entry (ENIG issue #370): the
+   * ONE Durable Object method `/admin/smoke-result-gate` reaches. It wires
+   * this session's own creation and execution seams into the harness core
+   * and adds no lifecycle of its own:
+   *
+   *   - `ensureGovernedWork` refuses to re-initialize an existing Work
+   *     (reuse/overwrite is impossible), then creates the synthetic Work
+   *     through the normal `init`, which records the test-only Action and
+   *     validates it against the Unit Manifest exactly like any other Work;
+   *   - `runWithWorkPersistence` advances that Work through the normal
+   *     `execute` cycle, which loads the Result contract from the Work's
+   *     OWN recorded Action and then runs `save()` -- the one place the
+   *     Machinery Worker verification trigger and the Result review gate
+   *     live. This method never calls the verifier, never records a
+   *     verdict, never stages an approval and never closes the Work.
+   *
+   * The synthetic Work's success stage is what makes `save()` verify and
+   * the gate refuse; Martin's own `resultreview` callback is the only thing
+   * that can later restore and close it.
+   */
+  async runResultGateSmoke(workId: string): Promise<ResultGateSmokeReport> {
+    return runResultGateSmoke(this.env, workId, {
+      ensureGovernedWork: async (id: string, chatId: number) => {
+        if (await this.getState()) {
+          return {
+            ok: false,
+            reason: `Work ${id} already exists in this session -- the Result Gate smoke harness refuses to reuse or overwrite an existing Work; run a fresh invocation with a new Work id instead.`,
+          };
+        }
+        await this.init(id, chatId, RESULT_GATE_SMOKE_TARGET.unit, RESULT_GATE_SMOKE_TARGET.hat, undefined, {
+          actionName: RESULT_GATE_SMOKE_TARGET.action,
+        });
+        return { ok: true };
+      },
+      runWithWorkPersistence: async (id: string, fn: (state: WorkState) => Promise<WorkState>) => {
+        const state = await this.require();
+        if (state.workId !== id) {
+          throw new Error(`Result Gate smoke Work mismatch: this session holds ${state.workId} but the smoke asked for ${id} -- refusing to run under another Work.`);
+        }
+        return this.execute(fn);
       },
     });
   }
@@ -736,7 +787,15 @@ export class WorkSession extends DurableObject<Env> {
       if (verdictPassed && !review?.approval && !review?.pendingApproval) {
         const staged = await stageResultReviewApproval(state);
         if (staged.ok) {
+          // A Result Gate smoke harness Work is announced as exactly that,
+          // so Martin's normal approval card can never be mistaken for a
+          // real consultancy Result (ENIG issue #370). The card, its token
+          // and the `resultreview` callback it carries are unchanged -- only
+          // the message text is marked.
           const message =
+            (isResultGateSmokeWorkId(state.workId)
+              ? `🧪 *TEST ONLY* -- synthetic Result Gate smoke harness Work (issue #370); it carries no business outcome.\n\n`
+              : "") +
             `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result and carries a passing independent Checker verdict against its completion criteria. BD-8 requires your separate Result approval before the Work may close.\n\nApprove or Reject below; the decision is bound to this exact Result, criteria and verdict.`;
           const buttons: InlineButton[][] = [
             [

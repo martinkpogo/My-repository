@@ -131,7 +131,8 @@ type OpportunityDevelopmentAction =
   | "develop_opportunity"
   | "determine_next_move"
   | "handoff_to_sales"
-  | "handoff_to_strategy";
+  | "handoff_to_strategy"
+  | "result_gate_smoke_test";
 
 // Matches BD_OPPORTUNITY_DEVELOPMENT's HatIdentity in ../../hats/registry.ts --
 // the Hat name (job position the runtime assumes), not concatenated with
@@ -224,6 +225,27 @@ const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentActi
   { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active opportunity." },
   { name: "handoff_to_sales", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
   { name: "handoff_to_strategy", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
+  {
+    name: "result_gate_smoke_test",
+    responsibility: "develop_opportunities",
+    consequence: "internal",
+    requiresApproval: false,
+    applicability: {
+      mode: "all",
+      conditions: [
+        { source: "work", field: "origin", operator: "equals", value: "result_gate_smoke" },
+        { source: "work", field: "requested_action", operator: "equals", value: "result_gate_smoke_test" },
+      ],
+    },
+    expectedResult: "A synthetic Result Gate smoke-test Work receives a snapshot-bound Machinery Worker verdict while remaining subject to Martin's separate approval.",
+    completionCriteria: [
+      "The Machinery Worker verifies the declared Result against its criteria and evidence.",
+      "The verdict is recorded against the exact Work snapshot.",
+      "A PASS does not automatically approve or close the Work.",
+      "Martin's separate approval is required before successful closure.",
+    ],
+    description: "Test-only Action for the isolated live Result Gate smoke test. Not selectable through ordinary intake, Action Resolution, Handoff pickup or normal Unit dispatch.",
+  },
 ];
 
 /**
