@@ -1,6 +1,6 @@
 ---
 name: sales-agreement
-description: ENIG Isolated Sales client agreements (CSA), after a released Proposal. Use when Martin says "MAT-n accepted," "prepare the agreement for MAT-n," "send the agreement," or "MAT-n agreement signed." Marks the Proposal Accepted on Martin's confirmation, builds the Client Service Agreement from the approved Template and the exact Approved Version (identity substituted into the client document only), sends it on Martin's approval of the exact email, and records it Signed on his confirmation, offering the 50% Deposit and Balance Payment rows. Never prices, changes terms or scope, invents a timeline, writes identity into Notion, or marks a Payment Paid. Part of the `enig-sales` plugin.
+description: ENIG Isolated Sales client agreements (CSA), after a released Proposal. Use when Martin says "MAT-n accepted," "prepare the agreement for MAT-n," "send the agreement," or "MAT-n agreement signed." Marks the Proposal Accepted on Martin's confirmation, builds the Client Service Agreement from the approved Template and the exact Approved Version (identity substituted into the client document only), sends it on Martin's approval of the exact email, and records it Signed on his confirmation, offering the 50% Deposit and Balance Payment rows. Never prices, changes terms or scope, invents a timeline, writes identity into Notion, or marks a Payment Paid. Part of the `enig-sales-agreement` plugin (companion to `enig-sales`).
 ---
 
 # sales-agreement — steps
@@ -35,7 +35,7 @@ Calls §9 with the MAT-n. More than one → ask which. Checklist in chat:
 - `Approval Status = Approved: Pass/Fail`
 - `Approved Version = Version: Pass/Fail`
 - `Artifact Status = Delivered: Pass/Fail`
-- `Status = Sent: Pass/Fail` (a Proposal released before this rule may show Draft; say so and continue only if Artifact Status is Delivered)
+- `Status = Sent: Pass/Fail` (until `sales-proposal-release` sets Sent at Delivered, a released Proposal may still show Draft; say so and continue only if Artifact Status is Delivered)
 Any other Fail → STOP and say which.
 
 ### 2. Approval request
@@ -51,7 +51,10 @@ Fetch the Proposal (Calls §9): `Status = Accepted`, `Approval Status = Approved
 Search Agreements for `MAT-n agreement`. A Draft or Sent row exists → resume from its state; a Signed row exists → STOP (already signed). Cancelled rows are ignored.
 
 ### 5. Verify the chain and resolve identity
-As `sales-proposal-release` steps 2–3: validate the Entity and Matter tokens, confirm Matter ↔ Entity and the Proposal's Handoff ↔ MAT-n, and read the Registry row (must be Confirmed). Any mismatch, Needs Review or missing row → solve first (§5), never guess identity.
+1. `python3 <SKILL>/scripts/validate_token.py entity "<Entity Token>"` and `... matter "<Matter Token>"`.
+2. Fetch the Matter (Calls §7) and confirm its Entity is the Entity Token.
+3. Fetch the Registry row for the ENT-n (Calls §6). It must be Confirmed. Missing, more than one, or Needs Review → solve first (§5): ask Martin to confirm it, or use identity he gives in chat for this document only. Never guess identity.
+Any token mismatch → STOP; change nothing.
 
 ### 6. Build the document
 1. Fetch the Template page. Missing or empty → STOP.
@@ -66,10 +69,11 @@ As `sales-proposal-release` steps 2–3: validate the Entity and Matter tokens, 
 
 ### 7. Approval request
 Show the exact email (recipient, subject, body) and the document link. Then the checks:
-- `scan_identity_leakage.py --client-facing` on the document text and the email: no internal tokens (`ENT-`, `MAT-`, `PROP-`, `HO-`) in client text: Pass/Fail
+- `python3 <SKILL>/scripts/check_client_text.py -` on the document text, then on the email: no internal tokens in client text: Pass/Fail
+- `python3 <SKILL>/scripts/scan_identity_leakage.py -` on the Agreements record values you will write, with `--identity` set to the client's name, contact name, email and phone: no hard failures: Pass/Fail
 - `Only brackets filled; every Template term unchanged: Pass/Fail`
 - `Scope, price and timeline match the Approved Version exactly: Pass/Fail`
-- the seven-line read-through for the Agreements record you will write (tokens and a link only)
+- `Agreements record holds tokens and a link only: Pass/Fail`
 End with: "Approve by saying 'Approve agreement for MAT-n'." STOP.
 
 ### 8. Record and send
@@ -88,7 +92,7 @@ Trigger: Martin says the agreement for MAT-n is signed and says how (signed PDF 
    - Agreements row: `Status` Signed, `Signed_Date`, `Signature_Evidence` (Signed PDF / Email acceptance); a signed PDF's Drive link may replace `Document_Reference` (link only).
    - Payment 1: `Payment` `MAT-n deposit`, `Matter_Token`, `Proposal_Token`, `Type` Deposit, `Amount`, `Currency`, `Status` Due, `Due_Date` today, `Invoice_Number` if Martin gives one.
    - Payment 2: `Payment` `MAT-n balance`, same tokens, `Type` Balance, `Amount`, `Currency`, `Status` Due, `Due_Date` empty (due on completion of delivery), `Notes` `Due on completion of delivery`.
-   - The read-through: tokens, amounts and dates only; no names in any field, Notes included.
+   - `scan_identity_leakage.py -` over every value of the three records, with `--identity` as in step 7: no hard failures: Pass/Fail. Tokens, amounts and dates only; no names in any field, Notes included.
    End with: "Approve by saying 'Approve signed agreement for MAT-n'." STOP.
 
 ### 10. Write and log
