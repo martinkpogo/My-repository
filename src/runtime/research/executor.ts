@@ -48,15 +48,21 @@ import type { ResearchBlockCode, ResearchExecutionInput, ResearchOutcome, Resear
 // contract the synthesis stage runs under (explicit page ID, not title
 // search). This is governance retrieval, NOT protocol retrieval: the six
 // protocol definitions are repo-native (protocols.ts) and are never
-// fetched from Notion during an execution.
-const RESEARCH_ROLE_CONTRACT_PAGE_ID = "3ddcb004-e583-8161-96ba-cdec357c5b5b";
+// fetched from Notion during an execution. Since 2026-11-09 this is
+// "Research Runtime -- Role & Authority Contract" (ENIG HQ / 0. Kernel),
+// Martin-approved, replacing the deleted R&I Analyst contract: it governs
+// the research step an owning Hat's Action runs, not a Unit or Hat.
+const RESEARCH_ROLE_CONTRACT_PAGE_ID = "413cb004-e583-817d-bdca-ede843a85033";
 
 // Canonical governance source for the abstracted consultancy category the
 // research runtime is authorized to reason from -- see safeContext.ts.
 // Established after the first live ENIG market-research test showed the
 // runtime had no grounding at all for what kind of consultancy it was
 // researching for (see Notion Activity & Decision Log entry LOG-325).
-const RESEARCH_SAFE_CONTEXT_PAGE_ID = "3ddcb004-e583-81e5-b30a-db8cba543823";
+// Since 2026-11-09 this is the Martin-approved replacement page (ENIG HQ /
+// Business-Wide Operating Models), an anonymised derivation of the ENIG
+// Consultancy Profile; the original was deleted.
+const RESEARCH_SAFE_CONTEXT_PAGE_ID = "413cb004-e583-81aa-8dc0-d1e1576022db";
 
 /**
  * Confirmed live: a research question/context that a caller accumulates by
