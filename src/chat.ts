@@ -266,11 +266,25 @@ export const ENIG_UNAVAILABLE_MESSAGE =
  * work starts only through router.ts's existing addressed-Unit dispatch.
  */
 export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
+  const reply = await runEnigTurn(env, chatId, threadId, userMessage);
+  return reply === null ? ENIG_UNAVAILABLE_MESSAGE : reply;
+}
+
+/**
+ * One ENIG turn for `situation` in this chat/thread, recorded in that
+ * thread's rolling history like any other turn. Returns null -- with no AI
+ * call made -- when either governance page is unreadable, so each caller
+ * decides how to say so (generalDmReply replies with
+ * ENIG_UNAVAILABLE_MESSAGE; the morning brief reports to Operations). An
+ * empty string means the provider produced nothing, exactly as
+ * runChatTurn reports it.
+ */
+export async function runEnigTurn(env: Env, chatId: number, threadId: number | undefined, situation: string): Promise<string | null> {
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, ENIG_HAT_DEFINITION_PAGE_ID, "Operations — ENIG Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
   ]);
-  if (!hatDefinition || !universalRoleContract) return ENIG_UNAVAILABLE_MESSAGE;
+  if (!hatDefinition || !universalRoleContract) return null;
 
   const [snapshot, activity] = await Promise.all([businessSnapshot(env), recentActivitySnapshot(env, undefined)]);
   const parts = {
@@ -279,5 +293,5 @@ export async function generalDmReply(env: Env, chatId: number, threadId: number 
     skillContent: [buildStructureFacts(), HOW_WORK_STARTS_RULE].join("\n\n"),
     context: [snapshot, `Recent Activity & Decision Log entries (all Units):\n${activity}`].join("\n\n"),
   };
-  return runChatTurn(env, chatId, threadId, parts, userMessage, "business_sensitive");
+  return runChatTurn(env, chatId, threadId, parts, situation, "business_sensitive");
 }

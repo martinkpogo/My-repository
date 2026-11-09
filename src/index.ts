@@ -35,6 +35,7 @@ import { handleWorkSessionState } from "./workSessionInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
+import { maybeSendMorningBrief } from "./morningBrief";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 import { isAdminAuthorized } from "./adminAuth";
@@ -509,6 +510,10 @@ export default {
     // Turso is unconfigured). Runs here as well as in the comment poll so the
     // sweep does not depend on any single entry point staying scheduled.
     await maybeSweepKvFallback(env).catch((err) => console.error("scheduled: fallback sweep failed", err));
+    // ENIG's morning brief: once per local day, self-throttled (see
+    // src/morningBrief.ts). Read-only notification -- isolated so a failure
+    // here never blocks Handoff discovery below.
+    await maybeSendMorningBrief(env).catch((err) => console.error("scheduled: morning brief failed", err));
     try {
       await discoverPendingHandoffsAllUnits(env);
       await checkStaleHandoffs(env);
