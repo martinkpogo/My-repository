@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { buildStructureFacts, generalDmReply, ENIG_HAT_DEFINITION_PAGE_ID, ENIG_UNAVAILABLE_MESSAGE } from "./chat";
+import { buildStructureFacts, enigChatReply, ENIG_HAT_DEFINITION_PAGE_ID, ENIG_UNAVAILABLE_MESSAGE } from "./chat";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { ALL_HATS } from "./hats/registry";
 import type { Env } from "./types";
@@ -82,8 +82,9 @@ test("ENIG: fails closed with no AI call when its Notion definition is unreadabl
       },
     } as any,
   });
-  const reply = await generalDmReply(env, 1, 2, "where are we?");
-  assert.strictEqual(reply, ENIG_UNAVAILABLE_MESSAGE);
+  const reply = await enigChatReply(env, 1, 2, "where are we?");
+  assert.strictEqual(reply.text, ENIG_UNAVAILABLE_MESSAGE);
+  assert.strictEqual(reply.buttons, undefined);
   assert.strictEqual(aiCalled, false);
 });
 
@@ -107,9 +108,10 @@ test("ENIG: answers from its live definition, the business snapshot and the how-
     } as any,
   });
 
-  const reply = await generalDmReply(env, 1, 2, "where are we?");
+  const reply = await enigChatReply(env, 1, 2, "where are we?");
 
-  assert.strictEqual(reply, "We have one Qualified matter, MAT-12.");
+  assert.strictEqual(reply.text, "We have one Qualified matter, MAT-12.");
+  assert.strictEqual(reply.buttons, undefined, "a plain answer carries no suggestion button");
   assert.match(capturedSystem, /MARKER_ENIG_DEFINITION/);
   assert.match(capturedSystem, /MARKER_UNIVERSAL_ROLE_CONTRACT/);
   assert.match(capturedSystem, /LIVE BUSINESS SNAPSHOT/);
