@@ -99,6 +99,16 @@ export interface Env {
   /** The Operations stream topic message_thread_id in ENIG HQ Supergroup. */
   OPERATIONS_TOPIC_ID?: string;
 
+  /**
+   * ENIG's morning brief schedule (src/morningBrief.ts). IANA time zone,
+   * local hour 0-23 from which the day's brief is due, and comma-separated
+   * three-letter weekdays (Mon,Tue,...). Any missing/invalid value disables
+   * the brief rather than guessing a schedule.
+   */
+  MORNING_BRIEF_TIMEZONE?: string;
+  MORNING_BRIEF_HOUR?: string;
+  MORNING_BRIEF_DAYS?: string;
+
   /** Shared secret for the Gmail-polling Apps Script -> /email/webhook. */
   EMAIL_WEBHOOK_SECRET?: string;
 

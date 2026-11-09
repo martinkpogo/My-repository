@@ -101,6 +101,13 @@ WORKSPACE_TOPIC_ID = "604"
 # dashboard when the two-stream architecture shipped; declared here to
 # keep this file in sync with the deployed configuration.
 OPERATIONS_TOPIC_ID = "588"
+# ENIG's morning brief (src/morningBrief.ts), posted to the Workspace topic
+# from the existing */30 cron above -- no second scheduler. Martin's
+# schedule (2026-11-09): 10:00 Africa/Accra, every day except Sunday. The
+# brief lands within 30 minutes of the hour; once per local day.
+MORNING_BRIEF_TIMEZONE = "Africa/Accra"
+MORNING_BRIEF_HOUR = "10"
+MORNING_BRIEF_DAYS = "Mon,Tue,Wed,Thu,Fri,Sat"
 # Google OAuth client ID. Not confidential -- Google treats this as a
 # public identifier (visible in redirect URLs and front-end apps), unlike
 # the client secret, which stays a Cloudflare Secret (see below) and is
