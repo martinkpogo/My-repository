@@ -146,7 +146,11 @@ export const HANDOFF_SOURCES_PROPERTY = "Sources";
  */
 export type GoogleHandoffSourceType = "google_doc" | "google_sheet";
 
-export type HandoffSourceType = GovernedSource | GoogleHandoffSourceType;
+// Payments is a governed source for Access, but not a Handoff source type:
+// no Handoff route may cite a Payment as evidence (2026-11-09, Payments added
+// read-only). Excluded at the type level so adding it to Access cannot widen
+// what a Handoff may carry.
+export type HandoffSourceType = Exclude<GovernedSource, "payments"> | GoogleHandoffSourceType;
 
 /**
  * One extracted reference, before any fetch. A Notion reference carries

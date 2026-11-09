@@ -66,9 +66,9 @@ import { findManifestAction } from "./units/unitManifest";
  * comparing anything, so a manifest can never be stale about, or assert,
  * an environment-specific id.
  */
-export type GovernedSource = "entities" | "matters" | "proposals" | "handoffs" | "leads" | "activity_log" | "call_notes";
+export type GovernedSource = "entities" | "matters" | "proposals" | "handoffs" | "leads" | "activity_log" | "call_notes" | "payments";
 
-const allSources: readonly GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log", "call_notes"];
+const allSources: readonly GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log", "call_notes", "payments"];
 
 /** The one operation an action can be approval-gated for. `create` and `update` are distinguished deliberately: an approval authorizes creating a governed record or changing an existing one, and these are different commitments. */
 export type GovernedOperation = "create" | "update";
@@ -228,6 +228,11 @@ export function governedSourceDataSourceId(env: Env, source: GovernedSource): st
       return env.ACTIVITY_LOG_DATA_SOURCE_ID;
     case "call_notes":
       return env.CALL_NOTES_DATA_SOURCE_ID;
+    case "payments":
+      // Payment Business Object (ENIG HQ / 5. Data / Payment). Optional in
+      // Env: an environment without it simply has no Payments source, and an
+      // empty id is never admitted as a target (see governedDataSourceIds).
+      return env.PAYMENTS_DATA_SOURCE_ID ?? "";
   }
 }
 
@@ -428,7 +433,7 @@ function kernelOwnedWriteDataSourceIds(env: Env): readonly string[] {
 
 /** Every governed data source in this Env, in symbolic order. The only targets a Notion operation may name. */
 function governedDataSourceIds(env: Env): readonly string[] {
-  return allSources.map((source) => governedSourceDataSourceId(env, source));
+  return allSources.map((source) => governedSourceDataSourceId(env, source)).filter((id): id is string => typeof id === "string" && id.length > 0);
 }
 
 /**
