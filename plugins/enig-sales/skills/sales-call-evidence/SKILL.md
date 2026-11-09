@@ -1,43 +1,74 @@
 ---
 name: sales-call-evidence
-description: Collect, attribute, and classify call evidence; determine Commercial Value Evidence (CVE); enforce Call Notes approval/versioning and provenance safeguards. No governed writes or external actions.
+description: "ENIG Isolated Sales completed-call evidence from a connected Read.ai report (or a connected fallback recorder: Fireflies, Otter.ai, Zoom, tldv, Tactiq) or pasted transcript/notes. Use when Martin brings a call recording, a Read.ai meeting report or call notes, or asks to \"log this call\" or \"capture call notes.\" Matches the call to an existing Matter (never creates one), labels the evidence, and — on Martin's one approval — writes the updated Matter.Current_understanding and one canonical Call Notes record for the call (identity-safe Note ending with the Commercial Value Evidence block, six-field record_approval marker, Status Ready, Version 1). Never assesses fit, never creates or offers a Handoff. Part of the `enig-sales` plugin."
 ---
-# sales-call-evidence
 
-## Purpose
-Evaluate call evidence against governed requirements, determine Commercial Value Evidence (CVE) outcome, and enforce Call Notes safeguards using only provided/accessible evidence.
+# sales-call-evidence — steps
 
-## Required inputs (use only provided/accessible evidence)
-Only use evidence and source material actually provided or legitimately accessible. Do not invent client history, qualification outcomes, investment ranges, approvals, or record state.
+Rules: the Project Instruction (§n). Facts — Call Notes fields, the CVE determination rule, evidence classes: the Project doc `enig-static-reference.md` (Ref, already in context). Exact calls: `references/notion-calls.md` (Calls). Labelling, the Current_understanding template and the CVE record: `references/evidence-examples.md` (Examples). Read-through: `references/checks.md` (Checks). Governing: LOG-1110 and LOG-1140 — one canonical, approved Call Notes record per completed call; evidence lives once, in its `Note`. If a step conflicts with the Instruction, follow the Instruction and report the conflict.
 
-## Evidence classification and attribution
-For each item:
-1. **Source attribution** — Record source identifier/path and provenance. Every verified fact must have an attributable source.
-2. **Classification** — Classify as Verified fact | Client-reported (unverified) | Assumption | Hypothesis | Unknown.
-3. **Traceability** — Every verified fact must have traceable source reference; unverified items must not be promoted to facts. An assumption alone is not sufficient as allowed evidence for Satisfied.
+Follow the steps in order. Where a step says STOP, end your turn and report.
 
-## Commercial Value Evidence (CVE) determination
-Apply the approved rule exactly:
+**Never in this skill:** create a Matter or Entity · change a Status · rate fit · create, offer or mention a Handoff · put content in a Call Notes page body · paste a raw transcript into Notion · write identity into any field · build a marker before Martin's approval · edit an existing Call Notes record (a correction is a new Version with governed authorisation, not an overwrite).
 
-- **Satisfied** — All required evidence elements are present, including **(a) a numeric value at stake or cost of inaction**, **(b) an allowed evidence type other than an assumption** (e.g., a verified/documented fact or approved source per canonical categories), **(c) an attributable source**, and **(d) a period** (timeframe the value applies to). All elements must be traceable.
-- **Not Satisfied** — Available evidence **contradicts** the requirement (not merely missing). State the contradiction and sources.
-- **Insufficient Evidence** — Evidence is missing, incomplete, untraceable, or does not establish whether the requirement is met. **This is the correct outcome when required elements are absent.** State the specific gaps and what evidence would resolve them (e.g., missing numeric value, missing period, missing attributable source, assumption-only). Do not default to Not Satisfied for absence.
+**Errors (Project Instruction §5–§6):** a failed read → retry up to twice, then solve first and offer ways forward. A failed write, or one whose outcome is unknown → hard stop 4: find out what took effect, never repeat it, and offer a resume plan from the failed step. Lookups use only the search, fetch and backlinks calls in Calls (§9); never `notion-query-data-sources`.
 
-Do not fabricate values. If information missing, mark Insufficient Evidence and list gaps.
+**Stage end state:** the call's evidence labelled in this chat; on approval, the Matter's `Current_understanding` updated and one Ready Call Notes record created and verified; one log entry.
 
-## Call Notes safeguards (BD-5)
-- **Canonical source**: The approved Call Notes record’s "Note" is canonical evidence.
-- **Temporary compatibility**: Retain the existing Handoff CVE copy as temporary compatibility data only until both Strategy and Finance consumers have migrated, integration tests pass, and Martin approves removal. Treat it as compatibility data, not an independent source of truth.
-- **Approval hash**: Preserve the six-field Call Notes approval hash contract. The hash covers metadata, not the "Note" content.
-- **Versioning**: Changes to approved Note content require a governed new Version and re-approval.
-- **Provenance & identity safety**: Enforce attribution and identity-safety rules. Do not leak sensitive identifiers beyond what is permitted.
-- **Separation of authority**: Finance retains authority to determine whether evidence is sufficient for pricing. This skill does not override that authority.
+## Before step 1
+1. Find this skill's folder: `find / -maxdepth 9 -path '*sales-call-evidence/scripts/validate_token.py' -not -path '/proc/*' 2>/dev/null | head -1`. `<SKILL>` = that path minus `/scripts/validate_token.py`. No result: tell Martin the plugin scripts can't be found; continue read-only work only.
+2. Read `<SKILL>/references/notion-calls.md`, `evidence-examples.md` and `checks.md` once each.
+3. Load tools with one call to `ToolSearch` (it may be named `tool_search`): `select:mcp__Read_AI__list_meetings,mcp__Read_AI__get_meeting_by_id,mcp__Notion__notion-fetch,mcp__Notion__notion-search,mcp__Notion__notion-list-page-backlinks,mcp__Notion__notion-update-page,mcp__Notion__notion-create-pages,mcp__Notion__notion-get-tool-access`. Any tool not returned → one keyword search for it. Then call `notion-get-tool-access` with `{}` once (Calls §0). Read.ai missing → try the fallbacks in `CONNECTORS.md` order, or ask Martin to paste the notes.
+4. **TEST RUN** in Martin's message: follow Project Instruction §11. Write nothing; label `build` output as simulated.
 
-## Rules
-- No governed writes or external actions.
-- Distinguish instruction-level guidance from technical enforcement. Written instructions do not provide technical enforcement.
-- If a safeguard cannot be reliably enforced within Claude.ai chat, state the limitation explicitly.
-- CVE/Call Notes/Handoff implementation details beyond this scope remain pending; do not expand scope.
-- Preserve existing plugin structure and tests.
+## Steps
 
-Source basis: Isolated Sales Operating Specification, Project Instruction, Static Reference (provided), BD-5.
+### 1. Receive
+Read the one call from Read.ai (or the fallback recorder you name to Martin), or take pasted transcript/notes exactly as given. Write down:
+- the locator: `Read.ai meeting <id>` or `Pasted call notes, received <YYYY-MM-DD>`;
+- the actual call date (YYYY-MM-DD). Not stated → ask Martin; never use the receipt date as the call date;
+- the call type: one of Discovery, Sales, Qualification, Follow-up, Review, Other.
+
+### 2. Sort in chat
+Two lists: **identity** (names, organisation, contacts, places) and **evidence**. Label every evidence item with the Examples labelling table. Client figures are VE (class CS). Pipeline is context, not impact. Investment words exactly as said; "no fixed budget" as said; none → `(UQ) Investment range or boundary.`
+
+### 3. Match the Matter
+Get the MAT-n from Martin. Fetch by URL if known, otherwise Calls §7. Show the Matter beside the call's identity details and ask Martin to confirm it is the right one. Fetch the Entity from the Matter's `Entity` relation and read both tokens from the titles; run `validate_token.py entity-title` and `matter-title` on them. No Matter → offer `sales-enquiry` first. Several possible Matters → ask.
+List existing Call Notes for the Matter (Calls §10). A record for this same call already exists → STOP: a correction is a new Version and needs Martin's governed authorisation.
+
+### 4. Draft the Call Notes `Note`
+The `Note` is the only substantive content (Ref "Call Notes"). Required sections `call_context` and `evidence`; use the optional sections that apply, as headings: business context · stated problems · objectives · current state · desired state · pain points · constraints · requirements · value evidence · decision process · stakeholders (by role, involvement, authority) · existing solutions · client statements · sales observations · confirmed facts · unresolved questions · follow-up items. Every item labelled. Stakeholders by role only.
+
+### 5. Build the Commercial Value Evidence block
+1. Write `evidence.json` from the VE items only, per the Examples "Commercial Value Evidence record" (determination by the Ref rule; `evidence: null` when the call held no value evidence).
+2. `python3 <SKILL>/scripts/handoff_attestation.py cve --json-file evidence.json`. FAIL → fix the record (never a figure) and run again.
+3. Append the printed block, unchanged, as the last lines of the `Note`.
+
+### 6. Draft the Matter summary
+Write the full new `Current_understanding` in the Examples template (every heading, `- (CLASS)` bullets, `Last updated <YYYY-MM-DD>, from <locator>.`). Merge it with what the field already holds; keep earlier evidence unless the call corrects it, and say what changed. Change `Next_action` only if the position changed, as a factual position.
+
+### 7. Sanitize
+1. Write the `Note` and the Matter fields to `draft.txt`.
+2. `python3 <SKILL>/scripts/scan_identity_leakage.py draft.txt --identity "<string>" "<string>" …` with every identity string from step 2: each person's full name, first name and surname, organisation and trading names, emails, phones, web addresses, social handles, places. One quoted argument per string.
+3. Exit 1 → remove only the identity and run again. Never delete a figure. Still failing after two redrafts → show Martin the hits and suggest neutral wording (hard stop 2).
+4. WARN lines → re-read each named phrase; fix it if it names anyone.
+5. Write the seven-line read-through from Checks §1.
+
+### 8. Approval request (one approval, two writes)
+Show: the MAT-n; the exact new `Current_understanding` (and `Next_action`, if changed); the exact Call Notes record — `Call Notes ID` (from `call_notes_attestation.py new-id`), Entity and Matter (tokens and pages), `Call Date`, `Call Type`, the full `Note`, `Status` Ready, `Version` 1; the scan result line; the seven read-through lines. End with: "Approve by saying 'Approve evidence for MAT-n'." STOP.
+An edit request → revise and show it all again. This approval covers only these two writes.
+
+### 9. Write and verify
+1. Only now: `python3 <SKILL>/scripts/call_notes_attestation.py build --record <CN-…> --entity <ENT-n> --matter <MAT-n> --call-date <YYYY-MM-DD> --call-type <option> --version 1 --approved-by-martin`. FAIL → STOP and report; never hand-build a marker.
+2. Update the Matter with exactly the approved text (`notion-update-page`). Read it back once and compare.
+3. Create the Call Notes record with the Calls "Call Notes create" payload: the approved values, the `Note`, the marker in `Approval Attestation`, no page body. Read it back once.
+4. `python3 <SKILL>/scripts/call_notes_attestation.py verify --marker "<Approval Attestation as read back>" --record … --entity … --matter … --call-date "<Call Date as read back>" --call-type "<as read back>" --version <as read back>`. Also confirm the read-back `Entity` / `Matter` relations point to the pages of ENT-n / MAT-n, and that the `Note` still ends with the block exactly as approved. Any FAIL or mismatch → hard stop 4: report exactly what exists; never edit or recreate the record.
+
+### 10. Log and stop
+One log entry: `Type` Activity, `Area` Sales, `Outcome` Complete, `Entry` = `Call Notes record created for MAT-n (<CN-…>)`. No names.
+Name the next stage: `sales-fit-assessment`. Do not offer or mention a Handoff.
+
+## Notes
+- Requests beyond evidence capture (follow-up drafts, "is this worth pursuing", scope, pricing): name the stage or Unit that owns it (§3).
+- Never paste the raw transcript or recording into Notion in any form (§7).
+- The legacy record `CN-a7f2d9c1-…` (Ref) is never migrated or edited here.
