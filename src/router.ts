@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { sendMessage, sendOperationsMessage } from "./telegram";
-import { generalChatReply, generalDmReply } from "./chat";
+import { enigChatReply, generalChatReply } from "./chat";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { classifyDataLookupRequest, runConversationalDataLookup } from "./dataLookup";
 import { findUnitManifest } from "./units/registry";
@@ -205,9 +205,15 @@ export async function routeIncomingText(
         // "ambiguous" -- fall through to ordinary conversation below.
       }
     }
-    const reply = decision.unit
-      ? await generalChatReply(env, decision.unit, chatId, threadId, text)
-      : await generalDmReply(env, chatId, threadId, text);
+    if (!decision.unit) {
+      // No Unit addressed: ENIG answers, and may attach a Yes/No button
+      // suggesting the owning Unit/Hat (src/enigSuggestion.ts). A tap
+      // re-enters this function with the addressed text; nothing starts here.
+      const enig = await enigChatReply(env, chatId, threadId, text);
+      await sendMessage(env, chatId, enig.text || AI_UNAVAILABLE_MESSAGE, enig.text ? enig.buttons : undefined, threadId);
+      return;
+    }
+    const reply = await generalChatReply(env, decision.unit, chatId, threadId, text);
     await sendMessage(env, chatId, reply || AI_UNAVAILABLE_MESSAGE, undefined, threadId);
     return;
   }

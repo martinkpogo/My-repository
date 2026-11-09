@@ -9,6 +9,8 @@ import { kvGet, kvPut } from "./kvStore";
 import { findUnitManifest } from "./units/registry";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { businessSnapshot } from "./businessSnapshot";
+import { offerEnigSuggestion, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
+import type { InlineButton } from "./telegram";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -265,21 +267,40 @@ export const ENIG_UNAVAILABLE_MESSAGE =
  * made and Martin is told so. ENIG declares no Actions and starts nothing;
  * work starts only through router.ts's existing addressed-Unit dispatch.
  */
-export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
-  const reply = await runEnigTurn(env, chatId, threadId, userMessage);
-  return reply === null ? ENIG_UNAVAILABLE_MESSAGE : reply;
+export async function enigChatReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<EnigChatReply> {
+  const reply = await runEnigTurn(env, chatId, threadId, userMessage, suggestionInstruction());
+  if (reply === null) return { text: ENIG_UNAVAILABLE_MESSAGE };
+  // ENIG suggests, Martin confirms: a validated SUGGEST line becomes a
+  // Yes/No button (src/enigSuggestion.ts); anything else is dropped.
+  const parsed = parseEnigReply(reply);
+  if (!parsed.addressee) return { text: parsed.text };
+  const buttons = await offerEnigSuggestion(env, chatId, threadId, userMessage, parsed.addressee);
+  return { text: parsed.text, buttons };
+}
+
+export interface EnigChatReply {
+  /** What Martin sees; empty when no provider answered. */
+  text: string;
+  /** A Yes/No suggestion button row, when ENIG proposed an owning Unit/Hat. */
+  buttons?: InlineButton[][];
 }
 
 /**
  * One ENIG turn for `situation` in this chat/thread, recorded in that
  * thread's rolling history like any other turn. Returns null -- with no AI
  * call made -- when either governance page is unreadable, so each caller
- * decides how to say so (generalDmReply replies with
+ * decides how to say so (enigChatReply replies with
  * ENIG_UNAVAILABLE_MESSAGE; the morning brief reports to Operations). An
  * empty string means the provider produced nothing, exactly as
  * runChatTurn reports it.
  */
-export async function runEnigTurn(env: Env, chatId: number, threadId: number | undefined, situation: string): Promise<string | null> {
+export async function runEnigTurn(
+  env: Env,
+  chatId: number,
+  threadId: number | undefined,
+  situation: string,
+  extraInstruction?: string,
+): Promise<string | null> {
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, ENIG_HAT_DEFINITION_PAGE_ID, "Operations — ENIG Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
@@ -290,7 +311,7 @@ export async function runEnigTurn(env: Env, chatId: number, threadId: number | u
   const parts = {
     persona: `You are ENIG. Your Hat Definition follows; act exactly within it.\n\n${hatDefinition}`,
     behavior: universalRoleContract,
-    skillContent: [buildStructureFacts(), HOW_WORK_STARTS_RULE].join("\n\n"),
+    skillContent: [buildStructureFacts(), HOW_WORK_STARTS_RULE, extraInstruction].filter(Boolean).join("\n\n"),
     context: [snapshot, `Recent Activity & Decision Log entries (all Units):\n${activity}`].join("\n\n"),
   };
   return runChatTurn(env, chatId, threadId, parts, situation, "business_sensitive");

@@ -36,6 +36,7 @@ import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinua
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { maybeSendMorningBrief } from "./morningBrief";
+import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 import { isAdminAuthorized } from "./adminAuth";
@@ -117,7 +118,7 @@ export default {
       if (!body.text) return new Response("Missing text", { status: 400 });
 
       // Martin's preferred front door is DM (see routeIncomingText's DM
-      // fallback and generalDmReply) -- an email-sourced enquiry lands
+      // fallback and enigChatReply) -- an email-sourced enquiry lands
       // there too, rather than a Unit topic, so every Unit/Hat's work
       // reaches him in one place.
       const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
@@ -768,6 +769,27 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await setWorkspaceMode(env, chatId, threadId, newMode);
       await setCoworkClarificationPending(env, chatId, threadId, false);
       await sendMessage(env, chatId, `Workspace mode switched to *${newMode}*.`, undefined, threadId);
+      return;
+    }
+
+    if (action === ENIG_SUGGEST_CALLBACK) {
+      // ENIG suggested an owning Unit/Hat for an unaddressed request
+      // (src/enigSuggestion.ts). Single-use; Yes re-sends Martin's original
+      // message prefixed with that name through routeIncomingText -- the
+      // exact path his own typed "<Unit>, <request>" takes, every gate intact.
+      // forceNewEnquiry: the tap is an explicit new request, not a reply to
+      // whatever Work this thread happens to point at.
+      const consumed = await consumeEnigSuggestion(env, workId, value, chatId, threadId);
+      if (consumed.kind === "unavailable") {
+        await sendMessage(env, chatId, "That suggestion was already used or has expired. Nothing was started.", undefined, threadId);
+        return;
+      }
+      if (consumed.kind === "declined") {
+        await sendMessage(env, chatId, "OK, nothing started.", undefined, threadId);
+        return;
+      }
+      await sendMessage(env, chatId, `Starting with ${consumed.addressee}…`, undefined, threadId);
+      await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true });
       return;
     }
 
