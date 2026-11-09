@@ -3,9 +3,12 @@ import { generate } from "./ai";
 import type { ChatTurn, GeneratePromptParts } from "./ai";
 import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
-import { marketingHatSummaryList } from "./hats/registry";
+import { ALL_HATS } from "./hats/registry";
 import { systemContext } from "./access";
 import { kvGet, kvPut } from "./kvStore";
+import { findUnitManifest } from "./units/registry";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
+import { businessSnapshot } from "./businessSnapshot";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -34,7 +37,7 @@ const MAX_HISTORY_TURNS = 20;
 // asked about ENIG's process and Marketing's roles, it invented a detailed
 // 5-step workflow and six job titles (Marketing Lead, Social Media
 // Manager, etc.) that don't exist -- the real Marketing Hats are named in
-// REAL_STRUCTURE_FACTS below, and none of the invented ones matched. The
+// buildStructureFacts below, and none of the invented ones matched. The
 // first version of this rule only named "past enquiries, entities,
 // matters, deals, numbers, dates" as off-limits to invent; process steps,
 // job titles/roles, and org structure are just as fabricatable and are
@@ -43,23 +46,56 @@ const MAX_HISTORY_TURNS = 20;
 // but that's still only a recent slice, not full database access, so the
 // rule against inventing beyond what it was actually given still applies.
 const EVIDENCE_RULE =
-  "If a snapshot of recent real Activity & Decision Log entries is provided below, use it to answer factual questions about recent activity — it is not the full history, and you have no other live connection to Notion or any record system beyond what's listed there (or nothing, if no snapshot is provided at all). Never invent specifics that aren't in that snapshot, in REAL_STRUCTURE_FACTS below, or in this conversation's own messages -- this includes but is not limited to: past enquiries, entities, matters, deals, numbers, dates, internal process steps or workflow stages, job titles or roles, team members, or org structure. If asked about something not covered by what you were actually given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example, even a generic-sounding one (a job title or process step can sound completely ordinary and still be entirely fabricated).";
+  "If a snapshot of recent real Activity & Decision Log entries is provided below, use it to answer factual questions about recent activity — it is not the full history, and you have no other live connection to Notion or any record system beyond what's listed there (or nothing, if no snapshot is provided at all). Never invent specifics that aren't in that snapshot, in the AUTHORITATIVE FACTS section, or in this conversation's own messages -- this includes but is not limited to: past enquiries, entities, matters, deals, numbers, dates, internal process steps or workflow stages, job titles or roles, team members, or org structure. If asked about something not covered by what you were actually given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example, even a generic-sounding one (a job title or process step can sound completely ordinary and still be entirely fabricated).";
+
+// Every Unit, in a fixed order. Typed as a total Record so a Unit added to
+// the type can't be silently left out of the facts below.
+const UNIT_ORDER: Record<Unit, number> = {
+  Sales: 0,
+  Marketing: 1,
+  "Business Development": 2,
+  Finance: 3,
+  Strategy: 4,
+  "Creative & Design": 5,
+  Operations: 6,
+};
+
+// The canonical Operations -- ENIG Hat Definition (Notion, ENIG HQ /
+// 2. Organization / Operations). ENIG is Chat's conversational voice when
+// no Unit is addressed; its role, behaviour, instructions and end results
+// are read live from this page, never restated in code.
+export const ENIG_HAT_DEFINITION_PAGE_ID = "413cb004-e583-8188-aad2-f36696f29d39";
 
 // The only roles/Hats that actually exist in this system, computed from
-// the same registry the runtime itself uses (hats/registry.ts) so this can
-// never drift out of sync with reality the way a hand-written list would.
-// Exists specifically because the chat invented six Marketing job titles
-// that don't exist (see EVIDENCE_RULE above) when asked what roles are
-// available -- the real answer was cheap and already known in code; there
-// was no reason for the model to have guessed.
-const REAL_STRUCTURE_FACTS = `=== AUTHORITATIVE FACTS -- READ THIS BEFORE ANSWERING ANY QUESTION ABOUT ROLES, HATS, JOB TITLES, OR TEAM STRUCTURE ===
-ENIG's real Units are exactly these seven: Sales, Marketing, Business Development, Finance, Strategy, Creative & Design, Operations.
-A "Hat" is an AI-executed role inside this system, not a human employee or job opening. Only Sales and Marketing currently have any defined Hats. Every other Unit (Business Development, Finance, Strategy, Creative & Design, Operations) has ZERO Hats -- open conversation only, no structured roles of any kind.
-Marketing's Hats are EXACTLY these five, no others exist under any name:
-${marketingHatSummaryList()}
-Sales has exactly one Hat: Sales Executive. It is paused here in this runtime by standing policy, but it is not inactive -- it is present and actively working as an isolated Sales Executive project in Claude, with its own Notion and Gmail access, where Martin reviews and approves every client-facing action directly. If asked whether Sales Executive is paused, active, or exists, say it is paused in this runtime specifically (due to the sensitive nature of its work) but implemented and live in that separate Claude project -- never say simply "paused" without that context.
+// the same registries the runtime itself routes with (hats/registry.ts's
+// ALL_HATS, which is exactly what workspaceRouter's addressee matching
+// reads, and units/registry.ts's manifests, which decide whether a Unit can
+// start governed work at all) so this can never drift out of sync with
+// reality the way the hand-written list it replaces did -- that list still
+// said Finance, Strategy and Business Development had zero Hats long after
+// all three were built. Exists specifically because the chat invented six
+// Marketing job titles that don't exist (see EVIDENCE_RULE above) when asked
+// what roles are available.
+export function buildStructureFacts(): string {
+  const units = (Object.keys(UNIT_ORDER) as Unit[]).sort((a, b) => UNIT_ORDER[a] - UNIT_ORDER[b]);
+  const unitLines = units.map((unit) => {
+    const hats = ALL_HATS.filter((h) => h.unit === unit).map((h) => (h.specialization ? `${h.name} (${h.specialization})` : h.name));
+    // ENIG is defined in Notion as an Operations Hat but declares no Actions,
+    // so it is in neither ALL_HATS nor a manifest -- named here so the facts
+    // match its definition without making it addressable or dispatchable.
+    if (unit === "Operations") hats.push("ENIG (Chief of Staff) -- the voice Martin talks to when he addresses no Unit; it routes work and starts none itself");
+    const startable = findUnitManifest(unit) !== undefined;
+    const hatText = hats.length ? `Hats: ${hats.join("; ")}` : "no Hats in this runtime";
+    return `- ${unit}: ${hatText}. ${startable ? "Governed work CAN be started from chat." : "Governed work can NOT be started from chat."}`;
+  });
+  return `=== AUTHORITATIVE FACTS -- READ THIS BEFORE ANSWERING ANY QUESTION ABOUT ROLES, HATS, JOB TITLES, OR TEAM STRUCTURE ===
+ENIG's real Units are exactly these seven, with exactly these Hats -- no others exist under any name:
+${unitLines.join("\n")}
+A "Hat" is an AI-executed role inside this system, not a human employee or job opening.
+Sales Executive is paused here in this runtime by standing policy, but it is not inactive -- it is present and actively working as an isolated Sales Executive project in Claude, with its own Notion and Gmail access, where Martin reviews and approves every client-facing action directly. If asked whether Sales Executive is paused, active, or exists, say it is paused in this runtime specifically (due to the sensitive nature of its work) but implemented and live in that separate Claude project -- never say simply "paused" without that context. Lead Generation Specialist is not paused.
 If asked what roles/Hats/positions exist anywhere, your answer must use ONLY the names listed above, copied exactly -- never add, combine, rename, pluralize into new variants, or supplement with anything that sounds like a typical department role (e.g. "Marketing Lead," "Social Media Manager," "SEO Specialist," "Marketing Coordinator," "Marketing Analyst" -- these and anything like them DO NOT EXIST here, no matter how plausible they sound). If earlier turns in this conversation named different or additional roles, that was a mistake -- correct it plainly rather than repeating or extending it. Since these are AI execution roles, never suggest applying for one, contacting a "lead" as if they were a person, or imply there's a hiring process of any kind.
 === END AUTHORITATIVE FACTS ===`;
+}
 
 // Confirmed necessary live, second occurrence: given a message that reads
 // like an instruction to run/test the workflow ("post that, run it
@@ -78,19 +114,29 @@ If asked what roles/Hats/positions exist anywhere, your answer must use ONLY the
 // narrate performing an action, and never claim an outcome (created,
 // sent, held, landed, succeeded) that isn't drawn from the snapshot or
 // this conversation's real messages.
-const NO_ACTIONS_RULE =
-  "You are a chat persona only — you have no ability to send messages to other topics, create or update Notion records, advance a Handoff, or run any part of the enquiry workflow yourself. Only the real system, triggered by an actual enquiry message, does that. If asked to run, post, submit, test, check, or report back on a process, say plainly you can't perform actions — never narrate doing so, and never claim an action succeeded, landed, or completed unless it's drawn from the real snapshot or this conversation's own messages.";
+//
+// That rule used to stop there, which made this reply talk Martin OUT of
+// work the system can do: Chat has been action-capable since the
+// 2026-09-28 decision (router.ts dispatches a message that addresses a
+// Unit/Hat through the Action Registry before this reply is ever reached).
+// The reply itself still executes nothing -- what changed is that it now
+// says how the work actually starts, so a request ends with the exact
+// message Martin can send rather than a bare "I can't".
+const HOW_WORK_STARTS_RULE =
+  "This reply itself cannot perform any action — you cannot send messages to other topics, create or update Notion records, advance a Handoff, or run any workflow. The real system can: when Martin starts a message with the name of a Unit or Hat listed in AUTHORITATIVE FACTS as able to start governed work from chat (for example \"Marketing, draft a LinkedIn post about how we diagnose before we prescribe\" or \"Lead Generation Specialist, find leads in ...\"), the system routes it to that Unit's real workflow, which asks Martin's approval before anything is written or sent. Strategy and Finance requests must also name an existing Matter token (e.g. MAT-12). So when Martin asks for work one of those Units does, say which Unit or Hat owns it and give him the exact one-line message to send, starting with that name. When no listed Unit can start it from chat, say so plainly. Never narrate doing the work yourself, and never claim anything succeeded, landed, was created, sent, or completed unless it's drawn from the real snapshot or this conversation's own messages.";
 
-async function recentActivitySnapshot(env: Env, unit: Unit): Promise<string> {
+// `unit` undefined reads across every Unit -- ENIG's view, which owns no
+// single Unit's log.
+async function recentActivitySnapshot(env: Env, unit: Unit | undefined): Promise<string> {
   try {
     const entries = await queryDataSource(
       env,
       env.ACTIVITY_LOG_DATA_SOURCE_ID,
       systemContext(),
-      { property: "Area", rich_text: { equals: unit } },
+      unit ? { property: "Area", rich_text: { equals: unit } } : undefined,
       { pageSize: 15, sortByCreatedDescending: true },
     );
-    if (entries.length === 0) return "(no Activity & Decision Log entries found for this Unit yet)";
+    if (entries.length === 0) return `(no Activity & Decision Log entries found${unit ? " for this Unit" : ""} yet)`;
     return entries
       .map((e) => {
         const entry = plainText(e.properties.Entry);
@@ -123,11 +169,11 @@ const UNIT_PERSONAS: Record<Unit, string> = {
   Marketing:
     `You are ENIG's Marketing staff AI, operating under Martin's authority. ${CONSULTANCY_DESCRIPTION} Outside of the structured intake workflow, chat naturally and helpfully about marketing strategy, content, brand, and digital questions. You are staff, not the final authority — never claim a business decision has been made; that's Martin's call to make.`,
   "Business Development":
-    `You are ENIG's Business Development staff AI. ${CONSULTANCY_DESCRIPTION} This Unit's structured Hats aren't built yet in this system, but you can still discuss partnerships, growth channels, and business-development questions naturally. You are staff, not the final authority — Martin decides.`,
+    `You are ENIG's Business Development staff AI. ${CONSULTANCY_DESCRIPTION} Outside of this Unit's structured workflows, discuss partnerships, growth channels, and business-development questions naturally. You are staff, not the final authority — Martin decides.`,
   Finance:
-    `You are ENIG's Finance staff AI (Financial Planning & Control). ${CONSULTANCY_DESCRIPTION} Outside of the structured Handoff-driven value-based pricing workflow, chat naturally about financial questions, budgeting, and planning. You are staff, not the final authority — never claim a financial decision has been made; that's Martin's call. New pricing work only ever comes through a Handoff from Sales, never directly from chat.`,
+    `You are ENIG's Finance staff AI (Financial Planning & Control). ${CONSULTANCY_DESCRIPTION} Outside of the structured value-based pricing workflow, chat naturally about financial questions, budgeting, and planning. You are staff, not the final authority — never claim a financial decision has been made; that's Martin's call. Pricing work starts from a Handoff or from Martin's own request naming an existing Matter token, never from this conversation alone.`,
   Strategy:
-    `You are ENIG's Strategy staff AI. ${CONSULTANCY_DESCRIPTION} This Unit's structured Hats aren't built yet in this system, but you can still discuss strategy, positioning, and business direction questions naturally and helpfully. You are staff, not the final authority — Martin decides.`,
+    `You are ENIG's Strategy staff AI. ${CONSULTANCY_DESCRIPTION} Outside of this Unit's structured diagnosis workflow, discuss strategy, positioning, and business direction questions naturally and helpfully. You are staff, not the final authority — Martin decides.`,
   "Creative & Design":
     `You are ENIG's Creative & Design staff AI. ${CONSULTANCY_DESCRIPTION} This Unit's structured Hats aren't built yet in this system, but you can still discuss creative direction, design questions, and brand ideas naturally. You are staff, not the final authority — Martin decides.`,
   Operations:
@@ -188,31 +234,50 @@ export async function generalChatReply(
 ): Promise<string> {
   const snapshot = await recentActivitySnapshot(env, unit);
   const parts = {
-    persona: REAL_STRUCTURE_FACTS,
+    persona: buildStructureFacts(),
     behavior: UNIT_PERSONAS[unit],
     skillContent: EVIDENCE_RULE,
-    context: [NO_ACTIONS_RULE, `Recent Activity & Decision Log entries for ${unit}:\n${snapshot}`].join("\n\n"),
+    context: [HOW_WORK_STARTS_RULE, `Recent Activity & Decision Log entries for ${unit}:\n${snapshot}`].join("\n\n"),
   };
   return runChatTurn(env, chatId, threadId, parts, userMessage, chatSensitivityForUnit(unit));
 }
 
-// Martin's default, no-topic-required front door -- DM isn't scoped to one
-// Unit, so it has no single Activity Log to snapshot and no reason to sit
-// behind Sales's client_confidential gate just because it happens to be the
-// fallback once Marketing classification and a genuine sales enquiry have
-// both been ruled out (classifyMarketingTask and classifyNewMessage in
-// router.ts still run first and still handle those cases on their own
-// terms). Ordinary DM conversation is business_sensitive, same as every
-// other Unit's chat.
-const DM_PERSONA = `You are ENIG's general staff AI for direct-message conversation with Martin — not scoped to any one Unit. ${CONSULTANCY_DESCRIPTION} Chat naturally and helpfully about the business, its Units, and general questions. You have no live Activity Log snapshot here (that's per-Unit); for anything specific to a particular Unit's recent activity, say so and point to that Unit's Telegram topic or Notion directly rather than guessing. You are staff, not the final authority — Martin decides.`;
+/**
+ * Shown instead of a reply when ENIG's canonical definition cannot be read.
+ * ENIG has no hard-coded fallback persona: answering without its approved
+ * definition would be answering as a role nobody approved.
+ */
+export const ENIG_UNAVAILABLE_MESSAGE =
+  "ENIG couldn't read its definition page in Notion (Operations — ENIG) just now, so it isn't answering without it. Nothing was started. Please try again shortly, or check that the page still exists.";
 
 /**
- * DM counterpart to generalChatReply: used once routeIncomingText's DM
- * fallback has already ruled out Marketing classification and a genuine
- * Sales enquiry, for whatever's left (small talk, general questions about
- * the business, anything not tied to one Unit's live work).
+ * ENIG -- the Operations Hat (Chief of Staff) Martin talks to when a
+ * message addresses no Unit: routeIncomingText's Chat-mode fallback once no
+ * Unit/Hat was addressed. Built on the SCRIBE split recorded on its Notion
+ * definition: Role, Instruction, Behaviour and End result come live from
+ * that page (plus the Universal Role Contract every Hat inherits);
+ * Situation is Martin's message; Context is assembled here from the
+ * sources the definition names -- the token-safe business snapshot, the
+ * cross-Unit Activity & Decision Log, the Unit/Hat structure, and the
+ * conversation history runChatTurn carries.
+ *
+ * Fails closed: if either governance page is unreadable, no AI call is
+ * made and Martin is told so. ENIG declares no Actions and starts nothing;
+ * work starts only through router.ts's existing addressed-Unit dispatch.
  */
 export async function generalDmReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<string> {
-  const parts = { persona: REAL_STRUCTURE_FACTS, behavior: DM_PERSONA, skillContent: EVIDENCE_RULE, context: NO_ACTIONS_RULE };
+  const [hatDefinition, universalRoleContract] = await Promise.all([
+    getGovernance(env, ENIG_HAT_DEFINITION_PAGE_ID, "Operations — ENIG Hat Definition"),
+    getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
+  ]);
+  if (!hatDefinition || !universalRoleContract) return ENIG_UNAVAILABLE_MESSAGE;
+
+  const [snapshot, activity] = await Promise.all([businessSnapshot(env), recentActivitySnapshot(env, undefined)]);
+  const parts = {
+    persona: `You are ENIG. Your Hat Definition follows; act exactly within it.\n\n${hatDefinition}`,
+    behavior: universalRoleContract,
+    skillContent: [buildStructureFacts(), HOW_WORK_STARTS_RULE].join("\n\n"),
+    context: [snapshot, `Recent Activity & Decision Log entries (all Units):\n${activity}`].join("\n\n"),
+  };
   return runChatTurn(env, chatId, threadId, parts, userMessage, "business_sensitive");
 }
