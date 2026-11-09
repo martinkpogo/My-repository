@@ -121,6 +121,7 @@ Verdicts: **Conforms** (contract satisfied and covered by tests) · **Gap closed
 ## 3. Research governance dependency (investigation only)
 
 * **Live-state check 2026-10-14:** both canonical pages are **deleted** in Notion — `Research & Intelligence Analyst` contract (`3ddcb004-e583-8161-96ba-cdec357c5b5b`) and `Research-Safe Consultancy Context` (`3ddcb004-e583-81e5-b30a-db8cba543823`). `UNIVERSAL_ROLE_CONTRACT_PAGE_ID` (`3cecb004-e583-81ee-8f1e-f0d58532f4aa`) is alive.
+* **Replaced 2026-11-09 (Martin-approved):** `Research Runtime — Role & Authority Contract` (`413cb004-e583-817d-bdca-ede843a85033`, ENIG HQ / 0. Kernel) and `Research-Safe Consultancy Context` (`413cb004-e583-81aa-8dc0-d1e1576022db`, ENIG HQ / Business-Wide Operating Models) are the executor's sources now.
 * **Runtime consequence (already fail-closed, verified):** `src/runtime/research/executor.ts:311-317` blocks `SAFE_CONTEXT_UNAVAILABLE`, `:331-338` blocks `GOVERNANCE_UNAVAILABLE` — no AI call, no generic-assumption fallback. Covered by `executor.test.ts:571` (EXEC 10) and `executor.test.ts:616` (EXEC 14). Live callers `runActionResearch` / `runProspectResearch` (`src/runtime/actionResearch.ts`) — i.e. lead-generation research — are therefore **blocked in production until governance restores the pages**.
 * **Not done, deliberately:** no page recreated, restored, edited or redirected; no hard-coded substitute content; no Notion write of any kind. **Governance decision required** (restore vs. replace vs. accept research being unavailable).
 

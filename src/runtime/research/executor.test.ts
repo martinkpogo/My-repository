@@ -506,8 +506,8 @@ test("EXEC 20. Token/privacy boundaries remain intact: the research-facing conte
 // and the boundary guarantees that make it non-organizational.
 // =====================================================================================
 
-const SAFE_CONTEXT_KV_KEY = "governance:3ddcb004-e583-81e5-b30a-db8cba543823";
-const ROLE_CONTRACT_KV_KEY = "governance:3ddcb004-e583-8161-96ba-cdec357c5b5b";
+const SAFE_CONTEXT_KV_KEY = "governance:413cb004-e583-81aa-8dc0-d1e1576022db";
+const ROLE_CONTRACT_KV_KEY = "governance:413cb004-e583-817d-bdca-ede843a85033";
 const UNIVERSAL_CONTRACT_KV_KEY = "governance:3cecb004-e583-81ee-8f1e-f0d58532f4aa";
 
 function researchEnv(ai: unknown, governance: Record<string, string> = {}): Env {
