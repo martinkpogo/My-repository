@@ -32,6 +32,8 @@ export interface Env {
    * application logic, exactly like every other data source above.
    */
   CALL_NOTES_DATA_SOURCE_ID: string;
+  /** Payments database (Payment Business Object). Read-only for the Runtime until an approval-gated Finance action exists. */
+  PAYMENTS_DATA_SOURCE_ID?: string;
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;

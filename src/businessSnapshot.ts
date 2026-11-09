@@ -17,7 +17,8 @@ import { humanizeStage, loadSessionsIndexForRead } from "./sessionsIndex";
  * the existing chat.data_lookup path already does. Reads go through the
  * same `user_lookup` Access context that path uses (read-only by
  * construction), plus the already-sanitized sessions index the /sessions
- * command reads.
+ * command reads. Money comes from the Payments database (token-only by its
+ * spec): amounts, currencies, dates and Matter tokens, never names.
  *
  * Every section fails soft on its own: one unreadable source is named as
  * unreadable, never guessed at, and never takes the chat reply down.
@@ -37,12 +38,79 @@ export interface StatusSection {
   latest: string[];
 }
 
+export interface MoneySection {
+  /** Rows sampled (the most recent up to MONEY_SAMPLE_SIZE). */
+  sampled: number;
+  /** Per currency: received this calendar month (UTC), and withholding tax deducted on those payments. */
+  paidThisMonth: Array<{ currency: string; amount: number; wht: number }>;
+  /** Per currency: every Due payment, overdue included. */
+  owed: Array<{ currency: string; amount: number; count: number }>;
+  /** Due payments whose Due_Date is before today, oldest first (token-safe lines). */
+  overdue: string[];
+  /** Deposits still Due, not overdue (token-safe lines). */
+  depositsDue: string[];
+}
+
 export interface BusinessSnapshotData {
   pendingApprovals: SectionResult<SessionSummary[]>;
   matters: SectionResult<StatusSection>;
   proposals: SectionResult<StatusSection>;
   openHandoffs: SectionResult<string[]>;
   leads: SectionResult<StatusSection>;
+  /** Undefined when this environment has no Payments source configured. */
+  money?: SectionResult<MoneySection>;
+}
+
+const MONEY_SAMPLE_SIZE = 100;
+
+function addTo(map: Map<string, { amount: number; wht: number; count: number }>, currency: string, amount: number, wht = 0): void {
+  const cur = map.get(currency) ?? { amount: 0, wht: 0, count: 0 };
+  cur.amount += amount;
+  cur.wht += wht;
+  cur.count += 1;
+  map.set(currency, cur);
+}
+
+/**
+ * Money from the Payments database (Payment Business Object). Overdue is
+ * DERIVED here -- Status Due and Due_Date before today -- never read from a
+ * stored field, per the spec. Rows missing an amount or currency are skipped
+ * rather than guessed. Dates compare as ISO YYYY-MM-DD strings in UTC
+ * (Accra is UTC+0).
+ */
+export function summarizeMoney(pages: NotionPage[], now: Date): MoneySection {
+  const today = now.toISOString().slice(0, 10);
+  const month = today.slice(0, 7);
+  const paid = new Map<string, { amount: number; wht: number; count: number }>();
+  const owed = new Map<string, { amount: number; wht: number; count: number }>();
+  const overdue: Array<{ due: string; line: string }> = [];
+  const depositsDue: Array<{ due: string; line: string }> = [];
+  for (const p of pages) {
+    const amount = p.properties.Amount?.number;
+    const currency = plainText(p.properties.Currency);
+    if (typeof amount !== "number" || !currency) continue;
+    const status = plainText(p.properties.Status);
+    const type = plainText(p.properties.Type) || "Payment";
+    const matter = plainText(p.properties.Matter_Token) || "(no matter token)";
+    const due = p.properties.Due_Date?.date?.start?.slice(0, 10) ?? "";
+    const paidOn = p.properties.Paid_Date?.date?.start?.slice(0, 10) ?? "";
+    const wht = p.properties.WHT_Deducted?.number;
+    const line = `${matter} ${type} ${currency} ${amount.toLocaleString("en-US")}${due ? ` due ${due}` : ""}`;
+    if (status === "Paid" && paidOn.slice(0, 7) === month) addTo(paid, currency, amount, typeof wht === "number" ? wht : 0);
+    if (status === "Due") {
+      addTo(owed, currency, amount);
+      if (due && due < today) overdue.push({ due, line });
+      else if (type === "Deposit") depositsDue.push({ due: due || "9999", line });
+    }
+  }
+  const byDue = (a: { due: string }, b: { due: string }) => a.due.localeCompare(b.due);
+  return {
+    sampled: pages.length,
+    paidThisMonth: [...paid.entries()].map(([currency, v]) => ({ currency, amount: v.amount, wht: v.wht })),
+    owed: [...owed.entries()].map(([currency, v]) => ({ currency, amount: v.amount, count: v.count })),
+    overdue: overdue.sort(byDue).map((o) => o.line),
+    depositsDue: depositsDue.sort(byDue).map((o) => o.line),
+  };
 }
 
 function countByStatus(statuses: string[]): Array<[string, number]> {
@@ -75,8 +143,17 @@ function query(env: Env, dataSourceId: string): Promise<NotionPage[]> {
   return queryDataSource(env, dataSourceId, userLookupContext(), undefined, { pageSize: SAMPLE_SIZE, sortByCreatedDescending: true });
 }
 
-export async function loadBusinessSnapshot(env: Env): Promise<BusinessSnapshotData> {
-  const [pendingApprovals, matters, proposals, openHandoffs, leads] = await Promise.all([
+export async function loadBusinessSnapshot(env: Env, now: Date = new Date()): Promise<BusinessSnapshotData> {
+  const paymentsId = env.PAYMENTS_DATA_SOURCE_ID;
+  const moneyPromise: Promise<SectionResult<MoneySection> | undefined> = paymentsId
+    ? attempt("Payments", async () =>
+        summarizeMoney(
+          await queryDataSource(env, paymentsId, userLookupContext(), undefined, { pageSize: MONEY_SAMPLE_SIZE, sortByCreatedDescending: true }),
+          now,
+        ),
+      )
+    : Promise.resolve(undefined);
+  const [pendingApprovals, matters, proposals, openHandoffs, leads, money] = await Promise.all([
     attempt("sessions index", async () => (await loadSessionsIndexForRead(env)).filter((s) => s.hasPendingApproval)),
     attempt("Matters", async () =>
       statusSection(
@@ -118,8 +195,9 @@ export async function loadBusinessSnapshot(env: Env): Promise<BusinessSnapshotDa
         () => null,
       ),
     ),
+    moneyPromise,
   ]);
-  return { pendingApprovals, matters, proposals, openHandoffs, leads };
+  return { pendingApprovals, matters, proposals, openHandoffs, leads, ...(money ? { money } : {}) };
 }
 
 function formatCounts(section: StatusSection, noun: string): string {
@@ -153,6 +231,25 @@ export function formatBusinessSnapshot(data: BusinessSnapshotData): string {
   else for (const h of data.openHandoffs.value.slice(0, 10)) lines.push(`  - ${h}`);
 
   lines.push(`Leads: ${data.leads.ok ? formatCounts(data.leads.value, "leads") : UNREADABLE}`);
+
+  if (data.money) {
+    lines.push("Money (Payments; Matter tokens and amounts only):");
+    if (!data.money.ok) lines.push(`  ${UNREADABLE}`);
+    else {
+      const m = data.money.value;
+      const fmt = (n: number) => n.toLocaleString("en-US");
+      if (m.sampled === 0) lines.push("  no payments recorded yet");
+      else {
+        lines.push(
+          `  Paid this month: ${m.paidThisMonth.length ? m.paidThisMonth.map((p) => `${p.currency} ${fmt(p.amount)}${p.wht ? ` (withholding tax deducted ${p.currency} ${fmt(p.wht)})` : ""}`).join("; ") : "nothing"}`,
+        );
+        lines.push(`  Owed (all Due, overdue included): ${m.owed.length ? m.owed.map((o) => `${o.currency} ${fmt(o.amount)} across ${o.count}`).join("; ") : "nothing"}`);
+        lines.push(`  Overdue: ${m.overdue.length ? m.overdue.slice(0, 5).join(", ") : "none"}`);
+        lines.push(`  Deposits due: ${m.depositsDue.length ? m.depositsDue.slice(0, 5).join(", ") : "none"}`);
+        if (m.sampled === MONEY_SAMPLE_SIZE) lines.push(`  (from the ${MONEY_SAMPLE_SIZE} most recent Payments rows)`);
+      }
+    }
+  }
   lines.push("=== END SNAPSHOT ===");
   return lines.join("\n");
 }

@@ -732,3 +732,12 @@ test("BD's develop_opportunity and Finance's price are gated Actions with no per
   // inferred from the action's name.
   assert.strictEqual(resolveActionRequirement(workSessionContext(SALES_ENQUIRY))!.requiresApproval, false);
 });
+
+test("Payments: a governed source readable by a user lookup, never writable without an Action, and absent when unconfigured", () => {
+  const env = { PAYMENTS_DATA_SOURCE_ID: "payments-ds" } as unknown as Env;
+  assert.doesNotThrow(() => evaluateAccess(env, { operation: "read", dataSourceId: "payments-ds" }, userLookupContext()));
+  assert.throws(() => evaluateAccess(env, { operation: "create", dataSourceId: "payments-ds" }, userLookupContext()), AccessDeniedError);
+  assert.throws(() => evaluateAccess(env, { operation: "create", dataSourceId: "payments-ds" }, systemContext()), AccessDeniedError);
+  // No Payments id configured: "" is never a recognised target.
+  assert.throws(() => evaluateAccess({} as Env, { operation: "read", dataSourceId: "" }, userLookupContext()), AccessDeniedError);
+});

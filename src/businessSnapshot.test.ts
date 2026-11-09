@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { formatBusinessSnapshot, loadBusinessSnapshot } from "./businessSnapshot";
+import { formatBusinessSnapshot, loadBusinessSnapshot, summarizeMoney } from "./businessSnapshot";
 import type { Env } from "./types";
 
 /**
@@ -131,4 +131,76 @@ test("businessSnapshot: a full sample says it is only the most recent records", 
   });
   assert.match(text, /Matters: Open: 50 \(of the 50 most recent matters\)/);
   assert.match(text, /Waiting on Martin's approval:\n {2}nothing/);
+});
+
+// ---- Money (Payments database, Payment Business Object) ----
+
+const num = (n: number) => ({ number: n });
+const date = (d: string) => ({ date: { start: d } });
+function payment(p: { matter: string; type: string; amount: number; currency: string; status: string; due?: string; paid?: string; wht?: number; org?: string }) {
+  return page({
+    Payment_ID: uid("PAY", Math.floor(Math.random() * 1000)),
+    Matter_Token: rich(p.matter),
+    Type: select(p.type),
+    Amount: num(p.amount),
+    Currency: select(p.currency),
+    Status: select(p.status),
+    ...(p.due ? { Due_Date: date(p.due) } : {}),
+    ...(p.paid ? { Paid_Date: date(p.paid) } : {}),
+    ...(p.wht !== undefined ? { WHT_Deducted: num(p.wht) } : {}),
+    ...(p.org ? { Notes: rich(p.org) } : {}),
+  });
+}
+
+test("money: paid this month, owed, overdue (derived) and deposits due, per currency", () => {
+  const now = new Date("2026-11-09T10:00:00Z");
+  const m = summarizeMoney(
+    [
+      payment({ matter: "MAT-12", type: "Deposit", amount: 2000, currency: "GHS", status: "Paid", paid: "2026-11-03", wht: 150 }),
+      payment({ matter: "MAT-11", type: "Balance", amount: 500, currency: "USD", status: "Paid", paid: "2026-11-01" }),
+      payment({ matter: "MAT-9", type: "Balance", amount: 999, currency: "GHS", status: "Paid", paid: "2026-10-30" }),
+      payment({ matter: "MAT-12", type: "Balance", amount: 2000, currency: "GHS", status: "Due", due: "2026-12-01" }),
+      payment({ matter: "MAT-10", type: "Balance", amount: 1000, currency: "GHS", status: "Due", due: "2026-11-01" }),
+      payment({ matter: "MAT-14", type: "Deposit", amount: 300, currency: "USD", status: "Due", due: "2026-11-12" }),
+      payment({ matter: "MAT-8", type: "Deposit", amount: 50, currency: "GHS", status: "Waived" }),
+    ] as any,
+    now,
+  );
+  assert.deepStrictEqual(m.paidThisMonth, [
+    { currency: "GHS", amount: 2000, wht: 150 },
+    { currency: "USD", amount: 500, wht: 0 },
+  ], "October's payment and the Waived row are excluded");
+  assert.deepStrictEqual(m.owed, [
+    { currency: "GHS", amount: 3000, count: 2 },
+    { currency: "USD", amount: 300, count: 1 },
+  ]);
+  assert.deepStrictEqual(m.overdue, ["MAT-10 Balance GHS 1,000 due 2026-11-01"]);
+  assert.deepStrictEqual(m.depositsDue, ["MAT-14 Deposit USD 300 due 2026-11-12"]);
+});
+
+test("money: a row with no amount or currency is skipped, not guessed", () => {
+  const m = summarizeMoney([page({ Matter_Token: rich("MAT-1"), Status: select("Due"), Type: select("Deposit") })] as any, new Date("2026-11-09T00:00:00Z"));
+  assert.deepStrictEqual(m.owed, []);
+  assert.deepStrictEqual(m.depositsDue, []);
+});
+
+test("money: the snapshot shows a Money section only when Payments is configured, and never Notes text", async (t) => {
+  mockNotionFetch(t, {
+    "payments-ds": [payment({ matter: "MAT-10", type: "Balance", amount: 1000, currency: "GHS", status: "Due", due: "2026-11-01", org: "Acme Bakeries" })],
+  });
+  const now = new Date("2026-11-09T10:00:00Z");
+  const without = formatBusinessSnapshot(await loadBusinessSnapshot(fakeEnv(), now));
+  assert.doesNotMatch(without, /Money/);
+
+  const withMoney = formatBusinessSnapshot(await loadBusinessSnapshot(fakeEnv({ PAYMENTS_DATA_SOURCE_ID: "payments-ds" }), now));
+  assert.match(withMoney, /Owed \(all Due, overdue included\): GHS 1,000 across 1/);
+  assert.match(withMoney, /Overdue: MAT-10 Balance GHS 1,000 due 2026-11-01/);
+  assert.match(withMoney, /Paid this month: nothing/);
+  assert.ok(!withMoney.includes("Acme"), "Notes never reach the snapshot");
+});
+
+test("money: an unreadable Payments source is named as unreadable", async (t) => {
+  mockNotionFetch(t, { "payments-ds": "fail" });
+  const text = formatBusinessSnapshot(await loadBusinessSnapshot(fakeEnv({ PAYMENTS_DATA_SOURCE_ID: "payments-ds" })));
+  assert.match(text, /Money \(Payments; Matter tokens and amounts only\):\n {2}\(couldn't read this right now/);
 });
