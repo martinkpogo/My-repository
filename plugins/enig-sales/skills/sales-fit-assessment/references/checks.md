@@ -33,5 +33,5 @@ In a TEST RUN, report on each of these from the installed plugin and live record
 7. `sales-progression` keeps the sequence (G1 → source check → Entity → Matter → Handoff → log) and stops on any failure.
 8. `sales-proposal-release` checks all four release conditions, the token chain and the Registry row, preserves the Approved Version, sends only on approval, and sets Proposal Status Sent at Delivered.
 9. `sales-agreement` builds only from the live Template and the exact Approved Version, sends only on approval, and records Signed only on Martin's confirmation.
-10. The plugin's files and script paths match what its skills and README name (`python3 scripts/selftest.py` passes).
+10. The plugin's files and script paths match what its skills name: `python3 <SKILL>/scripts/plugin_check.py` passes and reports the plugin version (Claude chat mounts only skill folders, so the package-level `selftest.py` is a release check, not a chat check).
 11. The Log holds no Decision newer than the Project doc's baseline that changes U1 or another open area.

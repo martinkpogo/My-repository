@@ -48,6 +48,8 @@ Unresolved, fail closed: U1 investment-range rule.
 
 ## Changes in 3.3.0
 
+- Every skill carries `scripts/plugin_check.py`, the in-chat health check: it reports the version, checks the skill's own files, runs the script behaviour checks and confirms all mounted skill copies match. Claude chat drops plugin-root files, so `selftest.py` stays a release check.
+
 Rebuilt from the canonical Isolated Sales specification, because the only copy available to the builder was 3.1.0 and the 3.2.x package was not retrievable. It supersedes 3.2.2 and the separate `enig-sales-agreement` 1.0.0 (uninstall that one).
 
 - **Notion access:** search, fetch and backlinks only (Project Instruction §9, LOG-1141); no `notion-query-data-sources`, no saved views.
