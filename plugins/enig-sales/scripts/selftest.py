@@ -26,7 +26,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS = ["sales-enquiry", "sales-correspondence", "sales-call-prep", "sales-call-evidence",
           "sales-fit-assessment", "sales-progression", "sales-proposal-release", "sales-agreement"]
-SCRIPTS = ["validate_token.py", "scan_identity_leakage.py", "call_notes_attestation.py", "handoff_attestation.py"]
+SCRIPTS = ["validate_token.py", "scan_identity_leakage.py", "call_notes_attestation.py", "handoff_attestation.py", "plugin_check.py"]
 REFERENCES = ["notion-calls.md", "evidence-examples.md", "checks.md"]
 fails = 0
 
@@ -80,6 +80,10 @@ for s in SKILLS:
     m = re.search(r'^description: (.*)$', text, re.M)
     desc = json.loads(m.group(1)) if m and m.group(1).startswith('"') else (m.group(1) if m else "")
     check(0 < len(desc) <= 500, f"{s} description at most 500 characters ({len(desc)})")
+
+# 3b. The in-chat check reports the manifest's version
+pc = open(os.path.join(ROOT, "scripts", "plugin_check.py"), encoding="utf-8").read()
+check(f'VERSION = "{manifest["version"]}"' in pc, "plugin_check.py VERSION matches the manifest")
 
 # 4. Script behaviour
 check(run("validate_token.py", "matter", "MAT-12")[0] == 0, "validate_token: MAT-12 valid")
