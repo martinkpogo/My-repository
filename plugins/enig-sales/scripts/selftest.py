@@ -52,6 +52,7 @@ def tmp(content):
 # 1. Structure
 manifest = json.load(open(os.path.join(ROOT, ".claude-plugin", "plugin.json")))
 check(manifest.get("name") == "enig-sales" and re.fullmatch(r"\d+\.\d+\.\d+", manifest.get("version", "")), "manifest name and version")
+check(isinstance(manifest.get("description"), str) and 0 < len(manifest["description"]) <= 500, f"manifest description at most 500 characters ({len(manifest.get('description', ''))})")
 for f in ["README.md", "CONNECTORS.md", ".mcp.json"]:
     check(os.path.exists(os.path.join(ROOT, f)), f"{f} present")
 check(json.load(open(os.path.join(ROOT, ".mcp.json"))) == {"mcpServers": {}}, ".mcp.json holds no servers or credentials")

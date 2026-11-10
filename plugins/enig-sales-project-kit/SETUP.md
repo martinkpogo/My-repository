@@ -15,7 +15,7 @@ Four files, built together and checked against each other (`sync_check.py`):
 2. **Create the Project** (for example "ENIG Isolated Sales").
 3. **Instructions:** paste the full text of `project-instruction.md`.
 4. **Project file:** add `enig-static-reference.md`. Keep the file name exactly; the Instruction and every skill refer to it by name.
-5. **Plugin:** upload `enig-sales.plugin` and enable it for the Project.
+5. **Plugin:** unzip the kit first, then upload **`enig-sales.plugin` itself** (not the kit zip) and enable it for the Project. Its manifest is `.claude-plugin/plugin.json` at the top level of that file; the kit zip has none, so uploading the kit is refused.
 6. **Code execution:** make sure the Project can run code. Every skill runs the plugin's Python scripts (token checks, identity scan, Call Notes and Handoff attestation); without code execution they stop at "scripts can't be found".
 7. **Connectors** (see the plugin's `CONNECTORS.md`): Notion (required — the account must see ENIG HQ, including the new Agreements and Payments databases), Gmail and Google Drive (required for correspondence, release and agreements), Read.ai (call evidence; fallbacks allowed), Google Calendar (optional).
 8. **First check — no writes.** In a new chat in the Project, send:
