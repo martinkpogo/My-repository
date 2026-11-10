@@ -1,6 +1,6 @@
 ---
 name: sales-enquiry
-description: ENIG Isolated Sales intake for a brand-new sales enquiry (connected Gmail or pasted text), and for recording new client evidence from correspondence against an existing Matter. Use when a new enquiry, lead or prospect email arrives, or Martin asks to "log this enquiry," "find the Entity for this," "set up a Matter," or "match this to an existing client." Matches or establishes the Entity + Registry pair and the Matter, and writes identity-safe Matter evidence, each only on Martin's approval. Never qualifies, changes a status, or creates or offers a Handoff. Part of the `enig-sales` plugin.
+description: "ENIG Isolated Sales intake for a brand-new enquiry (Gmail or pasted) and for new client evidence on an existing Matter. Use when a new enquiry, lead or prospect email arrives, or Martin asks to log an enquiry, find the Entity, set up a Matter or match it to a client. Matches or creates the Entity + Registry pair and the Matter and writes identity-safe Matter evidence, each on Martin's approval. Never qualifies, changes a status, or creates a Handoff."
 ---
 
 # sales-enquiry — steps

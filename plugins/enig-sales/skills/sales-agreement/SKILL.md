@@ -1,6 +1,6 @@
 ---
 name: sales-agreement
-description: ENIG Isolated Sales client agreements (CSA), after a released Proposal. Use when Martin says "MAT-n accepted," "prepare the agreement for MAT-n," "send the agreement," or "MAT-n agreement signed." Marks the Proposal Accepted on Martin's confirmation, builds the Client Service Agreement from the approved Template and the exact Approved Version (identity substituted into the client document only), sends it on Martin's approval of the exact email, and records it Signed on his confirmation, offering the 50% Deposit and Balance Payment rows. Never prices, changes terms or scope, invents a timeline, writes identity into Notion, or marks a Payment Paid. Part of the `enig-sales` plugin.
+description: "ENIG Isolated Sales client agreements (CSA) after a released Proposal. Use when Martin says \"MAT-n accepted\", \"prepare the agreement for MAT-n\", \"send the agreement\" or \"MAT-n agreement signed\". Marks the Proposal Accepted, builds the agreement from the live Template and the exact Approved Version, sends it on approval of the exact email, and records it Signed with the 50% Deposit and Balance Payment rows. Never prices, changes terms, invents a timeline or marks a Payment Paid."
 ---
 
 # sales-agreement — steps

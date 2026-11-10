@@ -1,6 +1,6 @@
 ---
 name: sales-call-evidence
-description: "ENIG Isolated Sales completed-call evidence from a connected Read.ai report (or a connected fallback recorder: Fireflies, Otter.ai, Zoom, tldv, Tactiq) or pasted transcript/notes. Use when Martin brings a call recording, a Read.ai meeting report or call notes, or asks to \"log this call\" or \"capture call notes.\" Matches the call to an existing Matter (never creates one), labels the evidence, and — on Martin's one approval — writes the updated Matter.Current_understanding and one canonical Call Notes record for the call (identity-safe Note ending with the Commercial Value Evidence block, six-field record_approval marker, Status Ready, Version 1). Never assesses fit, never creates or offers a Handoff. Part of the `enig-sales` plugin."
+description: "ENIG Isolated Sales completed-call evidence from Read.ai (or a fallback recorder) or pasted notes. Use when Martin brings a call recording, a meeting report or call notes, or says \"log this call\" or \"capture call notes\". Matches the call to an existing Matter and, on Martin's one approval, updates Current_understanding and creates one canonical Call Notes record (identity-safe Note with the Commercial Value Evidence block, verified approval marker). Never assesses fit or creates a Handoff."
 ---
 
 # sales-call-evidence — steps
