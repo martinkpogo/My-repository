@@ -1,6 +1,6 @@
 ---
 name: sales-fit-assessment
-description: Isolated Sales fit assessment for an ENIG Matter after the sales call. Use when Martin asks "is this a fit," "assess fit," "does this qualify," "can we progress MAT-n," or wants the outcome after call evidence has been captured. Rates the five canonical qualification conditions against the call evidence held in this chat and the Matter summary, keeps evidence separate from inference, preserves the unresolved investment-range condition (U1), and returns Qualified, More Information Required, or Not Qualified. Never delegated to Runtime Sales; changes no status and never creates or offers a Handoff. Part of the `enig-sales` plugin.
+description: "Isolated Sales fit assessment for an ENIG Matter after the sales call. Use when Martin asks \"is this a fit\", \"assess fit\", \"does this qualify\" or \"can we progress MAT-n\". Rates the five canonical qualification conditions against the call evidence, the approved Call Notes and the Matter summary, keeps evidence apart from inference, leaves U1 unresolved, and returns Qualified, More Information Required or Not Qualified. Changes no status and never creates a Handoff."
 ---
 
 # sales-fit-assessment — steps

@@ -1,6 +1,6 @@
 ---
 name: sales-call-prep
-description: "Prepares Martin for an upcoming ENIG sales call inside Isolated Sales, for an Entity/Matter that already exists. Use when Martin asks to \"prep me for the call,\" \"get me ready for the call with this client,\" or \"what do we still need to learn on the call.\" Reads the one Matter, its Registry row and its Gmail thread once, and produces a brief in chat only: what is known (with evidence classes), the evidence each canonical qualification condition still lacks, and the questions that would surface it. Never scores or qualifies, never suggests a price, budget or indicative amount, never fabricates missing evidence, and never creates or offers a Handoff. Part of the `enig-sales` plugin."
+description: "Prepares Martin for a sales call on an existing ENIG Matter. Use when Martin says \"prep me for the call\", \"get me ready for the call\" or \"what do we still need to learn on the call\". Reads the Matter, its Registry row, its Call Notes and its Gmail thread, and writes a brief in chat: what is known (with evidence classes), the evidence each qualification condition still lacks, and the questions to ask. Never scores, never suggests a price or budget, never invents evidence."
 ---
 
 # sales-call-prep — steps

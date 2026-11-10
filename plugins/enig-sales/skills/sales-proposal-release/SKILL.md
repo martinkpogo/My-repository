@@ -1,6 +1,6 @@
 ---
 name: sales-proposal-release
-description: Releases an approved ENIG Proposal to the client from Isolated Sales, after Runtime Sales has produced it and Martin has approved the exact Version. Use when Martin says "release the proposal for MAT-n," "build the proposal document," "draft the proposal email," or a Proposal reaches Artifact Status Pending Identity Resolution. Verifies the Proposal record, resolves identity from a Confirmed Registry row, substitutes identity into the Approved Version only, builds the Drive document and/or email, and sends only on Martin's approval of the exact email. Never prices, edits substance, sets Proposal Status, or creates a Handoff. Part of the `enig-sales` plugin.
+description: "Releases an approved ENIG Proposal to the client from Isolated Sales. Use when Martin says \"release the proposal for MAT-n\", \"build the proposal document\" or \"draft the proposal email\", or a Proposal reaches Artifact Status Pending Identity Resolution. Verifies the record, resolves identity from a Confirmed Registry row, builds the document and email from the Approved Version only, sends on Martin's approval of the exact email and sets Status Sent. Never prices or edits substance."
 ---
 
 # sales-proposal-release — steps

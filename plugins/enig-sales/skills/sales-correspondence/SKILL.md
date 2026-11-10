@@ -1,6 +1,6 @@
 ---
 name: sales-correspondence
-description: ENIG Isolated Sales client correspondence and scheduling. Use when Martin pastes an email and asks what it means or how to reply, refers to a thread in connected Gmail, wants a draft, or needs to propose or book call times. Flags a brand-new enquiry for `sales-enquiry` instead of answering it. Drafts every email and calendar action for Martin's approval of the exact action; never states a price, quote or delivery commitment, never judges fit, never writes Entity/Matter records, never creates or offers a Handoff, and never sends a Proposal (`sales-proposal-release`). Part of the `enig-sales` plugin.
+description: "ENIG Isolated Sales client email and scheduling. Use when Martin pastes or names a client email and asks what it means or how to reply, wants a draft, or needs to propose or book call times. Flags a brand-new enquiry for sales-enquiry. Drafts every email and calendar action for Martin's approval of the exact action; never states a price, quote or delivery commitment, never judges fit, never writes Entity or Matter records, never sends a Proposal."
 ---
 
 # sales-correspondence — steps

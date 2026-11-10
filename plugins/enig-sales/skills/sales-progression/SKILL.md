@@ -1,6 +1,6 @@
 ---
 name: sales-progression
-description: Executes ENIG's approved Sales progression event inside Isolated Sales. Use after `sales-fit-assessment` when Martin wants to progress a Matter ("progress MAT-n," "move this to Prospect," "hand this to Strategy"). Shows one progression package — the assessment, Entity Lead → Prospect, Matter Open → Qualified, the complete Sales → Strategy Work Handoff and the log entry — and executes it only on Martin's single explicit approval naming the MAT-n, with no second approval for the Handoff. Checks the live contracts first (gate G1) and stops on any failure. There is no Sales → Sales Handoff. Part of the `enig-sales` plugin.
+description: "Executes ENIG's approved Sales progression in Isolated Sales. Use after sales-fit-assessment when Martin says \"progress MAT-n\", \"move this to Prospect\" or \"hand this to Strategy\". Shows one package (assessment, Entity Lead → Prospect, Matter Open → Qualified, the thin Sales → Strategy Handoff, the log entry) and executes it only on Martin's single approval naming the MAT-n, checking the live contracts first (G1). Verifies the Handoff on read-back. No Sales → Sales Handoff."
 ---
 
 # sales-progression — steps

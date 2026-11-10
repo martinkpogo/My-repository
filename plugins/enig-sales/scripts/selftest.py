@@ -77,6 +77,9 @@ for s in SKILLS:
     check(refs <= set(REFERENCES), f"{s} names only shipped references")
     check("select:" not in text or "notion-query-data-sources" not in text.split("select:")[1].split("`")[0], f"{s} never loads notion-query-data-sources")
     check(text.startswith("---\nname: " + s + "\n"), f"{s} frontmatter name matches folder")
+    m = re.search(r'^description: (.*)$', text, re.M)
+    desc = json.loads(m.group(1)) if m and m.group(1).startswith('"') else (m.group(1) if m else "")
+    check(0 < len(desc) <= 500, f"{s} description at most 500 characters ({len(desc)})")
 
 # 4. Script behaviour
 check(run("validate_token.py", "matter", "MAT-12")[0] == 0, "validate_token: MAT-12 valid")
