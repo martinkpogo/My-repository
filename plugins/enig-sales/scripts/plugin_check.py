@@ -70,13 +70,20 @@ code, out = run("handoff_attestation.py", "source-boundary", "--text-file", t.na
 check(code == 0 and "[source_boundary_check result=Passed entity=ENT-27 matter=MAT-30" in out, "handoff source-boundary: marker built for clean text")
 
 # 3. Copy parity across the mounted skill folders
+# Claude may mount a skill as "<skill>" or with the plugin prefix, "enig-sales:<skill>".
 parent = os.path.dirname(SKILL_DIR)
-mounted = [s for s in SKILLS if os.path.isdir(os.path.join(parent, s))]
+def folder_for(skill):
+    for name in (skill, f"{PLUGIN}:{skill}"):
+        if os.path.isdir(os.path.join(parent, name)):
+            return os.path.join(parent, name)
+    return None
+found = {s: folder_for(s) for s in SKILLS}
+mounted = [s for s in SKILLS if found[s]]
 if len(mounted) > 1:
     print(f"INFO {len(mounted)} of {len(SKILLS)} skill folders mounted beside this one")
     for sub, names in (("scripts", SCRIPTS), ("references", REFERENCES)):
         for n in names:
-            hashes = {s: sha(os.path.join(parent, s, sub, n)) for s in mounted if os.path.exists(os.path.join(parent, s, sub, n))}
+            hashes = {s: sha(os.path.join(found[s], sub, n)) for s in mounted if os.path.exists(os.path.join(found[s], sub, n))}
             check(len(hashes) == len(mounted) and len(set(hashes.values())) == 1, f"{sub}/{n} identical in all mounted skills")
     check(len(mounted) == len(SKILLS), "all 8 skills mounted")
 else:
