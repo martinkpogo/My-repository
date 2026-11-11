@@ -302,6 +302,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Sales Intake Classification",
     description: "Routes an incoming Sales-Unit Cowork request among Sales's manifest-based Hats (currently only Lead Generation Specialist).",
   },
+  "finance.intake_classification": {
+    id: "finance.intake_classification",
+    name: "Finance Intake Classification",
+    description: "Routes an incoming Finance request between Finance's Hats: Value-Based Pricing Assessor (pricing) or Payments Clerk (recording a received payment).",
+  },
   "sales.hat_action_decision": {
     id: "sales.hat_action_decision",
     name: "Sales Hat Action Decision",

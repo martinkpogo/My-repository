@@ -43,6 +43,13 @@ export interface FinanceWorkState {
    * a pricing authority, and never overrides validateFinanceJudgement.
    */
   valueEvidenceFactSupplied?: boolean;
+
+  /**
+   * The Payments Clerk's staged change, shown to Martin on one approval card
+   * and consumed when he taps Record or Cancel (paymentsClerk.ts). Holds
+   * tokens, amounts and dates only.
+   */
+  pendingPayment?: import("./paymentsClerk").PendingPayment;
 }
 
 /** The Finance slice of a Work, created on first write. Reads use `state.finance?.field` and never create it. */

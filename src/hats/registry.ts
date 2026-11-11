@@ -42,6 +42,10 @@ export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sa
 // never a qualification, never a proposal/quote. See leadDiscovery.ts.
 export const LEAD_GENERATION_SPECIALIST: HatIdentity = { name: "Lead Generation Specialist", unit: "Sales", specialization: "Lead Discovery" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
+// Finance's second Hat (2026-11-11): records a payment Martin reports as
+// received, by setting the matching Due Payment row to Paid on his approval
+// of the exact change (financeManifest.ts / paymentsClerk.ts).
+export const PAYMENTS_CLERK: HatIdentity = { name: "Payments Clerk", unit: "Finance", specialization: "Payment Recording" };
 // Strategy's composable-Skills model (ENIG Core Structure v3.0). Strategy
 // Analyst's specialization is "Strategic Assessment & Synthesis" and it is
 // the Unit's ONE organizational Hat: assessment, methodological selection,
@@ -93,6 +97,7 @@ export const ALL_HATS: HatIdentity[] = [
   SALES_EXECUTIVE,
   LEAD_GENERATION_SPECIALIST,
   VALUE_BASED_PRICING_ASSESSOR,
+  PAYMENTS_CLERK,
   STRATEGY_ANALYST,
   BD_OPPORTUNITY_DEVELOPMENT,
   BD_PARTNERSHIP_DEVELOPMENT,

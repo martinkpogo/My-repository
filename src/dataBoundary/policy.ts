@@ -306,6 +306,10 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // classification: the registry defines a permitted task boundary
   // regardless of whether the current optimization happens to invoke it.
   "sales.intake_classification": "business_sensitive",
+  // Finance Stage 1 (Value-Based Pricing Assessor vs Payments Clerk): Martin's
+  // Workspace text plus static Hat summaries, the same payload category as
+  // sales.intake_classification. Classification approved by Martin 2026-11-11.
+  "finance.intake_classification": "business_sensitive",
   "sales.hat_action_decision": "business_sensitive",
 };
 
@@ -591,6 +595,7 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   // routing/action metadata), Architect-approved alongside their
   // business_sensitive classification in PRODUCTION_TASK_SENSITIVITY.
   "sales.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "finance.intake_classification": "TOKEN_SAFE_RUNTIME",
   "sales.hat_action_decision": "TOKEN_SAFE_RUNTIME",
   "research.context_relevance": "TOKEN_SAFE_RUNTIME",
   "research.protocol_selection": "TOKEN_SAFE_RUNTIME",

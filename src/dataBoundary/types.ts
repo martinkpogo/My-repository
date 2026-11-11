@@ -132,6 +132,11 @@ export type SemanticTaskId =
   // Sensitivity classification pending Architect review; UNCLASSIFIED in
   // PRODUCTION_TASK_SENSITIVITY until then (fails closed).
   | "sales.intake_classification"
+  // Finance Stage 1 (which Hat: Value-Based Pricing Assessor or Payments
+  // Clerk), from 2026-11-11 when Finance gained its second Hat. Same payload
+  // category as sales.intake_classification; Martin approved the same
+  // classification (business_sensitive, TOKEN_SAFE_RUNTIME) on 2026-11-11.
+  | "finance.intake_classification"
   | "sales.hat_action_decision"
   // Strategy's composable-Skills diagnosis (ENIG Core Structure
   // v3.0; successor to LOG-845's specialist-Hat composition, whose Hats are
