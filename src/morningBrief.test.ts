@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { maybeSendMorningBrief, morningBriefDueDate, readMorningBriefSchedule } from "./morningBrief";
+import { maybeSendMorningBrief, morningBriefDueDate, readMorningBriefSchedule, spaceBriefLines } from "./morningBrief";
 import { ENIG_HAT_DEFINITION_PAGE_ID, getChatHistory } from "./chat";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import type { Env } from "./types";
@@ -156,4 +156,13 @@ test("send: disabled when the Workspace topic is not configured", async (t) => {
   const sent = mockFetch(t);
   await maybeSendMorningBrief(fakeEnv({ WORKSPACE_TOPIC_ID: undefined }), new Date("2026-11-09T10:05:00Z"));
   assert.strictEqual(sent.length, 0);
+});
+
+test("format: every line of the brief is separated by one blank line, words unchanged", () => {
+  const brief = "Waiting on you\n- Strategy Analyst — ENT-25 · MAT-26\n- Sales Executive — ENT-25 · MAT-26  \n\n\nNot moving\n- HO-93 · Sales → Strategy · Held\nNext steps\n1. Review MAT-26.";
+  assert.strictEqual(
+    spaceBriefLines(brief),
+    "Waiting on you\n\n- Strategy Analyst — ENT-25 · MAT-26\n\n- Sales Executive — ENT-25 · MAT-26\n\nNot moving\n\n- HO-93 · Sales → Strategy · Held\n\nNext steps\n\n1. Review MAT-26.",
+  );
+  assert.strictEqual(spaceBriefLines("Nothing needs you today."), "Nothing needs you today.");
 });
