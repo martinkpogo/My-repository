@@ -71,4 +71,3 @@ Name the next stage: `sales-fit-assessment`. Do not offer or mention a Handoff.
 ## Notes
 - Requests beyond evidence capture (follow-up drafts, "is this worth pursuing", scope, pricing): name the stage or Unit that owns it (§3).
 - Never paste the raw transcript or recording into Notion in any form (§7).
-- The legacy record `CN-a7f2d9c1-…` (Ref) is never migrated or edited here.

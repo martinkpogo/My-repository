@@ -5,7 +5,7 @@ Four files, built together and checked against each other (`sync_check.py`):
 | File | Goes where | Canonical source |
 |---|---|---|
 | `project-instruction.md` | The Claude Project's **instructions** (paste the whole text) | Notion: Isolated Sales: Operating Specification › Project Instruction |
-| `enig-static-reference.md` | The Claude Project's **files / knowledge**, with exactly this file name | Notion: Isolated Sales: Operating Specification › Static Reference (LOG-1165) |
+| `enig-static-reference.md` | The Claude Project's **files / knowledge**, with exactly this file name | Notion: Isolated Sales: Operating Specification › Static Reference (LOG-1171) |
 | `enig-sales.plugin` | Your Claude **plugins** (upload and enable) — version 3.3.0 | This repository, `plugins/enig-sales/` |
 | `sync_check.py` | Nowhere — a check you can re-run after any change | — |
 
@@ -21,7 +21,7 @@ Four files, built together and checked against each other (`sync_check.py`):
 8. **First check — no writes.** In a new chat in the Project, send:
    > TEST RUN — run the plugin check (`scripts/plugin_check.py` in any enig-sales skill folder) and report its result, then confirm the Static Reference's "Log reviewed through" line.
 
-   Expected: `enig-sales 3.3.0: ALL PASS` (including "all 8 skills mounted"), and "Log reviewed through LOG-1164 (2026-11-09)". Claude chat loads only the skill folders, so the plugin's top-level files (manifest, README, `selftest.py`) are not visible there; that is normal. LOG-1165 appearing in the Log after the baseline is expected: it is the Change that corrected the Static Reference itself, not a Decision, and it pauses nothing.
+   Expected: `enig-sales 3.3.0: ALL PASS` (including "all 8 skills mounted"), and "Log reviewed through LOG-1170 (2026-11-11)". Claude chat loads only the skill folders, so the plugin's top-level files (manifest, README, `selftest.py`) are not visible there; that is normal. LOG-1171 appearing in the Log after the baseline is expected: it is the Change that corrected the Static Reference itself, not a Decision, and it pauses nothing.
 9. **Then the #358 acceptance test**, with `docs/test-sales-call-transcript-acceptance.md` (steps B1–B4).
 
 ## Keeping them in sync later
