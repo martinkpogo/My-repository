@@ -28,8 +28,12 @@ import { deleteMessage, editMessageText, sendMessage } from "../telegram";
  *     Labels come from fixed maps (a governed source's name, a registered AI
  *     task's name, a registered Tool operation id) -- never a page title,
  *     record content, client text or model output.
- *   - Quiet: nothing is sent until a run has lasted QUIET_MS (2 seconds,
- *     Martin's choice). Quick runs show nothing.
+ *   - Always shown (Martin, 2026-11-11, replacing the earlier 2-second
+ *     quiet period): the message is sent at the run's first real step,
+ *     however short the run is. A run that reports no step sends nothing.
+ *     There is deliberately no start timer: inside a Worker the clock only
+ *     advances on I/O, so a timer-plus-clock check could see "not yet" and
+ *     never send (the bug that hid the first deployment).
  *   - Within budget: every send/edit/delete is a Worker subrequest sharing
  *     the run's budget with Notion and AI calls (HO-86, 2026-10-08). A run
  *     makes at most 1 send + MAX_EDITS edits + 1 final edit or delete, and
@@ -40,8 +44,7 @@ import { deleteMessage, editMessageText, sendMessage } from "../telegram";
  *     steps a detail line instead of opening a second message.
  */
 
-export const QUIET_MS = 2000;
-export const EDIT_INTERVAL_MS = 3000;
+export const EDIT_INTERVAL_MS = 1000;
 export const MAX_EDITS = 6;
 
 export type LiveStatusOutcome = "succeeded" | "waiting" | "failed";
@@ -66,7 +69,6 @@ export interface LiveStatusDetailSink {
 }
 
 class LiveStatusRun {
-  private readonly startedAt = Date.now();
   private steps: Step[] = [];
   private messageId: number | undefined;
   private sendAttempted = false;
@@ -74,7 +76,6 @@ class LiveStatusRun {
   private lastEditAt = 0;
   private dirty = false;
   private finished = false;
-  private quietTimer: ReturnType<typeof setTimeout> | undefined;
   private trailingTimer: ReturnType<typeof setTimeout> | undefined;
   private chain: Promise<void> = Promise.resolve();
 
@@ -83,9 +84,7 @@ class LiveStatusRun {
     private readonly target: LiveStatusTarget,
     private readonly sink: LiveStatusDetailSink | undefined,
     private readonly clock: { now: () => number } = { now: () => Date.now() },
-  ) {
-    this.quietTimer = setTimeout(() => this.schedule(() => this.flush()), QUIET_MS);
-  }
+  ) {}
 
   step(label: string): void {
     if (this.finished) return;
@@ -98,7 +97,7 @@ class LiveStatusRun {
       void this.schedule(() => this.sink!.refresh());
       return;
     }
-    if (this.clock.now() - this.startedAt >= QUIET_MS) void this.schedule(() => this.flush());
+    void this.schedule(() => this.flush());
   }
 
   private current(): string | undefined {
@@ -124,10 +123,11 @@ class LiveStatusRun {
     return escapeMarkdown(lines.join("\n"));
   }
 
-  private async flush(): Promise<void> {
+  /** `fromTimer`: the trailing timer itself proves the interval passed, so the (I/O-frozen) clock is not consulted again. */
+  private async flush(fromTimer = false): Promise<void> {
     if (this.finished || this.sink?.hatStatusOpen()) return;
     if (this.messageId === undefined) {
-      if (this.sendAttempted || this.clock.now() - this.startedAt < QUIET_MS) return;
+      if (this.sendAttempted) return;
       this.sendAttempted = true;
       this.dirty = false;
       this.lastEditAt = this.clock.now();
@@ -135,12 +135,12 @@ class LiveStatusRun {
       return;
     }
     if (!this.dirty || this.edits >= MAX_EDITS) return;
-    const wait = this.lastEditAt + EDIT_INTERVAL_MS - this.clock.now();
+    const wait = fromTimer ? 0 : this.lastEditAt + EDIT_INTERVAL_MS - this.clock.now();
     if (wait > 0) {
       if (!this.trailingTimer) {
         this.trailingTimer = setTimeout(() => {
           this.trailingTimer = undefined;
-          void this.schedule(() => this.flush());
+          void this.schedule(() => this.flush(true));
         }, wait);
       }
       return;
@@ -162,7 +162,6 @@ class LiveStatusRun {
   async finish(outcome: LiveStatusOutcome): Promise<void> {
     if (this.finished) return;
     this.finished = true;
-    if (this.quietTimer) clearTimeout(this.quietTimer);
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
     this.sink?.setDetail(undefined);
     await this.chain;

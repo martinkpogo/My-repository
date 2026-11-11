@@ -56,20 +56,42 @@ const flush = async () => {
 const target = { chatId: -100, threadId: 604, header: "Payments Clerk — MAT-32" };
 const texts = (calls: Call[], method: string) => calls.filter((c) => c.method === method).map((c) => String(c.body.text ?? ""));
 
-test("quiet: a run that finishes within 2 seconds sends nothing at all", async (t) => {
+test("always shown: even a run that takes no time shows its first step at once, then removes it on success", async (t) => {
   const calls = mockTelegram(t);
-  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const result = await withLiveStatus(fakeEnv(), target, async () => {
     reportLiveStep("Reading Payments");
-    t.mock.timers.tick(1500);
     await flush();
     return "answer";
   });
+  await flush();
   assert.strictEqual(result, "answer");
+  assert.match(texts(calls, "sendMessage")[0], /⏳ Reading Payments/);
+  assert.strictEqual(calls.at(-1)!.method, "deleteMessage");
+});
+
+test("a run that reports no step sends nothing", async (t) => {
+  const calls = mockTelegram(t);
+  await withLiveStatus(fakeEnv(), target, async () => "ok");
+  await flush();
   assert.strictEqual(calls.length, 0);
 });
 
-test("slow run: one message after 2 s, edited in place with the steps, deleted when it succeeds", async (t) => {
+test("edits: the trailing timer sends the latest state even when the clock has not advanced (Worker clocks only move on I/O)", async (t) => {
+  const calls = mockTelegram(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] }); // Date NOT advanced: the frozen-clock case
+  await withLiveStatus(fakeEnv(), target, async () => {
+    reportLiveStep("Reading Payments");
+    await flush();
+    reportLiveStep("Writing to Payments");
+    await flush();
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.match(texts(calls, "editMessageText").at(-1) ?? "", /⏳ Writing to Payments/);
+    return { stage: "awaiting_x" };
+  }, (s) => workLiveOutcome(s as any));
+});
+
+test("a run: one message, edited in place with the steps, deleted when it succeeds", async (t) => {
   const calls = mockTelegram(t);
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   await withLiveStatus(fakeEnv(), target, async () => {
@@ -78,7 +100,7 @@ test("slow run: one message after 2 s, edited in place with the steps, deleted w
     t.mock.timers.tick(2000);
     await flush();
     reportLiveStep("Writing to Payments");
-    t.mock.timers.tick(3000);
+    t.mock.timers.tick(1000);
     reportLiveStep("Writing to the Activity Log");
     await flush();
     return "ok";
