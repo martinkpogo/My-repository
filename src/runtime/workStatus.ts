@@ -1,5 +1,6 @@
 import type { Env, WorkState } from "../types";
 import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../telegram";
+import { yieldLiveStatusToHat, type LiveStatusDetailSink, type LiveStatusOutcome, type LiveStatusTarget } from "./liveStatus";
 
 /**
  * Live work status -- a Runtime Service any Unit's Hat uses to show Martin
@@ -27,6 +28,14 @@ export interface WorkStatus {
   current?: string;
   /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
   edits?: number;
+  /**
+   * What the universal live status (liveStatus.ts) last saw this run do --
+   * "Reading Payments ×2" -- shown under the running step. Fixed labels only;
+   * never persisted meaningfully (cleared when the live run ends).
+   */
+  detail?: string;
+  /** When the last intermediate edit was made (ms), for the live detail's throttle. */
+  lastEditAt?: number;
 }
 
 /**
@@ -61,13 +70,17 @@ export function renderWorkStatus(status: WorkStatus, ending?: { line: string; cu
   const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
   const lines = [`🧭 ${status.header}`, ...status.done.map((d) => `✓ ${step(d)}`)];
   if (status.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(status.current)}`);
+  if (!ending && status.detail) lines.push(`   · ${status.detail}`);
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
 
 /** Sends a fresh status message for a new run, with `firstStep` running. */
 export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: string, header: string, firstStep: string): Promise<void> {
-  holder.workStatus = { hat, header, done: [], current: firstStep, edits: 0 };
+  // One message per run: a universal live-status message already shown for
+  // this run gives way to the Hat's own named steps.
+  yieldLiveStatusToHat();
+  holder.workStatus = { hat, header, done: [], current: firstStep, edits: 0, lastEditAt: Date.now() };
   holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
@@ -77,8 +90,10 @@ export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step
   if (holder.workStatusMessageId === undefined || !status) return;
   if (status.current) status.done.push(status.current);
   status.current = step;
+  status.detail = undefined;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
   status.edits = (status.edits ?? 0) + 1;
+  status.lastEditAt = Date.now();
   await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, escapeTelegramMarkdown(renderWorkStatus(status)));
 }
 
@@ -113,4 +128,45 @@ export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line:
   holder.workStatusMessageId = undefined;
   if (messageId === undefined || !status) return;
   await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
+}
+
+/** Minimum gap between two detail-only edits of a Hat's status message. */
+const DETAIL_EDIT_INTERVAL_MS = 3000;
+
+/**
+ * Shows the live detail line on the Hat's open status message -- a
+ * detail-only edit, throttled and inside the same MAX_INTERMEDIATE_EDITS
+ * budget as the Hat's own steps, so the budget rule is unchanged.
+ */
+export async function refreshWorkStatus(env: Env, holder: WorkStatusHolder): Promise<void> {
+  const status = holder.workStatus;
+  if (holder.workStatusMessageId === undefined || !status) return;
+  if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
+  if (Date.now() - (status.lastEditAt ?? 0) < DETAIL_EDIT_INTERVAL_MS) return;
+  status.edits = (status.edits ?? 0) + 1;
+  status.lastEditAt = Date.now();
+  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, escapeTelegramMarkdown(renderWorkStatus(status)));
+}
+
+/** The universal live status's handle onto a Work's own named status (see liveStatus.ts). */
+export function workStatusLiveSink(env: Env, holder: WorkStatusHolder): LiveStatusDetailSink {
+  return {
+    hatStatusOpen: () => holder.workStatusMessageId !== undefined && holder.workStatus !== undefined,
+    setDetail: (detail) => {
+      if (holder.workStatus) holder.workStatus.detail = detail;
+    },
+    refresh: () => refreshWorkStatus(env, holder),
+  };
+}
+
+/** Where a Work's universal live status appears, and its identity-free header. */
+export function workLiveStatusTarget(state: Pick<WorkState, "chatId" | "threadId" | "hat" | "unit" | "actionName" | "matterToken" | "entityToken">): LiveStatusTarget {
+  const who = state.hat || state.unit || "Work";
+  return { chatId: state.chatId, threadId: state.threadId, header: workStatusHeader(who, state, state.actionName ? state.actionName.replace(/_/g, " ") : "work") };
+}
+
+/** A Work run that stops to ask Martin is "waiting" (its status stays); anything else that returns is "succeeded" (its status is deleted). */
+export function workLiveOutcome(state: Pick<WorkState, "stage" | "awaiting" | "pendingActionSummary">): LiveStatusOutcome {
+  if (state.pendingActionSummary || state.awaiting || /^awaiting/.test(String(state.stage ?? ""))) return "waiting";
+  return "succeeded";
 }

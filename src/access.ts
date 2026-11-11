@@ -211,6 +211,12 @@ export class AccessDeniedError extends Error {
   }
 }
 
+/** The governed source a concrete data source id is, in this Env -- or undefined when it is none of them. */
+export function governedSourceForDataSourceId(env: Env, dataSourceId: string): GovernedSource | undefined {
+  if (!dataSourceId) return undefined;
+  return allSources.find((source) => governedSourceDataSourceId(env, source) === dataSourceId);
+}
+
 /** Maps a symbolic GovernedSource to the concrete data source id in this Env. */
 export function governedSourceDataSourceId(env: Env, source: GovernedSource): string {
   switch (source) {
