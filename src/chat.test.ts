@@ -71,6 +71,13 @@ test("buildStructureFacts: says which Units can start governed work from chat, f
   assert.match(facts, /ENIG \(Chief of Staff\)/);
 });
 
+test("buildStructureFacts: says what each Hat owns, from its manifest, so ENIG can route work to the Hat that does it", () => {
+  const facts = buildStructureFacts();
+  assert.match(facts, /· Lead Generation Specialist does: Identify and prepare potential commercial leads through proactive research and discovery/);
+  assert.match(facts, /· Payments Clerk does: Record a client payment Martin reports as received/);
+  assert.match(facts, /· Value-Based Pricing Assessor does: /);
+});
+
 test("ENIG: fails closed with no AI call when its Notion definition is unreadable", async (t) => {
   mockNotionFetch(t, {});
   let aiCalled = false;

@@ -87,12 +87,21 @@ export function buildStructureFacts(): string {
     // so it is in neither ALL_HATS nor a manifest -- named here so the facts
     // match its definition without making it addressable or dispatchable.
     if (unit === "Operations") hats.push("ENIG (Chief of Staff) -- the voice Martin talks to when he addresses no Unit; it routes work and starts none itself");
-    const startable = findUnitManifest(unit) !== undefined;
+    const manifest = findUnitManifest(unit);
+    const startable = manifest !== undefined;
     const hatText = hats.length ? `Hats: ${hats.join("; ")}` : "no Hats in this runtime";
-    return `- ${unit}: ${hatText}. ${startable ? "Governed work CAN be started from chat." : "Governed work can NOT be started from chat."}`;
+    // What each Hat owns, from its manifest's own declared responsibility --
+    // so ENIG can name the Hat that actually does a piece of work (e.g. that
+    // online discovery of businesses is Lead Generation Specialist's, not
+    // Marketing's) instead of guessing from names. Computed, never typed.
+    const duties = ALL_HATS.filter((h) => h.unit === unit)
+      .map((h) => ({ name: h.name, duty: manifest?.hats[h.name]?.responsibility?.trim() }))
+      .filter((d): d is { name: string; duty: string } => !!d.duty)
+      .map((d) => `    · ${d.name} does: ${d.duty}`);
+    return [`- ${unit}: ${hatText}. ${startable ? "Governed work CAN be started from chat." : "Governed work can NOT be started from chat."}`, ...duties].join("\n");
   });
   return `=== AUTHORITATIVE FACTS -- READ THIS BEFORE ANSWERING ANY QUESTION ABOUT ROLES, HATS, JOB TITLES, OR TEAM STRUCTURE ===
-ENIG's real Units are exactly these seven, with exactly these Hats -- no others exist under any name:
+ENIG's real Units are exactly these seven, with exactly these Hats -- no others exist under any name. Under each Unit, "does:" says what that Hat owns; when Martin asks for work, name the Hat whose "does:" covers it, even if he named a different Unit:
 ${unitLines.join("\n")}
 A "Hat" is an AI-executed role inside this system, not a human employee or job opening.
 Sales Executive is paused here in this runtime by standing policy, but it is not inactive -- it is present and actively working as an isolated Sales Executive project in Claude, with its own Notion and Gmail access, where Martin reviews and approves every client-facing action directly. If asked whether Sales Executive is paused, active, or exists, say it is paused in this runtime specifically (due to the sensitive nature of its work) but implemented and live in that separate Claude project -- never say simply "paused" without that context. Lead Generation Specialist is not paused.
