@@ -13,6 +13,8 @@ import {
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import { sendMessage, sendOperationsMessage } from "./telegram";
+import { withLiveStatus } from "./runtime/liveStatus";
+import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./runtime/workStatus";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { migrateSavedWork } from "./workStateMigration";
@@ -623,7 +625,10 @@ export class WorkSession extends DurableObject<Env> {
       }),
     );
     try {
-      return await this.save(await fn(state));
+      // Universal live status (src/runtime/liveStatus.ts): every Work run
+      // reports what it is doing, from the shared chokepoints, with no
+      // per-Hat code. Where the Hat reports its own named steps, those lead.
+      return await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state));
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);

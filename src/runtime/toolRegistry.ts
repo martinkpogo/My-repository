@@ -59,6 +59,7 @@ import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
 import { googleDriveEnsureFolderToolOperation } from "./tools/googleDriveFolderTool";
 import { googleDriveReplyToolOperation } from "./tools/googleDriveReplyTool";
 import { getWorkPersistence, type ToolOperationPersistence } from "./workPersistence";
+import { reportLiveStep } from "./liveStatus";
 
 // ---------------------------------------------------------------------------
 // Contract types.
@@ -457,6 +458,8 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
     );
   }
   const base = { tool_id: operation.toolId, operation_id: operation.operationId };
+  // Universal live status: the registered Tool operation's ids only, never its input.
+  reportLiveStep(`Running ${operation.toolId}: ${operation.operationId}`);
 
   // 1. Input contract.
   const inputDefect = operation.validateInput(request.input);

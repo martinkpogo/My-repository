@@ -11,6 +11,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { businessSnapshot } from "./businessSnapshot";
 import { offerEnigSuggestion, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
 import type { InlineButton } from "./telegram";
+import { withLiveStatus } from "./runtime/liveStatus";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -234,6 +235,17 @@ export async function generalChatReply(
   threadId: number | undefined,
   userMessage: string,
 ): Promise<string> {
+  // Universal live status: a slow reply shows what it is reading and doing; the status is removed once the reply is ready.
+  return withLiveStatus(env, { chatId, threadId, header: `${unit} chat` }, () => generalChatReplyInner(env, unit, chatId, threadId, userMessage));
+}
+
+async function generalChatReplyInner(
+  env: Env,
+  unit: Unit,
+  chatId: number,
+  threadId: number | undefined,
+  userMessage: string,
+): Promise<string> {
   const snapshot = await recentActivitySnapshot(env, unit);
   const parts = {
     persona: buildStructureFacts(),
@@ -295,6 +307,17 @@ export interface EnigChatReply {
  * runChatTurn reports it.
  */
 export async function runEnigTurn(
+  env: Env,
+  chatId: number,
+  threadId: number | undefined,
+  situation: string,
+  extraInstruction?: string,
+): Promise<string | null> {
+  // Universal live status for every ENIG turn (conversation and morning brief); removed once the turn has its answer.
+  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction));
+}
+
+async function runEnigTurnInner(
   env: Env,
   chatId: number,
   threadId: number | undefined,

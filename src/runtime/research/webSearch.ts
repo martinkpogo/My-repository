@@ -2,6 +2,7 @@ import type { Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
+import { reportLiveStep } from "../liveStatus";
 import type { ResearchPlanDimension } from "./researchPlan";
 
 // ---------------------------------------------------------------------------
@@ -292,6 +293,8 @@ function normalizeTavilyResults(raw: TavilyResponse["results"], retrievedAt: str
 export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
   const invalidReason = validateSearchRequest(request, TAVILY_ADAPTER);
   if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
+  // Universal live status: never the query text.
+  reportLiveStep("Searching the web");
 
   if (!env.TAVILY_API_KEY) {
     return { kind: "provider_unavailable", reason: "no search provider is configured (TAVILY_API_KEY is unset)" };

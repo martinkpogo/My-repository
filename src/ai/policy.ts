@@ -1,6 +1,7 @@
 import type { Env } from "../types";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
-import { isSemanticTaskId } from "../dataBoundary/registry";
+import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
+import { reportLiveStep } from "../runtime/liveStatus";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
 import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
@@ -134,6 +135,8 @@ export class AiPolicyExecutor {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
+    // Universal live status: the registered task's fixed name, never the prompt.
+    reportLiveStep(`Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
 
     const eligible = this.providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
