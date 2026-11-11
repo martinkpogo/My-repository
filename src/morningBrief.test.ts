@@ -55,6 +55,8 @@ function fakeEnv(overrides: Partial<Env> = {}): Env {
   } as Env;
 }
 
+const liveStatusCalls: Array<{ method: string; body: any }> = [];
+
 /** Fakes Notion (empty data sources; any page read fails) and records every Telegram send. */
 function mockFetch(t: any): Array<{ chat_id: number; message_thread_id?: number; text: string }> {
   const sent: Array<{ chat_id: number; message_thread_id?: number; text: string }> = [];
@@ -62,7 +64,14 @@ function mockFetch(t: any): Array<{ chat_id: number; message_thread_id?: number;
   globalThis.fetch = (async (url: string, init?: any) => {
     const u = String(url);
     if (u.includes("api.telegram.org")) {
-      sent.push(JSON.parse(init.body));
+      const body = JSON.parse(init.body);
+      // The universal live status (src/runtime/liveStatus.ts) shows the run's
+      // steps and is removed on success -- recorded apart from the brief itself.
+      if (u.endsWith("/deleteMessage") || u.endsWith("/editMessageText") || String(body.text ?? "").startsWith("🧭")) {
+        liveStatusCalls.push({ method: u.split("/").pop()!, body });
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 900 } }), { status: 200 });
+      }
+      sent.push(body);
       return new Response(JSON.stringify({ ok: true, result: { message_id: sent.length } }), { status: 200 });
     }
     if (/\/data_sources\/[^/]+\/query/.test(u)) return new Response(JSON.stringify({ results: [] }), { status: 200 });
@@ -113,6 +122,8 @@ test("send: posts ENIG's brief to the Workspace topic once per day, and records 
   await maybeSendMorningBrief(env, new Date("2026-11-09T10:35:00Z"));
 
   assert.strictEqual(sent.length, 1, "a second tick the same day sends nothing");
+  assert.ok(liveStatusCalls.some((c) => c.method === "sendMessage" && /🧭 ENIG/.test(c.body.text)), "the brief's run shows its live status");
+  assert.strictEqual(liveStatusCalls.at(-1)?.method, "deleteMessage", "and removes it once the brief is sent");
   assert.strictEqual(sent[0].chat_id, -100);
   assert.strictEqual(sent[0].message_thread_id, 604);
   assert.match(sent[0].text, /^☀️ Morning brief — 2026-11-09\n\nWaiting on you: nothing\./);
