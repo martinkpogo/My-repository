@@ -310,6 +310,11 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // Workspace text plus static Hat summaries, the same payload category as
   // sales.intake_classification. Classification approved by Martin 2026-11-11.
   "finance.intake_classification": "business_sensitive",
+  // Universal web research check (Martin, 2026-11-11). This is only the
+  // floor: each call stamps every segment with the calling step's own
+  // sensitivity, so a client_confidential chat reply's check is held to
+  // client_confidential.
+  "runtime.research_need": "business_sensitive",
   "sales.hat_action_decision": "business_sensitive",
 };
 
@@ -596,6 +601,7 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   // business_sensitive classification in PRODUCTION_TASK_SENSITIVITY.
   "sales.intake_classification": "TOKEN_SAFE_RUNTIME",
   "finance.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "runtime.research_need": "TOKEN_SAFE_RUNTIME",
   "sales.hat_action_decision": "TOKEN_SAFE_RUNTIME",
   "research.context_relevance": "TOKEN_SAFE_RUNTIME",
   "research.protocol_selection": "TOKEN_SAFE_RUNTIME",

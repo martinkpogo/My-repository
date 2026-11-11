@@ -11,6 +11,8 @@ export interface AiJsonOptions {
   user: string;
   light?: boolean;
   maxTokens?: number;
+  /** When given, stamped onto every segment -- overriding the task's default level, as aiChat's own `sensitivity` does. */
+  sensitivity?: SensitivityLevel;
 }
 
 export interface AiTextOptions {
@@ -39,8 +41,8 @@ export interface ChatTurn {
 function buildJsonTask(opts: AiJsonOptions): AiTask {
   const systemContent = `${opts.system}\n\nRespond with a single valid JSON object only. No prose, no markdown fences, no commentary before or after the JSON.`;
   const segments: ContextSegment[] = [
-    { type: "system", content: systemContent, provenance: `${opts.taskId}:system` },
-    { type: "user", content: opts.user, provenance: `${opts.taskId}:user` },
+    { type: "system", content: systemContent, provenance: `${opts.taskId}:system`, ...(opts.sensitivity ? { sensitivity: opts.sensitivity } : {}) },
+    { type: "user", content: opts.user, provenance: `${opts.taskId}:user`, ...(opts.sensitivity ? { sensitivity: opts.sensitivity } : {}) },
   ];
 
   const task: AiTask = {

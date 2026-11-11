@@ -5,7 +5,10 @@ import { executeProspectResearch, executeResearch } from "./research/executor";
 import type { ResearchExecutionInput, ResearchOutcome, ResearchSynthesis } from "./research/types";
 
 /**
- * Research as a Skill any Hat may use (Martin's decision, 2026-10-12).
+ * Research as a Skill any Hat may use (Martin's decision, 2026-10-12). Since
+ * 2026-11-11 web research is also a Runtime tool any Hat's output step gets
+ * without declaring anything (src/runtime/webResearch.ts); these Skill-gated
+ * entry points remain for Actions that run research as their own step.
  *
  * The research runtime is infrastructure; what makes an Action ABLE to use it
  * is declaring the `research_signal` Skill. These two entry points are the

@@ -3,6 +3,7 @@ import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
 import { reportLiveStep } from "../liveStatus";
+import { takeWebLookup } from "../webLookupAllowance";
 import type { ResearchPlanDimension } from "./researchPlan";
 
 // ---------------------------------------------------------------------------
@@ -301,6 +302,16 @@ export async function executeSearch(env: Env, request: SearchRequest, access: Ac
   }
 
   evaluateAccess(env, { operation: "read", dataSourceId: EXTERNAL_EGRESS_TARGET }, access);
+
+  // Universal web research ceilings (src/runtime/webLookupAllowance.ts): a
+  // search past the run's or the day's ceiling is not made, and says why.
+  const allowance = await takeWebLookup(env);
+  if (!allowance.ok) {
+    return {
+      kind: "provider_unavailable",
+      reason: allowance.reason === "run_limit" ? "the web search limit for this job was reached" : "the daily web search limit was reached",
+    };
+  }
 
   const maxResults = request.max_results ?? MAX_RESULTS_PER_QUERY;
   const retrievedAt = new Date().toISOString();
