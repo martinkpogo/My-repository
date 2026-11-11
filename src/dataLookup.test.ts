@@ -234,3 +234,19 @@ test("runConversationalDataLookup: history is scoped per source -- a Leads follo
 
   assert.deepStrictEqual(capturedHistories[1], [], "a different source must start with no history of its own");
 });
+
+test("classifyDataLookupRequest: the classifier is told a request for NEW work is never a lookup (2026-11-11: 'can marketing go online...' was answered from the empty Leads table)", async () => {
+  let prompt = "";
+  const env = fakeEnv({
+    AI: {
+      run: async (_model: string, input: any) => {
+        prompt = JSON.stringify(input);
+        return { response: JSON.stringify({ is_lookup: false }) };
+      },
+    } as any,
+  });
+  const result = await classifyDataLookupRequest(env, "can marketing go online and tell me what businesses might need to learn from me?");
+  assert.strictEqual(result, null);
+  assert.match(prompt, /A request for NEW work is never a lookup/);
+  assert.match(prompt, /Can marketing go online and tell me what businesses might need to learn from me\?.*is_lookup.*false/);
+});

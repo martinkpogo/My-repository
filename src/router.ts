@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { withLiveStatus } from "./runtime/liveStatus";
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { enigChatReply, generalChatReply } from "./chat";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
@@ -143,8 +144,11 @@ export async function routeIncomingText(
   // failure.
   let lookupReply: string | undefined;
   try {
-    const lookup = await classifyDataLookupRequest(env, text);
-    if (lookup) lookupReply = await runConversationalDataLookup(env, chatId, threadId, lookup.source, lookup.filter, text);
+    // Universal live status covers this check too: it is ENIG's first step on every message.
+    lookupReply = await withLiveStatus(env, { chatId, threadId, header: "ENIG" }, async () => {
+      const lookup = await classifyDataLookupRequest(env, text);
+      return lookup ? runConversationalDataLookup(env, chatId, threadId, lookup.source, lookup.filter, text) : undefined;
+    });
   } catch (err) {
     console.error("Data lookup check failed -- falling through to ordinary Workspace routing", err);
   }
