@@ -4,14 +4,17 @@ import type { ActionDefinition } from "../../hats/actionRegistry";
 import type { HatManifest, UnitManifest, ApprovalCallbackHandler } from "../unitManifest";
 import * as finance from "./valueBasedPricingAssessor";
 import { migrateLegacyFinanceState } from "./financeState";
+import * as paymentsClerk from "./paymentsClerk";
+import { PAYMENT_CALLBACK_PREFIX, PAYMENTS_CLERK_HAT_NAME } from "./paymentsClerkNames";
 
 /**
  * Finance's Unit Registry manifest (ENIG Operating Model design doc,
  * "The Unit Registry") -- deliberately partial by design, mirroring
- * strategyManifest.ts exactly. Finance has exactly
- * one Hat (Value-Based Pricing Assessor -- see hats/registry.ts's
- * VALUE_BASED_PRICING_ASSESSOR), so there is no Stage 1 Hat-ambiguity to
- * preserve. There is also no "which action" decision Martin's message
+ * strategyManifest.ts exactly. Finance had exactly
+ * one Hat (Value-Based Pricing Assessor) until 2026-11-11, when Payments
+ * Clerk was added (see below); a bare "Finance, ..." message now takes
+ * Stage 1 (finance.intake_classification), and a Handoff pickup still
+ * resolves by its To Hat. There is also no "which action" decision Martin's message
  * selects between -- handleDirectRequest is the only chat-triggered
  * entry, every time. So this manifest declares exactly one action, price
  * ("write", requiresApproval: true), whose entryHandler calls
@@ -32,13 +35,16 @@ import { migrateLegacyFinanceState } from "./financeState";
  * approval-callback dispatch mechanism (PRs #203-211), the first prefix
  * migrated for Finance now that a manifest exists to attach it to.
  *
- * intakeClassificationTaskId/actionClassificationTaskId reuse
- * finance.quote_judgment purely as a type-satisfying placeholder --
- * required by UnitManifest's shape, but never actually invoked through
- * this manifest: dispatchCowork's Finance branch (unchanged) never calls
- * resolveUnitRequest for Finance at all, and even if it did, resolveHat's
- * single-Hat shortcut skips Stage 1 entirely. No new SemanticTaskId
- * registration or Architect review needed.
+ * intakeClassificationTaskId is finance.intake_classification (registered
+ * 2026-11-11, Martin-approved, same classification as
+ * sales.intake_classification): Stage 1 picks which Hat a bare
+ * "Finance, ..." message is for. actionClassificationTaskId still reuses
+ * finance.quote_judgment. Cowork never calls it (each Finance Hat's one
+ * Action resolves structurally), but Chat's Stage 2 action check
+ * (tryResolveUnitAction) does call it -- for both Hats since 2026-11-11.
+ * That pre-existing reuse is recorded in docs/enig-operating-model.md
+ * "Known gaps and drift"; a dedicated Finance Stage 2 task is the
+ * Architect's call.
  */
 type FinanceAction = "price";
 
@@ -141,13 +147,66 @@ const valueBasedPricingAssessorHat: HatManifest<FinanceAction> = {
   callbackHandlers: valueBasedPricingAssessorCallbackHandlers,
 };
 
+/**
+ * Payments Clerk (2026-11-11, Martin-approved): Finance's second Hat. Its one
+ * Action, record_payment, sets a Due Payment row to Paid only after Martin
+ * approves the exact change on a card (paymentsClerk.ts). The Payment
+ * contract names this Action as the only Runtime path that may change a
+ * Payment. One Action per Hat keeps each Hat's Action resolution structural;
+ * only WHICH Hat a bare "Finance, ..." message is for needs Stage 1
+ * (finance.intake_classification). Addressing a Hat by name skips it.
+ */
+type PaymentsClerkAction = "record_payment";
+
+const paymentsClerkActions: ActionDefinition<PaymentsClerkAction>[] = [
+  {
+    name: "record_payment",
+    responsibility: "payment_recording",
+    consequence: "write",
+    // The Payment update is this Action's only governed effect, and it is
+    // Martin's to approve: the card shows the exact change, and Access
+    // refuses the update without the ApprovalProof his tap mints.
+    requiresApproval: true,
+    applicability: {
+      mode: "any",
+      conditions: [{ source: "work", field: "origin", operator: "equals", value: "direct_request" }],
+    },
+    description:
+      "Record a client payment Martin reports as received: find the one Due Payment row for the Matter and type, show the exact change, and set it to Paid only on Martin's approval. Never creates a Payment row or changes its Amount.",
+  },
+];
+
+async function paymentsClerkEntryHandler(env: Env, state: WorkState, _actionName: PaymentsClerkAction, text: string): Promise<WorkState> {
+  return paymentsClerk.handleRecordPaymentRequest(env, state, text);
+}
+
+async function paymentsClerkReadHandler(_env: Env, actionName: PaymentsClerkAction, _text: string): Promise<string> {
+  throw new Error(`${actionName}: not a read action -- Payments Clerk only declares "record_payment" ("write").`);
+}
+
+const paymentsClerkHat: HatManifest<PaymentsClerkAction> = {
+  name: PAYMENTS_CLERK_HAT_NAME,
+  specialization: "Payment Recording",
+  responsibility:
+    "Record a client payment Martin reports as received (deposit or balance) by setting the matching Due Payment row to Paid, only after Martin approves the exact change. Never prices, never creates a Payment row, never changes an Amount.",
+  actions: paymentsClerkActions,
+  responsibilityId: "payment_recording",
+  readHandler: paymentsClerkReadHandler,
+  entryHandler: paymentsClerkEntryHandler,
+  awaitingHandlers: {},
+  // Resolved at call time: paymentsClerk.ts may still be loading when this object is built.
+  callbackHandlers: { [PAYMENT_CALLBACK_PREFIX]: (env, state, approved) => paymentsClerk.handlePaymentApproval(env, state, approved) },
+};
+
 export const financeManifest: UnitManifest = {
   unit: "Finance",
   hats: {
     [valueBasedPricingAssessorHat.name]: valueBasedPricingAssessorHat,
+    [paymentsClerkHat.name]: paymentsClerkHat,
   },
-  intakeClassificationTaskId: "finance.quote_judgment",
-  intakeIntroLine: "You route incoming Finance requests for ENIG, to its Value-Based Pricing Assessor Hat.",
+  intakeClassificationTaskId: "finance.intake_classification",
+  intakeIntroLine:
+    "You route incoming Finance requests for ENIG to one of its two Hats: Value-Based Pricing Assessor (pricing an intervention or quote) or Payments Clerk (recording that a client payment was received).",
   actionClassificationTaskId: "finance.quote_judgment",
   // Handoff-originated Work is taken in through handlePickup -- a separate
   // declaration, NOT the entryHandler (see this file's doc comment).
