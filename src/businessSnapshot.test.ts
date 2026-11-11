@@ -67,6 +67,7 @@ test("businessSnapshot: reports counts, tokens and statuses from the live record
       page({ Matter_ID: uid("MAT", 12), Matter: title("Delivery complaints"), Status: select("Qualified") }),
       page({ Matter_ID: uid("MAT", 11), Matter: title("Positioning refresh"), Status: select("Open") }),
       page({ Matter_ID: uid("MAT", 10), Matter: title("Brand audit"), Status: select("Open") }),
+      page({ Matter_ID: uid("MAT", 9), Matter: title("Test"), Status: select("Closed") }),
     ],
     "proposals-ds": [page({ "Proposal ID": uid("PRP", 3), "Matter Token": rich("MAT-12"), "Approval Status": select("Pending Approval"), Status: select("Draft") })],
     "handoffs-ds": [
@@ -88,8 +89,9 @@ test("businessSnapshot: reports counts, tokens and statuses from the live record
 
   assert.match(text, /Marketing\/Content Manager — pending approval \(Awaiting approval\)/);
   assert.doesNotMatch(text, /w2|MAT-9/, "Work with no pending approval is not listed as waiting on Martin");
-  assert.match(text, /Matters: Qualified: 1, Open: 2 \(3 total\)/);
-  assert.match(text, /latest: MAT-12 \[Qualified\], MAT-11 \[Open\], MAT-10 \[Open\]/);
+  assert.match(text, /Matters: Qualified: 1, Open: 2, Closed: 1 \(4 total\)/);
+  assert.match(text, /latest not closed: MAT-12 \[Qualified\], MAT-11 \[Open\], MAT-10 \[Open\]\n/);
+  assert.doesNotMatch(text, /MAT-9/, "a Closed Matter is counted but not listed");
   assert.match(text, /PRP-3 for MAT-12 \[Pending Approval · Draft\]/);
   assert.match(text, /HND-4 Sales → Strategy \[Pending\]/);
   assert.doesNotMatch(text, /HND-3/, "closed Handoffs are not listed as open");

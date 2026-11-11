@@ -159,9 +159,12 @@ export async function loadBusinessSnapshot(env: Env, now: Date = new Date()): Pr
       statusSection(
         await query(env, env.MATTERS_DATA_SOURCE_ID),
         (p) => plainText(p.properties.Status),
+        // A Closed Matter needs nothing from anyone: it still counts, but is
+        // not listed, so neither chat nor the morning brief raises it.
         (p) => {
           const token = uniqueId(p.properties.Matter_ID);
-          return token ? `${token} [${plainText(p.properties.Status) || "?"}]` : null;
+          const status = plainText(p.properties.Status);
+          return token && status !== "Closed" ? `${token} [${status || "?"}]` : null;
         },
       ),
     ),
@@ -220,7 +223,7 @@ export function formatBusinessSnapshot(data: BusinessSnapshotData): string {
       lines.push(`  - ${s.unit ?? "?"}/${s.hat ?? "?"} — ${s.label} (${humanizeStage(s.stage)})`);
 
   lines.push(`Matters: ${data.matters.ok ? formatCounts(data.matters.value, "matters") : UNREADABLE}`);
-  if (data.matters.ok && data.matters.value.latest.length) lines.push(`  latest: ${data.matters.value.latest.join(", ")}`);
+  if (data.matters.ok && data.matters.value.latest.length) lines.push(`  latest not closed: ${data.matters.value.latest.join(", ")}`);
 
   lines.push(`Proposals: ${data.proposals.ok ? formatCounts(data.proposals.value, "proposals") : UNREADABLE}`);
   if (data.proposals.ok && data.proposals.value.latest.length) lines.push(`  latest: ${data.proposals.value.latest.join(", ")}`);
