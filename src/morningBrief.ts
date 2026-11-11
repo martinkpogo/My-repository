@@ -68,6 +68,19 @@ export function morningBriefDueDate(now: Date, schedule: MorningBriefSchedule): 
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+/**
+ * Telegram renders no tables, and ENIG's lines arrive packed together; on a
+ * phone that reads as one block. Every non-empty line is separated by one
+ * blank line. Presentation only: no word of ENIG's brief is changed.
+ */
+export function spaceBriefLines(brief: string): string {
+  return brief
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== "")
+    .join("\n\n");
+}
+
 const BRIEF_SITUATION =
   "Scheduled morning brief (situation: morning_brief). Martin has not written; this is ENIG's own unprompted daily brief. Produce the morning_brief exactly as your Hat Definition specifies.";
 
@@ -101,5 +114,5 @@ export async function maybeSendMorningBrief(env: Env, now: Date = new Date()): P
     );
     return;
   }
-  await sendMessage(env, chatId, `☀️ Morning brief — ${dueDate}\n\n${brief}`, undefined, threadId);
+  await sendMessage(env, chatId, `☀️ Morning brief — ${dueDate}\n\n${spaceBriefLines(brief)}`, undefined, threadId);
 }
