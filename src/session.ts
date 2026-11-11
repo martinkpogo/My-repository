@@ -628,7 +628,11 @@ export class WorkSession extends DurableObject<Env> {
       // Universal live status (src/runtime/liveStatus.ts): every Work run
       // reports what it is doing, from the shared chokepoints, with no
       // per-Hat code. Where the Hat reports its own named steps, those lead.
-      return await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state));
+      // The run also carries this Work's own Access context, which the
+      // universal web research tool (src/runtime/webResearch.ts) uses.
+      return await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
+        access: workSessionContext(state),
+      });
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);

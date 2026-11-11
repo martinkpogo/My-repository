@@ -135,6 +135,14 @@ export class AiPolicyExecutor {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
+    if (taskAugmenter) {
+      try {
+        task = await taskAugmenter(env, task);
+      } catch (err) {
+        // Web research is evidence for the step, never a condition of it.
+        console.error("AiPolicyExecutor: task augmenter failed -- continuing without it", err);
+      }
+    }
     // Universal live status: the registered task's fixed name, never the prompt.
     reportLiveStep(`Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
 
@@ -300,3 +308,17 @@ export class AiPolicyExecutor {
 }
 
 export const defaultPolicyExecutor = new AiPolicyExecutor();
+
+/**
+ * One hook every AI call passes through before any provider is tried: the
+ * universal web research tool (src/runtime/webResearch.ts, Martin
+ * 2026-11-11) installs it to give a Hat's output step public web findings
+ * when it needs them. Installed by that module, so this layer stays free of
+ * runtime imports. The augmented task still goes through every boundary,
+ * gate and validation below.
+ */
+type TaskAugmenter = (env: Env, task: AiTask) => Promise<AiTask>;
+let taskAugmenter: TaskAugmenter | undefined;
+export function setTaskAugmenter(fn: TaskAugmenter | undefined): void {
+  taskAugmenter = fn;
+}

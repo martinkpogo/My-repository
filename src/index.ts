@@ -37,6 +37,9 @@ import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { maybeSendMorningBrief } from "./morningBrief";
 import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
+// Installs universal web research on the shared AI executor (Martin, 2026-11-11).
+import { handleWebResearchCallback } from "./runtime/webResearch";
+import { WEB_RESEARCH_CALLBACK } from "./runtime/webLookupAllowance";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 import { isAdminAuthorized } from "./adminAuth";
@@ -769,6 +772,14 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await setWorkspaceMode(env, chatId, threadId, newMode);
       await setCoworkClarificationPending(env, chatId, threadId, false);
       await sendMessage(env, chatId, `Workspace mode switched to *${newMode}*.`, undefined, threadId);
+      return;
+    }
+
+    if (action === WEB_RESEARCH_CALLBACK) {
+      // Martin's tap on the web-research limit card (src/runtime/webLookupAllowance.ts):
+      // research the gaps only, allow more searches today, or stop. Read-only.
+      const reply = await handleWebResearchCallback(env, workId, value, chatId, threadId);
+      await sendMessage(env, chatId, reply, undefined, threadId);
       return;
     }
 

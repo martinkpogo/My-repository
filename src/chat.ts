@@ -245,7 +245,7 @@ export async function generalChatReply(
   userMessage: string,
 ): Promise<string> {
   // Universal live status: a slow reply shows what it is reading and doing; the status is removed once the reply is ready.
-  return withLiveStatus(env, { chatId, threadId, header: `${unit} chat` }, () => generalChatReplyInner(env, unit, chatId, threadId, userMessage));
+  return withLiveStatus(env, { chatId, threadId, header: `${unit} chat` }, () => generalChatReplyInner(env, unit, chatId, threadId, userMessage), undefined, undefined, { access: systemContext() });
 }
 
 async function generalChatReplyInner(
@@ -323,7 +323,7 @@ export async function runEnigTurn(
   extraInstruction?: string,
 ): Promise<string | null> {
   // Universal live status for every ENIG turn (conversation and morning brief); removed once the turn has its answer.
-  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction));
+  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction), undefined, undefined, { access: systemContext() });
 }
 
 async function runEnigTurnInner(

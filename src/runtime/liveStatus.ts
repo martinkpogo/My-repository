@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Env } from "../types";
+import type { AccessContext } from "../access";
 import { deleteMessage, editMessageText, sendMessage } from "../telegram";
 
 /**
@@ -68,7 +69,21 @@ export interface LiveStatusDetailSink {
   refresh(): Promise<void>;
 }
 
+/**
+ * What else a run carries for the Runtime services that work per run (the
+ * universal web research tool, src/runtime/webResearch.ts): the run's own
+ * Access context, its web-lookup count and ceiling, and hooks run once the
+ * run's status has ended. One run context, so a run is opened in one place.
+ */
+export interface RunExtras {
+  access?: AccessContext;
+}
+
 class LiveStatusRun {
+  readonly access: AccessContext | undefined;
+  searches = 0;
+  searchLimit = 0;
+  readonly endHooks: Array<() => Promise<void>> = [];
   private steps: Step[] = [];
   private messageId: number | undefined;
   private sendAttempted = false;
@@ -81,10 +96,13 @@ class LiveStatusRun {
 
   constructor(
     private readonly env: Env,
-    private readonly target: LiveStatusTarget,
+    readonly target: LiveStatusTarget,
     private readonly sink: LiveStatusDetailSink | undefined,
+    extras: RunExtras = {},
     private readonly clock: { now: () => number } = { now: () => Date.now() },
-  ) {}
+  ) {
+    this.access = extras.access;
+  }
 
   step(label: string): void {
     if (this.finished) return;
@@ -174,6 +192,17 @@ class LiveStatusRun {
     const ending = outcome === "waiting" ? { line: "⏸ Waiting for your reply or approval.", failed: false } : { line: `⛔ Stopped${this.current() ? ` at: ${this.current()}` : ""}.`, failed: true };
     await this.schedule(() => editMessageText(this.env, this.target.chatId, id, this.text(ending)));
   }
+
+  /** Runs the end hooks once, after the status has ended; a hook's failure is logged and never reaches the run. */
+  async runEndHooks(): Promise<void> {
+    for (const hook of this.endHooks.splice(0)) {
+      try {
+        await hook();
+      } catch (err) {
+        console.error("run end hook failed (the run's result is unaffected)", err);
+      }
+    }
+  }
 }
 
 function render(s: Step): string {
@@ -197,20 +226,28 @@ export async function withLiveStatus<T>(
   fn: () => Promise<T>,
   outcomeOf: (result: T) => LiveStatusOutcome = () => "succeeded",
   sink?: LiveStatusDetailSink,
+  extras?: RunExtras,
 ): Promise<T> {
   if (RUNS.getStore()) return fn();
-  const run = new LiveStatusRun(env, target, sink);
+  const run = new LiveStatusRun(env, target, sink, extras);
   return RUNS.run(run, async () => {
     let result: T;
     try {
       result = await fn();
     } catch (err) {
       await run.finish("failed");
+      await run.runEndHooks();
       throw err;
     }
     await run.finish(outcomeOf(result));
+    await run.runEndHooks();
     return result;
   });
+}
+
+/** The open run's Access context, target and lookup counters, for per-run Runtime services; undefined outside a run. */
+export function currentRun(): Pick<LiveStatusRun, "access" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
+  return RUNS.getStore();
 }
 
 /** Reports a step into the open run, if any. Safe to call from anywhere; a no-op outside a run. Labels must come from fixed maps, never content. */

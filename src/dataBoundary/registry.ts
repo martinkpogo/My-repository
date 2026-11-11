@@ -302,6 +302,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Sales Intake Classification",
     description: "Routes an incoming Sales-Unit Cowork request among Sales's manifest-based Hats (currently only Lead Generation Specialist).",
   },
+  "runtime.research_need": {
+    id: "runtime.research_need",
+    name: "Web Research Check",
+    description: "Before a Hat produces its output, decides whether public web research would materially help and, if so, the identity-free question to research.",
+  },
   "finance.intake_classification": {
     id: "finance.intake_classification",
     name: "Finance Intake Classification",

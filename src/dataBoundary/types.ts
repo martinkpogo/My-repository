@@ -137,6 +137,12 @@ export type SemanticTaskId =
   // category as sales.intake_classification; Martin approved the same
   // classification (business_sensitive, TOKEN_SAFE_RUNTIME) on 2026-11-11.
   | "finance.intake_classification"
+  // Universal web research (Martin, 2026-11-11): the light check before a
+  // Hat's output on whether the web is needed, and the question to research.
+  // Its payload is the calling step's own prompt, so every segment carries
+  // the CALLING step's sensitivity (src/runtime/webResearch.ts) -- it can
+  // never reach a provider the calling step could not.
+  | "runtime.research_need"
   | "sales.hat_action_decision"
   // Strategy's composable-Skills diagnosis (ENIG Core Structure
   // v3.0; successor to LOG-845's specialist-Hat composition, whose Hats are
