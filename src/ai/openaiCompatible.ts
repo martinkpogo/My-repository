@@ -184,12 +184,18 @@ export const GROQ_PROVIDER = new OpenAiCompatibleProvider({
   lightModel: "openai/gpt-oss-20b",
 });
 
+// Martin's choice 2026-11-13: the previous free models went stale (the
+// main one became paid-only, the light one was removed). Both chosen from
+// OpenRouter's live /models list as free and supporting JSON replies.
+export const OPENROUTER_MODEL = "google/gemma-4-31b-it:free";
+export const OPENROUTER_LIGHT_MODEL = "google/gemma-4-26b-a4b-it:free";
+
 export const OPENROUTER_PROVIDER = new OpenAiCompatibleProvider({
   id: "openrouter",
   baseUrl: "https://openrouter.ai/api/v1",
   apiKeyEnvVar: "OPENROUTER_API_KEY",
-  model: "nvidia/nemotron-3-super-120b-a12b:free",
-  lightModel: "liquid/lfm-2.5-2.6b:free",
+  model: OPENROUTER_MODEL,
+  lightModel: OPENROUTER_LIGHT_MODEL,
 });
 
 export const CEREBRAS_PROVIDER = new OpenAiCompatibleProvider({
