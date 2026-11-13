@@ -135,12 +135,12 @@ export class AiPolicyExecutor {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
-    if (taskAugmenter) {
+    for (const [id, { fn }] of [...taskAugmenters.entries()].sort((a, b) => a[1].order - b[1].order)) {
       try {
-        task = await taskAugmenter(env, task);
+        task = await fn(env, task);
       } catch (err) {
-        // Web research is evidence for the step, never a condition of it.
-        console.error("AiPolicyExecutor: task augmenter failed -- continuing without it", err);
+        // Context and research are aids to the step, never conditions of it.
+        console.error(`AiPolicyExecutor: task augmenter "${id}" failed -- continuing without it`, err);
       }
     }
     // Universal live status: the registered task's fixed name, never the prompt.
@@ -310,15 +310,17 @@ export class AiPolicyExecutor {
 export const defaultPolicyExecutor = new AiPolicyExecutor();
 
 /**
- * One hook every AI call passes through before any provider is tried: the
- * universal web research tool (src/runtime/webResearch.ts, Martin
- * 2026-11-11) installs it to give a Hat's output step public web findings
- * when it needs them. Installed by that module, so this layer stays free of
+ * The Runtime services every AI call passes through before any provider is
+ * tried, in ascending `order`: the shared Consultancy Profile context
+ * (src/runtime/businessContext.ts, order 10, Martin 2026-11-13) and the
+ * universal web research tool (src/runtime/webResearch.ts, order 20, Martin
+ * 2026-11-11). Each module installs itself, so this layer stays free of
  * runtime imports. The augmented task still goes through every boundary,
- * gate and validation below.
+ * gate and validation below; a failing augmenter is skipped, never fatal.
  */
 type TaskAugmenter = (env: Env, task: AiTask) => Promise<AiTask>;
-let taskAugmenter: TaskAugmenter | undefined;
-export function setTaskAugmenter(fn: TaskAugmenter | undefined): void {
-  taskAugmenter = fn;
+const taskAugmenters = new Map<string, { order: number; fn: TaskAugmenter }>();
+export function setTaskAugmenter(id: string, order: number, fn: TaskAugmenter | undefined): void {
+  if (fn) taskAugmenters.set(id, { order, fn });
+  else taskAugmenters.delete(id);
 }

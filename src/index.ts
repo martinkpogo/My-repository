@@ -40,6 +40,8 @@ import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
 import { claimTelegramUpdate } from "./telegramDedup";
 // Installs universal web research on the shared AI executor (Martin, 2026-11-11).
 import { handleWebResearchCallback } from "./runtime/webResearch";
+// Installs the shared Consultancy Profile context for every Hat step (Martin, 2026-11-13).
+import "./runtime/businessContext";
 import { WEB_RESEARCH_CALLBACK } from "./runtime/webLookupAllowance";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
