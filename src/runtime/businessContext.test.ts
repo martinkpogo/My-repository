@@ -39,7 +39,19 @@ test("a Hat step gets the canonical Profile as labelled context, held to the ste
   assert.match(out.messages[0].content, /=== ENIG CONSULTANCY PROFILE \(canonical, read live from Notion\) ===\n[^\n]*not evidence about any client[\s\S]*positioning, perception and communication[\s\S]*=== END ENIG CONSULTANCY PROFILE ===/);
   const seg = out.boundaryContext.segments.at(-1)!;
   assert.strictEqual(seg.provenance, "runtime:consultancy_profile");
-  assert.strictEqual(seg.sensitivity, undefined, "no lower stamp of its own");
+  assert.strictEqual(seg.sensitivity, "business_sensitive", "the step's own effective level (marketing.hat_action_decision's task level)");
+});
+
+test("a step whose segments are stamped lower than its task default (ENIG's chat) gets the Profile at that same stamped level -- never the stricter default that would lock every provider out", async () => {
+  const enig = {
+    taskId: "chat.general_reply",
+    type: "text",
+    boundaryContext: { segments: [{ type: "system", content: "s", provenance: "s", sensitivity: "business_sensitive" }, { type: "user", content: "u", provenance: "u", sensitivity: "business_sensitive" }] },
+    messages: [{ role: "system", content: "s" }, { role: "user", content: "u" }],
+  } as AiTask;
+  const out = await augmentTaskWithBusinessContext(env("ENIG profile"), enig);
+  assert.strictEqual(out.boundaryContext.segments.at(-1)!.sensitivity, "business_sensitive");
+  assert.ok(out.boundaryContext.segments.every((s) => s.sensitivity === "business_sensitive"), "no segment above the step's own level");
 });
 
 test("a step outside the set is untouched", async () => {
