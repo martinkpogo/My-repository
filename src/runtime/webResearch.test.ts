@@ -178,3 +178,19 @@ test("one check and at most one research run per run: later Hat steps in the sam
   assert.strictEqual(researched, 1);
   for (const o of outs) assert.match(o.messages[0].content, /=== WEB RESEARCH/);
 });
+
+test("a Work's Access context is taken at the moment of use, so a Hat resolved during the run is the one searches run under", async (t) => {
+  mockTelegram(t);
+  const state: any = { workId: "w1", chatId: -100, unit: "Marketing", hat: "Marketing", actionName: "handle_request" };
+  const { workSessionContext } = await import("../access");
+  let used: any;
+  await withLiveStatus(fakeEnv(), target, async () => {
+    state.hat = "Content Strategist"; // Marketing's intake resolves the Hat after the run opens
+    await augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision"), {
+      decide: async () => "What do growing businesses struggle with in communication?",
+      research: async (_e, _q, access) => ((used = access), research()),
+    });
+    return "ok";
+  }, () => "succeeded", undefined, { access: () => workSessionContext(state) });
+  assert.strictEqual(used.hat, "Content Strategist");
+});

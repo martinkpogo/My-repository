@@ -76,11 +76,21 @@ export interface LiveStatusDetailSink {
  * run's status has ended. One run context, so a run is opened in one place.
  */
 export interface RunExtras {
-  access?: AccessContext;
+  /**
+   * The run's Access context -- or a function giving it at the moment of
+   * use. A Work passes a function because its Hat can be resolved during the
+   * run (Marketing's intake picks the Hat after the run opens); a context
+   * captured at the start named no real Hat and every search under it was
+   * refused (2026-11-13).
+   */
+  access?: AccessContext | (() => AccessContext);
 }
 
 class LiveStatusRun {
-  readonly access: AccessContext | undefined;
+  private readonly accessSource: AccessContext | (() => AccessContext) | undefined;
+  get access(): AccessContext | undefined {
+    return typeof this.accessSource === "function" ? this.accessSource() : this.accessSource;
+  }
   searches = 0;
   searchLimit = 0;
   readonly endHooks: Array<() => Promise<void>> = [];
@@ -101,7 +111,7 @@ class LiveStatusRun {
     extras: RunExtras = {},
     private readonly clock: { now: () => number } = { now: () => Date.now() },
   ) {
-    this.access = extras.access;
+    this.accessSource = extras.access;
   }
 
   step(label: string): void {

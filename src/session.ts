@@ -631,7 +631,7 @@ export class WorkSession extends DurableObject<Env> {
       // The run also carries this Work's own Access context, which the
       // universal web research tool (src/runtime/webResearch.ts) uses.
       return await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
-        access: workSessionContext(state),
+        access: () => workSessionContext(state),
       });
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
