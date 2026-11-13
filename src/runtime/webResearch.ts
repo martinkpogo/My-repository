@@ -236,4 +236,4 @@ export async function handleWebResearchCallback(env: Env, id: string, value: str
   return found ? `🔎 More research on: ${question}\n\n${found.digest}` : "The extra research could not be completed (no usable sources). Nothing else was changed.";
 }
 
-setTaskAugmenter((env, task) => augmentTaskWithWebResearch(env, task));
+setTaskAugmenter("web_research", 20, (env, task) => augmentTaskWithWebResearch(env, task));
