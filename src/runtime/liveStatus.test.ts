@@ -291,7 +291,7 @@ test("work runs: header and outcome come from the Work's own fields", () => {
   assert.strictEqual(workLiveOutcome({ stage: "awaiting_lead_approval" } as any), "waiting");
 });
 
-test("chokepoint: an AI call inside a run reports the registered task's name -- never the prompt", async (t) => {
+test("chokepoint: an AI call inside a run reports the task's fixed plain label (Martin, 2026-11-13) -- never the prompt", async (t) => {
   const calls = mockTelegram(t);
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const { defaultPolicyExecutor } = await import("../ai/policy");
@@ -309,7 +309,7 @@ test("chokepoint: an AI call inside a run reports the registered task's name -- 
   }, () => "waiting");
   await flush();
   const all = calls.map((c) => JSON.stringify(c.body)).join("\n");
-  assert.match(texts(calls, "sendMessage")[0], /Thinking \(Finance Intake Classification\)/);
+  assert.match(texts(calls, "sendMessage")[0], /Working out what the Finance message is/);
   assert.ok(!all.includes("PRIVATE PROMPT TEXT"));
 });
 
