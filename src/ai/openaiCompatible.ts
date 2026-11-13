@@ -35,6 +35,13 @@ export interface OpenAiCompatibleConfig {
   lightModel?: string;
   /** Overridable for tests only -- production providers all use DEFAULT_PROVIDER_TIMEOUT_MS. */
   timeoutMs?: number;
+  /**
+   * Extra request-body fields this provider is sent (Gemini's thinking
+   * setting, Martin's decision 2026-11-13). If the provider rejects them
+   * with HTTP 400, the call is retried once without them, so an unsupported
+   * field can only cost one fast extra request, never the provider.
+   */
+  extraBody?: Record<string, unknown>;
 }
 
 // Confirmed live: nvidia-nim once took long enough to answer that
@@ -106,14 +113,20 @@ export class OpenAiCompatibleProvider implements AiProvider {
    * to the next eligible provider without delay.
    */
   public async execute(env: Env, task: AiTask): Promise<ProviderAdapterResult> {
-    const first = await this.attempt(env, task);
-    if (first.result.success || first.retryAfterMs === undefined) return first.result;
+    const first = await this.attempt(env, task, true);
+    if (first.result.success) return first.result;
+    if (this.config.extraBody && first.status === 400) {
+      // The provider may not accept the extra fields: retry once without them.
+      console.log(`AI provider call: ${this.id} rejected the extra request settings (HTTP 400); retrying without them`);
+      return (await this.attempt(env, task, false)).result;
+    }
+    if (first.retryAfterMs === undefined) return first.result;
 
     await sleep(Math.min(first.retryAfterMs, MAX_RETRY_AFTER_WAIT_MS));
-    return (await this.attempt(env, task)).result;
+    return (await this.attempt(env, task, true)).result;
   }
 
-  private async attempt(env: Env, task: AiTask): Promise<{ result: ProviderAdapterResult; retryAfterMs?: number }> {
+  private async attempt(env: Env, task: AiTask, withExtras: boolean): Promise<{ result: ProviderAdapterResult; retryAfterMs?: number; status?: number }> {
     const apiKey = env[this.config.apiKeyEnvVar];
     const model = task.light && this.config.lightModel ? this.config.lightModel : this.config.model;
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
@@ -136,6 +149,7 @@ export class OpenAiCompatibleProvider implements AiProvider {
           messages: task.messages,
           temperature: task.temperature ?? 0.2,
           max_tokens: task.maxTokens ?? 1024,
+          ...(withExtras ? this.config.extraBody : undefined),
         }),
         signal: timeoutController.signal,
       });
@@ -148,6 +162,7 @@ export class OpenAiCompatibleProvider implements AiProvider {
             error: new InfrastructureError(this.id, `${res.status} ${body}`.slice(0, 500), { statusCode: res.status }),
           },
           retryAfterMs: res.status === 429 ? parseRetryAfterMs(res, body) : undefined,
+          status: res.status,
         };
       }
       const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
@@ -215,8 +230,20 @@ export const CEREBRAS_PROVIDER = new OpenAiCompatibleProvider({
 // lite Gemini models, unlike a pinned version string (e.g. gemini-2.0-
 // flash) which Google retires outright -- confirmed live as the exact
 // failure mode that broke the pinned names below within weeks.
+/**
+ * Gemini's thinking setting (Martin's decision 2026-11-13). Gemini has not
+ * answered once in 24 hours -- every call timed out -- and its default model
+ * thinks before answering, which is slow on a long request. "none" turns
+ * thinking off where the model allows it (Google documents that for 2.5
+ * models; the 3-series may refuse or raise it to "low"). Unverified against
+ * the live model: the provider-call log shows the result, and a 400 retries
+ * without the setting.
+ */
+export const GEMINI_EXTRA_BODY = { reasoning_effort: "none" } as const;
+
 export const GEMINI_PROVIDER = new OpenAiCompatibleProvider({
   id: "gemini",
+  extraBody: { ...GEMINI_EXTRA_BODY },
   baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
   apiKeyEnvVar: "GEMINI_API_KEY",
   model: "gemini-flash-latest",
