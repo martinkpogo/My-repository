@@ -244,4 +244,5 @@ test("problem brief (Martin, 2026-11-13): every Marketing Hat's instructions car
   assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /no #, \* or other markup/, "headings are plain text -- Telegram showed a literal #");
   assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /The research did not directly show this problem/, "unsupported evidence is said plainly");
   assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Part 7 must give the reason/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /If NO WEB RESEARCH block is present, ignore this format: never ask for research/, "without research the Hat drafts normally instead of asking Martin for a research block");
 });
