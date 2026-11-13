@@ -312,3 +312,33 @@ test("chokepoint: an AI call inside a run reports the registered task's name -- 
   assert.match(texts(calls, "sendMessage")[0], /Thinking \(Finance Intake Classification\)/);
   assert.ok(!all.includes("PRIVATE PROMPT TEXT"));
 });
+
+test("web searches (Martin, 2026-11-13, A): each search is its own line, ⏳ until it returns, then named by its top result's site -- domain only", async () => {
+  const { resolvePendingStep, resolveLiveStep } = await import("./liveStatus");
+  const { finishedSearchLabel } = await import("./research/webSearch");
+  // Three searches in flight at once merge while pending, then split off one by one.
+  const steps = [{ label: "Thinking (Research Plan Generation)", count: 3 }, { label: "Searching the web", count: 3 }];
+  resolvePendingStep(steps, "Searching the web", "Searching the web — trade.gov");
+  resolvePendingStep(steps, "Searching the web", "Searching the web — yen.com.gh");
+  assert.deepStrictEqual(steps.map((s) => s.label), ["Thinking (Research Plan Generation)", "Searching the web — trade.gov", "Searching the web — yen.com.gh", "Searching the web"]);
+  resolvePendingStep(steps, "Searching the web", "Searching the web — modernghana.com");
+  assert.deepStrictEqual(steps.at(-1), { label: "Searching the web — modernghana.com", count: 1 });
+
+  // Labels: the site's domain only; anything else shows no site.
+  const result = (url: string) => ({ kind: "success_with_results", results: [{ url }] }) as any;
+  assert.strictEqual(finishedSearchLabel(result("https://www.modernghana.com/news/1538866/x.html?q=a")), "Searching the web — modernghana.com");
+  assert.strictEqual(finishedSearchLabel(result("not a url")), "Searching the web");
+  assert.strictEqual(finishedSearchLabel({ kind: "success_no_results" } as any), "Searching the web — nothing found");
+  assert.strictEqual(finishedSearchLabel({ kind: "provider_failure", reason: "x" } as any), "Searching the web — not completed");
+
+  // Through a Hat's own status: the trail shows one ✓ line per search.
+  const { renderWorkStatus } = await import("./workStatus");
+  const holder: WorkStatusHolder = { chatId: -100, workId: "w1", workStatusMessageId: 9, workStatus: { hat: "H", header: "H — task", done: [], current: "Deciding", edits: 99 } as any };
+  const sink = workStatusLiveSink(fakeEnv(), holder);
+  sink.setDetail("Searching the web");
+  sink.setDetail("Searching the web ×2");
+  sink.resolveDetail!("Searching the web", "Searching the web — trade.gov");
+  sink.resolveDetail!("Searching the web", "Searching the web — yen.com.gh");
+  assert.strictEqual(renderWorkStatus(holder.workStatus!, { line: "✅ Draft ready", currentFailed: false }), "🧭 H — task\n✓ Deciding\n✓ Searching the web — trade.gov\n✓ Searching the web — yen.com.gh\n✅ Draft ready");
+  resolveLiveStep("Searching the web", "x"); // outside a run: a no-op, never throws
+});

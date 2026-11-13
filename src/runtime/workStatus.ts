@@ -1,6 +1,6 @@
 import type { Env, WorkState } from "../types";
 import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../telegram";
-import { yieldLiveStatusToHat, type LiveStatusDetailSink, type LiveStatusOutcome, type LiveStatusTarget } from "./liveStatus";
+import { resolvePendingStep, yieldLiveStatusToHat, type LiveStatusDetailSink, type LiveStatusOutcome, type LiveStatusTarget } from "./liveStatus";
 
 /**
  * Live work status -- a Runtime Service any Unit's Hat uses to show Martin
@@ -68,7 +68,7 @@ export function workStatusHeader(hat: string, state: Partial<Pick<WorkState, "ma
 }
 
 /** At most this many trail entries are shown per step (the latest), so a busy step stays readable. */
-const MAX_TRAIL = 6;
+const MAX_TRAIL = 12;
 
 /**
  * The trail under a Hat step, one entry per line, aligned with the Hat steps
@@ -177,6 +177,15 @@ export function workStatusLiveSink(env: Env, holder: WorkStatusHolder): LiveStat
     // live run ending (undefined) leaves the trail as it is.
     setDetail: (detail) => {
       if (holder.workStatus && detail) addToTrail((holder.workStatus.trail ??= []), detail);
+    },
+    resolveDetail: (pending, final) => {
+      if (!holder.workStatus) return;
+      const steps = (holder.workStatus.trail ??= []).map((t) => {
+        const m = / ×(\d+)$/.exec(t);
+        return { label: m ? t.slice(0, m.index) : t, count: m ? Number(m[1]) : 1 };
+      });
+      resolvePendingStep(steps, pending, final);
+      holder.workStatus.trail = steps.map((st) => (st.count > 1 ? `${st.label} ×${st.count}` : st.label));
     },
     refresh: () => refreshWorkStatus(env, holder),
   };
