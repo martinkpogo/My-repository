@@ -119,7 +119,7 @@ interface HatActionDecision {
  */
 export const MARKETING_PROBLEM_BRIEF_FORMAT = [
   "=== PROBLEM BRIEF FORMAT (applies only when the task asks what businesses need, struggle with, or what problem to build a strategy around, AND a WEB RESEARCH block is present) ===",
-  "Write the draft as a problem brief with exactly these parts, each headed in plain text:",
+  "Write the draft as a problem brief with exactly these parts, each on its own line headed in plain text exactly as below (no #, * or other markup):",
   "1. The problem -- one sentence naming a communication, positioning, brand or visual-identity problem that ENIG's services (see the Consultancy Profile) can solve. Not a general business problem such as finance, taxes or skills.",
   "2. Evidence -- two or three findings from the WEB RESEARCH block that support it, each followed by its source link exactly as given there. Never invent a finding or a source.",
   "3. Who has it most -- the TYPE of business where the problem hurts most (sector, size, stage). Never name a company.",
@@ -127,7 +127,9 @@ export const MARKETING_PROBLEM_BRIEF_FORMAT = [
   "5. Where ENIG fits -- the ENIG service from the Consultancy Profile that addresses it.",
   "6. What's still unknown -- what the research could not establish; never fill it in.",
   "7. Recommendation -- the one problem to build the strategy around, and why.",
+  "Evidence must show the problem itself -- businesses having it -- not only facts about their customers or market. If no finding shows the problem, say plainly in part 2: \"The research did not directly show this problem\", and treat part 1 as a hypothesis to test.",
   "If the findings do not support a communication or brand problem, say so in part 1 and in part 6 instead of stretching them.",
+  "Part 7 must give the reason for choosing this problem, not repeat part 1.",
 ].join("\n");
 
 export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {

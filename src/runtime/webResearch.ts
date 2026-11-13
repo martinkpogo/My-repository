@@ -113,16 +113,24 @@ export function callerSensitivity(task: AiTask): SensitivityLevel | undefined {
   return highest(levels.length ? levels : [taskLevel]);
 }
 
-async function decideResearchNeed(env: Env, task: AiTask): Promise<string | null> {
-  const level = callerSensitivity(task);
-  if (!level) return null; // unresolved: never guess a level
-  const system = [
+/** The light check's instructions (runtime.research_need). */
+export const RESEARCH_NEED_INSTRUCTIONS = [
     "You decide whether a step in ENIG's work needs PUBLIC WEB research before it answers.",
     "Say yes only when current, public, external information (markets, sectors, trends, what businesses commonly struggle with or ask about, public facts about an industry) would materially improve the answer, and it is not already in the step's own context.",
     "Say no for questions about ENIG's own records, approvals, people, or anything the step's context already answers.",
     "The research question must be general and identity-free: never a client's name, record token (ENT-/MAT-/HO-...), contact, email, phone, or anything identifying.",
+    // Martin, 2026-11-13: a Marketing request for a problem businesses have
+    // was researched as a question about their customers, so the findings
+    // never showed the problem. The question must stay on the request's own
+    // subject.
+    "The research question must stay on the exact subject the request asks about. If it asks what problems or needs a kind of business has, research THOSE businesses' own problems and needs -- not their customers' behaviour or the market in general -- and ask for evidence that would show whether the problem exists.",
     'Reply ONLY with JSON: {"needs_web": true, "question": "<one general research question>"} or {"needs_web": false}.',
-  ].join("\n");
+].join("\n");
+
+async function decideResearchNeed(env: Env, task: AiTask): Promise<string | null> {
+  const level = callerSensitivity(task);
+  if (!level) return null; // unresolved: never guess a level
+  const system = RESEARCH_NEED_INSTRUCTIONS;
   const user = stepText(task);
   const result = await aiJson<ResearchNeed>(env, {
     taskId: "runtime.research_need",
