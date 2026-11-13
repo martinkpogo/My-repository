@@ -4,7 +4,7 @@ import type { ContextSegment, SemanticTaskId } from "../dataBoundary/types";
 import { setTaskAugmenter } from "../ai/policy";
 import { getGovernance } from "../governance";
 import { reportLiveStep } from "./liveStatus";
-import { WEB_RESEARCH_TASKS } from "./webResearch";
+import { callerSensitivity, WEB_RESEARCH_TASKS } from "./webResearch";
 
 /**
  * Every Hat knows what ENIG is (Martin's decision, 2026-11-13). Before any
@@ -49,8 +49,13 @@ export async function augmentTaskWithBusinessContext(env: Env, task: AiTask): Pr
     profile.slice(0, MAX_PROFILE_CHARS),
     "=== END ENIG CONSULTANCY PROFILE ===",
   ].join("\n");
-  // No stamp of its own: the Profile is held to the step's own level, so adding it never lowers what the step may send where.
-  const segment: ContextSegment = { type: "governance", content: block, provenance: "runtime:consultancy_profile" };
+  // Stamped with the step's EFFECTIVE level (its segments' own stamps, else
+  // its task level). An unstamped segment would instead take the task's
+  // DEFAULT level -- for ENIG's chat, client_confidential where its segments
+  // are stamped business_sensitive -- and lock every provider out of the
+  // whole step (2026-11-13: "no AI provider is currently available").
+  const level = callerSensitivity(task);
+  const segment: ContextSegment = { type: "governance", content: block, provenance: "runtime:consultancy_profile", ...(level ? { sensitivity: level } : {}) };
   const messages = [...task.messages];
   const i = messages.findIndex((m) => m.role === "system");
   if (i >= 0) messages[i] = { ...messages[i], content: `${messages[i].content}\n\n${block}` };
