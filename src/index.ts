@@ -37,6 +37,7 @@ import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { maybeSendMorningBrief } from "./morningBrief";
 import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
+import { claimTelegramUpdate } from "./telegramDedup";
 // Installs universal web research on the shared AI executor (Martin, 2026-11-11).
 import { handleWebResearchCallback } from "./runtime/webResearch";
 import { WEB_RESEARCH_CALLBACK } from "./runtime/webLookupAllowance";
@@ -98,6 +99,8 @@ export default {
         }
       }
       const update = (await request.json()) as TelegramUpdate;
+      // A redelivered update (Telegram retries a slow answer) is acknowledged and never processed twice -- see claimTelegramUpdate.
+      if (!(await claimTelegramUpdate(env, update.update_id))) return new Response("ok");
       try {
         await handleUpdate(env, update);
       } catch (err) {
