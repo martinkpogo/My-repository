@@ -209,14 +209,29 @@ test("a non-429 failure is never retried, even with rate-limit-shaped body text"
   assert.strictEqual(result.success, false);
 });
 
-test("Gemini waits 25s for long steps (Martin, 2026-11-13); every other provider keeps the 12s default", async () => {
+test("every provider uses the default 12s wait (the 25s Gemini trial of 2026-11-13 did not help and was reverted)", async () => {
   const mod = await import("./openaiCompatible");
-  assert.strictEqual(mod.GEMINI_TIMEOUT_MS, 25_000);
-  assert.strictEqual((mod.GEMINI_PROVIDER as any).config.timeoutMs, 25_000);
-  for (const p of [mod.GROQ_PROVIDER, mod.OPENROUTER_PROVIDER, mod.NVIDIA_NIM_PROVIDER, mod.CEREBRAS_PROVIDER, mod.SAMBANOVA_PROVIDER]) {
+  assert.strictEqual(mod.DEFAULT_PROVIDER_TIMEOUT_MS, 12_000);
+  for (const p of [mod.GEMINI_PROVIDER, mod.GROQ_PROVIDER, mod.OPENROUTER_PROVIDER, mod.NVIDIA_NIM_PROVIDER, mod.CEREBRAS_PROVIDER, mod.SAMBANOVA_PROVIDER]) {
     assert.strictEqual((p as any).config.timeoutMs, undefined, (p as any).config.id);
   }
-  assert.strictEqual(mod.DEFAULT_PROVIDER_TIMEOUT_MS, 12_000);
+  assert.strictEqual((mod as any).GEMINI_TIMEOUT_MS, undefined);
+});
+
+test("provider calls log timing and outcome, never the prompt or the answer", async (t) => {
+  const mod = await import("./openaiCompatible");
+  const logs: string[] = [];
+  t.mock.method(console, "log", (...a: unknown[]) => void logs.push(a.join(" ")));
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: "SECRET ANSWER" } }] }), { status: 200 })) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  const env = { GEMINI_API_KEY: "k" } as any;
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "SECRET PROMPT" }] } as any;
+  const r = await mod.GEMINI_PROVIDER.execute(env, task);
+  assert.ok(r.success);
+  const line = logs.find((l) => l.startsWith("AI provider call: gemini"))!;
+  assert.match(line, /marketing\.hat_action_decision answered \(13 chars\) after \d+ms/);
+  assert.ok(!logs.join("\n").includes("SECRET"));
 });
 
 test("OpenRouter uses Martin's chosen free models (2026-11-13)", async () => {

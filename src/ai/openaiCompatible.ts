@@ -33,10 +33,7 @@ export interface OpenAiCompatibleConfig {
     | "SAMBANOVA_API_KEY";
   model: string;
   lightModel?: string;
-  /**
-   * Per-provider wait; DEFAULT_PROVIDER_TIMEOUT_MS when unset. Only Gemini
-   * sets one in production (GEMINI_TIMEOUT_MS, Martin's decision 2026-11-13).
-   */
+  /** Overridable for tests only -- production providers all use DEFAULT_PROVIDER_TIMEOUT_MS. */
   timeoutMs?: number;
 }
 
@@ -122,6 +119,11 @@ export class OpenAiCompatibleProvider implements AiProvider {
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
     const timeoutController = new AbortController();
     const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
+    const startedAt = Date.now();
+    // Diagnostic only (Martin, 2026-11-13): how long a provider call took and
+    // how it ended -- never the prompt, the answer or any content -- so a
+    // slow provider can be told from a stuck one.
+    const logCall = (outcome: string) => console.log(`AI provider call: ${this.id} ${model} ${task.taskId} ${outcome} after ${Date.now() - startedAt}ms`);
     try {
       const res = await fetch(`${this.config.baseUrl}/chat/completions`, {
         method: "POST",
@@ -138,6 +140,7 @@ export class OpenAiCompatibleProvider implements AiProvider {
         signal: timeoutController.signal,
       });
       if (!res.ok) {
+        logCall(`HTTP ${res.status}`);
         const body = await res.text().catch(() => "");
         return {
           result: {
@@ -149,8 +152,10 @@ export class OpenAiCompatibleProvider implements AiProvider {
       }
       const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const rawText = data.choices?.[0]?.message?.content ?? "";
+      logCall(`answered (${rawText.length} chars)`);
       return { result: { success: true, response: { rawText } } };
     } catch (err: any) {
+      logCall(err?.name === "AbortError" ? "timed out" : "failed");
       const message =
         err?.name === "AbortError" ? `timed out after ${timeoutMs}ms` : err?.message || `${this.id} execution failed`;
       return { result: { success: false, error: new InfrastructureError(this.id, message) } };
@@ -210,20 +215,8 @@ export const CEREBRAS_PROVIDER = new OpenAiCompatibleProvider({
 // lite Gemini models, unlike a pinned version string (e.g. gemini-2.0-
 // flash) which Google retires outright -- confirmed live as the exact
 // failure mode that broke the pinned names below within weeks.
-/**
- * Gemini's wait (Martin's decision 2026-11-13). Confirmed live: on a
- * research-backed Marketing draft (Hat governance + Consultancy Profile +
- * web findings, a long prompt and a long answer) Gemini timed out at the
- * 12s default while every other provider was exhausted, so the draft
- * failed. It answers such steps given more time. NVIDIA keeps the
- * default: it has never answered on this account (see policy.ts), so a
- * longer wait there would only add delay.
- */
-export const GEMINI_TIMEOUT_MS = 25_000;
-
 export const GEMINI_PROVIDER = new OpenAiCompatibleProvider({
   id: "gemini",
-  timeoutMs: GEMINI_TIMEOUT_MS,
   baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
   apiKeyEnvVar: "GEMINI_API_KEY",
   model: "gemini-flash-latest",
