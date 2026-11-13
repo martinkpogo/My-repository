@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import { AI_TASK_LIVE_LABELS } from "./liveLabels";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
 import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
 import { reportLiveStep } from "../runtime/liveStatus";
@@ -144,7 +145,7 @@ export class AiPolicyExecutor {
       }
     }
     // Universal live status: the registered task's fixed name, never the prompt.
-    reportLiveStep(`Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
+    reportLiveStep(AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
 
     const eligible = this.providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
