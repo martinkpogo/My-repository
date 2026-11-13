@@ -201,3 +201,10 @@ test("research question stays on the request's subject (Martin, 2026-11-13): a p
   assert.match(RESEARCH_NEED_INSTRUCTIONS, /not their customers' behaviour or the market in general/);
   assert.match(RESEARCH_NEED_INSTRUCTIONS, /identity-free/, "the identity rule is unchanged");
 });
+
+test("research check (Martin, 2026-11-13): a reasoning model gets room to answer, and a request for market evidence always needs research", async () => {
+  const { RESEARCH_NEED_INSTRUCTIONS, RESEARCH_NEED_MAX_TOKENS } = await import("./webResearch");
+  assert.ok(RESEARCH_NEED_MAX_TOKENS >= 600, "200 left Groq's reasoning no room: it answered with 0 characters");
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /ALWAYS needs web research/);
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /Say no for questions about ENIG's own records/, "the exclusions are unchanged");
+});

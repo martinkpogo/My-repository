@@ -113,10 +113,22 @@ export function callerSensitivity(task: AiTask): SensitivityLevel | undefined {
   return highest(levels.length ? levels : [taskLevel]);
 }
 
+/**
+ * The check's answer limit. Raised from 200 (Martin, 2026-11-13): Groq's
+ * model reasons before it answers and the reasoning counts against this
+ * limit, so at 200 it returned nothing (0 characters, rejected as
+ * malformed) on every run. The answer itself is one short JSON line.
+ */
+export const RESEARCH_NEED_MAX_TOKENS = 600;
+
 /** The light check's instructions (runtime.research_need). */
 export const RESEARCH_NEED_INSTRUCTIONS = [
     "You decide whether a step in ENIG's work needs PUBLIC WEB research before it answers.",
     "Say yes only when current, public, external information (markets, sectors, trends, what businesses commonly struggle with or ask about, public facts about an industry) would materially improve the answer, and it is not already in the step's own context.",
+    // Martin, 2026-11-13: with a weaker model answering, a request for market
+    // evidence was judged "not needed" and the draft was written from
+    // general knowledge.
+    "A request that asks you to find, identify or research what businesses or customers need, struggle with, want or do -- or any current market or sector fact -- ALWAYS needs web research, even when you could answer from general knowledge: the point is current, sourced evidence.",
     "Say no for questions about ENIG's own records, approvals, people, or anything the step's context already answers.",
     "The research question must be general and identity-free: never a client's name, record token (ENT-/MAT-/HO-...), contact, email, phone, or anything identifying.",
     // Martin, 2026-11-13: a Marketing request for a problem businesses have
@@ -137,7 +149,7 @@ async function decideResearchNeed(env: Env, task: AiTask): Promise<string | null
     system,
     user,
     light: true,
-    maxTokens: 200,
+    maxTokens: RESEARCH_NEED_MAX_TOKENS,
     // Held to the calling step's own level (approved rule, 2026-11-11).
     sensitivity: level,
   });
