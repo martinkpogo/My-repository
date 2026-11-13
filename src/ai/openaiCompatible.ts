@@ -33,7 +33,10 @@ export interface OpenAiCompatibleConfig {
     | "SAMBANOVA_API_KEY";
   model: string;
   lightModel?: string;
-  /** Overridable for tests only -- production providers all use DEFAULT_PROVIDER_TIMEOUT_MS. */
+  /**
+   * Per-provider wait; DEFAULT_PROVIDER_TIMEOUT_MS when unset. Only Gemini
+   * sets one in production (GEMINI_TIMEOUT_MS, Martin's decision 2026-11-13).
+   */
   timeoutMs?: number;
 }
 
@@ -201,8 +204,20 @@ export const CEREBRAS_PROVIDER = new OpenAiCompatibleProvider({
 // lite Gemini models, unlike a pinned version string (e.g. gemini-2.0-
 // flash) which Google retires outright -- confirmed live as the exact
 // failure mode that broke the pinned names below within weeks.
+/**
+ * Gemini's wait (Martin's decision 2026-11-13). Confirmed live: on a
+ * research-backed Marketing draft (Hat governance + Consultancy Profile +
+ * web findings, a long prompt and a long answer) Gemini timed out at the
+ * 12s default while every other provider was exhausted, so the draft
+ * failed. It answers such steps given more time. NVIDIA keeps the
+ * default: it has never answered on this account (see policy.ts), so a
+ * longer wait there would only add delay.
+ */
+export const GEMINI_TIMEOUT_MS = 25_000;
+
 export const GEMINI_PROVIDER = new OpenAiCompatibleProvider({
   id: "gemini",
+  timeoutMs: GEMINI_TIMEOUT_MS,
   baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
   apiKeyEnvVar: "GEMINI_API_KEY",
   model: "gemini-flash-latest",

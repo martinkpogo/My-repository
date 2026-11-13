@@ -208,3 +208,13 @@ test("a non-429 failure is never retried, even with rate-limit-shaped body text"
   assert.strictEqual(callCount, 1, "retry-after handling is scoped to 429 only");
   assert.strictEqual(result.success, false);
 });
+
+test("Gemini waits 25s for long steps (Martin, 2026-11-13); every other provider keeps the 12s default", async () => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual(mod.GEMINI_TIMEOUT_MS, 25_000);
+  assert.strictEqual((mod.GEMINI_PROVIDER as any).config.timeoutMs, 25_000);
+  for (const p of [mod.GROQ_PROVIDER, mod.OPENROUTER_PROVIDER, mod.NVIDIA_NIM_PROVIDER, mod.CEREBRAS_PROVIDER, mod.SAMBANOVA_PROVIDER]) {
+    assert.strictEqual((p as any).config.timeoutMs, undefined, (p as any).config.id);
+  }
+  assert.strictEqual(mod.DEFAULT_PROVIDER_TIMEOUT_MS, 12_000);
+});
