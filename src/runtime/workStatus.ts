@@ -30,9 +30,9 @@ export interface WorkStatus {
   edits?: number;
   /**
    * What the universal live status (liveStatus.ts) saw happen during the
-   * running step -- "Thinking (Web Research Check)", "Searching the web ×4"
-   * -- kept under that step after it finishes, so the finished message still
-   * shows what ran (Martin, 2026-11-13). Fixed labels only.
+   * running step -- "Planning the searches", "Searching the web -- nca.org.gh".
+   * Only the latest entry is shown: it replaces the step's own wording on its
+   * line while the step runs (Martin, 2026-11-13). Fixed labels only.
    */
   trail?: string[];
   /** When the last intermediate edit was made (ms), for the live detail's throttle. */
@@ -67,31 +67,31 @@ export function workStatusHeader(hat: string, state: Partial<Pick<WorkState, "ma
   return `${hat} — ${state.matterToken || state.entityToken || fallback}`;
 }
 
-/** At most this many trail entries are shown per step (the latest), so a busy step stays readable. */
+/** Bounds what a busy step stores; only the latest entry is ever shown. */
 const MAX_TRAIL = 12;
-
-/**
- * The trail under a Hat step, one entry per line, aligned with the Hat steps
- * (Martin, 2026-11-13: "aligned vertically"). Every entry is ✓ except, while
- * the step is still running, its latest entry, which shows `lastMark`.
- */
-function trailLines(trail: string[], lastMark = "✓"): string {
-  const shown = trail.slice(-MAX_TRAIL);
-  return shown.map((t, i) => `${i === shown.length - 1 ? lastMark : "✓"} ${t}`).join("\n");
-}
 
 /** Adds a live step to the trail, merging a repeat of the same step ("Searching the web" ×n). */
 function addToTrail(trail: string[], label: string): void {
   const base = (s: string) => s.replace(/ ×\d+$/, "");
   if (trail.length && base(trail[trail.length - 1]) === base(label)) trail[trail.length - 1] = label;
   else trail.push(label);
+  if (trail.length > MAX_TRAIL) trail.splice(0, trail.length - MAX_TRAIL);
 }
 
 export function renderWorkStatus(status: WorkStatus, ending?: { line: string; currentFailed: boolean }): string {
   const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
   const lines = [`🧭 ${status.header}`, ...status.done.map((d) => `✓ ${step(d)}`)];
-  if (status.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(status.current)}`);
-  if (status.trail?.length) lines.push(trailLines(status.trail, ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"));
+  if (status.current) {
+    // One line per Hat step, edited in place (Martin, 2026-11-13): while the
+    // step runs the line shows what is happening inside it right now; a step
+    // that ends well goes back to its own wording with ✓; one that fails
+    // stays on the inner step that was running, marked ✗, so it shows where
+    // it broke.
+    const inner = status.trail?.length ? status.trail[status.trail.length - 1] : undefined;
+    const failed = ending?.currentFailed === true;
+    const text = !ending || failed ? (inner ?? status.current) : status.current;
+    lines.push(`${ending ? (failed ? "✗" : "✓") : "⏳"} ${step(text)}`);
+  }
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
@@ -109,7 +109,7 @@ export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: s
 export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step: string): Promise<void> {
   const status = holder.workStatus;
   if (holder.workStatusMessageId === undefined || !status) return;
-  if (status.current) status.done.push(status.trail?.length ? `${status.current}\n${trailLines(status.trail)}` : status.current);
+  if (status.current) status.done.push(status.current);
   status.current = step;
   status.trail = undefined;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
