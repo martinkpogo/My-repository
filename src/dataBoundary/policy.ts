@@ -674,6 +674,14 @@ export const OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS: ReadonlySet<SemanticTas
   "lead.candidate_research_protocol_selection",
   "lead.candidate_research_plan",
   "lead.candidate_research_synthesis",
+  // General web research (src/runtime/webResearch.ts) -- Martin's decision
+  // 2026-11-13: it summarises public web results, which routinely name
+  // companies. Company-suffix detector only; the email, phone and
+  // person-name detectors still apply to these steps unchanged.
+  "research.context_relevance",
+  "research.protocol_selection",
+  "research.plan_generation",
+  "research.synthesis",
 ]);
 
 export interface DataBoundaryEvaluatorOptions {
