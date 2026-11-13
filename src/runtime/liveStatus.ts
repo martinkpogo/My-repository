@@ -28,7 +28,9 @@ import { deleteMessage, editMessageText, sendMessage } from "../telegram";
  *   - Honest: a step is recorded only when the chokepoint actually starts it.
  *     Labels come from fixed maps (a governed source's name, a registered AI
  *     task's name, a registered Tool operation id) -- never a page title,
- *     record content, client text or model output.
+ *     record content, client text or model output. One approved exception
+ *     (Martin, 2026-11-13): a finished web search names the public site of
+ *     its top result, domain only ("Searching the web — trade.gov").
  *   - Always shown (Martin, 2026-11-11, replacing the earlier 2-second
  *     quiet period): the message is sent at the run's first real step,
  *     however short the run is. A run that reports no step sends nothing.
@@ -57,7 +59,7 @@ export interface LiveStatusTarget {
   header: string;
 }
 
-interface Step {
+export interface Step {
   label: string;
   count: number;
 }
@@ -66,6 +68,8 @@ interface Step {
 export interface LiveStatusDetailSink {
   hatStatusOpen(): boolean;
   setDetail(detail: string | undefined): void;
+  /** A pending step finished: one occurrence of `pending` becomes `final` (see resolveLiveStep). */
+  resolveDetail?(pending: string, final: string): void;
   refresh(): Promise<void>;
 }
 
@@ -122,6 +126,24 @@ class LiveStatusRun {
     this.dirty = true;
     if (this.sink?.hatStatusOpen()) {
       this.sink.setDetail(this.current());
+      void this.schedule(() => this.sink!.refresh());
+      return;
+    }
+    void this.schedule(() => this.flush());
+  }
+
+  /**
+   * One occurrence of the pending step `pending` finished as `final`: a
+   * single pending step is renamed in place; one of several merged pending
+   * steps ("Searching the web ×3") is taken out of the count and shown as
+   * its own line just before the still-pending ones.
+   */
+  resolve(pending: string, final: string): void {
+    if (this.finished) return;
+    resolvePendingStep(this.steps, pending, final);
+    this.dirty = true;
+    if (this.sink?.hatStatusOpen()) {
+      this.sink.resolveDetail?.(pending, final);
       void this.schedule(() => this.sink!.refresh());
       return;
     }
@@ -215,6 +237,19 @@ class LiveStatusRun {
   }
 }
 
+/** Shared by the live run and a Hat's trail: renames, or splits off, one occurrence of a pending step. */
+export function resolvePendingStep(steps: Step[], pending: string, final: string): void {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].label !== pending) continue;
+    if (steps[i].count > 1) {
+      steps[i].count--;
+      steps.splice(i, 0, { label: final, count: 1 });
+    } else steps[i] = { label: final, count: 1 };
+    return;
+  }
+  steps.push({ label: final, count: 1 });
+}
+
 function render(s: Step): string {
   return s.count > 1 ? `${s.label} ×${s.count}` : s.label;
 }
@@ -263,6 +298,17 @@ export function currentRun(): Pick<LiveStatusRun, "access" | "target" | "searche
 /** Reports a step into the open run, if any. Safe to call from anywhere; a no-op outside a run. Labels must come from fixed maps, never content. */
 export function reportLiveStep(label: string): void {
   RUNS.getStore()?.step(label);
+}
+
+/**
+ * Reports that a step reported earlier as `pending` has finished as `final`
+ * -- e.g. "Searching the web" becomes "Searching the web — modernghana.com".
+ * A no-op outside a run. `final` follows the same fixed-label rule as
+ * reportLiveStep, with the one approved exception for a search's public site
+ * name (src/runtime/research/webSearch.ts).
+ */
+export function resolveLiveStep(pending: string, final: string): void {
+  RUNS.getStore()?.resolve(pending, final);
 }
 
 /** For src/runtime/workStatus.ts: a Hat opening its own named status takes over the run's message. */

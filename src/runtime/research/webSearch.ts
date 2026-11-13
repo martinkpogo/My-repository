@@ -2,7 +2,7 @@ import type { Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
-import { reportLiveStep } from "../liveStatus";
+import { reportLiveStep, resolveLiveStep } from "../liveStatus";
 import { takeWebLookup } from "../webLookupAllowance";
 import type { ResearchPlanDimension } from "./researchPlan";
 
@@ -291,11 +291,35 @@ function normalizeTavilyResults(raw: TavilyResponse["results"], retrievedAt: str
  * 5. success_with_results / success_no_results only for a successful
  *    provider response, with results normalized to the contract shape.
  */
+export const SEARCH_STEP = "Searching the web";
+
+/**
+ * The live-status label for a finished search (Martin's decision 2026-11-13,
+ * option A): the public site of its top result, domain only -- never the
+ * query, the full link or any page text. Anything that is not a plain
+ * hostname is not shown.
+ */
+export function finishedSearchLabel(outcome: SearchOutcome): string {
+  if (outcome.kind === "success_with_results") {
+    const domain = extractDomain(outcome.results[0]?.url ?? "").toLowerCase();
+    return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) && domain.length <= 60 ? `${SEARCH_STEP} — ${domain}` : SEARCH_STEP;
+  }
+  if (outcome.kind === "success_no_results") return `${SEARCH_STEP} — nothing found`;
+  return `${SEARCH_STEP} — not completed`;
+}
+
 export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
   const invalidReason = validateSearchRequest(request, TAVILY_ADAPTER);
   if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
-  // Universal live status: never the query text.
-  reportLiveStep("Searching the web");
+  // Universal live status: never the query text. The step shows ⏳ until
+  // the search returns, then names the site it found.
+  reportLiveStep(SEARCH_STEP);
+  const outcome = await runSearch(env, request, access);
+  resolveLiveStep(SEARCH_STEP, finishedSearchLabel(outcome));
+  return outcome;
+}
+
+async function runSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
 
   if (!env.TAVILY_API_KEY) {
     return { kind: "provider_unavailable", reason: "no search provider is configured (TAVILY_API_KEY is unset)" };
