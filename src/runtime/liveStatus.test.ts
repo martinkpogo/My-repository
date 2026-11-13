@@ -236,7 +236,7 @@ test("a Hat's own named status leads: the live run sends nothing and records wha
   await flush();
   assert.strictEqual(texts(calls, "sendMessage").length, 1, "only the Hat's own message");
   assert.ok(!calls.some((c) => c.method === "deleteMessage"), "the Hat's message is the Hat's to finish");
-  assert.match(texts(calls, "editMessageText").at(-1)!, /✓ Deciding within ownership\n✓ Thinking \(Web Research Check\)\n✓ Searching the web ×3\n✓ Writing the draft\n⏸ Needs clarification/);
+  assert.match(texts(calls, "editMessageText").at(-1)!, /✓ Deciding within ownership\n✓ Writing the draft\n⏸ Needs clarification/);
 });
 
 test("a live message already shown gives way when a Hat opens its own named status", async (t) => {
@@ -331,7 +331,7 @@ test("web searches (Martin, 2026-11-13, A): each search is its own line, ⏳ unt
   assert.strictEqual(finishedSearchLabel({ kind: "success_no_results" } as any), "Searching the web — nothing found");
   assert.strictEqual(finishedSearchLabel({ kind: "provider_failure", reason: "x" } as any), "Searching the web — not completed");
 
-  // Through a Hat's own status: the trail shows one ✓ line per search.
+  // Through a Hat's own status: the line shows the latest search while running.
   const { renderWorkStatus } = await import("./workStatus");
   const holder: WorkStatusHolder = { chatId: -100, workId: "w1", workStatusMessageId: 9, workStatus: { hat: "H", header: "H — task", done: [], current: "Deciding", edits: 99 } as any };
   const sink = workStatusLiveSink(fakeEnv(), holder);
@@ -339,6 +339,7 @@ test("web searches (Martin, 2026-11-13, A): each search is its own line, ⏳ unt
   sink.setDetail("Searching the web ×2");
   sink.resolveDetail!("Searching the web", "Searching the web — trade.gov");
   sink.resolveDetail!("Searching the web", "Searching the web — yen.com.gh");
-  assert.strictEqual(renderWorkStatus(holder.workStatus!, { line: "✅ Draft ready", currentFailed: false }), "🧭 H — task\n✓ Deciding\n✓ Searching the web — trade.gov\n✓ Searching the web — yen.com.gh\n✅ Draft ready");
+  assert.strictEqual(renderWorkStatus(holder.workStatus!), "🧭 H — task\n⏳ Searching the web — yen.com.gh");
+  assert.strictEqual(renderWorkStatus(holder.workStatus!, { line: "✅ Draft ready", currentFailed: false }), "🧭 H — task\n✓ Deciding\n✅ Draft ready");
   resolveLiveStep("Searching the web", "x"); // outside a run: a no-op, never throws
 });
