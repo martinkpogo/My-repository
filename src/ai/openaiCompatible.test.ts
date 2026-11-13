@@ -239,3 +239,31 @@ test("OpenRouter uses Martin's chosen free models (2026-11-13)", async () => {
   assert.strictEqual((mod.OPENROUTER_PROVIDER as any).config.model, "google/gemma-4-31b-it:free");
   assert.strictEqual((mod.OPENROUTER_PROVIDER as any).config.lightModel, "google/gemma-4-26b-a4b-it:free");
 });
+
+test("Gemini is sent reasoning_effort none (Martin, 2026-11-13); a 400 retries once without it", async (t) => {
+  const mod = await import("./openaiCompatible");
+  const bodies: any[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if ("reasoning_effort" in body) return new Response(JSON.stringify({ error: { message: "unsupported" } }), { status: 400 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "x" }] } as any;
+  const r = await mod.GEMINI_PROVIDER.execute({ GEMINI_API_KEY: "k" } as any, task);
+  assert.ok(r.success, "answered after the retry");
+  assert.strictEqual(bodies.length, 2);
+  assert.strictEqual(bodies[0].reasoning_effort, "none");
+  assert.ok(!("reasoning_effort" in bodies[1]));
+});
+
+test("only Gemini sends extra request settings; no other provider changes", async () => {
+  const mod = await import("./openaiCompatible");
+  for (const p of [mod.GROQ_PROVIDER, mod.OPENROUTER_PROVIDER, mod.NVIDIA_NIM_PROVIDER, mod.CEREBRAS_PROVIDER, mod.SAMBANOVA_PROVIDER]) {
+    assert.strictEqual((p as any).config.extraBody, undefined, (p as any).config.id);
+  }
+  assert.deepStrictEqual((mod.GEMINI_PROVIDER as any).config.extraBody, { reasoning_effort: "none" });
+});
