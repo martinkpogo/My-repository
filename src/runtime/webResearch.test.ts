@@ -194,3 +194,10 @@ test("a Work's Access context is taken at the moment of use, so a Hat resolved d
   }, () => "succeeded", undefined, { access: () => workSessionContext(state) });
   assert.strictEqual(used.hat, "Content Strategist");
 });
+
+test("research question stays on the request's subject (Martin, 2026-11-13): a problem businesses have is researched as THEIR problem, not their customers'", async () => {
+  const { RESEARCH_NEED_INSTRUCTIONS } = await import("./webResearch");
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /stay on the exact subject the request asks about/);
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /not their customers' behaviour or the market in general/);
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /identity-free/, "the identity rule is unchanged");
+});
