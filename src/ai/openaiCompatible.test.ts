@@ -218,3 +218,9 @@ test("Gemini waits 25s for long steps (Martin, 2026-11-13); every other provider
   }
   assert.strictEqual(mod.DEFAULT_PROVIDER_TIMEOUT_MS, 12_000);
 });
+
+test("OpenRouter uses Martin's chosen free models (2026-11-13)", async () => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual((mod.OPENROUTER_PROVIDER as any).config.model, "google/gemma-4-31b-it:free");
+  assert.strictEqual((mod.OPENROUTER_PROVIDER as any).config.lightModel, "google/gemma-4-26b-a4b-it:free");
+});
