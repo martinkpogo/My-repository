@@ -65,10 +65,15 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 12_000;
  * frequently ALSO rate-limited or exhausted from the same burst of
  * calls (protocol selection, N per-protocol plan calls, and synthesis
  * can all land on the same provider within the same minute). Capped
- * well under DEFAULT_PROVIDER_TIMEOUT_MS so a wait-and-retry can never
+ * just under DEFAULT_PROVIDER_TIMEOUT_MS so a wait-and-retry can never
  * itself become the reason a request looks stalled.
+ *
+ * Raised from 6s to 10s (Martin, 2026-11-13): a live Marketing draft
+ * failed because Groq said "try again in 7.8s" and the old 6s cap retried
+ * 1.8s too early, was refused again, and the chain ran out of providers.
+ * Anything it asks beyond 10s still moves on to the next provider.
  */
-const MAX_RETRY_AFTER_WAIT_MS = 6_000;
+export const MAX_RETRY_AFTER_WAIT_MS = 10_000;
 
 function parseRetryAfterMs(res: Response, bodyText: string): number | undefined {
   const header = res.headers.get("retry-after");
