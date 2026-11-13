@@ -267,3 +267,29 @@ test("only Gemini sends extra request settings; no other provider changes", asyn
   }
   assert.deepStrictEqual((mod.GEMINI_PROVIDER as any).config.extraBody, { reasoning_effort: "none" });
 });
+
+test("a 429 naming a 7.8s wait is waited out in full (cap raised 6s -> 10s, Martin 2026-11-13)", async (t) => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual(mod.MAX_RETRY_AFTER_WAIT_MS, 10_000);
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    return calls === 1
+      ? new Response('{"error":{"message":"Rate limit reached. Please try again in 7.807499999s."}}', { status: 429 })
+      : new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "x" }] } as any;
+  const pending = mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  t.mock.timers.tick(6_000);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.strictEqual(calls, 1, "still waiting at the old 6s cap");
+  t.mock.timers.tick(1_900);
+  const r = await pending;
+  assert.strictEqual(calls, 2, "retried after the full 7.8s");
+  assert.ok(r.success);
+});
