@@ -130,6 +130,9 @@ export const MARKETING_PROBLEM_BRIEF_FORMAT = [
   "Evidence must show the problem itself -- businesses having it -- not only facts about their customers or market. If no finding shows the problem, say plainly in part 2: \"The research did not directly show this problem\", and treat part 1 as a hypothesis to test.",
   "If the findings do not support a communication or brand problem, say so in part 1 and in part 6 instead of stretching them.",
   "Part 7 must give the reason for choosing this problem, not repeat part 1.",
+  // 2026-11-13: with no research attached, the Hat asked Martin to "supply a
+  // WEB RESEARCH block" -- internal mechanics he cannot act on.
+  "If NO WEB RESEARCH block is present, ignore this format: never ask for research, a research block or data, and never mention this format. Write your normal draft from what you know, and say in one line that no current web research was available for it.",
 ].join("\n");
 
 export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {

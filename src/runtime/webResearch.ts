@@ -141,6 +141,8 @@ async function decideResearchNeed(env: Env, task: AiTask): Promise<string | null
     // Held to the calling step's own level (approved rule, 2026-11-11).
     sensitivity: level,
   });
+  // Diagnostic only: whether the check answered and what it decided -- never the question or the step's content.
+  console.log(`web research check for ${task.taskId}: ${!result ? "no usable answer" : result.needs_web === true ? "research needed" : "not needed"}`);
   if (!result || result.needs_web !== true || typeof result.question !== "string") return null;
   const question = scrubResearchQuestion(result.question);
   return question.length >= 8 ? question : null;
