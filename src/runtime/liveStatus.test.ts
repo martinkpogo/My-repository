@@ -209,19 +209,25 @@ test("outside any run, reporting a step is a no-op", async (t) => {
   assert.strictEqual(calls.length, 0);
 });
 
-test("a Hat's own named status leads: the live run sends nothing and feeds a detail line instead", async (t) => {
+test("a Hat's own named status leads: the live run sends nothing and records what ran under the Hat's step -- kept after the step finishes", async (t) => {
   const calls = mockTelegram(t);
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const holder: WorkStatusHolder = { chatId: -100, workId: "w1" };
+  const { advanceWorkStatus, finishWorkStatus } = await import("./workStatus");
   await withLiveStatus(
     fakeEnv(),
     target,
     async () => {
-      await startWorkStatus(fakeEnv(), holder, "Value-Based Pricing Assessor", "Value-Based Pricing Assessor — MAT-32", "Judging the value at stake");
+      await startWorkStatus(fakeEnv(), holder, "Marketing Strategist", "Marketing Strategist — task", "Deciding within ownership");
       t.mock.timers.tick(3500);
-      reportLiveStep("Reading Matters");
+      reportLiveStep("Thinking (Web Research Check)");
+      reportLiveStep("Searching the web");
+      reportLiveStep("Searching the web");
+      reportLiveStep("Searching the web");
       await flush();
-      assert.strictEqual(holder.workStatus?.detail, "Reading Matters");
+      assert.deepStrictEqual(holder.workStatus?.trail, ["Thinking (Web Research Check)", "Searching the web ×3"]);
+      await advanceWorkStatus(fakeEnv(), holder, "Writing the draft");
+      await finishWorkStatus(fakeEnv(), holder, "⏸ Needs clarification -- the question is below.", "succeeded");
       return "ok";
     },
     () => "succeeded",
@@ -230,8 +236,7 @@ test("a Hat's own named status leads: the live run sends nothing and feeds a det
   await flush();
   assert.strictEqual(texts(calls, "sendMessage").length, 1, "only the Hat's own message");
   assert.ok(!calls.some((c) => c.method === "deleteMessage"), "the Hat's message is the Hat's to finish");
-  assert.match(texts(calls, "editMessageText").at(-1)!, /⏳ Judging the value at stake\n   · Reading Matters/);
-  assert.strictEqual(holder.workStatus?.detail, undefined, "detail cleared when the run ends");
+  assert.match(texts(calls, "editMessageText").at(-1)!, /✓ Deciding within ownership\n   · Thinking \(Web Research Check\) · Searching the web ×3\n✓ Writing the draft\n⏸ Needs clarification/);
 });
 
 test("a live message already shown gives way when a Hat opens its own named status", async (t) => {
