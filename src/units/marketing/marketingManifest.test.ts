@@ -228,3 +228,17 @@ test("Status: a Marketing Hat run shows its real steps and ends on the draft awa
     at = next;
   }
 });
+
+test("problem brief (Martin, 2026-11-13): every Marketing Hat's instructions carry the seven-part shape, used only with web research, never naming a company", async () => {
+  const { buildHatPromptParts, MARKETING_PROBLEM_BRIEF_FORMAT } = await import("./marketingManifest");
+  const { MARKETING_HAT_REGISTRY } = await import("../../hats/registry");
+  for (const hat of Object.values(MARKETING_HAT_REGISTRY)) {
+    assert.ok(buildHatPromptParts(hat, "contract").context!.includes(MARKETING_PROBLEM_BRIEF_FORMAT), hat.name);
+  }
+  for (const part of ["1. The problem", "2. Evidence", "3. Who has it most", "4. Why it matters", "5. Where ENIG fits", "6. What's still unknown", "7. Recommendation"]) {
+    assert.ok(MARKETING_PROBLEM_BRIEF_FORMAT.includes(part), part);
+  }
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /AND a WEB RESEARCH block is present/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Never name a company/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Never invent a finding or a source/);
+});

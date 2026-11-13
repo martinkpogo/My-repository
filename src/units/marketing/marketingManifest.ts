@@ -109,7 +109,28 @@ interface HatActionDecision {
   involves_spend?: boolean;
 }
 
-function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+/**
+ * The shape of a problem brief (Martin's decision, 2026-11-13). When Martin
+ * asks a Marketing Hat to find what businesses struggle with -- a problem to
+ * build a strategy around -- and the step has web research attached, the
+ * draft follows these seven parts instead of a free paragraph. Never names a
+ * company: the subject is a TYPE of business, not a prospect (that is Lead
+ * Generation's work).
+ */
+export const MARKETING_PROBLEM_BRIEF_FORMAT = [
+  "=== PROBLEM BRIEF FORMAT (applies only when the task asks what businesses need, struggle with, or what problem to build a strategy around, AND a WEB RESEARCH block is present) ===",
+  "Write the draft as a problem brief with exactly these parts, each headed in plain text:",
+  "1. The problem -- one sentence naming a communication, positioning, brand or visual-identity problem that ENIG's services (see the Consultancy Profile) can solve. Not a general business problem such as finance, taxes or skills.",
+  "2. Evidence -- two or three findings from the WEB RESEARCH block that support it, each followed by its source link exactly as given there. Never invent a finding or a source.",
+  "3. Who has it most -- the TYPE of business where the problem hurts most (sector, size, stage). Never name a company.",
+  "4. Why it matters to them -- what the problem costs them (lost deals, price pressure, low trust, looking unprofessional).",
+  "5. Where ENIG fits -- the ENIG service from the Consultancy Profile that addresses it.",
+  "6. What's still unknown -- what the research could not establish; never fill it in.",
+  "7. Recommendation -- the one problem to build the strategy around, and why.",
+  "If the findings do not support a communication or brand problem, say so in part 1 and in part 6 instead of stretching them.",
+].join("\n");
+
+export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
     persona: `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
     behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract].join("\n\n"),
@@ -122,6 +143,7 @@ function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract:
     ].join("\n\n"),
     context: [
       "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+      MARKETING_PROBLEM_BRIEF_FORMAT,
       'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"..."}. Never guess past missing information or invent authority you don\'t have.',
     ].join("\n\n"),
   };
