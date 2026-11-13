@@ -29,11 +29,12 @@ export interface WorkStatus {
   /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
   edits?: number;
   /**
-   * What the universal live status (liveStatus.ts) last saw this run do --
-   * "Reading Payments ×2" -- shown under the running step. Fixed labels only;
-   * never persisted meaningfully (cleared when the live run ends).
+   * What the universal live status (liveStatus.ts) saw happen during the
+   * running step -- "Thinking (Web Research Check)", "Searching the web ×4"
+   * -- kept under that step after it finishes, so the finished message still
+   * shows what ran (Martin, 2026-11-13). Fixed labels only.
    */
-  detail?: string;
+  trail?: string[];
   /** When the last intermediate edit was made (ms), for the live detail's throttle. */
   lastEditAt?: number;
 }
@@ -66,11 +67,25 @@ export function workStatusHeader(hat: string, state: Partial<Pick<WorkState, "ma
   return `${hat} — ${state.matterToken || state.entityToken || fallback}`;
 }
 
+/** At most this many trail entries are shown per step (the latest), so a busy step stays readable. */
+const MAX_TRAIL = 6;
+
+function trailLine(trail: string[]): string {
+  return `   · ${trail.slice(-MAX_TRAIL).join(" · ")}`;
+}
+
+/** Adds a live step to the trail, merging a repeat of the same step ("Searching the web" ×n). */
+function addToTrail(trail: string[], label: string): void {
+  const base = (s: string) => s.replace(/ ×\d+$/, "");
+  if (trail.length && base(trail[trail.length - 1]) === base(label)) trail[trail.length - 1] = label;
+  else trail.push(label);
+}
+
 export function renderWorkStatus(status: WorkStatus, ending?: { line: string; currentFailed: boolean }): string {
   const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
   const lines = [`🧭 ${status.header}`, ...status.done.map((d) => `✓ ${step(d)}`)];
   if (status.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(status.current)}`);
-  if (!ending && status.detail) lines.push(`   · ${status.detail}`);
+  if (status.trail?.length) lines.push(trailLine(status.trail));
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
@@ -88,9 +103,9 @@ export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: s
 export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step: string): Promise<void> {
   const status = holder.workStatus;
   if (holder.workStatusMessageId === undefined || !status) return;
-  if (status.current) status.done.push(status.current);
+  if (status.current) status.done.push(status.trail?.length ? `${status.current}\n${trailLine(status.trail)}` : status.current);
   status.current = step;
-  status.detail = undefined;
+  status.trail = undefined;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
   status.edits = (status.edits ?? 0) + 1;
   status.lastEditAt = Date.now();
@@ -152,8 +167,10 @@ export async function refreshWorkStatus(env: Env, holder: WorkStatusHolder): Pro
 export function workStatusLiveSink(env: Env, holder: WorkStatusHolder): LiveStatusDetailSink {
   return {
     hatStatusOpen: () => holder.workStatusMessageId !== undefined && holder.workStatus !== undefined,
+    // A step the live run saw is added to the running Hat step's trail; the
+    // live run ending (undefined) leaves the trail as it is.
     setDetail: (detail) => {
-      if (holder.workStatus) holder.workStatus.detail = detail;
+      if (holder.workStatus && detail) addToTrail((holder.workStatus.trail ??= []), detail);
     },
     refresh: () => refreshWorkStatus(env, holder),
   };
