@@ -236,7 +236,7 @@ test("a Hat's own named status leads: the live run sends nothing and records wha
   await flush();
   assert.strictEqual(texts(calls, "sendMessage").length, 1, "only the Hat's own message");
   assert.ok(!calls.some((c) => c.method === "deleteMessage"), "the Hat's message is the Hat's to finish");
-  assert.match(texts(calls, "editMessageText").at(-1)!, /✓ Deciding within ownership\n   · Thinking \(Web Research Check\) · Searching the web ×3\n✓ Writing the draft\n⏸ Needs clarification/);
+  assert.match(texts(calls, "editMessageText").at(-1)!, /✓ Deciding within ownership\n✓ Thinking \(Web Research Check\)\n✓ Searching the web ×3\n✓ Writing the draft\n⏸ Needs clarification/);
 });
 
 test("a live message already shown gives way when a Hat opens its own named status", async (t) => {

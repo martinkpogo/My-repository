@@ -70,8 +70,14 @@ export function workStatusHeader(hat: string, state: Partial<Pick<WorkState, "ma
 /** At most this many trail entries are shown per step (the latest), so a busy step stays readable. */
 const MAX_TRAIL = 6;
 
-function trailLine(trail: string[]): string {
-  return `   · ${trail.slice(-MAX_TRAIL).join(" · ")}`;
+/**
+ * The trail under a Hat step, one entry per line, aligned with the Hat steps
+ * (Martin, 2026-11-13: "aligned vertically"). Every entry is ✓ except, while
+ * the step is still running, its latest entry, which shows `lastMark`.
+ */
+function trailLines(trail: string[], lastMark = "✓"): string {
+  const shown = trail.slice(-MAX_TRAIL);
+  return shown.map((t, i) => `${i === shown.length - 1 ? lastMark : "✓"} ${t}`).join("\n");
 }
 
 /** Adds a live step to the trail, merging a repeat of the same step ("Searching the web" ×n). */
@@ -85,7 +91,7 @@ export function renderWorkStatus(status: WorkStatus, ending?: { line: string; cu
   const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
   const lines = [`🧭 ${status.header}`, ...status.done.map((d) => `✓ ${step(d)}`)];
   if (status.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(status.current)}`);
-  if (status.trail?.length) lines.push(trailLine(status.trail));
+  if (status.trail?.length) lines.push(trailLines(status.trail, ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"));
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
@@ -103,7 +109,7 @@ export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: s
 export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step: string): Promise<void> {
   const status = holder.workStatus;
   if (holder.workStatusMessageId === undefined || !status) return;
-  if (status.current) status.done.push(status.trail?.length ? `${status.current}\n${trailLine(status.trail)}` : status.current);
+  if (status.current) status.done.push(status.trail?.length ? `${status.current}\n${trailLines(status.trail)}` : status.current);
   status.current = step;
   status.trail = undefined;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;

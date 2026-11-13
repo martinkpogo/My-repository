@@ -106,3 +106,12 @@ test("workStatus: Markdown entity characters are escaped, so Telegram accepts ea
 
   assert.strictEqual(calls[0].body.text, "Hat: H.\n\n🧭 H — x\n⏳ Running business\\_strategy, brand\\_strategy");
 });
+
+test("trail (Martin, 2026-11-13): each entry is its own ✓ line, aligned with the Hat steps; the running step's latest entry shows ⏳", async () => {
+  const { renderWorkStatus } = await import("./workStatus");
+  const running = renderWorkStatus({ hat: "H", header: "H — task", done: ["Loading the contract\n✓ Reading a definition page"], current: "Deciding", trail: ["Thinking (Research Plan Generation) ×3", "Searching the web ×8"] } as any);
+  assert.strictEqual(running, "🧭 H — task\n✓ Loading the contract\n✓ Reading a definition page\n⏳ Deciding\n✓ Thinking (Research Plan Generation) ×3\n⏳ Searching the web ×8");
+  const ended = renderWorkStatus({ hat: "H", header: "H — task", done: [], current: "Deciding", trail: ["Searching the web ×8", "Thinking (Research Synthesis)"] } as any, { line: "✅ Draft ready", currentFailed: false });
+  assert.strictEqual(ended, "🧭 H — task\n✓ Deciding\n✓ Searching the web ×8\n✓ Thinking (Research Synthesis)\n✅ Draft ready");
+  assert.ok(!/ · /.test(running + ended), "no dot-joined line");
+});
