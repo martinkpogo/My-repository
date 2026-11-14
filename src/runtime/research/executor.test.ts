@@ -528,8 +528,11 @@ function researchEnv(ai: unknown, governance: Record<string, string> = {}): Env 
 }
 
 interface ResearchScript {
-  relevance?: unknown;
+  /** Replaces the whole interpretation-and-selection answer. */
+  interpretation?: unknown;
+  /** Merged over a valid relevance: the selection fields only. */
   selection?: unknown;
+  interpretCalls?: number;
   plan?: unknown;
   synthesis?: unknown;
   seenSystemPrompts?: string[];
@@ -541,11 +544,15 @@ function scriptedAi(script: ResearchScript): unknown {
       const system = String(opts?.messages?.[0]?.content ?? "");
       script.seenSystemPrompts?.push(system);
       const respond = (value: unknown) => ({ response: JSON.stringify(value) });
-      if (system.includes("what the question means in relation to this authorized category")) {
-        return respond(script.relevance ?? { relevance: "A market-structure question for a strategy-led consultancy in Ghana." });
-      }
-      if (system.includes("You select research protocol(s)")) {
-        return respond(script.selection ?? { protocols: ["Market / Industry Research"], ambiguous: false, reason: "Broad market question." });
+      // One call interprets the question and selects protocol(s) (Martin's
+      // decision 2026-11-14, option D -- formerly two calls).
+      if (system.includes("You interpret a research question and select research protocol(s)")) {
+        script.interpretCalls = (script.interpretCalls ?? 0) + 1;
+        if (script.interpretation !== undefined) return respond(script.interpretation);
+        return respond({
+          relevance: "A market-structure question for a strategy-led consultancy in Ghana.",
+          ...((script.selection as object | undefined) ?? { protocols: ["Market / Industry Research"], ambiguous: false, reason: "Broad market question." }),
+        });
       }
       if (system.includes("You generate a bounded research plan")) {
         return respond(script.plan ?? { dimensions: [{ subQuestion: "What is the size of the consulting market in Ghana?" }] });
@@ -617,6 +624,27 @@ test("EXEC 10b. A cached-but-wrong safe context (log-entry-shaped text without t
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "SAFE_CONTEXT_UNAVAILABLE");
   assert.strictEqual(fetchCalls.length, 0, "a wrong cached context fails closed on what governance returned -- no silent Notion re-fetch, no substitute page");
+});
+
+test("EXEC 10c. Interpretation and protocol selection are ONE AI call (Martin, 2026-11-14, option D), and the interpretation still reaches the research plan", async () => {
+  const script: ResearchScript = { seenSystemPrompts: [] };
+  const outcome = await executeResearch(researchEnv(scriptedAi(script)), { question: QUESTION, context: "" }, discoveryCronContext());
+  assert.strictEqual(script.interpretCalls, 1);
+  assert.strictEqual(outcome.status, "completed");
+  const planPrompt = script.seenSystemPrompts!.find((p) => p.includes("You generate a bounded research plan")) ?? "";
+  assert.ok(planPrompt.includes("A market-structure question for a strategy-led consultancy in Ghana."), "the plan is grounded in the interpretation");
+});
+
+test("EXEC 10d. No usable interpretation still blocks as RELEVANCE_DERIVATION_FAILED; no protocol list still blocks as PROTOCOL_SELECTION_FAILED", async () => {
+  for (const [interpretation, code] of [
+    [{ protocols: ["Market / Industry Research"], ambiguous: false }, "RELEVANCE_DERIVATION_FAILED"],
+    [{ relevance: "   ", protocols: ["Market / Industry Research"] }, "RELEVANCE_DERIVATION_FAILED"],
+    [{ relevance: "A market question.", ambiguous: false }, "PROTOCOL_SELECTION_FAILED"],
+  ] as const) {
+    const outcome = await executeResearch(researchEnv(scriptedAi({ interpretation })), { question: QUESTION, context: "" }, discoveryCronContext());
+    assert.strictEqual(outcome.status, "blocked");
+    if (outcome.status === "blocked") assert.strictEqual(outcome.code, code);
+  }
 });
 
 test("EXEC 11. An ambiguous protocol selection blocks as AMBIGUOUS_PROTOCOL_SELECTION and carries the model's own reason -- never a guessed protocol", async () => {

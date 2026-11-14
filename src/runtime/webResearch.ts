@@ -7,8 +7,9 @@ import { aiJson } from "../ai";
 import { executeResearch } from "./research/executor";
 import { summarizeResearchSynthesis } from "./actionResearch";
 import { resolveRuntimeSkill } from "./actionSkills";
-import { currentRun } from "./liveStatus";
-import { kvGet } from "../kvStore";
+import { currentRun, reportLiveStep, resolveLiveStep } from "./liveStatus";
+import { kvGet, kvPut } from "../kvStore";
+import { hashContent } from "../contentHash";
 import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps } from "./webLookupAllowance";
 import { systemContext, type AccessContext } from "../access";
 
@@ -172,10 +173,59 @@ function findingsBlock(question: string, digest: string): string {
 
 /** Runs one research question through the existing engine with the Runtime's research_signal methodology. */
 export async function researchOnline(env: Env, question: string, access: AccessContext): Promise<{ digest: string; gaps: string[] } | null> {
+  const cacheKey = await researchCacheKey(question);
+  const cached = await readCachedResearch(env, cacheKey);
+  if (cached) {
+    reportLiveStep(RESEARCH_CACHE_HIT_STEP);
+    resolveLiveStep(RESEARCH_CACHE_HIT_STEP, RESEARCH_CACHE_HIT_STEP);
+    return cached;
+  }
   const methodology = resolveRuntimeSkill("research_signal").content;
   const outcome = await executeResearch(env, { question, context: "", skillContent: methodology }, access);
   if (outcome.status !== "completed") return null;
-  return { digest: summarizeResearchSynthesis(outcome.synthesis), gaps: outcome.synthesis.limitations.map((l) => l.statement) };
+  const result = { digest: summarizeResearchSynthesis(outcome.synthesis), gaps: outcome.synthesis.limitations.map((l) => l.statement) };
+  await writeCachedResearch(env, cacheKey, result);
+  return result;
+}
+
+/**
+ * Research cache (Martin's decision 2026-11-14, free-tier option C): the
+ * same research question within 24 hours reuses its saved findings -- no
+ * AI calls, no searches, nothing counted against the limits. Only a
+ * completed research run is saved. The key is a SHA-256 of the
+ * identity-free question, never the text; it is not in kvStore's fallback
+ * allowlist, so it stays Cloudflare-only. Best-effort: a cache failure is a
+ * miss, never a failed research run.
+ */
+export const RESEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60;
+export const RESEARCH_CACHE_HIT_STEP = "Using web research saved earlier today";
+const RESEARCH_CACHE_PREFIX = "web_research_cache:";
+
+async function researchCacheKey(question: string): Promise<string> {
+  return RESEARCH_CACHE_PREFIX + (await hashContent(question.trim().toLowerCase().replace(/\s+/g, " ")));
+}
+
+async function readCachedResearch(env: Env, key: string): Promise<{ digest: string; gaps: string[] } | null> {
+  if (!env.STATE_KV) return null;
+  try {
+    const raw = await kvGet(env, key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { digest?: unknown; gaps?: unknown };
+    if (typeof parsed.digest !== "string" || !parsed.digest || !Array.isArray(parsed.gaps)) return null;
+    return { digest: parsed.digest, gaps: parsed.gaps.filter((g): g is string => typeof g === "string") };
+  } catch (err) {
+    console.error("Research cache read failed", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+async function writeCachedResearch(env: Env, key: string, result: { digest: string; gaps: string[] }): Promise<void> {
+  if (!env.STATE_KV) return;
+  try {
+    await kvPut(env, key, JSON.stringify(result), { expirationTtl: RESEARCH_CACHE_TTL_SECONDS });
+  } catch (err) {
+    console.error("Research cache write failed", err instanceof Error ? err.message : err);
+  }
 }
 
 /** The augmenter installed on the shared AI executor. Never throws past the executor's own guard. */
