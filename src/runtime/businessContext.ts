@@ -25,14 +25,18 @@ const MAX_PROFILE_CHARS = 8000;
  * The Hat steps that receive it: every step that does a Hat's work -- the
  * web-research set plus the evidence-bound Hat steps (qualification and
  * Finance pricing), which need to know ENIG's specialization and terms.
- * Not routing/classification, extraction, Result verification or the
- * research engine's own steps.
+ * Not routing/classification, extraction or the research engine's own
+ * steps. (The advisory Checker is included, below, to judge relevance.)
  */
 export const BUSINESS_CONTEXT_TASKS: ReadonlySet<SemanticTaskId> = new Set<SemanticTaskId>([
   ...WEB_RESEARCH_TASKS,
   "finance.quote_judgment",
   "sales.call_qualification",
   "sales.call_qualification_handoff",
+  // The independent Checker's advisory assessment judges whether a draft is
+  // relevant to what ENIG does, so it reads the Profile (Martin's decision,
+  // 2026-11-14).
+  "work.result_verification",
 ]);
 
 export async function augmentTaskWithBusinessContext(env: Env, task: AiTask): Promise<AiTask> {

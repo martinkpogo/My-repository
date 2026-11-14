@@ -34,6 +34,7 @@
 // (The erased-type rule below that motivated the old import was about
 // *this* module importing Access; the Skill Registry is a leaf.)
 import { SKILL_IDS, type SkillId } from "../platform/skillRegistry";
+import type { WorkState } from "../types";
 
 export type ConsequenceLevel = "read" | "internal" | "write";
 
@@ -141,6 +142,24 @@ export interface ActionDefinition<A extends string> {
    * the default: Martin's separate Result approval is required (BD-8).
    */
   outputApprovalClosesWork?: boolean;
+  /**
+   * The independent Checker's ADVISORY second opinion (Martin's decision,
+   * 2026-11-14): where set, once the Action's draft is saved awaiting
+   * Martin's decision the Checker assesses it against `criteria` (CONTENT
+   * criteria only -- never the approval criterion, his approval does not
+   * exist yet) and whether it is relevant to what ENIG does and to the
+   * client's situation as recorded, and sends him a separate assessment with
+   * a recommended next action. `output` returns exactly the draft Martin was
+   * shown; `request` what he asked for; `awaitingStage` the Work stage while
+   * the draft awaits his decision. Never blocks, delays or invalidates his
+   * Approve, Redo or closure. See src/runtime/advisoryAssessment.ts.
+   */
+  advisoryAssessment?: {
+    output: (state: WorkState) => string | undefined;
+    request?: (state: WorkState) => string | undefined;
+    criteria: readonly string[];
+    awaitingStage: string;
+  };
   /**
    * Exact Skills the Worker must follow while performing this Action.
    *
