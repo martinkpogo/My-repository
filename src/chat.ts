@@ -51,6 +51,16 @@ const MAX_HISTORY_TURNS = 20;
 const EVIDENCE_RULE =
   "If a snapshot of recent real Activity & Decision Log entries is provided below, use it to answer factual questions about recent activity — it is not the full history, and you have no other live connection to Notion or any record system beyond what's listed there (or nothing, if no snapshot is provided at all). Never invent specifics that aren't in that snapshot, in the AUTHORITATIVE FACTS section, or in this conversation's own messages -- this includes but is not limited to: past enquiries, entities, matters, deals, numbers, dates, internal process steps or workflow stages, job titles or roles, team members, or org structure. If asked about something not covered by what you were actually given, say so plainly and point to /sessions or the actual Notion database — never answer with a plausible-sounding invented example, even a generic-sounding one (a job title or process step can sound completely ordinary and still be entirely fabricated).";
 
+/**
+ * The log is history, not the current state (Martin, 2026-11-14). Live:
+ * ENIG read earlier "needs clarification" Activity Log lines and told
+ * Martin a Marketing Work was "awaiting clarification" when it was not.
+ * What is open, pending or blocked NOW comes only from the business
+ * snapshot (the open-Work list and the records it reads).
+ */
+export const LOG_IS_HISTORY_RULE =
+  "The Activity & Decision Log entries are HISTORY: they record what happened at the time, not what is true now. Never describe something as currently pending, blocked, awaiting clarification or open because a log entry says so. What is open, pending or blocked right now comes ONLY from the business snapshot (its open Work and records). If the two disagree, the snapshot is current and the log is the past; you may mention a log entry only as something that happened earlier.";
+
 // Every Unit, in a fixed order. Typed as a total Record so a Unit added to
 // the type can't be silently left out of the facts below.
 const UNIT_ORDER: Record<Unit, number> = {
@@ -260,7 +270,7 @@ async function generalChatReplyInner(
     persona: buildStructureFacts(),
     behavior: UNIT_PERSONAS[unit],
     skillContent: EVIDENCE_RULE,
-    context: [HOW_WORK_STARTS_RULE, `Recent Activity & Decision Log entries for ${unit}:\n${snapshot}`].join("\n\n"),
+    context: [HOW_WORK_STARTS_RULE, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries for ${unit} -- history, not current state:\n${snapshot}`].join("\n\n"),
   };
   return runChatTurn(env, chatId, threadId, parts, userMessage, chatSensitivityForUnit(unit));
 }
@@ -344,7 +354,7 @@ async function runEnigTurnInner(
     persona: `You are ENIG. Your Hat Definition follows; act exactly within it.\n\n${hatDefinition}`,
     behavior: universalRoleContract,
     skillContent: [buildStructureFacts(), HOW_WORK_STARTS_RULE, extraInstruction].filter(Boolean).join("\n\n"),
-    context: [snapshot, `Recent Activity & Decision Log entries (all Units):\n${activity}`].join("\n\n"),
+    context: [snapshot, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries (all Units) -- history, not current state:\n${activity}`].join("\n\n"),
   };
   return runChatTurn(env, chatId, threadId, parts, situation, "business_sensitive");
 }
