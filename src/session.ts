@@ -18,6 +18,9 @@ import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./run
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { migrateSavedWork } from "./workStateMigration";
+import { hashContent } from "./contentHash";
+import type { ActionDefinition } from "./hats/actionRegistry";
+import { advisoryAssessmentDeps, assessmentDelivery, formatAdvisoryMessage, runAdvisoryAssessment, summarizeAssessment } from "./runtime/advisoryAssessment";
 import { runUnitOperationOnWork } from "./units/unitOperations";
 import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
@@ -611,7 +614,7 @@ export class WorkSession extends DurableObject<Env> {
    * the caller. Returns undefined for a Work that records no registered
    * Action; the gate then refuses its successful closure with that reason.
    */
-  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[]; outputApprovalClosesWork?: boolean } | undefined {
+  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[]; outputApprovalClosesWork?: boolean; advisoryAssessment?: NonNullable<ActionDefinition<string>["advisoryAssessment"]> } | undefined {
     if (!state.unit || !state.hat || !state.actionName) return undefined;
     const manifest = findUnitManifest(state.unit);
     const hat = manifest ? manifest.hats[state.hat] : undefined;
@@ -651,9 +654,14 @@ export class WorkSession extends DurableObject<Env> {
       // per-Hat code. Where the Hat reports its own named steps, those lead.
       // The run also carries this Work's own Access context, which the
       // universal web research tool (src/runtime/webResearch.ts) uses.
-      return await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
+      const saved = await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
         access: () => workSessionContext(state),
       });
+      // The independent Checker's advisory second opinion (Martin's decision,
+      // 2026-11-14): AFTER the draft is saved and with Martin, never before and
+      // never holding any state, so Approve and Redo are never delayed.
+      await this.maybeSendAdvisoryAssessment(saved);
+      return saved;
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);
@@ -757,6 +765,46 @@ export class WorkSession extends DurableObject<Env> {
     return state;
   }
 
+  /**
+   * Sends Martin the Checker's second opinion on a draft awaiting his
+   * decision, if the Work's Action declares `advisoryAssessment`. Runs after
+   * the cycle that produced the draft has SAVED, holds no state while the AI
+   * call runs, and re-reads the Work before recording or sending -- so a
+   * decision Martin makes meanwhile is never overwritten (the read and the
+   * write below share no await) and an assessment of a draft he has moved on
+   * from is dropped. Never throws; a missing, late or failed assessment
+   * changes nothing.
+   */
+  private async maybeSendAdvisoryAssessment(state: WorkState): Promise<void> {
+    try {
+      const declaration = this.recordedActionResult(state)?.advisoryAssessment;
+      if (!declaration || state.stage !== declaration.awaitingStage || !state.pendingActionSummary) return;
+      const output = declaration.output(state);
+      if (!output?.trim()) return;
+      const outputHash = await hashContent(output);
+      if (state.resultReview?.assessment?.outputHash === outputHash) return; // this exact draft was already assessed
+      const result = await runAdvisoryAssessment(
+        { output, request: declaration.request?.(state), criteria: declaration.criteria, unit: state.unit, hat: state.hat },
+        advisoryAssessmentDeps(this.env),
+      );
+      if (!result) return;
+      // Re-read the saved Work and record in ONE step (no await between the
+      // read and the write), so this can never overwrite a decision Martin
+      // made while the assessment ran.
+      const fresh = migrateSavedWork(await this.ctx.storage.get<WorkState>("state"));
+      if (!fresh) return;
+      const delivery = assessmentDelivery(fresh, output, declaration.output, declaration.awaitingStage);
+      if (delivery === "skip") return;
+      if (fresh.resultReview) {
+        fresh.resultReview.assessment = result;
+        await this.ctx.storage.put("state", fresh);
+      }
+      await sendMessage(this.env, fresh.chatId, formatAdvisoryMessage(result, delivery), undefined, fresh.threadId);
+    } catch (err) {
+      console.error(`WorkSession ${state.workId}: advisory assessment failed (nothing is blocked)`, err);
+    }
+  }
+
   private async reportResultReviewBlocked(state: WorkState, reason?: string): Promise<void> {
     try {
       const review = state.resultReview;
@@ -764,7 +812,7 @@ export class WorkSession extends DurableObject<Env> {
         const staged = await stageResultReviewApproval(state);
         if (staged.ok) {
           const message =
-            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result. BD-8 requires your Result approval before the Work may close.\n\nApprove or Reject below; the decision is bound to this exact Result and its recorded evidence.`;
+            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result. BD-8 requires your Result approval before the Work may close.\n\n${review.assessment ? `\n\n${summarizeAssessment(review.assessment)}` : ""}\n\nApprove or Reject below; the decision is bound to this exact Result and its recorded evidence.`;
           const buttons: InlineButton[][] = [
             [
               { text: "✅ Approve Result", callback_data: resultReviewCallbackData(state.workId, "a", staged.pending.token) },

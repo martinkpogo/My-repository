@@ -751,6 +751,19 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       // passes -- no second Result approval. Spend approval (paid media) records
       // no operator_approval evidence, so it keeps the Result approval card.
       outputApprovalClosesWork: true,
+      // The independent Checker's advisory second opinion, sent after the draft
+      // (Martin's decision, 2026-11-14). Content criteria only: his approval is
+      // checked mechanically at closing and does not exist while he reads the
+      // draft.
+      advisoryAssessment: {
+        output: (state) => state.marketing?.draft,
+        request: (state) => state.marketing?.taskText,
+        awaitingStage: "awaiting_marketing_draft_approval",
+        criteria: [
+          "The output was produced within THIS Hat's declared ownership and produced nothing outside it.",
+          "Anything the output asserts about the client or market traces to supplied or verifiable evidence (the sources it names), not to invented facts.",
+        ],
+      },
       completionCriteria: [
         "The output (or paid-media action) was produced within THIS Hat's declared ownership and produced nothing outside it.",
         "Martin's explicit approval (or explicit spend approval for Digital Marketer) is recorded for this exact output before it was treated as done.",

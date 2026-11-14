@@ -860,6 +860,8 @@ export interface ResultReviewState {
   evidence?: readonly ResultReviewEvidenceItem[];
   /** The independent Checker's ADVISORY assessment (Martin's decision, 2026-11-14): never required for closure, never blocks. */
   checker?: ResultReviewCheckerVerdict;
+  /** The Checker's advisory second opinion on the draft (src/runtime/advisoryAssessment.ts). */
+  assessment?: ResultReviewAssessment;
   approval?: ResultReviewApproval;
   pendingApproval?: PendingResultReviewApproval;
   gateStatus: "pending" | "blocked" | "passed";
@@ -897,6 +899,23 @@ export interface ResultReviewState {
  * hashes (src/resultReview.ts), so the recorded verdict can never be
  * reinterpreted as covering a different evidence set.
  */
+/**
+ * The independent Checker's ADVISORY assessment of a draft (Martin's decision,
+ * 2026-11-14), sent to him after the draft. Never required, never blocking.
+ * `outputHash` is the SHA-256 of the exact draft it assessed.
+ */
+export interface ResultReviewAssessment {
+  checkerId: string;
+  outputHash: string;
+  assessedAt: string;
+  assessment: string;
+  concerns: string[];
+  relevantToEnig: "yes" | "partly" | "no";
+  relevantToClient: "yes" | "partly" | "no" | "not_applicable";
+  recommended: "approve" | "redo" | "ask";
+  note?: string;
+}
+
 export interface ResultReviewEvidenceItem {
   kind: string;
   ref: string;

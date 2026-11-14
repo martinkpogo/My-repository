@@ -29,9 +29,11 @@ function task(taskId: string): AiTask {
   } as AiTask;
 }
 
-test("every Hat step gets the Profile; routing, extraction, verification and research steps never do", () => {
-  for (const id of ["chat.general_reply", "marketing.hat_action_decision", "strategy.diagnosis", "finance.quote_judgment", "sales.call_qualification", "business_development.develop_opportunity"]) assert.ok(BUSINESS_CONTEXT_TASKS.has(id as any), id);
-  for (const id of ["chat.data_lookup", "marketing.intake_classification", "sales.enquiry_extraction", "work.result_verification", "research.synthesis", "runtime.research_need"]) assert.ok(!BUSINESS_CONTEXT_TASKS.has(id as any), id);
+test("every Hat step -- and the advisory Checker, to judge relevance to what ENIG does -- gets the Profile; routing, extraction and research steps never do", () => {
+  // work.result_verification moved from "never" to "gets it" on 2026-11-14: Martin's
+  // decision that the Checker's second opinion judges relevance to what ENIG does.
+  for (const id of ["chat.general_reply", "marketing.hat_action_decision", "strategy.diagnosis", "finance.quote_judgment", "sales.call_qualification", "business_development.develop_opportunity", "work.result_verification"]) assert.ok(BUSINESS_CONTEXT_TASKS.has(id as any), id);
+  for (const id of ["chat.data_lookup", "marketing.intake_classification", "sales.enquiry_extraction", "research.synthesis", "runtime.research_need"]) assert.ok(!BUSINESS_CONTEXT_TASKS.has(id as any), id);
 });
 
 test("a Hat step gets the canonical Profile as labelled context, held to the step's own sensitivity", async () => {
