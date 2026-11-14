@@ -278,7 +278,7 @@ The runtime currently interfaces with:
 * Notion — system of record for governance pages and business objects (Entities, Matters, Proposals, Leads, Handoffs, Activity & Decision Log)
 * Telegram — operational interface (Workspace/Operations two-stream architecture), including inline-keyboard approval flows
 * Cloudflare Workers — runtime, Durable Objects (per-work-item session state), KV (routing pointers, `sessions_index`, watchdog bookkeeping)
-* Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Gemini) at the same protection tier; NVIDIA NIM, Cerebras and SambaNova adapters exist but are out of the chain (2026-11-14)
+* Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Gemini, NVIDIA NIM) at the same protection tier; Cerebras and SambaNova adapters exist but are out of the chain (2026-11-14)
 * Google Workspace (Docs, Sheets, Drive) — OAuth-authorized, multi-account controlled Doc/Sheet creation with explicit approval before anything is written, plus comment-triggered live editing (polled)
 * Tavily — optional live web search backing the research runtime and Lead Generation discovery; research stays closed-book (reasoning over supplied context only) if unset, rather than failing
 

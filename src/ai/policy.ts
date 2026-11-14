@@ -5,7 +5,7 @@ import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/regist
 import { reportLiveStep, resolveLiveStep } from "../runtime/liveStatus";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
-import { GEMINI_PROVIDER, GROQ_PROVIDER, OPENROUTER_PROVIDER } from "./openaiCompatible";
+import { GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
 import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator, type OutboundGateReasonCategory } from "./outboundGate";
 import { sendMessage } from "../telegram";
@@ -60,7 +60,12 @@ export type AiCallOutcome =
 //
 // Martin's decision, 2026-11-14: sambanova is OUT too -- ENIG does not use
 // it. Its adapter stays in openaiCompatible.ts, unused.
-const DEFAULT_PROVIDERS: AiProvider[] = [new WorkersAiProvider(), GROQ_PROVIDER, OPENROUTER_PROVIDER, GEMINI_PROVIDER];
+//
+// Martin's decision, 2026-11-14 (option A): nvidia-nim is BACK, last, on a
+// faster model (NVIDIA_NIM_MODEL). Last, so it is tried only when every
+// other provider has failed and can never slow a run that would succeed;
+// it keeps the same 12 s limit.
+const DEFAULT_PROVIDERS: AiProvider[] = [new WorkersAiProvider(), GROQ_PROVIDER, OPENROUTER_PROVIDER, GEMINI_PROVIDER, NVIDIA_NIM_PROVIDER];
 
 /** The providers in the fallback chain, in order (exported for tests). */
 export const DEFAULT_PROVIDER_IDS: readonly string[] = DEFAULT_PROVIDERS.map((p) => p.id);
