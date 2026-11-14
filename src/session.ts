@@ -799,7 +799,14 @@ export class WorkSession extends DurableObject<Env> {
         fresh.resultReview.assessment = result;
         await this.ctx.storage.put("state", fresh);
       }
-      await sendMessage(this.env, fresh.chatId, formatAdvisoryMessage(result, delivery), undefined, fresh.threadId);
+      // "🔁 Redo with this note": only while the assessed draft still awaits his
+      // decision, only when the Checker recommends a redo with a note, and only
+      // where the Action's Hat declares the callback.
+      const redoButtons: InlineButton[][] | undefined =
+        delivery === "before" && result.recommended === "redo" && result.note && declaration.redoCallbackPrefix
+          ? [[{ text: "🔁 Redo with this note", callback_data: `${declaration.redoCallbackPrefix}:${fresh.workId}:go` }]]
+          : undefined;
+      await sendMessage(this.env, fresh.chatId, formatAdvisoryMessage(result, delivery), redoButtons, fresh.threadId);
     } catch (err) {
       console.error(`WorkSession ${state.workId}: advisory assessment failed (nothing is blocked)`, err);
     }

@@ -90,11 +90,11 @@ test("marketingManifest: declares all five Marketing Hats", () => {
   );
 });
 
-test("marketingManifest: every Hat declares exactly markettransition, marketdraft, and marketpaid in callbackHandlers, all pointing to their shared handlers", () => {
+test("marketingManifest: every Hat declares exactly markettransition, marketdraft, marketpaid and marketredo (added 2026-11-14: the Checker's Redo-with-this-note button) in callbackHandlers, all pointing to their shared handlers", () => {
   for (const hat of Object.values(marketingManifest.hats)) {
     assert.deepStrictEqual(
       new Set(Object.keys(hat.callbackHandlers ?? {})),
-      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_PAID_CALLBACK_PREFIX]),
+      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_PAID_CALLBACK_PREFIX, "marketredo"]),
     );
     assert.strictEqual(hat.callbackHandlers?.[MARKET_TRANSITION_CALLBACK_PREFIX], handleTransitionApproval);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_DRAFT_CALLBACK_PREFIX], handleDraftApproval);
