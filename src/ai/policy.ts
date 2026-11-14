@@ -2,7 +2,7 @@ import type { Env } from "../types";
 import { AI_TASK_LIVE_LABELS } from "./liveLabels";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
 import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
-import { reportLiveStep } from "../runtime/liveStatus";
+import { reportLiveStep, resolveLiveStep } from "../runtime/liveStatus";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
 import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
@@ -321,9 +321,8 @@ export class AiPolicyExecutor {
       const candidate = waitCandidates.filter((c) => c.waitMs <= LAST_RESORT_MAX_WAIT_MS).sort((a, b) => a.waitMs - b.waitMs)[0];
       if (candidate) {
         const waitMs = candidate.waitMs + LAST_RESORT_MARGIN_MS;
-        reportLiveStep(`Waiting ${Math.ceil(waitMs / 1000)}s for an AI provider's rate limit`);
         console.warn(`AiPolicyExecutor: last resort -- waiting ${waitMs}ms for ${candidate.provider.id}'s rate limit, then trying it once more for task ${task.taskId}`);
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        await countDownLiveStep(waitMs, AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
         const retried = await this.runProviderChain(env, task, [candidate.provider], false);
         if (retried.ok) return retried;
       }
@@ -345,6 +344,32 @@ export class AiPolicyExecutor {
  */
 export const LAST_RESORT_MAX_WAIT_MS = 30_000;
 const LAST_RESORT_MARGIN_MS = 500;
+/** How often the countdown line is edited (Martin, 2026-11-13: in place, inside the existing edit budget). */
+export const COUNTDOWN_TICK_MS = 5_000;
+
+function waitLabel(ms: number): string {
+  return `Waiting ${Math.ceil(ms / 1000)}s for an AI provider's rate limit`;
+}
+
+/**
+ * Waits `waitMs`, showing a countdown on the live status line that is edited
+ * in place every COUNTDOWN_TICK_MS ("Waiting 26s..." -> "Waiting 21s..."),
+ * then puts the line back to the step's own wording as the retry starts.
+ * Edits go through the live status's own throttle and budget.
+ */
+async function countDownLiveStep(waitMs: number, stepLabel: string): Promise<void> {
+  let label = waitLabel(waitMs);
+  reportLiveStep(label);
+  let remaining = waitMs;
+  while (remaining > 0) {
+    const tick = Math.min(COUNTDOWN_TICK_MS, remaining);
+    await new Promise((resolve) => setTimeout(resolve, tick));
+    remaining -= tick;
+    const next = remaining > 0 ? waitLabel(remaining) : stepLabel;
+    resolveLiveStep(label, next);
+    label = next;
+  }
+}
 
 export const defaultPolicyExecutor = new AiPolicyExecutor();
 
