@@ -310,3 +310,20 @@ test("a 429 naming a wait over the 10s cap is not slept or retried inside the pr
   assert.ok(!r.success);
   assert.strictEqual((r as any).error.retryAfterMs, 25_372.5);
 });
+
+test("NVIDIA NIM (Martin, 2026-11-14, option A): requests go to the faster nemotron-3.5-lightning model, never the gpt-oss-20b that timed out", async () => {
+  const original = globalThis.fetch;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_url: any, init?: any) => {
+    bodies.push(JSON.parse(String(init?.body ?? "{}")));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as any;
+  try {
+    await NVIDIA_NIM_PROVIDER.execute({ NVIDIA_NIM_API_KEY: "key" } as any, { ...dummyTask, messages: [{ role: "user", content: "hi" }] } as any);
+  } catch {
+    // The response shape is not what this test checks.
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.strictEqual(bodies[0]?.model, "nvidia/nemotron-3.5-lightning-30b-a3b");
+});

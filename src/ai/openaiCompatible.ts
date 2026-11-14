@@ -206,11 +206,18 @@ export class OpenAiCompatibleProvider implements AiProvider {
 // found"/"end of life" error, query that provider's own /models list
 // endpoint with the live key to find a currently accessible replacement
 // rather than guessing a name.
+// Martin's decision 2026-11-14 (option A): openai/gpt-oss-20b timed out
+// at 12 s on every logged call. Replaced by a model that runs only 3B of
+// its 30B parameters per answer, chosen from NVIDIA's live /models list as
+// the likeliest to answer in time. Unverified for speed until the
+// provider-call log shows it.
+export const NVIDIA_NIM_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b";
+
 export const NVIDIA_NIM_PROVIDER = new OpenAiCompatibleProvider({
   id: "nvidia-nim",
   baseUrl: "https://integrate.api.nvidia.com/v1",
   apiKeyEnvVar: "NVIDIA_NIM_API_KEY",
-  model: "openai/gpt-oss-20b",
+  model: NVIDIA_NIM_MODEL,
 });
 
 export const GROQ_PROVIDER = new OpenAiCompatibleProvider({
