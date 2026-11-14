@@ -246,3 +246,43 @@ test("problem brief (Martin, 2026-11-13): every Marketing Hat's instructions car
   assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Part 7 must give the reason/);
   assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /If NO WEB RESEARCH block is present, ignore this format: never ask for research/, "without research the Hat drafts normally instead of asking Martin for a research block");
 });
+
+test("approving a draft records Martin's approval as Result evidence beside the draft, bound to it by SHA-256 (2026-11-14: the Checker failed criterion 2 on the draft alone)", async (t) => {
+  mockTelegramFetch(t);
+  const { hashContent } = await import("../../contentHash");
+  const draft = "The problem -- SMEs struggle with consistent messaging.";
+  const state = fakeWorkState({
+    stage: "awaiting_marketing_draft_approval",
+    marketing: { draft },
+    resultReview: { expectedResult: "A draft approved by Martin", completionCriteria: ["Martin's approval is recorded"], gateStatus: "pending" },
+  } as any);
+  await handleDraftApproval(fakeEnv(), state, true);
+  const evidence = state.resultReview?.evidence ?? [];
+  assert.deepStrictEqual(evidence.map((e) => e.kind), ["marketing_output", "operator_approval"]);
+  const approval = evidence[1];
+  assert.equal(approval.ref, "work-1-approval");
+  assert.match(approval.content, /Martin approved work-1-draft at \d{4}-\d\d-\d\dT.*through the verified Approve button/);
+  assert.ok(approval.content.includes(await hashContent(draft)), "the approval is bound to the exact approved draft");
+  assert.equal(evidence[0].content, draft, "the draft evidence is unchanged");
+});
+
+test("approving a paid-media action records the spend approval as Result evidence", async (t) => {
+  mockTelegramFetch(t);
+  const state = fakeWorkState({
+    hat: "Digital Marketer",
+    stage: "awaiting_paid_media_approval",
+    marketing: { pendingPaidMediaAction: { description: "Boost a Facebook post, $200 budget" } },
+    resultReview: { expectedResult: "A paid-media action with spend approval", completionCriteria: ["Spend approval is recorded"], gateStatus: "pending" },
+  } as any);
+  const { handlePaidMediaApproval } = await import("./marketingManifest");
+  await handlePaidMediaApproval(fakeEnv(), state, true);
+  assert.deepStrictEqual((state.resultReview?.evidence ?? []).map((e) => e.kind), ["paid_media_action", "spend_approval"]);
+  assert.match(state.resultReview!.evidence![1].content, /Martin approved work-1-paid-media/);
+});
+
+test("rejecting a draft records no approval evidence", async (t) => {
+  mockTelegramFetch(t);
+  const state = fakeWorkState({ stage: "awaiting_marketing_draft_approval", marketing: { draft: "x" }, resultReview: { expectedResult: "e", completionCriteria: ["c"], gateStatus: "pending" } } as any);
+  await handleDraftApproval(fakeEnv(), state, false);
+  assert.equal(state.resultReview?.evidence, undefined);
+});

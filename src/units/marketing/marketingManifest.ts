@@ -18,6 +18,8 @@ import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader 
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
+import { hashContent } from "../../contentHash";
+import type { ResultReviewEvidenceItem } from "../../types";
 import { handleHandoffPickup } from "../../hats/executionEngine";
 import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
 
@@ -475,6 +477,33 @@ export const MARKET_DRAFT_CALLBACK_PREFIX = "marketdraft" as const;
  * on marketing_feedback; approving closes the originating Handoff (if
  * any) and marks the work item complete.
  */
+/**
+ * The recorded fact of Martin's approval, as Result evidence (2026-11-14).
+ * Live: the independent Checker failed a Marketing Work on completion
+ * criterion 2 ("Martin's explicit approval ... is recorded for this exact
+ * output") because the only evidence recorded was the draft itself, whose
+ * note merely CLAIMED approval -- the Checker rightly treats the Work's own
+ * claim as no proof. The approval IS a real event: the approval handler is
+ * reached only from Martin's verified Approve-button callback (src/index.ts
+ * refuses every other sender). This records that event, bound to the exact
+ * output by its SHA-256, the same minter-style discipline as the other
+ * Result recorders: called only from the flow that established the fact.
+ */
+export async function approvalEvidence(
+  state: WorkState,
+  kind: "operator_approval" | "spend_approval",
+  output: { ref: string; content: string },
+): Promise<ResultReviewEvidenceItem> {
+  const hash = await hashContent(output.content);
+  const what = kind === "spend_approval" ? "spend approval for this paid-media action" : "approval of this output";
+  return {
+    kind,
+    ref: `${state.workId}-${kind === "spend_approval" ? "spend-approval" : "approval"}`,
+    note: `Martin's ${what}, recorded by the Marketing approval handler, which runs only from his verified Approve-button callback`,
+    content: `Martin approved ${output.ref} at ${new Date().toISOString()} through the verified Approve button for Work ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}). Approved content SHA-256: ${hash}.`,
+  };
+}
+
 export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (state.stage !== "awaiting_marketing_draft_approval") {
     await sendWorkspaceHatMessage(env, state, "This draft approval has already been resolved -- nothing to do.");
@@ -496,13 +525,15 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   // verification judges the declared criteria against exactly this set.
   // Recorded unconditionally: this approval is the Result production point
   // whether or not an inbound Handoff exists to close.
+  const approvedDraft = (state.marketing?.draft ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS);
   await recordResultEvidence(state, [
     {
       kind: "marketing_output",
       ref: `${state.workId}-draft`,
       note: "the Martin-approved Marketing draft this Result delivers",
-      content: (state.marketing?.draft ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+      content: approvedDraft,
     },
+    await approvalEvidence(state, "operator_approval", { ref: `${state.workId}-draft`, content: approvedDraft }),
   ]).then((rec) => {
     if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
   });
@@ -588,13 +619,15 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
   // the Result evidence before the transient copy is cleared, so the
   // independent Machinery Worker verification has the exact approved spend
   // action to judge the declared criteria against.
+  const approvedAction = (state.marketing?.pendingPaidMediaAction?.description ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS);
   await recordResultEvidence(state, [
     {
       kind: "paid_media_action",
       ref: `${state.workId}-paid-media`,
       note: "the Martin-approved paid-media action this Result delivers",
-      content: (state.marketing?.pendingPaidMediaAction?.description ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+      content: approvedAction,
     },
+    await approvalEvidence(state, "spend_approval", { ref: `${state.workId}-paid-media`, content: approvedAction }),
   ]).then((rec) => {
     if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
   });
