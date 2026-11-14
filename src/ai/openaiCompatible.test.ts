@@ -293,3 +293,20 @@ test("a 429 naming a 7.8s wait is waited out in full (cap raised 6s -> 10s, Mart
   assert.strictEqual(calls, 2, "retried after the full 7.8s");
   assert.ok(r.success);
 });
+
+test("a 429 naming a wait over the 10s cap is not slept or retried inside the provider; its stated wait is attached for the executor", async (t) => {
+  const mod = await import("./openaiCompatible");
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response('{"error":{"message":"Rate limit reached. Please try again in 25.3725s."}}', { status: 429 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "x" }] } as any;
+  const r = await mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  assert.strictEqual(calls, 1, "no pointless wait-and-retry that the provider would refuse again");
+  assert.ok(!r.success);
+  assert.strictEqual((r as any).error.retryAfterMs, 25_372.5);
+});

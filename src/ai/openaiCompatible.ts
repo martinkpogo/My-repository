@@ -96,6 +96,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Attaches a provider's stated wait to a failed result (a success is returned as is). */
+function withRetryAfter(result: ProviderAdapterResult, retryAfterMs: number): ProviderAdapterResult {
+  if (!result.success) result.error.retryAfterMs = retryAfterMs;
+  return result;
+}
+
 export class OpenAiCompatibleProvider implements AiProvider {
   public readonly id: ProviderId;
   private readonly config: OpenAiCompatibleConfig;
@@ -126,9 +132,15 @@ export class OpenAiCompatibleProvider implements AiProvider {
       return (await this.attempt(env, task, false)).result;
     }
     if (first.retryAfterMs === undefined) return first.result;
+    // A wait longer than the cap is not slept here (a retry after the cap
+    // would still be refused, as the live Groq run showed): the stated wait
+    // is attached so the executor can move on at once and, as a last resort,
+    // come back after it (src/ai/policy.ts).
+    if (first.retryAfterMs > MAX_RETRY_AFTER_WAIT_MS) return withRetryAfter(first.result, first.retryAfterMs);
 
-    await sleep(Math.min(first.retryAfterMs, MAX_RETRY_AFTER_WAIT_MS));
-    return (await this.attempt(env, task, true)).result;
+    await sleep(first.retryAfterMs);
+    const second = await this.attempt(env, task, true);
+    return second.retryAfterMs === undefined ? second.result : withRetryAfter(second.result, second.retryAfterMs);
   }
 
   private async attempt(env: Env, task: AiTask, withExtras: boolean): Promise<{ result: ProviderAdapterResult; retryAfterMs?: number; status?: number }> {

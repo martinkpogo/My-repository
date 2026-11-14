@@ -147,7 +147,16 @@ export class AiPolicyExecutor {
     // Universal live status: the registered task's fixed name, never the prompt.
     reportLiveStep(AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
 
-    const eligible = this.providers.filter((p) => p.isEligible(env, task));
+    return this.runProviderChain(env, task, this.providers, true);
+  }
+
+  /**
+   * The provider loop itself, shared by the first pass and by the last-resort
+   * retry below, so every eligibility check, boundary evaluation, redaction
+   * verification, gate evaluation and validation applies identically to both.
+   */
+  private async runProviderChain(env: Env, task: AiTask, providers: AiProvider[], allowLastResort: boolean): Promise<AiCallOutcome> {
+    const eligible = providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
       console.error("AiPolicyExecutor: No eligible AI provider available");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
@@ -162,6 +171,8 @@ export class AiPolicyExecutor {
     let malformed = 0;
     let infraFailures = 0;
     let redactionAborted = false;
+    // Providers that failed on a rate limit and named how long to wait.
+    const waitCandidates: Array<{ provider: AiProvider; waitMs: number }> = [];
     const gateReasons = new Set<OutboundGateReasonCategory>();
 
     for (const provider of eligible) {
@@ -292,10 +303,30 @@ export class AiPolicyExecutor {
       );
       // Fallback loop continues to next eligible provider
       infraFailures++;
+      if (result.error.retryAfterMs !== undefined) waitCandidates.push({ provider, waitMs: result.error.retryAfterMs });
     }
 
     if (!redactionAborted) {
       console.error("AiPolicyExecutor: All eligible AI providers exhausted without success");
+    }
+
+    // Last resort (Martin's decision, 2026-11-13, option A): every provider
+    // failed, but a rate-limited one named how long to wait -- a few seconds
+    // against a minute-long window that a burst of calls (a research run's
+    // steps) used up. Wait it out and try THAT provider once more, through
+    // the same checks, rather than failing the whole step. Only a wait up to
+    // LAST_RESORT_MAX_WAIT_MS; only once per call; never when the loop was
+    // stopped by the redaction hard stop.
+    if (allowLastResort && !redactionAborted) {
+      const candidate = waitCandidates.filter((c) => c.waitMs <= LAST_RESORT_MAX_WAIT_MS).sort((a, b) => a.waitMs - b.waitMs)[0];
+      if (candidate) {
+        const waitMs = candidate.waitMs + LAST_RESORT_MARGIN_MS;
+        reportLiveStep(`Waiting ${Math.ceil(waitMs / 1000)}s for an AI provider's rate limit`);
+        console.warn(`AiPolicyExecutor: last resort -- waiting ${waitMs}ms for ${candidate.provider.id}'s rate limit, then trying it once more for task ${task.taskId}`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        const retried = await this.runProviderChain(env, task, [candidate.provider], false);
+        if (retried.ok) return retried;
+      }
     }
     const reasons = [...gateReasons];
     if (gateBlocked > 0 && gateBlocked === processed) {
@@ -307,6 +338,13 @@ export class AiPolicyExecutor {
     return { ok: false, cause: "providers_exhausted", gateReasons: reasons };
   }
 }
+
+/**
+ * The longest rate-limit wait the last resort will sit out, and the margin
+ * added to a provider's stated wait (Martin's decision, 2026-11-13).
+ */
+export const LAST_RESORT_MAX_WAIT_MS = 30_000;
+const LAST_RESORT_MARGIN_MS = 500;
 
 export const defaultPolicyExecutor = new AiPolicyExecutor();
 
