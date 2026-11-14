@@ -1171,7 +1171,8 @@ test("Ifx. Integration: a real Finance quote approval writes the Handoff a fresh
   // approval). The test keeps asserting the real end-to-end behaviour it is
   // about -- the consumed Handoff -- while the gate's refusal cases live in
   // resultReview.test.ts / handoffLifecycle.test.ts.
-  await installSatisfiedResultReview(freshSales, declaredResultContract(salesManifest, "proposal_draft"));
+  await installSatisfiedResultReview(freshSales, declaredResultContract(salesManifest, "proposal_draft"), [{ kind: "proposal_record", ref: "PROP-fixture" }]);
+  // The approval binds to the KIND of evidence the Result rests on (2026-11-14), so the fixture records the same kind the handler under test records.
 
   const salesState = await handleProposalHandoffPickup(env, freshSales, NO_ACTION_SKILLS);
   assert.ok(!salesState.blockedReason, `pickup must succeed: ${salesState.blockedReason}`);

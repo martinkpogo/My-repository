@@ -17,7 +17,7 @@ import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../tel
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
-import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordOutputApprovalAsResultApproval, recordResultEvidence } from "../../resultReview";
 import { hashContent } from "../../contentHash";
 import type { ResultReviewEvidenceItem } from "../../types";
 import { handleHandoffPickup } from "../../hats/executionEngine";
@@ -537,6 +537,11 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   ]).then((rec) => {
     if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
   });
+  // Martin's approval of this exact output is the last step of the Work
+  // (outputApprovalClosesWork, 2026-11-14): record it as his Result approval
+  // now, from the evidence just recorded, so the Handoff closure below
+  // passes the gate. The independent Checker is advisory and plays no part.
+  await recordOutputApprovalAsResultApproval(state);
   if (state.handoffId) {
     // Authorized as a `write`-consequence Action (handle_request), and
     // ungated because closing the Handoff THIS work item was picked up from is

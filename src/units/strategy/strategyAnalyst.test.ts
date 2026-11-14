@@ -1874,7 +1874,8 @@ test("10. Approval creates the Strategy -> Finance Handoff and closes the Sales 
   // bound approval) and the test keeps asserting what it is about: the
   // closure happens once the approved proposal is transferred. The gate's
   // refusal cases live in resultReview.test.ts / handoffLifecycle.test.ts.
-  await installSatisfiedResultReview(state, declaredResultContract(strategyManifest, "commit_diagnosis"));
+  await installSatisfiedResultReview(state, declaredResultContract(strategyManifest, "commit_diagnosis"), [{ kind: "strategy_proposal", ref: "fixture-proposal" }]);
+  // The approval binds to the KIND of evidence the Result rests on (2026-11-14), so the fixture records the same kind the handler under test records.
 
   const afterPickup = await handlePickup(env, state, STRATEGY_SKILLS);
   const { proposalVersion } = afterPickup.strategy?.pendingApproval!;

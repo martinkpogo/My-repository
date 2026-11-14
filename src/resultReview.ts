@@ -106,14 +106,35 @@ function canonicalVerdictText(
   ]);
 }
 
-/** The snapshot an approval binds to: contract + the verdict hash in force. */
-function canonicalApprovalText(workId: string, expectedResult: string, completionCriteria: readonly string[], verdictHash: string): string {
+/**
+ * The snapshot an approval binds to: contract + the exact recorded evidence
+ * (Martin's decision, 2026-11-14: the independent Checker is advisory, so an
+ * approval no longer binds to a Checker verdict -- it binds to what Martin
+ * actually approved, the recorded Result evidence).
+ */
+function canonicalApprovalText(workId: string, expectedResult: string, completionCriteria: readonly string[], evidenceHash: string): string {
   return JSON.stringify([
     ["work", workId.trim()],
     ["expected_result", expectedResult.trim()],
     ["criteria", completionCriteria.map((c) => c.trim())],
-    ["verdict_hash", verdictHash.trim()],
+    ["evidence_hash", evidenceHash.trim()],
   ]);
+}
+
+/**
+ * SHA-256 over the kinds of evidence recorded for this Result, in order.
+ * Martin's approval binds to the Work, its contract and WHAT KIND of evidence
+ * the Result rests on (e.g. a marketing output plus his recorded approval of
+ * it), so an item added, removed or swapped for a different kind after he
+ * approved is refused. It deliberately does not bind to an item's reference or
+ * text: a Unit that re-records the same kinds (as the Handoff-closing handlers
+ * do) keeps the approval valid, and the exact output an approval covers is
+ * pinned by the `operator_approval` item's own SHA-256 where that path is used.
+ * This is no weaker than the Checker verdict binding it replaces, which the
+ * gate recomputed only from the verdict's own stored fields.
+ */
+export async function hashResultReviewEvidence(evidence: readonly ResultReviewEvidenceItem[]): Promise<string> {
+  return hashContent(JSON.stringify(evidence.map((e) => e.kind.trim())));
 }
 
 /**
@@ -139,9 +160,9 @@ export async function hashResultReviewApproval(input: {
   workId: string;
   expectedResult: string;
   completionCriteria: readonly string[];
-  verdictHash: string;
+  evidenceHash: string;
 }): Promise<string> {
-  return hashContent(canonicalApprovalText(input.workId, input.expectedResult, input.completionCriteria, input.verdictHash));
+  return hashContent(canonicalApprovalText(input.workId, input.expectedResult, input.completionCriteria, input.evidenceHash));
 }
 
 // ---------------------------------------------------------------------------
@@ -202,9 +223,9 @@ export type ResultReviewRecorderRefusal = { ok: false; reason: string } | { ok: 
  * outcome or identity is malformed, or the checker identity is not distinct
  * from the Work's recorded performer (Action or Hat).
  *
- * Recording a new verdict INVALIDATES any previously bound approval and
- * staged approval: an approval reviews one exact verdict, and a superseding
- * verdict must re-earn it.
+ * ADVISORY (Martin's decision, 2026-11-14): a recorded verdict is the
+ * Checker's assessment of the draft. It never invalidates or replaces
+ * Martin's approval and is not required for closure.
  */
 export async function recordCheckerVerdict(
   state: WorkState,
@@ -253,10 +274,9 @@ export async function recordCheckerVerdict(
     evidenceRefs: input.evidenceRefs,
     verdictHash,
   };
-  review.approval = undefined;
-  review.pendingApproval = undefined;
-  review.gateStatus = "pending";
-  review.blockReason = input.outcome === "failed" ? `Independent Checker verification FAILED: ${input.reason ?? "criteria not met"}` : undefined;
+  // Advisory (Martin's decision, 2026-11-14): recording an assessment never
+  // touches Martin's approval, a staged approval card or the gate -- the
+  // Checker cannot block, invalidate or reopen anything.
   return { ok: true };
 }
 
@@ -318,18 +338,14 @@ export async function stageResultReviewApproval(state: WorkState): Promise<
   if (!review?.expectedResult?.trim() || !review.completionCriteria?.length) {
     return { ok: false, reason: "cannot stage a Result approval: this Work declares no Result contract." };
   }
-  const verdict = review.checker;
-  if (!verdict || verdict.outcome !== "passed") {
-    return { ok: false, reason: "cannot stage a Result approval before a passing independent Checker verdict exists." };
-  }
-  if (await verdictStaleReason(state)) {
-    return { ok: false, reason: "cannot stage a Result approval: the Checker verdict in force is bound to a different snapshot of this Work." };
+  if (!review.evidence?.length) {
+    return { ok: false, reason: "cannot stage a Result approval: the producing Unit recorded no Result evidence for Martin to approve." };
   }
   const reviewHash = await hashResultReviewApproval({
     workId: state.workId,
     expectedResult: review.expectedResult,
     completionCriteria: review.completionCriteria,
-    verdictHash: verdict.verdictHash,
+    evidenceHash: await hashResultReviewEvidence(review.evidence),
   });
   review.pendingApproval = {
     token: crypto.randomUUID(),
@@ -344,16 +360,16 @@ export const OPERATOR_APPROVAL_EVIDENCE_KIND = "operator_approval";
 
 /**
  * Output approval closes the Work (Martin's decision, 2026-11-14). When the
- * Work's Action declares `outputApprovalClosesWork`, a PASSING independent
- * Checker verdict binds to the current snapshot, and the recorded evidence
+ * Work's Action declares `outputApprovalClosesWork` and the recorded evidence
  * holds an `operator_approval` item whose content carries the SHA-256 of
  * another evidence item (the exact approved output), this records Martin's
  * Result approval from that fact -- the approval he already gave at the last
- * step -- instead of asking for a second tap. Refuses (nothing recorded, the
- * Result approval card stays the path) in every other case: not declared, no
- * passing bound verdict, an approval already recorded or staged, no approval
- * evidence, or approval evidence not bound to an evidence item here. Minter-
- * style: call it only from the Work lifecycle after the verification.
+ * step -- instead of asking for a second tap. The independent Checker is
+ * advisory and plays no part. Refuses (nothing recorded, the Result approval
+ * card stays the path) in every other case: not declared, an approval
+ * already recorded or staged, no approval evidence, or approval evidence not
+ * bound to an evidence item here. Minter-style: call it only from the flow
+ * that recorded the approval evidence (or the Work lifecycle's save).
  */
 export async function recordOutputApprovalAsResultApproval(
   state: WorkState,
@@ -362,15 +378,7 @@ export async function recordOutputApprovalAsResultApproval(
   if (!review?.outputApprovalClosesWork) return { ok: false, reason: "this Work's Action does not declare that output approval closes the Work." };
   if (!review.expectedResult?.trim() || !review.completionCriteria?.length) return { ok: false, reason: "no Result contract." };
   if (review.approval || review.pendingApproval) return { ok: false, reason: "a Result approval is already recorded or staged." };
-  const verdict = review.checker;
-  if (!verdict || verdict.outcome !== "passed") return { ok: false, reason: "no passing independent Checker verdict." };
-  if (await verdictStaleReason(state)) return { ok: false, reason: "the Checker verdict is bound to a different snapshot." };
   const evidence = review.evidence ?? [];
-  // Defence in depth: the verdict must cover every evidence item now held
-  // (the Work lifecycle re-verifies on a changed set before calling this).
-  if (!evidence.every((e) => verdict.evidenceRefs.some((r) => r.kind === e.kind && r.ref === e.ref))) {
-    return { ok: false, reason: "the Checker verdict does not cover all the evidence now recorded." };
-  }
   const approvals = evidence.filter((e) => e.kind === OPERATOR_APPROVAL_EVIDENCE_KIND);
   if (approvals.length !== 1) return { ok: false, reason: "the evidence does not record exactly one operator approval." };
   const outputs = evidence.filter((e) => e !== approvals[0]);
@@ -383,7 +391,7 @@ export async function recordOutputApprovalAsResultApproval(
     workId: state.workId,
     expectedResult: review.expectedResult,
     completionCriteria: review.completionCriteria,
-    verdictHash: verdict.verdictHash,
+    evidenceHash: await hashResultReviewEvidence(evidence),
   });
   const approval: ResultReviewApproval = {
     approver: "martin",
@@ -489,20 +497,15 @@ export async function evaluateResultReviewGate(state: WorkState): Promise<{ allo
     return refuse("Result contract missing: the responsible Action declares no completion criteria.");
   }
 
-  const verdict = review.checker;
-  if (!verdict) return refuse("Independent Checker verification required: no Checker verdict is recorded against this Result.");
-  if (verdict.outcome !== "passed") {
-    return refuse(verdict.reason ? `Independent Checker verification failed: ${verdict.reason}` : "Independent Checker verification failed.");
+  // The independent Checker is ADVISORY (Martin's decision, 2026-11-14): its
+  // verdict -- present, missing, late, failed or negative -- is never
+  // consulted here. A Work closes on Martin's approval of the exact recorded
+  // Result.
+  if (!review.evidence?.length) {
+    return refuse("Result evidence required: the producing Unit recorded no Result evidence for Martin to approve.");
   }
-  if (!verdict.checkerId?.trim()) return refuse("Checker verification invalid: it records no checker identity.");
-  if (verdict.checkerId.trim() === state.actionName || verdict.checkerId.trim() === state.hat) {
-    return refuse("Checker verification invalid: the checker identity equals the Work's recorded performer -- BD-8 requires a Checker who did not perform the work.");
-  }
-  const stale = await verdictStaleReason(state);
-  if (stale) return refuse(`Checker verification invalid: ${stale}`);
-
   const approval = review.approval;
-  if (!approval) return refuse("Martin's Result approval required: no Result approval is recorded for this verified Result.");
+  if (!approval) return refuse("Martin's Result approval required: no Result approval is recorded for this Result.");
   if (approval.approver !== "martin") return refuse("Result approval invalid: it is not Martin's Result approval.");
   if (!approval.token?.trim() || !approval.approvedAt?.trim()) {
     return refuse("Result approval invalid: it carries no approval token or timestamp.");
@@ -511,10 +514,10 @@ export async function evaluateResultReviewGate(state: WorkState): Promise<{ allo
     workId: state.workId,
     expectedResult: review.expectedResult,
     completionCriteria: review.completionCriteria,
-    verdictHash: verdict.verdictHash,
+    evidenceHash: await hashResultReviewEvidence(review.evidence),
   });
   if (approval.reviewHash !== approvalHash) {
-    return refuse("Result approval invalid: it is bound to a different Work, Result, completion criteria or Checker verdict than this Work now holds.");
+    return refuse("Result approval invalid: it is bound to a different Work, Result, completion criteria or evidence than this Work now holds.");
   }
 
   review.gateStatus = "passed";

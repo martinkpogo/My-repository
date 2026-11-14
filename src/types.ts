@@ -858,6 +858,7 @@ export interface ResultReviewState {
    * so evidence recorded after a verdict cannot silently backfill it.
    */
   evidence?: readonly ResultReviewEvidenceItem[];
+  /** The independent Checker's ADVISORY assessment (Martin's decision, 2026-11-14): never required for closure, never blocks. */
   checker?: ResultReviewCheckerVerdict;
   approval?: ResultReviewApproval;
   pendingApproval?: PendingResultReviewApproval;

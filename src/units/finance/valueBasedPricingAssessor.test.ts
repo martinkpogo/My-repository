@@ -1151,7 +1151,8 @@ test("Valid non-assumption evidence stays priceable under the existing validator
   // approval) so this test keeps asserting the Unit behaviour it is about --
   // the gate's own fail-closed refusal cases are tested in
   // resultReview.test.ts / handoffLifecycle.test.ts.
-  await installSatisfiedResultReview(state, declaredResultContract(financeManifest, "price"));
+  await installSatisfiedResultReview(state, declaredResultContract(financeManifest, "price"), [{ kind: "pricing_judgment", ref: "fixture-quote" }]);
+  // The approval binds to the KIND of evidence the Result rests on (2026-11-14), so the fixture records the same kind the handler under test records.
 
   const result = await handlePickup(env, state, NO_ACTION_SKILLS);
 
