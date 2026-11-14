@@ -366,11 +366,11 @@ test("Last resort (Martin, 2026-11-13, A): every provider failed but one named a
   assert.equal(broken.attempts, 1, "the other provider is not tried again");
 });
 
-test("Last resort: a wait over 30s is not waited out; a failed retry is not repeated; the retry is once per call", async (t) => {
+test("Last resort: a wait over 60s is not waited out; a failed retry is not repeated; the retry is once per call", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   t.mock.method(console, "error", () => {});
   t.mock.method(console, "warn", () => {});
-  const tooLong = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 31_000 }) }));
+  const tooLong = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 61_000 }) }));
   const outcome = await new AiPolicyExecutor([tooLong], testBoundaryEvaluator).executeTaskWithOutcome(fakeEnv, {
     taskId: "chat.general_reply",
     type: "json",
@@ -378,7 +378,7 @@ test("Last resort: a wait over 30s is not waited out; a failed retry is not repe
     boundaryContext: { taskSensitivity: "public", segments: [{ type: "user", content: "u", provenance: "test" }] },
   } as any);
   assert.equal(outcome.ok, false);
-  assert.equal(tooLong.attempts, 1, "31s is over the last-resort cap: no wait, no retry");
+  assert.equal(tooLong.attempts, 1, "61s is over the last-resort cap: no wait, no retry");
 
   const stillLimited = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 5_000 }) }));
   const pending = new AiPolicyExecutor([stillLimited], testBoundaryEvaluator).executeTaskWithOutcome(fakeEnv, {
@@ -438,4 +438,10 @@ test("Last resort countdown (Martin, 2026-11-13): the wait counts down in place 
     "Writing the reply",
   ]);
   assert.equal(trail.filter((l) => l.startsWith("Waiting")).length, 0, "edited in place: no countdown line is left behind");
+});
+
+test("Last resort cap is 60s (Martin, 2026-11-14): Groq's 33s wait after a research run is waited out", async () => {
+  const { LAST_RESORT_MAX_WAIT_MS } = await import("./policy");
+  assert.equal(LAST_RESORT_MAX_WAIT_MS, 60_000);
+  assert.ok(33_210 <= LAST_RESORT_MAX_WAIT_MS);
 });

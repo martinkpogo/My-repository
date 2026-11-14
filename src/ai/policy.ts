@@ -340,9 +340,12 @@ export class AiPolicyExecutor {
 
 /**
  * The longest rate-limit wait the last resort will sit out, and the margin
- * added to a provider's stated wait (Martin's decision, 2026-11-13).
+ * added to a provider's stated wait (Martin's decision, 2026-11-13). Raised
+ * from 30s to 60s (Martin, 2026-11-14): Groq's limit is a rolling one-minute
+ * window, so after a research run it asked for 33s and the draft failed; it
+ * can never ask for more than about a minute.
  */
-export const LAST_RESORT_MAX_WAIT_MS = 30_000;
+export const LAST_RESORT_MAX_WAIT_MS = 60_000;
 const LAST_RESORT_MARGIN_MS = 500;
 /** How often the countdown line is edited (Martin, 2026-11-13: in place, inside the existing edit budget). */
 export const COUNTDOWN_TICK_MS = 5_000;
