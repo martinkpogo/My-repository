@@ -12,7 +12,7 @@ import {
 } from "./runtime/tools/googleDocsSmoke";
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
-import { sendMessage, sendOperationsMessage } from "./telegram";
+import { sendMessage, sendMessageWithOutcome, sendOperationsMessage } from "./telegram";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { migrateSavedWork } from "./workStateMigration";
@@ -803,7 +803,17 @@ export class WorkSession extends DurableObject<Env> {
               { text: "❌ Reject", callback_data: `resultreview:${staged.pending.token}:reject` },
             ],
           ];
-          await sendMessage(this.env, state.chatId, message, buttons, state.threadId);
+          const outcome = await sendMessageWithOutcome(this.env, state.chatId, message, buttons, state.threadId);
+          if (!outcome.delivered) {
+            // Telegram rejected every send attempt: the staged approval was
+            // never delivered to Martin. Roll back the pending approval so
+            // the Work's state accurately reflects that no card reached him,
+            // and the next save can retry. A staged approval is not a
+            // delivered approval card.
+            review!.pendingApproval = undefined;
+            console.error(`WorkSession ${state.workId}: Result approval card delivery failed -- ${outcome.attempts.length} attempt(s), none delivered`);
+            return;
+          }
           state.pendingActionSummary = {
             label: "Result review: awaiting Martin's Result approval",
             message,

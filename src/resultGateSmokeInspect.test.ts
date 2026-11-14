@@ -53,6 +53,13 @@ function smokeState(overrides: Partial<WorkState> = {}): WorkState {
       gateStatus: "blocked",
       blockReason: "Independent Checker verification failed: criteria not met",
       preBlockStage: "complete",
+      evidence: [{ kind: "smoke_test", ref: WORK_ID }, { kind: "smoke_test", ref: "result-gate-smoke-sequence" }],
+      verificationAttempt: {
+        snapshotKey: "snapshot-key-123",
+        outcome: "failed",
+        reason: "criteria not met",
+        at: "2026-01-02T00:00:00Z",
+      },
       checker: {
         checkerId: "Machinery Worker Alpha",
         outcome: "failed",
@@ -221,8 +228,20 @@ test("inspect: returns a minimal projection with no identity-bearing fields", as
   assert.strictEqual(body.stage, "result_review_blocked");
   assert.strictEqual(body.createdAt, "2026-01-01T00:00:00Z");
   assert.strictEqual(body.updatedAt, "2026-01-02T00:00:00Z");
-  assert.strictEqual(body.handoffId, "handoff-123");
   assert.strictEqual(body.blockedReason, "Independent Checker verification failed: criteria not met");
+  assert.strictEqual(body.workClosed, false, "result_review_blocked is not a terminal stage");
+
+  // Synthetic evidence references, sourced from persisted evidence items.
+  assert.deepStrictEqual(body.evidenceRefs, [
+    { kind: "smoke_test", ref: WORK_ID },
+    { kind: "smoke_test", ref: "result-gate-smoke-sequence" },
+  ]);
+
+  // Exact verification snapshot key, sourced from persisted verificationAttempt.
+  assert.strictEqual(body.snapshotKey, "snapshot-key-123");
+
+  // No handoff identifiers in the smoke's Result Gate state projection.
+  assert.ok(!("handoffId" in body), "no handoffId in projection");
 
   // No identity-bearing fields anywhere.
   const raw = JSON.stringify(body);
@@ -239,7 +258,20 @@ test("inspect: returns a minimal projection with no identity-bearing fields", as
   // Fixed projection shape.
   assert.deepStrictEqual(
     Object.keys(body).sort(),
-    ["action", "blockedReason", "createdAt", "handoffId", "hat", "resultReview", "stage", "unit", "updatedAt", "workId"].sort(),
+    [
+      "action",
+      "blockedReason",
+      "createdAt",
+      "evidenceRefs",
+      "hat",
+      "resultReview",
+      "stage",
+      "snapshotKey",
+      "unit",
+      "updatedAt",
+      "workClosed",
+      "workId",
+    ].sort(),
     "the response is a fixed minimal projection",
   );
 });
@@ -298,6 +330,24 @@ test("inspect: result review with empty fields", async () => {
   assert.strictEqual(body.resultReview.checker, null);
   assert.strictEqual(body.resultReview.approval, null);
   assert.strictEqual(body.resultReview.pendingApproval, null);
+});
+
+test("inspect: workClosed is true for terminal stages and false otherwise", async () => {
+  const { env } = createFakeEnv({
+    state: smokeState({ stage: "complete" }),
+  });
+  const res = await handleResultGateSmokeInspect(smokeRequest(), env);
+  assert.strictEqual(res.status, 200);
+  const body = (await res.json()) as { workClosed: boolean };
+  assert.strictEqual(body.workClosed, true);
+
+  const { env: env2 } = createFakeEnv({
+    state: smokeState({ stage: "result_review_blocked" }),
+  });
+  const res2 = await handleResultGateSmokeInspect(smokeRequest(), env2);
+  assert.strictEqual(res2.status, 200);
+  const body2 = (await res2.json()) as { workClosed: boolean };
+  assert.strictEqual(body2.workClosed, false);
 });
 
 // ---------------------------------------------------------------------------

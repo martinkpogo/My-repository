@@ -862,6 +862,78 @@ test("evidence: the harness's own synthetic evidence is always well-formed and w
   assert.ok(!JSON.stringify(items).includes("SENTINEL"), "no client identity appears in synthetic evidence");
 });
 
+// ---------------------------------------------------------------------------
+// Correction 1: Result contract concerns only producing-side evidence.
+// ---------------------------------------------------------------------------
+
+test("contract: the Action's expected Result concerns only producing-side evidence", async () => {
+  const resolution = await resolveResultGateSmokeAction();
+  assert.equal(resolution.ok, true, resolution.ok ? "" : resolution.reason);
+  if (!resolution.ok) return;
+  const { expectedResult, completionCriteria } = resolution.plan;
+  const joined = `${expectedResult}\n${completionCriteria.join("\n")}`;
+  // No active/past-tense claim that verification, approval, delivery, or closure has happened.
+  for (const word of ["verifies", "verified", "verdict has", "approves", "approved", "delivers", "delivered", "closes", "closed"]) {
+    assert.ok(!new RegExp(`\\b${word}\\b`, "i").test(joined), `contract must not claim ${word}: ${JSON.stringify(joined)}`);
+  }
+  // Criteria concern only what the producing side established.
+  assert.ok(/synthetic evidence/i.test(joined), "criteria mention synthetic evidence");
+  assert.ok(/recorded/i.test(joined), "criteria mention recording");
+  assert.ok(/declared Result contract/i.test(joined), "criteria mention the declared contract");
+});
+
+test("contract: the Action's completion criteria are checkable against produced evidence only", async () => {
+  const resolution = await resolveResultGateSmokeAction();
+  assert.equal(resolution.ok, true, resolution.ok ? "" : resolution.reason);
+  if (!resolution.ok) return;
+  for (const criterion of resolution.plan.completionCriteria) {
+    // Each criterion must be satisfiable from the produced evidence, not from
+    // a post-evidence gate outcome.
+    assert.ok(!/verif/i.test(criterion), `criterion must not require verification: ${criterion}`);
+    assert.ok(!/approv/i.test(criterion), `criterion must not require approval: ${criterion}`);
+    assert.ok(!/close/i.test(criterion), `criterion must not require closure: ${criterion}`);
+    assert.ok(!/deliver/i.test(criterion), `criterion must not require delivery: ${criterion}`);
+  }
+});
+
+test("evidence: does not claim verification, approval, delivery, or closure already happened", () => {
+  const items = resultGateSmokeEvidence(WORK_ID);
+  const joined = items.map((i) => i.content).join("\n");
+  for (const word of ["verifies", "verified", "approves", "approved", "delivers", "delivered", "closes", "closed"]) {
+    assert.ok(!new RegExp(`\\b${word}\\b`, "i").test(joined),
+      `evidence must not claim ${word} already happened: ${JSON.stringify(joined)}`);
+  }
+  assert.ok(/WorkSession.save\(\)/i.test(joined) === false,
+    `evidence must not reference save() running verification: ${JSON.stringify(joined)}`);
+});
+
+test("verification: the Checker verdict is recorded against the actual snapshot, independent of the harness's own claims", async () => {
+  const { report, harness } = await runHappy();
+  assert.equal(report.ok, true, report.refusal ?? "");
+  assert.equal(report.result_gate, "passed");
+  assert.ok(report.verification, "a verdict was recorded");
+
+  // The verdict hash recomputes from the actual persisted snapshot.
+  const state = harness.state()!;
+  const review = state.resultReview!;
+  const recomputedVerdict = await hashResultReviewVerdict({
+    workId: WORK_ID,
+    expectedResult: review.expectedResult!,
+    completionCriteria: review.completionCriteria!,
+    evidenceRefs: report.verification!.evidence_refs,
+    outcome: report.verification!.outcome,
+    reason: report.verification!.reason ?? undefined,
+  });
+  assert.equal(report.verification!.verdict_hash, recomputedVerdict);
+
+  // The snapshot key binds the verdict to this exact Work + contract state.
+  assert.ok(report.verification!.snapshot_key && report.verification!.snapshot_key.length > 0,
+    "snapshot key is present");
+  const stateSnapshotKey = state.resultReview?.verificationAttempt?.snapshotKey;
+  assert.equal(report.verification!.snapshot_key, stateSnapshotKey,
+    "reported snapshot key matches persisted state");
+});
+
 test("evidence: non-circular -- the evidence describes only what the harness produced, never the gate's verdict or Martin's decision", () => {
   const items = resultGateSmokeEvidence(WORK_ID);
   const joined = items.map((i) => i.content).join("\n");
@@ -1028,6 +1100,42 @@ test("wiring: the approval card for a smoke Work is marked TEST ONLY", () => {
   assert.ok(session.includes("TEST ONLY"), "the approval request is clearly marked as a test");
   assert.equal((session.match(/TEST ONLY/g) ?? []).length, 1, "one marker, on the one Result approval card");
 });
+
+// ---------------------------------------------------------------------------
+// Correction 3: approval card delivery outcome handling.
+// ---------------------------------------------------------------------------
+
+test("delivery: the approval card is sent via sendMessageWithOutcome, not plain sendMessage", () => {
+  const session = read("session.ts");
+  // Find the reportResultReviewBlocked method body.
+  const methodStart = session.indexOf("private async reportResultReviewBlocked");
+  assert.ok(methodStart > -1, "reportResultReviewBlocked exists");
+  const methodEnd = session.indexOf("\n  private async ", methodStart + 1);
+  const methodBody = methodEnd === -1 ? session.slice(methodStart) : session.slice(methodStart, methodEnd);
+
+  // The approval-card send path must use sendMessageWithOutcome so delivery
+  // success/failure is distinguishable from a staged-but-not-delivered card.
+  assert.ok(methodBody.includes("sendMessageWithOutcome("), "uses sendMessageWithOutcome for the approval card");
+});
+
+test("delivery: failed Telegram delivery rolls back the pending approval", () => {
+  const session = read("session.ts");
+  const methodStart = session.indexOf("private async reportResultReviewBlocked");
+  assert.ok(methodStart > -1, "reportResultReviewBlocked exists");
+  const methodEnd = session.indexOf("\n  private async ", methodStart + 1);
+  const methodBody = methodEnd === -1 ? session.slice(methodStart) : session.slice(methodStart, methodEnd);
+
+  // When delivery fails, pendingApproval is rolled back.
+  assert.ok(methodBody.includes("review!.pendingApproval = undefined"), "rolls back pending approval on delivery failure");
+  // The rollback is gated on !outcome.delivered.
+  assert.ok(methodBody.includes("!outcome.delivered"), "checks delivery outcome before rolling back");
+  // pendingActionSummary is only set after a successful delivery.
+  const pendingActionAt = methodBody.indexOf("state.pendingActionSummary =");
+  const deliveredCheckAt = methodBody.indexOf("if (!outcome.delivered)");
+  assert.ok(pendingActionAt > -1 && deliveredCheckAt > -1 && deliveredCheckAt < pendingActionAt,
+    "pendingActionSummary is set only after the delivery-outcome check");
+});
+
 
 // ---------------------------------------------------------------------------
 // Ordinary entry paths cannot reach the test Action.

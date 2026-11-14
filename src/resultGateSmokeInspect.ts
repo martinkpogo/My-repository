@@ -4,6 +4,7 @@ import { isAdminAuthorized } from "./adminAuth";
 import {
   RESULT_GATE_SMOKE_WORK_ID_PREFIX,
 } from "./runtime/resultGateSmoke";
+import { isTerminalWorkStage } from "./matterContinuation";
 
 /**
  * GET /admin/smoke-result-gate-inspect -- READ-ONLY operator inspection of one
@@ -26,9 +27,10 @@ import {
  * - the ONLY Durable Object call is `getState()` on the stub -- no execute(),
  *   no init(), no Handoff claim, no Notion/Telegram/Activity Log write, no
  *   session execution of any kind;
- * - the response is a fixed, minimal projection. Identity-bearing fields
- *   (chatId, threadId, entityName, matterName, enquiryText) are never
- *   returned; neither is the approval button token.
+ * - the response is a fixed projection of the complete Result Gate state.
+ *   Identity-bearing fields (chatId, threadId, entityName, matterName,
+ *   enquiryText) and the approval button token are never returned. Handoff
+ *   identifiers are not part of the smoke's Result Gate state and are omitted.
  */
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -55,31 +57,11 @@ export async function handleResultGateSmokeInspect(request: Request, env: Env): 
   }
 
   const review = state.resultReview;
-  const resultReviewProjection = review
-    ? {
-        gateStatus: review.gateStatus ?? null,
-        blockReason: review.blockReason ?? null,
-        preBlockStage: review.preBlockStage ?? null,
-        checker: review.checker
-          ? {
-              outcome: review.checker.outcome,
-              checkerId: review.checker.checkerId,
-              reason: review.checker.reason ?? null,
-              verdictHash: review.checker.verdictHash ?? null,
-            }
-          : null,
-        approval: review.approval
-          ? {
-              approver: review.approval.approver,
-              approvedAt: review.approval.approvedAt,
-              reviewHash: review.approval.reviewHash,
-            }
-          : null,
-        pendingApproval: review.pendingApproval
-          ? { staged: true, createdAt: review.pendingApproval.createdAt }
-          : null,
-      }
-    : null;
+  const checker = review?.checker;
+  const approval = review?.approval;
+  const evidenceRefs = (review?.evidence ?? []).map((item) => ({ kind: item.kind, ref: item.ref }));
+  const snapshotKey = review?.verificationAttempt?.snapshotKey ?? null;
+  const workClosed = isTerminalWorkStage(state.stage ?? "");
 
   return new Response(
     JSON.stringify({
@@ -90,9 +72,35 @@ export async function handleResultGateSmokeInspect(request: Request, env: Env): 
       stage: state.stage ?? null,
       createdAt: state.createdAt ?? null,
       updatedAt: state.updatedAt ?? null,
-      handoffId: state.handoffId ?? null,
       blockedReason: state.blockedReason ?? null,
-      resultReview: resultReviewProjection,
+      workClosed,
+      evidenceRefs,
+      snapshotKey,
+      resultReview: review
+        ? {
+            gateStatus: review.gateStatus ?? null,
+            blockReason: review.blockReason ?? null,
+            preBlockStage: review.preBlockStage ?? null,
+            checker: checker
+              ? {
+                  outcome: checker.outcome,
+                  checkerId: checker.checkerId,
+                  reason: checker.reason ?? null,
+                  verdictHash: checker.verdictHash ?? null,
+                }
+              : null,
+            approval: approval
+              ? {
+                  approver: approval.approver,
+                  approvedAt: approval.approvedAt,
+                  reviewHash: approval.reviewHash,
+                }
+              : null,
+            pendingApproval: review.pendingApproval
+              ? { staged: true, createdAt: review.pendingApproval.createdAt }
+              : null,
+          }
+        : null,
     }),
     { headers: JSON_HEADERS },
   );

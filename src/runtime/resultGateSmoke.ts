@@ -343,8 +343,8 @@ export function resultGateSmokeEvidence(workId: string): ResultReviewEvidenceIte
       ref: "result-gate-smoke-sequence",
       note: "the synthetic sequence this Work exercises",
       content: [
-        "Sequence executed by this Work: create the synthetic Work -> record synthetic evidence through the existing evidence model -> reach the success stage -> WorkSession.save() runs the Machinery Worker verification.",
-        "The Checker judges the produced evidence against the declared criteria only; nothing here asserts the outcome or pre-judges the decision.",
+        "Sequence executed by this Work: create the synthetic Work -> record synthetic evidence through the existing evidence model -> reach the success stage.",
+        "The Checker judges the produced evidence against the declared criteria independently; nothing here asserts the outcome or pre-judges the decision.",
         `Work: ${workId}`,
       ].join("\n"),
     },
