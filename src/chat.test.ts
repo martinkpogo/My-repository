@@ -126,3 +126,12 @@ test("ENIG: answers from its live definition, the business snapshot and the how-
   assert.match(capturedSystem, /give him the exact one-line message to send/);
   assert.doesNotMatch(capturedSystem, /say plainly you can't perform actions/, "the old talk-him-out-of-it rule is gone");
 });
+
+test("log is history (Martin, 2026-11-14): ENIG and Unit chat are told the Activity Log is the past, never the current state", async () => {
+  const fs = await import("node:fs");
+  const { LOG_IS_HISTORY_RULE } = await import("./chat");
+  assert.match(LOG_IS_HISTORY_RULE, /HISTORY/);
+  assert.match(LOG_IS_HISTORY_RULE, /ONLY from the business snapshot/);
+  const src = fs.readFileSync(new URL("./chat.ts", import.meta.url), "utf8");
+  assert.equal((src.match(/LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries/g) ?? []).length, 2, "both chat paths carry the rule next to the log");
+});
