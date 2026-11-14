@@ -455,3 +455,16 @@ test("the blocked-stage recovery state (preBlockStage/pendingClosure) is declare
   assert.match(typesSrc, /gateStatus: \"pending\" \| \"blocked\" \| \"passed\"/, "gateStatus must remain a required field of ResultReviewState");
   assert.strictEqual(RESULT_REVIEW_BLOCKED_STAGE, "result_review_blocked");
 });
+
+test("Checker prompt names the exact answer shape (2026-11-14): outcome pass|fail and a reason -- the shape the parser accepts", async () => {
+  const { buildResultCheckPromptParts, RESULT_CHECK_RESPONSE_FORMAT } = await import("./resultVerification");
+  const parts = buildResultCheckPromptParts(
+    { workId: "w1", unit: "Marketing", hat: "Marketing Strategist", action: "handle_request", stage: "delivered", expectedResult: "A draft", completionCriteria: ["It answers the task"] } as any,
+    { machineryWorkerId: "MW-1" } as any,
+    "[1] draft (x)\nbody",
+  );
+  assert.ok(parts.context.includes(RESULT_CHECK_RESPONSE_FORMAT));
+  assert.match(RESULT_CHECK_RESPONSE_FORMAT, /\{"outcome": "pass", "reason"/);
+  assert.match(RESULT_CHECK_RESPONSE_FORMAT, /exactly "pass" or "fail"/);
+  assert.match(parts.skillContent, /PASS only when every criterion is met/, "what the Checker judges is unchanged");
+});

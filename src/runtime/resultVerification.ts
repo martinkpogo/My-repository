@@ -421,13 +421,7 @@ export function resultVerificationDeps(env: Env): ResultVerificationDeps {
       const result = await generate<{ outcome?: unknown; reason?: unknown }>(env, {
         taskId: RESULT_VERIFICATION_TASK_ID,
         mode: "json",
-        parts: {
-          persona: `You are ENIG's independent Machinery Worker Result Checker "${authority.machineryWorkerId}". You did not perform this Work and you are not its producer; you verify only, and your verdict is never an approval.`,
-          skillContent:
-            "Verify the recorded evidence against EVERY completion criterion of the declared Expected Result. PASS only when every criterion is met by the recorded evidence itself. FAIL when any criterion is unmet or unsupported by the evidence. Never infer evidence that is not recorded, and never treat the Work's own claim as proof. Always give a concrete reason naming which criteria the evidence does or does not meet.",
-          context: `Expected Result: ${snapshot.expectedResult}\n\nCompletion criteria:\n${snapshot.completionCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
-          situation: `Work ${snapshot.workId} (${snapshot.unit ?? "unassigned"}/${snapshot.hat ?? "unassigned"}, action ${snapshot.action ?? "unassigned"}, stage ${snapshot.stage}).\n\nRecorded evidence:\n\n${evidenceText || "(no evidence recorded)"}`,
-        },
+        parts: buildResultCheckPromptParts(snapshot, authority, evidenceText),
       });
       if (!result || typeof result.outcome !== "string" || typeof result.reason !== "string") return null;
       const outcome = result.outcome.trim().toLowerCase();
@@ -436,5 +430,33 @@ export function resultVerificationDeps(env: Env): ResultVerificationDeps {
       if (!reason) return null;
       return { outcome, reason };
     },
+  };
+}
+
+/**
+ * The exact answer shape the Checker must return (2026-11-14). Live: the
+ * check answered but its reply was refused as "no usable verdict" -- the
+ * prompt asked for a verdict and a reason but never named the JSON keys or
+ * the allowed values, so the model chose its own. The parser above accepts
+ * only this shape; nothing about what the Checker judges changes.
+ */
+export const RESULT_CHECK_RESPONSE_FORMAT = [
+  "=== RESPONSE FORMAT (execution mechanics) ===",
+  'Reply ONLY with JSON exactly in this shape: {"outcome": "pass", "reason": "<which criteria the evidence meets>"} or {"outcome": "fail", "reason": "<which criteria the evidence does not meet, and why>"}.',
+  'The "outcome" value must be exactly "pass" or "fail" -- no other word, no other key names.',
+].join("\n");
+
+/** The Checker's prompt parts. Exported so the answer-format instruction is testable. */
+export function buildResultCheckPromptParts(
+  snapshot: ResultVerificationSnapshot,
+  authority: { machineryWorkerId: string },
+  evidenceText: string,
+) {
+  return {
+    persona: `You are ENIG's independent Machinery Worker Result Checker "${authority.machineryWorkerId}". You did not perform this Work and you are not its producer; you verify only, and your verdict is never an approval.`,
+    skillContent:
+      "Verify the recorded evidence against EVERY completion criterion of the declared Expected Result. PASS only when every criterion is met by the recorded evidence itself. FAIL when any criterion is unmet or unsupported by the evidence. Never infer evidence that is not recorded, and never treat the Work's own claim as proof. Always give a concrete reason naming which criteria the evidence does or does not meet.",
+    context: `Expected Result: ${snapshot.expectedResult}\n\nCompletion criteria:\n${snapshot.completionCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n\n${RESULT_CHECK_RESPONSE_FORMAT}`,
+    situation: `Work ${snapshot.workId} (${snapshot.unit ?? "unassigned"}/${snapshot.hat ?? "unassigned"}, action ${snapshot.action ?? "unassigned"}, stage ${snapshot.stage}).\n\nRecorded evidence:\n\n${evidenceText || "(no evidence recorded)"}`,
   };
 }
