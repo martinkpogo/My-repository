@@ -4,6 +4,8 @@ import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../.
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
 import { reportLiveStep, resolveLiveStep } from "../liveStatus";
 import { takeWebLookup } from "../webLookupAllowance";
+import { kvGet, kvPut } from "../../kvStore";
+import { hashContent } from "../../contentHash";
 import type { ResearchPlanDimension } from "./researchPlan";
 
 // ---------------------------------------------------------------------------
@@ -327,6 +329,15 @@ async function runSearch(env: Env, request: SearchRequest, access: AccessContext
 
   evaluateAccess(env, { operation: "read", dataSourceId: EXTERNAL_EGRESS_TARGET }, access);
 
+  // Search cache (Martin's decision 2026-11-14, free-tier option C): the
+  // same search within 7 days reuses its saved results instead of calling
+  // Tavily again, and does not count against the job's or the day's limit.
+  // Checked only after Access has allowed the search. Best-effort: a cache
+  // failure is a miss, never a failed search.
+  const cacheKey = await searchCacheKey(request);
+  const cached = await readCachedSearch(env, cacheKey);
+  if (cached) return cached;
+
   // Universal web research ceilings (src/runtime/webLookupAllowance.ts): a
   // search past the run's or the day's ceiling is not made, and says why.
   const allowance = await takeWebLookup(env);
@@ -354,7 +365,54 @@ async function runSearch(env: Env, request: SearchRequest, access: AccessContext
   }
 
   const results = normalizeTavilyResults(data.results, retrievedAt, maxResults);
-  return results.length > 0 ? { kind: "success_with_results", results } : { kind: "success_no_results" };
+  if (results.length === 0) return { kind: "success_no_results" };
+  const outcome: SearchOutcome = { kind: "success_with_results", results };
+  await writeCachedSearch(env, cacheKey, outcome);
+  return outcome;
+}
+
+/** How long a saved search is reused (Martin's decision 2026-11-14, option C). */
+export const SEARCH_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+const SEARCH_CACHE_PREFIX = "web_search_cache:";
+
+/**
+ * The cache key: a SHA-256 of the whole normalized request, so the stored
+ * key never carries the query text. Not in kvStore's fallback allowlist,
+ * so it stays Cloudflare-only.
+ */
+async function searchCacheKey(request: SearchRequest): Promise<string> {
+  const normalized = {
+    query: request.query.trim().toLowerCase().replace(/\s+/g, " "),
+    topic: request.topic ?? null,
+    max_results: request.max_results ?? MAX_RESULTS_PER_QUERY,
+    include_domains: [...(request.include_domains ?? [])].sort(),
+    exclude_domains: [...(request.exclude_domains ?? [])].sort(),
+  };
+  return SEARCH_CACHE_PREFIX + (await hashContent(JSON.stringify(normalized)));
+}
+
+/** Only a search that found results is saved, and only that shape is read back. */
+async function readCachedSearch(env: Env, key: string): Promise<SearchOutcome | null> {
+  if (!env.STATE_KV) return null;
+  try {
+    const raw = await kvGet(env, key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { results?: unknown };
+    if (!Array.isArray(parsed.results) || parsed.results.length === 0) return null;
+    return { kind: "success_with_results", results: parsed.results as SearchResult[] };
+  } catch (err) {
+    console.error("Search cache read failed", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+async function writeCachedSearch(env: Env, key: string, outcome: SearchOutcome): Promise<void> {
+  if (!env.STATE_KV || outcome.kind !== "success_with_results") return;
+  try {
+    await kvPut(env, key, JSON.stringify({ results: outcome.results }), { expirationTtl: SEARCH_CACHE_TTL_SECONDS });
+  } catch (err) {
+    console.error("Search cache write failed", err instanceof Error ? err.message : err);
+  }
 }
 
 /** Best-effort domain extraction for source-quality context -- falls back to the raw URL if parsing fails. */

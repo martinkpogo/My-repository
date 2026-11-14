@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AiPolicyExecutor } from "./policy";
+import { AiPolicyExecutor, DEFAULT_PROVIDER_IDS } from "./policy";
 import { aiJson, aiText, aiChat } from "../ai";
 import {
   AiProvider,
@@ -444,4 +444,8 @@ test("Last resort cap is 60s (Martin, 2026-11-14): Groq's 33s wait after a resea
   const { LAST_RESORT_MAX_WAIT_MS } = await import("./policy");
   assert.equal(LAST_RESORT_MAX_WAIT_MS, 60_000);
   assert.ok(33_210 <= LAST_RESORT_MAX_WAIT_MS);
+});
+
+test("fallback chain (Martin, 2026-11-14, free-tier option A): Workers AI, Groq, OpenRouter, Gemini, SambaNova -- NVIDIA NIM and Cerebras are out", () => {
+  assert.deepEqual([...DEFAULT_PROVIDER_IDS], ["workers-ai", "groq", "openrouter", "gemini", "sambanova"]);
 });

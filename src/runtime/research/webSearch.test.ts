@@ -492,3 +492,71 @@ test("gatherDimensionEvidence redacts identity terms from every outbound query -
   assert.ok(!queries[0].includes("Martin"), `identity must not leave the runtime: ${queries[0]}`);
   assert.ok(queries[0].includes("the business"), "the canonical redaction replacement must be applied");
 });
+
+function memoryKv() {
+  const store = new Map<string, string>();
+  const ttls = new Map<string, number | undefined>();
+  return {
+    store,
+    ttls,
+    get: async (k: string) => store.get(k) ?? null,
+    put: async (k: string, v: string, o?: { expirationTtl?: number }) => {
+      store.set(k, v);
+      ttls.set(k, o?.expirationTtl);
+    },
+    delete: async (k: string) => void store.delete(k),
+  };
+}
+
+test("search cache (Martin, 2026-11-14, option C): the same search within 7 days reuses its results -- no second provider call, no second count against the day's limit, and the stored key never carries the query", async () => {
+  const kv = memoryKv();
+  const env = { TAVILY_API_KEY: "key", STATE_KV: kv } as any;
+  let calls = 0;
+  const result = { title: "Ghana SMEs", url: "https://www.example.org/report", content: "snippet" };
+  const [first, second] = await withMockFetch(
+    async () => {
+      calls++;
+      return okJson({ results: [result] });
+    },
+    async () => [await executeSearch(env, { query: "Ghana SME branding needs" }, KERNEL_SEARCH), await executeSearch(env, { query: "  ghana sme   BRANDING needs " }, KERNEL_SEARCH)],
+  );
+  assert.strictEqual(calls, 1, "the second, equivalent search is served from the cache");
+  assert.strictEqual(first.kind, "success_with_results");
+  assert.deepStrictEqual(second, first);
+  const cacheKeys = [...kv.store.keys()].filter((k) => k.startsWith("web_search_cache:"));
+  assert.strictEqual(cacheKeys.length, 1);
+  assert.match(cacheKeys[0], /^web_search_cache:[0-9a-f]{64}$/);
+  assert.strictEqual(kv.ttls.get(cacheKeys[0]), 7 * 24 * 60 * 60);
+  const daily = [...kv.store.entries()].find(([k]) => k.startsWith("web_research_count:"));
+  assert.ok(daily, "the real search was counted");
+  assert.strictEqual(JSON.parse(daily[1]).used, 1, "only the real search counted");
+});
+
+test("search cache: a search that found nothing, or failed, is never saved -- the next attempt asks the provider again", async () => {
+  const kv = memoryKv();
+  const env = { TAVILY_API_KEY: "key", STATE_KV: kv } as any;
+  let calls = 0;
+  await withMockFetch(
+    async () => {
+      calls++;
+      return calls === 1 ? okJson({ results: [] }) : new Response("down", { status: 500 });
+    },
+    async () => {
+      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH);
+      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH);
+      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH);
+    },
+  );
+  assert.strictEqual(calls, 3);
+  assert.ok(![...kv.store.keys()].some((k) => k.startsWith("web_search_cache:")));
+});
+
+test("search cache: a cached search is still refused when Access refuses the disclosure -- the cache is read only after Access allows it", async () => {
+  const kv = memoryKv();
+  const env = { TAVILY_API_KEY: "key", STATE_KV: kv } as any;
+  await withMockFetch(
+    async () => okJson({ results: [{ title: "t", url: "https://example.org/a", content: "c" }] }),
+    () => executeSearch(env, { query: "a query" }, KERNEL_SEARCH),
+  );
+  await assert.rejects(() => executeSearch(env, { query: "a query" }, { kind: "work_session", workId: "work-x" } as any), AccessDeniedError);
+});

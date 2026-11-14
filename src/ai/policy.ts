@@ -5,7 +5,7 @@ import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/regist
 import { reportLiveStep, resolveLiveStep } from "../runtime/liveStatus";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
-import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
+import { GEMINI_PROVIDER, GROQ_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
 import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator, type OutboundGateReasonCategory } from "./outboundGate";
 import { sendMessage } from "../telegram";
@@ -49,15 +49,25 @@ export type AiCallOutcome =
 // Each is a no-op in the fallback loop below unless its own API key
 // secret is actually configured (see OpenAiCompatibleProvider.
 // isEligible) -- adding a key later needs no code change here.
+//
+// Martin's decision, 2026-11-14 (free-tier optimisation, option A):
+// nvidia-nim and cerebras are OUT of the chain. Neither answered once in
+// the live logs (nvidia timed out every call; cerebras returns 402 payment
+// required), and every failed try cost up to 12 s and part of the run's
+// 50-subrequest budget -- the budget a research run then ran out of. Their
+// adapters stay in openaiCompatible.ts, so restoring either is a one-line
+// change once it works (cerebras billing; a model nvidia actually serves).
+// sambanova stays: it fails only on a rejected key, which Martin can renew.
 const DEFAULT_PROVIDERS: AiProvider[] = [
   new WorkersAiProvider(),
   GROQ_PROVIDER,
   OPENROUTER_PROVIDER,
   GEMINI_PROVIDER,
-  NVIDIA_NIM_PROVIDER,
-  CEREBRAS_PROVIDER,
   SAMBANOVA_PROVIDER,
 ];
+
+/** The providers in the fallback chain, in order (exported for tests). */
+export const DEFAULT_PROVIDER_IDS: readonly string[] = DEFAULT_PROVIDERS.map((p) => p.id);
 
 export class AiPolicyExecutor {
   private providers: AiProvider[];

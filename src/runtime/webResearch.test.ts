@@ -208,3 +208,44 @@ test("research check (Martin, 2026-11-13): a reasoning model gets room to answer
   assert.match(RESEARCH_NEED_INSTRUCTIONS, /ALWAYS needs web research/);
   assert.match(RESEARCH_NEED_INSTRUCTIONS, /Say no for questions about ENIG's own records/, "the exclusions are unchanged");
 });
+
+test("research cache (Martin, 2026-11-14, option C): the same question within 24 hours reuses the saved findings with no AI call or search; the key is a hash, never the question", async () => {
+  const { researchOnline, RESEARCH_CACHE_TTL_SECONDS } = await import("./webResearch");
+  const { hashContent } = await import("../contentHash");
+  assert.strictEqual(RESEARCH_CACHE_TTL_SECONDS, 24 * 60 * 60);
+  const key = "web_research_cache:" + (await hashContent("what positioning problems do ghana smes face"));
+  const store = kv({ [key]: JSON.stringify({ digest: "saved findings (source: example.org)", gaps: ["no sector data"] }) });
+  const original = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    throw new Error("no network in this test");
+  }) as any;
+  try {
+    const result = await researchOnline(fakeEnv(store), "  What positioning problems do Ghana SMEs   face ", systemContext());
+    assert.deepStrictEqual(result, { digest: "saved findings (source: example.org)", gaps: ["no sector data"] });
+    assert.strictEqual(fetches, 0);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("research cache: an unreadable saved entry is a miss, never used as findings", async () => {
+  const { hashContent } = await import("../contentHash");
+  const key = "web_research_cache:" + (await hashContent("q for a broken cache entry"));
+  const store = kv({ [key]: JSON.stringify({ digest: 42 }) });
+  const { researchOnline } = await import("./webResearch");
+  const original = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    throw new Error("no network in this test");
+  }) as any;
+  try {
+    const result = await researchOnline(fakeEnv(store), "q for a broken cache entry", systemContext()).catch(() => null);
+    assert.strictEqual(result, null, "the real run is attempted and, with no network, cannot complete");
+    assert.ok(fetches > 0, "the broken entry was not used: the real research run was attempted");
+  } finally {
+    globalThis.fetch = original;
+  }
+});

@@ -16,8 +16,8 @@ import type { ResearchBlockCode, ResearchExecutionInput, ResearchOutcome, Resear
  *
  * `executeResearch` is one stateless pipeline:
  *   1. Validate the authorized/safe context          (requireSafeContext)
- *   2. Derive research relevance                     (deriveResearchRelevance)
- *   3. Select applicable protocol(s)                 (selectProtocols)
+ *   2-3. Interpret the question and select protocol(s), in ONE light
+ *        AI call                                     (interpretAndSelectProtocols)
  *   4. Apply deterministic selection guardrails      (applyProtocolSelectionGuardrails)
  *   5. Generate the research plan                    (generateResearchPlan)
  *   6. Gather evidence                               (gatherDimensionEvidence -- Access-checked egress)
@@ -107,18 +107,15 @@ export function capSuppliedEvidence(text: string): string {
     : text;
 }
 
-interface ProtocolSelectionResult {
+interface InterpretationAndSelectionResult {
+  relevance?: string;
   protocols?: string[];
   ambiguous?: boolean;
   reason?: string;
 }
 
-interface RelevanceResult {
-  relevance?: string;
-}
-
 /**
- * The four AI task ids one research run uses. The data boundary (provider
+ * The three AI task ids one research run uses. The data boundary (provider
  * eligibility, payload class, Outbound Data Gate exemptions) is decided per
  * task id, so a profile is exactly a data-boundary choice -- never a caller
  * flag. Two profiles exist, each reachable only through its own export:
@@ -134,21 +131,18 @@ interface RelevanceResult {
  *    2026-10-12). Only Lead Generation may import it (asserted by test).
  */
 interface ResearchTaskProfile {
-  relevance: "research.context_relevance" | "lead.candidate_research_relevance";
   selection: "research.protocol_selection" | "lead.candidate_research_protocol_selection";
   plan: "research.plan_generation" | "lead.candidate_research_plan";
   synthesis: "research.synthesis" | "lead.candidate_research_synthesis";
 }
 
 const STANDARD_RESEARCH_PROFILE: ResearchTaskProfile = {
-  relevance: "research.context_relevance",
   selection: "research.protocol_selection",
   plan: "research.plan_generation",
   synthesis: "research.synthesis",
 };
 
 const PUBLIC_PROSPECT_RESEARCH_PROFILE: ResearchTaskProfile = {
-  relevance: "lead.candidate_research_relevance",
   selection: "lead.candidate_research_protocol_selection",
   plan: "lead.candidate_research_plan",
   synthesis: "lead.candidate_research_synthesis",
@@ -174,36 +168,6 @@ async function requireSafeContext(env: Env): Promise<string | null> {
 }
 
 /**
- * Semantic stage between the raw research question and protocol
- * selection: Research Question -> Safe Consultancy Context -> Research
- * Relevance -> Protocol Selection. Establishes what the question means in
- * relation to the authorized category only -- never a strategic,
- * positioning, marketing, sales, finance, creative, or operational
- * decision. Feeding this (rather than the bare question) into protocol
- * selection is what fixes the earlier failure mode where losing business
- * meaning caused selection to default to the wrong protocol.
- */
-async function deriveResearchRelevance(env: Env, categorySummary: string, question: string, taskId: ResearchTaskProfile["relevance"]): Promise<string | null> {
-  const result = await generate<RelevanceResult>(env, {
-    taskId,
-    mode: "json",
-    parts: {
-      persona: `Below is the ONLY authorized description of the consultancy this research concerns -- an abstracted category, not the consultancy's real identity. Never assume, infer, or introduce any specific company name, person name, proprietary detail, or information beyond what's written here.
-
-${categorySummary}
-
-Given a research question, state in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This stage only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
-
-Return JSON: {"relevance": "<1-3 sentence reframing>"}`,
-      situation: question,
-    },
-    light: true,
-  });
-  const relevance = result?.relevance?.trim();
-  return relevance && relevance.length > 0 ? relevance : null;
-}
-
-/**
  * Maps the selection stage's returned protocol names to canonical
  * protocol ids, dropping anything that does not clearly resolve --
  * "couldn't determine" is never guessed into a nearest neighbor. An empty
@@ -216,39 +180,52 @@ export function resolveSelectedProtocols(names: string[]): ResearchProtocolId[] 
 }
 
 /**
- * Stage 1: question-driven protocol selection. Selection is based on the
- * actual research question, not keywords, and stops and surfaces
- * ambiguity rather than guessing when the choice materially affects the
- * research. Multiple protocols may be active at once.
+ * Interpretation and protocol selection in ONE light AI call (Martin's
+ * decision 2026-11-14, free-tier option D -- it was two calls, the second
+ * fed the first's answer). Two parts, both kept from the separate stages:
+ *
+ *  - Relevance: what the question means in relation to the authorized
+ *    category only -- never a strategic, positioning, marketing, sales,
+ *    finance, creative or operational decision. Grounding selection in
+ *    this (not the bare question) is what fixed the earlier failure where
+ *    selection defaulted to the wrong protocol.
+ *  - Selection: question-driven, never keyword matching; it stops and
+ *    surfaces ambiguity rather than guessing when the choice materially
+ *    affects the research. Several protocols may be active at once.
+ *
+ * The stops are unchanged: no usable interpretation is
+ * RELEVANCE_DERIVATION_FAILED, no protocol list is
+ * PROTOCOL_SELECTION_FAILED, and an ambiguous or unresolvable choice is
+ * AMBIGUOUS_PROTOCOL_SELECTION. Runs under the selection task id, which
+ * carries the same data-boundary class as the relevance id it replaces.
  */
-async function selectProtocols(
+async function interpretAndSelectProtocols(
   env: Env,
   categorySummary: string,
-  relevance: string,
   question: string,
   taskId: ResearchTaskProfile["selection"],
-): Promise<{ protocols: ResearchProtocolId[] } | { stop: ResearchOutcome }> {
-  const stage1 = await generate<ProtocolSelectionResult>(env, {
+): Promise<{ relevance: string; protocols: ResearchProtocolId[] } | { stop: ResearchOutcome }> {
+  const result = await generate<InterpretationAndSelectionResult>(env, {
     taskId,
     mode: "json",
     parts: {
-      persona: `You select research protocol(s) for a strategy-led consultancy's research needs. Below is the authorized research category this consultancy operates in -- use ONLY this, never any information about the consultancy beyond what's stated here:
+      persona: `You interpret a research question and select research protocol(s) for a strategy-led consultancy's research needs. Below is the ONLY authorized description of the consultancy this research concerns -- an abstracted category, not the consultancy's real identity. Never assume, infer, or introduce any specific company name, person name, proprietary detail, or information beyond what's written here:
 
 ${categorySummary}
 
-This research question has been interpreted, in relation to that authorized category, as:
-"${relevance}"
+Step 1 -- relevance. State in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
 
-Below are the six available protocols and what each investigates:
+Step 2 -- protocol selection, grounded in your Step 1 interpretation. Below are the six available protocols and what each investigates:
 
 ${researchProtocolSummaryList()}
 
-Select protocol(s) based on what the question genuinely requires, using the interpretation above for grounding -- never based on keyword matching alone. A broad question about the size, demand, growth, or structure of the market/industry for the consultancy's own authorized service domains and geography should select Market / Industry Research as the PRIMARY protocol -- do not default to Competitive Research for a broad market question; only add Competitive Research when the question specifically concerns named or observable competitors, substitutes, or positioning relative to others. A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another -- do not force a mixed question into a single category merely to simplify selection.
+Select protocol(s) based on what the question genuinely requires -- never based on keyword matching alone. A broad question about the size, demand, growth, or structure of the market/industry for the consultancy's own authorized service domains and geography should select Market / Industry Research as the PRIMARY protocol -- do not default to Competitive Research for a broad market question; only add Competitive Research when the question specifically concerns named or observable competitors, substitutes, or positioning relative to others. A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another -- do not force a mixed question into a single category merely to simplify selection.
 
 If the question is ambiguous and protocol selection would materially change what research is done, set ambiguous true and explain what's unclear rather than guessing.
 
 Return JSON:
 {
+  "relevance": "<1-3 sentence reframing>",
   "protocols": ["<exact protocol name from the list above>", ...],
   "ambiguous": true | false,
   "reason": "<brief rationale, or what's ambiguous>"
@@ -258,16 +235,20 @@ Return JSON:
     light: true,
   });
 
-  if (!stage1 || !stage1.protocols) {
+  const relevance = result?.relevance?.trim();
+  if (!result || !relevance) {
+    return { stop: blocked("RELEVANCE_DERIVATION_FAILED", "Couldn't interpret what this research question means for the authorized consultancy category — classification failed.") };
+  }
+  if (!Array.isArray(result.protocols)) {
     return { stop: blocked("PROTOCOL_SELECTION_FAILED", "Couldn't determine which research protocol(s) this question needs — classification failed.") };
   }
 
-  const selected = resolveSelectedProtocols(stage1.protocols);
-  if (stage1.ambiguous || selected.length === 0) {
+  const selected = resolveSelectedProtocols(result.protocols);
+  if (result.ambiguous || selected.length === 0) {
     return {
       stop: blocked(
         "AMBIGUOUS_PROTOCOL_SELECTION",
-        stage1.reason ?? "The research question could plausibly require more than one protocol, or none of the available protocols clearly apply.",
+        result.reason ?? "The research question could plausibly require more than one protocol, or none of the available protocols clearly apply.",
       ),
     };
   }
@@ -280,7 +261,7 @@ Return JSON:
   if (guarded.length !== selected.length || guarded[0] !== selected[0]) {
     console.log(`Research protocol-selection guardrail adjusted selection: [${selected.join(", ")}] -> [${guarded.join(", ")}]`);
   }
-  return { protocols: guarded };
+  return { relevance, protocols: guarded };
 }
 
 /**
@@ -323,14 +304,9 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   }
   const categorySummary = extractAuthorizedContextSummary(safeContext);
 
-  const relevance = await deriveResearchRelevance(env, categorySummary, question, profile.relevance);
-  if (!relevance) {
-    return blocked("RELEVANCE_DERIVATION_FAILED", "Couldn't interpret what this research question means for the authorized consultancy category — classification failed.");
-  }
-
-  const selection = await selectProtocols(env, categorySummary, relevance, question, profile.selection);
+  const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection);
   if ("stop" in selection) return selection.stop;
-  const protocols = selection.protocols;
+  const { relevance, protocols } = selection;
 
   await progress(`Using: ${protocols.map((id) => RESEARCH_PROTOCOL_REGISTRY[id].name).join(", ")} -- building a research plan and gathering evidence...`);
 
