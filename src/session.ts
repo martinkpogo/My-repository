@@ -54,6 +54,11 @@ import { strategyOf } from "./units/strategy/strategyState";
 const RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE =
   "✅ Result accepted. You approved this exact output as the last step, and the independent check passed, so no second Result approval is needed. The Work may close once saved.";
 
+/** The storage flag that arms the Checker's advisory assessment for alarm(). */
+const PENDING_ADVISORY_ASSESSMENT_KEY = "pendingAdvisoryAssessment";
+/** How long after the draft is saved the assessment's alarm fires. */
+const ADVISORY_ASSESSMENT_DELAY_MS = 2_000;
+
 /** Restores the success stage a Work was refused from, once its Result review is satisfied (shared by the approval callback, Re-check and the output-approval path). */
 function restoreResultReviewBlockedStage(state: WorkState): void {
   const review = state.resultReview;
@@ -270,6 +275,9 @@ export class WorkSession extends DurableObject<Env> {
       const state = await this.getState().catch(() => undefined);
       await notifyMartinOfDiscoveryFailure(this.env, state?.handoffId ?? "(unknown)", err);
     }
+    // The Checker's advisory second opinion, scheduled by execute() (see
+    // scheduleAdvisoryAssessment). Never throws and never blocks a pickup.
+    await this.runPendingAdvisoryAssessment();
   }
 
   /**
@@ -658,9 +666,13 @@ export class WorkSession extends DurableObject<Env> {
         access: () => workSessionContext(state),
       });
       // The independent Checker's advisory second opinion (Martin's decision,
-      // 2026-11-14): AFTER the draft is saved and with Martin, never before and
-      // never holding any state, so Approve and Redo are never delayed.
-      await this.maybeSendAdvisoryAssessment(saved);
+      // 2026-11-14): AFTER the draft is saved and with Martin, never before.
+      // It is only SCHEDULED here (a storage write and an alarm); it runs from
+      // alarm() in its own invocation, because run inline it shared this
+      // invocation's subrequest budget -- already spent by the research and the
+      // draft -- and failed ("Too many subrequests"), and it would have held
+      // the Telegram webhook open besides.
+      await this.scheduleAdvisoryAssessment(saved);
       return saved;
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
@@ -766,23 +778,49 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
-   * Sends Martin the Checker's second opinion on a draft awaiting his
-   * decision, if the Work's Action declares `advisoryAssessment`. Runs after
-   * the cycle that produced the draft has SAVED, holds no state while the AI
-   * call runs, and re-reads the Work before recording or sending -- so a
-   * decision Martin makes meanwhile is never overwritten (the read and the
-   * write below share no await) and an assessment of a draft he has moved on
-   * from is dropped. Never throws; a missing, late or failed assessment
-   * changes nothing.
+   * Arms the Checker's advisory second opinion for a draft awaiting Martin's
+   * decision, if the Work's Action declares `advisoryAssessment`: a storage
+   * flag and an alarm a couple of seconds out, nothing more. The assessment
+   * runs from alarm() in its own invocation with its own subrequest budget,
+   * after the cycle that produced the draft has SAVED, and never delays
+   * Approve, Redo or the webhook. Never throws.
    */
-  private async maybeSendAdvisoryAssessment(state: WorkState): Promise<void> {
+  private async scheduleAdvisoryAssessment(state: WorkState): Promise<void> {
     try {
       const declaration = this.recordedActionResult(state)?.advisoryAssessment;
       if (!declaration || state.stage !== declaration.awaitingStage || !state.pendingActionSummary) return;
       const output = declaration.output(state);
       if (!output?.trim()) return;
+      if (state.resultReview?.assessment?.outputHash === (await hashContent(output))) return; // this exact draft was already assessed
+      await this.ctx.storage.put(PENDING_ADVISORY_ASSESSMENT_KEY, true);
+      // One alarm per Durable Object: if a pickup already armed it, that same
+      // firing runs both (alarm() handles the pickup, then the assessment).
+      if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + ADVISORY_ASSESSMENT_DELAY_MS);
+    } catch (err) {
+      console.error(`WorkSession ${state.workId}: could not schedule the advisory assessment (nothing is blocked)`, err);
+    }
+  }
+
+  /**
+   * Sends Martin the Checker's second opinion on a draft awaiting his
+   * decision. Runs from alarm(); holds no state while the AI call runs, and
+   * re-reads the Work before recording or sending -- so a decision Martin
+   * makes meanwhile is never overwritten (the read and the write below share
+   * no await) and an assessment of a draft he has moved on from is dropped.
+   * Never throws; a missing, late or failed assessment changes nothing.
+   */
+  private async runPendingAdvisoryAssessment(): Promise<void> {
+    try {
+      if (!(await this.ctx.storage.get(PENDING_ADVISORY_ASSESSMENT_KEY))) return;
+      await this.ctx.storage.delete(PENDING_ADVISORY_ASSESSMENT_KEY); // a re-fired alarm never assesses twice
+      const state = await this.getState();
+      if (!state) return;
+      const declaration = this.recordedActionResult(state)?.advisoryAssessment;
+      if (!declaration || state.stage !== declaration.awaitingStage || !state.pendingActionSummary) return;
+      const output = declaration.output(state);
+      if (!output?.trim()) return;
       const outputHash = await hashContent(output);
-      if (state.resultReview?.assessment?.outputHash === outputHash) return; // this exact draft was already assessed
+      if (state.resultReview?.assessment?.outputHash === outputHash) return;
       const result = await runAdvisoryAssessment(
         { output, request: declaration.request?.(state), criteria: declaration.criteria, unit: state.unit, hat: state.hat },
         advisoryAssessmentDeps(this.env),
@@ -808,7 +846,7 @@ export class WorkSession extends DurableObject<Env> {
           : undefined;
       await sendMessage(this.env, fresh.chatId, formatAdvisoryMessage(result, delivery), redoButtons, fresh.threadId);
     } catch (err) {
-      console.error(`WorkSession ${state.workId}: advisory assessment failed (nothing is blocked)`, err);
+      console.error("WorkSession: advisory assessment failed (nothing is blocked)", err);
     }
   }
 
