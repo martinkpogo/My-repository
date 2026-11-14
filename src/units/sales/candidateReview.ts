@@ -168,7 +168,7 @@ export function socialSignalQueries(organisation: string): Array<{ query: string
  * discovery read uses -- no second retrieval mechanism, no provider choice,
  * no credentials.
  *
- * Each of the five SearchOutcome kinds is disclosed separately, because
+ * Each SearchOutcome kind is disclosed separately, because
  * "searched and found nothing" and "the search never succeeded" are different
  * facts about the world and a card must not conflate them.
  *
@@ -228,6 +228,8 @@ export async function gatherPublicSocialSignals(env: Env, organisation: string, 
       case "provider_unavailable":
       case "provider_failure":
       case "invalid_input":
+      case "interrupted":
+      case "internal_allowance_exhausted":
         disclosures.push(
           `Public social-signal search "${redactedQuery}" did not complete (${outcome.kind}). No conclusion about ${organisation}'s public social presence may be drawn from it -- an unsuccessful search is not an empty one.`,
         );
@@ -333,6 +335,8 @@ export async function gatherCandidateEvidence(
     case "provider_unavailable":
     case "provider_failure":
     case "invalid_input":
+    case "interrupted":
+    case "internal_allowance_exhausted":
       disclosures.push(
         `Candidate-specific search "${query}" did not complete (${outcome.kind}). No conclusion about ${organisation}'s public material may be drawn from it -- an unsuccessful search is not an empty one.`,
       );

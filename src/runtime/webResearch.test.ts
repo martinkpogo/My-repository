@@ -160,8 +160,29 @@ test("executeSearch: a search past the run's ceiling is never made, and says why
     run.searches = RUN_LIMIT;
     return executeSearch(env, { query: "branding challenges for SMEs" } as any, systemContext());
   }, () => "succeeded", undefined, { access: systemContext() });
-  assert.deepStrictEqual(outcome, { kind: "provider_unavailable", reason: "the web search limit for this job was reached" });
+  assert.deepStrictEqual(outcome, { kind: "internal_allowance_exhausted", reason: "the web search limit for this job was reached" });
   assert.strictEqual(tavily, 0);
+});
+
+test("executeSearch: with fallback providers enabled, an exhausted job allowance still asks NO provider -- fallback cannot bypass ENIG's own allowance", async (t) => {
+  const providerCalls: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: any) => {
+    const url = String(input);
+    if (/tavily|exa\.ai|serper/.test(url)) providerCalls.push(url);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const env = { ...fakeEnv(), EXA_API_KEY: "e", SERPER_API_KEY: "s", SEARCH_FALLBACK_PROVIDERS: "exa,serper", SEARCH_MONTHLY_BUDGET_EXA: "100" } as Env;
+  const outcome = await withLiveStatus(env, target, async () => {
+    const run = currentRun()!;
+    run.searches = RUN_LIMIT;
+    return executeSearch(env, { query: "branding challenges for SMEs" } as any, systemContext());
+  }, () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(outcome.kind, "internal_allowance_exhausted");
+  assert.deepStrictEqual(providerCalls, []);
 });
 
 test("one check and at most one research run per run: later Hat steps in the same run reuse the findings", async (t) => {

@@ -143,6 +143,27 @@ export interface Env {
   TAVILY_API_KEY?: string;
 
   /**
+   * Search fallback providers (BD-15, issue #338; Martin's choice 14 Nov
+   * 2026: Exa then Serper, Brave excluded). A fallback is used only when it
+   * is EXPLICITLY ENABLED in `SEARCH_FALLBACK_PROVIDERS` (a comma list, e.g.
+   * "exa,serper"), has its key secret set, and has a monthly budget
+   * (src/runtime/research/searchProviders.ts). Unset means Tavily alone, as
+   * before. Never selectable by a caller, Hat or Skill.
+   */
+  EXA_API_KEY?: string;
+  SERPER_API_KEY?: string;
+  SEARCH_FALLBACK_PROVIDERS?: string;
+  /**
+   * Monthly request budgets per search provider, each kept below the
+   * provider's free allowance so nothing is ever charged. Tavily and Serper
+   * have code defaults; Exa has none and stays ineligible until this is set
+   * from Martin's own Exa dashboard.
+   */
+  SEARCH_MONTHLY_BUDGET_TAVILY?: string;
+  SEARCH_MONTHLY_BUDGET_EXA?: string;
+  SEARCH_MONTHLY_BUDGET_SERPER?: string;
+
+  /**
    * Free-tier AI provider fallback keys (src/ai/openaiCompatible.ts),
    * all optional -- added after Cloudflare Workers AI's daily quota
    * exhaustion blocked every AI-driven Hat/Unit at once. Each is a no-op

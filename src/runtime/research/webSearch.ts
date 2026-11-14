@@ -7,28 +7,46 @@ import { takeWebLookup } from "../webLookupAllowance";
 import { kvGet, kvPut } from "../../kvStore";
 import { hashContent } from "../../contentHash";
 import type { ResearchPlanDimension } from "./researchPlan";
+import {
+  PRIMARY_SEARCH_PROVIDER,
+  SEARCH_PROVIDER_ADAPTERS,
+  SearchProviderError,
+  adapterSupports,
+  clearCooldown,
+  configuredProviderChain,
+  cooldownUntil,
+  isRecoverableFailure,
+  monthlyBudget,
+  readMonthlyUsage,
+  recordProviderRequest,
+  startCooldown,
+  type RawSearchResult,
+  type SearchProviderAdapter,
+  type SearchProviderCapabilities,
+  type SearchProviderId,
+} from "./searchProviders";
+
+export type { SearchProviderId } from "./searchProviders";
 
 // ---------------------------------------------------------------------------
 // The shared search Tool contract (canonical specification: ENIG HQ / 6.
-// Tools > Search, LOG-1068). This module is the single executable
-// registration and handler for the `search` tool id: one provider-neutral
-// request/outcome shape that every authorized consumer (research executor,
-// Sales Lead Generation, and any later consumer) calls through the same
-// Access-gated path. Provider policy comes from trusted runtime
-// configuration below -- never from a caller, Hat, or Skill.
+// Tools > Search, LOG-1068; provider fallback and recovery approved in
+// Build Decision Record BD-15, issue #338). This module is the single
+// executable registration and handler for the `search` tool id: one
+// provider-neutral request/outcome shape that every authorized consumer
+// (research executor, Sales Lead Generation, and any later consumer) calls
+// through the same Access-gated path. Provider policy comes from trusted
+// runtime configuration (./searchProviders.ts) -- never from a caller, Hat,
+// or Skill.
 // ---------------------------------------------------------------------------
 
-/** The provider ids the contract knows about. Only `tavily` is enabled (provider_policy: initial_provider: tavily). */
-export type SearchProviderId = "tavily";
-
 /**
- * Trusted runtime configuration: the one provider behind every search
- * invocation. A Hat, Skill, Work, or caller cannot select a provider or
- * supply credentials (provider_policy: caller_or_hat_selects_provider: false;
- * additional_providers_enabled: false). Adding a provider means changing
- * this approved configuration, not calling a second mechanism.
+ * Trusted runtime configuration: the primary provider (provider_policy.
+ * primary_provider: tavily). Fallback providers are used only when
+ * explicitly enabled for the deployment -- see ./searchProviders.ts. Kept
+ * under this name because the contract and existing callers know it.
  */
-export const ACTIVE_SEARCH_PROVIDER: SearchProviderId = "tavily";
+export const ACTIVE_SEARCH_PROVIDER: SearchProviderId = PRIMARY_SEARCH_PROVIDER;
 
 /** Optional input parameters of the search contract (canonical input schema). */
 export interface SearchRequest {
@@ -57,7 +75,7 @@ export interface SearchResult {
   /** Absolute http(s) URL, preserved exactly as the provider supplied it. */
   url: string;
   snippet: string;
-  /** Which provider produced this result (currently always "tavily"). */
+  /** Which provider actually produced this result (provider_attribution_required). */
   provider: string;
   /** When this result was retrieved from the provider, ISO-8601. */
   retrieved_at: string;
@@ -66,46 +84,30 @@ export interface SearchResult {
 }
 
 /**
- * The five distinguishable outcomes. A provider failure or unavailable
- * provider must never read as "no evidence exists" -- callers branch on
- * `kind` so an unsearched query cannot masquerade as an empty result.
- * (Access denial is deliberately NOT one of these: it is a governance
- * decision that throws AccessDeniedError before any provider request.)
+ * The distinguishable outcomes (canonical outcomes; outcome_distinction_
+ * required). A provider failure or unavailable provider must never read as
+ * "no evidence exists" -- callers branch on `kind` so an unsearched query
+ * cannot masquerade as an empty result. Access denial is deliberately NOT one
+ * of these: it is the contract's distinct `denied` outcome, delivered as a
+ * thrown AccessDeniedError before any provider request and never caught as a
+ * provider failure.
+ *
+ *   - internal_allowance_exhausted: ENIG's own search allowance (per job or
+ *     per day) is used up. Switching providers cannot bypass it.
+ *   - interrupted: every eligible provider was rate-limited, temporarily
+ *     unavailable or returned a malformed response. Nothing was found or
+ *     ruled out; the operation may be resumed through its owning Work, no
+ *     sooner than `retry_at` when one is known.
  */
 export type SearchOutcome =
   | { kind: "success_with_results"; results: SearchResult[] }
   | { kind: "success_no_results" }
   | { kind: "provider_unavailable"; reason: string }
   | { kind: "provider_failure"; reason: string }
-  | { kind: "invalid_input"; reason: string };
+  | { kind: "invalid_input"; reason: string }
+  | { kind: "internal_allowance_exhausted"; reason: string }
+  | { kind: "interrupted"; reason: string; retry_at?: string };
 
-/** What the active provider adapter can actually apply -- anything else is rejected, not ignored. */
-interface SearchProviderCapabilities {
-  topics: readonly string[];
-  maxResults: { min: number; max: number };
-  includeDomains: boolean;
-  excludeDomains: boolean;
-  dateRange: boolean;
-}
-
-/** Raw provider response shape (Tavily): only what normalization consumes. */
-interface TavilyResponse {
-  results?: Array<{ title?: string; url?: string; content?: string; published_date?: string }>;
-}
-
-interface SearchProviderAdapter {
-  id: SearchProviderId;
-  capabilities: SearchProviderCapabilities;
-  /**
-   * Translates one validated request into a provider call. Credentials
-   * never leave this function. Throws on network error, non-2xx, or
-   * malformed JSON -- the caller classifies every throw as
-   * provider_failure (a failed search, never an empty one).
-   */
-  fetchResults(env: Env, request: SearchRequest, maxResults: number): Promise<TavilyResponse>;
-}
-
-const TAVILY_API_URL = "https://api.tavily.com/search";
 // Confirmed live: even after capping each snippet's length (see
 // MAX_SNIPPET_LENGTH below), a full 8 dimensions x 5 results each (40
 // results) still pushed a single synthesis prompt to ~10,000+ requested
@@ -120,9 +122,9 @@ const TAVILY_API_URL = "https://api.tavily.com/search";
 const MAX_RESULTS_PER_QUERY = 3;
 
 // The runtime-defined upper bound for one search invocation (the
-// contract's max_results maximum, matched to Tavily's own API limit).
-// Requests beyond it are invalid_input rather than silently truncated.
-const MAX_RESULTS_PER_QUERY_LIMIT = 20;
+// contract's max_results maximum, matched to Tavily's own API limit) lives
+// with the adapters as MAX_RESULTS_PER_QUERY_LIMIT. Requests beyond it are
+// invalid_input rather than silently truncated.
 
 // Confirmed live: Tavily's "content" field is unbounded (some results ran
 // well over a thousand characters), and with up to MAX_DIMENSIONS_PER_
@@ -138,58 +140,21 @@ function capSnippet(snippet: string): string {
   return snippet.length > MAX_SNIPPET_LENGTH ? `${snippet.slice(0, MAX_SNIPPET_LENGTH)}...` : snippet;
 }
 
-/**
- * Tavily -- the only initially enabled provider (initial_provider: tavily).
- * Its capabilities are declared explicitly so validation can reject what
- * this adapter cannot honestly apply instead of pretending the filter was
- * passed through.
- */
-const TAVILY_ADAPTER: SearchProviderAdapter = {
-  id: "tavily",
-  capabilities: {
-    topics: ["general", "news"],
-    maxResults: { min: 1, max: MAX_RESULTS_PER_QUERY_LIMIT },
-    includeDomains: true,
-    excludeDomains: true,
-    dateRange: false,
-  },
-  async fetchResults(env, request, maxResults) {
-    const res = await fetch(TAVILY_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        api_key: env.TAVILY_API_KEY,
-        query: request.query.trim(),
-        max_results: maxResults,
-        search_depth: "basic",
-        ...(request.topic ? { topic: request.topic } : {}),
-        ...(request.include_domains ? { include_domains: request.include_domains } : {}),
-        ...(request.exclude_domains ? { exclude_domains: request.exclude_domains } : {}),
-      }),
-    });
-    if (!res.ok) {
-      // Status only -- logs must minimize sensitive content: no query text
-      // and no response body echo here.
-      console.error(`Tavily search failed: HTTP ${res.status}`);
-      throw new Error(`search provider responded with HTTP ${res.status}`);
-    }
-    // Malformed JSON throws here and is classified as provider_failure by
-    // the caller -- never as an empty successful search.
-    return (await res.json()) as TavilyResponse;
-  },
-};
-
+/** True when at least one provider (the primary, or an explicitly enabled fallback with its credential) is configured. */
 export function isWebSearchConfigured(env: Env): boolean {
-  return Boolean(env.TAVILY_API_KEY);
+  return configuredProviderChain(env).length > 0;
 }
 
 /**
  * Contract validation, run before Access and before any provider request
  * (validate_input_before_external_request): an invalid invocation makes no
- * external request at all. Returns a human-readable reason, or null when
- * the request is valid for the active adapter.
+ * external request at all. Validated against the PRIMARY adapter's
+ * capabilities, so the contract a caller sees does not change with which
+ * providers a deployment enables; a fallback that cannot honestly apply a
+ * valid request's filters is skipped, never used with a filter dropped.
+ * Returns a human-readable reason, or null when the request is valid.
  */
-function validateSearchRequest(request: SearchRequest, adapter: SearchProviderAdapter): string | null {
+function validateSearchRequest(request: SearchRequest, adapter: { capabilities: SearchProviderCapabilities }): string | null {
   if (!request || typeof request !== "object") return "search request must be an object";
 
   // additional_properties: false -- unknown parameters are rejected, never
@@ -255,18 +220,18 @@ function isAbsoluteHttpUrl(url: string): boolean {
  * retrieval time once, and carries publication dates through only when the
  * provider supplied them (never invented).
  */
-function normalizeTavilyResults(raw: TavilyResponse["results"], retrievedAt: string, maxResults: number): SearchResult[] {
+function normalizeProviderResults(raw: RawSearchResult[], provider: SearchProviderId, retrievedAt: string, maxResults: number): SearchResult[] {
   const results: SearchResult[] = [];
-  for (const entry of raw ?? []) {
+  for (const entry of raw) {
     if (results.length >= maxResults) break;
     if (!entry || typeof entry !== "object" || typeof entry.url !== "string" || !isAbsoluteHttpUrl(entry.url)) continue;
     results.push({
       title: typeof entry.title === "string" ? entry.title : "",
       url: entry.url,
       snippet: capSnippet(typeof entry.content === "string" ? entry.content : ""),
-      provider: ACTIVE_SEARCH_PROVIDER,
+      provider,
       retrieved_at: retrievedAt,
-      ...(typeof entry.published_date === "string" && entry.published_date.trim() ? { published_at: entry.published_date } : {}),
+      ...(typeof entry.published === "string" && entry.published.trim() ? { published_at: entry.published } : {}),
     });
   }
   return results;
@@ -307,11 +272,12 @@ export function finishedSearchLabel(outcome: SearchOutcome): string {
     return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) && domain.length <= 60 ? `${SEARCH_STEP} — ${domain}` : SEARCH_STEP;
   }
   if (outcome.kind === "success_no_results") return `${SEARCH_STEP} — nothing found`;
+  if (outcome.kind === "interrupted") return `${SEARCH_STEP} — paused, providers busy`;
   return `${SEARCH_STEP} — not completed`;
 }
 
 export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
-  const invalidReason = validateSearchRequest(request, TAVILY_ADAPTER);
+  const invalidReason = validateSearchRequest(request, SEARCH_PROVIDER_ADAPTERS[PRIMARY_SEARCH_PROVIDER]);
   if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
   // Universal live status: never the query text. The step shows ⏳ until
   // the search returns, then names the site it found.
@@ -322,9 +288,9 @@ export async function executeSearch(env: Env, request: SearchRequest, access: Ac
 }
 
 async function runSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
-
-  if (!env.TAVILY_API_KEY) {
-    return { kind: "provider_unavailable", reason: "no search provider is configured (TAVILY_API_KEY is unset)" };
+  const chain = configuredProviderChain(env);
+  if (chain.length === 0) {
+    return { kind: "provider_unavailable", reason: "no search provider is configured (TAVILY_API_KEY is unset and no fallback is enabled)" };
   }
 
   evaluateAccess(env, { operation: "read", dataSourceId: EXTERNAL_EGRESS_TARGET }, access);
@@ -340,35 +306,112 @@ async function runSearch(env: Env, request: SearchRequest, access: AccessContext
 
   // Universal web research ceilings (src/runtime/webLookupAllowance.ts): a
   // search past the run's or the day's ceiling is not made, and says why.
+  // Taken ONCE per logical search, before any provider is tried, so falling
+  // back to another provider can never reset or evade ENIG's own allowance
+  // (internal_allowance_must_not_be_bypassed_by_fallback), and exhaustion
+  // never triggers fallback (do_not_fallback_on: internal_allowance_exhaustion).
   const allowance = await takeWebLookup(env);
   if (!allowance.ok) {
     return {
-      kind: "provider_unavailable",
+      kind: "internal_allowance_exhausted",
       reason: allowance.reason === "run_limit" ? "the web search limit for this job was reached" : "the daily web search limit was reached",
     };
   }
 
+  return runProviderChain(env, request, access, chain);
+}
+
+/**
+ * Runs ONE logical search across the configured provider chain, in order
+ * (recovery: preserve_original_logical_operation). For each provider:
+ * skipped when it cannot apply the request's filters, is cooling down, or
+ * has used its monthly budget; otherwise Access is evaluated again (each
+ * external request is separately authorized), the request is counted against
+ * the provider's month, and it is made. A recoverable failure (rate limit,
+ * outage, malformed response) moves to the next provider, starting a
+ * cooldown for rate limits and outages; a refused request is a
+ * provider_failure that stops the operation. When no provider could complete
+ * it, the outcome is `interrupted` (recoverable later) or
+ * `provider_unavailable` (every provider's budget is used) -- never an empty
+ * success.
+ */
+async function runProviderChain(env: Env, request: SearchRequest, access: AccessContext, chain: SearchProviderAdapter[]): Promise<SearchOutcome> {
   const maxResults = request.max_results ?? MAX_RESULTS_PER_QUERY;
-  const retrievedAt = new Date().toISOString();
+  const providerRequest = {
+    query: request.query.trim(),
+    ...(request.topic !== undefined ? { topic: request.topic } : {}),
+    ...(request.include_domains !== undefined ? { include_domains: request.include_domains } : {}),
+    ...(request.exclude_domains !== undefined ? { exclude_domains: request.exclude_domains } : {}),
+  };
+  const notes: string[] = [];
+  let recoverable = false;
+  let earliestRetry: number | null = null;
+  const noteRetry = (at: number) => {
+    earliestRetry = earliestRetry === null ? at : Math.min(earliestRetry, at);
+  };
 
-  let data: TavilyResponse;
-  try {
-    data = await TAVILY_ADAPTER.fetchResults(env, request, maxResults);
-  } catch (err) {
-    console.error("Search provider request failed", err instanceof Error ? err.message : err);
-    return { kind: "provider_failure", reason: "the search provider request failed (network or provider execution error)" };
+  for (const adapter of chain) {
+    if (!adapterSupports(adapter, providerRequest)) {
+      notes.push(`${adapter.id}: cannot apply this request's filters`);
+      continue;
+    }
+    const coolingUntil = await cooldownUntil(env, adapter.id);
+    if (coolingUntil !== null) {
+      recoverable = true;
+      noteRetry(coolingUntil);
+      notes.push(`${adapter.id}: cooling down`);
+      continue;
+    }
+    const budget = monthlyBudget(env, adapter.id);
+    if (budget === null) {
+      notes.push(`${adapter.id}: no monthly budget configured`);
+      continue;
+    }
+    if ((await readMonthlyUsage(env, adapter.id)) >= budget) {
+      notes.push(`${adapter.id}: monthly budget used`);
+      continue;
+    }
+
+    // Each external request is separately authorized, the fallback included
+    // (authorize_before_each_external_request). A denial throws and is never
+    // caught here.
+    evaluateAccess(env, { operation: "read", dataSourceId: EXTERNAL_EGRESS_TARGET }, access);
+    await recordProviderRequest(env, adapter.id);
+    const retrievedAt = new Date().toISOString();
+    let raw: RawSearchResult[];
+    try {
+      raw = await adapter.fetchResults(env, providerRequest, maxResults);
+    } catch (err) {
+      const failure = err instanceof SearchProviderError ? err : new SearchProviderError("outage", `${adapter.id} request failed`);
+      console.error(`Search provider ${adapter.id}: ${failure.message}`);
+      if (!isRecoverableFailure(failure.failure)) {
+        return { kind: "provider_failure", reason: `the search provider request failed (${failure.message})` };
+      }
+      recoverable = true;
+      if (failure.failure === "rate_limited" || failure.failure === "outage") {
+        noteRetry(await startCooldown(env, adapter.id, failure.retryAfterMs));
+      }
+      notes.push(`${adapter.id}: ${failure.failure.replace("_", " ")}`);
+      continue;
+    }
+
+    await clearCooldown(env, adapter.id);
+    const results = normalizeProviderResults(raw, adapter.id, retrievedAt, maxResults);
+    if (results.length === 0) return { kind: "success_no_results" };
+    const outcome: SearchOutcome = { kind: "success_with_results", results };
+    await writeCachedSearch(env, await searchCacheKey(request), outcome);
+    return outcome;
   }
 
-  if (!data || typeof data !== "object" || !Array.isArray(data.results)) {
-    console.error("Search provider returned a malformed response");
-    return { kind: "provider_failure", reason: "the search provider returned a malformed response" };
+  const detail = notes.join("; ") || "no provider could take the request";
+  if (recoverable) {
+    return {
+      kind: "interrupted",
+      reason: `no search provider could complete the request right now (${detail})`,
+      ...(earliestRetry !== null ? { retry_at: new Date(earliestRetry).toISOString() } : {}),
+    };
   }
-
-  const results = normalizeTavilyResults(data.results, retrievedAt, maxResults);
-  if (results.length === 0) return { kind: "success_no_results" };
-  const outcome: SearchOutcome = { kind: "success_with_results", results };
-  await writeCachedSearch(env, cacheKey, outcome);
-  return outcome;
+  return { kind: "provider_unavailable", reason: `no eligible search provider can take the request (${detail})` };
 }
 
 /** How long a saved search is reused (Martin's decision 2026-11-14, option C). */

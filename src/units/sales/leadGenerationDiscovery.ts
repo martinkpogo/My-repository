@@ -860,7 +860,12 @@ async function searchAndScreenForQuery(
     summary.searchUnavailable++;
     return;
   }
-  if (outcome.kind === "provider_failure" || outcome.kind === "invalid_input") {
+  if (
+    outcome.kind === "provider_failure" ||
+    outcome.kind === "invalid_input" ||
+    outcome.kind === "interrupted" ||
+    outcome.kind === "internal_allowance_exhausted"
+  ) {
     // A failed search is recorded as a failed search -- never folded into
     // "nothing found", which would misrepresent an unsearched query as an
     // empty result.
