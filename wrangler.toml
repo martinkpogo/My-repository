@@ -155,7 +155,7 @@ TURSO_DATABASE_URL = "libsql://enig-fallback-martinkpogo.aws-eu-west-1.turso.io"
 #   OPENROUTER_API_KEY (optional — same, additional fallback)
 #   CEREBRAS_API_KEY (optional — same, additional fallback)
 #   GEMINI_API_KEY (optional — same, additional fallback)
-#   SAMBANOVA_API_KEY (optional — same, additional fallback)
+#   SAMBANOVA_API_KEY (unused since 2026-11-14 — SambaNova is out of the fallback chain)
 #   GOOGLE_OAUTH_CLIENT_SECRET (required for Google Workspace OAuth -- confidential, unlike GOOGLE_OAUTH_CLIENT_ID above, which is a plain var)
 #   TURSO_AUTH_TOKEN (required -- authenticates TURSO_DATABASE_URL above, the Turso fallback database `enig-fallback`; stored ONLY as a Cloudflare Secret, never committed to this file, source, logs or git)
 #

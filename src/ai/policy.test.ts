@@ -446,6 +446,6 @@ test("Last resort cap is 60s (Martin, 2026-11-14): Groq's 33s wait after a resea
   assert.ok(33_210 <= LAST_RESORT_MAX_WAIT_MS);
 });
 
-test("fallback chain (Martin, 2026-11-14, free-tier option A): Workers AI, Groq, OpenRouter, Gemini, SambaNova -- NVIDIA NIM and Cerebras are out", () => {
-  assert.deepEqual([...DEFAULT_PROVIDER_IDS], ["workers-ai", "groq", "openrouter", "gemini", "sambanova"]);
+test("fallback chain (Martin, 2026-11-14): Workers AI, Groq, OpenRouter, Gemini -- NVIDIA NIM, Cerebras and SambaNova are out", () => {
+  assert.deepEqual([...DEFAULT_PROVIDER_IDS], ["workers-ai", "groq", "openrouter", "gemini"]);
 });
