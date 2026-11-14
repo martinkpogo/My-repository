@@ -84,7 +84,8 @@ test("run: no assessment -- silently -- when the Checker's authority is missing,
   assert.equal(await runAdvisoryAssessment(INPUT, { ...ok, ask: async () => { throw new Error("all providers failed"); } }), null, "call fails");
   assert.equal(await runAdvisoryAssessment(INPUT, { ...ok, ask: async () => ({ nonsense: true }) }), null, "bad shape");
   assert.equal(await runAdvisoryAssessment(INPUT, { ...ok, ask: () => new Promise(() => {}) }, 20), null, "never answers: abandoned at the timeout");
-  assert.equal(ADVISORY_ASSESSMENT_TIMEOUT_MS, 25_000);
+  // 25 s while it ran inline in the draft's own request; 100 s since 2026-11-14, when it moved to an alarm (nothing waits on it; room for the executor's 60 s rate-limit wait).
+  assert.equal(ADVISORY_ASSESSMENT_TIMEOUT_MS, 100_000);
 });
 
 const AWAITING = "awaiting_marketing_draft_approval";
@@ -116,9 +117,16 @@ test("wiring: Marketing declares content criteria only; the Work assesses after 
   assert.equal(decl.request!({ marketing: { taskText: "Y" } } as any), "Y");
 
   const src = fs.readFileSync(new URL("../session.ts", import.meta.url), "utf8");
-  const exec = src.slice(src.indexOf("private async execute"), src.indexOf("private async maybeSendAdvisoryAssessment"));
-  assert.match(exec, /const saved = await withLiveStatus\([\s\S]*await this\.maybeSendAdvisoryAssessment\(saved\);\s*return saved;/, "assessed AFTER the saved cycle");
-  const fn = src.slice(src.indexOf("private async maybeSendAdvisoryAssessment"), src.indexOf("private async reportResultReviewBlocked"));
+  const exec = src.slice(src.indexOf("private async execute"), src.indexOf("private async scheduleAdvisoryAssessment"));
+  assert.match(exec, /const saved = await withLiveStatus\([\s\S]*await this\.scheduleAdvisoryAssessment\(saved\);\s*return saved;/, "only SCHEDULED after the saved cycle -- never run inline");
+  assert.ok(!/runAdvisoryAssessment\(/.test(exec), "no AI call inside the draft's own invocation (it shared that invocation's spent subrequest budget and failed)");
+  const schedule = src.slice(src.indexOf("private async scheduleAdvisoryAssessment"), src.indexOf("private async runPendingAdvisoryAssessment"));
+  assert.match(schedule, /storage\.put\(PENDING_ADVISORY_ASSESSMENT_KEY, true\)[\s\S]*getAlarm\(\)[\s\S]*setAlarm\(Date\.now\(\) \+ ADVISORY_ASSESSMENT_DELAY_MS\)/, "a flag and an alarm, nothing more");
+  assert.ok(!/await runAdvisoryAssessment|sendMessage/.test(schedule), "scheduling makes no AI call and sends nothing");
+  const alarm = src.slice(src.indexOf("async alarm()"), src.indexOf("async runHandoffPickup"));
+  assert.match(alarm, /await this\.runPendingAdvisoryAssessment\(\);/, "alarm() runs the pending assessment in its own invocation, after any pickup");
+  const fn = src.slice(src.indexOf("private async runPendingAdvisoryAssessment"), src.indexOf("private async reportResultReviewBlocked"));
+  assert.match(fn, /storage\.delete\(PENDING_ADVISORY_ASSESSMENT_KEY\)[\s\S]*re-fired alarm never assesses twice/, "the flag is cleared before the run");
   assert.match(fn, /catch \(err\)[\s\S]*nothing is blocked/, "never throws");
   assert.match(fn, /const fresh = migrateSavedWork\(await this\.ctx\.storage\.get<WorkState>\("state"\)\);[\s\S]{0,400}await this\.ctx\.storage\.put\("state", fresh\);/, "re-read and write share no await");
   const between = fn.slice(fn.indexOf("const fresh = migrateSavedWork"), fn.indexOf("await this.ctx.storage.put"));

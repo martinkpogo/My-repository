@@ -21,8 +21,14 @@ import { RESULT_VERIFICATION_AUTHORITY_PAGE_ID, RESULT_VERIFICATION_TASK_ID, par
  * live from the canonical Operations page (BD-13); without it, no assessment.
  */
 
-/** The longest the assessment may take before it is abandoned (the draft is already with Martin). */
-export const ADVISORY_ASSESSMENT_TIMEOUT_MS = 25_000;
+/**
+ * The longest the assessment may take before it is abandoned. It runs from a
+ * Durable Object alarm after the draft is already with Martin, so nothing
+ * waits on it; the allowance covers the executor's last-resort rate-limit wait
+ * (up to 60 s) plus the provider calls themselves. (Was 25 s while it ran
+ * inline in the draft's own request.)
+ */
+export const ADVISORY_ASSESSMENT_TIMEOUT_MS = 100_000;
 
 export interface AdvisoryAssessmentInput {
   /** The draft being assessed (exactly what Martin was shown). */
