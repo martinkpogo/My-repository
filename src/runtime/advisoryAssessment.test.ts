@@ -106,8 +106,12 @@ test("wiring: Marketing declares content criteria only; the Work assesses after 
   const decl = action.advisoryAssessment!;
   assert.ok(decl, "Marketing handle_request declares the advisory assessment");
   assert.equal(decl.awaitingStage, "awaiting_marketing_draft_approval");
-  assert.equal(decl.criteria.length, 2);
+  // Three content criteria: ownership, claims trace to sources, and (added 2026-11-14 at
+  // Martin's request) the seven-part problem-brief format with ENIG named.
+  assert.equal(decl.criteria.length, 3);
+  assert.match(decl.criteria[2], /seven-part problem brief[\s\S]*each part on its own line[\s\S]*refers to ENIG by name rather than "the business"/);
   assert.ok(!decl.criteria.some((c) => /approval/i.test(c)), "the approval criterion is never assessed: his approval does not exist yet");
+  assert.equal(decl.redoCallbackPrefix, "marketredo");
   assert.equal(decl.output({ marketing: { draft: "X" } } as any), "X");
   assert.equal(decl.request!({ marketing: { taskText: "Y" } } as any), "Y");
 
@@ -119,4 +123,46 @@ test("wiring: Marketing declares content criteria only; the Work assesses after 
   assert.match(fn, /const fresh = migrateSavedWork\(await this\.ctx\.storage\.get<WorkState>\("state"\)\);[\s\S]{0,400}await this\.ctx\.storage\.put\("state", fresh\);/, "re-read and write share no await");
   const between = fn.slice(fn.indexOf("const fresh = migrateSavedWork"), fn.indexOf("await this.ctx.storage.put"));
   assert.equal((between.match(/await /g) ?? []).length, 1, "the only await between the re-read and the write is the read itself");
+});
+
+test("redo button: built from the Action's declaration, shown only for a 'before' redo recommendation with a note; Marketing registers the handler", async () => {
+  const src = fs.readFileSync(new URL("../session.ts", import.meta.url), "utf8");
+  assert.match(src, /delivery === "before" && result\.recommended === "redo" && result\.note && declaration\.redoCallbackPrefix/);
+  assert.match(src, /callback_data: `\$\{declaration\.redoCallbackPrefix\}:\$\{fresh\.workId\}:go`/, "the Work id sits in the routing slot");
+  assert.match(src, /formatAdvisoryMessage\(result, delivery\), redoButtons,/);
+  const { marketingManifest, MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX } = await import("../units/marketing/marketingManifest");
+  for (const hat of Object.values(marketingManifest.hats)) assert.ok(hat.callbackHandlers?.[MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX], `${hat.name} registers the redo handler`);
+});
+
+test("redo handler: refuses unless the recommended draft is still the one awaiting his decision; never sends a note it was not given", async (t) => {
+  const sent: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      sent.push(JSON.parse(init.body).text ?? "");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  const { handleAssessmentRedo } = await import("../units/marketing/marketingManifest");
+  const { hashContent } = await import("../contentHash");
+  const env = { TELEGRAM_BOT_TOKEN: "t", TELEGRAM_GROUP_CHAT_ID: "-1", WORKSPACE_TOPIC_ID: "1", STATE_KV: { get: async () => null, put: async () => {} } } as any;
+  const base = (o: any) => ({ workId: "w", chatId: 1, unit: "Marketing", hat: "Marketing Strategist", stage: "awaiting_marketing_draft_approval", marketing: { draft: "D1", taskText: "ask" }, ...o });
+  const assessment = async (o: any = {}) => ({ checkerId: "MW", outputHash: await hashContent("D1"), assessedAt: "t", assessment: "a", concerns: [], relevantToEnig: "yes", relevantToClient: "not_applicable", recommended: "redo", note: "Find direct evidence.", ...o });
+
+  // Already decided: nothing happens.
+  const decided = base({ stage: "complete", marketing: {} }) as any;
+  assert.equal((await handleAssessmentRedo(env, decided)).marketing?.taskText, undefined);
+  assert.match(sent.at(-1) ?? "", /already been decided/);
+
+  // Recommendation is for a different draft, is not a redo, or carries no note: nothing sent.
+  for (const [label, resultReview] of [["different draft", { assessment: await assessment({ outputHash: "other" }) }], ["recommended approve", { assessment: await assessment({ recommended: "approve" }) }], ["no note", { assessment: await assessment({ note: undefined }) }], ["no assessment", {}]] as const) {
+    const st = base({ resultReview }) as any;
+    const out = await handleAssessmentRedo(env, st);
+    assert.equal(out.marketing?.taskText, "ask", `${label}: the task is untouched`);
+    assert.match(sent.at(-1) ?? "", /no longer applies/, label);
+  }
+  const src = fs.readFileSync(new URL("../units/marketing/marketingManifest.ts", import.meta.url), "utf8");
+  assert.match(src, /handleMarketingFeedback\(env, state, `\(the Checker's recommended note, sent by Martin's tap\) \$\{assessment\.note\}`\)/, "the Hat is told the note is the Checker's, sent by his tap");
 });

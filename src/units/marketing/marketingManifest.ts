@@ -471,6 +471,34 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
 export const MARKET_DRAFT_CALLBACK_PREFIX = "marketdraft" as const;
 
 /**
+ * "🔁 Redo with this note" on the Checker's second opinion (Martin's
+ * decision, 2026-11-14). A verified tap of his sends the Checker's
+ * recommended note as the redo note -- the same path as typing it after
+ * Redo. Refuses unless the draft it was recommended for is still the one
+ * awaiting his decision (a replayed, stale or already-decided button does
+ * nothing). The note is labelled as the Checker's so the Hat is never told
+ * Martin wrote it.
+ */
+export const MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX = "marketredo" as const;
+
+export async function handleAssessmentRedo(env: Env, state: WorkState): Promise<WorkState> {
+  const assessment = state.resultReview?.assessment;
+  const draft = state.marketing?.draft;
+  if (state.stage !== "awaiting_marketing_draft_approval" || !draft) {
+    await sendWorkspaceHatMessage(env, state, "This draft has already been decided -- nothing to redo.");
+    return state;
+  }
+  if (!assessment || assessment.recommended !== "redo" || !assessment.note || assessment.outputHash !== (await hashContent(draft))) {
+    await sendWorkspaceHatMessage(env, state, "That recommendation no longer applies to the current draft -- nothing was sent.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+  state.awaiting = undefined;
+  await sendWorkspaceHatMessage(env, state, `Redoing with the Checker's note: ${assessment.note}`);
+  return handleMarketingFeedback(env, state, `(the Checker's recommended note, sent by Martin's tap) ${assessment.note}`);
+}
+
+/**
  * Resolves runMarketingHat's "draft" branch approve/reject callback --
  * relocated unchanged, byte-for-byte, from executionEngine.ts's former
  * handleDraftApproval. Rejecting asks Martin what to reconsider and holds
@@ -647,6 +675,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
 const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_TRANSITION_CALLBACK_PREFIX]: handleTransitionApproval,
   [MARKET_DRAFT_CALLBACK_PREFIX]: handleDraftApproval,
+  [MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX]: (env, state) => handleAssessmentRedo(env, state),
   [MARKET_PAID_CALLBACK_PREFIX]: handlePaidMediaApproval,
 };
 
@@ -759,9 +788,12 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
         output: (state) => state.marketing?.draft,
         request: (state) => state.marketing?.taskText,
         awaitingStage: "awaiting_marketing_draft_approval",
+        redoCallbackPrefix: "marketredo",
         criteria: [
           "The output was produced within THIS Hat's declared ownership and produced nothing outside it.",
           "Anything the output asserts about the client or market traces to supplied or verifiable evidence (the sources it names), not to invented facts.",
+          // Martin, 2026-11-14: a draft came back as one run-on paragraph that called ENIG "the business".
+          "Where the request asks what problem businesses have, the output follows the seven-part problem brief -- the problem; evidence with source links; who has it most; why it matters to them; where ENIG fits; what is still unknown; one recommendation -- each part on its own line, and refers to ENIG by name rather than \"the business\".",
         ],
       },
       completionCriteria: [

@@ -159,6 +159,14 @@ export interface ActionDefinition<A extends string> {
     request?: (state: WorkState) => string | undefined;
     criteria: readonly string[];
     awaitingStage: string;
+    /**
+     * The Hat's own callback prefix for a "🔁 Redo with this note" button on
+     * the assessment (Martin's decision, 2026-11-14): shown only when the
+     * Checker recommends a redo with a note. The button data is
+     * `<prefix>:<workId>:go`; the handler (the Hat's own `callbackHandlers`
+     * entry) sends the Checker's note as Martin's redo note, only on his tap.
+     */
+    redoCallbackPrefix?: string;
   };
   /**
    * Exact Skills the Worker must follow while performing this Action.
