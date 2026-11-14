@@ -289,9 +289,11 @@ test("run: a FAIL records a failed verdict carrying the checker's exact reason",
   const verdict = state.resultReview?.checker;
   assert.strictEqual(verdict?.outcome, "failed");
   assert.match(verdict?.reason ?? "", /criterion 2 unmet/);
+  // ADVISORY (Martin's decision, 2026-11-14): a FAILED assessment is recorded
+  // with its exact reason but the gate does not consult it -- the Work waits
+  // only on Martin's approval, never on the Checker.
   const gate = await evaluateResultReviewGate(state);
-  assert.strictEqual(gate.allowed, false);
-  assert.match(gate.reason ?? "", /verification failed: criterion 2 unmet/);
+  assert.doesNotMatch(gate.reason ?? "", /verification failed/, "the gate never reports a Checker failure");
   assert.strictEqual(state.resultReview?.verificationAttempt?.outcome, "failed");
 });
 
@@ -397,18 +399,11 @@ test("run: the verdict is bound to THIS Work -- the same snapshot on a different
 
 const read = (rel: string) => fs.readFileSync(path.join(import.meta.dirname, rel), "utf8");
 
-test("WorkSession.save triggers the Machinery Worker verification BEFORE the gate, for success and blocked stages only", () => {
+test("WorkSession.save no longer runs the Checker as a prerequisite of closure (advisory, 2026-11-14)", () => {
   const src = read("../session.ts");
-  assert.match(src, /needsResultVerification\(state\)/, "save() must consult needsResultVerification before the gate");
-  assert.match(
-    src,
-    /isSuccessfulResultStage\(state\.stage\) \|\| state\.stage === RESULT_REVIEW_BLOCKED_STAGE/,
-    "verification runs for a success stage or an already-blocked Work, never for in-flight Work",
-  );
-  assert.match(src, /runMachineryResultVerification\(state, resultVerificationDeps\(this\.env\)\)/, "save() must run the verification with production deps");
-  const verifyAt = src.indexOf("needsResultVerification(state)");
-  const gateAt = src.indexOf("await applyResultReviewGate(state,");
-  assert.ok(verifyAt >= 0 && gateAt > verifyAt, "verification must run BEFORE the gate so the block message carries the fresh reason");
+  const save = src.slice(src.indexOf("private async save"), src.indexOf("private async reportResultReviewBlocked"));
+  assert.ok(!/needsResultVerification|runMachineryResultVerification/.test(save), "save() must not run or wait on the Checker");
+  assert.match(save, /await applyResultReviewGate\(state,/, "the gate (Martin's approval) still runs in save()");
 });
 
 test("WorkSession restores the pre-block stage on Martin's approval and retries the refused Handoff closure", () => {

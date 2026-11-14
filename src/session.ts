@@ -38,7 +38,6 @@ import {
   stageResultReviewApproval,
   resultReviewCallbackData,
 } from "./resultReview";
-import { needsResultVerification, resultVerificationDeps, runMachineryResultVerification } from "./runtime/resultVerification";
 import type { InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
@@ -670,54 +669,15 @@ export class WorkSession extends DurableObject<Env> {
 
   private async save(state: WorkState): Promise<WorkState> {
     state.updatedAt = new Date().toISOString();
-    // Machinery Worker Result verification (BD-13): before the gate is
-    // evaluated, the Work lifecycle invokes the independent verification
-    // exactly when the verdict in force no longer covers the Work's current
-    // snapshot (no verdict, changed evidence refs, or a stale verdict hash --
-    // needsResultVerification; an unchanged snapshot is a no-op, which is
-    // what keeps re-verification loop-free). Runs BEFORE the gate so the
-    // block message either names the FAIL reason or stages the approval card
-    // immediately, instead of "awaiting verification" one save later. Every
-    // failure path is fail-closed and quiet (console only): an unavailable
-    // verification leaves no verdict, and the gate below refuses with its
-    // own exact reason -- never a substitute verdict, never a silent PASS.
-    if (
-      state.resultReview &&
-      (isSuccessfulResultStage(state.stage) || state.stage === RESULT_REVIEW_BLOCKED_STAGE) &&
-      (await needsResultVerification(state))
-    ) {
-      const verification = await runMachineryResultVerification(state, resultVerificationDeps(this.env)).catch((err) => {
-        console.error(`WorkSession ${state.workId}: Machinery Worker Result verification failed to run`, err);
-        return { recorded: false as const, unavailableReason: err instanceof Error ? err.message : String(err) };
-      });
-      if (!verification.recorded) {
-        console.error(`WorkSession ${state.workId}: Result verification unavailable -- ${verification.unavailableReason}`);
-      } else if (verification.outcome === "failed" && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
-        // A fresh FAIL on an already-blocked Work: keep the visible reason
-        // accurate (recordCheckerVerdict set the review-level blockReason;
-        // the persisted state.blockedReason still held the earlier one).
-        state.blockedReason = state.resultReview.blockReason ?? state.blockedReason;
-      }
-      // A PASS landing on an ALREADY-blocked Work: the gate below will not
-      // re-fire reportResultReviewBlocked (a blocked stage is deliberately
-      // not a success stage), so Martin's Result approval card must be
-      // staged here instead -- otherwise the passing verdict would sit
-      // un-surfaced until some later transition.
-      if (
-        verification.recorded &&
-        verification.outcome === "passed" &&
-        state.stage === RESULT_REVIEW_BLOCKED_STAGE &&
-        !state.resultReview.approval &&
-        !state.resultReview.pendingApproval
-      ) {
-        await this.reportResultReviewBlocked(state, state.resultReview.blockReason);
-      }
-    }
+    // The independent Checker is ADVISORY (Martin's decision, 2026-11-14): it
+    // is no longer run here as a prerequisite of closure. Its assessment of a
+    // draft is sent to Martin after the draft, separately, and never blocks,
+    // delays or invalidates his approval or redo (see runAdvisoryAssessment).
     // Output approval closes the Work (Martin's decision, 2026-11-14): where
-    // the Action declares it, the Checker has passed, and the evidence
-    // records Martin's approval of the exact output (the last step of the
-    // Work), that approval stands as his Result approval -- no second tap.
-    // Anything else leaves the Result approval card as the path.
+    // the Action declares it and the evidence records Martin's approval of
+    // the exact output (the last step of the Work), that approval stands as
+    // his Result approval -- no second tap. Anything else leaves the Result
+    // approval card as the path.
     if (state.resultReview?.outputApprovalClosesWork && (isSuccessfulResultStage(state.stage) || state.stage === RESULT_REVIEW_BLOCKED_STAGE)) {
       const closed = await recordOutputApprovalAsResultApproval(state).catch((err) => {
         console.error(`WorkSession ${state.workId}: output-approval Result approval failed`, err);
@@ -733,9 +693,8 @@ export class WorkSession extends DurableObject<Env> {
     // defence in depth behind closeHandoffOnResult (the point where the
     // Handoff itself is closed) -- here the Work's own stage is refused into
     // `result_review_blocked` with the reason kept visible, and Martin is
-    // told once per transition: either that the Work awaits independent
-    // verification, or (when a passing bound verdict exists) the staged
-    // Result approval card with its Approve/Reject buttons.
+    // told once per transition with the staged Result approval card and its
+    // Approve/Reject buttons.
     const gateResult = await applyResultReviewGate(state, (s, reason) => this.reportResultReviewBlocked(s, reason));
     // BD-8 resumption: a successful Handoff closure the gate refused is kept
     // on the review (pendingClosure, recorded by closeHandoffOnResult) and
@@ -777,51 +736,35 @@ export class WorkSession extends DurableObject<Env> {
    */
   /**
    * Martin's 🔁 Re-check of a Work refused into `result_review_blocked`
-   * (2026-11-14): runs the SAME independent verification `save` runs, only
-   * when the verdict in force does not cover the current snapshot
-   * (needsResultVerification -- one check per real change, as BD-13
-   * requires), and reports the outcome. A pass stages the Result approval
-   * card exactly as `save` would; nothing closes without that card's
-   * approval.
+   * (2026-11-14). The independent Checker is advisory and no longer part of
+   * closure, so this re-presents the one thing the Work is waiting on:
+   * where the Action declares output approval closes the Work and the
+   * evidence records that approval, it is recorded now; otherwise the Result
+   * approval card is staged (or the open one is pointed to). Nothing closes
+   * without his approval.
    */
   private async recheckResultReview(state: WorkState): Promise<WorkState> {
-    const say = (text: string, buttons?: InlineButton[][]) => sendMessage(this.env, state.chatId, text, buttons, state.threadId).then(() => state);
-    const recheckButton: InlineButton[][] = [[{ text: "🔁 Re-check", callback_data: resultReviewCallbackData(state.workId, "c") }]];
-    if (state.stage !== RESULT_REVIEW_BLOCKED_STAGE || !state.resultReview) return say("This Work is not waiting on a Result check -- nothing to re-check.");
-    if (await needsResultVerification(state)) {
-      const verification = await runMachineryResultVerification(state, resultVerificationDeps(this.env)).catch((err) => ({
-        recorded: false as const,
-        unavailableReason: err instanceof Error ? err.message : String(err),
-      }));
-      if (!verification.recorded) {
-        console.error(`WorkSession ${state.workId}: Result re-check unavailable -- ${verification.unavailableReason}`);
-        return say(`The independent check could not run: ${verification.unavailableReason}\n\nNothing was recorded. Tap Re-check to try again.`, recheckButton);
-      }
+    const say = (text: string) => sendMessage(this.env, state.chatId, text, undefined, state.threadId).then(() => state);
+    if (state.stage !== RESULT_REVIEW_BLOCKED_STAGE || !state.resultReview) return say("This Work is not waiting on a Result approval -- nothing to re-check.");
+    const closed = await recordOutputApprovalAsResultApproval(state);
+    if (closed.ok) {
+      restoreResultReviewBlockedStage(state);
+      return say(RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE);
     }
     const review = state.resultReview;
-    if (review.checker?.outcome === "passed") {
-      const closed = await recordOutputApprovalAsResultApproval(state);
-      if (closed.ok) {
-        restoreResultReviewBlockedStage(state);
-        return say(RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE);
-      }
-      if (review.pendingApproval || review.approval) return say("The independent check has passed; your Result approval card is already open above.");
-      await this.reportResultReviewBlocked(state, review.blockReason);
-      return state;
-    }
-    state.blockedReason = review.blockReason ?? state.blockedReason;
-    return say(`❌ The independent check did not pass.\n\n${review.blockReason ?? "No reason was recorded."}\n\nThe Work stays open. Tap Re-check after the Result changes.`, recheckButton);
+    if (review.pendingApproval || review.approval) return say("Your Result approval card is already open above.");
+    await this.reportResultReviewBlocked(state, review.blockReason);
+    return state;
   }
 
   private async reportResultReviewBlocked(state: WorkState, reason?: string): Promise<void> {
     try {
       const review = state.resultReview;
-      const verdictPassed = review?.checker?.outcome === "passed";
-      if (verdictPassed && !review?.approval && !review?.pendingApproval) {
+      if (review && !review.approval && !review.pendingApproval) {
         const staged = await stageResultReviewApproval(state);
         if (staged.ok) {
           const message =
-            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result and carries a passing independent Checker verdict against its completion criteria. BD-8 requires your separate Result approval before the Work may close.\n\nApprove or Reject below; the decision is bound to this exact Result, criteria and verdict.`;
+            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result. BD-8 requires your Result approval before the Work may close.\n\nApprove or Reject below; the decision is bound to this exact Result and its recorded evidence.`;
           const buttons: InlineButton[][] = [
             [
               { text: "✅ Approve Result", callback_data: resultReviewCallbackData(state.workId, "a", staged.pending.token) },
@@ -842,7 +785,7 @@ export class WorkSession extends DurableObject<Env> {
       await sendMessage(
         this.env,
         state.chatId,
-        `⛔ *Work ${state.workId} cannot close yet* (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}).\n\n${reason ?? "The Result review gate refused successful closure."}\n\nThe Work stays open with the reason recorded; it keeps running and cancellation is unaffected. Successful closure (and the Handoff's own close) resumes once an independent Checker verdict and your Result approval are recorded against this exact Result.`,
+        `⛔ *Work ${state.workId} cannot close yet* (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}).\n\n${reason ?? "The Result review gate refused successful closure."}\n\nThe Work stays open with the reason recorded; it keeps running and cancellation is unaffected. Successful closure (and the Handoff's own close) resumes once your Result approval is recorded against this exact Result.`,
         [[{ text: "🔁 Re-check", callback_data: resultReviewCallbackData(state.workId, "c") }]],
         state.threadId,
       );
