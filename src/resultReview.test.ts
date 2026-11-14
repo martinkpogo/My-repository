@@ -539,3 +539,35 @@ test("legitimate Handoff creation is not gated by Result review", () => {
   assert.doesNotMatch(src, /evaluateResultReviewGate/, "createHandoff must not call the Result review gate");
   assert.doesNotMatch(src, /isResultReviewSatisfied/, "createHandoff must not call any Result review helper");
 });
+
+test("Result review buttons route to their Work and fit Telegram (2026-11-14): action:workId:value, under 64 bytes, bound to the card by token prefix", async () => {
+  const { resultReviewCallbackData } = await import("./resultReview");
+  const workId = "ed5013e0-98e7-4cce-addf-b868378823d9";
+  const token = "3f1c2b9a-0d4e-4f5a-9b8c-7d6e5f4a3b2c";
+  for (const data of [resultReviewCallbackData(workId, "a", token), resultReviewCallbackData(workId, "r", token), resultReviewCallbackData(workId, "c")]) {
+    const [action, routedWorkId, value] = data.split(":"); // exactly how index.ts routes a tap
+    assert.equal(action, "resultreview");
+    assert.equal(routedWorkId, workId, "the Work id sits in the slot index.ts routes on");
+    assert.ok(value && !value.includes(":"));
+    assert.ok(new TextEncoder().encode(data).length <= 64, `${data} fits Telegram's 64-byte callback_data`);
+  }
+  assert.equal(resultReviewCallbackData(workId, "a", token).split(":")[2], "a3f1c2b9a");
+  assert.equal(resultReviewCallbackData(workId, "c").split(":")[2], "c");
+});
+
+test("session wiring (2026-11-14): blocked message carries Re-check; the callback re-checks only when the verdict no longer covers the snapshot", async () => {
+  const fs = await import("node:fs");
+  const src = fs.readFileSync(new URL("./session.ts", import.meta.url), "utf8");
+  assert.match(src, /text: "🔁 Re-check", callback_data: resultReviewCallbackData\(state\.workId, "c"\)/);
+  assert.match(src, /if \(kind === "c"\) return this\.recheckResultReview\(state\);/);
+  assert.match(src, /if \(await needsResultVerification\(state\)\) \{\s*const verification = await runMachineryResultVerification/, "one check per real change -- never a forced re-verdict");
+  assert.ok(!/callback_data: `resultreview:\$\{staged\.pending\.token\}/.test(src), "the old token-in-the-work-slot buttons are gone");
+});
+
+test("resume (2026-11-14): picking a blocked Work with no card pending offers Re-check", async () => {
+  const { resumeNotice } = await import("./workContinuation");
+  const state = { workId: "ed5013e0-98e7-4cce-addf-b868378823d9", stage: "result_review_blocked", resultReview: { blockReason: "Independent Checker verification required" } } as any;
+  const notice = resumeNotice(state, "Switched active context to work item x.");
+  assert.match(notice.text, /cannot close yet: Independent Checker verification required/);
+  assert.equal(notice.buttons?.[0][0].callback_data, "resultreview:ed5013e0-98e7-4cce-addf-b868378823d9:c");
+});

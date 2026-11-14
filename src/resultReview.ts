@@ -499,3 +499,14 @@ export async function applyResultReviewGate(
   }
   return { blocked: false };
 }
+
+/**
+ * A Result review button's callback_data: `resultreview:<workId>:<kind><token prefix>`
+ * -- the Work id in the slot index.ts routes on, and an 8-character prefix
+ * of the staged card's token so a button stays bound to its own card while
+ * fitting Telegram's 64-byte callback_data limit. Kinds: a approve,
+ * r reject, c Re-check.
+ */
+export function resultReviewCallbackData(workId: string, kind: "a" | "r" | "c", token?: string): string {
+  return `resultreview:${workId}:${kind}${token ? token.slice(0, 8) : ""}`;
+}
