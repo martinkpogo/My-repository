@@ -334,3 +334,54 @@ test("WP3. Success outcome is unchanged -- ok plus the very response executeTask
   assert.equal(legacy?.rawText, '{"result": "ok"}', "executeTask returns the identical response on success");
   assert.equal(p1.attempts, 2, "both methods ran the same provider loop");
 });
+
+test("Last resort (Martin, 2026-11-13, A): every provider failed but one named a short wait -> wait it out and try that provider once more", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const limited = new MockProvider("p1", (_task, attempt) =>
+    attempt === 1
+      ? { success: false, error: new InfrastructureError("p1", "429 try again in 25s", { statusCode: 429, retryAfterMs: 25_000 }) }
+      : { success: true, response: { rawText: '{"result": "after the wait"}' } },
+  );
+  const broken = new MockProvider("p2", () => ({ success: false, error: new InfrastructureError("p2", "402 payment required", { statusCode: 402 }) }));
+  const executor = new AiPolicyExecutor([limited, broken], testBoundaryEvaluator);
+  const pending = aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(limited.attempts, 1, "waiting, not yet retried");
+  t.mock.timers.tick(25_000);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(limited.attempts, 1, "still inside the 0.5s margin");
+  t.mock.timers.tick(600);
+  assert.deepEqual(await pending, { result: "after the wait" });
+  assert.equal(limited.attempts, 2);
+  assert.equal(broken.attempts, 1, "the other provider is not tried again");
+});
+
+test("Last resort: a wait over 30s is not waited out; a failed retry is not repeated; the retry is once per call", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const tooLong = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 31_000 }) }));
+  const outcome = await new AiPolicyExecutor([tooLong], testBoundaryEvaluator).executeTaskWithOutcome(fakeEnv, {
+    taskId: "chat.general_reply",
+    type: "json",
+    messages: [{ role: "user", content: "u" }],
+    boundaryContext: { taskSensitivity: "public", segments: [{ type: "user", content: "u", provenance: "test" }] },
+  } as any);
+  assert.equal(outcome.ok, false);
+  assert.equal(tooLong.attempts, 1, "31s is over the last-resort cap: no wait, no retry");
+
+  const stillLimited = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 5_000 }) }));
+  const pending = new AiPolicyExecutor([stillLimited], testBoundaryEvaluator).executeTaskWithOutcome(fakeEnv, {
+    taskId: "chat.general_reply",
+    type: "json",
+    messages: [{ role: "user", content: "u" }],
+    boundaryContext: { taskSensitivity: "public", segments: [{ type: "user", content: "u", provenance: "test" }] },
+  } as any);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  t.mock.timers.tick(6_000);
+  const second = await pending;
+  assert.equal(second.ok, false);
+  assert.equal(stillLimited.attempts, 2, "exactly one retry -- never a loop");
+});

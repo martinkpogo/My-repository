@@ -35,13 +35,20 @@ export class InfrastructureError extends Error {
   public readonly providerId: ProviderId;
   public readonly statusCode?: number;
   public readonly code?: string;
+  /**
+   * A rate-limited provider's own stated wait before the same request would
+   * succeed, in ms -- set only when the provider named one and the call was
+   * not (or could not be) waited out inside the provider. Metadata only.
+   */
+  public retryAfterMs?: number;
 
-  constructor(providerId: ProviderId, message: string, options?: { statusCode?: number; code?: string }) {
+  constructor(providerId: ProviderId, message: string, options?: { statusCode?: number; code?: string; retryAfterMs?: number }) {
     super(message);
     this.name = "InfrastructureError";
     this.providerId = providerId;
     this.statusCode = options?.statusCode;
     this.code = options?.code;
+    this.retryAfterMs = options?.retryAfterMs;
   }
 }
 
