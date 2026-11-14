@@ -862,6 +862,23 @@ test("evidence: the harness's own synthetic evidence is always well-formed and w
   assert.ok(!JSON.stringify(items).includes("SENTINEL"), "no client identity appears in synthetic evidence");
 });
 
+test("evidence: non-circular -- the evidence describes only what the harness produced, never the gate's verdict or Martin's decision", () => {
+  const items = resultGateSmokeEvidence(WORK_ID);
+  const joined = items.map((i) => i.content).join("\n");
+  // The evidence must not pre-assert the Checker's verdict, the gate's
+  // refusal, or Martin's approval -- those are independent facts the gate
+  // and Martin establish, not claims the harness makes about itself.
+  const selfAsserting = ["verdict", "passed", "failed", "approve", "refuse", "blocked"];
+  for (const word of selfAsserting) {
+    assert.ok(!new RegExp(`\\b${word}\\b`, "i").test(joined),
+      `evidence must not assert "${word}": ${JSON.stringify(joined)}`);
+  }
+  // It describes only the synthetic Work, the Action, the origin, and the
+  // sequence the harness itself executes.
+  assert.ok(joined.includes("ENIG Result Gate live smoke harness"), "names the synthetic Work");
+  assert.ok(joined.includes("Synthetic evidence only"), "declares synthetic nature");
+});
+
 test("evidence: the existing recorder refuses a malformed set, so nothing can backfill it", async () => {
   const state = freshState(WORK_ID, MARTIN_CHAT);
   ensureResultReviewContract(state, recordedActionResult(state));
@@ -1026,6 +1043,7 @@ test("isolation: no ordinary intake, dispatch, Handoff or routing path names the
     "runtime/resolution.test.ts",
     "runtime/resultGateSmoke.test.ts",
     "resultGateSmokeRoute.test.ts",
+    "resultGateSmokeInspect.test.ts",
   ]);
   const actionOffenders = files.filter((f) => f.text.includes(RESULT_GATE_SMOKE_ACTION) && !actionAllowlist.has(f.rel)).map((f) => f.rel);
   assert.deepEqual(actionOffenders, [], "only the manifest, the harness and their tests may name the test Action");

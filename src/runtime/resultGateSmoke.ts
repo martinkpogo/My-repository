@@ -317,10 +317,12 @@ export async function resolveResultGateSmokeAction(manifest?: UnitManifest): Pro
  * through `recordResultEvidence` (the sanctioned recorder). Two bounded
  * items, both naming the Work and the synthetic nature of the run; no
  * Entity, Matter, Lead, Proposal, Handoff, client identity or external
- * resource appears in either. The producing side's evidence is what the
- * Machinery Worker judges the declared criteria against, so the synthetic
- * set is deliberately self-describing rather than fabricated business
- * content.
+ * resource appears in either. The evidence describes only what the harness
+ * produced -- it makes no claim about what the Checker will verify, what
+ * verdict the gate will record, or whether Martin will approve. The
+ * Machinery Worker judges the declared criteria against the produced items
+ * independently, so the verdict binds to the produced evidence set, never
+ * to any self-assertion.
  */
 export function resultGateSmokeEvidence(workId: string): ResultReviewEvidenceItem[] {
   return [
@@ -341,8 +343,8 @@ export function resultGateSmokeEvidence(workId: string): ResultReviewEvidenceIte
       ref: "result-gate-smoke-sequence",
       note: "the synthetic sequence this Work exercises",
       content: [
-        "Sequence: create the synthetic Work -> record synthetic evidence through the existing evidence model -> reach the success stage -> WorkSession.save() runs the Machinery Worker verification -> the Result Gate refuses the successful closure -> Martin's Result approval card is staged for his separate decision.",
-        "A PASS never auto-approves and never closes this Work; only Martin's normal resultreview callback records his decision.",
+        "Sequence executed by this Work: create the synthetic Work -> record synthetic evidence through the existing evidence model -> reach the success stage -> WorkSession.save() runs the Machinery Worker verification.",
+        "The Checker judges the produced evidence against the declared criteria only; nothing here asserts the outcome or pre-judges the decision.",
         `Work: ${workId}`,
       ].join("\n"),
     },

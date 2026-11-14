@@ -33,6 +33,7 @@ import { pollGoogleSheetComments } from "./googleSheetComments";
 import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
 import { handleResultGateSmokeRequest } from "./resultGateSmokeRoute";
+import { handleResultGateSmokeInspect } from "./resultGateSmokeInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
@@ -215,6 +216,14 @@ export default {
     // authorized separately, after Architect review.
     if (url.pathname === "/admin/smoke-result-gate" && request.method === "GET") {
       return handleResultGateSmokeRequest(request, env);
+    }
+
+    // Isolated live Result Gate smoke inspection (ENIG issue #370, correction A):
+    // READ-ONLY operator inspection of one smoke Work's persisted state -- getState()
+    // only, no identity fields, no execution of any kind. Header-gated, ID validated
+    // before idFromName, 404 if missing.
+    if (url.pathname === "/admin/smoke-result-gate-inspect" && request.method === "GET") {
+      return handleResultGateSmokeInspect(request, env);
     }
 
     // One-time setup helper: registers this Worker's own /telegram/webhook URL
