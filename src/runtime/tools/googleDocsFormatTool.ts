@@ -311,6 +311,8 @@ export const googleDocsFormatToolOperation: ToolOperationDefinition = {
   operationId: GOOGLE_DOCS_FORMAT_OPERATION_ID,
   version: "1.0",
   effect: "external_mutation",
+  activityLabel: "Formatting document",
+  resultLabel: "Document formatted",
 
   validateInput(input: unknown): string | null {
     const parsed = parseInput(input);

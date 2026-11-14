@@ -264,6 +264,8 @@ export const googleDriveReplyToolOperation: ToolOperationDefinition = {
   operationId: GOOGLE_DRIVE_REPLY_OPERATION_ID,
   version: "1.0",
   effect: "external_mutation",
+  activityLabel: "Replying to the comment",
+  resultLabel: "Reply posted",
 
   validateInput(input: unknown): string | null {
     const parsed = parseInput(input);

@@ -28,6 +28,7 @@ import { GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, GOOGLE_DRIVE_TOOL_ID } from ".
 import { GOOGLE_DRIVE_REPLY_OPERATION_ID } from "./tools/googleDriveReplyTool";
 import { installStatePersistence } from "./workPersistence";
 import { buildProposalDocLayout, buildProposalDocStyleRequests, expectedDocParagraphStyles } from "../proposalRedline";
+import { liveStatusSteps, withLiveStatus } from "./liveStatus";
 
 /**
  * The Tool Registry contract, proven at the invocation boundary:
@@ -282,6 +283,8 @@ test("F. malformed Tool definitions fail closed (validateToolOperations)", () =>
     operationId: "demo.act",
     version: "1.0",
     effect: "external_mutation",
+    activityLabel: "Doing the demo",
+    resultLabel: "Demo done",
     validateInput: () => null,
     resolveTarget: async () => ({ ok: true, target: { resourceId: "demo:1" } }),
     run: async () => ({ state: "succeeded", tool_id: "demo", operation_id: "demo.act", verified: true, remote_resource: { document_id: "1" } }),
@@ -292,6 +295,8 @@ test("F. malformed Tool definitions fail closed (validateToolOperations)", () =>
   assert.match(validateToolOperations([{ ...base, version: "" }]) ?? "", /must declare a version/);
   assert.match(validateToolOperations([{ ...base, effect: "external_read" as any }]) ?? "", /unknown effect/);
   assert.match(validateToolOperations([{ ...base, run: undefined as any }]) ?? "", /missing its run/);
+  assert.match(validateToolOperations([{ ...base, activityLabel: "" }]) ?? "", /non-empty activityLabel/);
+  assert.match(validateToolOperations([{ ...base, resultLabel: "" }]) ?? "", /non-empty resultLabel/);
   assert.match(validateToolOperations([base, { ...base }]) ?? "", /registered more than once/);
 });
 
@@ -1612,4 +1617,150 @@ test("BK. a persisted verified formatting success is returned as-is -- a repeate
   assert.equal(outcome.state, "succeeded");
   assert.equal(outcome.verified, true);
   assert.equal(googleCalls(calls).length, 0, "the stored verified outcome is returned with no request at all");
+});
+
+// ---------------------------------------------------------------------------
+// Live activity feed (issue #369): the registry lookup, the tool's own
+// availability and use, the operation's activity, and the outcome's STATE --
+// each as its own line, all labels fixed at registration, nothing from the
+// request's input ever shown.
+// ---------------------------------------------------------------------------
+
+/** Runs `fn` inside an open live-status run and returns the steps it recorded, as they render. */
+async function feedOf<T>(env: Env, fn: () => Promise<T>): Promise<{ result: T; steps: string[] }> {
+  let steps: string[] = [];
+  const result = await withLiveStatus(env, { chatId: -100, header: "Feed test" }, async () => {
+    const value = await fn();
+    steps = liveStatusSteps() ?? [];
+    return value;
+  });
+  return { result, steps };
+}
+
+const createCall = (input: unknown = VALID_INPUT) => ({ tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input });
+
+test("BL. a successful tool run walks the whole feed: registry check, availability, use, the operation's activity, then its declared result with the verified URL", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, docServer());
+  const { result, steps } = await feedOf(env, () => invokeTool(env, createCall(), submitContext()));
+  assert.equal(result.state, "succeeded");
+  assert.deepEqual(steps.slice(0, 3), ["Checking tool registry", "Tool available: Google Docs", "Using tool: Google Docs"], steps.join(" | "));
+  const declared = steps.find((s) => s.startsWith("Document created — "));
+  assert.ok(declared && /^Document created — https:\/\/docs\.google\.com\//.test(declared), `the declared result carries the verified URL: ${steps.join(" | ")}`);
+  assert.ok(!steps.some((s) => s.startsWith("Creating document")), "the running activity is replaced by the result, not left dangling");
+  assert.ok(!steps.join("\n").includes(VALID_INPUT.content), "no request input ever reaches the feed");
+});
+
+test("BM. an unregistered Tool resolves the registry check to 'Tool not registered' -- no availability or use line is ever shown for it", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, docServer());
+  const { steps } = await feedOf(env, () => invokeTool(env, { tool_id: "google_sheets", operation_id: "google_docs.create_and_verify", input: VALID_INPUT }, submitContext()));
+  assert.deepEqual(steps, ["Tool not registered"], steps.join(" | "));
+});
+
+test("BN. invalid input resolves the registry check to 'Tool use denied' -- the tool is never shown as available or used", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, docServer());
+  const { steps } = await feedOf(env, () => invokeTool(env, createCall("not an object"), submitContext()));
+  assert.deepEqual(steps, ["Tool use denied"], steps.join(" | "));
+});
+
+test("BO. an Access refusal resolves the registry check to 'Tool use denied' -- availability is claimed only after Access has passed", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, docServer());
+  const { steps } = await feedOf(env, () =>
+    invokeTool(env, createCall(), workSessionContext(toolState({ actionName: "new_enquiry" }))),
+  );
+  assert.deepEqual(steps, ["Tool use denied"], steps.join(" | "));
+  assert.ok(!steps.some((s) => s.startsWith("Tool available:")), "an operation Access does not permit is never shown as available");
+});
+
+test("BP. a refusal after availability (no persistence adapter) resolves 'Using tool: Google Docs' to 'Tool use denied' -- no line is left pending", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, docServer());
+  const { steps } = await feedOf(env, () =>
+    invokeTool(env, createCall(), workSessionContext(toolState({ workId: "work-no-persistence" }))),
+  );
+  assert.deepEqual(steps, ["Checking tool registry", "Tool available: Google Docs", "Tool use denied"], steps.join(" | "));
+});
+
+test("BQ. a definite failure reads '<Tool> operation failed' -- never the declared success label", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, (call) => (call.url.endsWith("/drive/v3/files") ? json({}, 500) : docServer()(call)));
+  const { result, steps } = await feedOf(env, () => invokeTool(env, createCall(), submitContext()));
+  assert.equal(result.state, "failed");
+  assert.ok(steps.includes("Google Docs operation failed"), steps.join(" | "));
+});
+
+test("BR. an unverified outcome reads '<Tool> operation unverified' -- an unknown remote state is never shown as a success", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, () => {
+    throw new TypeError("fetch failed");
+  });
+  const { result, steps } = await feedOf(env, () => invokeTool(env, createCall(), submitContext()));
+  assert.equal(result.state, "unverified");
+  assert.ok(steps.includes("Google Docs operation unverified"), steps.join(" | "));
+  assert.ok(!steps.some((s) => s.startsWith("Document created")), "an unverified outcome never wears the declared result");
+});
+
+test("BS. a partially-completed outcome reads '<Tool> operation partially completed' -- the declared result is worn only by a verified success", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, (call) => (call.url.includes(":batchUpdate") ? json({}, 500) : docServer()(call)));
+  const { result, steps } = await feedOf(env, () => invokeTool(env, createCall(), submitContext()));
+  assert.equal(result.state, "partially_completed");
+  assert.ok(steps.includes("Google Docs operation partially completed"), steps.join(" | "));
+  assert.ok(!steps.some((s) => s.startsWith("Document created")), "a partial outcome never wears the declared result");
+});
+
+test("BT. a prior verified success returned as-is resolves 'Using tool: Google Docs' to the declared result -- no operation activity is fabricated for work that did not run", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installGoogleFake(t, docServer());
+  const prior: ToolInvocationOutcome = {
+    state: "succeeded",
+    tool_id: GOOGLE_DOCS_TOOL_ID,
+    operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID,
+    verified: true,
+    remote_resource: { document_id: "doc-1", url: "https://docs.google.com/document/d/doc-1" },
+  };
+  const { result, steps } = await feedOf(env, () => invokeTool(env, { ...createCall(), prior_outcome: prior }, submitContext()));
+  assert.equal(result.state, "succeeded");
+  assert.equal(googleCalls(calls).length, 0);
+  assert.deepEqual(steps, ["Checking tool registry", "Tool available: Google Docs", "Document created — https://docs.google.com/document/d/doc-1"], steps.join(" | "));
+});
+
+test("BU. every registered operation declares a non-empty activity and result label -- the feed's wording is fixed at registration", () => {
+  for (const [toolId, operationId] of [
+    [GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID],
+    [GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID],
+    [GOOGLE_DOCS_TOOL_ID, GOOGLE_DOCS_FORMAT_OPERATION_ID],
+    [GOOGLE_DRIVE_TOOL_ID, GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID],
+    [GOOGLE_DRIVE_TOOL_ID, GOOGLE_DRIVE_REPLY_OPERATION_ID],
+  ] as const) {
+    const operation = resolveToolOperation(toolId, operationId);
+    assert.ok(operation, `${toolId}.${operationId} must be registered`);
+    assert.ok(operation.activityLabel.trim().length > 0, `${operation.operationId} must name its activity`);
+    assert.ok(operation.resultLabel.trim().length > 0, `${operation.operationId} must name its result`);
+  }
+  assert.match(validateToolOperations([{ toolId: "demo", operationId: "demo.act", version: "1.0", effect: "external_mutation", validateInput: () => null, resolveTarget: async () => ({ ok: true as const, target: { resourceId: "d" } }), run: async () => ({ state: "succeeded" as const, tool_id: "demo", operation_id: "demo.act", verified: true }) } as unknown as ToolOperationDefinition]) ?? "", /activityLabel/);
+});
+
+test("BV. the Google Drive tool is named by its display name in the feed, and its operation's activity and result are its own registered labels", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  installGoogleFake(t, folderServer());
+  const { result, steps } = await feedOf(env, () =>
+    invokeTool(env, { tool_id: GOOGLE_DRIVE_TOOL_ID, operation_id: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, input: FOLDER_INPUT }, submitContext()),
+  );
+  assert.equal(result.state, "succeeded");
+  assert.deepEqual(steps.slice(0, 3), ["Checking tool registry", "Tool available: Google Drive", "Using tool: Google Drive"], steps.join(" | "));
+  assert.ok(steps.some((s) => /^Folder ready — https:\/\/drive\.google\.com\/drive\/folders\//.test(s)), steps.join(" | "));
 });

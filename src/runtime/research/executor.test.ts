@@ -798,3 +798,52 @@ test(
     );
   },
 );
+
+// =====================================================================================
+// Live activity feed (issue #369): the review stage after the searches, honest about
+// whether any source actually came back.
+// =====================================================================================
+
+/** Runs `fn` inside an open live-status run and returns the steps it recorded, as they render. */
+async function feedSteps(fn: () => Promise<unknown>): Promise<string[]> {
+  const { liveStatusSteps, withLiveStatus } = await import("../liveStatus");
+  let steps: string[] = [];
+  await withLiveStatus({ TELEGRAM_BOT_TOKEN: "t" } as any, { chatId: -100, header: "Feed test" }, async () => {
+    await fn();
+    steps = liveStatusSteps() ?? [];
+  });
+  return steps;
+}
+
+test("EXEC 24. The feed reviews the searches: with web sources it resolves to 'Research sources retrieved' -- only after results actually exist", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any) => {
+    if (String(url).includes("api.tavily.com")) {
+      return new Response(JSON.stringify({ results: [{ title: "Market report", url: "https://example.com/market", content: "The market grew." }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env: Env = { ...researchEnv(scriptedAi({})), TAVILY_API_KEY: "key" };
+  const steps = await feedSteps(() => executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext()));
+
+  assert.ok(steps.includes("Research sources retrieved"), `the review must resolve when sources exist: ${steps.join(" | ")}`);
+  assert.ok(!steps.includes("Reviewing search results"), `the running review must be resolved, not left pending: ${steps.join(" | ")}`);
+});
+
+test("EXEC 25. With no sources at all the review stays as the running step -- 'Research sources retrieved' is never claimed over an empty search", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ results: [] }), { status: 200 })) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env: Env = { ...researchEnv(scriptedAi({})), TAVILY_API_KEY: "key" };
+  const steps = await feedSteps(() => executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext()));
+
+  assert.ok(steps.includes("Reviewing search results"), `the review still runs: ${steps.join(" | ")}`);
+  assert.ok(!steps.includes("Research sources retrieved"), `no source was retrieved, so none may be claimed: ${steps.join(" | ")}`);
+});

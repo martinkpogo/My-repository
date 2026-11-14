@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { Env } from "../types";
 import type { AccessContext } from "../access";
 import { deleteMessage, editMessageText, sendMessage } from "../telegram";
+import { setSkillStageListener, type SkillStage } from "../platform/skillRegistry";
 
 /**
  * Universal live status (Martin's decision, 2026-11-11): every run the
@@ -11,10 +12,14 @@ import { deleteMessage, editMessageText, sendMessage } from "../telegram";
  * How: a run is opened at the few places every run passes through
  * (WorkSession.execute, the chat turns, Chat-mode read Actions), and the
  * shared chokepoints every run already uses report steps into it: Notion
- * reads and writes (src/notion.ts), AI calls (src/ai/policy.ts) and Tool
- * invocations (src/runtime/toolRegistry.ts). Code outside a run reports into
- * nothing. A run is carried by AsyncLocalStorage, so concurrent requests
- * never see each other's run.
+ * reads and writes (src/notion.ts), AI calls (src/ai/policy.ts), Tool
+ * invocations (src/runtime/toolRegistry.ts), the Skill stages
+ * (src/platform/skillRegistry.ts reports through the listener registered at
+ * the bottom of this file -- the edge points this way on purpose so the
+ * Registry never imports this module), web search (src/runtime/research/
+ * webSearch.ts) and the research review stage (src/runtime/research/
+ * executor.ts). Code outside a run reports into nothing. A run is carried by
+ * AsyncLocalStorage, so concurrent requests never see each other's run.
  *
  * What Martin sees: one message in the run's own chat/topic, edited in place
  *   🧭 <header>
@@ -99,6 +104,8 @@ class LiveStatusRun {
   searchLimit = 0;
   readonly endHooks: Array<() => Promise<void>> = [];
   private steps: Step[] = [];
+  /** Labels already reported by `stepOnce` this run -- one "Using tool: Tavily" for a run's whole search fan-out. */
+  private readonly onceLabels = new Set<string>();
   private messageId: number | undefined;
   private sendAttempted = false;
   private edits = 0;
@@ -130,6 +137,18 @@ class LiveStatusRun {
       return;
     }
     void this.schedule(() => this.flush());
+  }
+
+  /** Reports `label` at most once per run; later calls with the same label do nothing. */
+  stepOnce(label: string): void {
+    if (this.onceLabels.has(label)) return;
+    this.onceLabels.add(label);
+    this.step(label);
+  }
+
+  /** Test seam: the run's steps as they would render right now ("label", "label ×n"). */
+  stepsForTest(): string[] {
+    return this.steps.map(render);
   }
 
   /**
@@ -301,6 +320,18 @@ export function reportLiveStep(label: string): void {
 }
 
 /**
+ * Reports a step at most ONCE per run: the first call in the run reports
+ * it, later calls with the same label are no-ops. For a stage that is
+ * genuinely entered once even though the code reaches it many times (one
+ * "Using tool: Tavily" for a run's whole search fan-out) -- per-call
+ * reporting would flood the trail and break the approved adjacent merge
+ * ("Searching the web ×3"). Same fixed-label rule as reportLiveStep.
+ */
+export function reportLiveStepOnce(label: string): void {
+  RUNS.getStore()?.stepOnce(label);
+}
+
+/**
  * Reports that a step reported earlier as `pending` has finished as `final`
  * -- e.g. "Searching the web" becomes "Searching the web — modernghana.com".
  * A no-op outside a run. `final` follows the same fixed-label rule as
@@ -320,3 +351,68 @@ export function yieldLiveStatusToHat(): void {
 export function liveStatusOpen(): boolean {
   return RUNS.getStore() !== undefined;
 }
+
+/** Test seam: the open run's steps as they would render right now, or undefined outside a run. */
+export function liveStatusSteps(): string[] | undefined {
+  return RUNS.getStore()?.stepsForTest();
+}
+
+// ---------------------------------------------------------------------------
+// Skill stages (issue #369). src/platform/skillRegistry.ts reports the three
+// stages a Skill execution genuinely reaches -- resolving, verifying,
+// applying -- through the listener the Registry exposes. The edge points THIS
+// way on purpose: the Registry is loaded by Unit manifests, so an import of
+// this module from it would close a module cycle through Units, Notion and
+// Telegram (the same direction as the AI layer's augmenters, which register
+// into ai/policy.ts rather than being imported by it). Labels are built here
+// from fixed stage wording plus the registered Skill id -- never the Skill's
+// content, prompt or methodology.
+// ---------------------------------------------------------------------------
+
+/** True while a synchronous parallel Skill-application wave reports its own single line (see withoutSkillApplyReports). */
+let skillApplySuppressed = false;
+
+/**
+ * Runs `fn` with the per-Skill "Applying" reports suppressed, for a path
+ * that fetches several Skills in ONE synchronous wave (Strategy's parallel
+ * plan): the wave's own line (reportSkillApplyWave) stands for the whole
+ * wave instead of a per-Skill checklist that would read as sequential
+ * execution. `fn` MUST be synchronous -- the flag is module-level and safe
+ * only because no await can interleave inside it.
+ */
+export function withoutSkillApplyReports<T>(fn: () => T): T {
+  const previous = skillApplySuppressed;
+  skillApplySuppressed = true;
+  try {
+    return fn();
+  } finally {
+    skillApplySuppressed = previous;
+  }
+}
+
+/**
+ * Reports one line for a whole parallel Skill-application wave -- the single
+ * Skill as "Applying skill: x", several as "Applying skills: a, b". Called
+ * by the owner of the wave (src/units/strategy/strategySkillCycle.ts), which
+ * wraps its plan in withoutSkillApplyReports so the per-Skill reports do not
+ * fabricate a sequential checklist around it.
+ */
+export function reportSkillApplyWave(skillIds: readonly string[]): void {
+  const unique = [...new Set(skillIds)];
+  if (unique.length === 0) return;
+  reportLiveStep(unique.length === 1 ? `Applying skill: ${unique[0]}` : `Applying skills: ${unique.join(", ")}`);
+}
+
+const SKILL_STAGE_LABELS: Record<SkillStage, string> = {
+  resolving: "Resolving skill",
+  verifying: "Verifying skill",
+  applying: "Applying skill",
+};
+
+// The one registration of the Registry's stage listener. A listener failure
+// is swallowed by the Registry, so live reporting can never fail a
+// resolution; outside a run reportLiveStep is a no-op.
+setSkillStageListener((stage, id) => {
+  if (stage === "applying" && skillApplySuppressed) return;
+  reportLiveStep(`${SKILL_STAGE_LABELS[stage]}: ${id}`);
+});

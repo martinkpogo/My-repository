@@ -215,6 +215,8 @@ export const googleDriveEnsureFolderToolOperation: ToolOperationDefinition = {
   operationId: GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID,
   version: "1.0",
   effect: "external_mutation",
+  activityLabel: "Ensuring folder exists",
+  resultLabel: "Folder ready",
 
   validateInput(input: unknown): string | null {
     const parsed = parseInput(input);

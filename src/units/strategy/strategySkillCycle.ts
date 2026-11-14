@@ -2,6 +2,7 @@ import type { Env } from "../../types";
 import { generate, generateWithOutcome, type AiFailureCause } from "../../ai";
 import type { SemanticTaskId } from "../../dataBoundary/types";
 import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegistry";
+import { reportSkillApplyWave, withoutSkillApplyReports } from "../../runtime/liveStatus";
 
 /**
  * Strategy's composable-Skills diagnosis: plan once, run in parallel,
@@ -477,15 +478,24 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   if (plan.length === 0) return { status: "ok", findings: [] };
 
   await onProgress?.(`Running Strategy Skills (${plan.map((p) => p.skillId).join(", ")})...`);
+  // One line for the WHOLE parallel application (issue #369): these Skills
+  // are fetched and run concurrently, so a per-Skill "Applying" line each
+  // would render as a sequential completion checklist. The wave line stands
+  // for the wave, and withoutSkillApplyReports suppresses the per-Skill
+  // reports around the synchronous plan (it must stay synchronous -- see
+  // src/runtime/liveStatus.ts).
+  reportSkillApplyWave(plan.map((p) => p.skillId));
   // Array order is the plan's order, so the recorded invocation order is
   // deterministic even though the calls run concurrently.
   const findings = await Promise.all(
-    plan.map(({ skillId, question }) =>
-      runDomainSkill(env, skillId as StrategyDomainSkillId, question, {
-        strategyQuestion,
-        strategyContext,
-        skillContent: skills.get(skillId as SkillId).content,
-      }),
+    withoutSkillApplyReports(() =>
+      plan.map(({ skillId, question }) =>
+        runDomainSkill(env, skillId as StrategyDomainSkillId, question, {
+          strategyQuestion,
+          strategyContext,
+          skillContent: skills.get(skillId as SkillId).content,
+        }),
+      ),
     ),
   );
 

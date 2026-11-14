@@ -308,6 +308,54 @@ export class SkillResolutionError extends Error {
 }
 
 /**
+ * The three Skill execution stages a caller may report (issue #369): the
+ * resolution pass, the integrity verification, and the point where execution
+ * obtains the Skill to follow. Which of them a code path actually reaches is
+ * exactly what gets reported -- never the Skill's content, prompt or
+ * methodology, and never anything but the registered id.
+ */
+export type SkillStage = "resolving" | "verifying" | "applying";
+
+/** Receives one stage event: the stage and the registered Skill id, nothing else. */
+export type SkillStageListener = (stage: SkillStage, id: SkillId) => void;
+
+let stageListener: SkillStageListener | undefined;
+
+/**
+ * Installs the one stage listener. `src/runtime/liveStatus.ts` registers it
+ * at module load; the edge points that way on purpose. This Registry has no
+ * imports of its own and is loaded by Unit manifests, so importing the live
+ * status from here would close a module cycle through Units, Notion and
+ * Telegram -- the live status points at the Registry instead (the same
+ * direction as the AI layer's augmenters, which register into ai/policy.ts).
+ * A listener failure is swallowed by `noteStage`: live reporting must never
+ * fail a resolution.
+ */
+export function setSkillStageListener(listener: SkillStageListener | undefined): void {
+  stageListener = listener;
+}
+
+/** Reports one stage to the installed listener, if any; a listener throw is logged and swallowed. */
+function noteStage(stage: SkillStage, id: SkillId): void {
+  try {
+    stageListener?.(stage, id);
+  } catch (err) {
+    console.error("skill stage listener failed (the resolution carries on)", err);
+  }
+}
+
+/**
+ * Reports a stage from a boundary module that obtains a Skill to follow
+ * without going through a set's `get()` -- `resolveRuntimeSkill` in
+ * src/runtime/actionSkills.ts, where the Runtime resolves its OWN research
+ * methodology to apply it immediately. Fixed stage wording plus the
+ * registered id only; the listener itself lives in src/runtime/liveStatus.ts.
+ */
+export function noteSkillStage(stage: SkillStage, id: SkillId): void {
+  noteStage(stage, id);
+}
+
+/**
  * The registered package metadata for every Skill, INCLUDING its expected
  * integrity digest.
  *
@@ -423,6 +471,7 @@ export function resolveSkill(id: SkillId): ResolvedSkill {
   if (!metadata) {
     throw new SkillResolutionError(`no Skill is registered under the id "${String(id)}" -- resolution is exact, and no other Skill may be substituted for it`);
   }
+  noteStage("resolving", id);
   if (metadata.format !== SUPPORTED_SKILL_PACKAGE_FORMAT) {
     throw new SkillResolutionError(`Skill "${id}" declares unsupported package format "${String(metadata.format)}"`);
   }
@@ -450,6 +499,7 @@ export async function verifySkillIntegrity(id: SkillId): Promise<void> {
   if (!expected) {
     throw new SkillResolutionError(`Skill "${String(id)}" has no registered integrity digest -- refusing to resolve without verifying it`);
   }
+  noteStage("verifying", id);
   const actual = await sha256Hex(SKILL_CONTENT[id] ?? "");
   if (actual !== expected) {
     throw new SkillResolutionError(
@@ -510,6 +560,7 @@ export function createResolvedActionSkillSet(resolved: readonly ResolvedSkill[])
       if (!skill) {
         throw new SkillResolutionError(`Skill "${String(id)}" was not declared by this Action -- execution may only follow the Skills its Action requires`);
       }
+      noteStage("applying", id);
       return skill;
     },
   };

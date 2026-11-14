@@ -2,6 +2,7 @@ import type { ActionDefinition } from "../hats/actionRegistry";
 import type { HatManifest } from "../units/unitManifest";
 import {
   createResolvedActionSkillSet,
+  noteSkillStage,
   resolveActionSkills,
   resolveSkill,
   SkillResolutionError,
@@ -110,7 +111,13 @@ export async function runWithRecordedActionSkills<T>(
  * one an Action declared (Martin, 2026-11-11: universal web research is a
  * Runtime tool, so its methodology comes from the Runtime). Resolved and
  * integrity-checked by the same Registry boundary as every declared Skill.
+ *
+ * The Runtime obtains the methodology here to follow it immediately, so this
+ * is the application stage for a runtime-supplied Skill -- the same point at
+ * which a set's `get()` reports it (issue #369).
  */
 export function resolveRuntimeSkill(id: SkillId): ResolvedSkill {
-  return resolveSkill(id);
+  const skill = resolveSkill(id);
+  noteSkillStage("applying", id);
+  return skill;
 }

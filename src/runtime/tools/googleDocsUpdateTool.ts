@@ -254,6 +254,8 @@ export const googleDocsUpdateToolOperation: ToolOperationDefinition = {
   operationId: GOOGLE_DOCS_UPDATE_OPERATION_ID,
   version: "1.0",
   effect: "external_mutation",
+  activityLabel: "Updating document",
+  resultLabel: "Document updated",
 
   validateInput(input: unknown): string | null {
     const parsed = parseInput(input);

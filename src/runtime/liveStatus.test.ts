@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import type { Env } from "../types";
-import { MAX_EDITS, reportLiveStep, withLiveStatus, yieldLiveStatusToHat, type LiveStatusDetailSink } from "./liveStatus";
+import { MAX_EDITS, liveStatusSteps, reportLiveStep, reportLiveStepOnce, reportSkillApplyWave, withLiveStatus, withoutSkillApplyReports, yieldLiveStatusToHat, type LiveStatusDetailSink } from "./liveStatus";
 import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink, startWorkStatus, type WorkStatusHolder } from "./workStatus";
 import { queryDataSource } from "../notion";
 import { workSessionContext } from "../access";
@@ -342,4 +342,70 @@ test("web searches (Martin, 2026-11-13, A): each search is its own line, ⏳ unt
   assert.strictEqual(renderWorkStatus(holder.workStatus!), "🧭 H — task\n⏳ Searching the web — yen.com.gh");
   assert.strictEqual(renderWorkStatus(holder.workStatus!, { line: "✅ Draft ready", currentFailed: false }), "🧭 H — task\n✓ Deciding\n✅ Draft ready");
   resolveLiveStep("Searching the web", "x"); // outside a run: a no-op, never throws
+});
+
+// ---------------------------------------------------------------------------
+// Issue #369: the once-per-run step, the parallel Skill wave, and the Skill
+// stages the Registry reports through its listener.
+// ---------------------------------------------------------------------------
+
+test("issue #369: reportLiveStepOnce reports a label once per run, and each run gets its own first report", async () => {
+  let first: string[] = [];
+  await withLiveStatus(fakeEnv(), target, async () => {
+    reportLiveStepOnce("Using tool: Tavily");
+    reportLiveStepOnce("Using tool: Tavily");
+    reportLiveStepOnce("Searching the web");
+    first = liveStatusSteps()!;
+  });
+  assert.deepStrictEqual(first, ["Using tool: Tavily", "Searching the web"], "a repeated report of the same label is a no-op");
+
+  let second: string[] = [];
+  await withLiveStatus(fakeEnv(), target, async () => {
+    reportLiveStepOnce("Using tool: Tavily");
+    second = liveStatusSteps()!;
+  });
+  assert.deepStrictEqual(second, ["Using tool: Tavily"], "the once-set is per run -- a new run reports its own first occurrence");
+  assert.strictEqual(liveStatusSteps(), undefined, "outside a run the seam reports no run");
+  reportLiveStepOnce("Using tool: Tavily"); // outside a run: a no-op, never throws
+});
+
+test("issue #369: a parallel Skill wave reports ONE line for the whole wave, and per-Skill reports inside it are suppressed", async () => {
+  await withLiveStatus(fakeEnv(), target, async () => {
+    reportSkillApplyWave(["brand_strategy", "business_strategy", "communication_strategy"]);
+    // The wave's owner wraps its synchronous plan: the per-Skill reports the
+    // Registry would otherwise emit must not turn the wave into a checklist.
+    const { noteSkillStage } = await import("../platform/skillRegistry");
+    withoutSkillApplyReports(() => {
+      for (const id of ["brand_strategy", "business_strategy", "communication_strategy"] as const) noteSkillStage("applying", id);
+    });
+    assert.deepStrictEqual(liveStatusSteps()!, ["Applying skills: brand_strategy, business_strategy, communication_strategy"], "one line for a multi-Skill wave");
+  });
+
+  await withLiveStatus(fakeEnv(), target, async () => {
+    reportSkillApplyWave(["research_signal"]);
+    assert.deepStrictEqual(liveStatusSteps()!, ["Applying skill: research_signal"], "a single-Skill wave reads in the singular");
+  });
+
+  reportSkillApplyWave([]); // empty wave: nothing to report, outside a run or in one
+  reportSkillApplyWave(["research_signal"]); // outside a run: a no-op, never throws
+  assert.strictEqual(liveStatusSteps(), undefined);
+});
+
+test("issue #369: the Registry's three Skill stages reach the feed as fixed labels -- never the Skill's content", async () => {
+  const { resolveSkill, verifySkillIntegrity, createResolvedActionSkillSet } = await import("../platform/skillRegistry");
+  const resolved = resolveSkill("research_signal");
+  const contentMarker = resolved.content.slice(0, 60);
+
+  await withLiveStatus(fakeEnv(), target, async () => {
+    resolveSkill("research_signal");
+    await verifySkillIntegrity("research_signal");
+    createResolvedActionSkillSet([resolved]).get("research_signal");
+    const steps = liveStatusSteps()!;
+    assert.deepStrictEqual(steps, ["Resolving skill: research_signal", "Verifying skill: research_signal", "Applying skill: research_signal"], steps.join(" | "));
+    assert.ok(!steps.join("\n").includes(contentMarker), "no Skill content ever reaches the feed");
+  });
+
+  // Outside a run the listener is a no-op: resolution itself is unaffected.
+  resolveSkill("research_signal");
+  await verifySkillIntegrity("research_signal");
 });

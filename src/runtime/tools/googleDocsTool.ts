@@ -292,6 +292,8 @@ export const googleDocsToolOperation: ToolOperationDefinition = {
   operationId: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID,
   version: "1.0",
   effect: "external_mutation",
+  activityLabel: "Creating document",
+  resultLabel: "Document created",
 
   validateInput(input: unknown): string | null {
     const parsed = parseInput(input);

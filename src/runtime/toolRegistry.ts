@@ -59,7 +59,7 @@ import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
 import { googleDriveEnsureFolderToolOperation } from "./tools/googleDriveFolderTool";
 import { googleDriveReplyToolOperation } from "./tools/googleDriveReplyTool";
 import { getWorkPersistence, type ToolOperationPersistence } from "./workPersistence";
-import { reportLiveStep } from "./liveStatus";
+import { reportLiveStep, resolveLiveStep } from "./liveStatus";
 
 // ---------------------------------------------------------------------------
 // Contract types.
@@ -134,6 +134,21 @@ export interface ToolOperationDefinition {
   version: string;
   /** The operation's declared effect classification. */
   effect: ToolEffectClassification;
+  /**
+   * The live-status label shown while the handler runs (issue #369): the
+   * operation's own activity in plain words ("Creating document"). Fixed at
+   * registration like every other live label -- never the input, the target
+   * or any content.
+   */
+  activityLabel: string;
+  /**
+   * The live-status label for a VERIFIED success (issue #369): the concrete
+   * result ("Document created"), fixed at registration. Only a `succeeded`
+   * outcome may wear it -- every other canonical state is labelled from the
+   * outcome state by the invocation boundary, so an unverified, partial,
+   * failed or denied outcome can never read as this success.
+   */
+  resultLabel: string;
   /** Runtime input validation. Returns null when valid, or the defect. Runs before target resolution, Access, and any request. */
   validateInput(input: unknown): string | null;
   /** Resolves and validates the external target from trusted runtime state. Runs after input validation and before the Access decision (Access binds approval evidence to what this returns). */
@@ -187,6 +202,12 @@ export function validateToolOperations(operations: readonly ToolOperationDefinit
     }
     if (operation.effect !== "external_mutation") {
       return `registered operation ${operation.operationId} declares unknown effect "${String(operation.effect)}"`;
+    }
+    if (typeof operation.activityLabel !== "string" || !operation.activityLabel.trim()) {
+      return `registered operation ${operation.operationId} must declare a non-empty activityLabel -- the live feed names the operation it is running from this registration, never from input`;
+    }
+    if (typeof operation.resultLabel !== "string" || !operation.resultLabel.trim()) {
+      return `registered operation ${operation.operationId} must declare a non-empty resultLabel -- only a verified success may wear the declared result`;
     }
     for (const member of ["validateInput", "resolveTarget", "run"] as const) {
       if (typeof operation[member] !== "function") {
@@ -295,6 +316,50 @@ function malformedOutcome(tool_id: string, operation_id: string, defect: string)
 
 function denied(tool_id: string, operation_id: string, reason: string): ToolInvocationOutcome {
   return { state: "denied", tool_id, operation_id, reason };
+}
+
+// ---------------------------------------------------------------------------
+// Live activity-feed naming (issue #369): controlled labels only.
+// ---------------------------------------------------------------------------
+
+/**
+ * How a tool is named in the live activity feed: a short controlled
+ * vocabulary of display names. Unknown tools fall back to their opaque
+ * registration id, which the registry -- not any caller or remote response --
+ * owns; no tool-provided, credential or content-derived text is ever shown.
+ */
+const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  google_docs: "Google Docs",
+  google_drive: "Google Drive",
+};
+
+/** The controlled display name for a tool id in activity-feed labels. */
+function toolDisplayName(toolId: string): string {
+  return TOOL_DISPLAY_NAMES[toolId] ?? toolId;
+}
+
+/**
+ * The terminal feed label for a finished operation, keyed on the outcome's
+ * OWN state so an unverified or partially-completed operation is never shown
+ * as a success: a declared result label carries `succeeded`, and each other
+ * state carries its own state-faithful wording. Only `succeeded` may append a
+ * verified remote-resource URL.
+ */
+function terminalLiveLabel(operation: ToolOperationDefinition, display: string, outcome: ToolInvocationOutcome): string {
+  switch (outcome.state) {
+    case "succeeded": {
+      const url = outcome.remote_resource?.url;
+      return typeof url === "string" && url.length > 0 ? `${operation.resultLabel} — ${url}` : operation.resultLabel;
+    }
+    case "failed":
+      return `${display} operation failed`;
+    case "partially_completed":
+      return `${display} operation partially completed`;
+    case "unverified":
+      return `${display} operation unverified`;
+    case "denied":
+      return `${display} operation denied`;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,8 +514,13 @@ const IN_FLIGHT_OPERATIONS = new Set<string>();
  * never as a substitute for a denial or failure outcome.
  */
 export async function invokeTool(env: Env, request: ToolInvocationRequest, context: AccessContext): Promise<ToolInvocationOutcome> {
+  // Universal live status (issue #369): the registry lookup itself is a real
+  // stage, so the feed shows it before any tool is named -- and only a lookup
+  // that actually happened is ever shown.
+  reportLiveStep("Checking tool registry");
   const operation = resolveToolOperation(request.tool_id, request.operation_id);
   if (!operation) {
+    resolveLiveStep("Checking tool registry", "Tool not registered");
     return denied(
       String(request.tool_id),
       String(request.operation_id),
@@ -458,13 +528,30 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
     );
   }
   const base = { tool_id: operation.toolId, operation_id: operation.operationId };
-  // Universal live status: the registered Tool operation's ids only, never its input.
-  reportLiveStep(`Running ${operation.toolId}: ${operation.operationId}`);
+  const display = toolDisplayName(operation.toolId);
+  // Any refusal before the tool is known to be available resolves the lookup
+  // step as a denial; nothing further is claimed in the feed.
+  const denyBeforeUse = (reason: string): ToolInvocationOutcome => {
+    resolveLiveStep("Checking tool registry", "Tool use denied");
+    return denied(operation.toolId, operation.operationId, reason);
+  };
+  // A refusal after the tool was shown as available resolves that step as a
+  // denial -- the feed never leaves a dangling "Using tool" line pending.
+  const denyAfterUse = (reason: string): ToolInvocationOutcome => {
+    resolveLiveStep(`Using tool: ${display}`, "Tool use denied");
+    return denied(operation.toolId, operation.operationId, reason);
+  };
+  // A terminal outcome reached before the handler ran resolves the "Using
+  // tool" step with the outcome's own state-faithful label.
+  const finishBeforeRun = (outcome: ToolInvocationOutcome): ToolInvocationOutcome => {
+    resolveLiveStep(`Using tool: ${display}`, terminalLiveLabel(operation, display, outcome));
+    return outcome;
+  };
 
   // 1. Input contract.
   const inputDefect = operation.validateInput(request.input);
   if (inputDefect) {
-    return denied(operation.toolId, operation.operationId, `invalid input for ${operation.operationId}: ${inputDefect}`);
+    return denyBeforeUse(`invalid input for ${operation.operationId}: ${inputDefect}`);
   }
 
   // 2. Trusted target resolution (account set and folder shape from this
@@ -472,7 +559,7 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
   //    binds to what Access is about to judge.
   const resolvedTarget = await operation.resolveTarget(env, request.input);
   if (!resolvedTarget.ok) {
-    return denied(operation.toolId, operation.operationId, resolvedTarget.reason);
+    return denyBeforeUse(resolvedTarget.reason);
   }
 
   // 3. Authorization -- the Work's own resolved Action, its declaration, its
@@ -490,10 +577,15 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
     );
   } catch (error) {
     if (error instanceof AccessDeniedError) {
-      return denied(operation.toolId, operation.operationId, error.reason);
+      return denyBeforeUse(error.reason);
     }
     throw error;
   }
+
+  // The tool is registered, its input and target are sound and Access has
+  // passed: it is now genuinely available, and about to be used.
+  reportLiveStep(`Tool available: ${display}`);
+  reportLiveStep(`Using tool: ${display}`);
 
   // 4. Durable recovery. The Work's own persisted operation record is the
   //    authority on what any previous attempt actually did; the caller's
@@ -503,9 +595,7 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
   //    be initiated, so a missing adapter fails closed here.
   const persistence = getWorkPersistence(String(context.workId ?? ""));
   if (!persistence) {
-    return denied(
-      operation.toolId,
-      operation.operationId,
+    return denyAfterUse(
       "durable operation persistence is not available for this Work (no WorkSession persistence adapter is installed) -- refusing to initiate an external effect that could not be recovered after an interruption",
     );
   }
@@ -514,18 +604,14 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
   try {
     stored = await persistence.load(recordKey);
   } catch (error) {
-    return denied(
-      operation.toolId,
-      operation.operationId,
+    return denyAfterUse(
       `the persisted operation record could not be read (${error instanceof Error ? error.message : "unknown error"}) -- its remote state is unknown, so no new attempt may run`,
     );
   }
   if (stored !== undefined) {
     const defect = validateStoredRecord(stored, operation, resolvedTarget.target.resourceId, String(context.workId ?? ""));
     if (defect) {
-      return denied(
-        operation.toolId,
-        operation.operationId,
+      return denyAfterUse(
         `a persisted operation record for this invocation is incompatible (${defect}) -- refusing to proceed rather than risk a duplicate remote effect`,
       );
     }
@@ -542,9 +628,7 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
   // Cross-restart uncertainty is carried by the durable record.
   const guardKey = `${String(context.workId ?? "")}|${operation.operationId}|${resolvedTarget.target.resourceId}`;
   if (IN_FLIGHT_OPERATIONS.has(guardKey)) {
-    return denied(
-      operation.toolId,
-      operation.operationId,
+    return denyAfterUse(
       "another attempt at this exact operation is already in progress for this Work -- a concurrent duplicate may not initiate a second remote effect",
     );
   }
@@ -571,35 +655,33 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
           prior.tool_id !== operation.toolId ||
           prior.operation_id !== operation.operationId)
       ) {
-        return denied(
-          operation.toolId,
-          operation.operationId,
+        return denyAfterUse(
           "a malformed prior_outcome was supplied (wrong operation or unknown state) -- refusing to proceed rather than risk a duplicate remote effect",
         );
       }
       if (prior.state === "succeeded") {
         // The effect already exists and was verified: return it, never recreate.
-        return { ...prior, tool_id: operation.toolId, operation_id: operation.operationId };
+        return finishBeforeRun({ ...prior, tool_id: operation.toolId, operation_id: operation.operationId });
       }
       if (prior.state === "partially_completed" || prior.state === "unverified") {
         if (!operation.reconcile) {
           if (!prior.remote_resource?.document_id) {
-            return {
+            return finishBeforeRun({
               ...base,
               state: "unverified",
               ...(prior.remote_resource ? { remote_resource: prior.remote_resource } : {}),
               reason:
                 "a previous attempt left an uncertain remote effect with no resource identifier to reconcile -- refusing to create again; the remote state must be resolved first",
               reconciliation_required: true,
-            };
+            });
           }
-          return {
+          return finishBeforeRun({
             ...base,
             state: "unverified",
             remote_resource: prior.remote_resource,
             reason: "a previous attempt left an uncertain remote effect and this operation declares no reconciliation step -- refusing to repeat it",
             reconciliation_required: true,
-          };
+          });
         }
         const reconciliation = await operation.reconcile(env, prior, request.input);
         const outcome = reconciliation.outcome;
@@ -609,7 +691,7 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
             ? malformedOutcome(operation.toolId, operation.operationId, defect)
             : { ...outcome, tool_id: operation.toolId, operation_id: operation.operationId };
           await persistOperationOutcome(persistence, recordKey, baseRecord, finalOutcome);
-          return finalOutcome;
+          return finishBeforeRun(finalOutcome);
         }
         // Reconciliation established that the desired remote effect does not
         // exist: a fresh attempt may proceed. A prior `failed`/`denied`
@@ -625,24 +707,35 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
     try {
       await persistence.save(recordKey, intent);
     } catch (error) {
-      return {
+      return finishBeforeRun({
         ...base,
         state: "failed",
         stage: "persistence",
         reason: `the execution intent could not be persisted to this Work's storage (${error instanceof Error ? error.message : "unknown error"}) -- refusing to start an external effect that could not be recovered after an interruption`,
-      };
+      });
     }
 
     // 5. The registered handler, then contract validation of what it
     //    returned, then the durable outcome. A failed outcome save never
     //    rewrites what was actually observed: the record stays `in_progress`
     //    and the next invocation reconciles it against the provider.
-    const result = await operation.run(env, request.input, resolvedTarget.target);
+    // The operation itself now runs, under its registered activity label.
+    reportLiveStep(operation.activityLabel);
+    let result: ToolInvocationOutcome;
+    try {
+      result = await operation.run(env, request.input, resolvedTarget.target);
+    } catch (error) {
+      // A thrown handler leaves the feed's running line unresolved; close it
+      // as a failure -- never as a success -- and rethrow unchanged.
+      resolveLiveStep(operation.activityLabel, `${display} operation failed`);
+      throw error;
+    }
     const defect = validateOutcomeShape(result, operation);
     const finalOutcome = defect
       ? malformedOutcome(operation.toolId, operation.operationId, defect)
       : { ...result, tool_id: operation.toolId, operation_id: operation.operationId };
     await persistOperationOutcome(persistence, recordKey, intent, finalOutcome);
+    resolveLiveStep(operation.activityLabel, terminalLiveLabel(operation, display, finalOutcome));
     return finalOutcome;
   } finally {
     IN_FLIGHT_OPERATIONS.delete(guardKey);

@@ -492,3 +492,67 @@ test("gatherDimensionEvidence redacts identity terms from every outbound query -
   assert.ok(!queries[0].includes("Martin"), `identity must not leave the runtime: ${queries[0]}`);
   assert.ok(queries[0].includes("the business"), "the canonical redaction replacement must be applied");
 });
+
+// --- Live activity feed (issue #369): the tool line, the search line, and what each outcome may claim ---
+
+/** Runs `fn` inside an open live-status run and returns the steps it recorded, as they render. */
+async function feedSteps(fn: () => Promise<unknown>): Promise<string[]> {
+  const { liveStatusSteps, withLiveStatus } = await import("../liveStatus");
+  let steps: string[] = [];
+  await withLiveStatus({ TELEGRAM_BOT_TOKEN: "t" } as any, { chatId: -100, header: "Feed test" }, async () => {
+    await fn();
+    steps = liveStatusSteps() ?? [];
+  });
+  return steps;
+}
+
+test("feed: one 'Using tool: Tavily' for a run's whole search fan-out, and each search resolves to the site it found -- domain only", async () => {
+  const steps = await feedSteps(() =>
+    withMockFetch(
+      async () => okJson({ results: [{ title: "T", url: "https://www.example.com/report", content: "c" }] }),
+      async () => {
+        await executeSearch(configuredEnv, { query: "first query" }, KERNEL_SEARCH);
+        await executeSearch(configuredEnv, { query: "second query" }, KERNEL_SEARCH);
+        await executeSearch(configuredEnv, { query: "third query" }, KERNEL_SEARCH);
+      },
+    ),
+  );
+  assert.strictEqual(steps.filter((s) => s === "Using tool: Tavily").length, 1, `one tool line for the whole fan-out: ${steps.join(" | ")}`);
+  assert.strictEqual(steps.filter((s) => s.startsWith("Searching the web")).length, 3, `one line per search: ${steps.join(" | ")}`);
+  assert.ok(steps.every((s) => s === "Using tool: Tavily" || s === "Searching the web — example.com"), `only domains are ever shown: ${steps.join(" | ")}`);
+  assert.ok(!steps.join("\n").includes("first query"), "a query never reaches the feed");
+});
+
+test("feed: success with no results says 'nothing found', a provider failure says 'not completed' -- never a success claim", async () => {
+  const empty = await feedSteps(() => withMockFetch(async () => okJson({ results: [] }), () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH)));
+  assert.ok(empty.includes("Searching the web — nothing found"), empty.join(" | "));
+  assert.ok(!empty.some((s) => s.includes("— example.com")));
+
+  const failed = await feedSteps(() => withMockFetch(async () => new Response("rate limited", { status: 429 }), () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH)));
+  assert.ok(failed.includes("Searching the web — not completed"), failed.join(" | "));
+  assert.ok(!failed.some((s) => s.startsWith("Searching the web — ") && !s.endsWith("not completed")), `a failed search never names a site: ${failed.join(" | ")}`);
+});
+
+test("feed: a request that never reaches the provider reports nothing -- invalid input, missing configuration and an Access refusal are all silent", async () => {
+  const invalid = await feedSteps(() => withMockFetch(async () => okJson({ results: [] }), () => executeSearch(configuredEnv, { query: "" }, KERNEL_SEARCH)));
+  assert.deepStrictEqual(invalid, [], `invalid input must report no search at all: ${invalid.join(" | ")}`);
+
+  const unconfigured = await feedSteps(() => withMockFetch(async () => okJson({ results: [] }), () => executeSearch({} as any, { query: "q" }, KERNEL_SEARCH)));
+  assert.deepStrictEqual(unconfigured, [], `an unconfigured provider must report no search at all: ${unconfigured.join(" | ")}`);
+
+  let denied: unknown;
+  const deniedSteps = await feedSteps(() =>
+    withMockFetch(
+      async () => okJson({ results: [] }),
+      async () => {
+        try {
+          await executeSearch(configuredEnv, { query: "a query" }, { kind: "work_session", workId: "work-x" });
+        } catch (err) {
+          denied = err;
+        }
+      },
+    ),
+  );
+  assert.ok(denied instanceof AccessDeniedError, "the typed refusal still reaches the caller");
+  assert.deepStrictEqual(deniedSteps, [], `an Access refusal must report no search at all: ${deniedSteps.join(" | ")}`);
+});

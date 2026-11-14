@@ -2,7 +2,7 @@ import type { Env } from "../../types";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
-import { reportLiveStep, resolveLiveStep } from "../liveStatus";
+import { reportLiveStep, reportLiveStepOnce, resolveLiveStep } from "../liveStatus";
 import { takeWebLookup } from "../webLookupAllowance";
 import type { ResearchPlanDimension } from "./researchPlan";
 
@@ -293,6 +293,17 @@ function normalizeTavilyResults(raw: TavilyResponse["results"], retrievedAt: str
  */
 export const SEARCH_STEP = "Searching the web";
 
+/** Fixed display wording for the active search provider (trusted runtime configuration, never caller input). */
+const SEARCH_PROVIDER_DISPLAY: Record<SearchProviderId, string> = { tavily: "Tavily" };
+
+/**
+ * The live-status line for entering the search tool (issue #369): reported
+ * ONCE per run through `reportLiveStepOnce` -- a research run fans out into
+ * several parallel searches, and one line per call would flood the trail
+ * while breaking the approved adjacent merge of "Searching the web ×3".
+ */
+export const SEARCH_TOOL_STEP = `Using tool: ${SEARCH_PROVIDER_DISPLAY[ACTIVE_SEARCH_PROVIDER]}`;
+
 /**
  * The live-status label for a finished search (Martin's decision 2026-11-13,
  * option A): the public site of its top result, domain only -- never the
@@ -311,12 +322,7 @@ export function finishedSearchLabel(outcome: SearchOutcome): string {
 export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
   const invalidReason = validateSearchRequest(request, TAVILY_ADAPTER);
   if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
-  // Universal live status: never the query text. The step shows ⏳ until
-  // the search returns, then names the site it found.
-  reportLiveStep(SEARCH_STEP);
-  const outcome = await runSearch(env, request, access);
-  resolveLiveStep(SEARCH_STEP, finishedSearchLabel(outcome));
-  return outcome;
+  return runSearch(env, request, access);
 }
 
 async function runSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
@@ -337,6 +343,25 @@ async function runSearch(env: Env, request: SearchRequest, access: AccessContext
     };
   }
 
+  // The genuine attempt starts HERE (issue #369): input validation, provider
+  // configuration, Access and the run/day ceilings have all passed, so the
+  // tool is really being used now. "Using tool: Tavily" is reported once per
+  // run; the search step itself is per search (adjacent calls merge into
+  // "Searching the web ×3") and each one resolves to the site it found --
+  // never the query text. A request that never reaches the provider reports
+  // nothing at all for these two lines: an invalid input or a missing key
+  // returns above, a refusal by Access throws above, and a ceiling reports
+  // its own fixed line (webLookupAllowance) -- none of them may show a
+  // search that did not happen.
+  reportLiveStepOnce(SEARCH_TOOL_STEP);
+  reportLiveStep(SEARCH_STEP);
+  const outcome = await fetchSearchResults(env, request);
+  resolveLiveStep(SEARCH_STEP, finishedSearchLabel(outcome));
+  return outcome;
+}
+
+/** The provider round trip and normalization -- reached only by a request that passed every check above. */
+async function fetchSearchResults(env: Env, request: SearchRequest): Promise<SearchOutcome> {
   const maxResults = request.max_results ?? MAX_RESULTS_PER_QUERY;
   const retrievedAt = new Date().toISOString();
 

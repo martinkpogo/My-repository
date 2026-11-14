@@ -9,6 +9,7 @@ import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { generateResearchPlan } from "./researchPlan";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
 import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatFailedSearchesWarning, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
+import { reportLiveStep, resolveLiveStep } from "../liveStatus";
 import type { ResearchBlockCode, ResearchExecutionInput, ResearchOutcome, ResearchSynthesis } from "./types";
 
 /**
@@ -361,8 +362,15 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // evidence below, so findUnverifiableSources naturally extends to verify
   // against them.
   const dimensionEvidence = await gatherDimensionEvidence(env, plan, access);
+  // Universal live status (issue #369): the searches are done, so the run
+  // reviews what came back before synthesis. A review that found sources
+  // resolves to say so; a review with none stays as the running step (the
+  // coverage assessment and the synthesis's own label follow) -- never a
+  // "sources retrieved" claim when there were none.
+  reportLiveStep("Reviewing search results");
   const { covered, uncovered, failed } = assessDimensionCoverage(dimensionEvidence);
   const webResultCount = covered.reduce((sum, d) => sum + d.results.length, 0);
+  if (webResultCount > 0) resolveLiveStep("Reviewing search results", "Research sources retrieved");
   const webEvidence = formatDimensionEvidenceForContext(dimensionEvidence);
   const uncoveredWarning = [formatUncoveredDimensionsWarning(uncovered), formatFailedSearchesWarning(failed)].filter(Boolean).join("\n\n");
 

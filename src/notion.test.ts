@@ -1,9 +1,10 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { uniqueId, queryDataSource } from "./notion";
+import { uniqueId, queryDataSource, createPage, title } from "./notion";
 import type { Env } from "./types";
-import { systemContext } from "./access";
+import { AccessDeniedError, systemContext, workSessionReadContext } from "./access";
+import { liveStatusSteps, withLiveStatus } from "./runtime/liveStatus";
 
 function fakeEnv(): Env {
   return {
@@ -124,4 +125,64 @@ test("every Notion request is authorized with env.NOTION_TOKEN from the Worker b
     "Bearer a-different-fixture-token",
     "changing env.NOTION_TOKEN between calls must change the Authorization header sent -- proves the token is read fresh from the binding on every request, never cached",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Issue #369: Notion reports to the live status only through authorize()'s
+// fixed source labels, and only AFTER Access has permitted the operation. A
+// denial reports nothing -- the feed must never claim a write that Access
+// refused -- and a permitted write carries only the source's fixed name,
+// never a page title or property value.
+// ---------------------------------------------------------------------------
+
+test("a denied Notion write reports nothing to the live status feed -- Access decides before any claim", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv();
+  let steps: string[] | undefined;
+  await assert.rejects(
+    withLiveStatus(env, { chatId: -100, header: "Notion feed" }, async () => {
+      try {
+        // A work-session read context may write nothing: createPage must be
+        // refused by authorize() before the network is touched.
+        await createPage(env, env.ENTITY_DATA_SOURCE_ID, { Name: title("A page title that must never show") }, workSessionReadContext("work-1"));
+      } finally {
+        steps = liveStatusSteps();
+      }
+    }),
+    AccessDeniedError,
+  );
+  assert.equal(fetchCalls, 0, "a denied operation reaches neither Notion nor Telegram");
+  assert.deepEqual(steps, [], `a denial must report nothing to the feed: ${(steps ?? []).join(" | ")}`);
+});
+
+test("a permitted Notion write reports only the source's fixed name -- never a title or property value", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: any) => {
+    if (String(url).includes("api.notion.com")) {
+      return new Response(JSON.stringify({ id: "page-1", url: "https://notion.so/page-1", properties: {} }), { status: 200 });
+    }
+    // The run's Telegram send/edit/delete: a valid empty ack is enough.
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = fakeEnv();
+  let steps: string[] = [];
+  await withLiveStatus(env, { chatId: -100, header: "Notion feed" }, async () => {
+    await createPage(env, env.ACTIVITY_LOG_DATA_SOURCE_ID, { Name: title("A page title that must never show") }, systemContext("kernel-1"));
+    steps = liveStatusSteps() ?? [];
+  });
+  assert.deepEqual(steps, ["Writing to the Activity Log"], steps.join(" | "));
+  assert.ok(!steps.join("\n").includes("A page title"), "no page title or property value may reach the feed");
 });
