@@ -11,6 +11,7 @@ import {
   hashResultReviewVerdict,
   isSuccessfulResultStage,
   recordCheckerVerdict,
+  recordOutputApprovalAsResultApproval,
   resolveResultReviewApprovalDecision,
   stageResultReviewApproval,
 } from "./resultReview";
@@ -570,4 +571,74 @@ test("resume (2026-11-14): picking a blocked Work with no card pending offers Re
   const notice = resumeNotice(state, "Switched active context to work item x.");
   assert.match(notice.text, /cannot close yet: Independent Checker verification required/);
   assert.equal(notice.buttons?.[0][0].callback_data, "resultreview:ed5013e0-98e7-4cce-addf-b868378823d9:c");
+});
+
+
+// ---------------------------------------------------------------------------
+// Output approval closes the Work (Martin's decision, 2026-11-14).
+// ---------------------------------------------------------------------------
+
+async function outputApprovalState(opts: { declared?: boolean; approvalEvidence?: boolean; bound?: boolean; verdict?: "passed" | "failed" } = {}): Promise<WorkState> {
+  const { hashContent } = await import("./contentHash");
+  const state = baseState({ stage: "delivered" });
+  ensureResultReviewContract(state, { ...DECLARED_CONTRACT, ...(opts.declared === false ? {} : { outputApprovalClosesWork: true }) });
+  const draft = "The approved draft text.";
+  const evidence = [{ kind: "marketing_output", ref: "w-draft", note: "draft", content: draft }];
+  if (opts.approvalEvidence !== false) {
+    evidence.push({ kind: "operator_approval", ref: "w-approval", note: "approval", content: `Martin approved w-draft ... SHA-256: ${opts.bound === false ? "deadbeef" : await hashContent(draft)}.` });
+  }
+  state.resultReview!.evidence = evidence;
+  const verdict = await recordCheckerVerdict(state, {
+    checkerId: "independent-checker",
+    outcome: opts.verdict ?? "passed",
+    evidenceRefs: evidence.map((e) => ({ kind: e.kind, ref: e.ref, note: e.note })),
+    ...(opts.verdict === "failed" ? { reason: "criterion not met" } : {}),
+  });
+  assert.ok(verdict.ok);
+  return state;
+}
+
+test("output approval: declared + passing bound verdict + approval evidence bound to the output -> Martin's Result approval is recorded (via output_approval) and the gate allows closure", async () => {
+  const state = await outputApprovalState();
+  const done = await recordOutputApprovalAsResultApproval(state);
+  assert.ok(done.ok);
+  assert.equal(state.resultReview?.approval?.via, "output_approval");
+  assert.equal(state.resultReview?.approval?.approver, "martin");
+  assert.deepEqual(await evaluateResultReviewGate(state), { allowed: true });
+});
+
+test("output approval: refused -- and the Result approval card stays the path -- when not declared, no approval evidence, approval not bound to the output, or the Checker did not pass", async () => {
+  for (const [label, opts] of [
+    ["not declared", { declared: false }],
+    ["no approval evidence (e.g. spend approval only)", { approvalEvidence: false }],
+    ["approval not bound to any evidence item", { bound: false }],
+    ["Checker failed", { verdict: "failed" as const }],
+  ] as const) {
+    const state = await outputApprovalState(opts);
+    const done = await recordOutputApprovalAsResultApproval(state);
+    assert.equal(done.ok, false, label);
+    assert.equal(state.resultReview?.approval, undefined, `${label}: nothing recorded`);
+    assert.equal((await evaluateResultReviewGate(state)).allowed, false, `${label}: the gate still refuses`);
+  }
+});
+
+test("output approval: never records a second approval, and refuses when evidence was added after the verdict", async () => {
+  const state = await outputApprovalState();
+  assert.ok((await recordOutputApprovalAsResultApproval(state)).ok);
+  assert.equal((await recordOutputApprovalAsResultApproval(state)).ok, false, "already recorded");
+  const changed = await outputApprovalState();
+  changed.resultReview!.evidence = [...changed.resultReview!.evidence!, { kind: "extra", ref: "x", content: "added after the verdict" }];
+  const refused = await recordOutputApprovalAsResultApproval(changed);
+  assert.equal(refused.ok, false);
+  assert.match((refused as { reason: string }).reason, /does not cover all the evidence/);
+});
+
+test("output approval wiring: Marketing declares it; the kind constant matches Marketing's evidence; save and Re-check call the one recorder; spend approval keeps its card", async () => {
+  const { OPERATOR_APPROVAL_EVIDENCE_KIND } = await import("./resultReview");
+  assert.equal(OPERATOR_APPROVAL_EVIDENCE_KIND, "operator_approval");
+  const manifest = fs.readFileSync(new URL("./units/marketing/marketingManifest.ts", import.meta.url), "utf8");
+  assert.match(manifest, /outputApprovalClosesWork: true/);
+  assert.match(manifest, /"operator_approval" \| "spend_approval"/);
+  const session = fs.readFileSync(new URL("./session.ts", import.meta.url), "utf8");
+  assert.equal((session.match(/await recordOutputApprovalAsResultApproval\(state\)/g) ?? []).length, 2, "save() and Re-check each call the one recorder");
 });

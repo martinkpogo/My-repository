@@ -741,6 +741,11 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       // are non-success outcomes and are deliberately not gated.
       expectedResult:
         "A Marketing output drafted within this Hat's ownership and approved by Martin (or a paid-media action approved with explicit spend approval) -- produced under this Hat's governance, never produced before approval, and never claimed done under a better-suited Hat's authority.",
+      // Martin's decision, 2026-11-14: approving the draft is the last step of
+      // a Marketing Work, so it closes the Work once the independent Checker
+      // passes -- no second Result approval. Spend approval (paid media) records
+      // no operator_approval evidence, so it keeps the Result approval card.
+      outputApprovalClosesWork: true,
       completionCriteria: [
         "The output (or paid-media action) was produced within THIS Hat's declared ownership and produced nothing outside it.",
         "Martin's explicit approval (or explicit spend approval for Digital Marketer) is recorded for this exact output before it was treated as done.",

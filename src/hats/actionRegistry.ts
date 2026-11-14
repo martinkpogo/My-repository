@@ -132,6 +132,16 @@ export interface ActionDefinition<A extends string> {
   expectedResult?: string;
   completionCriteria?: readonly string[];
   /**
+   * Output approval closes the Work (Martin's decision, 2026-11-14): declared
+   * only where Martin's approval of the output is the LAST step of the Work
+   * (nothing is sent, published or spent after it). When set, and the
+   * independent Checker has passed, and the evidence records Martin's
+   * approval of the exact output (an `operator_approval` item bound to it by
+   * SHA-256), the Work closes without a second Result approval. Absent means
+   * the default: Martin's separate Result approval is required (BD-8).
+   */
+  outputApprovalClosesWork?: boolean;
+  /**
    * Exact Skills the Worker must follow while performing this Action.
    *
    * Optional: a simple Action may require no Skill, and none is forced. When

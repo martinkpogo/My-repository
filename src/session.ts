@@ -34,6 +34,7 @@ import {
   isSuccessfulResultStage,
   resolveResultReviewApprovalDecision,
   RESULT_REVIEW_BLOCKED_STAGE,
+  recordOutputApprovalAsResultApproval,
   stageResultReviewApproval,
   resultReviewCallbackData,
 } from "./resultReview";
@@ -48,6 +49,19 @@ import { workSessionContext } from "./access";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 import { strategyOf } from "./units/strategy/strategyState";
+const RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE =
+  "✅ Result accepted. You approved this exact output as the last step, and the independent check passed, so no second Result approval is needed. The Work may close once saved.";
+
+/** Restores the success stage a Work was refused from, once its Result review is satisfied (shared by the approval callback, Re-check and the output-approval path). */
+function restoreResultReviewBlockedStage(state: WorkState): void {
+  const review = state.resultReview;
+  if (review?.preBlockStage && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
+    state.stage = review.preBlockStage;
+    review.preBlockStage = undefined;
+    state.blockedReason = undefined;
+  }
+}
+
 export class WorkSession extends DurableObject<Env> {
   /**
    * Creates the Work. `matterId`/`matterToken` are the ALREADY-RESOLVED
@@ -497,12 +511,7 @@ export class WorkSession extends DurableObject<Env> {
                 // The restored stage flows into save(), which re-evaluates
                 // the gate (now satisfied) and completes the pending
                 // closure.
-                const review = state.resultReview;
-                if (review?.preBlockStage && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
-                  state.stage = review.preBlockStage;
-                  review.preBlockStage = undefined;
-                  state.blockedReason = undefined;
-                }
+                restoreResultReviewBlockedStage(state);
               }
               const reply = outcome.approval
                 ? "✅ Result approved. The approval is recorded against this exact Result, criteria and Checker verdict; the Work may close once saved."
@@ -603,7 +612,7 @@ export class WorkSession extends DurableObject<Env> {
    * the caller. Returns undefined for a Work that records no registered
    * Action; the gate then refuses its successful closure with that reason.
    */
-  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[] } | undefined {
+  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[]; outputApprovalClosesWork?: boolean } | undefined {
     if (!state.unit || !state.hat || !state.actionName) return undefined;
     const manifest = findUnitManifest(state.unit);
     const hat = manifest ? manifest.hats[state.hat] : undefined;
@@ -704,6 +713,21 @@ export class WorkSession extends DurableObject<Env> {
         await this.reportResultReviewBlocked(state, state.resultReview.blockReason);
       }
     }
+    // Output approval closes the Work (Martin's decision, 2026-11-14): where
+    // the Action declares it, the Checker has passed, and the evidence
+    // records Martin's approval of the exact output (the last step of the
+    // Work), that approval stands as his Result approval -- no second tap.
+    // Anything else leaves the Result approval card as the path.
+    if (state.resultReview?.outputApprovalClosesWork && (isSuccessfulResultStage(state.stage) || state.stage === RESULT_REVIEW_BLOCKED_STAGE)) {
+      const closed = await recordOutputApprovalAsResultApproval(state).catch((err) => {
+        console.error(`WorkSession ${state.workId}: output-approval Result approval failed`, err);
+        return { ok: false as const, reason: String(err) };
+      });
+      if (closed.ok) {
+        restoreResultReviewBlockedStage(state);
+        await sendMessage(this.env, state.chatId, RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE, undefined, state.threadId).catch((err) => console.error("output-approval notice failed", err));
+      }
+    }
     // Result review gate (BD-8): a Work may not REMAIN recorded as
     // successfully closed while its Result review is unsatisfied. This is
     // defence in depth behind closeHandoffOnResult (the point where the
@@ -776,6 +800,11 @@ export class WorkSession extends DurableObject<Env> {
     }
     const review = state.resultReview;
     if (review.checker?.outcome === "passed") {
+      const closed = await recordOutputApprovalAsResultApproval(state);
+      if (closed.ok) {
+        restoreResultReviewBlockedStage(state);
+        return say(RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE);
+      }
       if (review.pendingApproval || review.approval) return say("The independent check has passed; your Result approval card is already open above.");
       await this.reportResultReviewBlocked(state, review.blockReason);
       return state;
