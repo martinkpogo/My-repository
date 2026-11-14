@@ -166,7 +166,7 @@ export async function hashResultReviewApproval(input: {
  */
 export function ensureResultReviewContract(
   state: WorkState,
-  action: { expectedResult?: string; completionCriteria?: readonly string[] } | undefined,
+  action: { expectedResult?: string; completionCriteria?: readonly string[]; outputApprovalClosesWork?: boolean } | undefined,
 ): void {
   const expectedResult = action?.expectedResult;
   const completionCriteria = action?.completionCriteria;
@@ -175,10 +175,14 @@ export function ensureResultReviewContract(
     state.resultReview = {
       expectedResult,
       completionCriteria,
+      ...(action?.outputApprovalClosesWork ? { outputApprovalClosesWork: true } : {}),
       gateStatus: "pending",
     };
     return;
   }
+  // Refreshed from the registered Action every cycle (it is the manifest's
+  // declaration, never recorded evidence).
+  state.resultReview.outputApprovalClosesWork = action?.outputApprovalClosesWork === true ? true : undefined;
   if (!state.resultReview.expectedResult && expectedResult) state.resultReview.expectedResult = expectedResult;
   if (!state.resultReview.completionCriteria && completionCriteria) {
     state.resultReview.completionCriteria = completionCriteria;
@@ -333,6 +337,65 @@ export async function stageResultReviewApproval(state: WorkState): Promise<
     createdAt: new Date().toISOString(),
   };
   return { ok: true, pending: review.pendingApproval };
+}
+
+/** The evidence kind that records Martin's approval of the exact output (see Marketing's `approvalEvidence`). */
+export const OPERATOR_APPROVAL_EVIDENCE_KIND = "operator_approval";
+
+/**
+ * Output approval closes the Work (Martin's decision, 2026-11-14). When the
+ * Work's Action declares `outputApprovalClosesWork`, a PASSING independent
+ * Checker verdict binds to the current snapshot, and the recorded evidence
+ * holds an `operator_approval` item whose content carries the SHA-256 of
+ * another evidence item (the exact approved output), this records Martin's
+ * Result approval from that fact -- the approval he already gave at the last
+ * step -- instead of asking for a second tap. Refuses (nothing recorded, the
+ * Result approval card stays the path) in every other case: not declared, no
+ * passing bound verdict, an approval already recorded or staged, no approval
+ * evidence, or approval evidence not bound to an evidence item here. Minter-
+ * style: call it only from the Work lifecycle after the verification.
+ */
+export async function recordOutputApprovalAsResultApproval(
+  state: WorkState,
+): Promise<{ ok: true; approval: ResultReviewApproval } | { ok: false; reason: string }> {
+  const review = state.resultReview;
+  if (!review?.outputApprovalClosesWork) return { ok: false, reason: "this Work's Action does not declare that output approval closes the Work." };
+  if (!review.expectedResult?.trim() || !review.completionCriteria?.length) return { ok: false, reason: "no Result contract." };
+  if (review.approval || review.pendingApproval) return { ok: false, reason: "a Result approval is already recorded or staged." };
+  const verdict = review.checker;
+  if (!verdict || verdict.outcome !== "passed") return { ok: false, reason: "no passing independent Checker verdict." };
+  if (await verdictStaleReason(state)) return { ok: false, reason: "the Checker verdict is bound to a different snapshot." };
+  const evidence = review.evidence ?? [];
+  // Defence in depth: the verdict must cover every evidence item now held
+  // (the Work lifecycle re-verifies on a changed set before calling this).
+  if (!evidence.every((e) => verdict.evidenceRefs.some((r) => r.kind === e.kind && r.ref === e.ref))) {
+    return { ok: false, reason: "the Checker verdict does not cover all the evidence now recorded." };
+  }
+  const approvals = evidence.filter((e) => e.kind === OPERATOR_APPROVAL_EVIDENCE_KIND);
+  if (approvals.length !== 1) return { ok: false, reason: "the evidence does not record exactly one operator approval." };
+  const outputs = evidence.filter((e) => e !== approvals[0]);
+  let bound = false;
+  for (const output of outputs) {
+    if (approvals[0].content.includes(await hashContent(output.content))) bound = true;
+  }
+  if (!bound) return { ok: false, reason: "the recorded operator approval is not bound to an evidence item (no matching SHA-256)." };
+  const reviewHash = await hashResultReviewApproval({
+    workId: state.workId,
+    expectedResult: review.expectedResult,
+    completionCriteria: review.completionCriteria,
+    verdictHash: verdict.verdictHash,
+  });
+  const approval: ResultReviewApproval = {
+    approver: "martin",
+    token: crypto.randomUUID(),
+    approvedAt: new Date().toISOString(),
+    reviewHash,
+    via: "output_approval",
+  };
+  review.approval = approval;
+  review.gateStatus = "pending";
+  review.blockReason = undefined;
+  return { ok: true, approval };
 }
 
 /**

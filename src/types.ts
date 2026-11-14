@@ -816,6 +816,13 @@ export interface ResultReviewApproval {
   token: string;
   approvedAt: string;
   reviewHash: string;
+  /**
+   * How Martin's Result approval was given: his own tap on the Result review
+   * card ("result_card", the default when absent), or his approval of the
+   * exact output being the last step of the Work, recorded as evidence and
+   * checked by the Checker ("output_approval", Martin's decision 2026-11-14).
+   */
+  via?: "result_card" | "output_approval";
 }
 
 /**
@@ -840,6 +847,8 @@ export interface PendingResultReviewApproval {
 export interface ResultReviewState {
   expectedResult?: string;
   completionCriteria?: readonly string[];
+  /** Copied from the Action's declaration (ActionDefinition.outputApprovalClosesWork). */
+  outputApprovalClosesWork?: boolean;
   /**
    * Evidence the producing Unit recorded for THIS Result at the moment it
    * produced it (src/resultReview.ts's `recordResultEvidence` -- the only
