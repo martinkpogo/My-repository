@@ -1,5 +1,6 @@
 import type { EvidenceSynthesis } from "../evidence/validation";
 import type { ResearchProtocolId } from "./protocols";
+import type { ResearchPlanDimension } from "./researchPlan";
 
 /**
  * A research synthesis: the shared Evidence -> Finding -> Implication ->
@@ -25,6 +26,68 @@ export interface ResearchExecutionInput {
   skillContent?: string;
   /** Optional status hook for the caller to surface stage progress; never able to affect the result. */
   onProgress?: (stageText: string) => Promise<void> | void;
+  /**
+   * Durable checkpoint storage for this job, supplied by the OWNING Work
+   * (WorkSession owns the durable lifecycle; research execution owns the
+   * checkpoint's content -- canonical Search spec, research_continuation).
+   * Absent outside a Work: research then runs as one pass, and an
+   * interruption is still reported as `interrupted`, never as completed.
+   */
+  checkpoints?: ResearchCheckpointStore;
+}
+
+/** One planned search operation's progress (completed_operation_statuses). */
+export type ResearchOperationStatus = "pending" | "completed_with_results" | "completed_no_results" | "failed" | "interrupted";
+
+export interface ResearchOperationCheckpoint {
+  /** Index into the approved plan. */
+  dimension: number;
+  status: ResearchOperationStatus;
+  /** The search outcome kind that produced this status, kept so a resumed run reports it exactly as before. */
+  search_outcome?: string;
+  /**
+   * Reference into the existing approved evidence storage (the Search Tool's
+   * 7-day result cache) -- never the evidence payload itself
+   * (store_full_evidence_payloads_in_checkpoint: false).
+   */
+  evidence_ref?: string;
+}
+
+/**
+ * The compact research checkpoint (canonical Search spec,
+ * research_continuation.checkpoint). Holds what is needed to continue the
+ * SAME approved job and nothing more: no conversation history, no evidence
+ * payloads.
+ */
+export interface ResearchCheckpoint {
+  /** research_job_identity: a SHA-256 over the profile, question and supplied context -- never the text. */
+  job_id: string;
+  /** original_approved_question */
+  question: string;
+  created_at: string;
+  updated_at: string;
+  status: "in_progress" | "interrupted" | "completed" | "blocked";
+  /** The interpretation and protocols the plan was built from. */
+  relevance?: string;
+  protocols?: ResearchProtocolId[];
+  /** approved_plan_and_dimensions */
+  plan?: ResearchPlanDimension[];
+  /** completed_operation_statuses + evidence_references */
+  operations: ResearchOperationCheckpoint[];
+  /** current_interrupted_operation (dimension index), when interrupted. */
+  current_interrupted_operation?: number;
+  /** remaining_operations (dimension indexes not yet completed). */
+  remaining_operations: number[];
+  /** No sooner than this may an interrupted job usefully resume (the earliest provider cooldown end). */
+  retry_at?: string;
+  synthesis_status: "pending" | "failed" | "completed";
+  validation_status: "pending" | "failed" | "passed";
+}
+
+/** The port WorkSession supplies: load and durably save one job's checkpoint. Saving must be durable on return. */
+export interface ResearchCheckpointStore {
+  load(jobId: string): Promise<ResearchCheckpoint | undefined>;
+  save(checkpoint: ResearchCheckpoint): Promise<void>;
 }
 
 /**
@@ -49,4 +112,19 @@ export type ResearchOutcome =
       /** What the question means in relation to the authorized safe-context category. */
       relevance: string;
     }
-  | { status: "blocked"; code: ResearchBlockCode; reason: string };
+  | { status: "blocked"; code: ResearchBlockCode; reason: string }
+  /**
+   * Search providers could not complete one or more planned searches right
+   * now (every eligible provider rate-limited, down or cooling). Nothing is
+   * synthesized from the partial evidence: the job stays visibly incomplete
+   * and, inside a Work, resumes from its checkpoint
+   * (incomplete_research_must_not_be_presented_as_complete).
+   */
+  | {
+      status: "interrupted";
+      reason: string;
+      /** The earliest time a provider is expected to be available again, when known. */
+      retryAt?: string;
+      completedOperations: number;
+      totalOperations: number;
+    };

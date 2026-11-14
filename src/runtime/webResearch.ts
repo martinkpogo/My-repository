@@ -10,7 +10,8 @@ import { resolveRuntimeSkill } from "./actionSkills";
 import { currentRun, reportLiveStep, resolveLiveStep } from "./liveStatus";
 import { kvGet, kvPut } from "../kvStore";
 import { hashContent } from "../contentHash";
-import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps } from "./webLookupAllowance";
+import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps, noteResearchInterrupted } from "./webLookupAllowance";
+import { getResearchCheckpointStore } from "./workPersistence";
 import { systemContext, type AccessContext } from "../access";
 
 /**
@@ -181,7 +182,17 @@ export async function researchOnline(env: Env, question: string, access: AccessC
     return cached;
   }
   const methodology = resolveRuntimeSkill("research_signal").content;
-  const outcome = await executeResearch(env, { question, context: "", skillContent: methodology }, access);
+  // Inside a Work, research checkpoints through that Work's own durable
+  // storage (BD-15), so an interrupted job resumes the next time this Work
+  // researches the same question instead of starting again.
+  const checkpoints = access.kind === "work_session" ? getResearchCheckpointStore(access.workId) : undefined;
+  const outcome = await executeResearch(env, { question, context: "", skillContent: methodology, ...(checkpoints ? { checkpoints } : {}) }, access);
+  if (outcome.status === "interrupted") {
+    // Visibly incomplete: the run's end card says research paused and why,
+    // and nothing is handed to the Hat as if research had completed.
+    noteResearchInterrupted(env, question, outcome);
+    return null;
+  }
   if (outcome.status !== "completed") return null;
   const result = { digest: summarizeResearchSynthesis(outcome.synthesis), gaps: outcome.synthesis.limitations.map((l) => l.statement) };
   await writeCachedResearch(env, cacheKey, result);

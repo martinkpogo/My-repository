@@ -613,6 +613,16 @@ export interface WorkState {
   externalOperations?: Record<string, ExternalToolOperationRecord>;
 
   /**
+   * Compact research checkpoints for this Work, keyed by research job id
+   * (BD-15, canonical Search spec research_continuation). Written through the
+   * same durable flush as `externalOperations` (src/runtime/workPersistence.ts)
+   * so a resumed research job never repeats completed searches. Holds the
+   * approved question, plan, per-search statuses and references into the
+   * Search Tool's result cache -- never evidence payloads or conversation.
+   */
+  researchCheckpoints?: Record<string, import("./runtime/research/types").ResearchCheckpoint>;
+
+  /**
    * A proposed new Matter's drafted title + stated need, shown to Martin
    * for approval before the record is created — per the Sales AI Project
    * Instructions' Matter identification rule ("pass through the applicable

@@ -423,7 +423,7 @@ const SEARCH_CACHE_PREFIX = "web_search_cache:";
  * key never carries the query text. Not in kvStore's fallback allowlist,
  * so it stays Cloudflare-only.
  */
-async function searchCacheKey(request: SearchRequest): Promise<string> {
+export async function searchCacheKey(request: SearchRequest): Promise<string> {
   const normalized = {
     query: request.query.trim().toLowerCase().replace(/\s+/g, " "),
     topic: request.topic ?? null,
@@ -434,8 +434,8 @@ async function searchCacheKey(request: SearchRequest): Promise<string> {
   return SEARCH_CACHE_PREFIX + (await hashContent(JSON.stringify(normalized)));
 }
 
-/** Only a search that found results is saved, and only that shape is read back. */
-async function readCachedSearch(env: Env, key: string): Promise<SearchOutcome | null> {
+/** Only a search that found results is saved, and only that shape is read back. Exported for research checkpoints, which reference saved results by this key. */
+export async function readCachedSearch(env: Env, key: string): Promise<SearchOutcome | null> {
   if (!env.STATE_KV) return null;
   try {
     const raw = await kvGet(env, key);
@@ -494,17 +494,37 @@ export interface DimensionEvidence extends ResearchPlanDimension {
  * per-dimension evidence outcome).
  */
 export async function gatherDimensionEvidence(env: Env, plan: ResearchPlanDimension[], access: AccessContext): Promise<DimensionEvidence[]> {
-  return Promise.all(
-    plan.map(async (dimension) => {
-      const query = redactIdentityTerms(dimension.subQuestion);
-      const outcome = await executeSearch(env, { query }, access);
-      return {
-        ...dimension,
-        searchOutcome: outcome.kind,
-        results: outcome.kind === "success_with_results" ? outcome.results : [],
-      };
-    }),
-  );
+  return Promise.all(plan.map(async (dimension) => (await searchDimension(env, dimension, access)).evidence));
+}
+
+/** The one search request a plan dimension makes -- deterministic, so a resumed job references the same saved results. */
+export function dimensionSearchRequest(dimension: ResearchPlanDimension): SearchRequest {
+  return { query: redactIdentityTerms(dimension.subQuestion) };
+}
+
+/**
+ * Runs ONE plan dimension's search and returns its evidence plus what a
+ * research checkpoint records about it: the reference to its saved results
+ * in the Search Tool's cache (never the payload) and, when interrupted, the
+ * earliest time a provider is expected back.
+ */
+export async function searchDimension(
+  env: Env,
+  dimension: ResearchPlanDimension,
+  access: AccessContext,
+): Promise<{ evidence: DimensionEvidence; evidenceRef?: string; retryAt?: string }> {
+  const request = dimensionSearchRequest(dimension);
+  const outcome = await executeSearch(env, request, access);
+  const evidence: DimensionEvidence = {
+    ...dimension,
+    searchOutcome: outcome.kind,
+    results: outcome.kind === "success_with_results" ? outcome.results : [],
+  };
+  return {
+    evidence,
+    ...(outcome.kind === "success_with_results" ? { evidenceRef: await searchCacheKey(request) } : {}),
+    ...(outcome.kind === "interrupted" && outcome.retry_at ? { retryAt: outcome.retry_at } : {}),
+  };
 }
 
 export interface DimensionCoverage {

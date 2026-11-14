@@ -8,13 +8,37 @@ import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, r
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { generateResearchPlan } from "./researchPlan";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
-import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatFailedSearchesWarning, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
-import type { ResearchBlockCode, ResearchExecutionInput, ResearchOutcome, ResearchSynthesis } from "./types";
+import {
+  assessDimensionCoverage,
+  formatDimensionEvidenceForContext,
+  formatFailedSearchesWarning,
+  formatUncoveredDimensionsWarning,
+  readCachedSearch,
+  searchDimension,
+  type DimensionEvidence,
+} from "./webSearch";
+import { hashContent } from "../../contentHash";
+import type { ResearchPlanDimension } from "./researchPlan";
+import type {
+  ResearchBlockCode,
+  ResearchCheckpoint,
+  ResearchCheckpointStore,
+  ResearchExecutionInput,
+  ResearchOperationStatus,
+  ResearchOutcome,
+  ResearchSynthesis,
+} from "./types";
 
 /**
  * Research runtime executor -- non-organizational execution infrastructure.
  *
- * `executeResearch` is one stateless pipeline:
+ * `executeResearch` is one pipeline, resumable when its caller supplies a
+ * checkpoint store (BD-15: the OWNING Work's durable storage -- see
+ * ResearchExecutionInput.checkpoints). The checkpoint carries the
+ * interpretation, the approved plan and each search's status with a
+ * reference to its saved results; a resumed job repeats no completed
+ * operation, and an interrupted search stops the job as `interrupted`
+ * rather than being synthesized around (until RESEARCH_PAUSE_LIMIT_MS):
  *   1. Validate the authorized/safe context          (requireSafeContext)
  *   2-3. Interpret the question and select protocol(s), in ONE light
  *        AI call                                     (interpretAndSelectProtocols)
@@ -284,6 +308,114 @@ export async function executeProspectResearch(env: Env, input: ResearchExecution
   return runResearch(env, input, access, PUBLIC_PROSPECT_RESEARCH_PROFILE);
 }
 
+/**
+ * Research continuation limits (Martin's decisions, 14 Nov 2026):
+ *  - an interrupted job waits for providers at most 24 hours from when it
+ *    started; after that it is synthesized from what was gathered, with the
+ *    searches that never completed reported as limitations;
+ *  - a checkpoint older than 7 days is not resumed (its evidence may be
+ *    stale), and the job starts again.
+ */
+export const RESEARCH_PAUSE_LIMIT_MS = 24 * 60 * 60 * 1000;
+export const RESEARCH_CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** research_job_identity: a SHA-256 over the profile, the question and the supplied context -- never the text itself. */
+export async function researchJobId(profile: ResearchTaskProfile, question: string, context: string): Promise<string> {
+  return hashContent(JSON.stringify({ profile: profile.synthesis, question: question.trim(), context: (context ?? "").trim() }));
+}
+
+function freshCheckpoint(jobId: string, question: string, now: string): ResearchCheckpoint {
+  return {
+    job_id: jobId,
+    question,
+    created_at: now,
+    updated_at: now,
+    status: "in_progress",
+    operations: [],
+    remaining_operations: [],
+    synthesis_status: "pending",
+    validation_status: "pending",
+  };
+}
+
+/**
+ * The checkpoint to continue, or a fresh one. A completed job is not
+ * resumed (the 24-hour research cache already answers a repeat); a
+ * checkpoint past RESEARCH_CHECKPOINT_MAX_AGE_MS, unreadable, or for a
+ * different job is not resumed either.
+ */
+async function loadResumableCheckpoint(
+  store: ResearchCheckpointStore | undefined,
+  jobId: string,
+  question: string,
+  nowMs: number,
+): Promise<{ checkpoint: ResearchCheckpoint; resumed: boolean }> {
+  const fresh = { checkpoint: freshCheckpoint(jobId, question, new Date(nowMs).toISOString()), resumed: false };
+  if (!store) return fresh;
+  let saved: ResearchCheckpoint | undefined;
+  try {
+    saved = await store.load(jobId);
+  } catch (err) {
+    console.error("Research checkpoint unreadable -- starting the job afresh", err instanceof Error ? err.message : err);
+    return fresh;
+  }
+  if (!saved || saved.job_id !== jobId || saved.status === "completed") return fresh;
+  const age = nowMs - Date.parse(saved.created_at);
+  if (!Number.isFinite(age) || age > RESEARCH_CHECKPOINT_MAX_AGE_MS) return fresh;
+  return { checkpoint: saved, resumed: true };
+}
+
+function statusForSearchOutcome(kind: DimensionEvidence["searchOutcome"]): ResearchOperationStatus {
+  if (kind === "success_with_results") return "completed_with_results";
+  if (kind === "success_no_results") return "completed_no_results";
+  if (kind === "interrupted") return "interrupted";
+  return "failed";
+}
+
+function isCompletedOperation(status: ResearchOperationStatus): boolean {
+  return status === "completed_with_results" || status === "completed_no_results";
+}
+
+/**
+ * Gathers evidence for the plan, one search per dimension, continuing from
+ * the checkpoint: a dimension already completed is NOT searched again
+ * (preserve_completed_operations) -- its saved results are read back from
+ * the Search Tool's cache by reference, and a completed empty search stays
+ * empty. Everything else (pending, interrupted, or failed last time) is
+ * searched now. The checkpoint is saved after each completed search.
+ */
+async function gatherCheckpointedEvidence(
+  env: Env,
+  plan: ResearchPlanDimension[],
+  access: AccessContext,
+  checkpoint: ResearchCheckpoint,
+  persist: () => Promise<void>,
+): Promise<{ evidence: DimensionEvidence[]; retryAt?: string }> {
+  let earliestRetry: string | undefined;
+  const evidence = await Promise.all(
+    plan.map(async (dimension, index): Promise<DimensionEvidence> => {
+      const op = checkpoint.operations[index] ?? (checkpoint.operations[index] = { dimension: index, status: "pending" });
+      if (op.status === "completed_no_results") return { ...dimension, searchOutcome: "success_no_results", results: [] };
+      if (op.status === "completed_with_results" && op.evidence_ref) {
+        const saved = await readCachedSearch(env, op.evidence_ref);
+        if (saved && saved.kind === "success_with_results") return { ...dimension, searchOutcome: "success_with_results", results: saved.results };
+        // The saved results are gone from evidence storage (evicted early):
+        // the only way to have evidence is to search again, and the log says so.
+        console.error(`Research checkpoint ${checkpoint.job_id.slice(0, 12)}: saved results for dimension ${index} are no longer stored -- searching again`);
+      }
+      const searched = await searchDimension(env, dimension, access);
+      op.status = statusForSearchOutcome(searched.evidence.searchOutcome);
+      op.search_outcome = searched.evidence.searchOutcome;
+      if (searched.evidenceRef) op.evidence_ref = searched.evidenceRef;
+      else delete op.evidence_ref;
+      if (searched.retryAt && (!earliestRetry || searched.retryAt < earliestRetry)) earliestRetry = searched.retryAt;
+      if (isCompletedOperation(op.status)) await persist();
+      return searched.evidence;
+    }),
+  );
+  return { evidence, ...(earliestRetry ? { retryAt: earliestRetry } : {}) };
+}
+
 async function runResearch(env: Env, input: ResearchExecutionInput, access: AccessContext, profile: ResearchTaskProfile): Promise<ResearchOutcome> {
   const progress = async (text: string): Promise<void> => {
     try {
@@ -304,9 +436,44 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   }
   const categorySummary = extractAuthorizedContextSummary(safeContext);
 
-  const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection);
-  if ("stop" in selection) return selection.stop;
-  const { relevance, protocols } = selection;
+  // Durable continuation (BD-15, canonical Search spec research_continuation):
+  // the checkpoint holds the interpretation, the approved plan and each
+  // search's status with a reference to its saved results. Saved after every
+  // successful operation, so a resumed job never repeats completed work.
+  const startedMs = Date.now();
+  const jobId = await researchJobId(profile, question, input.context);
+  const { checkpoint, resumed } = await loadResumableCheckpoint(input.checkpoints, jobId, question, startedMs);
+  const persist = async (): Promise<void> => {
+    if (!input.checkpoints) return;
+    checkpoint.updated_at = new Date().toISOString();
+    checkpoint.remaining_operations = checkpoint.operations.filter((o) => !isCompletedOperation(o.status)).map((o) => o.dimension);
+    try {
+      await input.checkpoints.save(checkpoint);
+    } catch (err) {
+      // Not a failure of the research itself -- but the job can no longer
+      // resume from here, so the log says so.
+      console.error(`Research checkpoint ${jobId.slice(0, 12)} not saved`, err instanceof Error ? err.message : err);
+    }
+  };
+  const finish = async (status: ResearchCheckpoint["status"], outcome: ResearchOutcome): Promise<ResearchOutcome> => {
+    checkpoint.status = status;
+    await persist();
+    return outcome;
+  };
+
+  let relevance: string;
+  let protocols: ResearchProtocolId[];
+  if (checkpoint.relevance && checkpoint.protocols?.length) {
+    relevance = checkpoint.relevance;
+    protocols = checkpoint.protocols;
+  } else {
+    const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection);
+    if ("stop" in selection) return finish("blocked", selection.stop);
+    ({ relevance, protocols } = selection);
+    checkpoint.relevance = relevance;
+    checkpoint.protocols = protocols;
+    await persist();
+  }
 
   await progress(`Using: ${protocols.map((id) => RESEARCH_PROTOCOL_REGISTRY[id].name).join(", ")} -- building a research plan and gathering evidence...`);
 
@@ -316,17 +483,31 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   ]);
   if (!researchRoleContract || !universalRoleContract) {
     const missing = [!researchRoleContract ? "research role contract" : null, !universalRoleContract ? "Universal Role Contract" : null].filter(Boolean).join(" and ");
-    return blocked("GOVERNANCE_UNAVAILABLE", `Couldn't retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`);
+    return finish("blocked", blocked("GOVERNANCE_UNAVAILABLE", `Couldn't retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`));
   }
 
   // Protocol-specific research plan: turns each selected protocol into a
   // bounded set of concrete, searchable sub-questions grounded in that
   // protocol's own registered method/evidenceRequirements. Load-bearing --
   // without it there's nothing to search beyond the bare question, so a
-  // failure here fails the whole request closed.
-  const plan = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan);
-  if (!plan || plan.length === 0) {
-    return blocked("PLAN_GENERATION_FAILED", "Couldn't generate a research plan for the selected protocol(s) — planning failed.");
+  // failure here fails the whole request closed. A resumed job keeps its
+  // approved plan, so it searches exactly the same dimensions.
+  let plan: ResearchPlanDimension[];
+  if (checkpoint.plan?.length) {
+    plan = checkpoint.plan;
+  } else {
+    const generated = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan);
+    if (!generated || generated.length === 0) {
+      return finish("blocked", blocked("PLAN_GENERATION_FAILED", "Couldn't generate a research plan for the selected protocol(s) — planning failed."));
+    }
+    plan = generated;
+    checkpoint.plan = plan;
+    checkpoint.operations = plan.map((_, dimension) => ({ dimension, status: "pending" }));
+    await persist();
+  }
+  if (resumed) {
+    const done = checkpoint.operations.filter((o) => isCompletedOperation(o.status)).length;
+    await progress(`Resuming research saved earlier: ${done} of ${plan.length} searches already done.`);
   }
 
   // Evidence gathering executes the plan -- one search per dimension, not
@@ -336,7 +517,31 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // results. Real fetched URLs/snippets become part of the supplied
   // evidence below, so findUnverifiableSources naturally extends to verify
   // against them.
-  const dimensionEvidence = await gatherDimensionEvidence(env, plan, access);
+  const gathered = await gatherCheckpointedEvidence(env, plan, access, checkpoint, persist);
+  const dimensionEvidence = gathered.evidence;
+
+  // Interrupted searches (every eligible provider busy) are NOT synthesized
+  // around: the job stays visibly incomplete and resumable, unless it has
+  // already waited RESEARCH_PAUSE_LIMIT_MS -- then what was gathered is
+  // synthesized, with the unfinished searches reported as limitations.
+  const interruptedOps = checkpoint.operations.filter((o) => o.status === "interrupted");
+  const pauseExpired = Date.now() - Date.parse(checkpoint.created_at) > RESEARCH_PAUSE_LIMIT_MS;
+  if (interruptedOps.length > 0 && !pauseExpired) {
+    checkpoint.current_interrupted_operation = interruptedOps[0].dimension;
+    if (gathered.retryAt) checkpoint.retry_at = gathered.retryAt;
+    else delete checkpoint.retry_at;
+    const completedOperations = checkpoint.operations.filter((o) => isCompletedOperation(o.status)).length;
+    return finish("interrupted", {
+      status: "interrupted",
+      reason: `Web search providers are busy (rate-limited or temporarily unavailable), so ${plan.length - completedOperations} of ${plan.length} planned searches are not done yet. Nothing was concluded from the partial evidence.`,
+      ...(gathered.retryAt ? { retryAt: gathered.retryAt } : {}),
+      completedOperations,
+      totalOperations: plan.length,
+    });
+  }
+  delete checkpoint.current_interrupted_operation;
+  delete checkpoint.retry_at;
+
   const { covered, uncovered, failed } = assessDimensionCoverage(dimensionEvidence);
   const webResultCount = covered.reduce((sum, d) => sum + d.results.length, 0);
   const webEvidence = formatDimensionEvidenceForContext(dimensionEvidence);
@@ -378,8 +583,12 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
     maxTokens: 4096,
   });
   if (!synthesis) {
-    return blocked("SYNTHESIS_FAILED", "The research couldn't be completed — synthesis generation failed.");
+    // The gathered evidence stays checkpointed: a retry continues from
+    // synthesis instead of searching again.
+    checkpoint.synthesis_status = "failed";
+    return finish("blocked", blocked("SYNTHESIS_FAILED", "The research couldn't be completed — synthesis generation failed."));
   }
+  checkpoint.synthesis_status = "completed";
   const result: ResearchSynthesis = { ...synthesis, protocolsUsed: protocols };
 
   // Mandatory evidence & source validation gate. Provenance half: the only
@@ -390,16 +599,24 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // output is (see findUnverifiableSources).
   const gate = applyEvidenceSourceValidationGate(result, effectiveResearchContext);
   if (!gate.valid && gate.failure === "invalid_synthesis") {
-    return blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
+    checkpoint.synthesis_status = "failed";
+    checkpoint.validation_status = "failed";
+    return finish("blocked", blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`));
   }
   if (!gate.valid && gate.failure === "unverifiable_sources") {
-    return blocked(
-      "UNVERIFIABLE_SOURCES",
-      `The research returned source(s) not present in the supplied context (${gate.unverifiableSources.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. Only sources actually supplied or fetched can be cited.`,
+    checkpoint.synthesis_status = "failed";
+    checkpoint.validation_status = "failed";
+    return finish(
+      "blocked",
+      blocked(
+        "UNVERIFIABLE_SOURCES",
+        `The research returned source(s) not present in the supplied context (${gate.unverifiableSources.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. Only sources actually supplied or fetched can be cited.`,
+      ),
     );
   }
 
-  return { status: "completed", synthesis: result, relevance };
+  checkpoint.validation_status = "passed";
+  return finish("completed", { status: "completed", synthesis: result, relevance });
 }
 
 /**

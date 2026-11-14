@@ -3,7 +3,8 @@ import assert from "node:assert";
 import type { Env } from "../types";
 import type { AiTask } from "../ai/types";
 import { augmentTaskWithWebResearch, callerSensitivity, handleWebResearchCallback, scrubResearchQuestion, WEB_RESEARCH_TASKS } from "./webResearch";
-import { DAILY_LIMIT, RUN_LIMIT, takeWebLookup } from "./webLookupAllowance";
+import { DAILY_LIMIT, RUN_LIMIT, noteResearchInterrupted, takeWebLookup } from "./webLookupAllowance";
+import { getResearchCheckpointStore, installStatePersistence } from "./workPersistence";
 import { withLiveStatus, currentRun } from "./liveStatus";
 import { systemContext } from "../access";
 import { executeSearch } from "./research/webSearch";
@@ -269,4 +270,32 @@ test("research cache: an unreadable saved entry is a miss, never used as finding
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("interrupted research (providers busy): the run ends with a paused card that says how far it got and when providers are back -- never a completed answer", async (t) => {
+  const calls = mockTelegram(t);
+  const env = fakeEnv();
+  await withLiveStatus(env, target, async () => {
+    noteResearchInterrupted(env, "what do SMEs struggle with", { retryAt: "2026-11-14T14:05:00.000Z", completedOperations: 3, totalOperations: 5 });
+    return "ok";
+  }, () => "succeeded", undefined, { access: systemContext() });
+  const card = calls.find((c) => c.method === "sendMessage" && /^⏸ Web research paused/.test(c.body.text));
+  assert.ok(card, "a paused card is posted after the run");
+  assert.ok(/3 of 5 searches are done and saved/.test(card!.body.text));
+  assert.ok(/14:05 UTC/.test(card!.body.text));
+  assert.ok(/written without it/.test(card!.body.text), "the card says the answer above did not use the research");
+  assert.deepStrictEqual(card!.body.reply_markup.inline_keyboard[0].map((b: any) => b.text), ["🔎 Try research again", "✅ That's enough"]);
+  assert.ok(calls.some((c) => /Web research paused: search providers busy/.test(c.body.text ?? "")), "the live status names the pause");
+});
+
+test("research checkpoints: the store is the executing Work's own -- found only while that Work's persistence is installed", () => {
+  assert.strictEqual(getResearchCheckpointStore("work-not-running"), undefined);
+  assert.strictEqual(getResearchCheckpointStore(undefined), undefined);
+  const { release } = installStatePersistence("work-running");
+  try {
+    assert.ok(getResearchCheckpointStore("work-running"), "a running Work has a checkpoint store");
+  } finally {
+    release();
+  }
+  assert.strictEqual(getResearchCheckpointStore("work-running"), undefined, "released with the Work's execution");
 });

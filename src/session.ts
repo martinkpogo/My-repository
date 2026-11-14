@@ -646,14 +646,17 @@ export class WorkSession extends DurableObject<Env> {
     // execution intent and outcome into `state.externalOperations` and
     // flushes them straight to this Work's own DO storage, so the records
     // survive even when the handler throws and `save` below never runs --
-    // which is exactly the interruption window recovery exists for. The flush
+    // which is exactly the interruption window recovery exists for. Research
+    // checkpoints (`state.researchCheckpoints`, BD-15) ride the same flush, so
+    // a research job interrupted mid-run resumes without repeating completed
+    // searches. The flush
     // writes ONLY those operation records over the last saved state; a thrown
     // handler still rolls back its own partial state exactly as before.
     const release = installWorkPersistence(
       String(state.workId),
       workStatePersistence(state, async () => {
         const persisted = migrateSavedWork(await this.ctx.storage.get<WorkState>("state")) ?? state;
-        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations });
+        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations, researchCheckpoints: state.researchCheckpoints });
       }),
     );
     try {
