@@ -283,7 +283,7 @@ test("interrupted research (providers busy): the run ends with a paused card tha
   assert.ok(card, "a paused card is posted after the run");
   assert.ok(/3 of 5 searches are done and saved/.test(card!.body.text));
   assert.ok(/14:05 UTC/.test(card!.body.text));
-  assert.ok(/written without it/.test(card!.body.text), "the card says the answer above did not use the research");
+  assert.ok(/could not use it yet/.test(card!.body.text), "the card says this step could not use the research yet");
   assert.deepStrictEqual(card!.body.reply_markup.inline_keyboard[0].map((b: any) => b.text), ["🔎 Try research again", "✅ That's enough"]);
   assert.ok(calls.some((c) => /Web research paused: search providers busy/.test(c.body.text ?? "")), "the live status names the pause");
 });
