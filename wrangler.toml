@@ -76,6 +76,11 @@ AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct-fast"
 # dashboard. Tavily (950/month) and Serper (200/month) have code defaults
 # below their free allowances; set SEARCH_MONTHLY_BUDGET_<ID> to override.
 SEARCH_FALLBACK_PROVIDERS = "exa,serper"
+# Exa's free tier is $10 a month: $4 per 1,000 searches plus $1 per 1,000
+# pages of content. At up to 10 results with highlights a search costs at
+# most about $0.014, so 600 searches stays under $10 with margin -- nothing
+# is ever charged (Martin, 15 Nov 2026).
+SEARCH_MONTHLY_BUDGET_EXA = "600"
 ENTITY_DATA_SOURCE_ID = "437248f7-f6d8-4e70-873b-7b1eb0fdc519"
 MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
