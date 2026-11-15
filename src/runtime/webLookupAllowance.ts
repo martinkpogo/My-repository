@@ -19,6 +19,8 @@ export const RUN_EXTENSION = 10;
 export const DAILY_LIMIT = 200;
 export const DAILY_EXTENSION = 50;
 export const WEB_RESEARCH_CALLBACK = "webresearch";
+/** Work-scoped research buttons (option B): "continue" to draft, "deep" to start Deep Research. Handled by the Work itself. */
+export const RESEARCH_WORK_CALLBACK = "researchwork";
 
 const CARD_TTL_SECONDS = 2 * 24 * 60 * 60;
 
@@ -117,6 +119,12 @@ export function noteResearchInterrupted(env: Env, question: string, outcome: { r
   armLimitCard(env, run);
 }
 
+/** True when research in the CURRENT run paused because providers were busy -- the Hat should hold its draft (option B). */
+export function researchPausedInRun(): boolean {
+  const run = currentRun();
+  return Boolean(run && runGaps.get(run)?.reason === "providers_busy");
+}
+
 /** "14:05 UTC" for a retry time, or null when none is known. */
 export function retryTimeLabel(retryAt: string | undefined): string | null {
   const ms = retryAt ? Date.parse(retryAt) : NaN;
@@ -139,7 +147,12 @@ async function postLimitCard(env: Env, run: NonNullable<ReturnType<typeof curren
     const when = retryTimeLabel(info.retryAt);
     const progress = info.total ? ` ${info.completed ?? 0} of ${info.total} searches are done and saved.` : "";
     const text = `⏸ Web research paused: the search providers are busy (rate-limited or temporarily down), so the answer above was written without it.${progress}${when ? ` They should be back around ${when}.` : ""} ${info.resumesAutomatically ? `Research resumes on its own${when ? ` around ${when}` : ""} from where it stopped, and you'll get a message when it is complete.` : "Research continues from where it stopped the next time this work researches the same question."}`;
-    const busyButtons: InlineButton[][] = [[{ text: "🔎 Try research again", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:more` }, { text: "✅ That's enough", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:done` }]];
+    const workId = run.access?.kind === "work_session" ? run.access.workId : undefined;
+    const busyButtons: InlineButton[][] = [
+      [{ text: "🔎 Try research again", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:more` }, { text: "✅ That's enough", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:done` }],
+      // Deep Research is only ever started by Martin's explicit tap (BD-16).
+      ...(workId ? [[{ text: "🔬 Deep research", callback_data: `${RESEARCH_WORK_CALLBACK}:${workId}:deep` }]] : []),
+    ];
     await sendMessage(env, run.target.chatId, text, busyButtons, run.target.threadId);
     return;
   }

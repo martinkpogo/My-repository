@@ -320,3 +320,38 @@ test("option B: when the Work will resume research itself, the paused card says 
   assert.ok(/resumes on its own around 14:05 UTC/.test(card!.body.text));
   assert.ok(/message when it is complete/.test(card!.body.text));
 });
+
+test("option B: researchPausedInRun is true only after this run's research paused", async (t) => {
+  mockTelegram(t);
+  const { researchPausedInRun } = await import("./webLookupAllowance");
+  const env = fakeEnv();
+  const seen = await withLiveStatus(env, target, async () => {
+    const before = researchPausedInRun();
+    noteResearchInterrupted(env, "q", { completedOperations: 0, totalOperations: 2 });
+    return [before, researchPausedInRun()];
+  }, () => "succeeded", undefined, { access: systemContext() });
+  assert.deepStrictEqual(seen, [false, true]);
+  assert.strictEqual(researchPausedInRun(), false, "outside a run nothing is paused");
+});
+
+test("option B: Continue feeds the completed findings into the run -- the step uses them without deciding or researching again", async (t) => {
+  mockTelegram(t);
+  const { seedRunResearchFindings, saveDeepResearchFindings } = await import("./webResearch");
+  const env = fakeEnv();
+  await saveDeepResearchFindings(env, "what do SMEs struggle with", { digest: "- SMEs cannot explain their difference (https://example.org/a)", gaps: [] });
+  let decided = false;
+  const out = await withLiveStatus(env, target, async () => {
+    assert.strictEqual(await seedRunResearchFindings(env, "what do SMEs struggle with"), true);
+    return augmentTaskWithWebResearch(env, task("chat.general_reply"), { decide: async () => ((decided = true), "another question"), research });
+  }, () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(decided, false, "no new research decision");
+  assert.ok(out.messages[0].content.includes("SMEs cannot explain their difference"));
+});
+
+test("option B: seeding with nothing saved returns false (Continue refuses rather than drafting without research)", async (t) => {
+  mockTelegram(t);
+  const { seedRunResearchFindings } = await import("./webResearch");
+  const env = fakeEnv();
+  const seeded = await withLiveStatus(env, target, async () => seedRunResearchFindings(env, "never researched"), () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(seeded, false);
+});

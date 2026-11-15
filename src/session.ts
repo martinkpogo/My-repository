@@ -3,7 +3,7 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import { handleMarketingIntake } from "./units/marketing/marketingManifest";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
-import { installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
+import { getResearchCheckpointStore, installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
 import {
   runGoogleDocsSmoke as runGoogleDocsSmokeOperation,
   GOOGLE_DOCS_SMOKE_CHAT_ID,
@@ -13,7 +13,10 @@ import {
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import { sendMessage, sendOperationsMessage } from "./telegram";
-import { researchOnline } from "./runtime/webResearch";
+import { researchOnline, saveDeepResearchFindings, seedRunResearchFindings } from "./runtime/webResearch";
+import { RESEARCH_WORK_CALLBACK, retryTimeLabel } from "./runtime/webLookupAllowance";
+import { runDeepResearchSkill } from "./runtime/research/researchRuntime";
+import { summarizeResearchSynthesis } from "./runtime/actionResearch";
 import type { PendingResearch } from "./runtime/research/types";
 import { withLiveStatus } from "./runtime/liveStatus";
 import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./runtime/workStatus";
@@ -60,6 +63,8 @@ const RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE =
 const PENDING_ADVISORY_ASSESSMENT_KEY = "pendingAdvisoryAssessment";
 /** A paused research job this Work resumes on its alarm (option B). */
 const PENDING_RESEARCH_KEY = "pendingResearch";
+/** The last completed research job, for the Continue / Deep research buttons. */
+const COMPLETED_RESEARCH_KEY = "completedResearch";
 /** How long after the draft is saved the assessment's alarm fires. */
 const ADVISORY_ASSESSMENT_DELAY_MS = 2_000;
 
@@ -300,6 +305,55 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * Deep Research in the background, explicitly requested by Martin's tap
+   * (BD-16). Runs inside this Work's execution with its checkpoint store;
+   * interrupted again -> re-armed; complete -> findings saved for 24 hours.
+   */
+  private async resumeDeepResearch(state: WorkState, pending: PendingResearch): Promise<{ digest: string; gaps: string[] } | null> {
+    const checkpoints = getResearchCheckpointStore(String(state.workId));
+    const outcome = await runDeepResearchSkill(this.env, { question: pending.question, context: "", ...(checkpoints ? { checkpoints } : {}) }, workSessionContext(state));
+    if (outcome.status === "interrupted") {
+      await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
+      const when = retryTimeLabel(outcome.retryAt);
+      await sendMessage(this.env, state.chatId, `⏸ Deep research paused: providers are busy.${when ? ` It resumes on its own around ${when}.` : " It resumes on its own shortly."}`, undefined, state.threadId);
+      return null;
+    }
+    if (outcome.status !== "completed") {
+      await sendMessage(this.env, state.chatId, `Deep research could not be completed: ${outcome.reason}`, undefined, state.threadId);
+      return null;
+    }
+    const result = { digest: summarizeResearchSynthesis(outcome.synthesis), gaps: outcome.synthesis.limitations.map((l) => l.statement) };
+    await saveDeepResearchFindings(this.env, pending.question, result);
+    return result;
+  }
+
+  /**
+   * Martin's research buttons on this Work (option B / BD-16): "continue"
+   * feeds the completed findings into the run and continues through the
+   * Hat's own redo path; "deep" starts Deep Research on the same question in
+   * the background. Never selected automatically.
+   */
+  private async handleResearchButton(state: WorkState, value: string): Promise<WorkState> {
+    const say = (text: string) => sendMessage(this.env, state.chatId, text, undefined, state.threadId).then(() => state);
+    const completed = await this.ctx.storage.get<{ question: string; mode: PendingResearch["mode"] }>(COMPLETED_RESEARCH_KEY);
+    const pending = await this.ctx.storage.get<PendingResearch>(PENDING_RESEARCH_KEY);
+    if (value === "deep") {
+      const question = completed?.question ?? pending?.question;
+      if (!question) return say("There is no research question on this work to research more deeply.");
+      await this.schedulePendingResearch({ question, mode: "deep_research" });
+      return say("🔬 Deep research started in the background. You'll get a message when it's complete.");
+    }
+    if (value === "continue") {
+      const hat = state.unit && state.hat ? findUnitManifest(state.unit)?.hats[state.hat] : undefined;
+      if (!completed || state.stage !== "awaiting_research" || !hat?.continueAfterResearch) return say("This work isn't waiting to continue after research -- nothing was run.");
+      if (!(await seedRunResearchFindings(this.env, completed.question))) return say("The saved research has expired. Ask again to research it afresh.");
+      await this.ctx.storage.delete(COMPLETED_RESEARCH_KEY);
+      return this.runUnderRecordedSkills(state, () => hat.continueAfterResearch!(this.env, state));
+    }
+    return say("That research button is not recognised -- nothing was run.");
+  }
+
+  /**
    * Resumes a paused research job from its checkpoint, inside this Work's own
    * execution (so its checkpoint store, Access and live status apply). Still
    * busy -> it pauses and re-arms itself (bounded by the 24-hour pause limit
@@ -318,16 +372,22 @@ export class WorkSession extends DurableObject<Env> {
       }
       await this.ctx.storage.delete(PENDING_RESEARCH_KEY); // a re-fired alarm never resumes twice
       await this.execute(async (state) => {
-        const found = await researchOnline(this.env, pending.question, workSessionContext(state));
-        if (found) {
-          await sendMessage(
-            this.env,
-            state.chatId,
-            `✅ The web research for this work is complete and saved for 24 hours.\n\n${found.digest}\n\nRedo the draft (or ask again) and it will use these findings.`,
-            undefined,
-            state.threadId,
-          );
-        }
+        const found = pending.mode === "deep_research" ? await this.resumeDeepResearch(state, pending) : await researchOnline(this.env, pending.question, workSessionContext(state));
+        if (!found) return state;
+        await this.ctx.storage.put(COMPLETED_RESEARCH_KEY, { question: pending.question, mode: pending.mode });
+        const hat = state.unit && state.hat ? findUnitManifest(state.unit)?.hats[state.hat] : undefined;
+        const canContinue = state.stage === "awaiting_research" && Boolean(hat?.continueAfterResearch);
+        const buttons: InlineButton[][] = [
+          ...(canContinue ? [[{ text: "▶️ Continue to draft", callback_data: `${RESEARCH_WORK_CALLBACK}:${state.workId}:continue` }]] : []),
+          ...(pending.mode === "light_search" ? [[{ text: "🔬 Deep research", callback_data: `${RESEARCH_WORK_CALLBACK}:${state.workId}:deep` }]] : []),
+        ];
+        await sendMessage(
+          this.env,
+          state.chatId,
+          `✅ ${pending.mode === "deep_research" ? "Deep research" : "The web research"} for this work is complete and saved for 24 hours.\n\n${found.digest}\n\n${canContinue ? "Tap Continue to draft with it." : "Redo the draft (or ask again) and it will use these findings."}`,
+          buttons.length ? buttons : undefined,
+          state.threadId,
+        );
         return state;
       });
     } catch (err) {
@@ -534,6 +594,8 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
+        case RESEARCH_WORK_CALLBACK:
+          return this.handleResearchButton(state, value);
         case "resultreview": {
           // Kernel-owned Work lifecycle, same class as the three
           // infrastructure prefixes above: Martin's Result-review decision
