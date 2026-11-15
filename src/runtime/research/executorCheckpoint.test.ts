@@ -89,7 +89,12 @@ function harness(opts: { failQueries?: Set<string>; synthesisBroken?: boolean } 
     if (!url.includes("tavily")) throw new Error(`unexpected request to ${url}`);
     const query = JSON.parse(String(init?.body ?? "{}")).query as string;
     counters.searches.push(query);
-    if (opts.failQueries?.has(query)) return new Response("busy", { status: 429 });
+    if (opts.failQueries?.has(query)) {
+      // Answered last, so the provider-wide cooldown it starts cannot race
+      // ahead of the concurrent successful search (searches run in parallel).
+      await new Promise((r) => setTimeout(r, 25));
+      return new Response("busy", { status: 429 });
+    }
     return new Response(JSON.stringify({ results: [{ title: `About ${query}`, url: `https://example.org/${counters.searches.length}`, content: "Evidence text." }] }), { status: 200 });
   }) as typeof fetch;
   return { env, kv, counters, fetchImpl };
