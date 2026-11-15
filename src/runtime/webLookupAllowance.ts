@@ -146,7 +146,7 @@ async function postLimitCard(env: Env, run: NonNullable<ReturnType<typeof curren
   if (info.reason === "providers_busy") {
     const when = retryTimeLabel(info.retryAt);
     const progress = info.total ? ` ${info.completed ?? 0} of ${info.total} searches are done and saved.` : "";
-    const text = `⏸ Web research paused: the search providers are busy (rate-limited or temporarily down), so the answer above was written without it.${progress}${when ? ` They should be back around ${when}.` : ""} ${info.resumesAutomatically ? `Research resumes on its own${when ? ` around ${when}` : ""} from where it stopped, and you'll get a message when it is complete.` : "Research continues from where it stopped the next time this work researches the same question."}`;
+    const text = `⏸ Web research paused: the search providers are busy (rate-limited or temporarily down), so this step could not use it yet.${progress}${when ? ` They should be back around ${when}.` : ""} ${info.resumesAutomatically ? `Research resumes on its own${when ? ` around ${when}` : ""} from where it stopped, and you'll get a message when it is complete.` : "Research continues from where it stopped the next time this work researches the same question."}`;
     const workId = run.access?.kind === "work_session" ? run.access.workId : undefined;
     const busyButtons: InlineButton[][] = [
       [{ text: "🔎 Try research again", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:more` }, { text: "✅ That's enough", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:done` }],
