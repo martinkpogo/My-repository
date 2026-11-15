@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { executeResearch, RESEARCH_CHECKPOINT_MAX_AGE_MS, RESEARCH_PAUSE_LIMIT_MS } from "./executor";
+import { runResearchSkill, RESEARCH_CHECKPOINT_MAX_AGE_MS, RESEARCH_PAUSE_LIMIT_MS } from "./researchRuntime";
 import { discoveryCronContext } from "../../access";
 import type { Env } from "../../types";
 import type { ResearchCheckpoint, ResearchCheckpointStore } from "./types";
@@ -124,7 +124,7 @@ const CTX = discoveryCronContext();
 test("an interrupted search stops the job as `interrupted` -- nothing is synthesized from partial evidence -- and the checkpoint keeps the completed search", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, only } = memoryStore();
-  const outcome = await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  const outcome = await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
 
   assert.strictEqual(outcome.status, "interrupted");
   if (outcome.status !== "interrupted") return;
@@ -148,14 +148,14 @@ test("an interrupted search stops the job as `interrupted` -- nothing is synthes
 test("resuming the same job repeats no completed work: no new interpretation, no new plan, and only the interrupted search is made", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, only } = memoryStore();
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   assert.deepStrictEqual(h.counters.searches, [Q_A, Q_B]);
 
   // The provider is back: its cooldown has ended and it no longer refuses.
   h.kv.delete("search_provider_cooldown:tavily");
   const back = harness();
   const resumedEnv = { ...h.env, AI: back.env.AI } as Env;
-  const outcome = await withFetch(back.fetchImpl, () => executeResearch(resumedEnv, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  const outcome = await withFetch(back.fetchImpl, () => runResearchSkill(resumedEnv, { question: QUESTION, context: "", checkpoints: store }, CTX));
 
   assert.strictEqual(outcome.status, "completed");
   assert.strictEqual(back.counters.interpret, 0, "the saved interpretation is reused");
@@ -172,13 +172,13 @@ test("resuming the same job repeats no completed work: no new interpretation, no
 test("after the 24-hour pause limit, an interrupted job is synthesized from what was gathered, the unfinished search reported as a limitation", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, saved, only } = memoryStore();
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   const cp = only();
   cp.created_at = new Date(Date.now() - RESEARCH_PAUSE_LIMIT_MS - 60_000).toISOString();
   saved.set(cp.job_id, cp);
   h.kv.delete("search_provider_cooldown:tavily");
 
-  const outcome = await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  const outcome = await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   assert.strictEqual(outcome.status, "completed");
   assert.strictEqual(h.counters.synthesis, 1);
   assert.strictEqual(only().status, "completed");
@@ -187,13 +187,13 @@ test("after the 24-hour pause limit, an interrupted job is synthesized from what
 test("a checkpoint older than 7 days is not resumed: the job starts again with a fresh interpretation and plan", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, saved, only } = memoryStore();
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   const cp = only();
   cp.created_at = new Date(Date.now() - RESEARCH_CHECKPOINT_MAX_AGE_MS - 60_000).toISOString();
   saved.set(cp.job_id, cp);
   h.kv.delete("search_provider_cooldown:tavily");
 
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   assert.strictEqual(h.counters.interpret, 2);
   assert.strictEqual(h.counters.plan, 2);
 });
@@ -201,7 +201,7 @@ test("a checkpoint older than 7 days is not resumed: the job starts again with a
 test("a failed synthesis keeps the gathered evidence: the retry goes straight to synthesis with no search at all", async () => {
   const broken = harness({ synthesisBroken: true });
   const { store, only } = memoryStore();
-  const first = await withFetch(broken.fetchImpl, () => executeResearch(broken.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  const first = await withFetch(broken.fetchImpl, () => runResearchSkill(broken.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   assert.strictEqual(first.status, "blocked");
   if (first.status === "blocked") assert.strictEqual(first.code, "SYNTHESIS_FAILED");
   assert.strictEqual(only().synthesis_status, "failed");
@@ -209,7 +209,7 @@ test("a failed synthesis keeps the gathered evidence: the retry goes straight to
 
   const fixed = harness();
   const env = { ...broken.env, AI: fixed.env.AI } as Env;
-  const second = await withFetch(fixed.fetchImpl, () => executeResearch(env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  const second = await withFetch(fixed.fetchImpl, () => runResearchSkill(env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   assert.strictEqual(second.status, "completed");
   assert.deepStrictEqual(fixed.counters.searches, [], "completed searches are never repeated because a later step failed");
   assert.strictEqual(fixed.counters.plan, 0);
@@ -218,7 +218,7 @@ test("a failed synthesis keeps the gathered evidence: the retry goes straight to
 test("the checkpoint is compact: it references evidence but holds no result payloads", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, only } = memoryStore();
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   const json = JSON.stringify(only());
   assert.ok(!json.includes("Evidence text."), "no snippet text in the checkpoint");
   assert.ok(!json.includes("https://example.org/"), "no result URLs in the checkpoint -- they live in evidence storage");
@@ -226,7 +226,7 @@ test("the checkpoint is compact: it references evidence but holds no result payl
 
 test("outside a Work (no checkpoint store) an interruption is still reported as `interrupted`, never as completed", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
-  const outcome = await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "" }, CTX));
+  const outcome = await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "" }, CTX));
   assert.strictEqual(outcome.status, "interrupted");
   assert.strictEqual(h.counters.synthesis, 0);
 });
@@ -234,9 +234,9 @@ test("outside a Work (no checkpoint store) an interruption is still reported as 
 test("a different question is a different job: its checkpoint is never used for another", async () => {
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, saved } = memoryStore();
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
   h.kv.delete("search_provider_cooldown:tavily");
-  await withFetch(h.fetchImpl, () => executeResearch(h.env, { question: `${QUESTION} In Accra?`, context: "", checkpoints: store }, CTX));
+  await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: `${QUESTION} In Accra?`, context: "", checkpoints: store }, CTX));
   assert.strictEqual(saved.size, 2);
   assert.strictEqual(h.counters.interpret, 2);
 });

@@ -1,7 +1,7 @@
 /**
  * The six canonical research protocol definitions -- data/method
  * descriptors consumed by the research runtime executor
- * (`executor.ts`). A protocol is never an actor, a Hat, a Unit, an Action,
+ * (`researchRuntime.ts`). A protocol is never an actor, a Hat, a Unit, an Action,
  * or an execution path of its own: it says what a kind of research is
  * for and how it is investigated, and the one shared pipeline (protocol
  * selection -> plan -> evidence gathering -> synthesis -> evidence & source
@@ -210,7 +210,7 @@ function normalizeProtocolName(name: string): string {
  * internal id. Returns null for anything that doesn't clearly match one
  * of the six registered protocols -- callers must treat that as "couldn't
  * determine," never guess a nearest neighbor. Shared by protocol
- * selection (executor.ts) and research-plan generation
+ * selection (researchRuntime.ts) and research-plan generation
  * (researchPlan.ts), which both need to resolve a model-returned
  * protocol name the same way.
  */

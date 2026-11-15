@@ -44,7 +44,8 @@ export type SkillId =
   | "strategy_analysis"
   | "brand_strategy"
   | "business_strategy"
-  | "communication_strategy";
+  | "communication_strategy"
+  | "light_search";
 
 /** Every registrable Skill id, for exact validation. Closed: a Skill outside this list cannot be declared or resolved. */
 export const SKILL_IDS: readonly SkillId[] = [
@@ -55,6 +56,7 @@ export const SKILL_IDS: readonly SkillId[] = [
   "brand_strategy",
   "business_strategy",
   "communication_strategy",
+  "light_search",
 ];
 
 /** The one runtime Worker ABI a Skill package may declare compatibility with. */
@@ -91,6 +93,55 @@ export async function sha256Hex(content: string): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
+/**
+ * Light Search (Research Runtime decision, Martin 15 Nov 2026): ENIG's
+ * default research METHOD, moved verbatim out of the research runtime's
+ * prompts so the machinery holds no methodology. The Research Runtime reads
+ * its sections by exact id (src/runtime/research/researchRuntime.ts) and
+ * fails closed if one is missing. research_signal stays the shared evidence
+ * discipline underneath it.
+ */
+const LIGHT_SEARCH = `\`\`\`yaml
+skill_id: light-search
+status: canonical
+purpose: >
+  ENIG's default research method: interpret one focused question, select the
+  research protocol(s) it needs, plan a bounded set of concrete searches, and
+  synthesize concise, source-grounded findings in one round.
+\`\`\`
+
+Sections below are read by the Research Runtime by their exact ids; a missing section fails closed.
+
+## interpretation-relevance
+
+Step 1 -- relevance. State in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
+
+## interpretation-selection
+
+Select protocol(s) based on what the question genuinely requires -- never based on keyword matching alone. A broad question about the size, demand, growth, or structure of the market/industry for the consultancy's own authorized service domains and geography should select Market / Industry Research as the PRIMARY protocol -- do not default to Competitive Research for a broad market question; only add Competitive Research when the question specifically concerns named or observable competitors, substitutes, or positioning relative to others. A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another -- do not force a mixed question into a single category merely to simplify selection.
+
+If the question is ambiguous and protocol selection would materially change what research is done, set ambiguous true and explain what's unclear rather than guessing.
+
+## plan-dimensions
+
+For EACH protocol listed above, generate 2-4 specific research sub-questions ("dimensions") that this protocol's own method and evidence requirements call for, tailored to what the actual research question asks -- never generic filler, and never the same dimensions regardless of the question.
+
+Illustrative examples of the KIND of dimension expected (not a checklist to copy verbatim -- tailor to the actual question):
+- Market / Industry Research: market structure, demand conditions, relevant market indicators or benchmarks, service categories, purchasing organisations/demand segments where evidence supports it, market developments and trends, geography-specific evidence (e.g. a named country), relevant comparison geography where useful, evidence gaps.
+- Competitive Research: demonstrable competitor/alternative overlap, named firms where evidence supports it, observable offers, positioning, public pricing where available, competitive crowding.
+- Customer / Audience Research: actual evidence about buyers/audiences, needs, behaviour, purchase drivers, perceptions, reviews, public feedback.
+
+Each dimension should be phrased as a concrete, searchable research sub-question (a complete question, not a topic label).
+
+## synthesis-output-contract
+
+Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique "id" (e.g. "f1", "f2"), and every Implication MUST reference the Finding id(s) it is based on via "basedOnFindingIds" — never a positional index, and never a Finding id that isn't actually present in "findings". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. Provide intelligence only: this research makes no downstream strategic, financial, marketing, sales, creative, or operational decision — those remain with the Responsibility that requested it.
+
+## synthesis-evidence-rule
+
+Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic "businesses should analyze their competitors" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. "businesses should conduct regular competitor analysis") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the "SUPPLIED CONTEXT/EVIDENCE" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.
+`;
 
 const RESEARCH_SIGNAL = `\`\`\`yaml
 skill_id: research-signal
@@ -272,6 +323,7 @@ Return three things -- the finding, its evidence limitation, and its implication
 
 const SKILL_CONTENT: Readonly<Record<SkillId, string>> = {
   research_signal: RESEARCH_SIGNAL,
+  light_search: LIGHT_SEARCH,
   opportunity_qualification_gate: OPPORTUNITY_QUALIFICATION_GATE,
   opportunity_forward_planning: OPPORTUNITY_FORWARD_PLANNING,
   strategy_analysis: STRATEGY_ANALYSIS,
@@ -382,7 +434,15 @@ const SKILL_PACKAGES: Readonly<Record<SkillId, SkillPackage>> = {
     workerRuntime: CURRENT_WORKER_RUNTIME,
     format: SUPPORTED_SKILL_PACKAGE_FORMAT,
     integritySha256: "bd6134cca6b858714421dcd609460b68a5d9c888ae03fd384f42fc3fc597d6b7",
+  },  light_search: {
+    id: "light_search",
+    version: "1.0.0",
+    status: "active",
+    workerRuntime: CURRENT_WORKER_RUNTIME,
+    format: SUPPORTED_SKILL_PACKAGE_FORMAT,
+    integritySha256: "b8734292ddb2507c168e7733cdb1f7cdedca73db3bf3ca00aa3476ed8741f3b8",
   },
+
 };
 
 /**

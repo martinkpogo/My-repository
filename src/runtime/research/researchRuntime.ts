@@ -18,6 +18,7 @@ import {
   type DimensionEvidence,
 } from "./webSearch";
 import { hashContent } from "../../contentHash";
+import { lightSearchSection } from "./lightSearchSkill";
 import type { ResearchPlanDimension } from "./researchPlan";
 import type {
   ResearchBlockCode,
@@ -32,7 +33,7 @@ import type {
 /**
  * Research runtime executor -- non-organizational execution infrastructure.
  *
- * `executeResearch` is one pipeline, resumable when its caller supplies a
+ * `runResearchSkill` is one pipeline, resumable when its caller supplies a
  * checkpoint store (BD-15: the OWNING Work's durable storage -- see
  * ResearchExecutionInput.checkpoints). The checkpoint carries the
  * interpretation, the approved plan and each search's status with a
@@ -144,10 +145,10 @@ interface InterpretationAndSelectionResult {
  * task id, so a profile is exactly a data-boundary choice -- never a caller
  * flag. Two profiles exist, each reachable only through its own export:
  *
- *  - STANDARD (executeResearch): research.* -- token-safe. The gate's
+ *  - STANDARD (runResearchSkill): research.* -- token-safe. The gate's
  *    company-name detector applies, so a real client name can never reach a
  *    provider. Every Action uses this, Strategy included.
- *  - PUBLIC PROSPECT (executeProspectResearch): lead.candidate_research_* --
+ *  - PUBLIC PROSPECT (runProspectResearchSkill): lead.candidate_research_* --
  *    researching a PUBLIC organisation ENIG has not engaged, found by Lead
  *    Generation's own web search. Exempt from the company-name detector ONLY
  *    (email/phone/person/address detectors still apply), the same narrow
@@ -196,7 +197,7 @@ async function requireSafeContext(env: Env): Promise<string | null> {
  * protocol ids, dropping anything that does not clearly resolve --
  * "couldn't determine" is never guessed into a nearest neighbor. An empty
  * result is what drives the fail-closed AMBIGUOUS_PROTOCOL_SELECTION stop
- * in executeResearch; exported so that deterministic filter is testable
+ * in runResearchSkill; exported so that deterministic filter is testable
  * without standing up the whole pipeline.
  */
 export function resolveSelectedProtocols(names: string[]): ResearchProtocolId[] {
@@ -237,15 +238,13 @@ async function interpretAndSelectProtocols(
 
 ${categorySummary}
 
-Step 1 -- relevance. State in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
+${lightSearchSection("interpretation-relevance")}
 
 Step 2 -- protocol selection, grounded in your Step 1 interpretation. Below are the six available protocols and what each investigates:
 
 ${researchProtocolSummaryList()}
 
-Select protocol(s) based on what the question genuinely requires -- never based on keyword matching alone. A broad question about the size, demand, growth, or structure of the market/industry for the consultancy's own authorized service domains and geography should select Market / Industry Research as the PRIMARY protocol -- do not default to Competitive Research for a broad market question; only add Competitive Research when the question specifically concerns named or observable competitors, substitutes, or positioning relative to others. A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another -- do not force a mixed question into a single category merely to simplify selection.
-
-If the question is ambiguous and protocol selection would materially change what research is done, set ambiguous true and explain what's unclear rather than guessing.
+${lightSearchSection("interpretation-selection")}
 
 Return JSON:
 {
@@ -294,7 +293,7 @@ Return JSON:
  * & source validation gate passes; a synthesis that fails it is a blocked
  * outcome, never a lower-confidence result.
  */
-export async function executeResearch(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+export async function runResearchSkill(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
   return runResearch(env, input, access, STANDARD_RESEARCH_PROFILE);
 }
 
@@ -302,9 +301,9 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
  * The same pipeline for researching a PUBLIC prospect organisation by name
  * (Lead Generation only -- see PUBLIC_PROSPECT_RESEARCH_PROFILE). Never use
  * it for anything concerning an engaged client: client identity stays
- * token-only through executeResearch.
+ * token-only through runResearchSkill.
  */
-export async function executeProspectResearch(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+export async function runProspectResearchSkill(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
   return runResearch(env, input, access, PUBLIC_PROSPECT_RESEARCH_PROFILE);
 }
 
@@ -652,9 +651,9 @@ export function buildSynthesisPromptParts(researchRoleDefinition: string, univer
       "=== ACTIVE PROTOCOL(S) FOR THIS REQUEST ===",
       researchProtocolDetail(protocols),
       "=== RESEARCH OUTPUT CONTRACT ===",
-      "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique \"id\" (e.g. \"f1\", \"f2\"), and every Implication MUST reference the Finding id(s) it is based on via \"basedOnFindingIds\" — never a positional index, and never a Finding id that isn't actually present in \"findings\". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. Provide intelligence only: this research makes no downstream strategic, financial, marketing, sales, creative, or operational decision — those remain with the Responsibility that requested it.",
+      lightSearchSection("synthesis-output-contract"),
       "=== HARD RULE: EVIDENCE MUST ACTUALLY ANSWER THE RESEARCH DIMENSION IT'S CITED FOR ===",
-      "Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic \"businesses should analyze their competitors\" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. \"businesses should conduct regular competitor analysis\") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the \"SUPPLIED CONTEXT/EVIDENCE\" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.",
+      lightSearchSection("synthesis-evidence-rule"),
       hasWebResults
         ? "=== HARD RULE: YOU ONLY HAVE THE LIVE WEB SEARCH RESULTS SUPPLIED BELOW -- NO OTHER BROWSING ACCESS ==="
         : "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",

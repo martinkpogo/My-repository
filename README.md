@@ -159,7 +159,7 @@ src/
 ├── googleDocComments.ts, googleSheetComments.ts
 │                                — comment-triggered live editing (polled) for Docs and Sheets
 ├── runtime/                    — generic runtime composition (Work contract, Organization/Action resolution) and non-organizational execution infrastructure
-│   ├── research/               — research runtime: executeResearch pipeline, protocol descriptors, plan, guardrails, the shared Search Tool (Tavily primary; Exa/Serper fallback), resumable research checkpoints, safe-context validation
+│   ├── research/               — research runtime: runResearchSkill pipeline, protocol descriptors, plan, guardrails, the shared Search Tool (Tavily primary; Exa/Serper fallback), resumable research checkpoints, safe-context validation
 │   └── evidence/               — shared evidence & source validation (citation chain, provenance gate)
 ├── hats/
 │   ├── registry.ts             — Marketing Hat registry (name → definition)

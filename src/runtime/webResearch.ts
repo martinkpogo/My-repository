@@ -4,7 +4,7 @@ import type { SemanticTaskId, SensitivityLevel, ContextSegment } from "../dataBo
 import { PRODUCTION_TASK_SENSITIVITY } from "../dataBoundary/policy";
 import { setTaskAugmenter } from "../ai/policy";
 import { aiJson } from "../ai";
-import { executeResearch } from "./research/executor";
+import { runResearchSkill } from "./research/researchRuntime";
 import { summarizeResearchSynthesis } from "./actionResearch";
 import { resolveRuntimeSkill } from "./actionSkills";
 import { currentRun, reportLiveStep, resolveLiveStep } from "./liveStatus";
@@ -23,7 +23,7 @@ import { systemContext, type AccessContext } from "../access";
  *   - Before a Hat's OUTPUT step (WEB_RESEARCH_TASKS) the AI decides, with
  *     one light check (runtime.research_need), whether public web research
  *     would materially help, and the question to research.
- *   - If so, the existing research engine (src/runtime/research/executor.ts:
+ *   - If so, the existing research engine (src/runtime/research/researchRuntime.ts:
  *     plan, search, source-checked synthesis) runs it, with the
  *     research_signal methodology supplied here by the Runtime, and its
  *     source-cited findings -- and what it could NOT establish -- are added
@@ -186,7 +186,7 @@ export async function researchOnline(env: Env, question: string, access: AccessC
   // storage (BD-15), so an interrupted job resumes the next time this Work
   // researches the same question instead of starting again.
   const checkpoints = access.kind === "work_session" ? getResearchCheckpointStore(access.workId) : undefined;
-  const outcome = await executeResearch(env, { question, context: "", skillContent: methodology, ...(checkpoints ? { checkpoints } : {}) }, access);
+  const outcome = await runResearchSkill(env, { question, context: "", skillContent: methodology, ...(checkpoints ? { checkpoints } : {}) }, access);
   if (outcome.status === "interrupted") {
     // Visibly incomplete: the run's end card says research paused and why,
     // and nothing is handed to the Hat as if research had completed.
