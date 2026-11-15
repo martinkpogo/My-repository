@@ -19,6 +19,8 @@ import {
 } from "./webSearch";
 import { hashContent } from "../../contentHash";
 import { lightSearchSection } from "./lightSearchSkill";
+import { resolveRuntimeSkill } from "../actionSkills";
+import { DEEP_RESEARCH_LIMITS, runSkillRounds, type EvidenceNote } from "./skillRounds";
 import type { ResearchPlanDimension } from "./researchPlan";
 import type {
   ResearchBlockCode,
@@ -616,6 +618,90 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
 
   checkpoint.validation_status = "passed";
   return finish("completed", { status: "completed", synthesis: result, relevance });
+}
+
+/** BD-16: synthesis reads notes only, about 8,000 characters of them. */
+export const DEEP_RESEARCH_NOTES_CHARS = 8000;
+
+/** The notes as the only supplied evidence, each with its exact quote and URL, bounded. */
+export function formatNotesAsEvidence(notes: readonly EvidenceNote[]): string {
+  const lines: string[] = [];
+  let used = 0;
+  for (const n of notes) {
+    const line = `- ${n.fact} — "${n.quote}" (${n.url}) [source: ${(() => {
+      try {
+        return new URL(n.url).hostname.replace(/^www\./, "");
+      } catch {
+        return n.url;
+      }
+    })()}]`;
+    if (used + line.length > DEEP_RESEARCH_NOTES_CHARS) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.length ? `[Deep Research] Evidence notes (each quote checked against the retrieved source):\n${lines.join("\n")}` : "";
+}
+
+/**
+ * Deep Research on the Research Runtime (BD-16; Research Runtime decision,
+ * Martin 15 Nov 2026). Explicitly requested only -- never selected
+ * automatically. The Worker follows the `deep_research` Skill through
+ * Skill-guided rounds (skillRounds.ts) within DEEP_RESEARCH_LIMITS; this
+ * runtime supplies the safe context, the governance, the checkpoints, the
+ * synthesis from the verified notes only, and the mandatory evidence and
+ * source validation gate. Interrupted rounds return `interrupted` and resume
+ * from the owning Work's checkpoint.
+ */
+export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+  const safeContext = await requireSafeContext(env);
+  if (!safeContext) {
+    return blocked("SAFE_CONTEXT_UNAVAILABLE", "Couldn't retrieve or validate the governed Research-Safe Consultancy Context from Notion. Refusing to research without it.");
+  }
+  const categorySummary = extractAuthorizedContextSummary(safeContext);
+  const [researchRoleContract, universalRoleContract] = await Promise.all([
+    getGovernance(env, RESEARCH_ROLE_CONTRACT_PAGE_ID, "research role & authority contract"),
+    getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
+  ]);
+  if (!researchRoleContract || !universalRoleContract) {
+    return blocked("GOVERNANCE_UNAVAILABLE", "Couldn't retrieve canonical governance from Notion. Refusing to execute without it.");
+  }
+
+  const method = resolveRuntimeSkill("deep_research").content;
+  const discipline = input.skillContent ?? resolveRuntimeSkill("research_signal").content;
+  const jobId = await hashContent(JSON.stringify({ mode: "deep_research", question: input.question.trim(), context: (input.context ?? "").trim() }));
+  const rounds = await runSkillRounds(
+    env,
+    {
+      skillContent: `${method}\n\n=== EVIDENCE DISCIPLINE (research_signal) ===\n${discipline}`,
+      question: input.question,
+      context: categorySummary,
+      limits: DEEP_RESEARCH_LIMITS,
+      ...(input.checkpoints ? { checkpoint: { store: input.checkpoints, jobId } } : {}),
+    },
+    access,
+  );
+  if (rounds.status === "blocked") return blocked("RESEARCH_STEP_FAILED", `A Deep Research step could not be completed: ${rounds.reason}`);
+  if (rounds.status === "interrupted") {
+    return { status: "interrupted", reason: rounds.reason, ...(rounds.retryAt ? { retryAt: rounds.retryAt } : {}), completedOperations: rounds.rounds, totalOperations: DEEP_RESEARCH_LIMITS.maxRounds };
+  }
+
+  const evidence = formatNotesAsEvidence(rounds.notes);
+  const supplied = capSuppliedEvidence([input.context, evidence].filter(Boolean).join("\n\n"));
+  const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, "Explicitly requested Deep Research.", input.question, supplied);
+  const synthesis = await generate<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
+    taskId: STANDARD_RESEARCH_PROFILE.synthesis,
+    mode: "json",
+    parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: effectiveResearchContext },
+    maxTokens: 4096,
+  });
+  if (!synthesis) return blocked("SYNTHESIS_FAILED", "The Deep Research synthesis could not be generated.");
+  const result: ResearchSynthesis = { ...synthesis, protocolsUsed: [] };
+  const gate = applyEvidenceSourceValidationGate(result, effectiveResearchContext);
+  if (!gate.valid && gate.failure === "invalid_synthesis") return blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
+  if (!gate.valid && gate.failure === "unverifiable_sources") {
+    return blocked("UNVERIFIABLE_SOURCES", `The research cited source(s) not in the verified notes (${gate.unverifiableSources.map((x) => x.source).join(", ")}). Not delivered.`);
+  }
+  return { status: "completed", synthesis: result, relevance: "Explicitly requested Deep Research." };
 }
 
 /**

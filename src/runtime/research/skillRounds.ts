@@ -4,6 +4,11 @@ import type { AccessContext } from "../../access";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { executeSearch, type SearchOutcome } from "./webSearch";
 import { readWebPage, unsafeUrlReason, type PageReadOutcome } from "./webPageRead";
+import { kvGet, kvPut } from "../../kvStore";
+import type { ResearchCheckpoint, ResearchCheckpointStore } from "./types";
+
+/** A rounds checkpoint older than 7 days is not resumed (BD-15 age limit). */
+export const ROUNDS_CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Skill-guided research rounds on the Research Runtime (Research Runtime
@@ -27,8 +32,8 @@ import { readWebPage, unsafeUrlReason, type PageReadOutcome } from "./webPageRea
 // retrieved in this job AND its quote literally appears in what was
 // retrieved from that URL. Anything else is dropped as unverifiable.
 //
-// Not built here (build step 4): per-round checkpoints, the 7-day notes
-// cache, and the deep_research Skill that is this module's first consumer.
+// With a checkpoint (build step 4) each batch is recorded before it runs,
+// notes go to a 7-day cache, and a resumed job repeats no AI step.
 // ---------------------------------------------------------------------------
 
 export type ResearchOperation = { type: "search"; query: string } | { type: "read_page"; url: string };
@@ -200,6 +205,45 @@ export interface SkillRoundsInput {
   /** Framing context the step may use (e.g. the authorized research category); never treated as a source. */
   context: string;
   limits: RoundLimits;
+  /**
+   * Durable continuation through the OWNING Work (WorkSession owns the
+   * lifecycle; this module only says what to record). Absent outside a Work:
+   * the job runs once, and an interruption is still `interrupted`.
+   */
+  checkpoint?: { store: ResearchCheckpointStore; jobId: string };
+}
+
+/** Notes are kept for 7 days under a hash key, beside the search and page-read caches (Research Runtime decision). */
+export const NOTES_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+async function loadNotes(env: Env, ref: string): Promise<EvidenceNote[]> {
+  try {
+    const raw = await kvGet(env, ref);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? (parsed as EvidenceNote[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveNotes(env: Env, ref: string, notes: readonly EvidenceNote[]): Promise<void> {
+  await kvPut(env, ref, JSON.stringify(notes), { expirationTtl: NOTES_CACHE_TTL_SECONDS }).catch((err) => console.error("Research notes not saved", err instanceof Error ? err.message : err));
+}
+
+function freshRoundsCheckpoint(jobId: string, question: string): ResearchCheckpoint {
+  const now = new Date().toISOString();
+  return {
+    job_id: jobId,
+    question,
+    created_at: now,
+    updated_at: now,
+    status: "in_progress",
+    operations: [],
+    remaining_operations: [],
+    synthesis_status: "pending",
+    validation_status: "pending",
+    rounds: { operations: [], next_round: 0, notes_ref: `research_notes:${jobId}` },
+  };
 }
 
 /**
@@ -207,10 +251,11 @@ export interface SkillRoundsInput {
  * back to the next step, until the step says done, returns no operations,
  * or the round limit is reached. An operation interrupted because providers
  * are busy stops the job as `interrupted` (nothing is concluded from partial
- * evidence); the caller owns persistence and resume.
+ * evidence). With a checkpoint, each batch is recorded before it runs and
+ * the job resumes from it: completed rounds are replayed from the caches
+ * (no provider call, no allowance) and no AI step is repeated.
  */
 export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: AccessContext): Promise<SkillRoundsOutcome> {
-  const notes: EvidenceNote[] = [];
   const retrieved = new Map<string, string>();
   let lastResults: OperationResult[] = [];
   let refusedLastRound: string[] = [];
@@ -218,7 +263,66 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
   let operationsRun = 0;
   let droppedNotes = 0;
 
-  for (let round = 0; round <= input.limits.maxRounds; round++) {
+  let cp: ResearchCheckpoint | undefined;
+  if (input.checkpoint) {
+    const saved = await input.checkpoint.store.load(input.checkpoint.jobId).catch(() => undefined);
+    const age = saved ? Date.now() - Date.parse(saved.created_at) : Infinity;
+    cp = saved?.rounds && saved.status !== "completed" && age <= ROUNDS_CHECKPOINT_MAX_AGE_MS ? saved : freshRoundsCheckpoint(input.checkpoint.jobId, input.question);
+  }
+  const rounds = cp?.rounds;
+  const persist = async (status: ResearchCheckpoint["status"]): Promise<void> => {
+    if (!cp || !input.checkpoint) return;
+    cp.status = status;
+    cp.updated_at = new Date().toISOString();
+    try {
+      await input.checkpoint.store.save(cp);
+    } catch (err) {
+      console.error("Research rounds checkpoint not saved", err instanceof Error ? err.message : err);
+    }
+  };
+  const notes: EvidenceNote[] = rounds ? await loadNotes(env, rounds.notes_ref) : [];
+
+  const absorb = (results: OperationResult[]) => {
+    for (const r of results) for (const item of r.retrieved) retrieved.set(item.url, `${retrieved.get(item.url) ?? ""}\n${item.text}`);
+    pages += results.filter((r) => r.operation.type === "read_page").length;
+  };
+  const interruptedOutcome = (results: OperationResult[], roundNumber: number): SkillRoundsOutcome | null => {
+    const interrupted = results.filter((r) => r.outcome === "interrupted");
+    if (!interrupted.length) return null;
+    const retryAt = interrupted.map((r) => r.retryAt).filter((t): t is string => Boolean(t)).sort()[0];
+    return {
+      status: "interrupted",
+      notes,
+      rounds: roundNumber,
+      reason: `${interrupted.length} of ${results.length} operations in round ${roundNumber} could not run because providers are busy. Nothing was concluded from the partial evidence.`,
+      ...(retryAt ? { retryAt } : {}),
+    };
+  };
+
+  // Resume: replay completed rounds from the caches, then the interrupted batch.
+  let startRound = 0;
+  if (rounds && (rounds.next_round > 0 || rounds.operations.length > 0)) {
+    for (let r = 0; r < rounds.next_round; r++) {
+      lastResults = await dispatchOperations(env, rounds.operations[r] ?? [], access, input.limits);
+      absorb(lastResults);
+    }
+    const pending = rounds.operations[rounds.next_round];
+    if (pending) {
+      lastResults = await dispatchOperations(env, pending, access, input.limits);
+      operationsRun += lastResults.length;
+      absorb(lastResults);
+      const stop = interruptedOutcome(lastResults, rounds.next_round + 1);
+      if (stop) {
+        await persist("interrupted");
+        return stop;
+      }
+      rounds.next_round += 1;
+      await persist("in_progress");
+    }
+    startRound = rounds.next_round;
+  }
+
+  for (let round = startRound; round <= input.limits.maxRounds; round++) {
     const finalStep = round === input.limits.maxRounds;
     const situation = [
       `RESEARCH QUESTION: ${input.question}`,
@@ -244,33 +348,41 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
       maxTokens: 2048,
     });
     const parsed = parseStepAnswer(raw, input.limits, round, pages, new Set(retrieved.keys()));
-    if ("error" in parsed) return { status: "blocked", reason: parsed.error };
+    if ("error" in parsed) {
+      await persist("blocked");
+      return { status: "blocked", reason: parsed.error };
+    }
 
     const verified = verifyNotes(parsed.answer.notes, retrieved, input.limits, notes);
     notes.push(...verified.kept);
     droppedNotes += verified.dropped;
     refusedLastRound = parsed.refused;
+    if (rounds && verified.kept.length) await saveNotes(env, rounds.notes_ref, notes);
 
     if (finalStep || parsed.answer.done || parsed.answer.operations.length === 0) {
+      await persist("completed");
       return { status: "completed", notes, rounds: round, operations: operationsRun, droppedNotes };
     }
 
+    // Recorded BEFORE dispatch, so an interruption mid-batch resumes this exact batch.
+    if (rounds) {
+      rounds.operations[round] = parsed.answer.operations;
+      rounds.next_round = round;
+      await persist("in_progress");
+    }
     lastResults = await dispatchOperations(env, parsed.answer.operations, access, input.limits);
     operationsRun += lastResults.length;
-    pages += lastResults.filter((r) => r.operation.type === "read_page").length;
-    for (const r of lastResults) for (const item of r.retrieved) retrieved.set(item.url, `${retrieved.get(item.url) ?? ""}\n${item.text}`);
-
-    const interrupted = lastResults.filter((r) => r.outcome === "interrupted");
-    if (interrupted.length) {
-      const retryAt = interrupted.map((r) => r.retryAt).filter((t): t is string => Boolean(t)).sort()[0];
-      return {
-        status: "interrupted",
-        notes,
-        rounds: round + 1,
-        reason: `${interrupted.length} of ${lastResults.length} operations in round ${round + 1} could not run because providers are busy. Nothing was concluded from the partial evidence.`,
-        ...(retryAt ? { retryAt } : {}),
-      };
+    absorb(lastResults);
+    const stop = interruptedOutcome(lastResults, round + 1);
+    if (stop) {
+      await persist("interrupted");
+      return stop;
+    }
+    if (rounds) {
+      rounds.next_round = round + 1;
+      await persist("in_progress");
     }
   }
+  await persist("completed");
   return { status: "completed", notes, rounds: input.limits.maxRounds, operations: operationsRun, droppedNotes };
 }

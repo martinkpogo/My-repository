@@ -82,6 +82,19 @@ export interface ResearchCheckpoint {
   retry_at?: string;
   synthesis_status: "pending" | "failed" | "completed";
   validation_status: "pending" | "failed" | "passed";
+  /**
+   * Skill-guided rounds (deep_research): each round's operation batch,
+   * recorded BEFORE it is dispatched, and the next round to dispatch. On
+   * resume the completed rounds are replayed from the Search / Web page read
+   * caches (no provider call, no allowance) and the interrupted batch is
+   * dispatched again; no AI step is repeated. Notes live in the 7-day notes
+   * cache under `notes_ref` -- never in the checkpoint.
+   */
+  rounds?: {
+    operations: Array<Array<{ type: "search"; query: string } | { type: "read_page"; url: string }>>;
+    next_round: number;
+    notes_ref: string;
+  };
 }
 
 /** The port WorkSession supplies: load and durably save one job's checkpoint. Saving must be durable on return. */
@@ -103,7 +116,9 @@ export type ResearchBlockCode =
   | "PLAN_GENERATION_FAILED"
   | "SYNTHESIS_FAILED"
   | "SYNTHESIS_INVALID"
-  | "UNVERIFIABLE_SOURCES";
+  | "UNVERIFIABLE_SOURCES"
+  /** A Skill-guided research step answered in an unusable shape (deep_research). */
+  | "RESEARCH_STEP_FAILED";
 
 export type ResearchOutcome =
   | {
