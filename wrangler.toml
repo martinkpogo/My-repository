@@ -81,6 +81,11 @@ SEARCH_FALLBACK_PROVIDERS = "exa,serper"
 # most about $0.014, so 600 searches stays under $10 with margin -- nothing
 # is ever charged (Martin, 15 Nov 2026).
 SEARCH_MONTHLY_BUDGET_EXA = "600"
+# Web page read fallbacks (Web page read Tool spec, 15 Nov 2026): when the
+# Worker's own direct fetch is blocked, Jina Reader (JINA_API_KEY; code
+# default 250 pages a month, below its one-time free grant) and then Tavily
+# Extract (shares Tavily's monthly budget). Each is used only while keyed.
+PAGE_READ_FALLBACK_READERS = "jina_reader,tavily_extract"
 ENTITY_DATA_SOURCE_ID = "437248f7-f6d8-4e70-873b-7b1eb0fdc519"
 MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
@@ -162,6 +167,8 @@ TURSO_DATABASE_URL = "libsql://enig-fallback-martinkpogo.aws-eu-west-1.turso.io"
 #   NOTION_WEBHOOK_SECRET (optional — only needed if you wire up the Notion webhook at /notion/webhook; unset means that endpoint fails closed)
 #   EMAIL_WEBHOOK_SECRET (optional — only needed if you wire up Gmail intake)
 #   TAVILY_API_KEY (optional — only needed for the research runtime's live web-search mechanism and Lead Generation discovery; unset means research stays closed-book)
+#   EXA_API_KEY, SERPER_API_KEY (optional — search fallbacks after Tavily; see SEARCH_FALLBACK_PROVIDERS)
+#   JINA_API_KEY (optional — Web page read fallback; see PAGE_READ_FALLBACK_READERS)
 #   NVIDIA_NIM_API_KEY (optional — free-tier AI provider fallback if Workers AI's daily quota is exhausted)
 #   GROQ_API_KEY (optional — same, additional fallback)
 #   OPENROUTER_API_KEY (optional — same, additional fallback)
