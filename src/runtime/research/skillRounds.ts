@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { generate } from "../../ai";
+import { generateWithOutcome } from "../../ai";
 import type { AccessContext } from "../../access";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { executeSearch, type SearchOutcome } from "./webSearch";
@@ -336,9 +336,8 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
       .filter(Boolean)
       .join("\n\n");
 
-    const raw = await generate(env, {
+    const stepOutcome = await generateWithOutcome(env, {
       taskId: "research.skill_step",
-      mode: "json",
       parts: {
         persona: "You are carrying out one step of a research method for a strategy-led consultancy, using only public sources that are retrieved for you. Never assume, infer or introduce any company name, person, proprietary detail or fact that is not in the retrieved results.",
         skillContent: ["=== RESEARCH METHOD (the Skill you follow) ===", input.skillContent].join("\n\n"),
@@ -347,6 +346,13 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
       },
       maxTokens: 2048,
     });
+    // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
+    // pause, like busy search providers -- this step runs again on resume.
+    if (!stepOutcome.ok && stepOutcome.cause === "providers_exhausted" && stepOutcome.retryAt) {
+      await persist("interrupted");
+      return { status: "interrupted", notes, rounds: round, reason: "Every AI provider is busy (rate-limited or temporarily down), so the next research step could not run yet.", retryAt: stepOutcome.retryAt };
+    }
+    const raw = stepOutcome.ok ? stepOutcome.json : null;
     const parsed = parseStepAnswer(raw, input.limits, round, pages, new Set(retrieved.keys()));
     if ("error" in parsed) {
       await persist("blocked");
@@ -360,7 +366,11 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
     if (rounds && verified.kept.length) await saveNotes(env, rounds.notes_ref, notes);
 
     if (finalStep || parsed.answer.done || parsed.answer.operations.length === 0) {
-      await persist("completed");
+      // "All rounds done", not "completed": the job is complete only once its
+      // caller's synthesis passes, so an interruption there resumes straight
+      // to synthesis (rounds replayed from caches, no AI step repeated).
+      if (rounds) rounds.next_round = input.limits.maxRounds + 1;
+      await persist("in_progress");
       return { status: "completed", notes, rounds: round, operations: operationsRun, droppedNotes };
     }
 
@@ -383,6 +393,7 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
       await persist("in_progress");
     }
   }
-  await persist("completed");
+  if (rounds) rounds.next_round = input.limits.maxRounds + 1;
+  await persist("in_progress");
   return { status: "completed", notes, rounds: input.limits.maxRounds, operations: operationsRun, droppedNotes };
 }

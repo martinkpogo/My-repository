@@ -158,3 +158,27 @@ test("notes live in the 7-day notes cache, not in the checkpoint", async () => {
   assert.ok(!JSON.stringify(cp).includes(QUOTE), "no note text in the checkpoint");
   assert.ok(h.kv.get(cp.rounds!.notes_ref)?.includes(QUOTE), "notes are in the notes cache under the checkpoint's reference");
 });
+
+test("Deep Research interrupted at synthesis (every AI provider busy) resumes straight to synthesis -- no round is repeated", async () => {
+  const h = harness(STEPS());
+  const { store, saved } = memoryStore();
+  // Synthesis fails with every provider rate-limited the first time.
+  const realRun = h.env.AI.run;
+  let synthBusy = true;
+  h.env.AI.run = async (m: unknown, o: any) => {
+    const system = String(o?.messages?.[0]?.content ?? "");
+    if (synthBusy && system.includes("research runtime — the selected research protocol")) throw Object.assign(new Error("429 rate limited"), { status: 429 });
+    return realRun(m, o);
+  };
+  const r1 = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "", checkpoints: store }, CTX));
+  assert.strictEqual(r1.status, "interrupted");
+  assert.strictEqual(h.counts.steps, 3);
+  assert.notStrictEqual([...saved.values()][0].status, "completed");
+
+  synthBusy = false;
+  h.kv.delete("search_provider_cooldown:ai:workers-ai"); // the shared cooldown store
+  const r2 = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "", checkpoints: store }, CTX));
+  assert.strictEqual(r2.status, "completed");
+  assert.strictEqual(h.counts.steps, 3, "no research step is repeated after the synthesis pause");
+  assert.strictEqual([...saved.values()][0].status, "completed");
+});

@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { generate, type GeneratePromptParts } from "../../ai";
+import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import type { AccessContext } from "../../access";
 import { applyEvidenceSourceValidationGate } from "../evidence/validation";
@@ -567,9 +567,8 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   const suppliedEvidence = capSuppliedEvidence([input.context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
-  const synthesis = await generate<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
+  const synthesisOutcome = await generateWithOutcome<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
     taskId: profile.synthesis,
-    mode: "json",
     parts: {
       ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, protocols, webResultCount > 0, input.skillContent),
       situation: effectiveResearchContext,
@@ -583,6 +582,14 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
     // so this is a safety margin, not a license to pad the response.
     maxTokens: 4096,
   });
+  // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
+  // pause, not a failure -- the evidence stays checkpointed and the job
+  // resumes at synthesis.
+  if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
+    const done = checkpoint.operations.filter((o) => isCompletedOperation(o.status)).length;
+    return finish("interrupted", { status: "interrupted", reason: "Every AI provider is busy (rate-limited or temporarily down), so the findings could not be written yet. The gathered evidence is saved.", retryAt: synthesisOutcome.retryAt, completedOperations: done, totalOperations: plan.length });
+  }
+  const synthesis = synthesisOutcome.ok ? synthesisOutcome.json : null;
   if (!synthesis) {
     // The gathered evidence stays checkpointed: a retry continues from
     // synthesis instead of searching again.
@@ -688,18 +695,33 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
   const evidence = formatNotesAsEvidence(rounds.notes);
   const supplied = capSuppliedEvidence([input.context, evidence].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, "Explicitly requested Deep Research.", input.question, supplied);
-  const synthesis = await generate<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
+  const synthesisOutcome = await generateWithOutcome<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
     taskId: STANDARD_RESEARCH_PROFILE.synthesis,
-    mode: "json",
     parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: effectiveResearchContext },
     maxTokens: 4096,
   });
+  if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
+    // The rounds are complete and their notes saved; a resume replays them from the caches and goes straight to synthesis.
+    return { status: "interrupted", reason: "Every AI provider is busy, so the Deep Research findings could not be written yet. The evidence is saved.", retryAt: synthesisOutcome.retryAt, completedOperations: rounds.rounds, totalOperations: DEEP_RESEARCH_LIMITS.maxRounds };
+  }
+  const synthesis = synthesisOutcome.ok ? synthesisOutcome.json : null;
   if (!synthesis) return blocked("SYNTHESIS_FAILED", "The Deep Research synthesis could not be generated.");
   const result: ResearchSynthesis = { ...synthesis, protocolsUsed: [] };
   const gate = applyEvidenceSourceValidationGate(result, effectiveResearchContext);
   if (!gate.valid && gate.failure === "invalid_synthesis") return blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
   if (!gate.valid && gate.failure === "unverifiable_sources") {
     return blocked("UNVERIFIABLE_SOURCES", `The research cited source(s) not in the verified notes (${gate.unverifiableSources.map((x) => x.source).join(", ")}). Not delivered.`);
+  }
+  // Only a synthesis that passed the gate completes the job.
+  if (input.checkpoints) {
+    const cp = await input.checkpoints.load(jobId).catch(() => undefined);
+    if (cp) {
+      cp.status = "completed";
+      cp.synthesis_status = "completed";
+      cp.validation_status = "passed";
+      cp.updated_at = new Date().toISOString();
+      await input.checkpoints.save(cp).catch((err) => console.error("Deep Research checkpoint not closed", err instanceof Error ? err.message : err));
+    }
   }
   return { status: "completed", synthesis: result, relevance: "Explicitly requested Deep Research." };
 }

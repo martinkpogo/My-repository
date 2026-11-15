@@ -84,17 +84,21 @@ function harness(opts: { failQueries?: Set<string>; synthesisBroken?: boolean } 
     AI_MODEL_PRIMARY: "m",
     AI_MODEL_LIGHT: "m-light",
   } as unknown as Env;
+  let markSuccess: () => void = () => {};
+  const successAnswered = new Promise<void>((r) => (markSuccess = r));
   const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     if (!url.includes("tavily")) throw new Error(`unexpected request to ${url}`);
     const query = JSON.parse(String(init?.body ?? "{}")).query as string;
     counters.searches.push(query);
     if (opts.failQueries?.has(query)) {
-      // Answered last, so the provider-wide cooldown it starts cannot race
-      // ahead of the concurrent successful search (searches run in parallel).
-      await new Promise((r) => setTimeout(r, 25));
+      // Answered only after a successful search has answered (or 1 s), so the
+      // provider-wide cooldown it starts cannot race ahead of the concurrent
+      // successful search (searches run in parallel). Deterministic under load.
+      await Promise.race([successAnswered, new Promise((r) => setTimeout(r, 1000))]);
       return new Response("busy", { status: 429 });
     }
+    markSuccess();
     return new Response(JSON.stringify({ results: [{ title: `About ${query}`, url: `https://example.org/${counters.searches.length}`, content: "Evidence text." }] }), { status: 200 });
   }) as typeof fetch;
   return { env, kv, counters, fetchImpl };
