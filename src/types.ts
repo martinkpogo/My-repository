@@ -164,6 +164,18 @@ export interface Env {
   SEARCH_MONTHLY_BUDGET_SERPER?: string;
 
   /**
+   * Web page read fallback readers (canonical spec "Web page read", Martin
+   * 15 Nov 2026): a comma list of "jina_reader", "tavily_extract". Direct
+   * fetch is always first and free. Jina needs JINA_API_KEY; its monthly
+   * budget defaults below its one-time free grant (override with
+   * PAGE_READ_MONTHLY_BUDGET_JINA). Tavily Extract shares Tavily's search
+   * budget. See src/runtime/research/webPageRead.ts.
+   */
+  PAGE_READ_FALLBACK_READERS?: string;
+  JINA_API_KEY?: string;
+  PAGE_READ_MONTHLY_BUDGET_JINA?: string;
+
+  /**
    * Free-tier AI provider fallback keys (src/ai/openaiCompatible.ts),
    * all optional -- added after Cloudflare Workers AI's daily quota
    * exhaustion blocked every AI-driven Hat/Unit at once. Each is a no-op

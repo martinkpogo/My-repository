@@ -118,7 +118,7 @@ export function parseRetryAfterMs(res: Response, now: number = Date.now()): numb
  * temporary outage. Any other status is a refused request (`rejected`).
  * Status only -- the response body is never echoed into logs or reasons.
  */
-export function classifyHttpFailure(provider: SearchProviderId, res: Response): SearchProviderError {
+export function classifyHttpFailure(provider: string, res: Response): SearchProviderError {
   const status = res.status;
   if (status === 429 || (provider === "tavily" && (status === 432 || status === 433))) {
     return new SearchProviderError("rate_limited", `${provider} rate-limited the request (HTTP ${status})`, parseRetryAfterMs(res));
@@ -312,12 +312,12 @@ export function configuredProviderChain(env: Env): SearchProviderAdapter[] {
   return chain;
 }
 
-function usageKey(provider: SearchProviderId, now: Date): string {
+function usageKey(provider: string, now: Date): string {
   return `search_provider_usage:${provider}:${now.toISOString().slice(0, 7)}`;
 }
 
 /** This month's recorded requests for a provider. Unreadable storage reads as 0 (logged), the same rule as the daily allowance. */
-export async function readMonthlyUsage(env: Env, provider: SearchProviderId, now: Date = new Date()): Promise<number> {
+export async function readMonthlyUsage(env: Env, provider: string, now: Date = new Date()): Promise<number> {
   try {
     const raw = await kvGet(env, usageKey(provider, now));
     return Number(raw) || 0;
@@ -328,7 +328,7 @@ export async function readMonthlyUsage(env: Env, provider: SearchProviderId, now
 }
 
 /** Counts one request against the provider's month BEFORE it is made, so an interrupted request is still counted. */
-export async function recordProviderRequest(env: Env, provider: SearchProviderId, now: Date = new Date()): Promise<void> {
+export async function recordProviderRequest(env: Env, provider: string, now: Date = new Date()): Promise<void> {
   const used = await readMonthlyUsage(env, provider, now);
   await kvPut(env, usageKey(provider, now), String(used + 1), { expirationTtl: 40 * 24 * 60 * 60 }).catch((err) =>
     console.error(`Search provider ${provider}: monthly usage not saved`, err instanceof Error ? err.message : err),
@@ -345,11 +345,11 @@ interface CooldownRecord {
   step: number;
 }
 
-function cooldownKey(provider: SearchProviderId): string {
+function cooldownKey(provider: string): string {
   return `search_provider_cooldown:${provider}`;
 }
 
-async function readCooldownRecord(env: Env, provider: SearchProviderId): Promise<CooldownRecord | null> {
+async function readCooldownRecord(env: Env, provider: string): Promise<CooldownRecord | null> {
   try {
     const raw = await kvGet(env, cooldownKey(provider));
     if (!raw) return null;
@@ -361,13 +361,13 @@ async function readCooldownRecord(env: Env, provider: SearchProviderId): Promise
 }
 
 /** When the provider's cooldown ends, or null when it is not cooling down. */
-export async function cooldownUntil(env: Env, provider: SearchProviderId, now: number = Date.now()): Promise<number | null> {
+export async function cooldownUntil(env: Env, provider: string, now: number = Date.now()): Promise<number | null> {
   const record = await readCooldownRecord(env, provider);
   return record && record.until > now ? record.until : null;
 }
 
 /** Starts (or escalates) a provider's cooldown after a rate limit or outage. Returns when it ends. */
-export async function startCooldown(env: Env, provider: SearchProviderId, retryAfterMs: number | undefined, now: number = Date.now()): Promise<number> {
+export async function startCooldown(env: Env, provider: string, retryAfterMs: number | undefined, now: number = Date.now()): Promise<number> {
   const previous = await readCooldownRecord(env, provider);
   const step = previous ? Math.min(previous.step + 1, COOLDOWN_STEPS_MS.length - 1) : 0;
   const wait = retryAfterMs !== undefined ? Math.min(Math.max(retryAfterMs, 1000), COOLDOWN_STEPS_MS[COOLDOWN_STEPS_MS.length - 1]) : COOLDOWN_STEPS_MS[step];
@@ -380,6 +380,6 @@ export async function startCooldown(env: Env, provider: SearchProviderId, retryA
 }
 
 /** A successful request ends the provider's cooldown history. */
-export async function clearCooldown(env: Env, provider: SearchProviderId): Promise<void> {
+export async function clearCooldown(env: Env, provider: string): Promise<void> {
   await kvDelete(env, cooldownKey(provider)).catch(() => {});
 }
