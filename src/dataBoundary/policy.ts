@@ -148,6 +148,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // steps. A step that included the Work's own context would be
   // business_sensitive and needs its own task id.
   "research.skill_step": "public_sourced",
+  // Martin-started research brief (Build Decision, 15 Nov 2026): Martin's own
+  // topic and answers, the same payload category as runtime.research_need --
+  // business_sensitive. Every Outbound Gate detector applies in full (this
+  // task is NOT company-suffix-exempt), so a topic naming a company or person
+  // is blocked before it reaches a provider.
+  "research.brief_questions": "business_sensitive",
   "action.google_doc_intake": "business_sensitive",
   "action.google_doc_comment_edit": "business_sensitive",
   // Same payload category as action.google_doc_comment_edit directly above:
@@ -650,6 +656,7 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "lead.candidate_research_plan": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_synthesis": "TOKEN_SAFE_RUNTIME",
   "research.skill_step": "TOKEN_SAFE_RUNTIME",
+  "research.brief_questions": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_intake": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_query_generation": "TOKEN_SAFE_RUNTIME",
   "action.google_doc_intake": "TOKEN_SAFE_RUNTIME",

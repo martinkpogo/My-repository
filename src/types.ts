@@ -34,6 +34,14 @@ export interface Env {
   CALL_NOTES_DATA_SOURCE_ID: string;
   /** Payments database (Payment Business Object). Read-only for the Runtime until an approval-gated Finance action exists. */
   PAYMENTS_DATA_SOURCE_ID?: string;
+  /**
+   * The Research database (Operation Records / Research): results of
+   * Martin-started research (/research, /deep_research -- Build Decision,
+   * 15 Nov 2026). Written only under the operator_research Access context.
+   * Optional: without it, research still runs and the result is only posted
+   * in Telegram, with a note that it was not saved.
+   */
+  RESEARCH_DATA_SOURCE_ID?: string;
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
@@ -495,6 +503,8 @@ export interface WorkState {
     | "finance_direct_request_matter"
     | "finance_direct_request_context"
     | "sales_proposal_revision"
+    /** A Martin-started research Work waiting for his topic or a brief answer (src/runtime/operatorResearch.ts). Owned by no Unit or Hat. */
+    | "operator_research_reply"
     /**
      * Set when a comment on a Proposal's Google Doc could not be classified
      * (ambiguous, mixed, malformed or failed classification): neither the
@@ -633,6 +643,14 @@ export interface WorkState {
    * Search Tool's result cache -- never evidence payloads or conversation.
    */
   researchCheckpoints?: Record<string, import("./runtime/research/types").ResearchCheckpoint>;
+
+  /**
+   * Martin-started research on this Work (/research, /deep_research --
+   * Build Decision, 15 Nov 2026). Present only on a Work that IS such a
+   * research job: one owned by no Unit or Hat, run under the bounded
+   * operator_research Access context (src/runtime/operatorResearch.ts).
+   */
+  operatorResearch?: import("./runtime/operatorResearch").OperatorResearchState;
 
   /**
    * A proposed new Matter's drafted title + stated need, shown to Martin

@@ -15,7 +15,19 @@ import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/sk
 import { sendMessage, sendOperationsMessage } from "./telegram";
 import { researchOnline, saveDeepResearchFindings, seedRunResearchFindings } from "./runtime/webResearch";
 import { RESEARCH_WORK_CALLBACK, retryTimeLabel } from "./runtime/webLookupAllowance";
-import { runDeepResearchSkill } from "./runtime/research/researchRuntime";
+import { runDeepResearchSkill, runResearchSkill } from "./runtime/research/researchRuntime";
+import { resolveRuntimeSkill } from "./runtime/actionSkills";
+import {
+  beginOperatorResearch,
+  completeOperatorResearch,
+  DEFAULT_OPERATOR_RESEARCH_DEPS,
+  failOperatorResearch,
+  handleOperatorResearchButton,
+  handleOperatorResearchReply,
+  OPERATOR_RESEARCH_AWAITING,
+  OPERATOR_RESEARCH_CALLBACK,
+  type OperatorResearchMode,
+} from "./runtime/operatorResearch";
 import { summarizeResearchSynthesis } from "./runtime/actionResearch";
 import type { PendingResearch } from "./runtime/research/types";
 import { withLiveStatus } from "./runtime/liveStatus";
@@ -52,7 +64,7 @@ import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointe
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
 import { recordWorkAction } from "./units/dispatch";
-import { workSessionContext } from "./access";
+import { operatorResearchContext, workSessionContext } from "./access";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 import { strategyOf } from "./units/strategy/strategyState";
@@ -224,8 +236,22 @@ export class WorkSession extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Starts Martin-started research on this (Unit-less) Work: /research or
+   * /deep_research (Build Decision, 15 Nov 2026). The shared Research Runtime
+   * operated directly -- no Unit, Hat or Action; see operatorResearch.ts.
+   */
+  async startOperatorResearch(mode: OperatorResearchMode, topic: string): Promise<WorkState> {
+    return this.execute((state) => beginOperatorResearch(this.env, state, mode, topic, DEFAULT_OPERATOR_RESEARCH_DEPS));
+  }
+
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
+      // A Martin-started research Work is owned by no Hat, so its reply
+      // state is the shared research flow's own, not a manifest's.
+      if (state.operatorResearch && state.awaiting === OPERATOR_RESEARCH_AWAITING) {
+        return handleOperatorResearchReply(this.env, state, text, DEFAULT_OPERATOR_RESEARCH_DEPS);
+      }
       // Every awaiting state resolves through the owning Hat's own
       // awaitingHandlers in its Unit's manifest (the hardcoded switch is
       // gone -- each case was moved to its Unit's manifest entry first,
@@ -311,7 +337,7 @@ export class WorkSession extends DurableObject<Env> {
    */
   private async resumeDeepResearch(state: WorkState, pending: PendingResearch): Promise<{ digest: string; gaps: string[] } | null> {
     const checkpoints = getResearchCheckpointStore(String(state.workId));
-    const outcome = await runDeepResearchSkill(this.env, { question: pending.question, context: "", ...(checkpoints ? { checkpoints } : {}) }, workSessionContext(state));
+    const outcome = await runDeepResearchSkill(this.env, { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) }, workSessionContext(state));
     if (outcome.status === "interrupted") {
       await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
       const when = retryTimeLabel(outcome.retryAt);
@@ -354,6 +380,29 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * Runs (or resumes) a Martin-started research job under the bounded
+   * operator_research Access context. Interrupted -> re-armed on this Work's
+   * alarm, exactly as BD-19; complete -> findings card and Research page.
+   */
+  private async runOperatorResearch(state: WorkState, pending: PendingResearch): Promise<WorkState> {
+    const access = operatorResearchContext(String(state.workId));
+    const checkpoints = getResearchCheckpointStore(String(state.workId));
+    const input = { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) };
+    const outcome =
+      pending.mode === "deep_research"
+        ? await runDeepResearchSkill(this.env, input, access)
+        : await runResearchSkill(this.env, { ...input, skillContent: resolveRuntimeSkill("research_signal").content }, access);
+    if (outcome.status === "interrupted") {
+      await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
+      const when = retryTimeLabel(outcome.retryAt);
+      await sendMessage(this.env, state.chatId, `⏸ Research paused: providers are busy (${outcome.completedOperations} of ${outcome.totalOperations} steps done).${when ? ` It resumes on its own around ${when}.` : " It resumes on its own shortly."}`, undefined, state.threadId);
+      return state;
+    }
+    if (outcome.status === "completed") return completeOperatorResearch(this.env, state, outcome.synthesis, DEFAULT_OPERATOR_RESEARCH_DEPS);
+    return failOperatorResearch(this.env, state, outcome.reason, DEFAULT_OPERATOR_RESEARCH_DEPS);
+  }
+
+  /**
    * Resumes a paused research job from its checkpoint, inside this Work's own
    * execution (so its checkpoint store, Access and live status apply). Still
    * busy -> it pauses and re-arms itself (bounded by the 24-hour pause limit
@@ -372,6 +421,7 @@ export class WorkSession extends DurableObject<Env> {
       }
       await this.ctx.storage.delete(PENDING_RESEARCH_KEY); // a re-fired alarm never resumes twice
       await this.execute(async (state) => {
+        if (state.operatorResearch) return this.runOperatorResearch(state, pending);
         const found = pending.mode === "deep_research" ? await this.resumeDeepResearch(state, pending) : await researchOnline(this.env, pending.question, workSessionContext(state));
         if (!found) return state;
         await this.ctx.storage.put(COMPLETED_RESEARCH_KEY, { question: pending.question, mode: pending.mode });
@@ -596,6 +646,12 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleActionApproval(this.env, state, value === "approve");
         case RESEARCH_WORK_CALLBACK:
           return this.handleResearchButton(state, value);
+        case OPERATOR_RESEARCH_CALLBACK:
+          // Martin-started research (owned by no Hat): its brief buttons.
+          return handleOperatorResearchButton(this.env, state, value, DEFAULT_OPERATOR_RESEARCH_DEPS).then(async ({ state: next, schedule }) => {
+            if (schedule) await this.schedulePendingResearch(schedule);
+            return next;
+          });
         case "resultreview": {
           // Kernel-owned Work lifecycle, same class as the three
           // infrastructure prefixes above: Martin's Result-review decision
@@ -783,7 +839,8 @@ export class WorkSession extends DurableObject<Env> {
       // The run also carries this Work's own Access context, which the
       // universal web research tool (src/runtime/webResearch.ts) uses.
       const saved = await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
-        access: () => workSessionContext(state),
+        // A Martin-started research Work runs under its own bounded context.
+        access: () => (state.operatorResearch ? operatorResearchContext(String(state.workId)) : workSessionContext(state)),
       });
       // The independent Checker's advisory second opinion (Martin's decision,
       // 2026-11-14): AFTER the draft is saved and with Martin, never before.

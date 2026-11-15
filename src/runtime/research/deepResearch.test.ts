@@ -182,3 +182,12 @@ test("Deep Research interrupted at synthesis (every AI provider busy) resumes st
   assert.strictEqual(h.counts.steps, 3, "no research step is repeated after the synthesis pause");
   assert.strictEqual([...saved.values()][0].status, "completed");
 });
+
+test("Deep Research runs end to end under the operator_research context (Martin-started /deep_research, owned by no Hat)", async () => {
+  const { operatorResearchContext } = await import("../../access");
+  const h = harness(STEPS());
+  const outcome = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "Martin's research brief:\nWhich market? Ghana" }, operatorResearchContext("w-op")));
+  assert.strictEqual(outcome.status, "completed");
+  assert.strictEqual(h.counts.searches, 1);
+  assert.strictEqual(h.counts.pages, 1);
+});

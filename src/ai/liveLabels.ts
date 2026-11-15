@@ -38,6 +38,7 @@ export const AI_TASK_LIVE_LABELS: Partial<Record<SemanticTaskId, string>> = {
   "lead.candidate_research_plan": "Planning the prospect searches",
   "lead.candidate_research_synthesis": "Summarising what the sources say about the prospect",
   "research.skill_step": "Deciding the next research step",
+  "research.brief_questions": "Preparing a question about your research",
   "action.google_doc_intake": "Reading the Google Doc request",
   "action.google_doc_comment_edit": "Working out the edit the comment asks for",
   "action.google_doc_comment_intent": "Working out what the comment means",
