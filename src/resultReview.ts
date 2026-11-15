@@ -355,6 +355,21 @@ export async function stageResultReviewApproval(state: WorkState): Promise<
   return { ok: true, pending: review.pendingApproval };
 }
 
+/**
+ * Generic form of the operator-approval evidence item: Martin's approval of
+ * one exact output, bound to it by SHA-256. Minter-style: call it only from the
+ * flow that handled his verified approval callback. (Marketing keeps its own
+ * equivalent `approvalEvidence`; a Unit may not import another Unit's code.)
+ */
+export async function operatorApprovalEvidence(state: WorkState, output: { ref: string; content: string }, via: string): Promise<ResultReviewEvidenceItem> {
+  return {
+    kind: OPERATOR_APPROVAL_EVIDENCE_KIND,
+    ref: `${state.workId}-approval`,
+    note: `Martin's approval of this output, recorded by ${via}, which runs only from his verified approval callback`,
+    content: `Martin approved ${output.ref} at ${new Date().toISOString()} through the verified approval callback for Work ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}). Approved content SHA-256: ${await hashContent(output.content)}.`,
+  };
+}
+
 /** The evidence kind that records Martin's approval of the exact output (see Marketing's `approvalEvidence`). */
 export const OPERATOR_APPROVAL_EVIDENCE_KIND = "operator_approval";
 
