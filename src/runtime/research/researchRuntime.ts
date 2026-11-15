@@ -1,5 +1,5 @@
 import type { Env } from "../../types";
-import { generate, type GeneratePromptParts } from "../../ai";
+import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import type { AccessContext } from "../../access";
 import { applyEvidenceSourceValidationGate } from "../evidence/validation";
@@ -8,13 +8,40 @@ import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, r
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { generateResearchPlan } from "./researchPlan";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
-import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatFailedSearchesWarning, formatUncoveredDimensionsWarning, gatherDimensionEvidence } from "./webSearch";
-import type { ResearchBlockCode, ResearchExecutionInput, ResearchOutcome, ResearchSynthesis } from "./types";
+import {
+  assessDimensionCoverage,
+  formatDimensionEvidenceForContext,
+  formatFailedSearchesWarning,
+  formatUncoveredDimensionsWarning,
+  readCachedSearch,
+  searchDimension,
+  type DimensionEvidence,
+} from "./webSearch";
+import { hashContent } from "../../contentHash";
+import { lightSearchSection } from "./lightSearchSkill";
+import { resolveRuntimeSkill } from "../actionSkills";
+import { DEEP_RESEARCH_LIMITS, runSkillRounds, type EvidenceNote } from "./skillRounds";
+import type { ResearchPlanDimension } from "./researchPlan";
+import type {
+  ResearchBlockCode,
+  ResearchCheckpoint,
+  ResearchCheckpointStore,
+  ResearchExecutionInput,
+  ResearchOperationStatus,
+  ResearchOutcome,
+  ResearchSynthesis,
+} from "./types";
 
 /**
  * Research runtime executor -- non-organizational execution infrastructure.
  *
- * `executeResearch` is one stateless pipeline:
+ * `runResearchSkill` is one pipeline, resumable when its caller supplies a
+ * checkpoint store (BD-15: the OWNING Work's durable storage -- see
+ * ResearchExecutionInput.checkpoints). The checkpoint carries the
+ * interpretation, the approved plan and each search's status with a
+ * reference to its saved results; a resumed job repeats no completed
+ * operation, and an interrupted search stops the job as `interrupted`
+ * rather than being synthesized around (until RESEARCH_PAUSE_LIMIT_MS):
  *   1. Validate the authorized/safe context          (requireSafeContext)
  *   2-3. Interpret the question and select protocol(s), in ONE light
  *        AI call                                     (interpretAndSelectProtocols)
@@ -120,10 +147,10 @@ interface InterpretationAndSelectionResult {
  * task id, so a profile is exactly a data-boundary choice -- never a caller
  * flag. Two profiles exist, each reachable only through its own export:
  *
- *  - STANDARD (executeResearch): research.* -- token-safe. The gate's
+ *  - STANDARD (runResearchSkill): research.* -- token-safe. The gate's
  *    company-name detector applies, so a real client name can never reach a
  *    provider. Every Action uses this, Strategy included.
- *  - PUBLIC PROSPECT (executeProspectResearch): lead.candidate_research_* --
+ *  - PUBLIC PROSPECT (runProspectResearchSkill): lead.candidate_research_* --
  *    researching a PUBLIC organisation ENIG has not engaged, found by Lead
  *    Generation's own web search. Exempt from the company-name detector ONLY
  *    (email/phone/person/address detectors still apply), the same narrow
@@ -172,7 +199,7 @@ async function requireSafeContext(env: Env): Promise<string | null> {
  * protocol ids, dropping anything that does not clearly resolve --
  * "couldn't determine" is never guessed into a nearest neighbor. An empty
  * result is what drives the fail-closed AMBIGUOUS_PROTOCOL_SELECTION stop
- * in executeResearch; exported so that deterministic filter is testable
+ * in runResearchSkill; exported so that deterministic filter is testable
  * without standing up the whole pipeline.
  */
 export function resolveSelectedProtocols(names: string[]): ResearchProtocolId[] {
@@ -213,15 +240,13 @@ async function interpretAndSelectProtocols(
 
 ${categorySummary}
 
-Step 1 -- relevance. State in 1-3 plain sentences what the question means in relation to this authorized category (business category, service domains, client type, problem domain, geography) -- i.e. reframe it as a research need for this type of consultancy. This only establishes what is being asked and why it matters for research purposes -- it must NOT perform strategic diagnosis or make a positioning, marketing, sales, finance, creative, or operational decision or recommendation of any kind.
+${lightSearchSection("interpretation-relevance")}
 
 Step 2 -- protocol selection, grounded in your Step 1 interpretation. Below are the six available protocols and what each investigates:
 
 ${researchProtocolSummaryList()}
 
-Select protocol(s) based on what the question genuinely requires -- never based on keyword matching alone. A broad question about the size, demand, growth, or structure of the market/industry for the consultancy's own authorized service domains and geography should select Market / Industry Research as the PRIMARY protocol -- do not default to Competitive Research for a broad market question; only add Competitive Research when the question specifically concerns named or observable competitors, substitutes, or positioning relative to others. A research question may require one protocol, several protocols, or Evidence & Source Validation alongside another -- do not force a mixed question into a single category merely to simplify selection.
-
-If the question is ambiguous and protocol selection would materially change what research is done, set ambiguous true and explain what's unclear rather than guessing.
+${lightSearchSection("interpretation-selection")}
 
 Return JSON:
 {
@@ -270,7 +295,7 @@ Return JSON:
  * & source validation gate passes; a synthesis that fails it is a blocked
  * outcome, never a lower-confidence result.
  */
-export async function executeResearch(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+export async function runResearchSkill(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
   return runResearch(env, input, access, STANDARD_RESEARCH_PROFILE);
 }
 
@@ -278,10 +303,118 @@ export async function executeResearch(env: Env, input: ResearchExecutionInput, a
  * The same pipeline for researching a PUBLIC prospect organisation by name
  * (Lead Generation only -- see PUBLIC_PROSPECT_RESEARCH_PROFILE). Never use
  * it for anything concerning an engaged client: client identity stays
- * token-only through executeResearch.
+ * token-only through runResearchSkill.
  */
-export async function executeProspectResearch(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+export async function runProspectResearchSkill(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
   return runResearch(env, input, access, PUBLIC_PROSPECT_RESEARCH_PROFILE);
+}
+
+/**
+ * Research continuation limits (Martin's decisions, 14 Nov 2026):
+ *  - an interrupted job waits for providers at most 24 hours from when it
+ *    started; after that it is synthesized from what was gathered, with the
+ *    searches that never completed reported as limitations;
+ *  - a checkpoint older than 7 days is not resumed (its evidence may be
+ *    stale), and the job starts again.
+ */
+export const RESEARCH_PAUSE_LIMIT_MS = 24 * 60 * 60 * 1000;
+export const RESEARCH_CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** research_job_identity: a SHA-256 over the profile, the question and the supplied context -- never the text itself. */
+export async function researchJobId(profile: ResearchTaskProfile, question: string, context: string): Promise<string> {
+  return hashContent(JSON.stringify({ profile: profile.synthesis, question: question.trim(), context: (context ?? "").trim() }));
+}
+
+function freshCheckpoint(jobId: string, question: string, now: string): ResearchCheckpoint {
+  return {
+    job_id: jobId,
+    question,
+    created_at: now,
+    updated_at: now,
+    status: "in_progress",
+    operations: [],
+    remaining_operations: [],
+    synthesis_status: "pending",
+    validation_status: "pending",
+  };
+}
+
+/**
+ * The checkpoint to continue, or a fresh one. A completed job is not
+ * resumed (the 24-hour research cache already answers a repeat); a
+ * checkpoint past RESEARCH_CHECKPOINT_MAX_AGE_MS, unreadable, or for a
+ * different job is not resumed either.
+ */
+async function loadResumableCheckpoint(
+  store: ResearchCheckpointStore | undefined,
+  jobId: string,
+  question: string,
+  nowMs: number,
+): Promise<{ checkpoint: ResearchCheckpoint; resumed: boolean }> {
+  const fresh = { checkpoint: freshCheckpoint(jobId, question, new Date(nowMs).toISOString()), resumed: false };
+  if (!store) return fresh;
+  let saved: ResearchCheckpoint | undefined;
+  try {
+    saved = await store.load(jobId);
+  } catch (err) {
+    console.error("Research checkpoint unreadable -- starting the job afresh", err instanceof Error ? err.message : err);
+    return fresh;
+  }
+  if (!saved || saved.job_id !== jobId || saved.status === "completed") return fresh;
+  const age = nowMs - Date.parse(saved.created_at);
+  if (!Number.isFinite(age) || age > RESEARCH_CHECKPOINT_MAX_AGE_MS) return fresh;
+  return { checkpoint: saved, resumed: true };
+}
+
+function statusForSearchOutcome(kind: DimensionEvidence["searchOutcome"]): ResearchOperationStatus {
+  if (kind === "success_with_results") return "completed_with_results";
+  if (kind === "success_no_results") return "completed_no_results";
+  if (kind === "interrupted") return "interrupted";
+  return "failed";
+}
+
+function isCompletedOperation(status: ResearchOperationStatus): boolean {
+  return status === "completed_with_results" || status === "completed_no_results";
+}
+
+/**
+ * Gathers evidence for the plan, one search per dimension, continuing from
+ * the checkpoint: a dimension already completed is NOT searched again
+ * (preserve_completed_operations) -- its saved results are read back from
+ * the Search Tool's cache by reference, and a completed empty search stays
+ * empty. Everything else (pending, interrupted, or failed last time) is
+ * searched now. The checkpoint is saved after each completed search.
+ */
+async function gatherCheckpointedEvidence(
+  env: Env,
+  plan: ResearchPlanDimension[],
+  access: AccessContext,
+  checkpoint: ResearchCheckpoint,
+  persist: () => Promise<void>,
+): Promise<{ evidence: DimensionEvidence[]; retryAt?: string }> {
+  let earliestRetry: string | undefined;
+  const evidence = await Promise.all(
+    plan.map(async (dimension, index): Promise<DimensionEvidence> => {
+      const op = checkpoint.operations[index] ?? (checkpoint.operations[index] = { dimension: index, status: "pending" });
+      if (op.status === "completed_no_results") return { ...dimension, searchOutcome: "success_no_results", results: [] };
+      if (op.status === "completed_with_results" && op.evidence_ref) {
+        const saved = await readCachedSearch(env, op.evidence_ref);
+        if (saved && saved.kind === "success_with_results") return { ...dimension, searchOutcome: "success_with_results", results: saved.results };
+        // The saved results are gone from evidence storage (evicted early):
+        // the only way to have evidence is to search again, and the log says so.
+        console.error(`Research checkpoint ${checkpoint.job_id.slice(0, 12)}: saved results for dimension ${index} are no longer stored -- searching again`);
+      }
+      const searched = await searchDimension(env, dimension, access);
+      op.status = statusForSearchOutcome(searched.evidence.searchOutcome);
+      op.search_outcome = searched.evidence.searchOutcome;
+      if (searched.evidenceRef) op.evidence_ref = searched.evidenceRef;
+      else delete op.evidence_ref;
+      if (searched.retryAt && (!earliestRetry || searched.retryAt < earliestRetry)) earliestRetry = searched.retryAt;
+      if (isCompletedOperation(op.status)) await persist();
+      return searched.evidence;
+    }),
+  );
+  return { evidence, ...(earliestRetry ? { retryAt: earliestRetry } : {}) };
 }
 
 async function runResearch(env: Env, input: ResearchExecutionInput, access: AccessContext, profile: ResearchTaskProfile): Promise<ResearchOutcome> {
@@ -304,9 +437,44 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   }
   const categorySummary = extractAuthorizedContextSummary(safeContext);
 
-  const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection);
-  if ("stop" in selection) return selection.stop;
-  const { relevance, protocols } = selection;
+  // Durable continuation (BD-15, canonical Search spec research_continuation):
+  // the checkpoint holds the interpretation, the approved plan and each
+  // search's status with a reference to its saved results. Saved after every
+  // successful operation, so a resumed job never repeats completed work.
+  const startedMs = Date.now();
+  const jobId = await researchJobId(profile, question, input.context);
+  const { checkpoint, resumed } = await loadResumableCheckpoint(input.checkpoints, jobId, question, startedMs);
+  const persist = async (): Promise<void> => {
+    if (!input.checkpoints) return;
+    checkpoint.updated_at = new Date().toISOString();
+    checkpoint.remaining_operations = checkpoint.operations.filter((o) => !isCompletedOperation(o.status)).map((o) => o.dimension);
+    try {
+      await input.checkpoints.save(checkpoint);
+    } catch (err) {
+      // Not a failure of the research itself -- but the job can no longer
+      // resume from here, so the log says so.
+      console.error(`Research checkpoint ${jobId.slice(0, 12)} not saved`, err instanceof Error ? err.message : err);
+    }
+  };
+  const finish = async (status: ResearchCheckpoint["status"], outcome: ResearchOutcome): Promise<ResearchOutcome> => {
+    checkpoint.status = status;
+    await persist();
+    return outcome;
+  };
+
+  let relevance: string;
+  let protocols: ResearchProtocolId[];
+  if (checkpoint.relevance && checkpoint.protocols?.length) {
+    relevance = checkpoint.relevance;
+    protocols = checkpoint.protocols;
+  } else {
+    const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection);
+    if ("stop" in selection) return finish("blocked", selection.stop);
+    ({ relevance, protocols } = selection);
+    checkpoint.relevance = relevance;
+    checkpoint.protocols = protocols;
+    await persist();
+  }
 
   await progress(`Using: ${protocols.map((id) => RESEARCH_PROTOCOL_REGISTRY[id].name).join(", ")} -- building a research plan and gathering evidence...`);
 
@@ -316,17 +484,31 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   ]);
   if (!researchRoleContract || !universalRoleContract) {
     const missing = [!researchRoleContract ? "research role contract" : null, !universalRoleContract ? "Universal Role Contract" : null].filter(Boolean).join(" and ");
-    return blocked("GOVERNANCE_UNAVAILABLE", `Couldn't retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`);
+    return finish("blocked", blocked("GOVERNANCE_UNAVAILABLE", `Couldn't retrieve canonical governance from Notion (${missing}). Refusing to execute without it.`));
   }
 
   // Protocol-specific research plan: turns each selected protocol into a
   // bounded set of concrete, searchable sub-questions grounded in that
   // protocol's own registered method/evidenceRequirements. Load-bearing --
   // without it there's nothing to search beyond the bare question, so a
-  // failure here fails the whole request closed.
-  const plan = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan);
-  if (!plan || plan.length === 0) {
-    return blocked("PLAN_GENERATION_FAILED", "Couldn't generate a research plan for the selected protocol(s) — planning failed.");
+  // failure here fails the whole request closed. A resumed job keeps its
+  // approved plan, so it searches exactly the same dimensions.
+  let plan: ResearchPlanDimension[];
+  if (checkpoint.plan?.length) {
+    plan = checkpoint.plan;
+  } else {
+    const generated = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan);
+    if (!generated || generated.length === 0) {
+      return finish("blocked", blocked("PLAN_GENERATION_FAILED", "Couldn't generate a research plan for the selected protocol(s) — planning failed."));
+    }
+    plan = generated;
+    checkpoint.plan = plan;
+    checkpoint.operations = plan.map((_, dimension) => ({ dimension, status: "pending" }));
+    await persist();
+  }
+  if (resumed) {
+    const done = checkpoint.operations.filter((o) => isCompletedOperation(o.status)).length;
+    await progress(`Resuming research saved earlier: ${done} of ${plan.length} searches already done.`);
   }
 
   // Evidence gathering executes the plan -- one search per dimension, not
@@ -336,7 +518,31 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // results. Real fetched URLs/snippets become part of the supplied
   // evidence below, so findUnverifiableSources naturally extends to verify
   // against them.
-  const dimensionEvidence = await gatherDimensionEvidence(env, plan, access);
+  const gathered = await gatherCheckpointedEvidence(env, plan, access, checkpoint, persist);
+  const dimensionEvidence = gathered.evidence;
+
+  // Interrupted searches (every eligible provider busy) are NOT synthesized
+  // around: the job stays visibly incomplete and resumable, unless it has
+  // already waited RESEARCH_PAUSE_LIMIT_MS -- then what was gathered is
+  // synthesized, with the unfinished searches reported as limitations.
+  const interruptedOps = checkpoint.operations.filter((o) => o.status === "interrupted");
+  const pauseExpired = Date.now() - Date.parse(checkpoint.created_at) > RESEARCH_PAUSE_LIMIT_MS;
+  if (interruptedOps.length > 0 && !pauseExpired) {
+    checkpoint.current_interrupted_operation = interruptedOps[0].dimension;
+    if (gathered.retryAt) checkpoint.retry_at = gathered.retryAt;
+    else delete checkpoint.retry_at;
+    const completedOperations = checkpoint.operations.filter((o) => isCompletedOperation(o.status)).length;
+    return finish("interrupted", {
+      status: "interrupted",
+      reason: `Web search providers are busy (rate-limited or temporarily unavailable), so ${plan.length - completedOperations} of ${plan.length} planned searches are not done yet. Nothing was concluded from the partial evidence.`,
+      ...(gathered.retryAt ? { retryAt: gathered.retryAt } : {}),
+      completedOperations,
+      totalOperations: plan.length,
+    });
+  }
+  delete checkpoint.current_interrupted_operation;
+  delete checkpoint.retry_at;
+
   const { covered, uncovered, failed } = assessDimensionCoverage(dimensionEvidence);
   const webResultCount = covered.reduce((sum, d) => sum + d.results.length, 0);
   const webEvidence = formatDimensionEvidenceForContext(dimensionEvidence);
@@ -361,9 +567,8 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   const suppliedEvidence = capSuppliedEvidence([input.context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
 
-  const synthesis = await generate<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
+  const synthesisOutcome = await generateWithOutcome<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
     taskId: profile.synthesis,
-    mode: "json",
     parts: {
       ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, protocols, webResultCount > 0, input.skillContent),
       situation: effectiveResearchContext,
@@ -377,9 +582,21 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
     // so this is a safety margin, not a license to pad the response.
     maxTokens: 4096,
   });
-  if (!synthesis) {
-    return blocked("SYNTHESIS_FAILED", "The research couldn't be completed — synthesis generation failed.");
+  // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
+  // pause, not a failure -- the evidence stays checkpointed and the job
+  // resumes at synthesis.
+  if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
+    const done = checkpoint.operations.filter((o) => isCompletedOperation(o.status)).length;
+    return finish("interrupted", { status: "interrupted", reason: "Every AI provider is busy (rate-limited or temporarily down), so the findings could not be written yet. The gathered evidence is saved.", retryAt: synthesisOutcome.retryAt, completedOperations: done, totalOperations: plan.length });
   }
+  const synthesis = synthesisOutcome.ok ? synthesisOutcome.json : null;
+  if (!synthesis) {
+    // The gathered evidence stays checkpointed: a retry continues from
+    // synthesis instead of searching again.
+    checkpoint.synthesis_status = "failed";
+    return finish("blocked", blocked("SYNTHESIS_FAILED", "The research couldn't be completed — synthesis generation failed."));
+  }
+  checkpoint.synthesis_status = "completed";
   const result: ResearchSynthesis = { ...synthesis, protocolsUsed: protocols };
 
   // Mandatory evidence & source validation gate. Provenance half: the only
@@ -390,16 +607,123 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // output is (see findUnverifiableSources).
   const gate = applyEvidenceSourceValidationGate(result, effectiveResearchContext);
   if (!gate.valid && gate.failure === "invalid_synthesis") {
-    return blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
+    checkpoint.synthesis_status = "failed";
+    checkpoint.validation_status = "failed";
+    return finish("blocked", blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`));
   }
   if (!gate.valid && gate.failure === "unverifiable_sources") {
-    return blocked(
-      "UNVERIFIABLE_SOURCES",
-      `The research returned source(s) not present in the supplied context (${gate.unverifiableSources.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. Only sources actually supplied or fetched can be cited.`,
+    checkpoint.synthesis_status = "failed";
+    checkpoint.validation_status = "failed";
+    return finish(
+      "blocked",
+      blocked(
+        "UNVERIFIABLE_SOURCES",
+        `The research returned source(s) not present in the supplied context (${gate.unverifiableSources.map((s) => s.source).join(", ")}), which would have been fabricated. Not delivered. Only sources actually supplied or fetched can be cited.`,
+      ),
     );
   }
 
-  return { status: "completed", synthesis: result, relevance };
+  checkpoint.validation_status = "passed";
+  return finish("completed", { status: "completed", synthesis: result, relevance });
+}
+
+/** BD-16: synthesis reads notes only, about 8,000 characters of them. */
+export const DEEP_RESEARCH_NOTES_CHARS = 8000;
+
+/** The notes as the only supplied evidence, each with its exact quote and URL, bounded. */
+export function formatNotesAsEvidence(notes: readonly EvidenceNote[]): string {
+  const lines: string[] = [];
+  let used = 0;
+  for (const n of notes) {
+    const line = `- ${n.fact} — "${n.quote}" (${n.url}) [source: ${(() => {
+      try {
+        return new URL(n.url).hostname.replace(/^www\./, "");
+      } catch {
+        return n.url;
+      }
+    })()}]`;
+    if (used + line.length > DEEP_RESEARCH_NOTES_CHARS) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.length ? `[Deep Research] Evidence notes (each quote checked against the retrieved source):\n${lines.join("\n")}` : "";
+}
+
+/**
+ * Deep Research on the Research Runtime (BD-16; Research Runtime decision,
+ * Martin 15 Nov 2026). Explicitly requested only -- never selected
+ * automatically. The Worker follows the `deep_research` Skill through
+ * Skill-guided rounds (skillRounds.ts) within DEEP_RESEARCH_LIMITS; this
+ * runtime supplies the safe context, the governance, the checkpoints, the
+ * synthesis from the verified notes only, and the mandatory evidence and
+ * source validation gate. Interrupted rounds return `interrupted` and resume
+ * from the owning Work's checkpoint.
+ */
+export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInput, access: AccessContext): Promise<ResearchOutcome> {
+  const safeContext = await requireSafeContext(env);
+  if (!safeContext) {
+    return blocked("SAFE_CONTEXT_UNAVAILABLE", "Couldn't retrieve or validate the governed Research-Safe Consultancy Context from Notion. Refusing to research without it.");
+  }
+  const categorySummary = extractAuthorizedContextSummary(safeContext);
+  const [researchRoleContract, universalRoleContract] = await Promise.all([
+    getGovernance(env, RESEARCH_ROLE_CONTRACT_PAGE_ID, "research role & authority contract"),
+    getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
+  ]);
+  if (!researchRoleContract || !universalRoleContract) {
+    return blocked("GOVERNANCE_UNAVAILABLE", "Couldn't retrieve canonical governance from Notion. Refusing to execute without it.");
+  }
+
+  const method = resolveRuntimeSkill("deep_research").content;
+  const discipline = input.skillContent ?? resolveRuntimeSkill("research_signal").content;
+  const jobId = await hashContent(JSON.stringify({ mode: "deep_research", question: input.question.trim(), context: (input.context ?? "").trim() }));
+  const rounds = await runSkillRounds(
+    env,
+    {
+      skillContent: `${method}\n\n=== EVIDENCE DISCIPLINE (research_signal) ===\n${discipline}`,
+      question: input.question,
+      context: categorySummary,
+      limits: DEEP_RESEARCH_LIMITS,
+      ...(input.checkpoints ? { checkpoint: { store: input.checkpoints, jobId } } : {}),
+    },
+    access,
+  );
+  if (rounds.status === "blocked") return blocked("RESEARCH_STEP_FAILED", `A Deep Research step could not be completed: ${rounds.reason}`);
+  if (rounds.status === "interrupted") {
+    return { status: "interrupted", reason: rounds.reason, ...(rounds.retryAt ? { retryAt: rounds.retryAt } : {}), completedOperations: rounds.rounds, totalOperations: DEEP_RESEARCH_LIMITS.maxRounds };
+  }
+
+  const evidence = formatNotesAsEvidence(rounds.notes);
+  const supplied = capSuppliedEvidence([input.context, evidence].filter(Boolean).join("\n\n"));
+  const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, "Explicitly requested Deep Research.", input.question, supplied);
+  const synthesisOutcome = await generateWithOutcome<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
+    taskId: STANDARD_RESEARCH_PROFILE.synthesis,
+    parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: effectiveResearchContext },
+    maxTokens: 4096,
+  });
+  if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
+    // The rounds are complete and their notes saved; a resume replays them from the caches and goes straight to synthesis.
+    return { status: "interrupted", reason: "Every AI provider is busy, so the Deep Research findings could not be written yet. The evidence is saved.", retryAt: synthesisOutcome.retryAt, completedOperations: rounds.rounds, totalOperations: DEEP_RESEARCH_LIMITS.maxRounds };
+  }
+  const synthesis = synthesisOutcome.ok ? synthesisOutcome.json : null;
+  if (!synthesis) return blocked("SYNTHESIS_FAILED", "The Deep Research synthesis could not be generated.");
+  const result: ResearchSynthesis = { ...synthesis, protocolsUsed: [] };
+  const gate = applyEvidenceSourceValidationGate(result, effectiveResearchContext);
+  if (!gate.valid && gate.failure === "invalid_synthesis") return blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
+  if (!gate.valid && gate.failure === "unverifiable_sources") {
+    return blocked("UNVERIFIABLE_SOURCES", `The research cited source(s) not in the verified notes (${gate.unverifiableSources.map((x) => x.source).join(", ")}). Not delivered.`);
+  }
+  // Only a synthesis that passed the gate completes the job.
+  if (input.checkpoints) {
+    const cp = await input.checkpoints.load(jobId).catch(() => undefined);
+    if (cp) {
+      cp.status = "completed";
+      cp.synthesis_status = "completed";
+      cp.validation_status = "passed";
+      cp.updated_at = new Date().toISOString();
+      await input.checkpoints.save(cp).catch((err) => console.error("Deep Research checkpoint not closed", err instanceof Error ? err.message : err));
+    }
+  }
+  return { status: "completed", synthesis: result, relevance: "Explicitly requested Deep Research." };
 }
 
 /**
@@ -435,9 +759,9 @@ export function buildSynthesisPromptParts(researchRoleDefinition: string, univer
       "=== ACTIVE PROTOCOL(S) FOR THIS REQUEST ===",
       researchProtocolDetail(protocols),
       "=== RESEARCH OUTPUT CONTRACT ===",
-      "Separate Evidence, Finding, Implication, and Limitation explicitly. Every Finding MUST cite at least one Evidence item id it is drawn from — never state a conclusion as a finding without evidence backing it; that is an unsupported inference, not a finding. Every Evidence item MUST cite at least one Source id. Every Finding MUST have its own unique \"id\" (e.g. \"f1\", \"f2\"), and every Implication MUST reference the Finding id(s) it is based on via \"basedOnFindingIds\" — never a positional index, and never a Finding id that isn't actually present in \"findings\". If evidence is insufficient, contradictory, or materially ambiguous, still return your best synthesis but record this explicitly as a Limitation rather than omitting the gap or filling it with unsupported inference. Provide intelligence only: this research makes no downstream strategic, financial, marketing, sales, creative, or operational decision — those remain with the Responsibility that requested it.",
+      lightSearchSection("synthesis-output-contract"),
       "=== HARD RULE: EVIDENCE MUST ACTUALLY ANSWER THE RESEARCH DIMENSION IT'S CITED FOR ===",
-      "Confirmed live as a real failure: a source about how to conduct competitor analysis (a methodology article) was cited as if it were evidence that a specific market is growing -- it was not; a generic \"businesses should analyze their competitors\" statement is not a Finding or Implication of THIS research, it is filler. A source counts as evidence for a dimension only if its content actually addresses that dimension's specific subject matter (e.g. real market/demand data for a market-size question, a named real organisation's observable offer for a competitor question) -- a company merely appearing in a search result does not by itself establish it is a relevant competitor, and a generic industry statement does not become geography-specific evidence merely because the search query included that geography. Never produce generic business advice (e.g. \"businesses should conduct regular competitor analysis\") as a Finding or Implication -- state only what the gathered evidence actually establishes about the specific situation asked about. If the \"SUPPLIED CONTEXT/EVIDENCE\" section below flags a research dimension with no search evidence, or the evidence you do have is off-topic/generic for that dimension, report it as a Limitation -- never as a Finding.",
+      lightSearchSection("synthesis-evidence-rule"),
       hasWebResults
         ? "=== HARD RULE: YOU ONLY HAVE THE LIVE WEB SEARCH RESULTS SUPPLIED BELOW -- NO OTHER BROWSING ACCESS ==="
         : "=== HARD RULE: YOU HAVE NO LIVE BROWSING, SEARCH, OR INTERNET ACCESS ===",

@@ -216,7 +216,7 @@ test("No Action execution path looks Skill content up directly: only the Registr
 test("The generic boundary names no Unit, Hat or research-specific concept: no Unit-specific branch provides Skill behaviour", async () => {
   for (const { file, code } of await productionSources()) {
     if (file !== "runtime/actionSkills.ts" && file !== "platform/skillRegistry.ts") continue;
-    assert.ok(!/Business Development|Sales|Strategy|Finance|Marketing|Research & Intelligence|executeResearch|\bunit\s*===|\.unit\b/.test(code), `${file} must stay generic`);
+    assert.ok(!/Business Development|Sales|Strategy|Finance|Marketing|Research & Intelligence|runResearchSkill|\bunit\s*===|\.unit\b/.test(code), `${file} must stay generic`);
   }
 });
 

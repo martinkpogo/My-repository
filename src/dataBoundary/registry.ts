@@ -166,6 +166,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Lead Candidate Research Synthesis",
     description: "Synthesizes source-linked public evidence about a prospect organisation into Evidence/Finding/Implication/Limitation output (Lead Generation only). Never fabricates a decision-maker, contact, or fact not present in the sources.",
   },
+  "research.skill_step": {
+    id: "research.skill_step",
+    name: "Research Skill Step",
+    description: "One Skill-guided research step on the Research Runtime: reads the public results gathered so far and answers with the next batch of search / page-read operations, evidence notes, or done. Never fabricates a source, quote or fact.",
+  },
   "action.google_doc_intake": {
     id: "action.google_doc_intake",
     name: "Google Doc Intake Classification & Parameter Extraction",

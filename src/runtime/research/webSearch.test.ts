@@ -216,31 +216,40 @@ test("a successful response whose entries are all invalid urls is success_no_res
   assert.strictEqual(outcome.kind, "success_no_results");
 });
 
-// --- Outcome: provider_failure ---
+// --- Outcomes: interrupted (recoverable) and provider_failure (refused) ---
+// BD-15 / canonical recovery: a rate limit, an outage and a malformed
+// response are RECOVERABLE -- with no other eligible provider the logical
+// search is `interrupted` (resumable), never an empty success. A refused
+// request (any other 4xx) is provider_failure and stops the operation.
 
-test("a network error during the provider request is provider_failure -- never reported as no results", async () => {
+test("a network error during the provider request is interrupted (recoverable) -- never reported as no results", async () => {
   const outcome = await withMockFetch(
     async () => {
       throw new Error("network down");
     },
     () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH),
   );
-  assert.strictEqual(outcome.kind, "provider_failure");
+  assert.strictEqual(outcome.kind, "interrupted");
 });
 
-test("a non-2xx provider status is provider_failure", async () => {
+test("a rate-limited provider (HTTP 429) is interrupted -- not an empty success and not a terminal failure", async () => {
   const outcome = await withMockFetch(async () => new Response("rate limited", { status: 429 }), () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH));
+  assert.strictEqual(outcome.kind, "interrupted");
+});
+
+test("a refused provider request (HTTP 401) is provider_failure -- not recoverable, so no fallback and no resume", async () => {
+  const outcome = await withMockFetch(async () => new Response("unauthorized", { status: 401 }), () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH));
   assert.strictEqual(outcome.kind, "provider_failure");
 });
 
-test("malformed provider JSON is provider_failure", async () => {
+test("malformed provider JSON is interrupted -- never an empty success", async () => {
   const outcome = await withMockFetch(async () => new Response("<html>not json</html>", { status: 200 }), () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH));
-  assert.strictEqual(outcome.kind, "provider_failure");
+  assert.strictEqual(outcome.kind, "interrupted");
 });
 
-test("a structurally malformed provider response (no results array) is provider_failure", async () => {
+test("a structurally malformed provider response (no results array) is interrupted -- never an empty success", async () => {
   const outcome = await withMockFetch(async () => okJson({ unexpected: true }), () => executeSearch(configuredEnv, { query: "q" }, KERNEL_SEARCH));
-  assert.strictEqual(outcome.kind, "provider_failure");
+  assert.strictEqual(outcome.kind, "interrupted");
 });
 
 // --- Outcome: invalid_input (validation before any request, before Access) ---
@@ -377,7 +386,7 @@ test("gatherDimensionEvidence records each dimension's own search outcome alongs
   assert.deepStrictEqual(outcome[1].results, []);
 });
 
-test("gatherDimensionEvidence records provider_failure per dimension on a failed request -- the dimension is failed, not empty", async () => {
+test("gatherDimensionEvidence records an interrupted search per dimension on a failed request -- the dimension is failed, not empty", async () => {
   const evidence = await withMockFetch(
     async () => {
       throw new Error("provider exploded");
@@ -385,7 +394,7 @@ test("gatherDimensionEvidence records provider_failure per dimension on a failed
     () =>
       gatherDimensionEvidence(configuredEnv, [{ protocol: "competitive" as const, subQuestion: "Who are the competitors?" }], KERNEL_SEARCH),
   );
-  assert.strictEqual(evidence[0].searchOutcome, "provider_failure");
+  assert.strictEqual(evidence[0].searchOutcome, "interrupted");
   assert.deepStrictEqual(evidence[0].results, []);
   const { covered, uncovered, failed } = assessDimensionCoverage(evidence);
   assert.strictEqual(covered.length, 0);
@@ -532,22 +541,26 @@ test("search cache (Martin, 2026-11-14, option C): the same search within 7 days
   assert.strictEqual(JSON.parse(daily[1]).used, 1, "only the real search counted");
 });
 
-test("search cache: a search that found nothing, or failed, is never saved -- the next attempt asks the provider again", async () => {
+test("search cache: a search that found nothing, or failed, is never saved -- the next attempt is not served from cache", async () => {
   const kv = memoryKv();
   const env = { TAVILY_API_KEY: "key", STATE_KV: kv } as any;
   let calls = 0;
-  await withMockFetch(
+  const outcomes = await withMockFetch(
     async () => {
       calls++;
       return calls === 1 ? okJson({ results: [] }) : new Response("down", { status: 500 });
     },
-    async () => {
-      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH);
-      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH);
-      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH);
-    },
+    async () => [
+      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH),
+      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH),
+      await executeSearch(env, { query: "q one" }, KERNEL_SEARCH),
+    ],
   );
-  assert.strictEqual(calls, 3);
+  // The empty search is not cached, so the second attempt asks the provider
+  // again; its outage starts a cooldown, so the third attempt does not hammer
+  // the provider -- and is interrupted rather than served from any cache.
+  assert.strictEqual(calls, 2);
+  assert.deepStrictEqual(outcomes.map((o) => o.kind), ["success_no_results", "interrupted", "interrupted"]);
   assert.ok(![...kv.store.keys()].some((k) => k.startsWith("web_search_cache:")));
 });
 

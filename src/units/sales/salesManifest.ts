@@ -197,12 +197,21 @@ const leadGenerationSpecialistActions: ActionDefinition<LeadGenerationSpecialist
     // gate refuses this Work's successful closure until an independent
     // Checker verifies the evidence against these criteria and Martin
     // approves that exact Result.
+    // Martin's approval of the candidate card is the last step of this Work:
+    // it closes the Work as his Result approval (2026-11-14 rule), so an
+    // approved Lead is never left stuck in result_review_blocked.
+    outputApprovalClosesWork: true,
+    // Corrected 2026-11-15 (assessment finding, Martin's go-ahead): a Lead is
+    // a PUBLIC organisation ENIG has not engaged, recorded before any Entity
+    // or Matter exists -- so it carries the organisation's public name and no
+    // tokens. The former wording (opaque tokens, no real name) described a
+    // record this Action never writes, so no Lead Work could ever satisfy it.
     expectedResult:
-      "A Lead record committed in Notion for the ONE screened discovery candidate Martin approved, carrying that candidate's screening evidence and opaque Entity/Matter tokens -- and nothing else.",
+      "A Lead record committed in Notion for the ONE screened discovery candidate Martin approved, carrying that public organisation's name, its source and its screening evidence -- and no contact details.",
     completionCriteria: [
       "A Lead record exists in the Leads data source for the exact candidate Martin approved (no other candidate).",
       "The commit is traceable to Martin's approval of that specific candidate (the leadopportunity approval callback), not to an unapproved screen result.",
-      "The committed Lead carries the candidate's screening evidence and opaque tokens, and no real name, contact detail or other identity-bearing value.",
+      "The committed Lead carries the candidate's public organisation name, source and screening evidence, and no contact name or contact details.",
     ],
   },
 ];

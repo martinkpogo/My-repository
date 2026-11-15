@@ -142,6 +142,12 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "lead.candidate_research_protocol_selection": "public_sourced",
   "lead.candidate_research_plan": "public_sourced",
   "lead.candidate_research_synthesis": "public_sourced",
+  // A Skill-guided research step on the Research Runtime (Martin, 15 Nov
+  // 2026): it sees only the identity-scrubbed question and public search /
+  // page results, so it is public_sourced like the other public research
+  // steps. A step that included the Work's own context would be
+  // business_sensitive and needs its own task id.
+  "research.skill_step": "public_sourced",
   "action.google_doc_intake": "business_sensitive",
   "action.google_doc_comment_edit": "business_sensitive",
   // Same payload category as action.google_doc_comment_edit directly above:
@@ -643,6 +649,7 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "lead.candidate_research_protocol_selection": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_plan": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_synthesis": "TOKEN_SAFE_RUNTIME",
+  "research.skill_step": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_intake": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_query_generation": "TOKEN_SAFE_RUNTIME",
   "action.google_doc_intake": "TOKEN_SAFE_RUNTIME",
@@ -674,6 +681,7 @@ export const OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS: ReadonlySet<SemanticTas
   "lead.candidate_research_protocol_selection",
   "lead.candidate_research_plan",
   "lead.candidate_research_synthesis",
+  "research.skill_step",
   // General web research (src/runtime/webResearch.ts) -- Martin's decision
   // 2026-11-13: it summarises public web results, which routinely name
   // companies. Company-suffix detector only; the email, phone and

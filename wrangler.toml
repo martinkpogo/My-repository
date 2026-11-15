@@ -69,6 +69,13 @@ crons = ["*/30 * * * *"]
 NOTION_VERSION = "2025-09-03"
 AI_MODEL_PRIMARY = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct-fast"
+# Search fallback providers (BD-15, issue #338; Martin, 14 Nov 2026: Exa then
+# Serper, Brave excluded). Explicit enablement only -- each is used only once
+# its key secret is set (EXA_API_KEY / SERPER_API_KEY), and Exa also needs
+# SEARCH_MONTHLY_BUDGET_EXA set below its free allowance from the Exa
+# dashboard. Tavily (950/month) and Serper (200/month) have code defaults
+# below their free allowances; set SEARCH_MONTHLY_BUDGET_<ID> to override.
+SEARCH_FALLBACK_PROVIDERS = "exa,serper"
 ENTITY_DATA_SOURCE_ID = "437248f7-f6d8-4e70-873b-7b1eb0fdc519"
 MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"

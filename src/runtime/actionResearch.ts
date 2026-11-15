@@ -1,7 +1,7 @@
 import type { Env } from "../types";
 import type { AccessContext } from "../access";
 import type { ResolvedActionSkillSet } from "../platform/skillRegistry";
-import { executeProspectResearch, executeResearch } from "./research/executor";
+import { runProspectResearchSkill, runResearchSkill } from "./research/researchRuntime";
 import type { ResearchExecutionInput, ResearchOutcome, ResearchSynthesis } from "./research/types";
 
 /**
@@ -29,7 +29,7 @@ export async function runActionResearch(
   access: AccessContext,
 ): Promise<ResearchOutcome> {
   const methodology = skills.get("research_signal");
-  return executeResearch(env, { ...input, skillContent: methodology.content }, access);
+  return runResearchSkill(env, { ...input, skillContent: methodology.content }, access);
 }
 
 /**
@@ -45,7 +45,7 @@ export async function runProspectResearch(
   access: AccessContext,
 ): Promise<ResearchOutcome> {
   const methodology = skills.get("research_signal");
-  return executeProspectResearch(env, { ...input, skillContent: methodology.content }, access);
+  return runProspectResearchSkill(env, { ...input, skillContent: methodology.content }, access);
 }
 
 /**

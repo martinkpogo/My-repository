@@ -13,6 +13,8 @@ import {
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import { sendMessage, sendOperationsMessage } from "./telegram";
+import { researchOnline } from "./runtime/webResearch";
+import type { PendingResearch } from "./runtime/research/types";
 import { withLiveStatus } from "./runtime/liveStatus";
 import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./runtime/workStatus";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
@@ -56,6 +58,8 @@ const RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE =
 
 /** The storage flag that arms the Checker's advisory assessment for alarm(). */
 const PENDING_ADVISORY_ASSESSMENT_KEY = "pendingAdvisoryAssessment";
+/** A paused research job this Work resumes on its alarm (option B). */
+const PENDING_RESEARCH_KEY = "pendingResearch";
 /** How long after the draft is saved the assessment's alarm fires. */
 const ADVISORY_ASSESSMENT_DELAY_MS = 2_000;
 
@@ -278,6 +282,57 @@ export class WorkSession extends DurableObject<Env> {
     // The Checker's advisory second opinion, scheduled by execute() (see
     // scheduleAdvisoryAssessment). Never throws and never blocks a pickup.
     await this.runPendingAdvisoryAssessment();
+    // A research job paused because providers were busy (option B). Never throws.
+    await this.runPendingResearch();
+  }
+
+  /**
+   * Records a research job to resume in the background and arms this Work's
+   * alarm for it (option B, Martin 15 Nov 2026). Only the research resumes --
+   * no Hat step is re-run. One alarm serves every pending task, so an earlier
+   * alarm is never pushed later.
+   */
+  private async schedulePendingResearch(pending: PendingResearch): Promise<void> {
+    await this.ctx.storage.put(PENDING_RESEARCH_KEY, pending);
+    const at = Math.max(Date.now() + 1000, pending.retryAt ? Date.parse(pending.retryAt) || 0 : 0);
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || existing > at) await this.ctx.storage.setAlarm(at);
+  }
+
+  /**
+   * Resumes a paused research job from its checkpoint, inside this Work's own
+   * execution (so its checkpoint store, Access and live status apply). Still
+   * busy -> it pauses and re-arms itself (bounded by the 24-hour pause limit
+   * in the Research Runtime). Complete -> the findings are saved (24-hour
+   * research cache) and Martin is told they are ready for the draft.
+   */
+  private async runPendingResearch(): Promise<void> {
+    try {
+      const pending = await this.ctx.storage.get<PendingResearch>(PENDING_RESEARCH_KEY);
+      if (!pending) return;
+      const due = pending.retryAt ? Date.parse(pending.retryAt) : 0;
+      if (Number.isFinite(due) && due > Date.now() + 1000) {
+        // The alarm fired for another task first: wait for this job's own time.
+        await this.schedulePendingResearch(pending);
+        return;
+      }
+      await this.ctx.storage.delete(PENDING_RESEARCH_KEY); // a re-fired alarm never resumes twice
+      await this.execute(async (state) => {
+        const found = await researchOnline(this.env, pending.question, workSessionContext(state));
+        if (found) {
+          await sendMessage(
+            this.env,
+            state.chatId,
+            `✅ The web research for this work is complete and saved for 24 hours.\n\n${found.digest}\n\nRedo the draft (or ask again) and it will use these findings.`,
+            undefined,
+            state.threadId,
+          );
+        }
+        return state;
+      });
+    } catch (err) {
+      console.error(`WorkSession: resuming paused research failed`, err);
+    }
   }
 
   /**
@@ -646,15 +701,18 @@ export class WorkSession extends DurableObject<Env> {
     // execution intent and outcome into `state.externalOperations` and
     // flushes them straight to this Work's own DO storage, so the records
     // survive even when the handler throws and `save` below never runs --
-    // which is exactly the interruption window recovery exists for. The flush
+    // which is exactly the interruption window recovery exists for. Research
+    // checkpoints (`state.researchCheckpoints`, BD-15) ride the same flush, so
+    // a research job interrupted mid-run resumes without repeating completed
+    // searches. The flush
     // writes ONLY those operation records over the last saved state; a thrown
     // handler still rolls back its own partial state exactly as before.
     const release = installWorkPersistence(
       String(state.workId),
       workStatePersistence(state, async () => {
         const persisted = migrateSavedWork(await this.ctx.storage.get<WorkState>("state")) ?? state;
-        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations });
-      }),
+        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations, researchCheckpoints: state.researchCheckpoints });
+      }, (pending) => this.schedulePendingResearch(pending)),
     );
     try {
       // Universal live status (src/runtime/liveStatus.ts): every Work run

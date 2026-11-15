@@ -9,6 +9,18 @@ import { GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDE
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
 import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator, type OutboundGateReasonCategory } from "./outboundGate";
 import { sendMessage } from "../telegram";
+import { clearCooldown, cooldownUntil, startCooldown } from "../runtime/research/searchProviders";
+
+/**
+ * Resumable AI calls (Martin's decision, 15 Nov 2026): the executor remembers
+ * which AI providers are cooling down after a rate limit or outage and skips
+ * them until the cooldown ends (the shared bounded ladder: the provider's own
+ * retry-after, else 1, 5, 15, 60 minutes). Eligibility is unchanged -- a
+ * cooldown only removes a provider for a while, never adds one.
+ */
+export function aiCooldownKey(providerId: string): string {
+  return `ai:${providerId}`;
+}
 
 /**
  * WHY an AI call produced no usable response -- the distinction a plain
@@ -32,7 +44,17 @@ export type AiFailureCause = "outbound_gate_blocked" | "providers_exhausted" | "
  */
 export type AiCallOutcome =
   | { ok: true; response: CommonAiResponse }
-  | { ok: false; cause: AiFailureCause; gateReasons: string[] };
+  | {
+      ok: false;
+      cause: AiFailureCause;
+      gateReasons: string[];
+      /**
+       * When the failure is that every eligible provider is cooling down or
+       * just failed on a rate limit / outage: the earliest time one is expected
+       * back (resumable AI calls, Martin 15 Nov 2026). Absent otherwise.
+       */
+      retryAt?: string;
+    };
 
 // Fallback order: Workers AI first (it's the free baseline until its
 // daily quota is hit), then the free-tier OpenAI-compatible providers.
@@ -166,7 +188,7 @@ export class AiPolicyExecutor {
    * retry below, so every eligibility check, boundary evaluation, redaction
    * verification, gate evaluation and validation applies identically to both.
    */
-  private async runProviderChain(env: Env, task: AiTask, providers: AiProvider[], allowLastResort: boolean): Promise<AiCallOutcome> {
+  private async runProviderChain(env: Env, task: AiTask, providers: AiProvider[], allowLastResort: boolean, ignoreCooldown = false): Promise<AiCallOutcome> {
     const eligible = providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
       console.error("AiPolicyExecutor: No eligible AI provider available");
@@ -182,6 +204,11 @@ export class AiPolicyExecutor {
     let malformed = 0;
     let infraFailures = 0;
     let redactionAborted = false;
+    let cooling = 0;
+    let earliestRetry: number | null = null;
+    const noteRetry = (at: number) => {
+      earliestRetry = earliestRetry === null ? at : Math.min(earliestRetry, at);
+    };
     // Providers that failed on a rate limit and named how long to wait.
     const waitCandidates: Array<{ provider: AiProvider; waitMs: number }> = [];
     const gateReasons = new Set<OutboundGateReasonCategory>();
@@ -191,6 +218,13 @@ export class AiPolicyExecutor {
         continue;
       }
       attempted.add(provider.id);
+      // The last resort has just waited out this provider's own rate limit, so it is not skipped for it.
+      const coolingUntil = ignoreCooldown ? null : await cooldownUntil(env, aiCooldownKey(provider.id));
+      if (coolingUntil !== null) {
+        cooling++;
+        noteRetry(coolingUntil);
+        continue;
+      }
       processed++;
 
       // Data Boundary Seam: Evaluates provider independently against data boundary policy
@@ -295,6 +329,7 @@ export class AiPolicyExecutor {
           malformed++;
           continue;
         }
+        await clearCooldown(env, aiCooldownKey(provider.id));
         return { ok: true, response: result.response };
       }
 
@@ -315,6 +350,10 @@ export class AiPolicyExecutor {
       // Fallback loop continues to next eligible provider
       infraFailures++;
       if (result.error.retryAfterMs !== undefined) waitCandidates.push({ provider, waitMs: result.error.retryAfterMs });
+      const status = result.error.statusCode;
+      if (status === 429 || status === 408 || (status !== undefined && status >= 500) || status === undefined) {
+        noteRetry(await startCooldown(env, aiCooldownKey(provider.id), result.error.retryAfterMs));
+      }
     }
 
     if (!redactionAborted) {
@@ -334,7 +373,7 @@ export class AiPolicyExecutor {
         const waitMs = candidate.waitMs + LAST_RESORT_MARGIN_MS;
         console.warn(`AiPolicyExecutor: last resort -- waiting ${waitMs}ms for ${candidate.provider.id}'s rate limit, then trying it once more for task ${task.taskId}`);
         await countDownLiveStep(waitMs, AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
-        const retried = await this.runProviderChain(env, task, [candidate.provider], false);
+        const retried = await this.runProviderChain(env, task, [candidate.provider], false, true);
         if (retried.ok) return retried;
       }
     }
@@ -345,7 +384,12 @@ export class AiPolicyExecutor {
     if (malformed > 0 && infraFailures === 0) {
       return { ok: false, cause: "unparseable", gateReasons: reasons };
     }
-    return { ok: false, cause: "providers_exhausted", gateReasons: reasons };
+    return {
+      ok: false,
+      cause: "providers_exhausted",
+      gateReasons: reasons,
+      ...(earliestRetry !== null && (infraFailures > 0 || cooling > 0) ? { retryAt: new Date(earliestRetry).toISOString() } : {}),
+    };
   }
 }
 

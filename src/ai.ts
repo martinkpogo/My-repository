@@ -245,7 +245,7 @@ export async function generate(env: Env, options: BaseGenerateOptions & { mode: 
  */
 export type AiJsonOutcome<T> =
   | { ok: true; json: T }
-  | { ok: false; cause: AiFailureCause; gateReasons: string[] };
+  | { ok: false; cause: AiFailureCause; gateReasons: string[]; retryAt?: string };
 
 /**
  * generateWithOutcome -- json mode only: byte-identical to
@@ -274,7 +274,7 @@ export async function generateWithOutcome<T = Record<string, unknown>>(
     maxTokens: options.maxTokens,
   }));
   if (!outcome.ok) {
-    return { ok: false, cause: outcome.cause, gateReasons: outcome.gateReasons };
+    return { ok: false, cause: outcome.cause, gateReasons: outcome.gateReasons, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) };
   }
 
   const jsonText = extractJson(outcome.response.rawText);

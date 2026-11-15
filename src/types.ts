@@ -143,6 +143,39 @@ export interface Env {
   TAVILY_API_KEY?: string;
 
   /**
+   * Search fallback providers (BD-15, issue #338; Martin's choice 14 Nov
+   * 2026: Exa then Serper, Brave excluded). A fallback is used only when it
+   * is EXPLICITLY ENABLED in `SEARCH_FALLBACK_PROVIDERS` (a comma list, e.g.
+   * "exa,serper"), has its key secret set, and has a monthly budget
+   * (src/runtime/research/searchProviders.ts). Unset means Tavily alone, as
+   * before. Never selectable by a caller, Hat or Skill.
+   */
+  EXA_API_KEY?: string;
+  SERPER_API_KEY?: string;
+  SEARCH_FALLBACK_PROVIDERS?: string;
+  /**
+   * Monthly request budgets per search provider, each kept below the
+   * provider's free allowance so nothing is ever charged. Tavily and Serper
+   * have code defaults; Exa has none and stays ineligible until this is set
+   * from Martin's own Exa dashboard.
+   */
+  SEARCH_MONTHLY_BUDGET_TAVILY?: string;
+  SEARCH_MONTHLY_BUDGET_EXA?: string;
+  SEARCH_MONTHLY_BUDGET_SERPER?: string;
+
+  /**
+   * Web page read fallback readers (canonical spec "Web page read", Martin
+   * 15 Nov 2026): a comma list of "jina_reader", "tavily_extract". Direct
+   * fetch is always first and free. Jina needs JINA_API_KEY; its monthly
+   * budget defaults below its one-time free grant (override with
+   * PAGE_READ_MONTHLY_BUDGET_JINA). Tavily Extract shares Tavily's search
+   * budget. See src/runtime/research/webPageRead.ts.
+   */
+  PAGE_READ_FALLBACK_READERS?: string;
+  JINA_API_KEY?: string;
+  PAGE_READ_MONTHLY_BUDGET_JINA?: string;
+
+  /**
    * Free-tier AI provider fallback keys (src/ai/openaiCompatible.ts),
    * all optional -- added after Cloudflare Workers AI's daily quota
    * exhaustion blocked every AI-driven Hat/Unit at once. Each is a no-op
@@ -590,6 +623,16 @@ export interface WorkState {
    * first external operation.
    */
   externalOperations?: Record<string, ExternalToolOperationRecord>;
+
+  /**
+   * Compact research checkpoints for this Work, keyed by research job id
+   * (BD-15, canonical Search spec research_continuation). Written through the
+   * same durable flush as `externalOperations` (src/runtime/workPersistence.ts)
+   * so a resumed research job never repeats completed searches. Holds the
+   * approved question, plan, per-search statuses and references into the
+   * Search Tool's result cache -- never evidence payloads or conversation.
+   */
+  researchCheckpoints?: Record<string, import("./runtime/research/types").ResearchCheckpoint>;
 
   /**
    * A proposed new Matter's drafted title + stated need, shown to Martin
