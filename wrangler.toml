@@ -106,6 +106,10 @@ CALL_NOTES_DATA_SOURCE_ID = "a2bf0fa6-7fd5-47ab-b5f2-1fc599f2d164"
 # token-only. Read by ENIG's business snapshot; the Runtime writes nothing
 # here until an approval-gated Finance action exists (Martin, 2026-11-09).
 PAYMENTS_DATA_SOURCE_ID = "703a276e-2183-4f89-9627-9625b099a851"
+# Research (Operation Records / Research): results of Martin-started research
+# (/research, /deep_research -- Build Decision, 15 Nov 2026). Written only
+# under the operator_research Access context; never a client name.
+RESEARCH_DATA_SOURCE_ID = "419cb004-e583-81e5-ab45-000b0291e404"
 # Maps each Unit to its Telegram forum topic's message_thread_id in the
 # ENIG HQ Supergroup, simulating one dedicated AI Workspace per Unit.
 UNIT_TOPIC_MAP = '{"Marketing": 393, "Business Development": 397, "Sales": 399, "Finance": 6, "Strategy": 8, "Creative & Design": 12, "Operations": 14}'

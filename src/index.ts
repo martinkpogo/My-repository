@@ -4,6 +4,8 @@ import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import {
   getActiveWorkId,
   getSessionStub,
+  newWorkId,
+  resolveStreamForThread,
   getWorkspaceMode,
   routeIncomingText,
   setActiveWorkId,
@@ -18,6 +20,7 @@ import {
 } from "./checkHandoffs";
 import { startGoogleDocsSmokeFlow } from "./googleDocsSmokeFlow";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
+import { parseResearchCommand } from "./runtime/operatorResearch";
 import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
 import { findUnitManifest, getUnitManifests } from "./units/registry";
@@ -580,7 +583,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /continue <Matter> to resume a Matter's current work item (e.g. /continue MAT-20), /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly.",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /continue <Matter> to resume a Matter's current work item (e.g. /continue MAT-20), /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly, /research or /deep_research [topic] to research a topic on the public web (it asks you a few questions first).",
         undefined,
         threadId,
       );
@@ -677,6 +680,26 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       }
       await Promise.all(keys.map((key) => kvDelete(env, key)));
       await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
+      return;
+    }
+    // Martin-started research (Build Decision, 15 Nov 2026): Martin operating
+    // the SHARED Research Runtime directly, like /lookup -- owned by no Unit
+    // or Hat, so it starts no Unit dispatch. A named, bounded exception to
+    // "capabilities start only through the Action Registry": its Work runs
+    // under the operator_research Access context (public web and the
+    // Research database only). Topics only, where replies reach the Work.
+    const researchCommand = parseResearchCommand(text);
+    if (researchCommand) {
+      const stream = resolveStreamForThread(env, threadId);
+      if (stream === "dm" || stream === "operations" || stream === "unmapped") {
+        await sendMessage(env, chatId, "Use /research or /deep_research in the Workspace topic (or a Unit topic), so your answers reach it.", undefined, threadId);
+        return;
+      }
+      const workId = newWorkId();
+      const stub = getSessionStub(env, workId);
+      await stub.init(workId, chatId, undefined, undefined, threadId);
+      await setActiveWorkId(env, chatId, threadId, workId);
+      await stub.startOperatorResearch(researchCommand.mode, researchCommand.topic);
       return;
     }
     // Lead Generation Specialist's own entry point (Sales Unit's Lead

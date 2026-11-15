@@ -171,6 +171,11 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Research Skill Step",
     description: "One Skill-guided research step on the Research Runtime: reads the public results gathered so far and answers with the next batch of search / page-read operations, evidence notes, or done. Never fabricates a source, quote or fact.",
   },
+  "research.brief_questions": {
+    id: "research.brief_questions",
+    name: "Research Brief Questions",
+    description: "For Martin-started research (/research, /deep_research): reads Martin's research topic and his answers so far and writes the next short clarifying question, or flags that the topic names a specific person or organisation so he can rephrase it. Never researches and never answers the question itself.",
+  },
   "action.google_doc_intake": {
     id: "action.google_doc_intake",
     name: "Google Doc Intake Classification & Parameter Extraction",

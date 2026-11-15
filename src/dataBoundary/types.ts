@@ -35,6 +35,7 @@ export type SemanticTaskId =
   | "lead.candidate_research_plan"
   | "lead.candidate_research_synthesis"
   | "research.skill_step"
+  | "research.brief_questions"
   | "action.google_doc_intake"
   | "action.google_doc_comment_edit"
   | "action.google_doc_comment_intent"

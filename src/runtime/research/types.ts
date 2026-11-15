@@ -101,6 +101,8 @@ export interface ResearchCheckpoint {
 export interface PendingResearch {
   question: string;
   mode: "light_search" | "deep_research";
+  /** Supplied context the job was started with (Martin's research brief answers); part of the job's identity, so a resume finds the same checkpoint. */
+  context?: string;
   /** No sooner than this; absent means "as soon as the alarm can run". */
   retryAt?: string;
 }
