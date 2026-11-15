@@ -189,8 +189,19 @@ export async function researchOnline(env: Env, question: string, access: AccessC
   const outcome = await runResearchSkill(env, { question, context: "", skillContent: methodology, ...(checkpoints ? { checkpoints } : {}) }, access);
   if (outcome.status === "interrupted") {
     // Visibly incomplete: the run's end card says research paused and why,
-    // and nothing is handed to the Hat as if research had completed.
-    noteResearchInterrupted(env, question, outcome);
+    // and nothing is handed to the Hat as if research had completed. Inside
+    // a Work, the research job itself resumes on the Work's alarm
+    // (option B, Martin 15 Nov 2026) -- no Hat step is re-run.
+    const scheduled = checkpoints?.scheduleResume
+      ? await checkpoints.scheduleResume({ question, mode: "light_search", ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) }).then(
+          () => true,
+          (err) => {
+            console.error("Research resume not scheduled", err instanceof Error ? err.message : err);
+            return false;
+          },
+        )
+      : false;
+    noteResearchInterrupted(env, question, { ...outcome, resumesAutomatically: scheduled });
     return null;
   }
   if (outcome.status !== "completed") return null;

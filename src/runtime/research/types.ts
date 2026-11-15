@@ -97,10 +97,24 @@ export interface ResearchCheckpoint {
   };
 }
 
+/** A research job waiting for providers, which the owning Work resumes on its own alarm (option B, Martin 15 Nov 2026). */
+export interface PendingResearch {
+  question: string;
+  mode: "light_search" | "deep_research";
+  /** No sooner than this; absent means "as soon as the alarm can run". */
+  retryAt?: string;
+}
+
 /** The port WorkSession supplies: load and durably save one job's checkpoint. Saving must be durable on return. */
 export interface ResearchCheckpointStore {
   load(jobId: string): Promise<ResearchCheckpoint | undefined>;
   save(checkpoint: ResearchCheckpoint): Promise<void>;
+  /**
+   * Arms the owning Work's alarm to resume this research job in the
+   * background (WorkSession owns the lifecycle and scheduling). Absent where
+   * no Work can resume it.
+   */
+  scheduleResume?(pending: PendingResearch): Promise<void>;
 }
 
 /**

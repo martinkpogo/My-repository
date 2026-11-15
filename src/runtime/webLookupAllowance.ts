@@ -75,6 +75,8 @@ export interface RunGaps {
   retryAt?: string;
   completed?: number;
   total?: number;
+  /** True when the owning Work will resume the research on its own alarm. */
+  resumesAutomatically?: boolean;
 }
 export const runGaps = new WeakMap<object, RunGaps>();
 
@@ -100,7 +102,7 @@ function armLimitCard(env: Env, run: NonNullable<ReturnType<typeof currentRun>>)
  * how far it got, when providers are expected back -- so an incomplete job is
  * never mistaken for a finished one. Outside a run there is no card.
  */
-export function noteResearchInterrupted(env: Env, question: string, outcome: { retryAt?: string; completedOperations: number; totalOperations: number }): void {
+export function noteResearchInterrupted(env: Env, question: string, outcome: { retryAt?: string; completedOperations: number; totalOperations: number; resumesAutomatically?: boolean }): void {
   const run = currentRun();
   if (!run) return;
   const gaps = runGaps.get(run) ?? { question, gaps: [] };
@@ -109,6 +111,7 @@ export function noteResearchInterrupted(env: Env, question: string, outcome: { r
   if (outcome.retryAt) gaps.retryAt = outcome.retryAt;
   gaps.completed = outcome.completedOperations;
   gaps.total = outcome.totalOperations;
+  gaps.resumesAutomatically = outcome.resumesAutomatically === true;
   runGaps.set(run, gaps);
   reportLiveStep("Web research paused: search providers busy");
   armLimitCard(env, run);
@@ -135,7 +138,7 @@ async function postLimitCard(env: Env, run: NonNullable<ReturnType<typeof curren
   if (info.reason === "providers_busy") {
     const when = retryTimeLabel(info.retryAt);
     const progress = info.total ? ` ${info.completed ?? 0} of ${info.total} searches are done and saved.` : "";
-    const text = `⏸ Web research paused: the search providers are busy (rate-limited or temporarily down), so the answer above was written without it.${progress}${when ? ` They should be back around ${when}.` : ""} Research continues from where it stopped the next time this work researches the same question.`;
+    const text = `⏸ Web research paused: the search providers are busy (rate-limited or temporarily down), so the answer above was written without it.${progress}${when ? ` They should be back around ${when}.` : ""} ${info.resumesAutomatically ? `Research resumes on its own${when ? ` around ${when}` : ""} from where it stopped, and you'll get a message when it is complete.` : "Research continues from where it stopped the next time this work researches the same question."}`;
     const busyButtons: InlineButton[][] = [[{ text: "🔎 Try research again", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:more` }, { text: "✅ That's enough", callback_data: `${WEB_RESEARCH_CALLBACK}:${id}:done` }]];
     await sendMessage(env, run.target.chatId, text, busyButtons, run.target.threadId);
     return;

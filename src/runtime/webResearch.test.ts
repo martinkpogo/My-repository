@@ -299,3 +299,24 @@ test("research checkpoints: the store is the executing Work's own -- found only 
   }
   assert.strictEqual(getResearchCheckpointStore("work-running"), undefined, "released with the Work's execution");
 });
+
+test("option B: the Work's checkpoint store exposes scheduleResume, passing the paused job to WorkSession's scheduler", async () => {
+  const scheduled: unknown[] = [];
+  const { workStatePersistence } = await import("./workPersistence");
+  const store = workStatePersistence({ workId: "w" } as any, async () => undefined, async (p) => void scheduled.push(p)).research!;
+  await store.scheduleResume!({ question: "what do SMEs struggle with", mode: "light_search", retryAt: "2026-11-15T14:05:00.000Z" });
+  assert.deepStrictEqual(scheduled, [{ question: "what do SMEs struggle with", mode: "light_search", retryAt: "2026-11-15T14:05:00.000Z" }]);
+  assert.strictEqual(workStatePersistence({ workId: "w" } as any, async () => undefined).research!.scheduleResume, undefined, "no scheduler, no resume");
+});
+
+test("option B: when the Work will resume research itself, the paused card says so and names the time", async (t) => {
+  const calls = mockTelegram(t);
+  const env = fakeEnv();
+  await withLiveStatus(env, target, async () => {
+    noteResearchInterrupted(env, "q", { retryAt: "2026-11-15T14:05:00.000Z", completedOperations: 1, totalOperations: 2, resumesAutomatically: true });
+    return "ok";
+  }, () => "succeeded", undefined, { access: systemContext() });
+  const card = calls.find((c) => c.method === "sendMessage" && /^⏸ Web research paused/.test(c.body.text));
+  assert.ok(/resumes on its own around 14:05 UTC/.test(card!.body.text));
+  assert.ok(/message when it is complete/.test(card!.body.text));
+});

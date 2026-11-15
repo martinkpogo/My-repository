@@ -27,7 +27,7 @@
  * recovered after an interruption must not be initiated at all.
  */
 import type { ExternalToolOperationRecord, WorkState } from "../types";
-import type { ResearchCheckpoint, ResearchCheckpointStore } from "./research/types";
+import type { PendingResearch, ResearchCheckpoint, ResearchCheckpointStore } from "./research/types";
 
 /**
  * The minimal durable-recovery surface the invocation boundary needs.
@@ -86,7 +86,7 @@ export function installWorkPersistence(workId: string, persistence: ToolOperatio
  * durable (WorkSession passes a Durable Object storage write that preserves
  * the pre-handler state except for `externalOperations`).
  */
-export function workStatePersistence(state: WorkState, flush: () => Promise<void>): ToolOperationPersistence {
+export function workStatePersistence(state: WorkState, flush: () => Promise<void>, scheduleResume?: (pending: PendingResearch) => Promise<void>): ToolOperationPersistence {
   return {
     research: {
       async load(jobId: string): Promise<ResearchCheckpoint | undefined> {
@@ -99,6 +99,7 @@ export function workStatePersistence(state: WorkState, flush: () => Promise<void
         pruneResearchCheckpoints(checkpoints);
         await flush();
       },
+      ...(scheduleResume ? { scheduleResume } : {}),
     },
     async load(key: string): Promise<ExternalToolOperationRecord | undefined> {
       return state.externalOperations?.[key];
