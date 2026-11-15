@@ -286,3 +286,22 @@ test("rejecting a draft records no approval evidence", async (t) => {
   await handleDraftApproval(fakeEnv(), state, false);
   assert.equal(state.resultReview?.evidence, undefined);
 });
+
+test("option B: Marketing declares continueAfterResearch, and it refuses unless the Work is waiting on research", async () => {
+  const { marketingManifest, continueMarketingAfterResearch } = await import("./marketingManifest");
+  for (const hat of Object.values(marketingManifest.hats)) assert.strictEqual(typeof hat.continueAfterResearch, "function", hat.name);
+  const sent: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+    sent.push(JSON.parse(String(init?.body ?? "{}")).text ?? "");
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+  }) as typeof fetch;
+  try {
+    const state = { workId: "w", chatId: 1, stage: "awaiting_marketing_draft_approval", unit: "Marketing", hat: Object.keys(marketingManifest.hats)[0] } as any;
+    const out = await continueMarketingAfterResearch({ TELEGRAM_BOT_TOKEN: "t" } as any, state);
+    assert.strictEqual(out.stage, "awaiting_marketing_draft_approval");
+    assert.deepStrictEqual(sent, [], "no draft or dispatch ran");
+  } finally {
+    globalThis.fetch = original;
+  }
+});

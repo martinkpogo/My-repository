@@ -19,6 +19,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordOutputApprovalAsResultApproval, recordResultEvidence } from "../../resultReview";
 import { hashContent } from "../../contentHash";
+import { researchPausedInRun } from "../../runtime/webLookupAllowance";
 import type { ResultReviewEvidenceItem } from "../../types";
 import { handleHandoffPickup } from "../../hats/executionEngine";
 import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
@@ -206,6 +207,17 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(env, state, `Couldn't determine how to handle this. Please try again or rephrase.`);
+    return state;
+  }
+
+  // Option B (Martin, 15 Nov 2026): a draft is the finished result of the
+  // analysis. If this step's web research paused because providers were
+  // busy, hold the draft: the research resumes on the Work's alarm, and
+  // "Continue to draft" re-runs this step with the completed findings.
+  if (researchPausedInRun()) {
+    state.stage = "awaiting_research";
+    state.awaiting = undefined;
+    await finishWorkStatus(env, state, "⏸ Research paused -- the draft is held until it is complete.", "succeeded");
     return state;
   }
 
@@ -824,7 +836,23 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       marketing_clarification: handleMarketingClarification,
     },
     callbackHandlers: marketingCallbackHandlers,
+    // Option B (Martin, 15 Nov 2026): Marketing holds its draft while its
+    // research is paused, and continues through its own redo path -- the
+    // same re-run handleMarketingFeedback uses -- once WorkSession has fed
+    // the completed findings into the run.
+    continueAfterResearch: continueMarketingAfterResearch,
   };
+}
+
+/** Re-runs the Hat step after paused research completed (the findings are already in the run). */
+export async function continueMarketingAfterResearch(env: Env, state: WorkState): Promise<WorkState> {
+  if (state.stage !== "awaiting_research") {
+    await sendWorkspaceHatMessage(env, state, "This work isn't waiting on research -- nothing to continue.");
+    return state;
+  }
+  state.stage = "in_progress";
+  await sendWorkspaceHatMessage(env, state, "Research is complete -- drafting with it now.");
+  return dispatchMarketingHat(env, state);
 }
 
 export const marketingManifest: UnitManifest = {

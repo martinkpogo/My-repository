@@ -225,6 +225,14 @@ export interface HatManifest<A extends string = string> {
    * it exactly as their former switch case did.
    */
   callbackHandlers?: Record<string, ApprovalCallbackHandler>;
+  /**
+   * Option B (Martin, 15 Nov 2026): this Hat holds its draft when research
+   * pauses (stage `awaiting_research`) and declares how to continue once the
+   * research completes -- through its own existing, re-run-safe redo path.
+   * WorkSession feeds the completed findings into the run before calling it.
+   * Absent: the Hat drafts as before, with the paused card alongside.
+   */
+  continueAfterResearch?: (env: Env, state: WorkState) => Promise<WorkState>;
 }
 
 export interface UnitManifest {

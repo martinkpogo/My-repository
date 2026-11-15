@@ -250,6 +250,39 @@ async function writeCachedResearch(env: Env, key: string, result: { digest: stri
   }
 }
 
+/** Deep Research findings are cached under their own key, so a Light answer is never served for a Deep request. */
+async function deepResearchCacheKey(question: string): Promise<string> {
+  return RESEARCH_CACHE_PREFIX + "deep:" + (await hashContent(question.trim().toLowerCase().replace(/\s+/g, " ")));
+}
+
+/** Saves completed Deep Research findings for 24 hours (same rules as the research cache). */
+export async function saveDeepResearchFindings(env: Env, question: string, result: { digest: string; gaps: string[] }): Promise<void> {
+  await writeCachedResearch(env, await deepResearchCacheKey(question), result);
+}
+
+/** Completed findings for this question, Deep Research first, else Light Search; null when none are saved. */
+export async function savedResearchFindings(env: Env, question: string): Promise<{ digest: string; gaps: string[]; mode: "deep_research" | "light_search" } | null> {
+  const deep = await readCachedResearch(env, await deepResearchCacheKey(question));
+  if (deep) return { ...deep, mode: "deep_research" };
+  const light = await readCachedResearch(env, await researchCacheKey(question));
+  return light ? { ...light, mode: "light_search" } : null;
+}
+
+/**
+ * Feeds already-completed research findings into the CURRENT run, so the
+ * Hat's next AI step uses exactly these findings instead of deciding and
+ * researching again ("Continue to draft", option B). Returns false when no
+ * findings are saved or there is no run.
+ */
+export async function seedRunResearchFindings(env: Env, question: string): Promise<boolean> {
+  const run = currentRun();
+  if (!run) return false;
+  const saved = await savedResearchFindings(env, question);
+  if (!saved) return false;
+  runResearch.set(run, Promise.resolve(findingsBlock(question, saved.digest)));
+  return true;
+}
+
 /** The augmenter installed on the shared AI executor. Never throws past the executor's own guard. */
 export interface WebResearchDeps {
   decide: (env: Env, task: AiTask) => Promise<string | null>;
