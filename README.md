@@ -10,7 +10,7 @@ Current status
 
 Runtime: Cloudflare Worker (`enig-agent`), Durable Objects for per-work-item state, KV for routing/session-index state
 Primary AI provider: Cloudflare Workers AI
-Provider architecture: Provider abstraction implemented (Workers AI plus several OpenAI-compatible fallback providers); automatic cross-provider fallback policy is not yet implemented — an ineligible/unavailable provider fails closed rather than silently downgrading
+Provider architecture: Provider abstraction implemented (Workers AI plus OpenAI-compatible fallback providers). Cross-provider AI fallback is implemented and data-boundary-gated (`src/ai/policy.ts`, `src/dataBoundary/policy.ts`): a provider is tried only if eligible for the task's sensitivity, and an ineligible/unavailable chain fails closed rather than silently downgrading
 System of record: Notion
 Operational interface: Telegram (two-stream: a Workspace topic for interactive decisions/approvals, an Operations topic for background telemetry/watchdogs)
 Live Units: Sales (Lead Generation Specialist), Marketing, Finance
@@ -159,7 +159,7 @@ src/
 ├── googleDocComments.ts, googleSheetComments.ts
 │                                — comment-triggered live editing (polled) for Docs and Sheets
 ├── runtime/                    — generic runtime composition (Work contract, Organization/Action resolution) and non-organizational execution infrastructure
-│   ├── research/               — research runtime: executeResearch pipeline, protocol descriptors, plan, guardrails, Tavily-backed search, safe-context validation
+│   ├── research/               — research runtime: executeResearch pipeline, protocol descriptors, plan, guardrails, the shared Search Tool (Tavily primary; Exa/Serper fallback), resumable research checkpoints, safe-context validation
 │   └── evidence/               — shared evidence & source validation (citation chain, provenance gate)
 ├── hats/
 │   ├── registry.ts             — Marketing Hat registry (name → definition)
@@ -280,7 +280,7 @@ The runtime currently interfaces with:
 * Cloudflare Workers — runtime, Durable Objects (per-work-item session state), KV (routing pointers, `sessions_index`, watchdog bookkeeping)
 * Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Gemini, NVIDIA NIM) at the same protection tier; Cerebras and SambaNova adapters exist but are out of the chain (2026-11-14)
 * Google Workspace (Docs, Sheets, Drive) — OAuth-authorized, multi-account controlled Doc/Sheet creation with explicit approval before anything is written, plus comment-triggered live editing (polled)
-* Tavily — optional live web search backing the research runtime and Lead Generation discovery; research stays closed-book (reasoning over supplied context only) if unset, rather than failing
+* Search providers — Tavily (primary) with optional Exa and Serper fallbacks (enabled only via `SEARCH_FALLBACK_PROVIDERS` plus their keys, each held to a monthly budget below its free allowance; BD-15). Research stays closed-book (reasoning over supplied context only) if no provider is configured, rather than failing
 
 Additional integrations may be added when required by an approved responsibility.
 
