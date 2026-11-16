@@ -123,6 +123,26 @@ export function validateSynthesis(synthesis: EvidenceSynthesis): SynthesisValida
 }
 
 /**
+ * Removes every Finding that cites no evidence, and every Implication that
+ * rests on a removed Finding, stating the removal as a Limitation -- for a
+ * caller that declared it (ResearchExecutionInput.dropUnsupportedFindings).
+ * Only that one failure is repaired: a Finding citing evidence that does not
+ * exist is a fabricated reference and is left for validateSynthesis to
+ * reject. When nothing would remain, the synthesis is returned unchanged so
+ * the gate rejects it with its own reason.
+ */
+export function removeUnsupportedFindings<T extends EvidenceSynthesis>(synthesis: T): { synthesis: T; removed: number } {
+  const unsupported = new Set(synthesis.findings.filter((f) => f.evidenceIds.length === 0).map((f) => f.id));
+  if (unsupported.size === 0) return { synthesis, removed: 0 };
+  const findings = synthesis.findings.filter((f) => !unsupported.has(f.id));
+  if (findings.length === 0) return { synthesis, removed: 0 };
+  const removed = synthesis.findings.length - findings.length;
+  const implications = synthesis.implications.filter((i) => !i.basedOnFindingIds.some((id) => unsupported.has(id)));
+  const note = `${removed} finding${removed === 1 ? " was" : "s were"} removed because ${removed === 1 ? "it" : "they"} cited no evidence${implications.length < synthesis.implications.length ? ", with the implications that rested on them" : ""}.`;
+  return { synthesis: { ...synthesis, findings, implications, limitations: [...synthesis.limitations, { statement: note }] }, removed };
+}
+
+/**
  * Evidence & Source Validation -- the mandatory validation gate every
  * evidence synthesis passes through exactly once, in this order, before
  * it is shown to Martin or written back anywhere:

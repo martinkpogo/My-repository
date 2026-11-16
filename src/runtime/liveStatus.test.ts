@@ -289,6 +289,14 @@ test("work runs: header and outcome come from the Work's own fields", () => {
   assert.strictEqual(workLiveOutcome({ stage: "complete" } as any), "succeeded");
   assert.strictEqual(workLiveOutcome({ stage: "complete", awaiting: "x" } as any), "waiting");
   assert.strictEqual(workLiveOutcome({ stage: "awaiting_lead_approval" } as any), "waiting");
+  // A Work that stopped without succeeding keeps its status (16 Nov 2026).
+  for (const stage of ["research_incomplete", "strategy_blocked", "finance_blocked", "handoff_held", "identity_boundary_hold"]) {
+    assert.strictEqual(workLiveOutcome({ stage } as any), "failed", stage);
+  }
+  assert.strictEqual(workLiveOutcome({ stage: "qualification_hold", awaiting: "call_notes" } as any), "waiting", "a hold that waits for Martin waits");
+  for (const stage of ["cancelled", "closed_not_qualified", "delivered", "researching"]) {
+    assert.strictEqual(workLiveOutcome({ stage } as any), "succeeded", stage);
+  }
 });
 
 test("chokepoint: an AI call inside a run reports the task's fixed plain label (Martin, 2026-11-13) -- never the prompt", async (t) => {

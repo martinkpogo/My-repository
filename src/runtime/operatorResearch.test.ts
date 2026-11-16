@@ -84,7 +84,7 @@ test("identityProblem refuses record tokens, contact details, links and ENIG/Mar
   assert.strictEqual(identityProblem("Why do Accra SMEs struggle to stand out?"), null);
 });
 
-test("light flow: topic -> two questions one at a time -> brief -> Start schedules the job with the answers as context", async () => {
+test("light flow: topic -> two questions one at a time -> brief -> Start schedules the job with the answers as its brief, never as evidence", async () => {
   const h = harness([{ question: "What is it for?" }, { question: "Which sector?" }]);
   let state = await beginOperatorResearch(env, h.state, "light_search", "", h.deps);
   assert.strictEqual(state.awaiting, OPERATOR_RESEARCH_AWAITING);
@@ -103,7 +103,8 @@ test("light flow: topic -> two questions one at a time -> brief -> Start schedul
   assert.strictEqual(started.awaiting, undefined);
   assert.strictEqual(schedule?.question, "Why Accra SMEs struggle to stand out");
   assert.strictEqual(schedule?.mode, "light_search");
-  assert.match(schedule?.context ?? "", /A LinkedIn post[\s\S]*Retail/);
+  assert.match(schedule?.brief ?? "", /A LinkedIn post[\s\S]*Retail/);
+  assert.strictEqual(schedule?.context, undefined, "the brief is never supplied as evidence");
 });
 
 test("the topic can be given with the command, and the AI's absence falls back to the fixed questions", async () => {
@@ -171,7 +172,7 @@ test("correcting the topic or one answer keeps everything else and shows the upd
   ]);
   const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
   assert.strictEqual(schedule?.question, "Why Accra SMEs struggle");
-  assert.match(schedule?.context ?? "", /A LinkedIn post[\s\S]*Retail/);
+  assert.match(schedule?.brief ?? "", /A LinkedIn post[\s\S]*Retail/);
 });
 
 test("a correction gets the same identity checks as the original and a refused one keeps the old line", async () => {
@@ -253,7 +254,7 @@ test("completion: findings card with the Research page link, Go deeper on a ligh
   const deeper = await handleOperatorResearchButton(env, state, "deeper", h.deps);
   assert.strictEqual(deeper.schedule?.mode, "deep_research");
   assert.strictEqual(deeper.schedule?.question, first.schedule?.question);
-  assert.strictEqual(deeper.schedule?.context, first.schedule?.context, "no question is asked again");
+  assert.strictEqual(deeper.schedule?.brief, first.schedule?.brief, "no question is asked again");
   const done = await completeOperatorResearch(env, deeper.state, SYNTHESIS, h.deps);
   assert.deepStrictEqual(callbacks(h.sent.at(-1)!), [], "a deep result has no Go deeper");
   assert.strictEqual(done.operatorResearch?.mode, "deep_research");
@@ -303,7 +304,7 @@ test("the brief shows the AI's typo suggestions; Fix typos corrects Martin's wor
   assert.deepStrictEqual(callbacks(fixed), ["oresearch:w-1:start", "oresearch:w-1:edit"]);
   const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
   assert.strictEqual(schedule?.question, "Why Accra SMEs struggle in Accra");
-  assert.match(schedule?.context ?? "", /A LinkedIn post/);
+  assert.match(schedule?.brief ?? "", /A LinkedIn post/);
 });
 
 test("Start as is keeps Martin's words exactly, and Fix typos is stale once nothing is suggested", async () => {
@@ -312,7 +313,7 @@ test("Start as is keeps Martin's words exactly, and Fix typos is stale once noth
   state = await handleOperatorResearchReply(env, state, "A postt", h.deps);
   assert.match(h.sent.at(-1)!.text, /"postt" → "post"/, "the reply that ends the questions carries the suggestions -- no second AI call");
   const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
-  assert.match(schedule?.context ?? "", /A postt/);
+  assert.match(schedule?.brief ?? "", /A postt/);
   ({ state } = await handleOperatorResearchButton(env, state, "fixtypos", h.deps));
   assert.match(h.sent.at(-1)!.text, /no longer current/);
 

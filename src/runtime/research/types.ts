@@ -18,6 +18,20 @@ export interface ResearchExecutionInput {
   /** Sanitized supplied context/evidence the question arrives with (may be empty). */
   context: string;
   /**
+   * The requester's own framing of what to research (e.g. Martin's research
+   * brief answers). Shown to synthesis in its own section as framing only and
+   * never part of the evidence: a source can never be cited from it. Part of
+   * the job's identity.
+   */
+  brief?: string;
+  /**
+   * Caller-declared: a Finding that cites no evidence is removed (and the
+   * removal stated as a Limitation) instead of rejecting the whole synthesis.
+   * Everything else in the evidence gate is unchanged, and a synthesis left
+   * with no Finding is still rejected. Off unless the caller sets it.
+   */
+  dropUnsupportedFindings?: boolean;
+  /**
    * Reusable methodology the caller's own Action declared, already resolved
    * through the Skill Registry (src/platform/skillRegistry.ts). The research
    * runtime only passes it into synthesis; it never selects, resolves or
@@ -101,8 +115,10 @@ export interface ResearchCheckpoint {
 export interface PendingResearch {
   question: string;
   mode: "light_search" | "deep_research";
-  /** Supplied context the job was started with (Martin's research brief answers); part of the job's identity, so a resume finds the same checkpoint. */
+  /** Supplied context/evidence the job was started with; part of the job's identity, so a resume finds the same checkpoint. */
   context?: string;
+  /** The requester's framing (Martin's research brief answers) -- never evidence; part of the job's identity. See ResearchExecutionInput.brief. */
+  brief?: string;
   /** No sooner than this; absent means "as soon as the alarm can run". */
   retryAt?: string;
 }

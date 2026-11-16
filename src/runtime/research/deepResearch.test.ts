@@ -34,13 +34,14 @@ const PAGE = "Growing SMEs in Accra say customers cannot tell what makes them di
 const QUOTE = "customers cannot tell what makes them different";
 const URL_ = "https://news.example/sme";
 
-function harness(steps: unknown[], opts: { searchStatus?: () => number } = {}) {
+function harness(steps: unknown[], opts: { searchStatus?: () => number; synthesis?: unknown } = {}) {
   const kv = new Map<string, string>([
     ["governance:413cb004-e583-81aa-8dc0-d1e1576022db", SAFE.padEnd(200, " ")],
     ["governance:413cb004-e583-817d-bdca-ede843a85033", "Research role contract text."],
     ["governance:3cecb004-e583-81ee-8f1e-f0d58532f4aa", "Universal role contract text."],
   ]);
   const counts = { steps: 0, synthesis: 0, searches: 0, pages: 0 };
+  const synthesisPrompts: string[] = [];
   const env = {
     TAVILY_API_KEY: "t",
     NOTION_VERSION: "2025-09-03",
@@ -59,6 +60,8 @@ function harness(steps: unknown[], opts: { searchStatus?: () => number } = {}) {
         }
         if (system.includes("research runtime — the selected research protocol")) {
           counts.synthesis++;
+          synthesisPrompts.push((o?.messages ?? []).map((m: any) => String(m?.content ?? "")).join("\n"));
+          if (opts.synthesis) return { response: JSON.stringify(opts.synthesis) };
           return {
             response: JSON.stringify({
               sources: [{ id: "s1", source: "news.example", sourceType: "secondary", url: URL_, passage: QUOTE, claimSupported: "differentiation", validationStatus: "validated" }],
@@ -87,7 +90,7 @@ function harness(steps: unknown[], opts: { searchStatus?: () => number } = {}) {
     }
     throw new Error(`unexpected request ${url}`);
   }) as typeof fetch;
-  return { env, kv, counts, fetchImpl };
+  return { env, kv, counts, fetchImpl, synthesisPrompts };
 }
 
 async function withFetch<T>(impl: typeof fetch, fn: () => Promise<T>): Promise<T> {
@@ -190,4 +193,87 @@ test("Deep Research runs end to end under the operator_research context (Martin-
   assert.strictEqual(outcome.status, "completed");
   assert.strictEqual(h.counts.searches, 1);
   assert.strictEqual(h.counts.pages, 1);
+});
+
+// Martin-started research (16 Nov 2026): the brief is framing, never evidence;
+// an unsupported finding is dropped instead of discarding the result.
+
+const GOOD_SOURCE = { id: "s1", source: "news.example", sourceType: "secondary", url: URL_, passage: QUOTE, claimSupported: "differentiation", validationStatus: "validated" };
+const GOOD_EVIDENCE = { id: "e1", statement: "SMEs report customers cannot tell them apart", sourceIds: ["s1"] };
+const BRIEF = "Who are the buyers? SMEs of any kind";
+
+test("the brief reaches synthesis in its own framing section, outside the supplied evidence", async () => {
+  const h = harness(STEPS());
+  const outcome = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "", brief: BRIEF }, CTX));
+  assert.strictEqual(outcome.status, "completed");
+  const prompt = h.synthesisPrompts[0];
+  const briefAt = prompt.indexOf("=== REQUESTER'S BRIEF");
+  const suppliedAt = prompt.indexOf("=== SUPPLIED CONTEXT/EVIDENCE ===");
+  assert.ok(briefAt > -1 && suppliedAt > briefAt, "the brief section comes before, and apart from, the evidence");
+  assert.ok(prompt.indexOf(BRIEF) > briefAt && prompt.indexOf(BRIEF) < suppliedAt, "the brief text sits only in its own section");
+});
+
+test("a source cited from the brief itself is refused: the provenance check never reads the brief", async () => {
+  const h = harness(STEPS(), {
+    synthesis: {
+      sources: [GOOD_SOURCE, { id: "s2", source: "SMEs of any kind", sourceType: "primary", url: "", passage: "SMEs of any kind", claimSupported: "buyers", validationStatus: "validated" }],
+      evidence: [GOOD_EVIDENCE, { id: "e2", statement: "The buyers are SMEs", sourceIds: ["s2"] }],
+      findings: [{ id: "f1", statement: "Differentiation is a reported problem", evidenceIds: ["e1", "e2"] }],
+      implications: [],
+      limitations: [],
+    },
+  });
+  const outcome = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "", brief: BRIEF, dropUnsupportedFindings: true }, CTX));
+  assert.strictEqual(outcome.status, "blocked");
+  assert.strictEqual((outcome as any).code, "UNVERIFIABLE_SOURCES");
+});
+
+const WITH_UNSUPPORTED = {
+  sources: [GOOD_SOURCE],
+  evidence: [GOOD_EVIDENCE],
+  findings: [
+    { id: "f1", statement: "Differentiation is a reported problem", evidenceIds: ["e1"] },
+    { id: "f2", statement: "The consultancy typically works with SMEs", evidenceIds: [] },
+  ],
+  implications: [
+    { statement: "Lead with differentiation", basedOnFindingIds: ["f1"] },
+    { statement: "Target SMEs", basedOnFindingIds: ["f2"] },
+  ],
+  limitations: [],
+};
+
+test("with dropUnsupportedFindings, a finding that cites no evidence is removed with its implications, and the removal is stated", async () => {
+  const h = harness(STEPS(), { synthesis: WITH_UNSUPPORTED });
+  const outcome = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "", dropUnsupportedFindings: true }, CTX));
+  assert.strictEqual(outcome.status, "completed");
+  const synthesis = (outcome as any).synthesis;
+  assert.deepStrictEqual(synthesis.findings.map((f: any) => f.id), ["f1"]);
+  assert.deepStrictEqual(synthesis.implications.map((i: any) => i.statement), ["Lead with differentiation"]);
+  assert.match(synthesis.limitations.at(-1).statement, /1 finding was removed because it cited no evidence/);
+});
+
+test("without the option the evidence bar is unchanged: one unsupported finding rejects the whole result", async () => {
+  const h = harness(STEPS(), { synthesis: WITH_UNSUPPORTED });
+  const outcome = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "" }, CTX));
+  assert.strictEqual(outcome.status, "blocked");
+  assert.strictEqual((outcome as any).code, "SYNTHESIS_INVALID");
+});
+
+test("dropUnsupportedFindings never forgives a made-up reference", async () => {
+  const h = harness(STEPS(), {
+    synthesis: { ...WITH_UNSUPPORTED, findings: [{ id: "f1", statement: "Differentiation is a reported problem", evidenceIds: ["e9"] }], implications: [] },
+  });
+  const outcome = await withFetch(h.fetchImpl, () => runDeepResearchSkill(h.env, { question: Q, context: "", dropUnsupportedFindings: true }, CTX));
+  assert.strictEqual(outcome.status, "blocked");
+  assert.match((outcome as any).reason, /unknown evidence id "e9"/);
+});
+
+test("a job without a brief keeps its existing identity, so a paused job still resumes; a brief makes a distinct job", async () => {
+  const { researchJobId } = await import("./researchRuntime");
+  const { hashContent } = await import("../../contentHash");
+  const profile = { synthesis: "research.synthesis" } as any;
+  const before = await hashContent(JSON.stringify({ profile: profile.synthesis, question: Q, context: "ctx" }));
+  assert.strictEqual(await researchJobId(profile, Q, "ctx"), before);
+  assert.strictEqual(await researchJobId(profile, Q, "ctx", "  "), before);
+  assert.notStrictEqual(await researchJobId(profile, Q, "ctx", BRIEF), before);
 });
