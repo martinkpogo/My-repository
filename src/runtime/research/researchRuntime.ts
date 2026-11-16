@@ -31,6 +31,7 @@ import type {
   ResearchOutcome,
   ResearchSynthesis,
 } from "./types";
+import { startOperation, type OperationMetadata } from "../../runtime/activityReporter";
 
 /**
  * Research runtime executor -- non-organizational execution infrastructure.
@@ -231,6 +232,7 @@ async function interpretAndSelectProtocols(
   categorySummary: string,
   question: string,
   taskId: ResearchTaskProfile["selection"],
+  operationMetadata?: OperationMetadata,
 ): Promise<{ relevance: string; protocols: ResearchProtocolId[] } | { stop: ResearchOutcome }> {
   const result = await generate<InterpretationAndSelectionResult>(env, {
     taskId,
@@ -258,7 +260,7 @@ Return JSON:
       situation: question,
     },
     light: true,
-  });
+  }, operationMetadata ? { ...operationMetadata, label: "research.interpretation" } : undefined);
 
   const relevance = result?.relevance?.trim();
   if (!result || !relevance) {
@@ -391,6 +393,7 @@ async function gatherCheckpointedEvidence(
   access: AccessContext,
   checkpoint: ResearchCheckpoint,
   persist: () => Promise<void>,
+  operationMetadata?: OperationMetadata,
 ): Promise<{ evidence: DimensionEvidence[]; retryAt?: string }> {
   let earliestRetry: string | undefined;
   const evidence = await Promise.all(
@@ -404,7 +407,15 @@ async function gatherCheckpointedEvidence(
         // the only way to have evidence is to search again, and the log says so.
         console.error(`Research checkpoint ${checkpoint.job_id.slice(0, 12)}: saved results for dimension ${index} are no longer stored -- searching again`);
       }
-      const searched = await searchDimension(env, dimension, access);
+      let dimCtx;
+      if (operationMetadata?.holder?.workStatus) {
+        try {
+          dimCtx = await startOperation(env, operationMetadata.holder, `research-dim-${index}-${Date.now()}`, "Searching the web", operationMetadata.parentOperationId);
+        } catch {
+          dimCtx = undefined;
+        }
+      }
+      const searched = await searchDimension(env, dimension, access, dimCtx);
       op.status = statusForSearchOutcome(searched.evidence.searchOutcome);
       op.search_outcome = searched.evidence.searchOutcome;
       if (searched.evidenceRef) op.evidence_ref = searched.evidenceRef;
@@ -468,12 +479,12 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
     relevance = checkpoint.relevance;
     protocols = checkpoint.protocols;
   } else {
-    const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection);
-    if ("stop" in selection) return finish("blocked", selection.stop);
-    ({ relevance, protocols } = selection);
-    checkpoint.relevance = relevance;
-    checkpoint.protocols = protocols;
-    await persist();
+  const selection = await interpretAndSelectProtocols(env, categorySummary, question, profile.selection, input.operationMetadata);
+  if ("stop" in selection) return finish("blocked", selection.stop);
+  ({ relevance, protocols } = selection);
+  checkpoint.relevance = relevance;
+  checkpoint.protocols = protocols;
+  await persist();
   }
 
   await progress(`Using: ${protocols.map((id) => RESEARCH_PROTOCOL_REGISTRY[id].name).join(", ")} -- building a research plan and gathering evidence...`);
@@ -497,7 +508,7 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   if (checkpoint.plan?.length) {
     plan = checkpoint.plan;
   } else {
-    const generated = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan);
+    const generated = await generateResearchPlan(env, categorySummary, relevance, question, protocols, profile.plan, input.operationMetadata);
     if (!generated || generated.length === 0) {
       return finish("blocked", blocked("PLAN_GENERATION_FAILED", "Couldn't generate a research plan for the selected protocol(s) — planning failed."));
     }
@@ -518,7 +529,7 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // results. Real fetched URLs/snippets become part of the supplied
   // evidence below, so findUnverifiableSources naturally extends to verify
   // against them.
-  const gathered = await gatherCheckpointedEvidence(env, plan, access, checkpoint, persist);
+  const gathered = await gatherCheckpointedEvidence(env, plan, access, checkpoint, persist, input.operationMetadata);
   const dimensionEvidence = gathered.evidence;
 
   // Interrupted searches (every eligible provider busy) are NOT synthesized
@@ -573,15 +584,8 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
       ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, protocols, webResultCount > 0, input.skillContent),
       situation: effectiveResearchContext,
     },
-    // Raised from 2048 after live failures ("synthesis generation
-    // failed") that started once evidence breadth grew to up to 8
-    // dimensions x 5 results -- the fuller structured JSON output can need
-    // more than 2048 tokens to complete, and a truncated response fails to
-    // parse entirely rather than degrading gracefully. Paired with an
-    // explicit "cite selectively, don't enumerate everything" instruction
-    // so this is a safety margin, not a license to pad the response.
     maxTokens: 4096,
-  });
+  }, undefined, input.operationMetadata ? { ...input.operationMetadata, label: "research.synthesis" } : undefined);
   // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
   // pause, not a failure -- the evidence stays checkpointed and the job
   // resumes at synthesis.
@@ -684,6 +688,7 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
       context: categorySummary,
       limits: DEEP_RESEARCH_LIMITS,
       ...(input.checkpoints ? { checkpoint: { store: input.checkpoints, jobId } } : {}),
+      ...(input.operationMetadata ? { operationMetadata: { ...input.operationMetadata, label: "research.deep_research" } } : {}),
     },
     access,
   );
@@ -699,7 +704,7 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
     taskId: STANDARD_RESEARCH_PROFILE.synthesis,
     parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: effectiveResearchContext },
     maxTokens: 4096,
-  });
+  }, undefined, input.operationMetadata ? { ...input.operationMetadata, label: "research.deep_research_synthesis" } : undefined);
   if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
     // The rounds are complete and their notes saved; a resume replays them from the caches and goes straight to synthesis.
     return { status: "interrupted", reason: "Every AI provider is busy, so the Deep Research findings could not be written yet. The evidence is saved.", retryAt: synthesisOutcome.retryAt, completedOperations: rounds.rounds, totalOperations: DEEP_RESEARCH_LIMITS.maxRounds };

@@ -337,7 +337,11 @@ export class WorkSession extends DurableObject<Env> {
    */
   private async resumeDeepResearch(state: WorkState, pending: PendingResearch): Promise<{ digest: string; gaps: string[] } | null> {
     const checkpoints = getResearchCheckpointStore(String(state.workId));
-    const outcome = await runDeepResearchSkill(this.env, { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) }, workSessionContext(state));
+    const outcome = await runDeepResearchSkill(
+      this.env,
+      { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}), operationMetadata: { runId: state.workId, holder: state, label: "research.deep_research" } },
+      workSessionContext(state),
+    );
     if (outcome.status === "interrupted") {
       await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
       const when = retryTimeLabel(outcome.retryAt);
@@ -390,8 +394,16 @@ export class WorkSession extends DurableObject<Env> {
     const input = { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) };
     const outcome =
       pending.mode === "deep_research"
-        ? await runDeepResearchSkill(this.env, input, access)
-        : await runResearchSkill(this.env, { ...input, skillContent: resolveRuntimeSkill("research_signal").content }, access);
+        ? await runDeepResearchSkill(
+            this.env,
+            { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}), operationMetadata: { runId: state.workId, holder: state, label: "research.deep_research" } },
+            access,
+          )
+        : await runResearchSkill(
+            this.env,
+            { ...input, skillContent: resolveRuntimeSkill("research_signal").content, operationMetadata: { runId: state.workId, holder: state, label: "research.light_search" } },
+            access,
+          );
     if (outcome.status === "interrupted") {
       await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
       const when = retryTimeLabel(outcome.retryAt);

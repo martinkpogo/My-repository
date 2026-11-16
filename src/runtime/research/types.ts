@@ -1,6 +1,7 @@
 import type { EvidenceSynthesis } from "../evidence/validation";
 import type { ResearchProtocolId } from "./protocols";
 import type { ResearchPlanDimension } from "./researchPlan";
+import type { OperationMetadata } from "../../runtime/activityReporter";
 
 /**
  * A research synthesis: the shared Evidence -> Finding -> Implication ->
@@ -34,6 +35,12 @@ export interface ResearchExecutionInput {
    * interruption is still reported as `interrupted`, never as completed.
    */
   checkpoints?: ResearchCheckpointStore;
+  /**
+   * Optional activity-reporting metadata (holder/run/label) for live
+   * Work-status operations. Reporting only -- never authorization evidence,
+   * never used by Access, and never stored in durable operation records.
+   */
+  operationMetadata?: OperationMetadata;
 }
 
 /** One planned search operation's progress (completed_operation_statuses). */

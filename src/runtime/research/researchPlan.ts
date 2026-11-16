@@ -3,6 +3,7 @@ import { generate, type GeneratePromptParts } from "../../ai";
 import type { ResearchProtocolId } from "./protocols";
 import { researchProtocolDetail } from "./protocols";
 import { lightSearchSection } from "./lightSearchSkill";
+import type { OperationMetadata } from "../../runtime/activityReporter";
 
 /**
  * Protocol-specific research planning -- the layer that was missing
@@ -109,13 +110,14 @@ async function generateProtocolPlan(
   question: string,
   protocol: ResearchProtocolId,
   planTaskId: "research.plan_generation" | "lead.candidate_research_plan",
+  operationMetadata?: OperationMetadata,
 ): Promise<ResearchPlanDimension[]> {
   const result = await generate<PlanResult>(env, {
     taskId: planTaskId,
     mode: "json",
     parts: { ...buildResearchPlanPromptParts(categorySummary, relevance, [protocol]), situation: question },
     maxTokens: 1536,
-  });
+  }, operationMetadata ? { ...operationMetadata, label: "research.plan" } : undefined);
 
   if (!result?.dimensions || result.dimensions.length === 0) return [];
 
@@ -150,9 +152,10 @@ export async function generateResearchPlan(
   question: string,
   protocols: ResearchProtocolId[],
   planTaskId: "research.plan_generation" | "lead.candidate_research_plan" = "research.plan_generation",
+  operationMetadata?: OperationMetadata,
 ): Promise<ResearchPlanDimension[] | null> {
   const perProtocol = await Promise.all(
-    protocols.map((protocol) => generateProtocolPlan(env, categorySummary, relevance, question, protocol, planTaskId)),
+    protocols.map((protocol) => generateProtocolPlan(env, categorySummary, relevance, question, protocol, planTaskId, operationMetadata)),
   );
   const mapped = perProtocol.flat();
 

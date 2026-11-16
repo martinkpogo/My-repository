@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { startOperation, finishOperation, reportOperationOutcome, type OperationContext, type OperationMetadata } from "./runtime/activityReporter";
-import { evaluateAccess, governedSourceForDataSourceId, NON_GOVERNED_PAGE_TARGET, type AccessContext, type AccessRequest, type GovernedSource } from "./access";
+import { evaluateAccess, governedSourceForDataSourceId, NON_GOVERNED_PAGE_TARGET, AccessDeniedError, type AccessContext, type AccessRequest, type GovernedSource } from "./access";
 import { reportLiveStep } from "./runtime/liveStatus";
 
 const API = "https://api.notion.com/v1";
@@ -30,7 +30,7 @@ function isOperationContext(v: any): v is OperationContext {
   return !!v && typeof v.operationId === "string" && typeof v.startedAt === "number" && !!v.holder;
 }
 
-async function notionFetch(env: Env, path: string, init: RequestInit = {}, operation?: OperationContext | OperationMetadata | OperationMetadata): Promise<any> {
+async function notionFetch(env: Env, path: string, init: RequestInit = {}, operation?: OperationContext | OperationMetadata): Promise<any> {
   let ctx: OperationContext | undefined;
   let owns = false;
   if (operation && isOperationContext(operation)) {
@@ -70,7 +70,8 @@ async function notionFetch(env: Env, path: string, init: RequestInit = {}, opera
     }
     return data;
   } catch (err) {
-    // If fetch threw before response handling reported, ensure owned ctx closes.
+    // If fetch threw before response handling reported, ensure owned ctx closes
+    // (e.g. network error). Avoid double-reporting if already finished above.
     if (ctx && owns) await finishOperation(env, ctx, "failed").catch(() => undefined);
     throw err;
   }
@@ -93,8 +94,35 @@ const SOURCE_LABELS: Record<GovernedSource, string> = {
  * to the universal live status (src/runtime/liveStatus.ts) by the source's
  * fixed name only -- never a page title or content.
  */
-function authorize(env: Env, request: AccessRequest, access: AccessContext): void {
-  evaluateAccess(env, request, access);
+async function authorize(env: Env, request: AccessRequest, access: AccessContext, operation?: OperationContext | OperationMetadata): Promise<void> {
+  try {
+    evaluateAccess(env, request, access);
+  } catch (err) {
+    if (err instanceof AccessDeniedError && operation) {
+      // Access denied before any network request: report "denied" and still fail closed.
+      let ctx: OperationContext | undefined;
+      let owns = false;
+      if (isOperationContext(operation)) {
+        ctx = operation;
+      } else if ((operation as any).holder?.workStatus) {
+        try {
+          ctx = await startOperation(env, (operation as any).holder, `notion:${Date.now()}`, (operation as any).label ?? "Notion operation", (operation as any).parentOperationId);
+          owns = true;
+        } catch {
+          ctx = undefined;
+        }
+      }
+      if (ctx) {
+        try {
+          if (owns) await finishOperation(env, ctx, "denied");
+          else await reportOperationOutcome(env, ctx, "denied");
+        } catch {
+          // reporting failure must not change the denial
+        }
+      }
+    }
+    throw err;
+  }
   const source = governedSourceForDataSourceId(env, request.dataSourceId);
   const where = source ? SOURCE_LABELS[source] : request.dataSourceId === NON_GOVERNED_PAGE_TARGET ? "a definition page" : "Notion";
   const verb = request.operation === "read" ? "Reading" : request.operation === "create" ? "Writing to" : "Updating";
@@ -154,7 +182,7 @@ export async function queryDataSource(
   // unauthorized read never reaches Notion. `access` is a required
   // parameter precisely so no caller can reach this without declaring
   // which kind of execution context it is running under.
-  authorize(env, { operation: "read", dataSourceId }, access);
+  await authorize(env, { operation: "read", dataSourceId }, access, operationContext);
   const body: Record<string, unknown> = { page_size: options?.pageSize ?? 20 };
   if (filter) body.filter = filter;
   if (options?.sortByCreatedDescending) {
@@ -187,7 +215,7 @@ export async function createPage(
   // the authoritative target -- there is no page to resolve. Access
   // decides from the resolved ActionDefinition whether this particular
   // governed source is one Martin's approval was required for.
-  authorize(env, { operation: "create", dataSourceId }, access);
+  await authorize(env, { operation: "create", dataSourceId }, access, operationContext);
   const data = await notionFetch(env, `/pages`, {
     method: "POST",
     body: JSON.stringify({
@@ -227,7 +255,7 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
   // Access is evaluated against the page's REAL data source, so an
   // ApprovalProof's targetDataSourceId is compared against the actual
   // target rather than anything the caller asserted.
-  authorize(env, { operation: "update", dataSourceId, pageId }, access);
+  await authorize(env, { operation: "update", dataSourceId, pageId }, access, operationContext);
   const data = await notionFetch(env, `/pages/${pageId}`, {
     method: "PATCH",
     body: JSON.stringify({ properties }),
@@ -285,7 +313,7 @@ async function resolvePageTarget(env: Env, pageId: string, operation: string, op
  */
 export async function getPage(env: Env, pageId: string, access: AccessContext, operationContext?: OperationContext | OperationMetadata): Promise<NotionPage> {
   const { target, page } = await resolvePageTarget(env, pageId, "read", operationContext);
-  authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
+  await authorize(env, { operation: "read", dataSourceId: target, pageId }, access, operationContext);
   return page;
 }
 
@@ -306,7 +334,7 @@ export async function appendTextBlocks(env: Env, pageId: string, heading: string
   // Authorized before the first network write, and against the page's real
   // data source rather than a caller-supplied one.
   const { target } = await resolvePageTarget(env, pageId, "update", operationContext);
-  authorize(env, { operation: "update", dataSourceId: target, pageId }, access);
+  await authorize(env, { operation: "update", dataSourceId: target, pageId }, access, operationContext);
   const paragraphs: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
     paragraphs.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
@@ -345,7 +373,7 @@ export async function createVersionPage(
   operationContext?: OperationContext | OperationMetadata,
 ): Promise<{ id: string; url: string }> {
   const { target } = await resolvePageTarget(env, parentPageId, "update", operationContext);
-  authorize(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access);
+  await authorize(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access, operationContext);
   const blocks: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
     blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
@@ -427,7 +455,7 @@ export async function getPageContent(env: Env, pageId: string, access: AccessCon
   // Same rule as getPage: the read is authorized against the page's real
   // target, resolved from Notion rather than asserted by the caller.
   const { target } = await resolvePageTarget(env, pageId, "read", operationContext);
-  authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
+  await authorize(env, { operation: "read", dataSourceId: target, pageId }, access, operationContext);
   const parts: string[] = [];
   let cursor: string | undefined;
   do {

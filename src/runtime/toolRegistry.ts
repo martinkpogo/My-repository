@@ -59,6 +59,7 @@ import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
 import { googleDriveEnsureFolderToolOperation } from "./tools/googleDriveFolderTool";
 import { googleDriveReplyToolOperation } from "./tools/googleDriveReplyTool";
 import { getWorkPersistence, type ToolOperationPersistence } from "./workPersistence";
+import { startOperation, finishOperation, type OperationMetadata, type OperationOutcome } from "./activityReporter";
 import { reportLiveStep } from "./liveStatus";
 
 // ---------------------------------------------------------------------------
@@ -448,203 +449,237 @@ const IN_FLIGHT_OPERATIONS = new Set<string>();
  * unexpected error from Access itself or from the handler's environment),
  * never as a substitute for a denial or failure outcome.
  */
-export async function invokeTool(env: Env, request: ToolInvocationRequest, context: AccessContext): Promise<ToolInvocationOutcome> {
-  const operation = resolveToolOperation(request.tool_id, request.operation_id);
-  if (!operation) {
-    return denied(
-      String(request.tool_id),
-      String(request.operation_id),
-      `tool operation ${String(request.tool_id)}.${String(request.operation_id)} is not registered in the Tool Registry -- an unknown Tool or operation is never treated as an unguarded one`,
-    );
-  }
-  const base = { tool_id: operation.toolId, operation_id: operation.operationId };
-  // Universal live status: the registered Tool operation's ids only, never its input.
-  reportLiveStep(`Running ${operation.toolId}: ${operation.operationId}`);
-
-  // 1. Input contract.
-  const inputDefect = operation.validateInput(request.input);
-  if (inputDefect) {
-    return denied(operation.toolId, operation.operationId, `invalid input for ${operation.operationId}: ${inputDefect}`);
-  }
-
-  // 2. Trusted target resolution (account set and folder shape from this
-  //    Worker's own runtime state) -- before Access, so approval evidence
-  //    binds to what Access is about to judge.
-  const resolvedTarget = await operation.resolveTarget(env, request.input);
-  if (!resolvedTarget.ok) {
-    return denied(operation.toolId, operation.operationId, resolvedTarget.reason);
-  }
-
-  // 3. Authorization -- the Work's own resolved Action, its declaration, its
-  //    effect classification, and bound approval evidence when gated.
+export async function invokeTool(env: Env, request: ToolInvocationRequest, context: AccessContext, options?: { persistence?: ToolOperationPersistence; prior_outcome?: ToolInvocationOutcome; activity?: OperationMetadata }): Promise<ToolInvocationOutcome> {
+  let activityCtx: { runId: string; holder: any; operationId: string; label: string; startedAt: number; parentOperationId?: string } | undefined;
+  const mapOutcome = (out: ToolInvocationOutcome): OperationOutcome => {
+    if (out.state === "succeeded") return "succeeded";
+    if (out.state === "denied") return "denied";
+    if (out.state === "failed") return "failed";
+    if (out.state === "partially_completed") return "partially_completed";
+    return "unverified";
+  };
+  const finishWithActivity = async (out: ToolInvocationOutcome): Promise<ToolInvocationOutcome> => {
+    if (activityCtx) await finishOperation(env, activityCtx as any, mapOutcome(out)).catch(() => undefined);
+    return out;
+  };
   try {
-    evaluateExternalMutationAccess(
-      env,
-      {
-        toolId: operation.toolId,
-        operationId: operation.operationId,
-        effect: operation.effect,
-        targetResourceId: resolvedTarget.target.resourceId,
-      },
-      context,
-    );
-  } catch (error) {
-    if (error instanceof AccessDeniedError) {
-      return denied(operation.toolId, operation.operationId, error.reason);
+    const operation = resolveToolOperation(request.tool_id, request.operation_id);
+    if (!operation) {
+      const out = denied(
+        String(request.tool_id),
+        String(request.operation_id),
+        `tool operation ${String(request.tool_id)}.${String(request.operation_id)} is not registered in the Tool Registry -- an unknown Tool or operation is never treated as an unguarded one`,
+      );
+      if (options?.activity?.holder?.workStatus) {
+        try { activityCtx = await startOperation(env, options.activity.holder, `tool:${String(request.tool_id)}:${Date.now()}`, options.activity.label ?? `Running ${String(request.tool_id)}`, options.activity.parentOperationId); } catch { activityCtx = undefined; }
+      }
+      return await finishWithActivity(out);
     }
-    throw error;
-  }
+    const base = { tool_id: operation.toolId, operation_id: operation.operationId };
+    // Universal live status: the registered Tool operation's ids only, never its input.
+    reportLiveStep(`Running ${operation.toolId}: ${operation.operationId}`);
 
-  // 4. Durable recovery. The Work's own persisted operation record is the
-  //    authority on what any previous attempt actually did; the caller's
-  //    `prior_outcome` is consulted only when no record exists. Without the
-  //    Work's durable persistence adapter no effect may start at all -- an
-  //    operation that could not be recovered after an interruption must not
-  //    be initiated, so a missing adapter fails closed here.
-  const persistence = getWorkPersistence(String(context.workId ?? ""));
-  if (!persistence) {
-    return denied(
-      operation.toolId,
-      operation.operationId,
-      "durable operation persistence is not available for this Work (no WorkSession persistence adapter is installed) -- refusing to initiate an external effect that could not be recovered after an interruption",
-    );
-  }
-  const recordKey = operationRecordKey(operation.operationId, resolvedTarget.target.resourceId, request.input);
-  let stored: ExternalToolOperationRecord | undefined;
-  try {
-    stored = await persistence.load(recordKey);
-  } catch (error) {
-    return denied(
-      operation.toolId,
-      operation.operationId,
-      `the persisted operation record could not be read (${error instanceof Error ? error.message : "unknown error"}) -- its remote state is unknown, so no new attempt may run`,
-    );
-  }
-  if (stored !== undefined) {
-    const defect = validateStoredRecord(stored, operation, resolvedTarget.target.resourceId, String(context.workId ?? ""));
-    if (defect) {
-      return denied(
+    // 1. Input contract.
+    const inputDefect = operation.validateInput(request.input);
+    if (inputDefect) {
+      const out = denied(operation.toolId, operation.operationId, `invalid input for ${operation.operationId}: ${inputDefect}`);
+      if (options?.activity?.holder?.workStatus) {
+        try { activityCtx = await startOperation(env, options.activity.holder, `tool:${operation.operationId}:${Date.now()}`, options.activity.label ?? `Running ${operation.toolId}: ${operation.operationId}`, options.activity.parentOperationId); } catch { activityCtx = undefined; }
+      }
+      return await finishWithActivity(out);
+    }
+
+    // 2. Trusted target resolution (account set and folder shape from this
+    //    Worker's own runtime state) -- before Access, so approval evidence
+    //    binds to what Access is about to judge.
+    const resolvedTarget = await operation.resolveTarget(env, request.input);
+    if (!resolvedTarget.ok) {
+      const out = denied(operation.toolId, operation.operationId, resolvedTarget.reason);
+      if (options?.activity?.holder?.workStatus) {
+        try { activityCtx = await startOperation(env, options.activity.holder, `tool:${operation.operationId}:${Date.now()}`, options.activity.label ?? `Running ${operation.toolId}: ${operation.operationId}`, options.activity.parentOperationId); } catch { activityCtx = undefined; }
+      }
+      return await finishWithActivity(out);
+    }
+
+    // Start reporting before authorization/effect so denials and outcomes are observed.
+    if (options?.activity?.holder?.workStatus) {
+      try { activityCtx = await startOperation(env, options.activity.holder, `tool:${operation.operationId}:${Date.now()}`, options.activity.label ?? `Running ${operation.toolId}: ${operation.operationId}`, options.activity.parentOperationId); } catch { activityCtx = undefined; }
+    }
+
+    // 3. Authorization -- the Work's own resolved Action, its declaration, its
+    //    effect classification, and bound approval evidence when gated.
+    try {
+      evaluateExternalMutationAccess(
+        env,
+        {
+          toolId: operation.toolId,
+          operationId: operation.operationId,
+          effect: operation.effect,
+          targetResourceId: resolvedTarget.target.resourceId,
+        },
+        context,
+      );
+    } catch (error) {
+      if (error instanceof AccessDeniedError) {
+        return await finishWithActivity(denied(operation.toolId, operation.operationId, error.reason));
+      }
+      throw error;
+    }
+
+    // 4. Durable recovery. The Work's own persisted operation record is the
+    //    authority on what any previous attempt actually did; the caller's
+    //    `prior_outcome` is consulted only when no record exists. Without the
+    //    Work's durable persistence adapter no effect may start at all -- an
+    //    operation that could not be recovered after an interruption must not
+    //    be initiated, so a missing adapter fails closed here.
+    const persistence = options?.persistence ?? getWorkPersistence(String(context.workId ?? ""));
+    if (!persistence) {
+      return await finishWithActivity(denied(
         operation.toolId,
         operation.operationId,
-        `a persisted operation record for this invocation is incompatible (${defect}) -- refusing to proceed rather than risk a duplicate remote effect`,
-      );
+        "durable operation persistence is not available for this Work (no WorkSession persistence adapter is installed) -- refusing to initiate an external effect that could not be recovered after an interruption",
+      ));
     }
-  }
-  const prior: ToolInvocationOutcome | undefined = stored ? priorFromStoredRecord(stored, operation) : request.prior_outcome;
-
-  // In-flight guard: one concurrent attempt per (Work, operation, target) in
-  // this session. A Durable Object interleaves events while awaiting a
-  // provider response, so without this two racing attempts in the same Work
-  // could each start the same remote effect; the loser is refused before any
-  // request. It is deliberately COARSER than the record identity above: two
-  // concurrent attempts that request DIFFERENT states of the same document
-  // would race each other, so only one of them may be in flight at a time.
-  // Cross-restart uncertainty is carried by the durable record.
-  const guardKey = `${String(context.workId ?? "")}|${operation.operationId}|${resolvedTarget.target.resourceId}`;
-  if (IN_FLIGHT_OPERATIONS.has(guardKey)) {
-    return denied(
-      operation.toolId,
-      operation.operationId,
-      "another attempt at this exact operation is already in progress for this Work -- a concurrent duplicate may not initiate a second remote effect",
-    );
-  }
-  IN_FLIGHT_OPERATIONS.add(guardKey);
-  try {
-    // Retry safety -- after authorization, before anything that could act
-    // remotely. A prior uncertain effect is reconciled first; a verified
-    // success is returned as-is and never repeated.
-    const baseRecord: ExternalToolOperationRecord = stored ?? {
-      work_id: String(context.workId ?? ""),
-      tool_id: operation.toolId,
-      operation_id: operation.operationId,
-      version: operation.version,
-      target_resource_id: resolvedTarget.target.resourceId,
-      status: "in_progress",
-      updatedAt: new Date().toISOString(),
-    };
-    if (prior !== undefined) {
-      if (
-        !stored &&
-        (typeof prior !== "object" ||
-          prior === null ||
-          !isToolOutcomeState(prior.state) ||
-          prior.tool_id !== operation.toolId ||
-          prior.operation_id !== operation.operationId)
-      ) {
-        return denied(
+    const recordKey = operationRecordKey(operation.operationId, resolvedTarget.target.resourceId, request.input);
+    let stored: ExternalToolOperationRecord | undefined;
+    try {
+      stored = await persistence.load(recordKey);
+    } catch (error) {
+      return await finishWithActivity(denied(
+        operation.toolId,
+        operation.operationId,
+        `the persisted operation record could not be read (${error instanceof Error ? error.message : "unknown error"}) -- its remote state is unknown, so no new attempt may run`,
+      ));
+    }
+    if (stored !== undefined) {
+      const defect = validateStoredRecord(stored, operation, resolvedTarget.target.resourceId, String(context.workId ?? ""));
+      if (defect) {
+        return await finishWithActivity(denied(
           operation.toolId,
           operation.operationId,
-          "a malformed prior_outcome was supplied (wrong operation or unknown state) -- refusing to proceed rather than risk a duplicate remote effect",
-        );
+          `a persisted operation record for this invocation is incompatible (${defect}) -- refusing to proceed rather than risk a duplicate remote effect`,
+        ));
       }
-      if (prior.state === "succeeded") {
-        // The effect already exists and was verified: return it, never recreate.
-        return { ...prior, tool_id: operation.toolId, operation_id: operation.operationId };
-      }
-      if (prior.state === "partially_completed" || prior.state === "unverified") {
-        if (!operation.reconcile) {
-          if (!prior.remote_resource?.document_id) {
-            return {
+    }
+    const prior: ToolInvocationOutcome | undefined = stored ? priorFromStoredRecord(stored, operation) : (options?.prior_outcome ?? request.prior_outcome);
+
+    // In-flight guard: one concurrent attempt per (Work, operation, target) in
+    // this session. A Durable Object interleaves events while awaiting a
+    // provider response, so without this two racing attempts in the same Work
+    // could each start the same remote effect; the loser is refused before any
+    // request. It is deliberately COARSER than the record identity above: two
+    // concurrent attempts that request DIFFERENT states of the same document
+    // would race each other, so only one of them may be in flight at a time.
+    // Cross-restart uncertainty is carried by the durable record.
+    const guardKey = `${String(context.workId ?? "")}|${operation.operationId}|${resolvedTarget.target.resourceId}`;
+    if (IN_FLIGHT_OPERATIONS.has(guardKey)) {
+      return await finishWithActivity(denied(
+        operation.toolId,
+        operation.operationId,
+        "another attempt at this exact operation is already in progress for this Work -- a concurrent duplicate may not initiate a second remote effect",
+      ));
+    }
+    IN_FLIGHT_OPERATIONS.add(guardKey);
+    try {
+      // Retry safety -- after authorization, before anything that could act
+      // remotely. A prior uncertain effect is reconciled first; a verified
+      // success is returned as-is and never repeated.
+      const baseRecord: ExternalToolOperationRecord = stored ?? {
+        work_id: String(context.workId ?? ""),
+        tool_id: operation.toolId,
+        operation_id: operation.operationId,
+        version: operation.version,
+        target_resource_id: resolvedTarget.target.resourceId,
+        status: "in_progress",
+        updatedAt: new Date().toISOString(),
+      };
+      if (prior !== undefined) {
+        if (
+          !stored &&
+          (typeof prior !== "object" ||
+            prior === null ||
+            !isToolOutcomeState(prior.state) ||
+            prior.tool_id !== operation.toolId ||
+            prior.operation_id !== operation.operationId)
+        ) {
+          return await finishWithActivity(denied(
+            operation.toolId,
+            operation.operationId,
+            "a malformed prior_outcome was supplied (wrong operation or unknown state) -- refusing to proceed rather than risk a duplicate remote effect",
+          ));
+        }
+        if (prior.state === "succeeded") {
+          // The effect already exists and was verified: return it, never recreate.
+          return await finishWithActivity({ ...prior, tool_id: operation.toolId, operation_id: operation.operationId });
+        }
+        if (prior.state === "partially_completed" || prior.state === "unverified") {
+          if (!operation.reconcile) {
+            if (!prior.remote_resource?.document_id) {
+              return await finishWithActivity({
+                ...base,
+                state: "unverified",
+                ...(prior.remote_resource ? { remote_resource: prior.remote_resource } : {}),
+                reason:
+                  "a previous attempt left an uncertain remote effect with no resource identifier to reconcile -- refusing to create again; the remote state must be resolved first",
+                reconciliation_required: true,
+              });
+            }
+            return await finishWithActivity({
               ...base,
               state: "unverified",
-              ...(prior.remote_resource ? { remote_resource: prior.remote_resource } : {}),
-              reason:
-                "a previous attempt left an uncertain remote effect with no resource identifier to reconcile -- refusing to create again; the remote state must be resolved first",
+              remote_resource: prior.remote_resource,
+              reason: "a previous attempt left an uncertain remote effect and this operation declares no reconciliation step -- refusing to repeat it",
               reconciliation_required: true,
-            };
+            });
           }
-          return {
-            ...base,
-            state: "unverified",
-            remote_resource: prior.remote_resource,
-            reason: "a previous attempt left an uncertain remote effect and this operation declares no reconciliation step -- refusing to repeat it",
-            reconciliation_required: true,
-          };
+          const reconciliation = await operation.reconcile(env, prior, request.input);
+          const outcome = reconciliation.outcome;
+          if (outcome !== null && outcome !== undefined) {
+            const defect = validateOutcomeShape(outcome, operation);
+            const finalOutcome = defect
+              ? malformedOutcome(operation.toolId, operation.operationId, defect)
+              : { ...outcome, tool_id: operation.toolId, operation_id: operation.operationId };
+            await persistOperationOutcome(persistence, recordKey, baseRecord, finalOutcome);
+            return await finishWithActivity(finalOutcome);
+          }
+          // Reconciliation established that the desired remote effect does not
+          // exist: a fresh attempt may proceed. A prior `failed`/`denied`
+          // record likewise carried no remote effect and falls through to the
+          // same place.
         }
-        const reconciliation = await operation.reconcile(env, prior, request.input);
-        const outcome = reconciliation.outcome;
-        if (outcome !== null && outcome !== undefined) {
-          const defect = validateOutcomeShape(outcome, operation);
-          const finalOutcome = defect
-            ? malformedOutcome(operation.toolId, operation.operationId, defect)
-            : { ...outcome, tool_id: operation.toolId, operation_id: operation.operationId };
-          await persistOperationOutcome(persistence, recordKey, baseRecord, finalOutcome);
-          return finalOutcome;
-        }
-        // Reconciliation established that the desired remote effect does not
-        // exist: a fresh attempt may proceed. A prior `failed`/`denied`
-        // record likewise carried no remote effect and falls through to the
-        // same place.
       }
-    }
 
-    // Persist the execution intent BEFORE the first protected external
-    // effect: if the process dies from here on, resumption finds an
-    // `in_progress` record and reconciles instead of repeating.
-    const intent: ExternalToolOperationRecord = { ...baseRecord, status: "in_progress", updatedAt: new Date().toISOString() };
-    try {
-      await persistence.save(recordKey, intent);
-    } catch (error) {
-      return {
-        ...base,
-        state: "failed",
-        stage: "persistence",
-        reason: `the execution intent could not be persisted to this Work's storage (${error instanceof Error ? error.message : "unknown error"}) -- refusing to start an external effect that could not be recovered after an interruption`,
-      };
-    }
+      // Persist the execution intent BEFORE the first protected external
+      // effect: if the process dies from here on, resumption finds an
+      // `in_progress` record and reconciles instead of repeating.
+      const intent: ExternalToolOperationRecord = { ...baseRecord, status: "in_progress", updatedAt: new Date().toISOString() };
+      try {
+        await persistence.save(recordKey, intent);
+      } catch (error) {
+        return await finishWithActivity({
+          ...base,
+          state: "failed",
+          stage: "persistence",
+          reason: `the execution intent could not be persisted to this Work's storage (${error instanceof Error ? error.message : "unknown error"}) -- refusing to start an external effect that could not be recovered after an interruption`,
+        });
+      }
 
-    // 5. The registered handler, then contract validation of what it
-    //    returned, then the durable outcome. A failed outcome save never
-    //    rewrites what was actually observed: the record stays `in_progress`
-    //    and the next invocation reconciles it against the provider.
-    const result = await operation.run(env, request.input, resolvedTarget.target);
-    const defect = validateOutcomeShape(result, operation);
-    const finalOutcome = defect
-      ? malformedOutcome(operation.toolId, operation.operationId, defect)
-      : { ...result, tool_id: operation.toolId, operation_id: operation.operationId };
-    await persistOperationOutcome(persistence, recordKey, intent, finalOutcome);
-    return finalOutcome;
-  } finally {
-    IN_FLIGHT_OPERATIONS.delete(guardKey);
+      // 5. The registered handler, then contract validation of what it
+      //    returned, then the durable outcome. A failed outcome save never
+      //    rewrites what was actually observed: the record stays `in_progress`
+      //    and the next invocation reconciles it against the provider.
+      const result = await operation.run(env, request.input, resolvedTarget.target);
+      const defect = validateOutcomeShape(result, operation);
+      const finalOutcome = defect
+        ? malformedOutcome(operation.toolId, operation.operationId, defect)
+        : { ...result, tool_id: operation.toolId, operation_id: operation.operationId };
+      await persistOperationOutcome(persistence, recordKey, intent, finalOutcome);
+      return await finishWithActivity(finalOutcome);
+    } finally {
+      IN_FLIGHT_OPERATIONS.delete(guardKey);
+    }
+  } catch (err) {
+    if (activityCtx) await finishOperation(env, activityCtx as any, "failed").catch(() => undefined);
+    throw err;
   }
 }
