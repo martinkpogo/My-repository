@@ -305,3 +305,8 @@ test("option B: Marketing declares continueAfterResearch, and it refuses unless 
     globalThis.fetch = original;
   }
 });
+
+test("resuming a held draft never claims research ran: it follows a skip or a failed run as well as a completed one", async () => {
+  const { MARKETING_CONTINUE_MESSAGE } = await import("./marketingManifest");
+  assert.doesNotMatch(MARKETING_CONTINUE_MESSAGE, /research|complete/i);
+});

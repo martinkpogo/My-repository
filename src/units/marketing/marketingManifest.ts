@@ -848,14 +848,22 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
   };
 }
 
-/** Re-runs the Hat step after paused research completed (the findings are already in the run). */
+/**
+ * What Marketing says as it resumes a held draft. Neutral on purpose (Martin,
+ * 16 Nov 2026): this runs after completed research, after Martin skipped deep
+ * research, and after "Continue without it" on failed research, and in every
+ * case the message just before it already says what happened to the research.
+ */
+export const MARKETING_CONTINUE_MESSAGE = "Drafting now.";
+
+/** Re-runs the Hat step a held draft was waiting on, with whatever research findings are already in the run. */
 export async function continueMarketingAfterResearch(env: Env, state: WorkState): Promise<WorkState> {
   if (state.stage !== "awaiting_research") {
     await sendWorkspaceHatMessage(env, state, "This work isn't waiting on research -- nothing to continue.");
     return state;
   }
   state.stage = "in_progress";
-  await sendWorkspaceHatMessage(env, state, "Research is complete -- drafting with it now.");
+  await sendWorkspaceHatMessage(env, state, MARKETING_CONTINUE_MESSAGE);
   return dispatchMarketingHat(env, state);
 }
 
