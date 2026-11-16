@@ -153,7 +153,12 @@ test("resuming the same job repeats no completed work: no new interpretation, no
   const h = harness({ failQueries: new Set([Q_B]) });
   const { store, only } = memoryStore();
   await withFetch(h.fetchImpl, () => runResearchSkill(h.env, { question: QUESTION, context: "", checkpoints: store }, CTX));
-  assert.deepStrictEqual(h.counters.searches, [Q_A, Q_B]);
+  // Both dimensions are searched in parallel (Promise.all; the contract in
+  // webSearch.test.ts is that searches are "never serialized"), so which fetch
+  // lands first is scheduling, not a guarantee: the cache-key SHA-256 runs on
+  // the thread pool and can complete out of call order. Phase 1 must prove
+  // each planned dimension was searched exactly once -- in either order.
+  assert.deepStrictEqual([...h.counters.searches].sort(), [Q_A, Q_B].sort(), "each planned dimension was searched exactly once");
 
   // The provider is back: its cooldown has ended and it no longer refuses.
   h.kv.delete("search_provider_cooldown:tavily");
