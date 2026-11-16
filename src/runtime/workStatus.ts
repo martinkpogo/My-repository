@@ -20,12 +20,26 @@ import { resolvePendingStep, yieldLiveStatusToHat, type LiveStatusDetailSink, ty
  * The holder is a WorkState, or -- for a run with no Work (a scheduled
  * sweep) -- any object carrying the same two fields plus a chatId.
  */
+export type OperationOutcome = "succeeded" | "failed" | "partially_completed" | "unverified" | "denied";
+
+export interface OperationEntry {
+  operationId: string;
+  label: string;
+  startedAt: number;
+  outcome?: OperationOutcome;
+  completedAt?: number;
+}
+
 export interface WorkStatus {
   /** The Hat the status bubble is labelled with ("Hat: <name>."). */
   hat: string;
   header: string;
   done: string[];
   current?: string;
+  /** In-progress operations with start-time markers (truthful concurrency). */
+  running?: OperationEntry[];
+  /** Completed operations in actual completion order. */
+  completed?: OperationEntry[];
   /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
   edits?: number;
   /**
@@ -56,7 +70,7 @@ export const MAX_INTERMEDIATE_EDITS = 6;
  * first call instead of being rejected and retried as plain text (two
  * subrequests instead of one).
  */
-function escapeTelegramMarkdown(text: string): string {
+export function escapeTelegramMarkdown(text: string): string {
   return text.replace(/([_*`\[])/g, "\\$1");
 }
 
@@ -92,6 +106,14 @@ export function renderWorkStatus(status: WorkStatus, ending?: { line: string; cu
     const text = !ending || failed ? (inner ?? status.current) : status.current;
     lines.push(`${ending ? (failed ? "✗" : "✓") : "⏳"} ${step(text)}`);
   }
+  // Outcome-driven operation feed: in-progress operations shown with start
+  // markers (truthful concurrency, no implied sequence) and completed
+  // operations shown in actual completion order with their outcome.
+  for (const r of status.running ?? []) lines.push(`⏳ ${step(r.label)} (started ${new Date(r.startedAt).toISOString()})`);
+  for (const c of status.completed ?? []) {
+    const mark = c.outcome === "succeeded" ? "✓" : c.outcome === "denied" ? "⛔" : c.outcome === "failed" ? "✗" : "•";
+    lines.push(`${mark} ${step(c.label)} [${c.outcome}]`);
+  }
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
@@ -101,7 +123,7 @@ export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: s
   // One message per run: a universal live-status message already shown for
   // this run gives way to the Hat's own named steps.
   yieldLiveStatusToHat();
-  holder.workStatus = { hat, header, done: [], current: firstStep, edits: 0, lastEditAt: Date.now() };
+  holder.workStatus = { hat, header, done: [], current: firstStep, running: [], completed: [], edits: 0, lastEditAt: Date.now() };
   holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
@@ -142,13 +164,13 @@ export function noteWorkStatus(holder: WorkStatusHolder, step: string): void {
  * that was running ✗, so the message shows exactly where it stopped. Clears
  * the run, so a later run never edits a finished message.
  */
-export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line: string, outcome: "succeeded" | "failed"): Promise<void> {
+export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line: string, outcome: "succeeded" | "failed" | "partially_completed" | "unverified" | "denied"): Promise<void> {
   const status = holder.workStatus;
   const messageId = holder.workStatusMessageId;
   holder.workStatus = undefined;
   holder.workStatusMessageId = undefined;
   if (messageId === undefined || !status) return;
-  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" })));
+  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" || outcome === "denied" })));
 }
 
 /** Minimum gap between two detail-only edits of a Hat's status message. */

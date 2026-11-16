@@ -1,4 +1,5 @@
 import type { Env } from "../../types";
+import { reportOperationOutcome, type OperationContext } from "../../runtime/activityReporter";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
@@ -276,14 +277,26 @@ export function finishedSearchLabel(outcome: SearchOutcome): string {
   return `${SEARCH_STEP} — not completed`;
 }
 
-export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
+export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext, operationContext?: OperationContext): Promise<SearchOutcome> {
   const invalidReason = validateSearchRequest(request, SEARCH_PROVIDER_ADAPTERS[PRIMARY_SEARCH_PROVIDER]);
-  if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
+  if (invalidReason) {
+    if (operationContext) await reportOperationOutcome(env, operationContext, "failed");
+    return { kind: "invalid_input", reason: invalidReason };
+  }
   // Universal live status: never the query text. The step shows ⏳ until
   // the search returns, then names the site it found.
   reportLiveStep(SEARCH_STEP);
   const outcome = await runSearch(env, request, access);
   resolveLiveStep(SEARCH_STEP, finishedSearchLabel(outcome));
+  if (operationContext) {
+    const opOutcome =
+      outcome.kind === "success_with_results" || outcome.kind === "success_no_results"
+        ? "succeeded"
+        : outcome.kind === "interrupted"
+          ? "unverified"
+          : "failed";
+    await reportOperationOutcome(env, operationContext, opOutcome);
+  }
   return outcome;
 }
 

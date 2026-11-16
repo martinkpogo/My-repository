@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { reportOperationOutcome, type OperationContext } from "./runtime/activityReporter";
 import { evaluateAccess, governedSourceForDataSourceId, NON_GOVERNED_PAGE_TARGET, type AccessContext, type AccessRequest, type GovernedSource } from "./access";
 import { reportLiveStep } from "./runtime/liveStatus";
 
@@ -25,7 +26,7 @@ export interface NotionPage {
   inTrash?: boolean;
 }
 
-async function notionFetch(env: Env, path: string, init: RequestInit = {}): Promise<any> {
+async function notionFetch(env: Env, path: string, init: RequestInit = {}, operationContext?: OperationContext): Promise<any> {
   const res = await fetch(`${API}${path}`, {
     ...init,
     headers: {
@@ -37,9 +38,14 @@ async function notionFetch(env: Env, path: string, init: RequestInit = {}): Prom
   });
   if (!res.ok) {
     const body = await res.text();
+    void body;
+    const outcome = (res.status === 401 || res.status === 403) ? "denied" : "failed";
+    if (operationContext) await reportOperationOutcome(env, operationContext, outcome);
     throw new Error(`Notion API ${path} failed: ${res.status} ${body}`);
   }
-  return res.json();
+  const data = await res.json();
+  if (operationContext) await reportOperationOutcome(env, operationContext, "succeeded");
+  return data;
 }
 
 const SOURCE_LABELS: Record<GovernedSource, string> = {

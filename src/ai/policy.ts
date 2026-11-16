@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import type { OperationMetadata } from "../runtime/activityReporter";
 import { AI_TASK_LIVE_LABELS } from "./liveLabels";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
 import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
@@ -136,8 +137,9 @@ export class AiPolicyExecutor {
   public async executeTask(
     env: Env,
     task: AiTask,
+    _operationMetadata?: OperationMetadata,
   ): Promise<CommonAiResponse | null> {
-    const outcome = await this.executeTaskWithOutcome(env, task);
+    const outcome = await this.executeTaskWithOutcome(env, task, _operationMetadata);
     return outcome.ok ? outcome.response : null;
   }
 
@@ -164,6 +166,7 @@ export class AiPolicyExecutor {
   public async executeTaskWithOutcome(
     env: Env,
     task: AiTask,
+    _operationMetadata?: OperationMetadata,
   ): Promise<AiCallOutcome> {
     if (!task || !task.taskId || !isSemanticTaskId(task.taskId) || !task.boundaryContext) {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
