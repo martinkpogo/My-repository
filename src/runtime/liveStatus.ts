@@ -45,12 +45,51 @@ import { deleteMessage, editMessageText, sendMessage } from "../telegram";
  *   - One message per run: where a Hat already reports its own named steps
  *     (src/runtime/workStatus.ts), this run stays silent and feeds those
  *     steps a detail line instead of opening a second message.
+ *   - Outcome-driven (#369): the chokepoints report OPERATIONS
+ *     (withLiveOperation), each ended with the outcome it actually had --
+ *     succeeded, failed, partially_completed, unverified or denied. Running
+ *     operations each show ⏳, finished ones are listed in completion order,
+ *     and a Hat's own status shows the same feed. See withLiveOperation.
  */
 
 export const EDIT_INTERVAL_MS = 1000;
 export const MAX_EDITS = 6;
 
 export type LiveStatusOutcome = "succeeded" | "waiting" | "failed";
+
+/**
+ * How one operation actually ended (#369, the outcome-driven activity feed):
+ * the same five states the Tool Registry already returns. `unverified` means
+ * the effect may or may not have happened and must be reconciled.
+ */
+export type OperationOutcome = "succeeded" | "failed" | "partially_completed" | "unverified" | "denied";
+
+/** One operation in a run's feed: running (no outcome yet) or finished. */
+export interface OperationEntry {
+  operationId: string;
+  label: string;
+  startedAt: number;
+  outcome?: OperationOutcome;
+  completedAt?: number;
+  /** Consecutive finished operations with the same label and outcome are merged ("Reading Matters ×3"). */
+  count?: number;
+}
+
+/** The run's operations as a Hat's own status shows them: what is running now, and what finished, in completion order. */
+export interface OperationFeed {
+  running: OperationEntry[];
+  completed: OperationEntry[];
+  /** Finished operations dropped from `completed` to keep the message bounded. */
+  earlier: number;
+}
+
+/** At most this many finished entries are kept per run (merged entries count once); older ones are counted in `earlier`. */
+export const MAX_COMPLETED_OPERATIONS = 8;
+
+/** The mark a finished operation is shown with. */
+export const OUTCOME_MARK: Record<OperationOutcome, string> = { succeeded: "✓", failed: "✗", partially_completed: "◐", unverified: "?", denied: "⛔" };
+/** Plain words for a non-success outcome, shown after the label. */
+export const OUTCOME_WORDS: Record<OperationOutcome, string> = { succeeded: "", failed: "failed", partially_completed: "partly done", unverified: "not confirmed", denied: "refused" };
 
 export interface LiveStatusTarget {
   chatId: number;
@@ -62,6 +101,10 @@ export interface LiveStatusTarget {
 export interface Step {
   label: string;
   count: number;
+  /** Set when an operation reported on this line finished other than `succeeded`. */
+  outcome?: OperationOutcome;
+  /** True when the line was opened by an operation (so it can show ✓ once nothing is running). */
+  op?: boolean;
 }
 
 /** The handle a Hat's own named status uses to receive this run's current step as a detail line. */
@@ -71,6 +114,12 @@ export interface LiveStatusDetailSink {
   /** A pending step finished: one occurrence of `pending` becomes `final` (see resolveLiveStep). */
   resolveDetail?(pending: string, final: string): void;
   refresh(): Promise<void>;
+  /**
+   * The run's operation feed changed (#369). A Hat's own status shows it on
+   * its message instead of the run opening a second one. Optional: a sink
+   * without it gets the operation as a detail line, as before.
+   */
+  setOperations?(feed: OperationFeed): void;
 }
 
 /**
@@ -107,6 +156,10 @@ class LiveStatusRun {
   private finished = false;
   private trailingTimer: ReturnType<typeof setTimeout> | undefined;
   private chain: Promise<void> = Promise.resolve();
+  private opSeq = 0;
+  private readonly running = new Map<string, OperationEntry>();
+  private readonly completed: OperationEntry[] = [];
+  private earlier = 0;
 
   constructor(
     private readonly env: Env,
@@ -150,6 +203,74 @@ class LiveStatusRun {
     void this.schedule(() => this.flush());
   }
 
+  /**
+   * An operation starts. Into a Hat's own status it goes on the operation
+   * feed; otherwise it is a line on this run's own message, exactly like a
+   * step. Returns its id, or undefined once the run has finished.
+   */
+  startOperation(label: string): string | undefined {
+    if (this.finished) return undefined;
+    const id = `op${++this.opSeq}`;
+    this.running.set(id, { operationId: id, label, startedAt: this.clock.now() });
+    if (this.feedToHat()) {
+      this.pushFeed();
+      return id;
+    }
+    this.step(label);
+    const last = this.steps.at(-1);
+    if (last) last.op = true;
+    return id;
+  }
+
+  /** The operation `id` ended with `outcome`; `finalLabel` renames it (a search naming the site it found). */
+  finishOperation(id: string | undefined, outcome: OperationOutcome, finalLabel?: string): void {
+    const entry = id === undefined ? undefined : this.running.get(id);
+    if (!entry) return;
+    this.running.delete(id!);
+    const label = finalLabel ?? entry.label;
+    this.recordCompleted({ ...entry, label, outcome, completedAt: this.clock.now(), count: 1 });
+    if (this.finished) return;
+    if (this.feedToHat()) {
+      this.pushFeed();
+      return;
+    }
+    if (label !== entry.label) resolvePendingStep(this.steps, entry.label, label);
+    if (outcome !== "succeeded") markStepOutcome(this.steps, label, outcome);
+    this.dirty = true;
+    void this.schedule(() => this.flush());
+  }
+
+  /** The feed as it stands; running entries in start order, finished ones in completion order. */
+  feed(): OperationFeed {
+    return { running: [...this.running.values()], completed: this.completed.map((c) => ({ ...c })), earlier: this.earlier };
+  }
+
+  private feedToHat(): boolean {
+    return Boolean(this.sink?.setOperations && this.sink.hatStatusOpen());
+  }
+
+  /** Hands the feed to the Hat's status. A failing sink is logged and never reaches the operation or the run. */
+  private pushFeed(): void {
+    try {
+      this.sink!.setOperations!(this.feed());
+    } catch (err) {
+      console.error("liveStatus: operation feed not shown (the operation is unaffected)", err);
+      return;
+    }
+    void this.schedule(() => this.sink!.refresh());
+  }
+
+  private recordCompleted(entry: OperationEntry): void {
+    const last = this.completed.at(-1);
+    if (last && last.label === entry.label && last.outcome === entry.outcome) {
+      last.count = (last.count ?? 1) + 1;
+      last.completedAt = entry.completedAt;
+      return;
+    }
+    this.completed.push(entry);
+    while (this.completed.length > MAX_COMPLETED_OPERATIONS) this.earlier += this.completed.shift()!.count ?? 1;
+  }
+
   private current(): string | undefined {
     const s = this.steps.at(-1);
     return s ? render(s) : undefined;
@@ -163,10 +284,24 @@ class LiveStatusRun {
 
   private text(ending?: { line: string; failed: boolean }): string {
     const lines = [`🧭 ${this.target.header}`];
+    const inFlight = new Set([...this.running.values()].map((r) => r.label));
     this.steps.forEach((s, i) => {
       const isLast = i === this.steps.length - 1;
-      const mark = !isLast ? "✓" : ending ? (ending.failed ? "✗" : "✓") : "⏳";
-      lines.push(`${mark} ${render(s)}`);
+      // An operation's line is ⏳ exactly while an operation with its label is
+      // in flight, wherever it sits (truthful concurrency); a plain step keeps
+      // the original rule (only the last line is running).
+      const mark = s.outcome
+        ? OUTCOME_MARK[s.outcome]
+        : s.op && inFlight.has(s.label)
+          ? "⏳"
+          : !isLast || s.op
+            ? "✓"
+            : ending
+              ? ending.failed
+                ? "✗"
+                : "✓"
+              : "⏳";
+      lines.push(`${mark} ${render(s)}${s.outcome && OUTCOME_WORDS[s.outcome] ? ` — ${OUTCOME_WORDS[s.outcome]}` : ""}`);
     });
     if (this.steps.length === 0 && !ending) lines.push("⏳ Working");
     if (ending) lines.push(ending.line);
@@ -211,6 +346,10 @@ class LiveStatusRun {
 
   async finish(outcome: LiveStatusOutcome): Promise<void> {
     if (this.finished) return;
+    // An operation still in flight when its run ends never reported how it
+    // ended: its result is unknown, so it is shown as not confirmed -- never
+    // as done.
+    for (const id of [...this.running.keys()]) this.finishOperation(id, "unverified");
     this.finished = true;
     if (this.trailingTimer) clearTimeout(this.trailingTimer);
     this.sink?.setDetail(undefined);
@@ -250,6 +389,18 @@ export function resolvePendingStep(steps: Step[], pending: string, final: string
   steps.push({ label: final, count: 1 });
 }
 
+/** Marks one occurrence of `label` with a non-success outcome, splitting it off a merged line so the others keep theirs. */
+function markStepOutcome(steps: Step[], label: string, outcome: OperationOutcome): void {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].label !== label || steps[i].outcome) continue;
+    if (steps[i].count > 1) {
+      steps[i].count--;
+      steps.splice(i + 1, 0, { label, count: 1, outcome, op: true });
+    } else steps[i].outcome = outcome;
+    return;
+  }
+}
+
 function render(s: Step): string {
   return s.count > 1 ? `${s.label} ×${s.count}` : s.label;
 }
@@ -259,6 +410,8 @@ function escapeMarkdown(text: string): string {
 }
 
 const RUNS = new AsyncLocalStorage<LiveStatusRun>();
+/** Set inside an operation's own work, so a chokepoint it passes through reports a detail step, not a second operation. */
+const IN_OPERATION = new AsyncLocalStorage<true>();
 
 /**
  * Runs `fn` with a live status run open. Nested calls join the run already
@@ -319,4 +472,72 @@ export function yieldLiveStatusToHat(): void {
 /** Test seam: whether a run is open in the current async context. */
 export function liveStatusOpen(): boolean {
   return RUNS.getStore() !== undefined;
+}
+
+/**
+ * How a thrown error ends an operation: an Access refusal is `denied`;
+ * anything else is `failed`. Matched by name, so this module needs no Access
+ * import.
+ */
+export function errorOperationOutcome(err: unknown): OperationOutcome {
+  return err instanceof Error && err.name === "AccessDeniedError" ? "denied" : "failed";
+}
+
+/**
+ * Runs `fn` as one operation of the open run (#369, the outcome-driven
+ * activity feed): reported when it actually starts, and finished with the
+ * outcome it actually had -- never assumed. Called only from the shared
+ * chokepoints (AI calls, Notion operations, web searches, page reads, Tool
+ * invocations) and for work a Hat runs in parallel, so no call site threads
+ * a reporting handle: the run is found the same way every live step is.
+ *
+ * - Outside a run it just runs `fn`.
+ * - Inside another operation it reports a plain detail step instead, so a
+ *   wrapped call is not listed twice.
+ * - Reporting never changes the result: `fn`'s value or error is returned
+ *   or rethrown unchanged, whatever the reporting does.
+ */
+export async function withLiveOperation<T>(
+  label: string,
+  fn: () => Promise<T>,
+  outcomeOf: (result: T) => OperationOutcome = () => "succeeded",
+  options: { finalLabel?: (result: T) => string | undefined; errorOutcome?: (err: unknown) => OperationOutcome } = {},
+): Promise<T> {
+  const run = RUNS.getStore();
+  if (!run) return fn();
+  if (IN_OPERATION.getStore()) {
+    safely(() => run.step(label), undefined);
+    const result = await fn();
+    safely(() => {
+      const final = options.finalLabel?.(result);
+      if (final && final !== label) run.resolve(label, final);
+    }, undefined);
+    return result;
+  }
+  const id = safely(() => run.startOperation(label), undefined);
+  let result: T;
+  try {
+    result = await IN_OPERATION.run(true, fn);
+  } catch (err) {
+    safely(() => run.finishOperation(id, (options.errorOutcome ?? errorOperationOutcome)(err)), undefined);
+    throw err;
+  }
+  safely(() => run.finishOperation(id, outcomeOf(result), options.finalLabel?.(result)), undefined);
+  return result;
+}
+
+/** Records an operation that was refused before it could start (an Access denial at a chokepoint): it appears once, `denied`. */
+export function reportRefusedOperation(label: string): void {
+  const run = RUNS.getStore();
+  if (!run || IN_OPERATION.getStore()) return;
+  safely(() => run.finishOperation(run.startOperation(label), "denied"), undefined);
+}
+
+function safely<T>(fn: () => T, fallback: T): T {
+  try {
+    return fn();
+  } catch (err) {
+    console.error("liveStatus: operation reporting failed (the operation is unaffected)", err);
+    return fallback;
+  }
 }

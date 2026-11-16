@@ -1,5 +1,4 @@
 import type { Env } from "./types";
-import type { OperationMetadata } from "./runtime/activityReporter";
 import { defaultPolicyExecutor, AiPolicyExecutor, type AiFailureCause } from "./ai/policy";
 import type { AiTask } from "./ai/types";
 import type { SemanticTaskId, ContextSegment, SensitivityLevel } from "./dataBoundary/types";
@@ -77,9 +76,8 @@ export async function aiJson<T = Record<string, unknown>>(
   env: Env,
   opts: AiJsonOptions,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationMetadata,
 ): Promise<T | null> {
-  const response = await executor.executeTask(env, buildJsonTask(opts), operationContext);
+  const response = await executor.executeTask(env, buildJsonTask(opts));
   if (!response) {
     return null;
   }
@@ -103,7 +101,6 @@ export async function aiText(
   user: string,
   options: AiTextOptions = {},
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationMetadata,
 ): Promise<string> {
   const segments: ContextSegment[] = [
     { type: "system", content: system, provenance: `${taskId}:system` },
@@ -123,7 +120,7 @@ export async function aiText(
     light: options.light,
   };
 
-  const response = await executor.executeTask(env, task, operationContext);
+  const response = await executor.executeTask(env, task);
   return response ? response.rawText : "";
 }
 
@@ -148,7 +145,6 @@ export async function aiChat(
   maxTokens = 800,
   sensitivity?: SensitivityLevel,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationMetadata,
 ): Promise<string> {
   const segments: ContextSegment[] = [
     { type: "system", content: system, provenance: `${taskId}:system`, sensitivity },
@@ -174,7 +170,7 @@ export async function aiChat(
     maxTokens,
   };
 
-  const response = await executor.executeTask(env, task, operationContext);
+  const response = await executor.executeTask(env, task);
   return response ? response.rawText : "";
 }
 
@@ -227,18 +223,18 @@ function assembleSystemPrompt(parts: GeneratePromptParts): string {
  * treatment, so TypeScript overloads keep this one exported function name
  * while still typing each call site's return correctly.
  */
-export async function generate<T = Record<string, unknown>>(env: Env, options: BaseGenerateOptions & { mode: "json" }, operationMetadata?: OperationMetadata): Promise<T | null>;
-export async function generate(env: Env, options: BaseGenerateOptions & { mode: "text" }, operationMetadata?: OperationMetadata): Promise<string>;
-export async function generate(env: Env, options: BaseGenerateOptions & { mode: "json" | "text" }, operationContext?: OperationMetadata): Promise<unknown> {
+export async function generate<T = Record<string, unknown>>(env: Env, options: BaseGenerateOptions & { mode: "json" }): Promise<T | null>;
+export async function generate(env: Env, options: BaseGenerateOptions & { mode: "text" }): Promise<string>;
+export async function generate(env: Env, options: BaseGenerateOptions & { mode: "json" | "text" }): Promise<unknown> {
   const system = assembleSystemPrompt(options.parts);
   const situation = options.parts.situation;
   if (options.mode === "json") {
-    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens }, undefined, operationContext);
+    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens });
   }
   if (options.history) {
-    return aiChat(env, options.taskId, system, options.history, situation, options.maxTokens ?? 800, options.sensitivity, undefined, operationContext);
+    return aiChat(env, options.taskId, system, options.history, situation, options.maxTokens ?? 800, options.sensitivity);
   }
-  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens }, undefined, operationContext);
+  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens });
 }
 
 /**
@@ -268,7 +264,6 @@ export async function generateWithOutcome<T = Record<string, unknown>>(
   env: Env,
   options: BaseGenerateOptions,
   executor: AiPolicyExecutor = defaultPolicyExecutor,
-  operationContext?: OperationMetadata,
 ): Promise<AiJsonOutcome<T>> {
   const system = assembleSystemPrompt(options.parts);
   const outcome = await executor.executeTaskWithOutcome(env, buildJsonTask({
@@ -277,7 +272,7 @@ export async function generateWithOutcome<T = Record<string, unknown>>(
     user: options.parts.situation,
     light: options.light,
     maxTokens: options.maxTokens,
-  }), operationContext);
+  }));
   if (!outcome.ok) {
     return { ok: false, cause: outcome.cause, gateReasons: outcome.gateReasons, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) };
   }

@@ -1,6 +1,6 @@
 import type { Env } from "../../types";
-import { startOperation, finishOperation, type OperationMetadata } from "../../runtime/activityReporter";
 import { generate, generateWithOutcome, type AiFailureCause } from "../../ai";
+import { withLiveOperation } from "../../runtime/liveStatus";
 import type { SemanticTaskId } from "../../dataBoundary/types";
 import type { ResolvedActionSkillSet, SkillId } from "../../platform/skillRegistry";
 
@@ -177,8 +177,6 @@ export interface StrategySkillCycleParams {
   skills: ResolvedActionSkillSet;
   /** Progress narration for the in-progress message, if the caller wants one. */
   onProgress?: (message: string) => Promise<void>;
-  /** Optional activity metadata propagated explicitly from the caller. */
-  operationMetadata?: OperationMetadata;
 }
 
 export function findingsText(findings: readonly StrategySkillFinding[]): string {
@@ -233,7 +231,6 @@ async function planStrategySkills(
     availableSkills: readonly StrategyDomainSkillId[];
     strategyAnalysisContent: string;
   },
-  operationMetadata?: OperationMetadata,
 ): Promise<{ plan: StrategySkillPlanEntry[] | null; cause?: AiFailureCause }> {
   try {
     const outcome = await generateWithOutcome<{ interpretation?: string; plan?: unknown; rationale?: string }>(env, {
@@ -272,7 +269,7 @@ async function planStrategySkills(
         ].join("\n"),
       },
       light: true,
-     }, undefined, operationMetadata ? { ...operationMetadata, label: "strategy.skill_plan" } : undefined);
+    });
 
     if (!outcome.ok) {
       // The documented degradation is unchanged (the caller proceeds to
@@ -311,7 +308,6 @@ async function runDomainSkill(
   skillId: StrategyDomainSkillId,
   question: string,
   input: { strategyQuestion: string; strategyContext: string; skillContent: string },
-  _operationMetadata?: OperationMetadata,
 ): Promise<StrategySkillFinding> {
   const profile = DOMAIN_PROFILES[skillId];
   try {
@@ -392,7 +388,6 @@ async function runDomainSkill(
 async function synthesizeStrategyFindings(
   env: Env,
   input: { strategyQuestion: string; strategyContext: string; findings: StrategySkillFinding[]; strategyAnalysisContent: string },
-  operationMetadata?: OperationMetadata,
 ): Promise<{
   synthesis: StrategySynthesisResult | null;
   aiFailure?: { cause: AiFailureCause; gateReasons: string[] };
@@ -428,7 +423,7 @@ async function synthesizeStrategyFindings(
       },
       light: true,
       maxTokens: 2000,
-     }, undefined, operationMetadata ? { ...operationMetadata, label: "strategy.skill_synthesis" } : undefined);
+    });
     if (!outcome.ok) {
       return { synthesis: null, aiFailure: { cause: outcome.cause, gateReasons: outcome.gateReasons } };
     }
@@ -455,7 +450,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   const availableSkills = STRATEGY_DOMAIN_SKILL_IDS.filter((id) => skills.declared.includes(id));
 
   await onProgress?.("Planning which Strategy Skills (if any) this diagnosis needs...");
-  const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content }, params.operationMetadata);
+  const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content });
   if (planOutcome.plan === null) {
     // Unchanged degradation: proceed to core diagnosis, only the CAUSE is
     // additionally carried for the caller's log and WorkState.
@@ -484,22 +479,23 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
 
   await onProgress?.(`Running Strategy Skills (${plan.map((p) => p.skillId).join(", ")})...`);
   // Array order is the plan's order, so the recorded invocation order is
-  // deterministic even though the calls run concurrently. Start all
-  // operation markers before awaiting so parallel work is represented
-  // truthfully without implying a sequential order.
-  const skillOps = params.operationMetadata?.holder?.workStatus
-    ? await Promise.all(plan.map(async ({ skillId }) => ({ skillId, ctx: await startOperation(env, params.operationMetadata!.holder!, `strategy-skill-${skillId}`, `Applying skill: ${skillId}`) })))
-    : [];
+  // deterministic even though the calls run concurrently. Each Skill is one
+  // operation on the run's activity feed (#369): all start together, so they
+  // show as parallel, and each ends with what its finding actually was. The
+  // AI call inside each is a detail of that operation, never listed twice.
   const findings = await Promise.all(
-    plan.map(async ({ skillId, question }, i) => {
-      const finding = await runDomainSkill(env, skillId as StrategyDomainSkillId, question, {
-        strategyQuestion,
-        strategyContext,
-        skillContent: skills.get(skillId as SkillId).content,
-      }, params.operationMetadata);
-      if (skillOps[i]) await finishOperation(env, skillOps[i].ctx, finding.status === "completed" ? "succeeded" : "failed");
-      return finding;
-    }),
+    plan.map(({ skillId, question }) =>
+      withLiveOperation(
+        `Applying Skill: ${skillId}`,
+        () =>
+          runDomainSkill(env, skillId as StrategyDomainSkillId, question, {
+            strategyQuestion,
+            strategyContext,
+            skillContent: skills.get(skillId as SkillId).content,
+          }),
+        (finding) => (finding.status === "completed" ? "succeeded" : "failed"),
+      ),
+    ),
   );
 
   if (findings.every((f) => f.status === "failed")) {
@@ -511,7 +507,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   }
 
   await onProgress?.("Reconciling Strategy Skill findings...");
-  const synthesisOutcome = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content }, params.operationMetadata);
+  const synthesisOutcome = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content });
   if (synthesisOutcome.synthesis === null) {
     if (synthesisOutcome.aiFailure) {
       // A failed synthesis call is phrased by cause (gate refusal vs

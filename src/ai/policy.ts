@@ -1,9 +1,8 @@
 import type { Env } from "../types";
-import { startOperation, finishOperation, type OperationContext, type OperationMetadata, type OperationOutcome } from "../runtime/activityReporter";
 import { AI_TASK_LIVE_LABELS } from "./liveLabels";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
 import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
-import { reportLiveStep, resolveLiveStep } from "../runtime/liveStatus";
+import { reportLiveStep, resolveLiveStep, withLiveOperation, type OperationOutcome } from "../runtime/liveStatus";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
 import { GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER } from "./openaiCompatible";
@@ -137,9 +136,8 @@ export class AiPolicyExecutor {
   public async executeTask(
     env: Env,
     task: AiTask,
-    _operationMetadata?: OperationMetadata,
   ): Promise<CommonAiResponse | null> {
-    const outcome = await this.executeTaskWithOutcome(env, task, _operationMetadata);
+    const outcome = await this.executeTaskWithOutcome(env, task);
     return outcome.ok ? outcome.response : null;
   }
 
@@ -166,7 +164,6 @@ export class AiPolicyExecutor {
   public async executeTaskWithOutcome(
     env: Env,
     task: AiTask,
-    operationMetadata?: OperationMetadata,
   ): Promise<AiCallOutcome> {
     if (!task || !task.taskId || !isSemanticTaskId(task.taskId) || !task.boundaryContext) {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
@@ -180,37 +177,13 @@ export class AiPolicyExecutor {
         console.error(`AiPolicyExecutor: task augmenter "${id}" failed -- continuing without it`, err);
       }
     }
+    // Universal live status: the registered task's fixed name, never the
+    // prompt -- one operation, ended with what actually happened (#369): a
+    // result is `succeeded`; an Outbound Data Gate refusal is `denied`;
+    // anything else (no provider answered, an unusable answer) is `failed`.
     const label = AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`;
-    // Universal live status: the registered task's fixed name, never the prompt.
-    reportLiveStep(label);
-
-    const holder = operationMetadata?.holder;
-    const canReport = !!(holder?.workStatus);
-    let opCtx: OperationContext | undefined;
-    if (canReport) {
-      try {
-        opCtx = await startOperation(env, holder!, `ai:${task.taskId}:${Date.now()}`, operationMetadata?.label ?? label, operationMetadata?.parentOperationId);
-      } catch {
-        opCtx = undefined;
-      }
-    }
-    try {
-      const outcome = await this.runProviderChain(env, task, this.providers, true);
-      if (opCtx) {
-        const mapped: OperationOutcome = outcome.ok
-          ? "succeeded"
-          : outcome.cause === "outbound_gate_blocked"
-            ? "denied"
-            : outcome.cause === "unparseable"
-              ? "failed"
-              : (outcome.retryAt ? "unverified" : "failed");
-        await finishOperation(env, opCtx, mapped).catch(() => undefined);
-      }
-      return outcome;
-    } catch (err) {
-      if (opCtx) await finishOperation(env, opCtx, "failed").catch(() => undefined);
-      throw err;
-    }
+    const checked = task;
+    return withLiveOperation(label, () => this.runProviderChain(env, checked, this.providers, true), aiOperationOutcome);
   }
 
   /**
@@ -457,6 +430,12 @@ async function countDownLiveStep(waitMs: number, stepLabel: string): Promise<voi
     resolveLiveStep(label, next);
     label = next;
   }
+}
+
+/** How one AI call ended, for the activity feed: never the prompt or the answer. */
+export function aiOperationOutcome(outcome: AiCallOutcome): OperationOutcome {
+  if (outcome.ok) return "succeeded";
+  return outcome.cause === "outbound_gate_blocked" ? "denied" : "failed";
 }
 
 export const defaultPolicyExecutor = new AiPolicyExecutor();

@@ -59,7 +59,7 @@ import { googleDocsFormatToolOperation } from "./tools/googleDocsFormatTool";
 import { googleDriveEnsureFolderToolOperation } from "./tools/googleDriveFolderTool";
 import { googleDriveReplyToolOperation } from "./tools/googleDriveReplyTool";
 import { getWorkPersistence, type ToolOperationPersistence } from "./workPersistence";
-import { reportLiveStep } from "./liveStatus";
+import { withLiveOperation } from "./liveStatus";
 
 // ---------------------------------------------------------------------------
 // Contract types.
@@ -457,9 +457,15 @@ export async function invokeTool(env: Env, request: ToolInvocationRequest, conte
       `tool operation ${String(request.tool_id)}.${String(request.operation_id)} is not registered in the Tool Registry -- an unknown Tool or operation is never treated as an unguarded one`,
     );
   }
+  // Universal live status: the registered Tool operation's ids only, never its
+  // input -- one operation, ended with the canonical state this invocation
+  // actually returned (#369), including `unverified` when a remote effect may
+  // exist. A thrown runtime fault is `failed`.
+  return withLiveOperation(`Running ${operation.toolId}: ${operation.operationId}`, () => invokeRegisteredOperation(env, operation, request, context), (outcome) => outcome.state);
+}
+
+async function invokeRegisteredOperation(env: Env, operation: ToolOperationDefinition, request: ToolInvocationRequest, context: AccessContext): Promise<ToolInvocationOutcome> {
   const base = { tool_id: operation.toolId, operation_id: operation.operationId };
-  // Universal live status: the registered Tool operation's ids only, never its input.
-  reportLiveStep(`Running ${operation.toolId}: ${operation.operationId}`);
 
   // 1. Input contract.
   const inputDefect = operation.validateInput(request.input);

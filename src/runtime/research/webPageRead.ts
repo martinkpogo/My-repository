@@ -3,7 +3,7 @@ import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../.
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { hashContent } from "../../contentHash";
 import { kvGet, kvPut } from "../../kvStore";
-import { currentRun, reportLiveStep, resolveLiveStep } from "../liveStatus";
+import { currentRun, withLiveOperation, type OperationOutcome } from "../liveStatus";
 import {
   classifyHttpFailure,
   clearCooldown,
@@ -391,14 +391,25 @@ function domainOf(url: string): string {
   }
 }
 
+/** How one page read ended, for the activity feed: a page with no usable text is partly done; ENIG's allowance refusing it is `denied`. */
+export function pageReadOperationOutcome(outcome: PageReadOutcome): OperationOutcome {
+  if (outcome.kind === "success") return "succeeded";
+  if (outcome.kind === "empty_page") return "partially_completed";
+  return outcome.kind === "internal_allowance_exhausted" ? "denied" : "failed";
+}
+
 export async function readWebPage(env: Env, request: PageReadRequest, access: AccessContext): Promise<PageReadOutcome> {
   const invalid = validatePageReadRequest(request);
   if (invalid) return { kind: "invalid_input", reason: invalid };
-  reportLiveStep(PAGE_READ_STEP);
-  const outcome = await runPageRead(env, { url: request.url.trim(), max: request.max_characters ?? DEFAULT_PAGE_TEXT_CHARS }, access);
+  // One operation (#369): ⏳ until the read returns, then the site's domain
+  // and how it actually ended.
   const domain = domainOf(request.url);
-  resolveLiveStep(PAGE_READ_STEP, outcome.kind === "success" && /^[a-z0-9.-]+$/.test(domain) ? `${PAGE_READ_STEP} — ${domain}` : `${PAGE_READ_STEP} — not completed`);
-  return outcome;
+  return withLiveOperation(
+    PAGE_READ_STEP,
+    () => runPageRead(env, { url: request.url.trim(), max: request.max_characters ?? DEFAULT_PAGE_TEXT_CHARS }, access),
+    pageReadOperationOutcome,
+    { finalLabel: (outcome) => (outcome.kind === "success" && /^[a-z0-9.-]+$/.test(domain) ? `${PAGE_READ_STEP} — ${domain}` : `${PAGE_READ_STEP} — not completed`) },
+  );
 }
 
 async function runPageRead(env: Env, request: { url: string; max: number }, access: AccessContext): Promise<PageReadOutcome> {
