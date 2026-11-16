@@ -9,6 +9,7 @@ import {
   identityProblem,
   OPERATOR_RESEARCH_AWAITING,
   parseResearchCommand,
+  validTypos,
   type BriefQuestionAnswer,
   type OperatorResearchDeps,
 } from "./operatorResearch";
@@ -263,6 +264,90 @@ test("a stale button changes nothing", async () => {
   const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
   assert.strictEqual(schedule, null);
   assert.match(h.sent.at(-1)!.text, /no longer current/);
+});
+
+// ---------------------------------------------------------------------------
+// Typo suggestions on the brief
+// ---------------------------------------------------------------------------
+
+test("the brief shows the AI's typo suggestions; Fix typos corrects Martin's words only and the job uses the corrected brief", async () => {
+  const h = harness([
+    { question: "What is it for?" },
+    { question: "Which sector?" },
+    { typos: [{ wrong: "Acrca", right: "Accra" }, { wrong: "LinkdIn", right: "LinkedIn" }] },
+  ]);
+  let state = await beginOperatorResearch(env, h.state, "light_search", "Why Acrca SMEs struggle in Acrca", h.deps);
+  state = await handleOperatorResearchReply(env, state, "A LinkdIn post", h.deps);
+  state = await handleOperatorResearchReply(env, state, "Retail", h.deps);
+  const brief = h.sent.at(-1)!;
+  assert.match(brief.text, /Possible typos: "Acrca" → "Accra", "LinkdIn" → "LinkedIn"/);
+  assert.deepStrictEqual(callbacks(brief), ["oresearch:w-1:fixtypos", "oresearch:w-1:start", "oresearch:w-1:edit"]);
+  assert.strictEqual(state.operatorResearch?.topic, "Why Acrca SMEs struggle in Acrca", "nothing is changed until Martin taps Fix typos");
+
+  ({ state } = await handleOperatorResearchButton(env, state, "fixtypos", h.deps));
+  assert.strictEqual(state.operatorResearch?.topic, "Why Accra SMEs struggle in Accra");
+  assert.strictEqual(state.operatorResearch?.answers[0].answer, "A LinkedIn post");
+  assert.strictEqual(state.operatorResearch?.answers[0].question, "What is it for?", "questions are never touched");
+  const fixed = h.sent.at(-1)!;
+  assert.doesNotMatch(fixed.text, /Possible typos/);
+  assert.deepStrictEqual(callbacks(fixed), ["oresearch:w-1:start", "oresearch:w-1:edit"]);
+  const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
+  assert.strictEqual(schedule?.question, "Why Accra SMEs struggle in Accra");
+  assert.match(schedule?.context ?? "", /A LinkedIn post/);
+});
+
+test("Start as is keeps Martin's words exactly, and Fix typos is stale once nothing is suggested", async () => {
+  const h = harness([{ question: "What is it for?" }, { enough: true, typos: [{ wrong: "postt", right: "post" }] }]);
+  let state = await beginOperatorResearch(env, h.state, "deep_research", "SME positioning", h.deps);
+  state = await handleOperatorResearchReply(env, state, "A postt", h.deps);
+  assert.match(h.sent.at(-1)!.text, /"postt" → "post"/, "the reply that ends the questions carries the suggestions -- no second AI call");
+  const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
+  assert.match(schedule?.context ?? "", /A postt/);
+  ({ state } = await handleOperatorResearchButton(env, state, "fixtypos", h.deps));
+  assert.match(h.sent.at(-1)!.text, /no longer current/);
+
+  const plain = harness([]);
+  let s2 = await beginOperatorResearch(env, plain.state, "light_search", "SME positioning", plain.deps);
+  ({ state: s2 } = await handleOperatorResearchButton(env, s2, "enough", plain.deps));
+  assert.deepStrictEqual(callbacks(plain.sent.at(-1)!), ["oresearch:w-1:start", "oresearch:w-1:edit"], "no AI reply: the brief as before");
+  ({ state: s2 } = await handleOperatorResearchButton(env, s2, "fixtypos", plain.deps));
+  assert.match(plain.sent.at(-1)!.text, /no longer current/);
+});
+
+test("validTypos keeps only small whole-word spelling fixes to Martin's own words that stay identity-clean", () => {
+  const research = {
+    mode: "light_search" as const,
+    phase: "brief" as const,
+    topic: "Retial pricing in Acrca",
+    answers: [
+      { question: "Which markt?", answer: "Ghana" },
+      { question: "Skipped?", answer: null },
+    ],
+  };
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "Retial", right: "Retail" }]), [{ wrong: "Retial", right: "Retail" }]);
+  assert.deepStrictEqual(validTypos(research, "Retial -> Retail"), [], "malformed: dropped");
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "markt", right: "market" }]), [], "only in a question");
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "Ret", right: "Rat" }]), [], "part of a word");
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "Ghana", right: "Ghana" }]), [], "no change");
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "Ghana", right: "x".repeat(41) }]), [], "too long");
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "Ghana", right: "ama@example.com" }]), [], "the corrected text must pass the identity check");
+  assert.deepStrictEqual(validTypos(research, [{ wrong: "Acrca", right: "ENIG" }]), [], "never introduces ENIG or Martin");
+  assert.strictEqual(
+    validTypos({ ...research, topic: "aa bb cc dd" }, ["aa", "bb", "cc", "dd"].map((w) => ({ wrong: w, right: w + "x" }))).length,
+    3,
+    "at most three",
+  );
+});
+
+test("a brief reached at the question limit is checked by the AI too: a named party drops the last answer", async () => {
+  const h = harness([{ question: "What is it for?" }, { question: "Which sector?" }, { names_party: true }]);
+  let state = await beginOperatorResearch(env, h.state, "light_search", "SME positioning", h.deps);
+  state = await handleOperatorResearchReply(env, state, "A post", h.deps);
+  state = await handleOperatorResearchReply(env, state, "The one Kofi runs", h.deps);
+  assert.match(h.sent.at(-1)!.text, /That answer seems to name/);
+  assert.strictEqual(state.operatorResearch?.phase, "questions");
+  assert.strictEqual(state.operatorResearch?.current, "Which sector?");
+  assert.strictEqual(state.operatorResearch?.answers.length, 1);
 });
 
 // ---------------------------------------------------------------------------
