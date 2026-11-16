@@ -125,6 +125,44 @@ export function researchPausedInRun(): boolean {
   return Boolean(run && runGaps.get(run)?.reason === "providers_busy");
 }
 
+/**
+ * A Hat's proposal to research deeper (Martin, 16 Nov 2026): light research
+ * stays automatic; deep research is only ever PROPOSED, as a brief the Hat
+ * writes from its own step (webResearch.ts), and runs only after Martin
+ * approves it. Kept here, import-light, so a Hat can ask whether to hold.
+ */
+export interface DeepResearchProposal {
+  /** What the research will let the step do, in one line. */
+  neededFor: string;
+  topic: string;
+  lines: Array<{ question: string; answer: string }>;
+}
+
+/** A Hat's deep-research proposal made in a run, for the owning Work to show as a brief (at most one per run). */
+const runDeepProposal = new WeakMap<object, DeepResearchProposal & { lightQuestion: string }>();
+
+/** Records the CURRENT run's deep-research proposal (the research check only). */
+export function noteDeepResearchProposal(proposal: DeepResearchProposal & { lightQuestion: string }): void {
+  const run = currentRun();
+  if (run && !runDeepProposal.has(run)) runDeepProposal.set(run, proposal);
+}
+
+/** The deep-research proposal the CURRENT run's research check made, if any. */
+export function deepResearchProposalInRun(): (DeepResearchProposal & { lightQuestion: string }) | undefined {
+  const run = currentRun();
+  return run ? runDeepProposal.get(run) : undefined;
+}
+
+/**
+ * Whether the Hat should hold its draft for research in the CURRENT run: the
+ * light research paused (providers busy), or the Hat proposed deep research
+ * that Martin has not yet approved or skipped.
+ */
+export function researchHeldInRun(): "paused" | "deep_proposed" | null {
+  if (researchPausedInRun()) return "paused";
+  return deepResearchProposalInRun() ? "deep_proposed" : null;
+}
+
 /** "14:05 UTC" for a retry time, or null when none is known. */
 export function retryTimeLabel(retryAt: string | undefined): string | null {
   const ms = retryAt ? Date.parse(retryAt) : NaN;

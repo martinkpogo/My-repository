@@ -1,6 +1,6 @@
 # Task instruction (DRAFT, awaiting Martin's approval): Hat-written deep research brief
 
-Status: **draft**. Nothing is built until Martin approves this instruction and sets the execution authority (field 9). The open decisions are listed at the end.
+Status: **approved by Martin (16 Nov 2026) with all four recommendations (A–D); execution authority: implement, open a PR, watch through merge.** The decisions at the end are resolved as recommended.
 
 ## 1. Problem
 

@@ -139,10 +139,20 @@ export interface RunExtras {
    * refused (2026-11-13).
    */
   access?: AccessContext | (() => AccessContext);
+  /**
+   * Whether this run's Work can take a Hat's deep-research proposal right now
+   * (its Hat declares continueAfterResearch and no proposal was made on this
+   * Work yet) -- a function for the same reason as `access`. Absent: never.
+   */
+  offersDeepResearch?: () => boolean;
 }
 
 class LiveStatusRun {
   private readonly accessSource: AccessContext | (() => AccessContext) | undefined;
+  private readonly deepResearchSource: (() => boolean) | undefined;
+  get offersDeepResearch(): boolean {
+    return this.deepResearchSource?.() === true;
+  }
   get access(): AccessContext | undefined {
     return typeof this.accessSource === "function" ? this.accessSource() : this.accessSource;
   }
@@ -171,6 +181,7 @@ class LiveStatusRun {
     private readonly clock: { now: () => number } = { now: () => Date.now() },
   ) {
     this.accessSource = extras.access;
+    this.deepResearchSource = extras.offersDeepResearch;
   }
 
   step(label: string): void {
@@ -446,7 +457,7 @@ export async function withLiveStatus<T>(
 }
 
 /** The open run's Access context, target and lookup counters, for per-run Runtime services; undefined outside a run. */
-export function currentRun(): Pick<LiveStatusRun, "access" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
+export function currentRun(): Pick<LiveStatusRun, "access" | "offersDeepResearch" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
   return RUNS.getStore();
 }
 
