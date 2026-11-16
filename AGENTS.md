@@ -1,10 +1,10 @@
 # ENIG Agent Execution Contract
 
-This document establishes the ENIG operating model and execution contracts for Claude Code and Jules. The architectural, governance, security, provider, data-boundary, fail-closed, evidence, and documentation rules bind every implementation agent.
+This document establishes the ENIG operating model and execution contracts for Claude Code, Jules, and Kilo Code. The architectural, governance, security, provider, data-boundary, fail-closed, evidence, and documentation rules bind every implementation agent.
 
 ## Governing reasoning boundary
 
-ENIG uses two coding agents with the same architectural reasoning boundary but different execution ceilings. **Architect/Martin owns**:
+ENIG uses three coding agents (Claude Code, Jules, and Kilo Code) with the same architectural reasoning boundary but different execution ceilings. **Architect/Martin owns**:
 
 - architectural decisions;
 - governance decisions;
@@ -14,7 +14,7 @@ ENIG uses two coding agents with the same architectural reasoning boundary but d
 - business-policy interpretation; and
 - changes to governing operating-model contracts.
 
-Both Claude Code and Jules may reason deeply about implementation inside an approved boundary. Neither may invent or silently resolve a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision.
+Claude Code, Jules, and Kilo Code may reason deeply about implementation inside an approved boundary. No agent may invent or silently resolve a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision.
 
 > **Think deeply inside the approved boundary; stop at the boundary instead of crossing it.**
 
@@ -26,7 +26,25 @@ Both Claude Code and Jules may reason deeply about implementation inside an appr
 4. A coding agent may challenge or report contradictions discovered during implementation, but must stop when resolving them would require a new architectural or governance decision.
 5. For non-trivial tasks, the task instruction should establish, where applicable: the problem, approved design/decision, scope, no-change scope, boundaries, acceptance criteria, verification requirements, and execution authority.
 6. An agent's plan is an implementation plan, not permission to redesign approved architecture.
-7. Neither agent should invent requirements, expand scope, introduce a second mechanism, or generalize a local implementation need into a new platform abstraction without approval.
+7. No agent should invent requirements, expand scope, introduce a second mechanism, or generalize a local implementation need into a new platform abstraction without approval.
+
+### Discovery before implementation
+
+Every implementation agent (Claude Code, Jules, and Kilo Code) must discover before designing or implementing. This is a permanent requirement, not a suggestion.
+
+Before proposing or building a feature, the agent must:
+
+1. Discover existing capabilities, services, interfaces, registries, helpers, execution boundaries, tests, and relevant documentation.
+2. Trace the actual production execution path from entrypoint to the relevant shared boundary.
+3. Identify existing mechanisms that can be reused or extended.
+4. Prefer extending established infrastructure over introducing parallel mechanisms.
+5. Explain why new infrastructure is necessary when existing capabilities cannot satisfy the requirement.
+
+Working method: **Discover → Map → Extend → Verify**.
+
+Once the approved architecture and scope are clear, use engineering judgement to choose the best implementation. Do not stop for ordinary implementation decisions or ask Martin to choose between routine technical approaches. Stop and report when a genuinely new architectural, governance, authority, security, provider, or business-policy decision is required.
+
+Discovery-first is not permission to expand scope or change approved architecture.
 
 ## The Handoff identity-write boundary
 
@@ -37,9 +55,9 @@ Every production Handoff write goes through `src/handoffWriter.ts`'s `createHand
 ## Authority model
 
 - **Architect/Martin** remains the architectural and governance authority for ENIG.
-- Both agents operate autonomously inside the boundary approved by Architect; Jules is not incapable of reasoning, but has a lower platform execution ceiling.
-- Neither agent may redesign ENIG architecture, modify runtime behavior outside authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
-- Both agents must stop and report when a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision is required rather than inventing a rule.
+- All three agents operate autonomously inside the boundary approved by Architect; Jules is not incapable of reasoning, but has a lower platform execution ceiling.
+- No agent may redesign ENIG architecture, modify runtime behavior outside authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
+- All three agents must stop and report when a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision is required rather than inventing a rule.
 
 ## ENIG Runtime Architecture — mandatory reading
 
@@ -92,6 +110,58 @@ Jules shares the same reasoning boundary above but has a deliberately lower plat
 - Jules must not claim that a PR was created or merged merely because a branch was pushed. If no PR URL or merge confirmation is returned, report those states as pending/unknown.
 - After Martin reviews and marks the Draft PR Ready for review, configured repository automation may validate, merge, and deploy according to its approved rules. Jules must not bypass, replace, or reinterpret that workflow.
 
+## Kilo Code execution contract
+
+Kilo Code is an implementation agent governed by the same ENIG architecture, security, authority, and execution rules as Claude Code and Jules. It shares the reasoning boundary above and may reason deeply about implementation inside an approved boundary.
+
+Kilo follows the task-specific execution authority Martin provides. It must not assume permission to:
+
+- Commit or push.
+- Open or modify pull requests.
+- Merge or deploy.
+- Change GitHub issues, labels, or comments.
+- Create or modify Notion records.
+
+Those actions require explicit authorization from Martin.
+
+Kilo may inspect, reason about implementation, implement, test, typecheck, build, and self-audit within the approved scope.
+
+Kilo may create a local commit only when Martin's task instruction explicitly authorizes committing. Pushing, opening or modifying pull requests, merging, deploying, and GitHub or Notion changes each require the corresponding explicit authorization. Permission to implement does not automatically grant permission to commit.
+
+Kilo is subject to the same stop-and-report rule for new architectural or governance decisions.
+
+### Kilo Cloud Agent and local VS Code environments
+
+Kilo runs in two distinct environments that must not be confused:
+
+- **Kilo Cloud Agent:** a remote workspace accessed through the browser or phone.
+- **Kilo (local VS Code extension):** a local repository and worktree on Martin's Mac.
+
+Both environments follow the same root `AGENTS.md` and repository architecture rules. Neither environment is assumed to share files, uncommitted changes, environment variables, MCP processes, credentials, installed tools, or permissions with the other.
+
+Requirements:
+
+1. Treat each independent working session as its own worktree and branch, following `docs/concurrent-development.md`.
+2. When continuing the same task on another device, resume the existing session and worktree where supported.
+3. When starting an independent session, create a separate branch from the freshly fetched remote tip.
+4. Never allow two independent sessions to edit the same branch concurrently.
+5. Coordinate changes to shared contracts and integration-owned files according to the concurrent-development guide.
+6. Verify the capabilities actually available in the active environment before relying on them.
+
+In particular, a local Notion MCP configuration is not proof that Cloud Agent has Notion access. Do not modify Notion MCP configuration as part of a task unless explicitly authorized.
+
+### Initial environment and progress reporting
+
+Every implementation agent (Claude Code, Jules, and Kilo Code) must identify, at the start of its work:
+
+- Execution environment (Kilo Cloud Agent, local Kilo VS Code, Claude Code, or Jules).
+- Repository and working directory.
+- Active worktree and branch.
+- Base branch and base commit.
+- Relevant tools and integrations actually available in that environment.
+
+Agents must report commits, pushes, pull requests, CI, merge, deployment, and live verification as separate states. Never imply that one proves another.
+
 ## Execution sequences
 
 ### Claude Code
@@ -142,4 +212,4 @@ Never report an intended or prospective action as complete. Final evidence must 
 - Do not put provider-specific data handling inside individual Hats.
 - If no eligible execution path exists, stop, hold, or use an explicitly approved human-controlled path.
 
-These constraints, the Handoff identity-token boundary, fail-closed behavior, the Unit Manifest/Action Registry rule, mandatory operating-model reading, and synchronized documentation remain binding for both agents.
+These constraints, the Handoff identity-token boundary, fail-closed behavior, the Unit Manifest/Action Registry rule, mandatory operating-model reading, and synchronized documentation remain binding for every implementation agent.
