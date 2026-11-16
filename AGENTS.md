@@ -142,12 +142,11 @@ Both environments follow the same root `AGENTS.md` and repository architecture r
 Requirements:
 
 1. Treat each independent working session as its own worktree and branch, following `docs/concurrent-development.md`.
-2. Never assume cloud and local environments share files, uncommitted changes, environment variables, MCP processes, credentials, installed tools, or permissions.
-3. When continuing the same task on another device, resume the existing session and worktree where supported.
-4. When starting an independent session, create a separate branch from the freshly fetched remote tip.
-5. Never allow two independent sessions to edit the same branch concurrently.
-6. Coordinate changes to shared contracts and integration-owned files according to the concurrent-development guide.
-7. Verify the capabilities actually available in the active environment before relying on them.
+2. When continuing the same task on another device, resume the existing session and worktree where supported.
+3. When starting an independent session, create a separate branch from the freshly fetched remote tip.
+4. Never allow two independent sessions to edit the same branch concurrently.
+5. Coordinate changes to shared contracts and integration-owned files according to the concurrent-development guide.
+6. Verify the capabilities actually available in the active environment before relying on them.
 
 In particular, a local Notion MCP configuration is not proof that Cloud Agent has Notion access. Do not modify Notion MCP configuration as part of a task unless explicitly authorized.
 
