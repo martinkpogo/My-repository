@@ -12,7 +12,8 @@ import {
 } from "./runtime/tools/googleDocsSmoke";
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
-import { sendMessage, sendOperationsMessage } from "./telegram";
+import { sendMessage, sendMessageWithOutcome, sendOperationsMessage } from "./telegram";
+import { isResultGateSmokeWorkId, runResultGateSmoke, RESULT_GATE_SMOKE_TARGET, type ResultGateSmokeReport } from "./runtime/resultGateSmoke";
 import { deepResearchProposalInRun, researchOnline, saveDeepResearchFindings, seedRunResearchFindings } from "./runtime/webResearch";
 import { RESEARCH_WORK_CALLBACK, retryTimeLabel } from "./runtime/webLookupAllowance";
 import { runDeepResearchSkill, runResearchSkill } from "./runtime/research/researchRuntime";
@@ -60,6 +61,7 @@ import {
   RESULT_REVIEW_BLOCKED_STAGE,
   recordOutputApprovalAsResultApproval,
   stageResultReviewApproval,
+  recordApprovalRequestDelivery,
   resultReviewCallbackData,
 } from "./resultReview";
 import type { InlineButton } from "./telegram";
@@ -237,6 +239,31 @@ export class WorkSession extends DurableObject<Env> {
           return sendMessage(this.env, state.chatId, "A Skill this action requires could not be verified -- nothing was run.", undefined, state.threadId).then(() => state);
         },
       );
+    });
+  }
+
+  /**
+   * The isolated live Result Gate smoke test's entry (ENIG #370, rebuilt 16
+   * Nov 2026): the ONE method /admin/smoke-result-gate reaches. It wires this
+   * session's own creation and execute seams into the harness and adds no
+   * lifecycle of its own: an existing Work is never reused or overwritten;
+   * the synthetic Work is created through the normal init (which validates
+   * the recorded test Action against the Unit Manifest) and advanced through
+   * the normal execute cycle, whose save() runs the unchanged Result Gate.
+   * Nothing here records a verdict, an approval or a closure.
+   */
+  async runResultGateSmoke(workId: string): Promise<ResultGateSmokeReport> {
+    return runResultGateSmoke(this.env, workId, {
+      ensureGovernedWork: async (id, chatId) => {
+        if (await this.getState()) return { ok: false, reason: `Work ${id} already exists -- the smoke harness never reuses or overwrites a Work; run again with a fresh id.` };
+        await this.init(id, chatId, RESULT_GATE_SMOKE_TARGET.unit, RESULT_GATE_SMOKE_TARGET.hat, undefined, { actionName: RESULT_GATE_SMOKE_TARGET.action });
+        return { ok: true };
+      },
+      runWithWorkPersistence: async (id, fn) => {
+        const state = await this.require();
+        if (state.workId !== id) throw new Error(`Result Gate smoke Work mismatch: this session holds ${state.workId}, not ${id}.`);
+        return this.execute(fn);
+      },
     });
   }
 
@@ -774,7 +801,7 @@ export class WorkSession extends DurableObject<Env> {
                 restoreResultReviewBlockedStage(state);
               }
               const reply = outcome.approval
-                ? "✅ Result approved. The approval is recorded against this exact Result, criteria and Checker verdict; the Work may close once saved."
+                ? "✅ Result approved. The approval is recorded against this exact Result, criteria and recorded evidence; the Work may close once saved."
                 : "❌ Result rejected. The rejection is recorded and the Work stays open with the reason visible.";
               return sendMessage(this.env, state.chatId, reply, undefined, state.threadId).then(() => state);
             },
@@ -1115,6 +1142,9 @@ export class WorkSession extends DurableObject<Env> {
         const staged = await stageResultReviewApproval(state);
         if (staged.ok) {
           const message =
+            // A smoke Work's card is marked as exactly that (ENIG #370), so it
+            // can never be mistaken for a real Result; the card is otherwise unchanged.
+            (isResultGateSmokeWorkId(state.workId) ? `🧪 *TEST ONLY* -- synthetic Result Gate smoke test Work (ENIG #370); it carries no business outcome.\n\n` : "") +
             `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result. BD-8 requires your Result approval before the Work may close.\n\n${review.assessment ? `\n\n${summarizeAssessment(review.assessment)}` : ""}\n\nApprove or Reject below; the decision is bound to this exact Result and its recorded evidence.`;
           const buttons: InlineButton[][] = [
             [
@@ -1122,16 +1152,25 @@ export class WorkSession extends DurableObject<Env> {
               { text: "❌ Reject", callback_data: resultReviewCallbackData(state.workId, "r", staged.pending.token) },
             ],
           ];
-          await sendMessage(this.env, state.chatId, message, buttons, state.threadId);
-          state.pendingActionSummary = {
-            label: "Result review: awaiting Martin's Result approval",
-            message,
-            buttons,
-            createdAt: staged.pending.createdAt,
-          };
-          return;
+          // Delivery of the request is recorded as its own fact (ENIG #370):
+          // a staged card is not a delivered card. One Telegram never
+          // delivered is un-staged, so it is never left looking like a pending
+          // approval, and the "cannot close yet" message below offers Re-check,
+          // which stages it again.
+          const outcome = await sendMessageWithOutcome(this.env, state.chatId, message, buttons, state.threadId);
+          if (recordApprovalRequestDelivery(review, staged.pending.createdAt, outcome.delivered, outcome.attempts.length)) {
+            state.pendingActionSummary = {
+              label: "Result review: awaiting Martin's Result approval",
+              message,
+              buttons,
+              createdAt: staged.pending.createdAt,
+            };
+            return;
+          }
+          console.error(`WorkSession ${state.workId}: Result approval card not delivered -- un-staged`);
+        } else {
+          console.error(`WorkSession ${state.workId}: could not stage the Result approval card -- ${staged.reason}`);
         }
-        console.error(`WorkSession ${state.workId}: could not stage the Result approval card -- ${staged.reason}`);
       }
       await sendMessage(
         this.env,

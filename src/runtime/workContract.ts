@@ -74,7 +74,12 @@ export type WorkMode = "chat" | "cowork";
  * HOW the Work was entered -- the origin Action Resolution evaluates.
  * Distinct from `WorkState.entryType`, which is domain-authored text.
  */
-export type WorkOrigin = "direct_request" | "handoff_pickup" | "lifecycle_transition";
+/**
+ * `result_gate_smoke` is entered ONLY by the admin Result Gate smoke harness
+ * (src/runtime/resultGateSmoke.ts); it is the one origin the test-only Action
+ * is applicable to, which keeps that Action unreachable from ordinary entry.
+ */
+export type WorkOrigin = "direct_request" | "handoff_pickup" | "lifecycle_transition" | "result_gate_smoke";
 
 /** Facts about the Handoff a Work was entered from, when there is one. */
 export interface WorkHandoffContext {

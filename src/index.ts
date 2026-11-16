@@ -35,6 +35,8 @@ import { pollGoogleDocComments } from "./googleDocComments";
 import { pollGoogleSheetComments } from "./googleSheetComments";
 import { handleNotionWebhookRequest } from "./notionWebhook";
 import { handleWorkSessionState } from "./workSessionInspect";
+import { handleResultGateSmokeRequest } from "./resultGateSmokeRoute";
+import { handleResultGateSmokeInspect } from "./resultGateSmokeInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
@@ -471,6 +473,17 @@ export default {
     // instead of ?key= so the admin secret never appears in the URL or in
     // observability logs (wrangler.toml sets redact_query_string = false).
     // The handler makes exactly one Durable Object call: getState().
+    // Isolated live Result Gate smoke test (ENIG #370, rebuilt on the current
+    // gate 16 Nov 2026): the admin harness drives ONE synthetic Work through
+    // the normal lifecycle; the read-only inspection reads it back (getState()
+    // only). Never invoked by repository tests -- the live run is Martin's.
+    if (url.pathname === "/admin/smoke-result-gate" && request.method === "GET") {
+      return handleResultGateSmokeRequest(request, env);
+    }
+    if (url.pathname === "/admin/smoke-result-gate-inspect" && request.method === "GET") {
+      return handleResultGateSmokeInspect(request, env);
+    }
+
     if (url.pathname === "/admin/work-session-state" && request.method === "GET") {
       return handleWorkSessionState(request, env);
     }

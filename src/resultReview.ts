@@ -422,6 +422,24 @@ export async function recordOutputApprovalAsResultApproval(
 }
 
 /**
+ * Records whether the staged Result-approval card actually reached Martin
+ * (ENIG #370, 2026-11-16): a staged card is not a delivered card. Delivered:
+ * the delivery time is kept on `approvalRequest`, which survives his decision
+ * consuming the card. Not delivered: the staged approval is withdrawn -- so a
+ * card he never saw is never left looking like a pending approval -- and the
+ * failure is recorded; Re-check stages a fresh card. Returns `delivered`.
+ */
+export function recordApprovalRequestDelivery(review: NonNullable<WorkState["resultReview"]>, stagedAt: string, delivered: boolean, attempts: number): boolean {
+  if (delivered) {
+    review.approvalRequest = { stagedAt, deliveredAt: new Date().toISOString() };
+    return true;
+  }
+  review.pendingApproval = undefined;
+  review.approvalRequest = { stagedAt, failedReason: `Telegram did not deliver the Result approval card (${attempts} attempt(s)).` };
+  return false;
+}
+
+/**
  * Records Martin's Result decision at the moment the staged approval is
  * consumed -- the ONLY sanctioned way a Result approval enters WorkState.
  * `token` must match the staged card's own token (the button is bound to the

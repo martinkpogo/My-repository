@@ -923,6 +923,14 @@ export interface ResultReviewState {
   checker?: ResultReviewCheckerVerdict;
   /** The Checker's advisory second opinion on the draft (src/runtime/advisoryAssessment.ts). */
   assessment?: ResultReviewAssessment;
+  /**
+   * The latest Result-approval request card (ENIG #370, 2026-11-16): when it
+   * was staged, and whether Telegram actually delivered it. Kept after
+   * Martin's decision consumes the staged card, so delivery of the request is
+   * always a separate fact from his decision. A card never delivered is not
+   * left staged (failedReason is set and Re-check can stage it again).
+   */
+  approvalRequest?: { stagedAt: string; deliveredAt?: string; failedReason?: string };
   approval?: ResultReviewApproval;
   pendingApproval?: PendingResultReviewApproval;
   gateStatus: "pending" | "blocked" | "passed";
