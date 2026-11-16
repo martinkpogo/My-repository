@@ -13,6 +13,13 @@ import { generate } from "../../ai";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
 
 import { bdOf, migrateLegacyBusinessDevelopmentState } from "./businessDevelopmentState";
+import {
+  RESULT_GATE_SMOKE_ACTION,
+  RESULT_GATE_SMOKE_ADVISORY,
+  RESULT_GATE_SMOKE_CRITERIA,
+  RESULT_GATE_SMOKE_EXPECTED_RESULT,
+  RESULT_GATE_SMOKE_ORIGIN,
+} from "../../runtime/resultGateSmokeContract";
 /**
  * Business Development's Unit Manifest -- the first Unit built entirely
  * on the manifest/registry pattern (ENIG Operating Model design doc,
@@ -131,7 +138,8 @@ type OpportunityDevelopmentAction =
   | "develop_opportunity"
   | "determine_next_move"
   | "handoff_to_sales"
-  | "handoff_to_strategy";
+  | "handoff_to_strategy"
+  | "result_gate_smoke_test";
 
 // Matches BD_OPPORTUNITY_DEVELOPMENT's HatIdentity in ../../hats/registry.ts --
 // the Hat name (job position the runtime assumes), not concatenated with
@@ -224,6 +232,30 @@ const opportunityDevelopmentActions: ActionDefinition<OpportunityDevelopmentActi
   { name: "determine_next_move", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, skill_requirements: [{ skill_id: "opportunity_forward_planning" }], applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "determine_next_move" }] }, description: "Commit to the next concrete action for an active opportunity." },
   { name: "handoff_to_sales", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_sales" }] }, description: "Governed transition to Sales once the opportunity is a genuine client-acquisition opportunity." },
   { name: "handoff_to_strategy", responsibility: "develop_opportunities", consequence: "write", requiresApproval: true, applicability: { mode: "all", conditions: [{ source: "work", field: "requested_action", operator: "equals", value: "handoff_to_strategy" }] }, description: "Governed transition to Strategy when the opportunity needs strategic diagnosis rather than client-acquisition progression." },
+  // TEST ONLY (ENIG #370, rebuilt 16 Nov 2026): the isolated live Result Gate
+  // smoke test's Action. Applicable only to the `result_gate_smoke` origin,
+  // which no ordinary entry carries, so intake, Action Resolution, Handoff
+  // pickup and dispatch can never select it. No handler, no Skill, no Tool
+  // operation: the admin harness records its one synthetic artefact and the
+  // unchanged Result Gate does the rest. Its contract is non-circular (see
+  // src/runtime/resultGateSmokeContract.ts).
+  {
+    name: RESULT_GATE_SMOKE_ACTION,
+    responsibility: "develop_opportunities",
+    consequence: "internal",
+    requiresApproval: false,
+    applicability: {
+      mode: "all",
+      conditions: [
+        { source: "work", field: "origin", operator: "equals", value: RESULT_GATE_SMOKE_ORIGIN },
+        { source: "work", field: "requested_action", operator: "equals", value: RESULT_GATE_SMOKE_ACTION },
+      ],
+    },
+    expectedResult: RESULT_GATE_SMOKE_EXPECTED_RESULT,
+    completionCriteria: RESULT_GATE_SMOKE_CRITERIA,
+    advisoryAssessment: RESULT_GATE_SMOKE_ADVISORY,
+    description: "TEST ONLY: the isolated live Result Gate smoke test (ENIG #370). Not selectable through ordinary intake, Action Resolution, Handoff pickup or normal Unit dispatch.",
+  },
 ];
 
 /**
