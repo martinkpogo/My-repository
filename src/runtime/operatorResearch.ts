@@ -18,7 +18,8 @@ import type { PendingResearch, ResearchSynthesis } from "./research/types";
  * Research database; nothing else).
  *
  * The flow: what to research -> clarifying questions one at a time (Skip /
- * That's enough) -> a research brief (Start / Edit) -> research in the Work's
+ * That's enough) -> a research brief (Start / Edit: change one line, or start
+ * over) -> research in the Work's
  * background alarm (pauses and resumes exactly as BD-19) -> a findings card
  * plus a page in the Research database, with "Go deeper" on a light result.
  *
@@ -30,17 +31,19 @@ export type OperatorResearchMode = "light_search" | "deep_research";
 
 export interface OperatorResearchState {
   mode: OperatorResearchMode;
-  phase: "topic" | "questions" | "brief" | "researching" | "done";
+  phase: "topic" | "questions" | "brief" | "editing" | "researching" | "done";
   topic?: string;
   /** Martin's answers so far; `answer: null` is a skipped question. */
   answers: Array<{ question: string; answer: string | null }>;
   /** The question currently waiting for an answer. */
   current?: string;
+  /** While `phase` is "editing": the brief line being corrected -- the topic, or an index into `answers`. */
+  editing?: "topic" | number;
   /** The Research database page of the last completed run, when saved. */
   notionUrl?: string;
 }
 
-/** The callback prefix for this flow's buttons: `oresearch:<workId>:<skip|enough|start|edit|deeper>`. */
+/** The callback prefix for this flow's buttons: `oresearch:<workId>:<skip|enough|start|edit|edit_topic|edit_<n>|restart|deeper>`. */
 export const OPERATOR_RESEARCH_CALLBACK = "oresearch";
 /** The awaiting state a research Work waits in for Martin's typed reply. */
 export const OPERATOR_RESEARCH_AWAITING = "operator_research_reply";
@@ -133,8 +136,79 @@ export async function handleOperatorResearchReply(env: Env, state: WorkState, te
     research.current = undefined;
     return askNext(env, state, deps);
   }
-  await deps.send(env, state, "Tap Start to begin, or Edit to change the topic.");
+  if (research.phase === "editing" && research.editing !== undefined) return acceptCorrection(env, state, text, deps);
+  await deps.send(env, state, "Tap Start to begin, or Edit to change something.");
   return state;
+}
+
+/** The brief lines Martin can correct: the topic, and each question he answered (a skipped one is not in the brief). */
+function editableLines(research: OperatorResearchState): Array<{ label: string; value: string; text: string }> {
+  const lines = [{ label: "Topic", value: "edit_topic", text: `Topic: ${research.topic ?? ""}` }];
+  let n = 0;
+  research.answers.forEach((qa, i) => {
+    if (qa.answer) lines.push({ label: `Answer ${++n}`, value: `edit_${i}`, text: `Answer ${n}: ${qa.question} ${qa.answer}` });
+  });
+  return lines;
+}
+
+async function askWhatToChange(env: Env, state: WorkState, deps: OperatorResearchDeps): Promise<WorkState> {
+  const research = state.operatorResearch!;
+  research.phase = "brief";
+  research.editing = undefined;
+  const lines = editableLines(research);
+  await deps.send(
+    env,
+    state,
+    `✏️ What would you like to change?\n\n${lines.map((l) => l.text).join("\n")}`,
+    [lines.map((l) => ({ text: l.label, callback_data: `${OPERATOR_RESEARCH_CALLBACK}:${state.workId}:${l.value}` })), ...buttons(state.workId, [["🔁 Start over", "restart"]])],
+  );
+  return state;
+}
+
+async function pickLine(env: Env, state: WorkState, value: string, deps: OperatorResearchDeps): Promise<WorkState | null> {
+  const research = state.operatorResearch!;
+  if (value === "edit_topic") {
+    research.phase = "editing";
+    research.editing = "topic";
+    await deps.send(env, state, `Send the corrected topic.\n\nNow: ${research.topic ?? ""}`);
+    return state;
+  }
+  const index = Number(value.slice("edit_".length));
+  const qa = Number.isInteger(index) ? research.answers[index] : undefined;
+  if (!qa?.answer) return null;
+  research.phase = "editing";
+  research.editing = index;
+  await deps.send(env, state, `Send the corrected answer to:\n${qa.question}\n\nNow: ${qa.answer}`);
+  return state;
+}
+
+/**
+ * Martin's corrected line: the same checks as when it was first typed -- the
+ * deterministic identity check, then the AI's names-a-party flag on that line
+ * -- and then the updated brief. A refused correction keeps the old line.
+ */
+async function acceptCorrection(env: Env, state: WorkState, text: string, deps: OperatorResearchDeps): Promise<WorkState> {
+  const research = state.operatorResearch!;
+  const editing = research.editing!;
+  const value = text.trim().slice(0, MAX_TEXT);
+  const problem = editing === "topic" && value.length < 3 ? "it is too short" : identityProblem(value);
+  if (problem) {
+    await deps.send(env, state, `Please rephrase that -- ${problem}. Describe the kind of business or person instead of naming them.`);
+    return state;
+  }
+  // The AI judges "the topic or the latest answer", so an edited answer is put last for the check.
+  const probe: OperatorResearchState =
+    editing === "topic"
+      ? { ...research, topic: value }
+      : { ...research, answers: [...research.answers.filter((_, i) => i !== editing), { question: research.answers[editing].question, answer: value }] };
+  const ai = await deps.nextQuestion(env, probe).catch(() => null);
+  if (ai?.names_party === true) {
+    await deps.send(env, state, "That seems to name a specific person or organisation. Please rephrase it -- describe the kind of business or person instead.");
+    return state;
+  }
+  if (editing === "topic") research.topic = value;
+  else research.answers[editing] = { question: research.answers[editing].question, answer: value };
+  return showBrief(env, state, deps);
 }
 
 async function acceptTopic(env: Env, state: WorkState, text: string, deps: OperatorResearchDeps): Promise<WorkState> {
@@ -183,6 +257,7 @@ async function showBrief(env: Env, state: WorkState, deps: OperatorResearchDeps)
   const research = state.operatorResearch!;
   research.phase = "brief";
   research.current = undefined;
+  research.editing = undefined;
   await deps.send(env, state, `📋 ${MODE_LABEL[research.mode]} brief\n\n${briefText(research)}`, buttons(state.workId, [["▶️ Start", "start"], ["✏️ Edit", "edit"]]));
   return state;
 }
@@ -200,7 +275,12 @@ export async function handleOperatorResearchButton(env: Env, state: WorkState, v
     return { state: await askNext(env, state, deps), schedule: null };
   }
   if (value === "enough" && research.phase === "questions") return { state: await showBrief(env, state, deps), schedule: null };
-  if (value === "edit" && research.phase === "brief") {
+  if (value === "edit" && (research.phase === "brief" || research.phase === "editing")) return { state: await askWhatToChange(env, state, deps), schedule: null };
+  if (value.startsWith("edit_") && (research.phase === "brief" || research.phase === "editing")) {
+    const next = await pickLine(env, state, value, deps);
+    if (next) return { state: next, schedule: null };
+  }
+  if (value === "restart" && (research.phase === "brief" || research.phase === "editing")) {
     state.operatorResearch = { mode: research.mode, phase: "topic", answers: [] };
     state.awaiting = OPERATOR_RESEARCH_AWAITING;
     await deps.send(env, state, "OK -- what do you want to research?");

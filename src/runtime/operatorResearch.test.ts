@@ -110,7 +110,7 @@ test("the topic can be given with the command, and the AI's absence falls back t
   assert.match(h.sent[0].text, new RegExp(`Question 1 of up to 5:\\n${FALLBACK_BRIEF_QUESTIONS[0].replace(/[?()-]/g, "\\$&")}`));
 });
 
-test("Skip records nothing, 'That's enough' goes straight to the brief, Edit starts over", async () => {
+test("Skip records nothing, 'That's enough' goes straight to the brief, Edit -> Start over starts over", async () => {
   const h = harness([]);
   let state = await beginOperatorResearch(env, h.state, "deep_research", "SME positioning", h.deps);
   ({ state } = await handleOperatorResearchButton(env, state, "skip", h.deps));
@@ -119,8 +119,99 @@ test("Skip records nothing, 'That's enough' goes straight to the brief, Edit sta
   assert.match(h.sent.at(-1)!.text, /brief/);
   assert.doesNotMatch(h.sent.at(-1)!.text, /What is this research for/, "a skipped question is not in the brief");
   ({ state } = await handleOperatorResearchButton(env, state, "edit", h.deps));
+  assert.match(h.sent.at(-1)!.text, /What would you like to change/);
+  assert.strictEqual(state.operatorResearch?.topic, "SME positioning", "Edit alone keeps the brief");
+  ({ state } = await handleOperatorResearchButton(env, state, "restart", h.deps));
   assert.strictEqual(state.operatorResearch?.phase, "topic");
+  assert.strictEqual(state.operatorResearch?.answers.length, 0);
   assert.strictEqual(state.awaiting, OPERATOR_RESEARCH_AWAITING);
+});
+
+async function briefWithTwoAnswers(h: ReturnType<typeof harness>) {
+  let state = await beginOperatorResearch(env, h.state, "light_search", "Why Acrca SMEs struggle", h.deps);
+  state = await handleOperatorResearchReply(env, state, "A LinkdIn post", h.deps);
+  state = await handleOperatorResearchReply(env, state, "Retail", h.deps);
+  return state;
+}
+
+test("Edit asks what to change: one button per brief line (skipped questions excluded), plus Start over", async () => {
+  const h = harness([{ question: "What is it for?" }, { question: "Which sector?" }]);
+  let state = await beginOperatorResearch(env, h.state, "deep_research", "SME positioning", h.deps);
+  state = await handleOperatorResearchReply(env, state, "A post", h.deps);
+  ({ state } = await handleOperatorResearchButton(env, state, "skip", h.deps));
+  ({ state } = await handleOperatorResearchButton(env, state, "enough", h.deps));
+  ({ state } = await handleOperatorResearchButton(env, state, "edit", h.deps));
+  const prompt = h.sent.at(-1)!;
+  assert.match(prompt.text, /Topic: SME positioning\nAnswer 1: What is it for\? A post/);
+  assert.doesNotMatch(prompt.text, /Which sector/, "a skipped question is not offered");
+  assert.deepStrictEqual(callbacks(prompt), ["oresearch:w-1:edit_topic", "oresearch:w-1:edit_0", "oresearch:w-1:restart"]);
+  assert.strictEqual(state.operatorResearch?.answers.length, 2, "nothing was discarded");
+});
+
+test("correcting the topic or one answer keeps everything else and shows the updated brief", async () => {
+  const h = harness([{ question: "What is it for?" }, { question: "Which sector?" }]);
+  let state = await briefWithTwoAnswers(h);
+  ({ state } = await handleOperatorResearchButton(env, state, "edit", h.deps));
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_topic", h.deps));
+  assert.match(h.sent.at(-1)!.text, /Send the corrected topic\.\n\nNow: Why Acrca SMEs struggle/);
+  assert.strictEqual(state.operatorResearch?.phase, "editing");
+  state = await handleOperatorResearchReply(env, state, "Why Accra SMEs struggle", h.deps);
+  assert.match(h.sent.at(-1)!.text, /brief\n\nTopic: Why Accra SMEs struggle\n- What is it for\? A LinkdIn post\n- Which sector\? Retail/);
+  assert.deepStrictEqual(callbacks(h.sent.at(-1)!), ["oresearch:w-1:start", "oresearch:w-1:edit"]);
+
+  ({ state } = await handleOperatorResearchButton(env, state, "edit", h.deps));
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_0", h.deps));
+  assert.match(h.sent.at(-1)!.text, /corrected answer to:\nWhat is it for\?\n\nNow: A LinkdIn post/);
+  state = await handleOperatorResearchReply(env, state, "A LinkedIn post", h.deps);
+  assert.deepStrictEqual(state.operatorResearch?.answers, [
+    { question: "What is it for?", answer: "A LinkedIn post" },
+    { question: "Which sector?", answer: "Retail" },
+  ]);
+  const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
+  assert.strictEqual(schedule?.question, "Why Accra SMEs struggle");
+  assert.match(schedule?.context ?? "", /A LinkedIn post[\s\S]*Retail/);
+});
+
+test("a correction gets the same identity checks as the original and a refused one keeps the old line", async () => {
+  const h = harness([{ question: "What is it for?" }, { question: "Which sector?" }]);
+  let state = await briefWithTwoAnswers(h);
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_1", h.deps));
+  state = await handleOperatorResearchReply(env, state, "see https://example.com", h.deps);
+  assert.match(h.sent.at(-1)!.text, /Please rephrase that -- it contains/);
+  assert.strictEqual(state.operatorResearch?.phase, "editing");
+  assert.strictEqual(state.operatorResearch?.answers[1].answer, "Retail");
+
+  const seen: string[] = [];
+  h.deps.nextQuestion = async (_e, r) => {
+    seen.push(r.answers.at(-1)?.answer ?? "");
+    return { names_party: true };
+  };
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_0", h.deps));
+  state = await handleOperatorResearchReply(env, state, "The one Kofi runs", h.deps);
+  assert.deepStrictEqual(seen, ["The one Kofi runs"], "the AI judges the edited answer as the latest one");
+  assert.match(h.sent.at(-1)!.text, /seems to name a specific person or organisation/);
+  assert.strictEqual(state.operatorResearch?.answers[0].answer, "A LinkdIn post", "the old answer stays");
+
+  h.deps.nextQuestion = async () => null;
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_topic", h.deps));
+  state = await handleOperatorResearchReply(env, state, "ab", h.deps);
+  assert.match(h.sent.at(-1)!.text, /too short/);
+  assert.strictEqual(state.operatorResearch?.topic, "Why Acrca SMEs struggle");
+});
+
+test("edit buttons outside the brief, or for a line that does not exist, change nothing", async () => {
+  const h = harness([{ question: "What is it for?" }, { question: "Which sector?" }]);
+  let state = await briefWithTwoAnswers(h);
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_7", h.deps));
+  assert.match(h.sent.at(-1)!.text, /no longer current/);
+  assert.strictEqual(state.operatorResearch?.phase, "brief");
+  ({ state } = await handleOperatorResearchButton(env, state, "start", h.deps));
+  for (const value of ["edit", "edit_topic", "restart"]) {
+    const { schedule } = await handleOperatorResearchButton(env, state, value, h.deps);
+    assert.strictEqual(schedule, null);
+    assert.match(h.sent.at(-1)!.text, /no longer current/);
+    assert.strictEqual(state.operatorResearch?.phase, "researching");
+  }
 });
 
 test("a topic or answer naming a party is never rewritten: Martin is asked to rephrase", async () => {
