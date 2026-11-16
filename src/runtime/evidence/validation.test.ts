@@ -198,3 +198,36 @@ test("the gate records evidence gaps/conflicts as limitations rather than droppi
   );
   assert.strictEqual(gate.valid, true);
 });
+
+test("removeUnsupportedFindings removes only findings that cite no evidence, with the implications resting on them", async () => {
+  const { removeUnsupportedFindings, validateSynthesis } = await import("./validation");
+  const base = {
+    sources: [{ id: "s1", source: "a.example" } as any],
+    evidence: [{ id: "e1", statement: "x", sourceIds: ["s1"] }],
+    findings: [
+      { id: "f1", statement: "supported", evidenceIds: ["e1"] },
+      { id: "f2", statement: "unsupported", evidenceIds: [] },
+      { id: "f3", statement: "also unsupported", evidenceIds: [] },
+    ],
+    implications: [
+      { statement: "on f1", basedOnFindingIds: ["f1"] },
+      { statement: "on f1 and f2", basedOnFindingIds: ["f1", "f2"] },
+    ],
+    limitations: [{ statement: "existing" }],
+  };
+  const { synthesis, removed } = removeUnsupportedFindings(base);
+  assert.strictEqual(removed, 2);
+  assert.deepStrictEqual(synthesis.findings.map((f) => f.id), ["f1"]);
+  assert.deepStrictEqual(synthesis.implications.map((i) => i.statement), ["on f1"]);
+  assert.deepStrictEqual(synthesis.limitations.map((l) => l.statement), ["existing", "2 findings were removed because they cited no evidence, with the implications that rested on them."]);
+  assert.strictEqual(validateSynthesis(synthesis).valid, true);
+
+  const none = { ...base, findings: [{ id: "f2", statement: "unsupported", evidenceIds: [] }], implications: [] };
+  assert.strictEqual(removeUnsupportedFindings(none).removed, 0, "nothing would remain: unchanged, so the gate rejects it");
+  assert.strictEqual(removeUnsupportedFindings(none).synthesis, none);
+  assert.strictEqual(validateSynthesis(removeUnsupportedFindings(none).synthesis).valid, false);
+
+  const fabricated = { ...base, findings: [{ id: "f1", statement: "made up", evidenceIds: ["e9"] }], implications: [] };
+  assert.strictEqual(removeUnsupportedFindings(fabricated).removed, 0, "a made-up reference is not repaired");
+  assert.strictEqual(validateSynthesis(removeUnsupportedFindings(fabricated).synthesis).valid, false);
+});

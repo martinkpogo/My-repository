@@ -2,7 +2,7 @@ import type { Env } from "../../types";
 import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import type { AccessContext } from "../../access";
-import { applyEvidenceSourceValidationGate } from "../evidence/validation";
+import { applyEvidenceSourceValidationGate, removeUnsupportedFindings } from "../evidence/validation";
 import type { ResearchProtocolId } from "./protocols";
 import { RESEARCH_PROTOCOL_REGISTRY, nameToProtocolId, researchProtocolDetail, researchProtocolSummaryList } from "./protocols";
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
@@ -321,8 +321,9 @@ export const RESEARCH_PAUSE_LIMIT_MS = 24 * 60 * 60 * 1000;
 export const RESEARCH_CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** research_job_identity: a SHA-256 over the profile, the question and the supplied context -- never the text itself. */
-export async function researchJobId(profile: ResearchTaskProfile, question: string, context: string): Promise<string> {
-  return hashContent(JSON.stringify({ profile: profile.synthesis, question: question.trim(), context: (context ?? "").trim() }));
+export async function researchJobId(profile: ResearchTaskProfile, question: string, context: string, brief?: string): Promise<string> {
+  // The brief joins the identity only when there is one, so every existing job keeps its id.
+  return hashContent(JSON.stringify({ profile: profile.synthesis, question: question.trim(), context: (context ?? "").trim(), ...(brief?.trim() ? { brief: brief.trim() } : {}) }));
 }
 
 function freshCheckpoint(jobId: string, question: string, now: string): ResearchCheckpoint {
@@ -442,7 +443,7 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // search's status with a reference to its saved results. Saved after every
   // successful operation, so a resumed job never repeats completed work.
   const startedMs = Date.now();
-  const jobId = await researchJobId(profile, question, input.context);
+  const jobId = await researchJobId(profile, question, input.context, input.brief);
   const { checkpoint, resumed } = await loadResumableCheckpoint(input.checkpoints, jobId, question, startedMs);
   const persist = async (): Promise<void> => {
     if (!input.checkpoints) return;
@@ -565,13 +566,16 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
   // dimensions that found no evidence and for dimensions whose search
   // itself failed -- reported distinctly, never conflated).
   const suppliedEvidence = capSuppliedEvidence([input.context, webEvidence, uncoveredWarning].filter(Boolean).join("\n\n"));
+  // The provenance check reads the context WITHOUT the requester's brief, so
+  // a source can never be cited from the brief itself.
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence);
+  const synthesisContext = buildEffectiveResearchContext(categorySummary, relevance, question, suppliedEvidence, input.brief);
 
   const synthesisOutcome = await generateWithOutcome<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
     taskId: profile.synthesis,
     parts: {
       ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, protocols, webResultCount > 0, input.skillContent),
-      situation: effectiveResearchContext,
+      situation: synthesisContext,
     },
     // Raised from 2048 after live failures ("synthesis generation
     // failed") that started once evidence breadth grew to up to 8
@@ -597,7 +601,8 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
     return finish("blocked", blocked("SYNTHESIS_FAILED", "The research couldn't be completed — synthesis generation failed."));
   }
   checkpoint.synthesis_status = "completed";
-  const result: ResearchSynthesis = { ...synthesis, protocolsUsed: protocols };
+  const produced: ResearchSynthesis = { ...synthesis, protocolsUsed: protocols };
+  const result = input.dropUnsupportedFindings ? removeUnsupportedFindings(produced).synthesis : produced;
 
   // Mandatory evidence & source validation gate. Provenance half: the only
   // facts the model could honestly have are what is in the supplied
@@ -675,7 +680,7 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
 
   const method = resolveRuntimeSkill("deep_research").content;
   const discipline = input.skillContent ?? resolveRuntimeSkill("research_signal").content;
-  const jobId = await hashContent(JSON.stringify({ mode: "deep_research", question: input.question.trim(), context: (input.context ?? "").trim() }));
+  const jobId = await hashContent(JSON.stringify({ mode: "deep_research", question: input.question.trim(), context: (input.context ?? "").trim(), ...(input.brief?.trim() ? { brief: input.brief.trim() } : {}) }));
   const rounds = await runSkillRounds(
     env,
     {
@@ -695,9 +700,10 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
   const evidence = formatNotesAsEvidence(rounds.notes);
   const supplied = capSuppliedEvidence([input.context, evidence].filter(Boolean).join("\n\n"));
   const effectiveResearchContext = buildEffectiveResearchContext(categorySummary, "Explicitly requested Deep Research.", input.question, supplied);
+  const synthesisContext = buildEffectiveResearchContext(categorySummary, "Explicitly requested Deep Research.", input.question, supplied, input.brief);
   const synthesisOutcome = await generateWithOutcome<Omit<ResearchSynthesis, "protocolsUsed">>(env, {
     taskId: STANDARD_RESEARCH_PROFILE.synthesis,
-    parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: effectiveResearchContext },
+    parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: synthesisContext },
     maxTokens: 4096,
   });
   if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
@@ -706,7 +712,8 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
   }
   const synthesis = synthesisOutcome.ok ? synthesisOutcome.json : null;
   if (!synthesis) return blocked("SYNTHESIS_FAILED", "The Deep Research synthesis could not be generated.");
-  const result: ResearchSynthesis = { ...synthesis, protocolsUsed: [] };
+  const produced: ResearchSynthesis = { ...synthesis, protocolsUsed: [] };
+  const result = input.dropUnsupportedFindings ? removeUnsupportedFindings(produced).synthesis : produced;
   const gate = applyEvidenceSourceValidationGate(result, effectiveResearchContext);
   if (!gate.valid && gate.failure === "invalid_synthesis") return blocked("SYNTHESIS_INVALID", `The research output didn't meet the evidence bar and was not delivered: ${gate.reason}`);
   if (!gate.valid && gate.failure === "unverifiable_sources") {
@@ -736,7 +743,7 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
  * Contract (those stay system-side governance, unchanged) or any
  * unrelated Handoff record.
  */
-export function buildEffectiveResearchContext(categorySummary: string, relevance: string, question: string, supplied: string): string {
+export function buildEffectiveResearchContext(categorySummary: string, relevance: string, question: string, supplied: string, brief?: string): string {
   return [
     "=== AUTHORIZED RESEARCH CATEGORY (abstracted -- not the consultancy's real identity) ===",
     categorySummary,
@@ -744,6 +751,12 @@ export function buildEffectiveResearchContext(categorySummary: string, relevance
     relevance,
     "=== RESEARCH QUESTION ===",
     question,
+    ...(brief?.trim()
+      ? [
+          "=== REQUESTER'S BRIEF (what they want researched -- framing only: never a source, never evidence, never restated as a finding) ===",
+          brief.trim(),
+        ]
+      : []),
     "=== SUPPLIED CONTEXT/EVIDENCE ===",
     supplied || "(none supplied)",
   ].join("\n\n");

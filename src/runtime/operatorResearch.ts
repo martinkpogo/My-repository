@@ -150,10 +150,10 @@ export function briefText(research: OperatorResearchState): string {
   return lines.join("\n");
 }
 
-/** What the Research Runtime is given: the topic as the question, Martin's answers as its supplied context. */
+/** What the Research Runtime is given: the topic as the question, Martin's answers as its brief -- framing, never evidence. */
 export function pendingFor(research: OperatorResearchState): PendingResearch {
-  const context = research.answers.filter((qa) => qa.answer).map((qa) => `${qa.question} ${qa.answer}`).join("\n");
-  return { question: research.topic ?? "", mode: research.mode, ...(context ? { context: `Martin's research brief:\n${context}` } : {}) };
+  const brief = research.answers.filter((qa) => qa.answer).map((qa) => `${qa.question} ${qa.answer}`).join("\n");
+  return { question: research.topic ?? "", mode: research.mode, ...(brief ? { brief } : {}) };
 }
 
 function buttons(workId: string, values: Array<[string, string]>): InlineButton[][] {

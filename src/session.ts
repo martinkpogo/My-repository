@@ -387,7 +387,16 @@ export class WorkSession extends DurableObject<Env> {
   private async runOperatorResearch(state: WorkState, pending: PendingResearch): Promise<WorkState> {
     const access = operatorResearchContext(String(state.workId));
     const checkpoints = getResearchCheckpointStore(String(state.workId));
-    const input = { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) };
+    // Martin's brief is framing, never evidence; and an unsupported finding is
+    // dropped (stated as a limitation) rather than discarding the whole result
+    // -- for Martin-started research only (Martin, 16 Nov 2026).
+    const input = {
+      question: pending.question,
+      context: pending.context ?? "",
+      ...(pending.brief ? { brief: pending.brief } : {}),
+      dropUnsupportedFindings: true,
+      ...(checkpoints ? { checkpoints } : {}),
+    };
     const outcome =
       pending.mode === "deep_research"
         ? await runDeepResearchSkill(this.env, input, access)

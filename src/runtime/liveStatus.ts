@@ -23,6 +23,8 @@ import { deleteMessage, editMessageText, sendMessage } from "../telegram";
  * ending with ⏸ (waiting for his approval or reply) or ⛔ (stopped, the
  * step marked ✗). A run that succeeds DELETES its message (Martin's choice
  * (b)): the result stays in the topic and the trail is in the Activity Log.
+ * A Work that ends blocked, incomplete or held did not succeed and keeps its
+ * message (workLiveOutcome / STOPPED_STAGE in workStatus.ts, 2026-11-16).
  *
  * The rules this module keeps:
  *   - Honest: a step is recorded only when the chokepoint actually starts it.

@@ -251,5 +251,12 @@ export function workLiveStatusTarget(state: Pick<WorkState, "chatId" | "threadId
 /** A Work run that stops to ask Martin is "waiting" (its status stays); anything else that returns is "succeeded" (its status is deleted). */
 export function workLiveOutcome(state: Pick<WorkState, "stage" | "awaiting" | "pendingActionSummary">): LiveStatusOutcome {
   if (state.pendingActionSummary || state.awaiting || /^awaiting/.test(String(state.stage ?? ""))) return "waiting";
+  // A Work that ended blocked, incomplete or held did not succeed: its status
+  // stays (⛔) instead of being deleted like a success (Martin, 16 Nov 2026).
+  // A naming convention, so a Unit's new stage needs no change here.
+  if (STOPPED_STAGE.test(String(state.stage ?? ""))) return "failed";
   return "succeeded";
 }
+
+/** Stage names that mean the run stopped without succeeding: `<x>_blocked`, `<x>_incomplete`, `<x>_held`, `<x>_hold`. */
+export const STOPPED_STAGE = /_(blocked|incomplete|held|hold)$/;
