@@ -39,11 +39,13 @@ export interface OperatorResearchState {
   current?: string;
   /** While `phase` is "editing": the brief line being corrected -- the topic, or an index into `answers`. */
   editing?: "topic" | number;
+  /** Spelling fixes the AI suggested for the brief on screen; applied only when Martin taps "Fix typos". */
+  typos?: TypoFix[];
   /** The Research database page of the last completed run, when saved. */
   notionUrl?: string;
 }
 
-/** The callback prefix for this flow's buttons: `oresearch:<workId>:<skip|enough|start|edit|edit_topic|edit_<n>|restart|deeper>`. */
+/** The callback prefix for this flow's buttons: `oresearch:<workId>:<skip|enough|start|fixtypos|edit|edit_topic|edit_<n>|restart|deeper>`. */
 export const OPERATOR_RESEARCH_CALLBACK = "oresearch";
 /** The awaiting state a research Work waits in for Martin's typed reply. */
 export const OPERATOR_RESEARCH_AWAITING = "operator_research_reply";
@@ -81,6 +83,8 @@ export interface OperatorResearchDeps {
 export interface BriefQuestionAnswer {
   names_party?: boolean;
   enough?: boolean;
+  /** Likely spelling mistakes in the topic or Martin's answers -- a suggestion, never applied by itself. */
+  typos?: unknown;
   question?: string | null;
 }
 
@@ -93,6 +97,51 @@ export function identityProblem(text: string): string | null {
   if (scrubResearchQuestion(trimmed) !== trimmed.replace(/\s+/g, " ")) return "it contains a record token, email, phone number or link";
   if (redactIdentityTerms(trimmed) !== trimmed) return "it names ENIG or you";
   return null;
+}
+
+export interface TypoFix {
+  wrong: string;
+  right: string;
+}
+
+const MAX_TYPOS = 3;
+const MAX_TYPO_LENGTH = 40;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** `wrong` as a whole word (never part of a longer word), every occurrence. */
+function wholeWord(wrong: string): RegExp {
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(wrong)}(?![\\p{L}\\p{N}])`, "gu");
+}
+
+function applyTypos(text: string, typos: TypoFix[]): string {
+  return typos.reduce((t, fix) => t.replace(wholeWord(fix.wrong), fix.right), text);
+}
+
+/**
+ * The AI's typo suggestions, kept only when each one is a small spelling fix
+ * to words Martin actually typed (the topic or his answers, never the
+ * questions) and the corrected text still passes the identity check. AI output
+ * is a suggestion: anything malformed is dropped, never repaired.
+ */
+export function validTypos(research: OperatorResearchState, raw: unknown): TypoFix[] {
+  if (!Array.isArray(raw)) return [];
+  const typed = [research.topic ?? "", ...research.answers.map((qa) => qa.answer ?? "")];
+  const fixes: TypoFix[] = [];
+  for (const item of raw) {
+    if (fixes.length >= MAX_TYPOS) break;
+    const wrong = typeof item?.wrong === "string" ? item.wrong.trim() : "";
+    const right = typeof item?.right === "string" ? item.right.trim() : "";
+    if (!wrong || !right || wrong === right || wrong.length > MAX_TYPO_LENGTH || right.length > MAX_TYPO_LENGTH) continue;
+    if (fixes.some((f) => f.wrong === wrong)) continue;
+    if (!typed.some((t) => wholeWord(wrong).test(t))) continue;
+    const candidate = [...fixes, { wrong, right }];
+    if (typed.some((t) => t && identityProblem(applyTypos(t, candidate)))) continue;
+    fixes.push({ wrong, right });
+  }
+  return fixes;
 }
 
 export function briefText(research: OperatorResearchState): string {
@@ -208,7 +257,7 @@ async function acceptCorrection(env: Env, state: WorkState, text: string, deps: 
   }
   if (editing === "topic") research.topic = value;
   else research.answers[editing] = { question: research.answers[editing].question, answer: value };
-  return showBrief(env, state, deps);
+  return showBrief(env, state, deps, ai);
 }
 
 async function acceptTopic(env: Env, state: WorkState, text: string, deps: OperatorResearchDeps): Promise<WorkState> {
@@ -229,37 +278,63 @@ async function askNext(env: Env, state: WorkState, deps: OperatorResearchDeps): 
   if (research.answers.length >= MAX_BRIEF_QUESTIONS[research.mode]) return showBrief(env, state, deps);
   const asked = new Set(research.answers.map((qa) => qa.question));
   const ai = await deps.nextQuestion(env, research).catch(() => null);
-  if (ai?.names_party === true) {
-    // The last thing Martin typed names a specific person or organisation:
-    // drop it and ask again, never rewrite it.
-    const last = research.answers.pop();
-    if (last) {
-      research.current = last.question;
-      await deps.send(env, state, `That answer seems to name a specific person or organisation. Please rephrase it -- describe the kind of business or person instead.\n\n${last.question}`, buttons(state.workId, [["Skip", "skip"], ["That's enough, start", "enough"]]));
-    } else {
-      research.topic = undefined;
-      research.phase = "topic";
-      await deps.send(env, state, "That topic seems to name a specific person or organisation. Please rephrase it -- describe the kind of business or person instead.");
-    }
-    return state;
-  }
-  if (ai?.enough === true && research.answers.length > 0) return showBrief(env, state, deps);
+  if (ai?.names_party === true) return refuseNamedParty(env, state, deps);
+  if (ai?.enough === true && research.answers.length > 0) return showBrief(env, state, deps, ai);
   const aiQuestion = typeof ai?.question === "string" ? ai.question.trim().slice(0, 300) : "";
   const question = aiQuestion && !asked.has(aiQuestion) && !identityProblem(aiQuestion) ? aiQuestion : FALLBACK_BRIEF_QUESTIONS.find((q) => !asked.has(q));
-  if (!question) return showBrief(env, state, deps);
+  if (!question) return showBrief(env, state, deps, ai);
   research.current = question;
   const n = research.answers.length + 1;
   await deps.send(env, state, `Question ${n} of up to ${MAX_BRIEF_QUESTIONS[research.mode]}:\n${question}`, buttons(state.workId, [["Skip", "skip"], ["That's enough, start", "enough"]]));
   return state;
 }
 
-async function showBrief(env: Env, state: WorkState, deps: OperatorResearchDeps): Promise<WorkState> {
+/** The last thing Martin typed names a specific person or organisation: drop it and ask again, never rewrite it. */
+async function refuseNamedParty(env: Env, state: WorkState, deps: OperatorResearchDeps): Promise<WorkState> {
   const research = state.operatorResearch!;
+  research.editing = undefined;
+  research.typos = undefined;
+  const last = research.answers.pop();
+  if (last) {
+    research.phase = "questions";
+    research.current = last.question;
+    await deps.send(env, state, `That answer seems to name a specific person or organisation. Please rephrase it -- describe the kind of business or person instead.\n\n${last.question}`, buttons(state.workId, [["Skip", "skip"], ["That's enough, start", "enough"]]));
+  } else {
+    research.topic = undefined;
+    research.phase = "topic";
+    await deps.send(env, state, "That topic seems to name a specific person or organisation. Please rephrase it -- describe the kind of business or person instead.");
+  }
+  return state;
+}
+
+/**
+ * Shows the brief. `ai` is the brief_questions reply already in hand for this
+ * exact brief; without one, the step is asked once here, so every brief gets
+ * the names-a-party flag and typo suggestions (an AI failure shows the brief
+ * with neither, as before).
+ */
+async function showBrief(env: Env, state: WorkState, deps: OperatorResearchDeps, ai?: BriefQuestionAnswer | null): Promise<WorkState> {
+  const research = state.operatorResearch!;
+  const reply = ai === undefined ? await deps.nextQuestion(env, research).catch(() => null) : ai;
+  if (reply?.names_party === true) return refuseNamedParty(env, state, deps);
   research.phase = "brief";
   research.current = undefined;
   research.editing = undefined;
-  await deps.send(env, state, `📋 ${MODE_LABEL[research.mode]} brief\n\n${briefText(research)}`, buttons(state.workId, [["▶️ Start", "start"], ["✏️ Edit", "edit"]]));
+  const typos = validTypos(research, reply?.typos);
+  research.typos = typos.length ? typos : undefined;
+  const suggestion = typos.length ? `\n\n✍️ Possible typos: ${typos.map((t) => `"${t.wrong}" → "${t.right}"`).join(", ")}` : "";
+  const actions: Array<[string, string]> = typos.length ? [["✅ Fix typos", "fixtypos"], ["▶️ Start as is", "start"], ["✏️ Edit", "edit"]] : [["▶️ Start", "start"], ["✏️ Edit", "edit"]];
+  await deps.send(env, state, `📋 ${MODE_LABEL[research.mode]} brief\n\n${briefText(research)}${suggestion}`, buttons(state.workId, actions));
   return state;
+}
+
+/** Martin accepted the suggested fixes: apply them to his own lines and show the brief again (no new suggestions). */
+async function fixTypos(env: Env, state: WorkState, deps: OperatorResearchDeps): Promise<WorkState> {
+  const research = state.operatorResearch!;
+  const typos = research.typos ?? [];
+  if (research.topic) research.topic = applyTypos(research.topic, typos);
+  research.answers = research.answers.map((qa) => (qa.answer ? { question: qa.question, answer: applyTypos(qa.answer, typos) } : qa));
+  return showBrief(env, state, deps, null);
 }
 
 /**
@@ -275,6 +350,7 @@ export async function handleOperatorResearchButton(env: Env, state: WorkState, v
     return { state: await askNext(env, state, deps), schedule: null };
   }
   if (value === "enough" && research.phase === "questions") return { state: await showBrief(env, state, deps), schedule: null };
+  if (value === "fixtypos" && research.phase === "brief" && research.typos?.length) return { state: await fixTypos(env, state, deps), schedule: null };
   if (value === "edit" && (research.phase === "brief" || research.phase === "editing")) return { state: await askWhatToChange(env, state, deps), schedule: null };
   if (value.startsWith("edit_") && (research.phase === "brief" || research.phase === "editing")) {
     const next = await pickLine(env, state, value, deps);
@@ -350,7 +426,8 @@ export const BRIEF_QUESTION_INSTRUCTIONS = [
   "Write the ONE next short clarifying question that would most improve the research -- about its purpose, audience, market or region, kind of business, time period, or what to leave out. Never repeat a question already asked.",
   'If the answers already make the research clear, set "enough": true.',
   'If the topic or the latest answer names a specific person, or a specific company or organisation by name, set "names_party": true.',
-  'Reply ONLY with JSON: {"names_party": false, "enough": false, "question": "<one short question>"}.',
+  'List likely spelling mistakes in the topic and the answers (never in the questions) as "typos": [{"wrong": "<the word exactly as written>", "right": "<its correct spelling>"}] -- spelling only: never rephrase, never change meaning, never "correct" a name or a local word you do not know; [] when there are none.',
+  'Reply ONLY with JSON: {"names_party": false, "enough": false, "question": "<one short question>", "typos": []}.',
 ].join("\n");
 
 async function aiNextQuestion(env: Env, research: OperatorResearchState): Promise<BriefQuestionAnswer | null> {
