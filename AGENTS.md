@@ -1,10 +1,10 @@
 # ENIG Agent Execution Contract
 
-This document establishes the ENIG operating model and execution contracts for Claude Code, Jules, and Kilo Code. The architectural, governance, security, provider, data-boundary, fail-closed, evidence, and documentation rules bind every implementation agent.
+This document establishes the ENIG operating model and execution contracts for Claude Code, OpenCode, Jules, and Kilo Code. The architectural, governance, security, provider, data-boundary, fail-closed, evidence, and documentation rules bind every implementation agent.
 
 ## Governing reasoning boundary
 
-ENIG uses three coding agents (Claude Code, Jules, and Kilo Code) with the same architectural reasoning boundary but different execution ceilings. **Architect/Martin owns**:
+ENIG uses four coding agents (Claude Code, OpenCode, Jules, and Kilo Code) with the same architectural reasoning boundary but with execution ceilings that differ by agent: Claude Code and OpenCode share the same task-scoped ceiling, while Jules and Kilo Code are each governed by their own contracts below. **Architect/Martin owns**:
 
 - architectural decisions;
 - governance decisions;
@@ -14,7 +14,7 @@ ENIG uses three coding agents (Claude Code, Jules, and Kilo Code) with the same 
 - business-policy interpretation; and
 - changes to governing operating-model contracts.
 
-Claude Code, Jules, and Kilo Code may reason deeply about implementation inside an approved boundary. No agent may invent or silently resolve a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision.
+Claude Code, OpenCode, Jules, and Kilo Code may reason deeply about implementation inside an approved boundary. No agent may invent or silently resolve a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision.
 
 > **Think deeply inside the approved boundary; stop at the boundary instead of crossing it.**
 
@@ -30,7 +30,7 @@ Claude Code, Jules, and Kilo Code may reason deeply about implementation inside 
 
 ### Discovery before implementation
 
-Every implementation agent (Claude Code, Jules, and Kilo Code) must discover before designing or implementing. This is a permanent requirement, not a suggestion.
+Every implementation agent (Claude Code, OpenCode, Jules, and Kilo Code) must discover before designing or implementing. This is a permanent requirement, not a suggestion.
 
 Before proposing or building a feature, the agent must:
 
@@ -55,9 +55,9 @@ Every production Handoff write goes through `src/handoffWriter.ts`'s `createHand
 ## Authority model
 
 - **Architect/Martin** remains the architectural and governance authority for ENIG.
-- All three agents operate autonomously inside the boundary approved by Architect; Jules is not incapable of reasoning, but has a lower platform execution ceiling.
+- All four agents operate autonomously inside the boundary approved by Architect; Jules is not incapable of reasoning, but has a lower platform execution ceiling.
 - No agent may redesign ENIG architecture, modify runtime behavior outside authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
-- All three agents must stop and report when a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision is required rather than inventing a rule.
+- All four agents must stop and report when a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision is required rather than inventing a rule.
 
 ## ENIG Runtime Architecture — mandatory reading
 
@@ -93,6 +93,33 @@ Claude Code is trusted to execute the full engineering lifecycle inside the appr
 - If already-approved repository automation performs a later action, Claude Code may monitor it when the task explicitly asks it to watch the workflow, but must distinguish automated workflow progression from its own authority.
 
 Claude Code must not commit, push, open a PR, merge, or deploy merely because those actions would be convenient or customary. The task instruction itself may explicitly grant the relevant authority; no separate approval beyond that task instruction is required.
+
+## OpenCode execution contract
+
+OpenCode runs alongside Claude Code as a full engineering agent. It has the same engineering reasoning model and the same **task-scoped** execution authority as the Claude Code contract above.
+
+- If Martin says **implement only**, OpenCode implements, verifies, self-audits, fixes in-scope findings, and stops.
+- If Martin explicitly authorizes **commit/push/open PR**, OpenCode may perform those actions after verification.
+- If Martin explicitly says to **watch/babysit the PR through merge**, OpenCode may monitor CI, review, and merge state and continue the authorized workflow through merge.
+- If Martin explicitly authorizes **deployment**, OpenCode may execute the approved deployment path and verify deployment and smoke tests.
+- If only part of the lifecycle is authorized, OpenCode stops at that authorized completion state.
+- Execution authorization never grants permission to make a new architectural or governance decision.
+- OpenCode must report actual states rather than assuming them: commit SHA, remote push, PR URL, CI state, merge state, deployment state, and smoke-test result.
+- If already-approved repository automation performs a later action, OpenCode may monitor it when the task explicitly asks it to watch the workflow, but must distinguish automated workflow progression from its own authority.
+
+OpenCode must not commit, push, open a PR, merge, or deploy merely because those actions would be convenient or customary. The task instruction itself may explicitly grant the relevant authority; no separate approval beyond that task instruction is required.
+
+### Engineering autonomy
+
+A task instruction defines the outcome, the boundaries, and the verification — not a file-by-file procedure. Unless the task instruction says otherwise, OpenCode works autonomously: it understands the requested outcome and its governing architectural constraints; explores the repository to locate the relevant implementation, documentation, dependencies, and tests; investigates existing patterns, related code, and potential conflicts before choosing an approach; develops and explains its implementation plan; challenges assumptions and proposes better approaches where appropriate; then implements, verifies, self-audits, fixes in-scope findings, and reports actual results. It does not need per-file instructions or prescribed investigation steps for ordinary engineering work, and it does not stop for routine implementation decisions inside approved architecture — the discovery-before-implementation requirement above binds it as it binds every agent. When an approach would require a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision, OpenCode stops, explains the conflict, presents the available options, and waits for Martin.
+
+### Platform mechanics and ceilings
+
+- OpenCode is a local agent (TUI, web, desktop, or CLI) that runs shell commands with the local user's filesystem, process, and network authority. Like Claude Code and unlike Jules, it has no platform sandbox that hard-blocks `git push` or PR creation; its platform ceiling is the task-scoped authority above plus the permission rules configured in `opencode.json(c)` (ordered `allow`/`ask`/`deny` rules; a configured `deny` can never be overridden by an interactive approval).
+- When a permission rule resolves to `ask`, the person at the console authorizes that specific operation for that session. That approval does not broaden the task-scoped authority granted by the task instruction, and repeated prompting is not a substitute for authorization.
+- When a configured `deny` rule or the shell scanner refuses a command (the scanner also rejects shell constructs it cannot safely analyze), report it as a platform limitation and stop or ask — never route around it.
+- OpenCode reads this contract from the repository root `AGENTS.md` (it does not fall back to `CLAUDE.md`), so this file is the delivery mechanism for OpenCode's operating rules.
+- OpenCode's built-in worktree and session tools implement the one-session-one-worktree-one-branch rule of `docs/concurrent-development.md`. Subagents it launches run in fresh child sessions and inherit this contract through the task given to them.
 
 ## Jules execution contract and sandbox
 
@@ -152,9 +179,9 @@ In particular, a local Notion MCP configuration is not proof that Cloud Agent ha
 
 ### Initial environment and progress reporting
 
-Every implementation agent (Claude Code, Jules, and Kilo Code) must identify, at the start of its work:
+Every implementation agent (Claude Code, OpenCode, Jules, and Kilo Code) must identify, at the start of its work:
 
-- Execution environment (Kilo Cloud Agent, local Kilo VS Code, Claude Code, or Jules).
+- Execution environment (Kilo Cloud Agent, local Kilo VS Code, Claude Code, OpenCode, or Jules).
 - Repository and working directory.
 - Active worktree and branch.
 - Base branch and base commit.
@@ -165,6 +192,12 @@ Agents must report commits, pushes, pull requests, CI, merge, deployment, and li
 ## Execution sequences
 
 ### Claude Code
+
+`inspect → reason → implement → test → self-audit → fix in-scope findings → execute the explicitly authorized lifecycle → final evidence report`
+
+The authorized lifecycle may include, depending on Martin's instruction: `commit → push → PR → watch checks/merge → deploy → smoke test`.
+
+### OpenCode
 
 `inspect → reason → implement → test → self-audit → fix in-scope findings → execute the explicitly authorized lifecycle → final evidence report`
 
