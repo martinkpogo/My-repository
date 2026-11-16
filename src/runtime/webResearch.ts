@@ -10,7 +10,8 @@ import { resolveRuntimeSkill } from "./actionSkills";
 import { currentRun, reportLiveStep, resolveLiveStep } from "./liveStatus";
 import { kvGet, kvPut } from "../kvStore";
 import { hashContent } from "../contentHash";
-import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps, noteResearchInterrupted } from "./webLookupAllowance";
+import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps, noteResearchInterrupted, researchPausedInRun, noteDeepResearchProposal, type DeepResearchProposal } from "./webLookupAllowance";
+export { deepResearchProposalInRun, researchHeldInRun, type DeepResearchProposal } from "./webLookupAllowance";
 import { getResearchCheckpointStore } from "./workPersistence";
 import { systemContext, type AccessContext } from "../access";
 
@@ -95,6 +96,39 @@ export function scrubResearchQuestion(question: string): string {
 interface ResearchNeed {
   needs_web?: boolean;
   question?: string;
+  deep?: unknown;
+}
+
+/** The check's decision: the light question, and optionally a deep-research proposal. */
+export interface ResearchDecision {
+  question: string;
+  deep?: DeepResearchProposal;
+}
+
+const MAX_PROPOSAL_LINES = 5;
+const MAX_PROPOSAL_TEXT = 300;
+
+/**
+ * The proposal as the check wrote it, kept only when well-formed and scrubbed
+ * of record tokens, emails, phone numbers and links. Malformed parts are
+ * dropped, never repaired; the identity check proper runs where the brief is
+ * shown (operatorResearch.ts), before Martin sees it.
+ */
+export function parseDeepProposal(raw: unknown): DeepResearchProposal | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as { needed_for?: unknown; topic?: unknown; brief?: unknown };
+  const clean = (v: unknown) => (typeof v === "string" ? scrubResearchQuestion(v).slice(0, MAX_PROPOSAL_TEXT) : "");
+  const neededFor = clean(r.needed_for);
+  const topic = clean(r.topic);
+  if (neededFor.length < 8 || topic.length < 8) return undefined;
+  const lines: DeepResearchProposal["lines"] = [];
+  for (const item of Array.isArray(r.brief) ? r.brief : []) {
+    if (lines.length >= MAX_PROPOSAL_LINES) break;
+    const question = clean((item as { question?: unknown })?.question);
+    const answer = clean((item as { answer?: unknown })?.answer);
+    if (question.length >= 3 && answer.length >= 2) lines.push({ question, answer });
+  }
+  return { neededFor, topic, lines };
 }
 
 function stepText(task: AiTask): string {
@@ -138,10 +172,13 @@ export const RESEARCH_NEED_INSTRUCTIONS = [
     // never showed the problem. The question must stay on the request's own
     // subject.
     "The research question must stay on the exact subject the request asks about. If it asks what problems or needs a kind of business has, research THOSE businesses' own problems and needs -- not their customers' behaviour or the market in general -- and ask for evidence that would show whether the problem exists.",
-    'Reply ONLY with JSON: {"needs_web": true, "question": "<one general research question>"} or {"needs_web": false}.',
+    // Martin, 2026-11-16: light research stays automatic; deep research is
+    // only PROPOSED, as a brief Martin approves before anything runs.
+    'When the step is substantial work -- a campaign, a strategy, a proposal, a market or offer decision -- whose quality depends on evidence one quick search cannot give (several angles, comparisons, buyer behaviour, what has worked elsewhere), ALSO propose Deep Research by adding "deep": {"needed_for": "<what this research will let the step do, one line>", "topic": "<one research question>", "brief": [{"question": "<a clarifying question>", "answer": "<its answer, from this step\'s own context>"}]}. Give 2 to 5 brief lines answered only from the step\'s own context and role -- the purpose or decision it serves, who the buyers or audience are, the market or region, the time period, what to leave out. Every part identity-free, like the question. Leave "deep" out when one quick search is enough.',
+    'Reply ONLY with JSON: {"needs_web": true, "question": "<one general research question>"}, optionally with "deep" as above, or {"needs_web": false}.',
 ].join("\n");
 
-async function decideResearchNeed(env: Env, task: AiTask): Promise<string | null> {
+async function decideResearchNeed(env: Env, task: AiTask): Promise<ResearchDecision | null> {
   const level = callerSensitivity(task);
   if (!level) return null; // unresolved: never guess a level
   const system = RESEARCH_NEED_INSTRUCTIONS;
@@ -159,7 +196,9 @@ async function decideResearchNeed(env: Env, task: AiTask): Promise<string | null
   console.log(`web research check for ${task.taskId}: ${!result ? "no usable answer" : result.needs_web === true ? "research needed" : "not needed"}`);
   if (!result || result.needs_web !== true || typeof result.question !== "string") return null;
   const question = scrubResearchQuestion(result.question);
-  return question.length >= 8 ? question : null;
+  if (question.length < 8) return null;
+  const deep = parseDeepProposal(result.deep);
+  return deep ? { question, deep } : { question };
 }
 
 function findingsBlock(question: string, digest: string): string {
@@ -285,7 +324,8 @@ export async function seedRunResearchFindings(env: Env, question: string): Promi
 
 /** The augmenter installed on the shared AI executor. Never throws past the executor's own guard. */
 export interface WebResearchDeps {
-  decide: (env: Env, task: AiTask) => Promise<string | null>;
+  /** The light question (a string, as before), or a decision that may carry a deep-research proposal. */
+  decide: (env: Env, task: AiTask) => Promise<string | ResearchDecision | null>;
   research: (env: Env, question: string, access: AccessContext) => Promise<{ digest: string; gaps: string[] } | null>;
 }
 const DEFAULT_DEPS: WebResearchDeps = { decide: decideResearchNeed, research: researchOnline };
@@ -307,10 +347,15 @@ export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: W
   let pending = runResearch.get(run);
   if (!pending) {
     pending = (async () => {
-      const decided = await deps.decide(env, task);
+      const decision = await deps.decide(env, task);
+      const decided = typeof decision === "string" ? decision : decision?.question;
       const question = decided ? scrubResearchQuestion(decided) : null;
       if (!question || question.length < 8) return null;
       const found = await deps.research(env, question, access);
+      // A deep proposal is kept only where the Work can hold its draft for
+      // it, and never when the light research itself paused.
+      const deep = typeof decision === "object" ? decision?.deep : undefined;
+      if (deep && run.offersDeepResearch && !researchPausedInRun()) noteDeepResearchProposal({ ...deep, lightQuestion: question });
       if (!found) return null;
       const info = runGaps.get(run) ?? { question, gaps: [] };
       info.question = question;

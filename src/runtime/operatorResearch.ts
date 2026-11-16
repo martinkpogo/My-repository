@@ -41,11 +41,25 @@ export interface OperatorResearchState {
   editing?: "topic" | number;
   /** Spelling fixes the AI suggested for the brief on screen; applied only when Martin taps "Fix typos". */
   typos?: TypoFix[];
+  /**
+   * Set when a Hat wrote this brief for its own Work (Martin, 16 Nov 2026):
+   * deep research its work would benefit from, proposed and run only after
+   * Martin approves. Absent: Martin's own /research or /deep_research.
+   */
+  origin?: "hat";
+  /** The Hat that prepared the brief (origin "hat"). */
+  preparedBy?: string;
+  /** What the research will let the Hat do (origin "hat"). */
+  neededFor?: string;
+  /** The light research question already answered in the Hat's run, reused when Martin skips deep research (origin "hat"). */
+  lightQuestion?: string;
+  /** What the Work was already waiting for when the brief opened (origin "hat"); restored when the brief is done with. */
+  priorAwaiting?: WorkState["awaiting"];
   /** The Research database page of the last completed run, when saved. */
   notionUrl?: string;
 }
 
-/** The callback prefix for this flow's buttons: `oresearch:<workId>:<skip|enough|start|fixtypos|edit|edit_topic|edit_<n>|restart|deeper>`. */
+/** The callback prefix for this flow's buttons: `oresearch:<workId>:<skip|enough|start|fixtypos|edit|edit_topic|edit_<n>|restart|deeper|skipresearch>`. */
 export const OPERATOR_RESEARCH_CALLBACK = "oresearch";
 /** The awaiting state a research Work waits in for Martin's typed reply. */
 export const OPERATOR_RESEARCH_AWAITING = "operator_research_reply";
@@ -323,9 +337,64 @@ async function showBrief(env: Env, state: WorkState, deps: OperatorResearchDeps,
   const typos = validTypos(research, reply?.typos);
   research.typos = typos.length ? typos : undefined;
   const suggestion = typos.length ? `\n\n✍️ Possible typos: ${typos.map((t) => `"${t.wrong}" → "${t.right}"`).join(", ")}` : "";
-  const actions: Array<[string, string]> = typos.length ? [["✅ Fix typos", "fixtypos"], ["▶️ Start as is", "start"], ["✏️ Edit", "edit"]] : [["▶️ Start", "start"], ["✏️ Edit", "edit"]];
-  await deps.send(env, state, `📋 ${MODE_LABEL[research.mode]} brief\n\n${briefText(research)}${suggestion}`, buttons(state.workId, actions));
+  const fromHat = research.origin === "hat";
+  const startLabel = fromHat ? "▶️ Start deep research" : "▶️ Start";
+  const actions: Array<[string, string]> = typos.length ? [["✅ Fix typos", "fixtypos"], [`${startLabel} as is`, "start"], ["✏️ Edit", "edit"]] : [[startLabel, "start"], ["✏️ Edit", "edit"]];
+  const header = fromHat
+    ? `📋 ${MODE_LABEL[research.mode]} brief${research.preparedBy ? `, prepared by ${research.preparedBy}` : ""}${research.neededFor ? `\nNeeded for: ${research.neededFor}` : ""}\nNothing is researched until you tap Start.`
+    : `📋 ${MODE_LABEL[research.mode]} brief`;
+  const rows = [...buttons(state.workId, actions), ...(fromHat ? buttons(state.workId, [["⏭ Skip deep research", "skipresearch"]]) : [])];
+  await deps.send(env, state, `${header}\n\n${briefText(research)}${suggestion}`, rows);
   return state;
+}
+
+/**
+ * A Hat's deep-research proposal on its own Work, shown as a brief Martin
+ * approves (Start), corrects (Edit, Fix typos) or declines (Skip) -- the same
+ * brief, checks and buttons as /research. Every line passes the identity
+ * check first; a line that fails is left out, never rewritten. A topic that
+ * fails is replaced by the light question already researched, and if that
+ * fails too nothing is proposed: Martin is told and can continue without it.
+ * The Work's stage is left as the Hat set it (it holds its draft).
+ */
+export async function proposeHatResearch(
+  env: Env,
+  state: WorkState,
+  proposal: { neededFor: string; topic: string; lines: Array<{ question: string; answer: string }>; lightQuestion?: string },
+  deps: OperatorResearchDeps,
+): Promise<WorkState> {
+  const clean = (text: string) => text.trim().slice(0, MAX_TEXT);
+  const topic = [proposal.topic, proposal.lightQuestion ?? ""].map(clean).find((t) => t.length >= 3 && !identityProblem(t));
+  const neededFor = identityProblem(proposal.neededFor) ? undefined : clean(proposal.neededFor);
+  const priorAwaiting = state.awaiting && state.awaiting !== OPERATOR_RESEARCH_AWAITING ? state.awaiting : undefined;
+  state.operatorResearch = {
+    mode: "deep_research",
+    phase: "brief",
+    origin: "hat",
+    ...(state.hat ? { preparedBy: state.hat } : {}),
+    ...(neededFor ? { neededFor } : {}),
+    ...(proposal.lightQuestion ? { lightQuestion: proposal.lightQuestion } : {}),
+    ...(priorAwaiting ? { priorAwaiting } : {}),
+    answers: [],
+  };
+  const research = state.operatorResearch;
+  if (!topic) {
+    research.phase = "done";
+    state.awaiting = priorAwaiting;
+    await deps.send(
+      env,
+      state,
+      "Deeper research was suggested for this work, but its research question could not be made identity-free, so it was not proposed. Nothing was researched.",
+      buttons(state.workId, [["▶️ Continue without it", "skipresearch"]]),
+    );
+    return state;
+  }
+  research.topic = topic;
+  research.answers = proposal.lines
+    .map((l) => ({ question: clean(l.question), answer: clean(l.answer) }))
+    .filter((l) => l.question && l.answer && !identityProblem(l.question) && !identityProblem(l.answer));
+  state.awaiting = OPERATOR_RESEARCH_AWAITING;
+  return showBrief(env, state, deps);
 }
 
 /** Martin accepted the suggested fixes: apply them to his own lines and show the brief again (no new suggestions). */
@@ -341,7 +410,12 @@ async function fixTypos(env: Env, state: WorkState, deps: OperatorResearchDeps):
  * Martin's button on a research Work. Returns the job to schedule when one
  * starts (the caller owns the Work's alarm), else null.
  */
-export async function handleOperatorResearchButton(env: Env, state: WorkState, value: string, deps: OperatorResearchDeps): Promise<{ state: WorkState; schedule: PendingResearch | null }> {
+export async function handleOperatorResearchButton(
+  env: Env,
+  state: WorkState,
+  value: string,
+  deps: OperatorResearchDeps,
+): Promise<{ state: WorkState; schedule: PendingResearch | null; continueHat?: true }> {
   const research = state.operatorResearch;
   if (!research) return { state, schedule: null };
   if (value === "skip" && research.phase === "questions" && research.current) {
@@ -356,8 +430,18 @@ export async function handleOperatorResearchButton(env: Env, state: WorkState, v
     const next = await pickLine(env, state, value, deps);
     if (next) return { state: next, schedule: null };
   }
+  if (value === "skipresearch" && research.origin === "hat" && research.phase !== "researching") {
+    research.phase = "done";
+    research.current = undefined;
+    research.editing = undefined;
+    research.typos = undefined;
+    state.awaiting = research.priorAwaiting;
+    await deps.send(env, state, "OK -- no deep research. Continuing without it.");
+    return { state, schedule: null, continueHat: true };
+  }
   if (value === "restart" && (research.phase === "brief" || research.phase === "editing")) {
-    state.operatorResearch = { mode: research.mode, phase: "topic", answers: [] };
+    const { origin, preparedBy, neededFor, lightQuestion, priorAwaiting } = research;
+    state.operatorResearch = { mode: research.mode, phase: "topic", answers: [], ...(origin ? { origin } : {}), ...(preparedBy ? { preparedBy } : {}), ...(neededFor ? { neededFor } : {}), ...(lightQuestion ? { lightQuestion } : {}), ...(priorAwaiting ? { priorAwaiting } : {}) };
     state.awaiting = OPERATOR_RESEARCH_AWAITING;
     await deps.send(env, state, "OK -- what do you want to research?");
     return { state, schedule: null };
@@ -373,8 +457,13 @@ export async function handleOperatorResearchButton(env: Env, state: WorkState, v
 
 async function start(env: Env, state: WorkState, research: OperatorResearchState, deps: OperatorResearchDeps): Promise<{ state: WorkState; schedule: PendingResearch }> {
   research.phase = "researching";
+  state.awaiting = research.origin === "hat" ? research.priorAwaiting : undefined;
+  if (research.origin === "hat") {
+    // The Hat's Work keeps its own stage: it holds its draft until the research completes.
+    await deps.send(env, state, `🔬 Deep research started in the background. It can take several minutes. When it is complete, I'll post the findings here, save them to the Research database, and ${research.preparedBy ?? "the Hat"} continues the work with them.`);
+    return { state, schedule: pendingFor(research) };
+  }
   state.stage = "researching";
-  state.awaiting = undefined;
   await deps.send(
     env,
     state,
@@ -403,6 +492,44 @@ export async function completeOperatorResearch(env: Env, state: WorkState, synth
     `✅ ${MODE_LABEL[research.mode]} complete: ${research.topic}\n\n${summarizeResearchSynthesis(synthesis, 3200)}\n\n${saved}`,
     research.mode === "light_search" ? buttons(state.workId, [["🔬 Go deeper", "deeper"]]) : undefined,
   );
+  return state;
+}
+
+/**
+ * Whether a Hat's step proposal becomes a brief on its Work: the Hat held its
+ * draft for it (stage awaiting_research), its Hat can continue after research,
+ * and no brief was ever opened on this Work (at most one proposal per Work).
+ */
+export function shouldOfferHatBrief(state: Pick<WorkState, "stage" | "operatorResearch">, hatContinues: boolean, hasProposal: boolean): boolean {
+  return hasProposal && hatContinues && state.stage === "awaiting_research" && !state.operatorResearch;
+}
+
+/**
+ * A Hat's approved deep research completed: the findings card with the
+ * Research page link, then -- when the Hat still holds its draft -- it
+ * continues automatically (Martin already approved the brief). Returns
+ * whether the caller should continue the Hat now.
+ */
+export async function completeHatResearch(env: Env, state: WorkState, synthesis: ResearchSynthesis, hatContinues: boolean, deps: OperatorResearchDeps): Promise<boolean> {
+  const research = state.operatorResearch!;
+  const url = await deps.saveToNotion(env, state, synthesis).catch((err) => {
+    console.error("Hat research page not saved", err instanceof Error ? err.message : err);
+    return null;
+  });
+  research.phase = "done";
+  if (url) research.notionUrl = url;
+  const continues = hatContinues && state.stage === "awaiting_research";
+  const saved = url ? `Saved to the Research database: ${url}` : env.RESEARCH_DATA_SOURCE_ID ? "⚠️ It could not be saved to the Research database -- it is only in this message." : "The Research database is not configured, so this is only in this message.";
+  const next = continues ? `${research.preparedBy ?? "The Hat"} is continuing the work with it now.` : "Redo the draft (or ask again) and it will use these findings.";
+  await deps.send(env, state, `✅ Deep research complete: ${research.topic}\n\n${summarizeResearchSynthesis(synthesis, 3200)}\n\n${saved}\n\n${next}`);
+  return continues;
+}
+
+/** A Hat's approved deep research could not complete: said plainly, never as findings; the Hat can continue without it. */
+export async function failHatResearch(env: Env, state: WorkState, reason: string, hatContinues: boolean, deps: OperatorResearchDeps): Promise<WorkState> {
+  state.operatorResearch!.phase = "done";
+  const canContinue = hatContinues && state.stage === "awaiting_research";
+  await deps.send(env, state, `Deep research could not be completed: ${reason}`, canContinue ? buttons(state.workId, [["▶️ Continue without it", "skipresearch"]]) : undefined);
   return state;
 }
 

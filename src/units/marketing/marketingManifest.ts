@@ -19,7 +19,7 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordOutputApprovalAsResultApproval, recordResultEvidence } from "../../resultReview";
 import { hashContent } from "../../contentHash";
-import { researchPausedInRun } from "../../runtime/webLookupAllowance";
+import { researchHeldInRun } from "../../runtime/webLookupAllowance";
 import type { ResultReviewEvidenceItem } from "../../types";
 import { handleHandoffPickup } from "../../hats/executionEngine";
 import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
@@ -214,10 +214,14 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   // analysis. If this step's web research paused because providers were
   // busy, hold the draft: the research resumes on the Work's alarm, and
   // "Continue to draft" re-runs this step with the completed findings.
-  if (researchPausedInRun()) {
+  // Likewise (Martin, 16 Nov 2026) when this step proposed deep research:
+  // the draft is held while Martin approves or skips the Hat's brief, and
+  // continues with the findings once the approved research completes.
+  const held = researchHeldInRun();
+  if (held) {
     state.stage = "awaiting_research";
     state.awaiting = undefined;
-    await finishWorkStatus(env, state, "⏸ Research paused -- the draft is held until it is complete.", "succeeded");
+    await finishWorkStatus(env, state, held === "paused" ? "⏸ Research paused -- the draft is held until it is complete." : "⏸ Deep research proposed -- the draft is held for your approval of the brief below.", "succeeded");
     return state;
   }
 

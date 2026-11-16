@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert";
 import type { Env } from "../types";
 import type { AiTask } from "../ai/types";
-import { augmentTaskWithWebResearch, callerSensitivity, handleWebResearchCallback, scrubResearchQuestion, WEB_RESEARCH_TASKS } from "./webResearch";
+import { augmentTaskWithWebResearch, callerSensitivity, deepResearchProposalInRun, handleWebResearchCallback, parseDeepProposal, researchHeldInRun, RESEARCH_NEED_INSTRUCTIONS, scrubResearchQuestion, WEB_RESEARCH_TASKS } from "./webResearch";
 import { DAILY_LIMIT, RUN_LIMIT, noteResearchInterrupted, takeWebLookup } from "./webLookupAllowance";
 import { getResearchCheckpointStore, installStatePersistence } from "./workPersistence";
 import { withLiveStatus, currentRun } from "./liveStatus";
@@ -354,4 +354,73 @@ test("option B: seeding with nothing saved returns false (Continue refuses rathe
   const env = fakeEnv();
   const seeded = await withLiveStatus(env, target, async () => seedRunResearchFindings(env, "never researched"), () => "succeeded", undefined, { access: systemContext() });
   assert.strictEqual(seeded, false);
+});
+
+// Deep research is proposed, never run, by the check (Martin, 16 Nov 2026).
+
+const DEEP = {
+  needed_for: "Designing the free-consultation campaign to build a mailing list",
+  topic: "Which free offers get SMEs to join a consultancy's mailing list?",
+  brief: [
+    { question: "Who is it for?", answer: "SMEs considering branding help" },
+    { question: "Contact?", answer: "ama@acme.com or MAT-32" },
+    { question: "", answer: "dropped: no question" },
+  ],
+};
+
+test("parseDeepProposal keeps a well-formed, scrubbed brief and drops malformed parts", () => {
+  const p = parseDeepProposal(DEEP)!;
+  assert.strictEqual(p.neededFor, DEEP.needed_for);
+  assert.strictEqual(p.topic, DEEP.topic);
+  assert.deepStrictEqual(p.lines[0], { question: "Who is it for?", answer: "SMEs considering branding help" });
+  assert.ok(!p.lines.some((l) => /@|MAT-32/.test(l.answer)), "tokens and emails are scrubbed");
+  assert.strictEqual(p.lines.length, 2, "a line with no question is dropped");
+  assert.strictEqual(parseDeepProposal({ needed_for: "x", topic: DEEP.topic }), undefined, "too short: nothing proposed");
+  assert.strictEqual(parseDeepProposal("deep please"), undefined);
+  assert.strictEqual(parseDeepProposal({ ...DEEP, brief: Array.from({ length: 9 }, (_, i) => ({ question: `Question ${i}?`, answer: "an answer" })) })!.lines.length, 5, "at most five lines");
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /ALSO propose Deep Research/);
+});
+
+async function inRun(offers: boolean, decide: any, researchFn: any = research) {
+  let proposal: unknown;
+  let held: unknown;
+  await withLiveStatus(
+    fakeEnv(),
+    target,
+    async () => {
+      await augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision"), { decide, research: researchFn });
+      proposal = deepResearchProposalInRun();
+      held = researchHeldInRun();
+    },
+    () => "succeeded",
+    undefined,
+    { access: systemContext(), offersDeepResearch: () => offers },
+  );
+  return { proposal, held };
+}
+
+test("a deep proposal is recorded only where the Work can hold its draft for it; light research still runs either way", async (t) => {
+  mockTelegram(t);
+  const parsed = parseDeepProposal(DEEP)!;
+  let researched = 0;
+  const counting = async () => (researched++, research());
+  const offered = await inRun(true, async () => ({ question: "What free offers do SMEs sign up for?", deep: parsed }), counting);
+  assert.deepStrictEqual(offered.proposal, { ...parsed, lightQuestion: "What free offers do SMEs sign up for?" });
+  assert.strictEqual(offered.held, "deep_proposed", "the Hat is told to hold its draft");
+  const refused = await inRun(false, async () => ({ question: "What free offers do SMEs sign up for?", deep: parsed }), counting);
+  assert.strictEqual(refused.proposal, undefined, "a Work that cannot hold (or already had one) gets no proposal");
+  assert.strictEqual(refused.held, null);
+  assert.strictEqual(researched, 2, "light research is automatic in both runs");
+  const plain = await inRun(true, async () => "What free offers do SMEs sign up for?");
+  assert.strictEqual(plain.proposal, undefined, "a plain light question proposes nothing");
+});
+
+test("no deep proposal when the light research itself paused", async (t) => {
+  mockTelegram(t);
+  const paused = await inRun(true, async () => ({ question: "What free offers do SMEs sign up for?", deep: parseDeepProposal(DEEP)! }), async () => {
+    noteResearchInterrupted(fakeEnv(), "q", { completedOperations: 1, totalOperations: 3 });
+    return null;
+  });
+  assert.strictEqual(paused.proposal, undefined);
+  assert.strictEqual(paused.held, "paused");
 });

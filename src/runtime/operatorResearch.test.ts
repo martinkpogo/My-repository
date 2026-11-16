@@ -11,6 +11,10 @@ import {
   parseResearchCommand,
   validTypos,
   BRIEF_QUESTION_INSTRUCTIONS,
+  proposeHatResearch,
+  shouldOfferHatBrief,
+  completeHatResearch,
+  failHatResearch,
   type BriefQuestionAnswer,
   type OperatorResearchDeps,
 } from "./operatorResearch";
@@ -359,6 +363,161 @@ test("a brief reached at the question limit is checked by the AI too: a named pa
   assert.strictEqual(state.operatorResearch?.phase, "questions");
   assert.strictEqual(state.operatorResearch?.current, "Which sector?");
   assert.strictEqual(state.operatorResearch?.answers.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// A Hat's deep-research brief on its own Work (Martin, 16 Nov 2026)
+// ---------------------------------------------------------------------------
+
+const PROPOSAL = {
+  neededFor: "Designing the free-consultation campaign to build a mailing list",
+  topic: "Which free offers get SMEs to join a consultancy's mailing list?",
+  lines: [
+    { question: "Who is it for?", answer: "SMEs considering branding help" },
+    { question: "Anything to leave out?", answer: "Ask ama@example.com" },
+  ],
+  lightQuestion: "What free offers do SMEs sign up for?",
+};
+
+function hatWork() {
+  const h = harness([]);
+  h.state.unit = "Marketing";
+  h.state.hat = "Campaign & Marketing Communications Manager";
+  h.state.stage = "awaiting_research";
+  return h;
+}
+
+test("a Hat's brief: same card as /research, says who prepared it and what for, nothing researched, the Hat's stage kept", async () => {
+  const h = hatWork();
+  const state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  const card = h.sent.at(-1)!;
+  assert.match(card.text, /Deep research brief, prepared by Campaign & Marketing Communications Manager\nNeeded for: Designing the free-consultation campaign/);
+  assert.match(card.text, /Nothing is researched until you tap Start/);
+  assert.match(card.text, /Topic: Which free offers get SMEs to join a consultancy's mailing list\?\n- Who is it for\? SMEs considering branding help/);
+  assert.doesNotMatch(card.text, /ama@example.com/, "a line failing the identity check is left out");
+  assert.deepStrictEqual(callbacks(card), ["oresearch:w-1:start", "oresearch:w-1:edit", "oresearch:w-1:skipresearch"]);
+  assert.strictEqual(state.stage, "awaiting_research", "the Hat still holds its draft");
+  assert.strictEqual(state.awaiting, OPERATOR_RESEARCH_AWAITING, "typed corrections reach the brief");
+  assert.strictEqual(state.operatorResearch?.origin, "hat");
+});
+
+test("Start on a Hat's brief schedules deep research with the brief as framing, and keeps the Hat's stage", async () => {
+  const h = hatWork();
+  let state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  const { state: started, schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
+  assert.strictEqual(schedule?.mode, "deep_research");
+  assert.strictEqual(schedule?.question, PROPOSAL.topic);
+  assert.match(schedule?.brief ?? "", /Who is it for\? SMEs considering branding help/);
+  assert.strictEqual(schedule?.context, undefined);
+  assert.strictEqual(started.stage, "awaiting_research");
+  assert.strictEqual(started.awaiting, undefined);
+  assert.match(h.sent.at(-1)!.text, /Campaign & Marketing Communications Manager continues the work with them/);
+});
+
+test("Edit works on a Hat's brief exactly as on /research, and Start over keeps it the Hat's brief", async () => {
+  const h = hatWork();
+  let state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  ({ state } = await handleOperatorResearchButton(env, state, "edit", h.deps));
+  ({ state } = await handleOperatorResearchButton(env, state, "edit_0", h.deps));
+  state = await handleOperatorResearchReply(env, state, "SMEs in Ghana considering branding help", h.deps);
+  assert.match(h.sent.at(-1)!.text, /prepared by[\s\S]*SMEs in Ghana considering branding help/);
+  ({ state } = await handleOperatorResearchButton(env, state, "restart", h.deps));
+  assert.strictEqual(state.operatorResearch?.origin, "hat");
+  assert.strictEqual(state.operatorResearch?.lightQuestion, PROPOSAL.lightQuestion);
+  assert.strictEqual(state.stage, "awaiting_research");
+});
+
+test("Skip deep research continues the Hat without it; Skip never applies to Martin's own research or while researching", async () => {
+  const h = hatWork();
+  let state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  const skipped = await handleOperatorResearchButton(env, state, "skipresearch", h.deps);
+  assert.strictEqual(skipped.continueHat, true);
+  assert.strictEqual(skipped.schedule, null);
+  assert.strictEqual(skipped.state.operatorResearch?.phase, "done");
+  assert.strictEqual(skipped.state.awaiting, undefined);
+
+  const running = hatWork();
+  let s2 = await proposeHatResearch(env, running.state, PROPOSAL, running.deps);
+  ({ state: s2 } = await handleOperatorResearchButton(env, s2, "start", running.deps));
+  const late = await handleOperatorResearchButton(env, s2, "skipresearch", running.deps);
+  assert.strictEqual(late.continueHat, undefined, "not while the research runs");
+
+  const mine = harness([]);
+  const s3 = await beginOperatorResearch(env, mine.state, "light_search", "SME positioning", mine.deps);
+  const own = await handleOperatorResearchButton(env, s3, "skipresearch", mine.deps);
+  assert.strictEqual(own.continueHat, undefined, "Martin's own research has no Skip");
+});
+
+test("a brief opened on a Work already waiting on Martin gives that wait back when it is done; no Hat: no 'prepared by'", async () => {
+  const h = hatWork();
+  h.state.awaiting = "proposal_feedback";
+  let state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  assert.strictEqual(state.awaiting, OPERATOR_RESEARCH_AWAITING, "typed corrections reach the brief while it is open");
+  ({ state } = await handleOperatorResearchButton(env, state, "start", h.deps));
+  assert.strictEqual(state.awaiting, "proposal_feedback");
+
+  const skip = hatWork();
+  skip.state.awaiting = "proposal_feedback";
+  let s2 = await proposeHatResearch(env, skip.state, PROPOSAL, skip.deps);
+  ({ state: s2 } = await handleOperatorResearchButton(env, s2, "skipresearch", skip.deps));
+  assert.strictEqual(s2.awaiting, "proposal_feedback");
+
+  const plain = harness([]);
+  await proposeHatResearch(env, plain.state, PROPOSAL, plain.deps);
+  assert.match(plain.sent.at(-1)!.text, /^📋 Deep research brief\nNeeded for:/);
+});
+
+test("a Hat's topic that fails the identity check falls back to the light question; if that fails too, nothing is proposed", async () => {
+  const h = hatWork();
+  const state = await proposeHatResearch(env, h.state, { ...PROPOSAL, topic: "What does ENIG's market want?" }, h.deps);
+  assert.strictEqual(state.operatorResearch?.topic, PROPOSAL.lightQuestion);
+
+  const none = hatWork();
+  const s2 = await proposeHatResearch(env, none.state, { ...PROPOSAL, topic: "ENIG offers", lightQuestion: "How ENIG compares" }, none.deps);
+  assert.strictEqual(s2.operatorResearch?.phase, "done");
+  assert.match(none.sent.at(-1)!.text, /could not be made identity-free, so it was not proposed/);
+  assert.deepStrictEqual(callbacks(none.sent.at(-1)!), ["oresearch:w-1:skipresearch"]);
+});
+
+test("a brief is offered only when the Hat held its draft, can continue, and none was opened on this Work before", () => {
+  const held = { stage: "awaiting_research" } as any;
+  assert.strictEqual(shouldOfferHatBrief(held, true, true), true);
+  assert.strictEqual(shouldOfferHatBrief(held, false, true), false, "a Hat that cannot continue after research");
+  assert.strictEqual(shouldOfferHatBrief(held, true, false), false, "no proposal");
+  assert.strictEqual(shouldOfferHatBrief({ stage: "awaiting_output_approval" } as any, true, true), false, "the Hat did not hold its draft");
+  assert.strictEqual(shouldOfferHatBrief({ stage: "awaiting_research", operatorResearch: { phase: "done" } } as any, true, true), false, "at most one per Work");
+});
+
+test("a Hat's deep research completes: findings and the Research page, then the Hat continues automatically", async () => {
+  const h = hatWork();
+  let state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  ({ state } = await handleOperatorResearchButton(env, state, "start", h.deps));
+  const continues = await completeHatResearch(env, state, SYNTHESIS, true, h.deps);
+  assert.strictEqual(continues, true);
+  assert.strictEqual(state.operatorResearch?.phase, "done");
+  assert.strictEqual(h.saved.length, 1, "saved to the Research database");
+  const card = h.sent.at(-1)!;
+  assert.match(card.text, /Deep research complete: Which free offers/);
+  assert.match(card.text, /Saved to the Research database: https:\/\/notion.example\/research-1/);
+  assert.match(card.text, /Campaign & Marketing Communications Manager is continuing the work with it now/);
+
+  const moved = hatWork();
+  let s2 = await proposeHatResearch(env, moved.state, PROPOSAL, moved.deps);
+  ({ state: s2 } = await handleOperatorResearchButton(env, s2, "start", moved.deps));
+  s2.stage = "awaiting_output_approval";
+  assert.strictEqual(await completeHatResearch(env, s2, SYNTHESIS, true, moved.deps), false, "a Work no longer holding its draft is not continued");
+  assert.match(moved.sent.at(-1)!.text, /Redo the draft/);
+});
+
+test("a Hat's deep research that fails says so plainly and offers to continue without it", async () => {
+  const h = hatWork();
+  let state = await proposeHatResearch(env, h.state, PROPOSAL, h.deps);
+  ({ state } = await handleOperatorResearchButton(env, state, "start", h.deps));
+  state = await failHatResearch(env, state, "no usable sources", true, h.deps);
+  assert.match(h.sent.at(-1)!.text, /Deep research could not be completed: no usable sources/);
+  assert.deepStrictEqual(callbacks(h.sent.at(-1)!), ["oresearch:w-1:skipresearch"]);
+  const { continueHat } = await handleOperatorResearchButton(env, state, "skipresearch", h.deps);
+  assert.strictEqual(continueHat, true);
 });
 
 // ---------------------------------------------------------------------------

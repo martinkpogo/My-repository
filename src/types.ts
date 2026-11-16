@@ -503,7 +503,7 @@ export interface WorkState {
     | "finance_direct_request_matter"
     | "finance_direct_request_context"
     | "sales_proposal_revision"
-    /** A Martin-started research Work waiting for his topic or a brief answer (src/runtime/operatorResearch.ts). Owned by no Unit or Hat. */
+    /** A research brief waiting for Martin's topic, answer or correction (src/runtime/operatorResearch.ts): a Martin-started research Work (owned by no Unit or Hat), or a Hat's deep-research brief on its own Work. */
     | "operator_research_reply"
     /**
      * Set when a comment on a Proposal's Google Doc could not be classified

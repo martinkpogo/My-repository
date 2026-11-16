@@ -13,7 +13,7 @@ import {
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import { sendMessage, sendOperationsMessage } from "./telegram";
-import { researchOnline, saveDeepResearchFindings, seedRunResearchFindings } from "./runtime/webResearch";
+import { deepResearchProposalInRun, researchOnline, saveDeepResearchFindings, seedRunResearchFindings } from "./runtime/webResearch";
 import { RESEARCH_WORK_CALLBACK, retryTimeLabel } from "./runtime/webLookupAllowance";
 import { runDeepResearchSkill, runResearchSkill } from "./runtime/research/researchRuntime";
 import { resolveRuntimeSkill } from "./runtime/actionSkills";
@@ -26,6 +26,10 @@ import {
   handleOperatorResearchReply,
   OPERATOR_RESEARCH_AWAITING,
   OPERATOR_RESEARCH_CALLBACK,
+  completeHatResearch,
+  failHatResearch,
+  proposeHatResearch,
+  shouldOfferHatBrief,
   type OperatorResearchMode,
 } from "./runtime/operatorResearch";
 import { summarizeResearchSynthesis } from "./runtime/actionResearch";
@@ -366,8 +370,13 @@ export class WorkSession extends DurableObject<Env> {
     if (value === "deep") {
       const question = completed?.question ?? pending?.question;
       if (!question) return say("There is no research question on this work to research more deeply.");
-      await this.schedulePendingResearch({ question, mode: "deep_research" });
-      return say("🔬 Deep research started in the background. You'll get a message when it's complete.");
+      // Deep research needs Martin's approval of a brief (Martin, 16 Nov
+      // 2026): the tap opens one on this question instead of starting.
+      const open = state.operatorResearch;
+      // Martin's own /research Work keeps its own flow (its Go deeper button).
+      if (open && open.origin !== "hat") return say("This is your own research -- use its Go deeper button.");
+      if (open && open.phase !== "done") return say("A research brief is already open on this work -- use its buttons.");
+      return proposeHatResearch(this.env, state, { neededFor: "researching this work's question more deeply", topic: question, lines: [], lightQuestion: question }, DEFAULT_OPERATOR_RESEARCH_DEPS);
     }
     if (value === "continue") {
       const hat = state.unit && state.hat ? findUnitManifest(state.unit)?.hats[state.hat] : undefined;
@@ -377,6 +386,61 @@ export class WorkSession extends DurableObject<Env> {
       return this.runUnderRecordedSkills(state, () => hat.continueAfterResearch!(this.env, state));
     }
     return say("That research button is not recognised -- nothing was run.");
+  }
+
+  private hatOf(state: WorkState) {
+    return state.unit && state.hat ? findUnitManifest(state.unit)?.hats[state.hat] : undefined;
+  }
+
+  /**
+   * After a Hat step: when the step's research check proposed deep research
+   * and the Hat held its draft for it (stage awaiting_research), show the
+   * Hat's brief for Martin's approval. Nothing is researched until he taps
+   * Start (Martin, 16 Nov 2026).
+   */
+  private async offerHatResearchBrief(state: WorkState): Promise<WorkState> {
+    const proposal = deepResearchProposalInRun();
+    if (!proposal || !shouldOfferHatBrief(state, Boolean(this.hatOf(state)?.continueAfterResearch), true)) return state;
+    return proposeHatResearch(this.env, state, proposal, DEFAULT_OPERATOR_RESEARCH_DEPS);
+  }
+
+  /**
+   * Continues a Hat that held its draft for research: the given question's
+   * saved findings (deep first, else light) are fed into the run, then the
+   * Hat's own declared continueAfterResearch re-runs its step.
+   */
+  private async continueHatAfterResearch(state: WorkState, question: string | undefined): Promise<WorkState> {
+    const hat = this.hatOf(state);
+    if (state.stage !== "awaiting_research" || !hat?.continueAfterResearch) return state;
+    if (question) await seedRunResearchFindings(this.env, question);
+    return this.runUnderRecordedSkills(state, () => hat.continueAfterResearch!(this.env, state));
+  }
+
+  /**
+   * A Hat's approved deep research (Martin, 16 Nov 2026), under this Work's
+   * own Access context: the brief is framing, never evidence; an uncited
+   * finding is dropped with a note; the findings are saved (24-hour cache and
+   * the Research database) and the Hat continues automatically -- Martin
+   * already approved the brief.
+   */
+  private async runHatDeepResearch(state: WorkState, pending: PendingResearch): Promise<WorkState> {
+    const checkpoints = getResearchCheckpointStore(String(state.workId));
+    const outcome = await runDeepResearchSkill(
+      this.env,
+      { question: pending.question, context: pending.context ?? "", ...(pending.brief ? { brief: pending.brief } : {}), dropUnsupportedFindings: true, ...(checkpoints ? { checkpoints } : {}) },
+      workSessionContext(state),
+    );
+    if (outcome.status === "interrupted") {
+      await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
+      const when = retryTimeLabel(outcome.retryAt);
+      await sendMessage(this.env, state.chatId, `⏸ Deep research paused: providers are busy.${when ? ` It resumes on its own around ${when}.` : " It resumes on its own shortly."}`, undefined, state.threadId);
+      return state;
+    }
+    const hatContinues = Boolean(this.hatOf(state)?.continueAfterResearch);
+    if (outcome.status !== "completed") return failHatResearch(this.env, state, outcome.reason, hatContinues, DEFAULT_OPERATOR_RESEARCH_DEPS);
+    await saveDeepResearchFindings(this.env, pending.question, { digest: summarizeResearchSynthesis(outcome.synthesis), gaps: outcome.synthesis.limitations.map((l) => l.statement) });
+    const continues = await completeHatResearch(this.env, state, outcome.synthesis, hatContinues, DEFAULT_OPERATOR_RESEARCH_DEPS);
+    return continues ? this.continueHatAfterResearch(state, pending.question) : state;
   }
 
   /**
@@ -430,7 +494,8 @@ export class WorkSession extends DurableObject<Env> {
       }
       await this.ctx.storage.delete(PENDING_RESEARCH_KEY); // a re-fired alarm never resumes twice
       await this.execute(async (state) => {
-        if (state.operatorResearch) return this.runOperatorResearch(state, pending);
+        if (state.operatorResearch?.origin === "hat" && state.operatorResearch.phase === "researching") return this.runHatDeepResearch(state, pending);
+        if (state.operatorResearch && state.operatorResearch.origin !== "hat") return this.runOperatorResearch(state, pending);
         const found = pending.mode === "deep_research" ? await this.resumeDeepResearch(state, pending) : await researchOnline(this.env, pending.question, workSessionContext(state));
         if (!found) return state;
         await this.ctx.storage.put(COMPLETED_RESEARCH_KEY, { question: pending.question, mode: pending.mode });
@@ -657,8 +722,11 @@ export class WorkSession extends DurableObject<Env> {
           return this.handleResearchButton(state, value);
         case OPERATOR_RESEARCH_CALLBACK:
           // Martin-started research (owned by no Hat): its brief buttons.
-          return handleOperatorResearchButton(this.env, state, value, DEFAULT_OPERATOR_RESEARCH_DEPS).then(async ({ state: next, schedule }) => {
+          // Martin-started research, or a Hat's deep-research brief on its own
+          // Work: the same brief buttons.
+          return handleOperatorResearchButton(this.env, state, value, DEFAULT_OPERATOR_RESEARCH_DEPS).then(async ({ state: next, schedule, continueHat }) => {
             if (schedule) await this.schedulePendingResearch(schedule);
+            if (continueHat) return this.continueHatAfterResearch(next, next.operatorResearch?.lightQuestion);
             return next;
           });
         case "resultreview": {
@@ -847,9 +915,13 @@ export class WorkSession extends DurableObject<Env> {
       // per-Hat code. Where the Hat reports its own named steps, those lead.
       // The run also carries this Work's own Access context, which the
       // universal web research tool (src/runtime/webResearch.ts) uses.
-      const saved = await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
-        // A Martin-started research Work runs under its own bounded context.
-        access: () => (state.operatorResearch ? operatorResearchContext(String(state.workId)) : workSessionContext(state)),
+      const saved = await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await this.offerHatResearchBrief(await fn(state))), workLiveOutcome, workStatusLiveSink(this.env, state), {
+        // A Martin-started research Work runs under its own bounded context;
+        // a Hat's Work keeps its own, also while it shows a research brief.
+        access: () => (state.operatorResearch && state.operatorResearch.origin !== "hat" ? operatorResearchContext(String(state.workId)) : workSessionContext(state)),
+        // A Hat may propose deep research only where its Work can hold the
+        // draft for it, and at most once per Work (Martin, 16 Nov 2026).
+        offersDeepResearch: () => Boolean(this.hatOf(state)?.continueAfterResearch) && !state.operatorResearch,
       });
       // The independent Checker's advisory second opinion (Martin's decision,
       // 2026-11-14): AFTER the draft is saved and with Martin, never before.

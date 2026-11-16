@@ -229,6 +229,8 @@ export interface HatManifest<A extends string = string> {
    * Option B (Martin, 15 Nov 2026): this Hat holds its draft when research
    * pauses (stage `awaiting_research`) and declares how to continue once the
    * research completes -- through its own existing, re-run-safe redo path.
+   * Declaring it also lets the Hat's step propose deep research as a brief
+   * Martin approves (Martin, 16 Nov 2026; see operatorResearch.ts).
    * WorkSession feeds the completed findings into the run before calling it.
    * Absent: the Hat drafts as before, with the paused card alongside.
    */
