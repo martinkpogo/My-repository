@@ -332,6 +332,20 @@ export async function editMessageText(env: Env, chatId: number, messageId: numbe
   }
 }
 
+/**
+ * Deletes a message the bot sent -- used by the universal live status to
+ * remove a run's status message once the run succeeded. Best-effort: logged,
+ * never thrown.
+ */
+export async function deleteMessage(env: Env, chatId: number, messageId: number): Promise<void> {
+  try {
+    const res = await call(env, "deleteMessage", { chat_id: chatId, message_id: messageId });
+    if (!res.ok) console.error("telegram deleteMessage failed", await res.text());
+  } catch (err) {
+    console.error("telegram deleteMessage failed", err);
+  }
+}
+
 /** Shape every WorkState already satisfies -- chatId/threadId/hat -- so callers can pass state directly. */
 export interface HatMessageTarget {
   chatId: number;

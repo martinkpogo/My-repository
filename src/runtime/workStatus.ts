@@ -1,5 +1,6 @@
 import type { Env, WorkState } from "../types";
 import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../telegram";
+import { resolvePendingStep, yieldLiveStatusToHat, type LiveStatusDetailSink, type LiveStatusOutcome, type LiveStatusTarget } from "./liveStatus";
 
 /**
  * Live work status -- a Runtime Service any Unit's Hat uses to show Martin
@@ -41,8 +42,15 @@ export interface WorkStatus {
   completed?: OperationEntry[];
   /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
   edits?: number;
-  finalEditAttempted?: boolean;
-  finalEditDelivered?: boolean;
+  /**
+   * What the universal live status (liveStatus.ts) saw happen during the
+   * running step -- "Planning the searches", "Searching the web -- nca.org.gh".
+   * Only the latest entry is shown: it replaces the step's own wording on its
+   * line while the step runs (Martin, 2026-11-13). Fixed labels only.
+   */
+  trail?: string[];
+  /** When the last intermediate edit was made (ms), for the live detail's throttle. */
+  lastEditAt?: number;
 }
 
 /**
@@ -73,19 +81,49 @@ export function workStatusHeader(hat: string, state: Partial<Pick<WorkState, "ma
   return `${hat} — ${state.matterToken || state.entityToken || fallback}`;
 }
 
+/** Bounds what a busy step stores; only the latest entry is ever shown. */
+const MAX_TRAIL = 12;
+
+/** Adds a live step to the trail, merging a repeat of the same step ("Searching the web" ×n). */
+function addToTrail(trail: string[], label: string): void {
+  const base = (s: string) => s.replace(/ ×\d+$/, "");
+  if (trail.length && base(trail[trail.length - 1]) === base(label)) trail[trail.length - 1] = label;
+  else trail.push(label);
+  if (trail.length > MAX_TRAIL) trail.splice(0, trail.length - MAX_TRAIL);
+}
+
 export function renderWorkStatus(status: WorkStatus, ending?: { line: string; currentFailed: boolean }): string {
   const step = (text: string) => text.replace(/(\.\.\.|…)$/, "");
   const lines = [`🧭 ${status.header}`, ...status.done.map((d) => `✓ ${step(d)}`)];
-  if (status.current) lines.push(`${ending ? (ending.currentFailed ? "✗" : "✓") : "⏳"} ${step(status.current)}`);
+  if (status.current) {
+    // One line per Hat step, edited in place (Martin, 2026-11-13): while the
+    // step runs the line shows what is happening inside it right now; a step
+    // that ends well goes back to its own wording with ✓; one that fails
+    // stays on the inner step that was running, marked ✗, so it shows where
+    // it broke.
+    const inner = status.trail?.length ? status.trail[status.trail.length - 1] : undefined;
+    const failed = ending?.currentFailed === true;
+    const text = !ending || failed ? (inner ?? status.current) : status.current;
+    lines.push(`${ending ? (failed ? "✗" : "✓") : "⏳"} ${step(text)}`);
+  }
+  // Outcome-driven operation feed: in-progress operations shown with start
+  // markers (truthful concurrency, no implied sequence) and completed
+  // operations shown in actual completion order with their outcome.
   for (const r of status.running ?? []) lines.push(`⏳ ${step(r.label)} (started ${new Date(r.startedAt).toISOString()})`);
-  for (const c of status.completed ?? []) lines.push(`${c.outcome === "succeeded" ? "✓" : c.outcome === "denied" ? "⛔" : c.outcome === "failed" ? "✗" : "•"} ${step(c.label)} [${c.outcome}]`);
+  for (const c of status.completed ?? []) {
+    const mark = c.outcome === "succeeded" ? "✓" : c.outcome === "denied" ? "⛔" : c.outcome === "failed" ? "✗" : "•";
+    lines.push(`${mark} ${step(c.label)} [${c.outcome}]`);
+  }
   if (ending) lines.push(ending.line);
   return lines.join("\n");
 }
 
 /** Sends a fresh status message for a new run, with `firstStep` running. */
 export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: string, header: string, firstStep: string): Promise<void> {
-  holder.workStatus = { hat, header, done: [], current: firstStep, running: [], completed: [], edits: 0 };
+  // One message per run: a universal live-status message already shown for
+  // this run gives way to the Hat's own named steps.
+  yieldLiveStatusToHat();
+  holder.workStatus = { hat, header, done: [], current: firstStep, running: [], completed: [], edits: 0, lastEditAt: Date.now() };
   holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
@@ -95,8 +133,10 @@ export async function advanceWorkStatus(env: Env, holder: WorkStatusHolder, step
   if (holder.workStatusMessageId === undefined || !status) return;
   if (status.current) status.done.push(status.current);
   status.current = step;
+  status.trail = undefined;
   if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
   status.edits = (status.edits ?? 0) + 1;
+  status.lastEditAt = Date.now();
   await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, escapeTelegramMarkdown(renderWorkStatus(status)));
 }
 
@@ -131,4 +171,56 @@ export async function finishWorkStatus(env: Env, holder: WorkStatusHolder, line:
   holder.workStatusMessageId = undefined;
   if (messageId === undefined || !status) return;
   await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, messageId, escapeTelegramMarkdown(renderWorkStatus(status, { line, currentFailed: outcome === "failed" || outcome === "denied" })));
+}
+
+/** Minimum gap between two detail-only edits of a Hat's status message. */
+const DETAIL_EDIT_INTERVAL_MS = 3000;
+
+/**
+ * Shows the live detail line on the Hat's open status message -- a
+ * detail-only edit, throttled and inside the same MAX_INTERMEDIATE_EDITS
+ * budget as the Hat's own steps, so the budget rule is unchanged.
+ */
+export async function refreshWorkStatus(env: Env, holder: WorkStatusHolder): Promise<void> {
+  const status = holder.workStatus;
+  if (holder.workStatusMessageId === undefined || !status) return;
+  if ((status.edits ?? 0) >= MAX_INTERMEDIATE_EDITS) return;
+  if (Date.now() - (status.lastEditAt ?? 0) < DETAIL_EDIT_INTERVAL_MS) return;
+  status.edits = (status.edits ?? 0) + 1;
+  status.lastEditAt = Date.now();
+  await editWorkspaceHatMessage(env, { chatId: holder.chatId, hat: status.hat }, holder.workStatusMessageId, escapeTelegramMarkdown(renderWorkStatus(status)));
+}
+
+/** The universal live status's handle onto a Work's own named status (see liveStatus.ts). */
+export function workStatusLiveSink(env: Env, holder: WorkStatusHolder): LiveStatusDetailSink {
+  return {
+    hatStatusOpen: () => holder.workStatusMessageId !== undefined && holder.workStatus !== undefined,
+    // A step the live run saw is added to the running Hat step's trail; the
+    // live run ending (undefined) leaves the trail as it is.
+    setDetail: (detail) => {
+      if (holder.workStatus && detail) addToTrail((holder.workStatus.trail ??= []), detail);
+    },
+    resolveDetail: (pending, final) => {
+      if (!holder.workStatus) return;
+      const steps = (holder.workStatus.trail ??= []).map((t) => {
+        const m = / ×(\d+)$/.exec(t);
+        return { label: m ? t.slice(0, m.index) : t, count: m ? Number(m[1]) : 1 };
+      });
+      resolvePendingStep(steps, pending, final);
+      holder.workStatus.trail = steps.map((st) => (st.count > 1 ? `${st.label} ×${st.count}` : st.label));
+    },
+    refresh: () => refreshWorkStatus(env, holder),
+  };
+}
+
+/** Where a Work's universal live status appears, and its identity-free header. */
+export function workLiveStatusTarget(state: Pick<WorkState, "chatId" | "threadId" | "hat" | "unit" | "actionName" | "matterToken" | "entityToken">): LiveStatusTarget {
+  const who = state.hat || state.unit || "Work";
+  return { chatId: state.chatId, threadId: state.threadId, header: workStatusHeader(who, state, state.actionName ? state.actionName.replace(/_/g, " ") : "work") };
+}
+
+/** A Work run that stops to ask Martin is "waiting" (its status stays); anything else that returns is "succeeded" (its status is deleted). */
+export function workLiveOutcome(state: Pick<WorkState, "stage" | "awaiting" | "pendingActionSummary">): LiveStatusOutcome {
+  if (state.pendingActionSummary || state.awaiting || /^awaiting/.test(String(state.stage ?? ""))) return "waiting";
+  return "succeeded";
 }

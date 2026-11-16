@@ -7,7 +7,7 @@
 
 export type MarketingHatName =
   | "Marketing Strategist"
-  | "Brand & Communications Strategist"
+  | "Campaign & Marketing Communications Manager"
   | "Content Strategist"
   | "Content Manager"
   | "Digital Marketer";

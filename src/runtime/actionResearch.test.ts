@@ -20,12 +20,12 @@ function walk(dir: string): string[] {
   });
 }
 
-test("Only Lead Generation's discovery reaches the public-prospect research profile; nothing else calls executeProspectResearch or runProspectResearch", () => {
-  const allowed = new Set(["runtime/research/executor.ts", "runtime/actionResearch.ts", "units/sales/leadGenerationDiscovery.ts"]);
+test("Only Lead Generation's discovery reaches the public-prospect research profile; nothing else calls runProspectResearchSkill or runProspectResearch", () => {
+  const allowed = new Set(["runtime/research/researchRuntime.ts", "runtime/actionResearch.ts", "units/sales/leadGenerationDiscovery.ts"]);
   for (const file of walk(join(__dirname, ".."))) {
     const rel = file.slice(join(__dirname, "..").length + 1);
     const text = readFileSync(file, "utf8");
-    if (/\b(executeProspectResearch|runProspectResearch)\b/.test(text)) {
+    if (/\b(runProspectResearchSkill|runProspectResearch)\b/.test(text)) {
       assert.ok(allowed.has(rel), `${rel} must not use the public-prospect research profile`);
     }
   }

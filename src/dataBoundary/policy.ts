@@ -116,6 +116,17 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "strategy.brand_diagnosis": "business_sensitive",
   "strategy.communication_diagnosis": "business_sensitive",
   "strategy.specialist_synthesis": "business_sensitive",
+  // BD-13 Machinery Worker Result verification -- payload is the token-safe
+  // Work snapshot (canonical Work/unit/hat/action ids, stage, the declared
+  // expected Result and completion criteria, and the producing Unit's own
+  // recorded Result evidence content), never raw enquiry text or
+  // identity-bearing state slices: same already-sanitized,
+  // Entity/Matter-token-bound operational category as
+  // finance.quote_judgment/strategy.diagnosis, and the same rationale as
+  // those entries applies unchanged. The Outbound Data Gate still inspects
+  // the actual payload per call and blocks anything it cannot establish as
+  // safe -- this entry is necessary but never sufficient on its own.
+  "work.result_verification": "business_sensitive",
   // public_sourced, not business_sensitive -- Lead Discovery's evidence
   // originates from the open web, not from ENIG's own internal
   // operations. Never sees the discovered identity/contact itself (see
@@ -131,6 +142,18 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   "lead.candidate_research_protocol_selection": "public_sourced",
   "lead.candidate_research_plan": "public_sourced",
   "lead.candidate_research_synthesis": "public_sourced",
+  // A Skill-guided research step on the Research Runtime (Martin, 15 Nov
+  // 2026): it sees only the identity-scrubbed question and public search /
+  // page results, so it is public_sourced like the other public research
+  // steps. A step that included the Work's own context would be
+  // business_sensitive and needs its own task id.
+  "research.skill_step": "public_sourced",
+  // Martin-started research brief (Build Decision, 15 Nov 2026): Martin's own
+  // topic and answers, the same payload category as runtime.research_need --
+  // business_sensitive. Every Outbound Gate detector applies in full (this
+  // task is NOT company-suffix-exempt), so a topic naming a company or person
+  // is blocked before it reaches a provider.
+  "research.brief_questions": "business_sensitive",
   "action.google_doc_intake": "business_sensitive",
   "action.google_doc_comment_edit": "business_sensitive",
   // Same payload category as action.google_doc_comment_edit directly above:
@@ -295,6 +318,15 @@ export const PRODUCTION_TASK_SENSITIVITY: Readonly<Partial<Record<SemanticTaskId
   // classification: the registry defines a permitted task boundary
   // regardless of whether the current optimization happens to invoke it.
   "sales.intake_classification": "business_sensitive",
+  // Finance Stage 1 (Value-Based Pricing Assessor vs Payments Clerk): Martin's
+  // Workspace text plus static Hat summaries, the same payload category as
+  // sales.intake_classification. Classification approved by Martin 2026-11-11.
+  "finance.intake_classification": "business_sensitive",
+  // Universal web research check (Martin, 2026-11-11). This is only the
+  // floor: each call stamps every segment with the calling step's own
+  // sensitivity, so a client_confidential chat reply's check is held to
+  // client_confidential.
+  "runtime.research_need": "business_sensitive",
   "sales.hat_action_decision": "business_sensitive",
 };
 
@@ -580,6 +612,8 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   // routing/action metadata), Architect-approved alongside their
   // business_sensitive classification in PRODUCTION_TASK_SENSITIVITY.
   "sales.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "finance.intake_classification": "TOKEN_SAFE_RUNTIME",
+  "runtime.research_need": "TOKEN_SAFE_RUNTIME",
   "sales.hat_action_decision": "TOKEN_SAFE_RUNTIME",
   "research.context_relevance": "TOKEN_SAFE_RUNTIME",
   "research.protocol_selection": "TOKEN_SAFE_RUNTIME",
@@ -609,12 +643,20 @@ export const PRODUCTION_OUTBOUND_POLICY: Readonly<Partial<Record<SemanticTaskId,
   "strategy.brand_diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.communication_diagnosis": "TOKEN_SAFE_RUNTIME",
   "strategy.specialist_synthesis": "TOKEN_SAFE_RUNTIME",
+  // BD-13 Machinery Worker Result verification -- token-safe Work snapshot
+  // only (same payload category as strategy.specialist_synthesis directly
+  // above): the gate inspects the actual prompt and blocks any content it
+  // cannot establish as identity-free, degrading the check to fail-closed
+  // "unavailable" rather than ever widening what may cross the boundary.
+  "work.result_verification": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_classification": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_signal_evaluation": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_relevance": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_protocol_selection": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_plan": "TOKEN_SAFE_RUNTIME",
   "lead.candidate_research_synthesis": "TOKEN_SAFE_RUNTIME",
+  "research.skill_step": "TOKEN_SAFE_RUNTIME",
+  "research.brief_questions": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_intake": "TOKEN_SAFE_RUNTIME",
   "lead.discovery_ondemand_query_generation": "TOKEN_SAFE_RUNTIME",
   "action.google_doc_intake": "TOKEN_SAFE_RUNTIME",
@@ -646,6 +688,15 @@ export const OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS: ReadonlySet<SemanticTas
   "lead.candidate_research_protocol_selection",
   "lead.candidate_research_plan",
   "lead.candidate_research_synthesis",
+  "research.skill_step",
+  // General web research (src/runtime/webResearch.ts) -- Martin's decision
+  // 2026-11-13: it summarises public web results, which routinely name
+  // companies. Company-suffix detector only; the email, phone and
+  // person-name detectors still apply to these steps unchanged.
+  "research.context_relevance",
+  "research.protocol_selection",
+  "research.plan_generation",
+  "research.synthesis",
 ]);
 
 export interface DataBoundaryEvaluatorOptions {

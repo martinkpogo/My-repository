@@ -12,7 +12,7 @@ export const CONTENT_STRATEGIST: MarketingHatDefinition = {
   unit: "Marketing",
   specialization: "Marketing",
   purpose:
-    "Own ENIG's content strategy: what content should be created, why, for whom, and how it serves agreed marketing objectives, translating Marketing Strategy and Brand & Communications guidance into actionable content direction.",
+    "Own ENIG's content strategy: what content should be created, why, for whom, and how it serves agreed marketing objectives, translating Marketing Strategy and approved campaign requirements into actionable content direction.",
   owns: [
     "Content themes and pillars, editorial direction",
     "Content objectives and the strategic purpose of content pieces",
@@ -24,7 +24,8 @@ export const CONTENT_STRATEGIST: MarketingHatDefinition = {
   ],
   doesNotOwn: [
     "What marketing needs to accomplish (Marketing Strategist)",
-    "Established brand positioning, tone, or messaging standards (Brand & Communications Strategist)",
+    "Established brand positioning, tone, or messaging standards (Strategy — Brand Strategist and Communication Strategist)",
+    "Campaign coordination and cross-channel consistency (Campaign & Marketing Communications Manager)",
     "Calendars, scheduling, contributor coordination, production workflow, publication (Content Manager)",
     "Digital distribution or paid execution (Digital Marketer)",
   ],

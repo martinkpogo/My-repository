@@ -175,7 +175,7 @@ test("Non-exempted TOKEN_SAFE_RUNTIME task still blocks a company-suffix name", 
 
 test("Every registered SemanticTaskId either has a resolved outbound policy or is deliberately absent (blocked)", () => {
   const allTaskIds = Object.keys(SEMANTIC_TASK_REGISTRY) as SemanticTaskId[];
-  assert.strictEqual(allTaskIds.length, 62);
+  assert.strictEqual(allTaskIds.length, 67);
   for (const id of allTaskIds) {
     const policy = PRODUCTION_OUTBOUND_POLICY[id];
     assert.ok(
@@ -231,10 +231,16 @@ test("Lead Discovery public-source tasks are TOKEN_SAFE_RUNTIME, and only the si
       "lead.candidate_research_relevance",
       "lead.candidate_research_synthesis",
       "lead.discovery_signal_evaluation",
+      "research.context_relevance",
+      "research.plan_generation",
+      "research.protocol_selection",
+      "research.skill_step",
+      "research.synthesis",
     ],
-    "the exemption is narrow, not blanket: public-prospect discovery and research only, never research.* (engaged-client research stays token-only)",
+    "the exemption is narrow, not blanket: public-prospect discovery and research, plus general web research (Martin's decision 2026-11-13: its public results name companies) -- no other task",
   );
-  assert.ok(!OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.has("research.synthesis" as SemanticTaskId));
+  assert.ok(OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.has("research.synthesis" as SemanticTaskId));
+  assert.ok(!OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS.has("chat.general_reply" as SemanticTaskId), "a Hat's own output step is never exempt");
 });
 
 test("All 18 Business Development tasks (Stage 1/2 classification and all three Hats) are TOKEN_SAFE_RUNTIME", () => {

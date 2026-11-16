@@ -1,6 +1,7 @@
 import type { Env, WorkState } from "../../types";
 import { executeSearch, isWebSearchConfigured } from "../../runtime/research/webSearch";
 import type { SearchResult } from "../../runtime/research/webSearch";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, operatorApprovalEvidence, recordResultEvidence } from "../../resultReview";
 import { createPage, richText, select, title } from "../../notion";
 import { generate } from "../../ai";
 import type { ResolvedActionSkillSet } from "../../platform/skillRegistry";
@@ -600,7 +601,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
   };
 
   if (!approved) {
-    state.stage = "complete";
+    state.stage = "cancelled";
     // Remembered so later discovery runs do not propose the same
     // organisation again. Best-effort: a failed write only means it may be
     // proposed again later, never that anything is created.
@@ -635,7 +636,7 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
     return state;
   }
   if (duplicates.length > 0) {
-    state.stage = "complete";
+    state.stage = "cancelled";
     await logActivity(env, {
       entry: `Opportunity approval blocked -- possible duplicate: ${opportunity.organisation}`,
       type: "Discovery",
@@ -668,6 +669,15 @@ export async function handleLeadOpportunityApproval(env: Env, state: WorkState, 
       Status: select("New"),
     }, workSessionContext(state, proof));
 
+    // BD-8 Result evidence: the committed Lead and Martin's approval of that
+    // exact candidate, bound by hash. With outputApprovalClosesWork, the Work
+    // then closes on save instead of being refused for missing evidence.
+    const leadEvidence = `Lead ${page.url} (Notion page ${page.id}) for ${opportunity.organisation}. Source: ${opportunity.sourceUrl || "(none)"}. Screening evidence: ${opportunity.evidence}`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS);
+    const recorded = await recordResultEvidence(state, [
+      { kind: "lead_record", ref: page.id, note: "the Lead record committed for the candidate Martin approved", content: leadEvidence },
+      await operatorApprovalEvidence(state, { ref: page.id, content: leadEvidence }, "the Lead Opportunity approval handler"),
+    ]);
+    if (!recorded.ok) console.error(`Lead Opportunity Approval: Result evidence NOT recorded for ${state.workId} -- ${recorded.reason}`);
     state.stage = "complete";
     await kvDelete(env, leadCandidateMemoryKey(opportunity.organisation)).catch(() => {});
 
@@ -860,7 +870,12 @@ async function searchAndScreenForQuery(
     summary.searchUnavailable++;
     return;
   }
-  if (outcome.kind === "provider_failure" || outcome.kind === "invalid_input") {
+  if (
+    outcome.kind === "provider_failure" ||
+    outcome.kind === "invalid_input" ||
+    outcome.kind === "interrupted" ||
+    outcome.kind === "internal_allowance_exhausted"
+  ) {
     // A failed search is recorded as a failed search -- never folded into
     // "nothing found", which would misrepresent an unsearched query as an
     // empty result.

@@ -27,16 +27,30 @@
  * recovered after an interruption must not be initiated at all.
  */
 import type { ExternalToolOperationRecord, WorkState } from "../types";
+import type { PendingResearch, ResearchCheckpoint, ResearchCheckpointStore } from "./research/types";
 
 /**
  * The minimal durable-recovery surface the invocation boundary needs.
  * `load` reads this Work's record for one operation identity; `save` writes
  * one and makes it durable immediately (it must not merely mutate memory).
+ *
+ * `research` is the same Work's durable store for research checkpoints
+ * (BD-15, canonical Search spec research_continuation: WorkSession owns the
+ * durable lifecycle, research execution owns the checkpoint content). It is
+ * optional so a host that only persists Tool operations needs nothing more.
  */
 export interface ToolOperationPersistence {
   load(key: string): Promise<ExternalToolOperationRecord | undefined>;
   save(key: string, record: ExternalToolOperationRecord): Promise<void>;
+  research?: ResearchCheckpointStore;
 }
+
+/**
+ * How many research checkpoints one Work keeps. Pruning removes completed and
+ * blocked checkpoints first (oldest first), then the oldest others, so a Work
+ * that researches many questions stays bounded.
+ */
+export const MAX_RESEARCH_CHECKPOINTS = 5;
 
 /**
  * How many operation records one Work keeps. Evolution only: pruning removes
@@ -72,8 +86,21 @@ export function installWorkPersistence(workId: string, persistence: ToolOperatio
  * durable (WorkSession passes a Durable Object storage write that preserves
  * the pre-handler state except for `externalOperations`).
  */
-export function workStatePersistence(state: WorkState, flush: () => Promise<void>): ToolOperationPersistence {
+export function workStatePersistence(state: WorkState, flush: () => Promise<void>, scheduleResume?: (pending: PendingResearch) => Promise<void>): ToolOperationPersistence {
   return {
+    research: {
+      async load(jobId: string): Promise<ResearchCheckpoint | undefined> {
+        return state.researchCheckpoints?.[jobId];
+      },
+      async save(checkpoint: ResearchCheckpoint): Promise<void> {
+        // Mutated in place, for the same reason as the operation records below.
+        const checkpoints = state.researchCheckpoints ?? (state.researchCheckpoints = {});
+        checkpoints[checkpoint.job_id] = checkpoint;
+        pruneResearchCheckpoints(checkpoints);
+        await flush();
+      },
+      ...(scheduleResume ? { scheduleResume } : {}),
+    },
     async load(key: string): Promise<ExternalToolOperationRecord | undefined> {
       return state.externalOperations?.[key];
     },
@@ -88,6 +115,21 @@ export function workStatePersistence(state: WorkState, flush: () => Promise<void
       await flush();
     },
   };
+}
+
+/** Caps the checkpoint set: finished (completed or blocked) checkpoints go first, oldest first, then the oldest of the rest. */
+function pruneResearchCheckpoints(checkpoints: Record<string, ResearchCheckpoint>): void {
+  const keys = Object.keys(checkpoints);
+  if (keys.length <= MAX_RESEARCH_CHECKPOINTS) return;
+  const finished = (k: string) => checkpoints[k].status === "completed" || checkpoints[k].status === "blocked";
+  const order = keys.sort((a, b) => Number(finished(b)) - Number(finished(a)) || checkpoints[a].updated_at.localeCompare(checkpoints[b].updated_at));
+  for (const key of order.slice(0, keys.length - MAX_RESEARCH_CHECKPOINTS)) delete checkpoints[key];
+}
+
+/** The research checkpoint store of the Work currently executing, or undefined outside one. */
+export function getResearchCheckpointStore(workId: string | undefined): ResearchCheckpointStore | undefined {
+  if (!workId) return undefined;
+  return getWorkPersistence(workId)?.research;
 }
 
 /** Caps the record set by dropping the oldest TERMINAL records first -- never an in_progress one. */

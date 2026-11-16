@@ -4,6 +4,8 @@ import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import {
   getActiveWorkId,
   getSessionStub,
+  newWorkId,
+  resolveStreamForThread,
   getWorkspaceMode,
   routeIncomingText,
   setActiveWorkId,
@@ -18,6 +20,7 @@ import {
 } from "./checkHandoffs";
 import { startGoogleDocsSmokeFlow } from "./googleDocsSmokeFlow";
 import { handleLeadDiscoverySignal, LEAD_COMMAND_PATTERN } from "./units/sales/leadDiscovery";
+import { parseResearchCommand } from "./runtime/operatorResearch";
 import { runDataLookup, LOOKUP_SOURCES, type LookupSource } from "./dataLookup";
 import { notifyDiscoveryRunSummary, runAutonomousLeadDiscovery } from "./units/sales/leadGenerationDiscovery";
 import { findUnitManifest, getUnitManifests } from "./units/registry";
@@ -35,6 +38,14 @@ import { handleWorkSessionState } from "./workSessionInspect";
 import { MATTER_CURRENT_WORK_PREFIX, continueMatterWork } from "./matterContinuation";
 import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
+import { maybeSendMorningBrief } from "./morningBrief";
+import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
+import { claimTelegramUpdate } from "./telegramDedup";
+// Installs universal web research on the shared AI executor (Martin, 2026-11-11).
+import { handleWebResearchCallback } from "./runtime/webResearch";
+// Installs the shared Consultancy Profile context for every Hat step (Martin, 2026-11-13).
+import "./runtime/businessContext";
+import { WEB_RESEARCH_CALLBACK } from "./runtime/webLookupAllowance";
 import { humanizeStage, loadSessionsIndexForRead, sessionRowText } from "./sessionsIndex";
 import { handleDriveNotifyRequest, handleRegisterDriveWatchRequest, handleRenewDriveWatchesRequest, handleDriveWatchStatusRequest } from "./googleDriveWatch";
 import { isAdminAuthorized } from "./adminAuth";
@@ -93,6 +104,8 @@ export default {
         }
       }
       const update = (await request.json()) as TelegramUpdate;
+      // A redelivered update (Telegram retries a slow answer) is acknowledged and never processed twice -- see claimTelegramUpdate.
+      if (!(await claimTelegramUpdate(env, update.update_id))) return new Response("ok");
       try {
         await handleUpdate(env, update);
       } catch (err) {
@@ -116,7 +129,7 @@ export default {
       if (!body.text) return new Response("Missing text", { status: 400 });
 
       // Martin's preferred front door is DM (see routeIncomingText's DM
-      // fallback and generalDmReply) -- an email-sourced enquiry lands
+      // fallback and enigChatReply) -- an email-sourced enquiry lands
       // there too, rather than a Unit topic, so every Unit/Hat's work
       // reaches him in one place.
       const chatId = Number(env.MARTIN_TELEGRAM_USER_ID);
@@ -509,6 +522,10 @@ export default {
     // Turso is unconfigured). Runs here as well as in the comment poll so the
     // sweep does not depend on any single entry point staying scheduled.
     await maybeSweepKvFallback(env).catch((err) => console.error("scheduled: fallback sweep failed", err));
+    // ENIG's morning brief: once per local day, self-throttled (see
+    // src/morningBrief.ts). Read-only notification -- isolated so a failure
+    // here never blocks Handoff discovery below.
+    await maybeSendMorningBrief(env).catch((err) => console.error("scheduled: morning brief failed", err));
     try {
       await discoverPendingHandoffsAllUnits(env);
       await checkStaleHandoffs(env);
@@ -566,7 +583,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await sendMessage(
         env,
         chatId,
-        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /continue <Matter> to resume a Matter's current work item (e.g. /continue MAT-20), /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly.",
+        "ENIG agent runtime online. Send a commercial enquiry to start, /mode to view or switch this thread between Chat and Cowork, /sessions to see open work items, /continue <Matter> to resume a Matter's current work item (e.g. /continue MAT-20), /cancel to drop the active one, /clearsessions to wipe all KV routing/session state (Notion untouched), /checkhandoffs to run Handoff discovery now, /lead to record a discovered Lead (send /lead with no arguments for the format), /lookup <matters|entities|handoffs|proposals|leads|activity> [filter] to check what's in a database directly, /research or /deep_research [topic] to research a topic on the public web (it asks you a few questions first).",
         undefined,
         threadId,
       );
@@ -663,6 +680,26 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       }
       await Promise.all(keys.map((key) => kvDelete(env, key)));
       await sendMessage(env, chatId, `Cleared ${keys.length} KV key(s). Every chat/topic starts a fresh work item on its next message.`, undefined, threadId);
+      return;
+    }
+    // Martin-started research (Build Decision, 15 Nov 2026): Martin operating
+    // the SHARED Research Runtime directly, like /lookup -- owned by no Unit
+    // or Hat, so it starts no Unit dispatch. A named, bounded exception to
+    // "capabilities start only through the Action Registry": its Work runs
+    // under the operator_research Access context (public web and the
+    // Research database only). Topics only, where replies reach the Work.
+    const researchCommand = parseResearchCommand(text);
+    if (researchCommand) {
+      const stream = resolveStreamForThread(env, threadId);
+      if (stream === "dm" || stream === "operations" || stream === "unmapped") {
+        await sendMessage(env, chatId, "Use /research or /deep_research in the Workspace topic (or a Unit topic), so your answers reach it.", undefined, threadId);
+        return;
+      }
+      const workId = newWorkId();
+      const stub = getSessionStub(env, workId);
+      await stub.init(workId, chatId, undefined, undefined, threadId);
+      await setActiveWorkId(env, chatId, threadId, workId);
+      await stub.startOperatorResearch(researchCommand.mode, researchCommand.topic);
       return;
     }
     // Lead Generation Specialist's own entry point (Sales Unit's Lead
@@ -763,6 +800,35 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await setWorkspaceMode(env, chatId, threadId, newMode);
       await setCoworkClarificationPending(env, chatId, threadId, false);
       await sendMessage(env, chatId, `Workspace mode switched to *${newMode}*.`, undefined, threadId);
+      return;
+    }
+
+    if (action === WEB_RESEARCH_CALLBACK) {
+      // Martin's tap on the web-research limit card (src/runtime/webLookupAllowance.ts):
+      // research the gaps only, allow more searches today, or stop. Read-only.
+      const reply = await handleWebResearchCallback(env, workId, value, chatId, threadId);
+      await sendMessage(env, chatId, reply, undefined, threadId);
+      return;
+    }
+
+    if (action === ENIG_SUGGEST_CALLBACK) {
+      // ENIG suggested an owning Unit/Hat for an unaddressed request
+      // (src/enigSuggestion.ts). Single-use; Yes re-sends Martin's original
+      // message prefixed with that name through routeIncomingText -- the
+      // exact path his own typed "<Unit>, <request>" takes, every gate intact.
+      // forceNewEnquiry: the tap is an explicit new request, not a reply to
+      // whatever Work this thread happens to point at.
+      const consumed = await consumeEnigSuggestion(env, workId, value, chatId, threadId);
+      if (consumed.kind === "unavailable") {
+        await sendMessage(env, chatId, "That suggestion was already used or has expired. Nothing was started.", undefined, threadId);
+        return;
+      }
+      if (consumed.kind === "declined") {
+        await sendMessage(env, chatId, "OK, nothing started.", undefined, threadId);
+        return;
+      }
+      await sendMessage(env, chatId, `Starting with ${consumed.addressee}…`, undefined, threadId);
+      await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true });
       return;
     }
 

@@ -10,7 +10,7 @@ Current status
 
 Runtime: Cloudflare Worker (`enig-agent`), Durable Objects for per-work-item state, KV for routing/session-index state
 Primary AI provider: Cloudflare Workers AI
-Provider architecture: Provider abstraction implemented (Workers AI plus several OpenAI-compatible fallback providers); automatic cross-provider fallback policy is not yet implemented — an ineligible/unavailable provider fails closed rather than silently downgrading
+Provider architecture: Provider abstraction implemented (Workers AI plus OpenAI-compatible fallback providers). Cross-provider AI fallback is implemented and data-boundary-gated (`src/ai/policy.ts`, `src/dataBoundary/policy.ts`): a provider is tried only if eligible for the task's sensitivity, and an ineligible/unavailable chain fails closed rather than silently downgrading
 System of record: Notion
 Operational interface: Telegram (two-stream: a Workspace topic for interactive decisions/approvals, an Operations topic for background telemetry/watchdogs)
 Live Units: Sales (Lead Generation Specialist), Marketing, Finance
@@ -159,7 +159,7 @@ src/
 ├── googleDocComments.ts, googleSheetComments.ts
 │                                — comment-triggered live editing (polled) for Docs and Sheets
 ├── runtime/                    — generic runtime composition (Work contract, Organization/Action resolution) and non-organizational execution infrastructure
-│   ├── research/               — research runtime: executeResearch pipeline, protocol descriptors, plan, guardrails, Tavily-backed search, safe-context validation
+│   ├── research/               — research runtime: runResearchSkill pipeline, protocol descriptors, plan, guardrails, the shared Search Tool (Tavily primary; Exa/Serper fallback), resumable research checkpoints, safe-context validation
 │   └── evidence/               — shared evidence & source validation (citation chain, provenance gate)
 ├── hats/
 │   ├── registry.ts             — Marketing Hat registry (name → definition)
@@ -191,7 +191,7 @@ The current live Units:
 * **Sales** — Lead Generation Specialist is live: scheduled discovery (fixed problem-signal queries against the canonical Acquisition Criteria) and on-demand discovery (asked for directly in the Workspace stream, e.g. "find me 3 companies with a positioning problem"). Both paths run the same pipeline — search → AI screening against the Acquisition Criteria; candidates that pass are held (the former Research & Intelligence Handoff step was retired and has no replacement yet) — and neither may create a Lead without Martin's explicit approval of the resulting Opportunity Finding. Sales Executive (the client-facing enquiry → proposal pipeline) is paused by standing policy: real client identity is confirmed-sensitive data Workers AI's training-data policy hasn't been approved to process, so that work runs instead in an isolated Sales Executive project with its own Notion/Gmail access, exchanging only opaque Entity/Matter tokens with this Worker via the Handoffs database.
 * **Marketing** — 5 Hats (Marketing Strategist, Brand Communications Strategist, Content Strategist, Content Manager, Digital Marketer), each drafting within its own ownership or routing/escalating to another Hat; paid-media/spend actions carry their own explicit approval gate.
 * **Finance** — Value-Based Pricing Assessor, activated only via Handoff from Sales (never directly from chat); judges a quote, presents it for approval, then hands the approved quote back to Sales.
-* **Research** is not a Unit: Research & Intelligence was retired as an organizational Unit. Reusable research methodology is the `research_signal` Skill; the research/evidence execution machinery is non-organizational runtime infrastructure (`src/runtime/research`, `src/runtime/evidence`) that a future owning Action composes. No Action invokes it yet — see `docs/enig-operating-model.md`, "Research runtime and the retired R&I Unit".
+* **Research** is not a Unit: Research & Intelligence was retired as an organizational Unit. Reusable research methodology is the `research_signal` Skill; the research/evidence execution machinery is non-organizational runtime infrastructure (`src/runtime/research`, `src/runtime/evidence`) that Hats point to when their work needs it (shared features are owned by no Hat). Martin can also run it directly: `/research [topic]` (light) and `/deep_research [topic]` ask a few clarifying questions one at a time, run in the background, post the findings with sources and save them to the Research database (Operation Records / Research) — see `docs/enig-operating-model.md`, "Martin-started research".
 
 Every approval-gated action across these Units — Google Doc/Sheet creation, Lead Opportunities, Entity/Matter drafts, Finance quotes, Marketing drafts/transitions/paid-media, Strategy Handoffs — shares one generic recovery mechanism: if the Telegram approval message is missed or dismissed, `/sessions` shows it with a meaningful label and resurfaces the exact original message/buttons on selection, guarded against being actioned twice. `sessions_index` (the KV-backed enumeration this relies on) is bounded, not a second source of truth — see `src/sessionsIndex.ts`.
 
@@ -278,9 +278,9 @@ The runtime currently interfaces with:
 * Notion — system of record for governance pages and business objects (Entities, Matters, Proposals, Leads, Handoffs, Activity & Decision Log)
 * Telegram — operational interface (Workspace/Operations two-stream architecture), including inline-keyboard approval flows
 * Cloudflare Workers — runtime, Durable Objects (per-work-item session state), KV (routing pointers, `sessions_index`, watchdog bookkeeping)
-* Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Cerebras, Gemini, SambaNova, NVIDIA NIM) at the same protection tier
+* Cloudflare Workers AI — primary AI provider, plus optional OpenAI-compatible fallback providers (Groq, OpenRouter, Gemini, NVIDIA NIM) at the same protection tier; Cerebras and SambaNova adapters exist but are out of the chain (2026-11-14)
 * Google Workspace (Docs, Sheets, Drive) — OAuth-authorized, multi-account controlled Doc/Sheet creation with explicit approval before anything is written, plus comment-triggered live editing (polled)
-* Tavily — optional live web search backing the research runtime and Lead Generation discovery; research stays closed-book (reasoning over supplied context only) if unset, rather than failing
+* Search providers — Tavily (primary) with optional Exa and Serper fallbacks (enabled only via `SEARCH_FALLBACK_PROVIDERS` plus their keys, each held to a monthly budget below its free allowance; BD-15). Research stays closed-book (reasoning over supplied context only) if no provider is configured, rather than failing
 
 Additional integrations may be added when required by an approved responsibility.
 

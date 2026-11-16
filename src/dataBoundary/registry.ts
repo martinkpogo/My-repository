@@ -166,6 +166,16 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Lead Candidate Research Synthesis",
     description: "Synthesizes source-linked public evidence about a prospect organisation into Evidence/Finding/Implication/Limitation output (Lead Generation only). Never fabricates a decision-maker, contact, or fact not present in the sources.",
   },
+  "research.skill_step": {
+    id: "research.skill_step",
+    name: "Research Skill Step",
+    description: "One Skill-guided research step on the Research Runtime: reads the public results gathered so far and answers with the next batch of search / page-read operations, evidence notes, or done. Never fabricates a source, quote or fact.",
+  },
+  "research.brief_questions": {
+    id: "research.brief_questions",
+    name: "Research Brief Questions",
+    description: "For Martin-started research (/research, /deep_research): reads Martin's research topic and his answers so far and writes the next short clarifying question, or flags that the topic names a specific person or organisation so he can rephrase it. Never researches and never answers the question itself.",
+  },
   "action.google_doc_intake": {
     id: "action.google_doc_intake",
     name: "Google Doc Intake Classification & Parameter Extraction",
@@ -302,6 +312,16 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     name: "Sales Intake Classification",
     description: "Routes an incoming Sales-Unit Cowork request among Sales's manifest-based Hats (currently only Lead Generation Specialist).",
   },
+  "runtime.research_need": {
+    id: "runtime.research_need",
+    name: "Web Research Check",
+    description: "Before a Hat produces its output, decides whether public web research would materially help and, if so, the identity-free question to research.",
+  },
+  "finance.intake_classification": {
+    id: "finance.intake_classification",
+    name: "Finance Intake Classification",
+    description: "Routes an incoming Finance request between Finance's Hats: Value-Based Pricing Assessor (pricing) or Payments Clerk (recording a received payment).",
+  },
   "sales.hat_action_decision": {
     id: "sales.hat_action_decision",
     name: "Sales Hat Action Decision",
@@ -331,6 +351,12 @@ export const SEMANTIC_TASK_REGISTRY: Readonly<Record<SemanticTaskId, SemanticTas
     id: "strategy.specialist_synthesis",
     name: "Strategy Analysis Synthesis",
     description: "Reconciles the bounded Strategy Skill findings into a single synthesized context for the Strategy Analyst's diagnosis -- distinguishes evidence from inference, identifies agreement/disagreement and cross-domain relationships, and determines whether the findings are sufficient to proceed.",
+  },
+  "work.result_verification": {
+    id: "work.result_verification",
+    name: "Work Result Verification (Machinery Worker)",
+    description:
+      "Independently verifies a Work's recorded Result evidence against its declared Expected Result and completion criteria at the Result verification gate (BD-13). A Machinery Worker granted verify_work_result by Martin in the canonical Organization model; the verdict it records is verification, never Martin's Result approval.",
   },
 };
 

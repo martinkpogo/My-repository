@@ -34,6 +34,7 @@
 // (The erased-type rule below that motivated the old import was about
 // *this* module importing Access; the Skill Registry is a leaf.)
 import { SKILL_IDS, type SkillId } from "../platform/skillRegistry";
+import type { WorkState } from "../types";
 
 export type ConsequenceLevel = "read" | "internal" | "write";
 
@@ -124,6 +125,49 @@ export interface ActionDefinition<A extends string> {
    * Action must state which it is rather than relying on omission.
    */
   requiresApproval: boolean;
+  /**
+   * Result contract (BD-8): the intended Result this Action produces and
+   * explicit completion criteria that must be satisfied before successful
+   * closure. Work owns generic enforcement of the review lifecycle.
+   */
+  expectedResult?: string;
+  completionCriteria?: readonly string[];
+  /**
+   * Output approval closes the Work (Martin's decision, 2026-11-14): declared
+   * only where Martin's approval of the output is the LAST step of the Work
+   * (nothing is sent, published or spent after it). When set, and the
+   * independent Checker has passed, and the evidence records Martin's
+   * approval of the exact output (an `operator_approval` item bound to it by
+   * SHA-256), the Work closes without a second Result approval. Absent means
+   * the default: Martin's separate Result approval is required (BD-8).
+   */
+  outputApprovalClosesWork?: boolean;
+  /**
+   * The independent Checker's ADVISORY second opinion (Martin's decision,
+   * 2026-11-14): where set, once the Action's draft is saved awaiting
+   * Martin's decision the Checker assesses it against `criteria` (CONTENT
+   * criteria only -- never the approval criterion, his approval does not
+   * exist yet) and whether it is relevant to what ENIG does and to the
+   * client's situation as recorded, and sends him a separate assessment with
+   * a recommended next action. `output` returns exactly the draft Martin was
+   * shown; `request` what he asked for; `awaitingStage` the Work stage while
+   * the draft awaits his decision. Never blocks, delays or invalidates his
+   * Approve, Redo or closure. See src/runtime/advisoryAssessment.ts.
+   */
+  advisoryAssessment?: {
+    output: (state: WorkState) => string | undefined;
+    request?: (state: WorkState) => string | undefined;
+    criteria: readonly string[];
+    awaitingStage: string;
+    /**
+     * The Hat's own callback prefix for a "🔁 Redo with this note" button on
+     * the assessment (Martin's decision, 2026-11-14): shown only when the
+     * Checker recommends a redo with a note. The button data is
+     * `<prefix>:<workId>:go`; the handler (the Hat's own `callbackHandlers`
+     * entry) sends the Checker's note as Martin's redo note, only on his tap.
+     */
+    redoCallbackPrefix?: string;
+  };
   /**
    * Exact Skills the Worker must follow while performing this Action.
    *

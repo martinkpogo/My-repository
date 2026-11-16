@@ -2,6 +2,7 @@ import type { Env, WorkState } from "./types";
 import type { InlineButton } from "./telegram";
 import { getSessionStub } from "./sessionRouting";
 import { maybeAutoContinueCheckHandoffs } from "./checkHandoffs";
+import { RESULT_REVIEW_BLOCKED_STAGE, resultReviewCallbackData } from "./resultReview";
 
 /**
  * The ONE path that picks an already-existing Work back up, whatever
@@ -81,6 +82,15 @@ export function resumeNotice(state: WorkState | undefined, fallback: string): { 
   const pending = state?.pendingActionSummary;
   if (pending) {
     return { text: `Re-sending pending approval:\n\n${pending.message}`, buttons: pending.buttons };
+  }
+  // A Work refused into result_review_blocked with no card pending is
+  // waiting on its independent check: offer Martin's Re-check (2026-11-14),
+  // the same button the "cannot close yet" message carries.
+  if (state && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
+    return {
+      text: `${fallback}\n\nThis Work cannot close yet: ${state.resultReview?.blockReason ?? state.blockedReason ?? "its Result review is unresolved."}`,
+      buttons: [[{ text: "🔁 Re-check", callback_data: resultReviewCallbackData(state.workId, "c") }]],
+    };
   }
   return { text: fallback };
 }

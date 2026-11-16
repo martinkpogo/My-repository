@@ -368,9 +368,15 @@ function mockActionAi(env: Partial<Env>, action: string | null) {
 test("T0a. Chat mode dispatches a confidently-resolved read action directly, using tryResolveUnitAction's own reply target, and no WorkSession is created", async (t) => {
   const originalFetch = globalThis.fetch;
   const sent: { chatId: number; threadId?: number; text: string }[] = [];
+  const liveStatus: string[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
     if (String(url).includes("api.telegram.org")) {
       const body = JSON.parse(init?.body ?? "{}");
+      // The universal live status (its own message, removed on success) is recorded apart from the reply.
+      if (/\/(deleteMessage|editMessageText)$/.test(String(url)) || String(body.text ?? "").startsWith("🧭")) {
+        liveStatus.push(String(url).split("/").pop()!);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 7 } }), { status: 200 });
+      }
       sent.push({ chatId: body.chat_id, threadId: body.message_thread_id, text: body.text ?? "" });
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
     }
@@ -400,6 +406,7 @@ test("T0a. Chat mode dispatches a confidently-resolved read action directly, usi
   assert.strictEqual(sent[0].chatId, -1004435157576);
   assert.strictEqual(sent[0].threadId, 604);
   assert.match(sent[0].text, /toy-reply:check_status/);
+  assert.ok(liveStatus.every((m, i) => m !== "sendMessage" || liveStatus[i + 1] !== undefined), "every live status shown is also removed");
 });
 
 test("T0b. Chat mode dispatches a confidently-resolved write action into a real WorkSession via handleUnitAction, same as Cowork's manifest dispatch", async (t) => {

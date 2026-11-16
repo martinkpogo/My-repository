@@ -1,13 +1,27 @@
 import type { Env } from "../types";
 import type { OperationMetadata } from "../runtime/activityReporter";
+import { AI_TASK_LIVE_LABELS } from "./liveLabels";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
-import { isSemanticTaskId } from "../dataBoundary/registry";
+import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
+import { reportLiveStep, resolveLiveStep } from "../runtime/liveStatus";
 import { AiMessage, AiProvider, AiTask, CommonAiResponse } from "./types";
 import { WorkersAiProvider } from "./workersai";
-import { CEREBRAS_PROVIDER, GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER, SAMBANOVA_PROVIDER } from "./openaiCompatible";
+import { GEMINI_PROVIDER, GROQ_PROVIDER, NVIDIA_NIM_PROVIDER, OPENROUTER_PROVIDER } from "./openaiCompatible";
 import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
 import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator, type OutboundGateReasonCategory } from "./outboundGate";
 import { sendMessage } from "../telegram";
+import { clearCooldown, cooldownUntil, startCooldown } from "../runtime/research/searchProviders";
+
+/**
+ * Resumable AI calls (Martin's decision, 15 Nov 2026): the executor remembers
+ * which AI providers are cooling down after a rate limit or outage and skips
+ * them until the cooldown ends (the shared bounded ladder: the provider's own
+ * retry-after, else 1, 5, 15, 60 minutes). Eligibility is unchanged -- a
+ * cooldown only removes a provider for a while, never adds one.
+ */
+export function aiCooldownKey(providerId: string): string {
+  return `ai:${providerId}`;
+}
 
 /**
  * WHY an AI call produced no usable response -- the distinction a plain
@@ -31,7 +45,17 @@ export type AiFailureCause = "outbound_gate_blocked" | "providers_exhausted" | "
  */
 export type AiCallOutcome =
   | { ok: true; response: CommonAiResponse }
-  | { ok: false; cause: AiFailureCause; gateReasons: string[] };
+  | {
+      ok: false;
+      cause: AiFailureCause;
+      gateReasons: string[];
+      /**
+       * When the failure is that every eligible provider is cooling down or
+       * just failed on a rate limit / outage: the earliest time one is expected
+       * back (resumable AI calls, Martin 15 Nov 2026). Absent otherwise.
+       */
+      retryAt?: string;
+    };
 
 // Fallback order: Workers AI first (it's the free baseline until its
 // daily quota is hit), then the free-tier OpenAI-compatible providers.
@@ -48,15 +72,26 @@ export type AiCallOutcome =
 // Each is a no-op in the fallback loop below unless its own API key
 // secret is actually configured (see OpenAiCompatibleProvider.
 // isEligible) -- adding a key later needs no code change here.
-const DEFAULT_PROVIDERS: AiProvider[] = [
-  new WorkersAiProvider(),
-  GROQ_PROVIDER,
-  OPENROUTER_PROVIDER,
-  GEMINI_PROVIDER,
-  NVIDIA_NIM_PROVIDER,
-  CEREBRAS_PROVIDER,
-  SAMBANOVA_PROVIDER,
-];
+//
+// Martin's decision, 2026-11-14 (free-tier optimisation, option A):
+// nvidia-nim and cerebras are OUT of the chain. Neither answered once in
+// the live logs (nvidia timed out every call; cerebras returns 402 payment
+// required), and every failed try cost up to 12 s and part of the run's
+// 50-subrequest budget -- the budget a research run then ran out of. Their
+// adapters stay in openaiCompatible.ts, so restoring either is a one-line
+// change once it works (cerebras billing; a model nvidia actually serves).
+//
+// Martin's decision, 2026-11-14: sambanova is OUT too -- ENIG does not use
+// it. Its adapter stays in openaiCompatible.ts, unused.
+//
+// Martin's decision, 2026-11-14 (option A): nvidia-nim is BACK, last, on a
+// faster model (NVIDIA_NIM_MODEL). Last, so it is tried only when every
+// other provider has failed and can never slow a run that would succeed;
+// it keeps the same 12 s limit.
+const DEFAULT_PROVIDERS: AiProvider[] = [new WorkersAiProvider(), GROQ_PROVIDER, OPENROUTER_PROVIDER, GEMINI_PROVIDER, NVIDIA_NIM_PROVIDER];
+
+/** The providers in the fallback chain, in order (exported for tests). */
+export const DEFAULT_PROVIDER_IDS: readonly string[] = DEFAULT_PROVIDERS.map((p) => p.id);
 
 export class AiPolicyExecutor {
   private providers: AiProvider[];
@@ -137,8 +172,27 @@ export class AiPolicyExecutor {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
     }
+    for (const [id, { fn }] of [...taskAugmenters.entries()].sort((a, b) => a[1].order - b[1].order)) {
+      try {
+        task = await fn(env, task);
+      } catch (err) {
+        // Context and research are aids to the step, never conditions of it.
+        console.error(`AiPolicyExecutor: task augmenter "${id}" failed -- continuing without it`, err);
+      }
+    }
+    // Universal live status: the registered task's fixed name, never the prompt.
+    reportLiveStep(AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
 
-    const eligible = this.providers.filter((p) => p.isEligible(env, task));
+    return this.runProviderChain(env, task, this.providers, true);
+  }
+
+  /**
+   * The provider loop itself, shared by the first pass and by the last-resort
+   * retry below, so every eligibility check, boundary evaluation, redaction
+   * verification, gate evaluation and validation applies identically to both.
+   */
+  private async runProviderChain(env: Env, task: AiTask, providers: AiProvider[], allowLastResort: boolean, ignoreCooldown = false): Promise<AiCallOutcome> {
+    const eligible = providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
       console.error("AiPolicyExecutor: No eligible AI provider available");
       return { ok: false, cause: "providers_exhausted", gateReasons: [] };
@@ -153,6 +207,13 @@ export class AiPolicyExecutor {
     let malformed = 0;
     let infraFailures = 0;
     let redactionAborted = false;
+    let cooling = 0;
+    let earliestRetry: number | null = null;
+    const noteRetry = (at: number) => {
+      earliestRetry = earliestRetry === null ? at : Math.min(earliestRetry, at);
+    };
+    // Providers that failed on a rate limit and named how long to wait.
+    const waitCandidates: Array<{ provider: AiProvider; waitMs: number }> = [];
     const gateReasons = new Set<OutboundGateReasonCategory>();
 
     for (const provider of eligible) {
@@ -160,6 +221,13 @@ export class AiPolicyExecutor {
         continue;
       }
       attempted.add(provider.id);
+      // The last resort has just waited out this provider's own rate limit, so it is not skipped for it.
+      const coolingUntil = ignoreCooldown ? null : await cooldownUntil(env, aiCooldownKey(provider.id));
+      if (coolingUntil !== null) {
+        cooling++;
+        noteRetry(coolingUntil);
+        continue;
+      }
       processed++;
 
       // Data Boundary Seam: Evaluates provider independently against data boundary policy
@@ -264,6 +332,7 @@ export class AiPolicyExecutor {
           malformed++;
           continue;
         }
+        await clearCooldown(env, aiCooldownKey(provider.id));
         return { ok: true, response: result.response };
       }
 
@@ -283,10 +352,33 @@ export class AiPolicyExecutor {
       );
       // Fallback loop continues to next eligible provider
       infraFailures++;
+      if (result.error.retryAfterMs !== undefined) waitCandidates.push({ provider, waitMs: result.error.retryAfterMs });
+      const status = result.error.statusCode;
+      if (status === 429 || status === 408 || (status !== undefined && status >= 500) || status === undefined) {
+        noteRetry(await startCooldown(env, aiCooldownKey(provider.id), result.error.retryAfterMs));
+      }
     }
 
     if (!redactionAborted) {
       console.error("AiPolicyExecutor: All eligible AI providers exhausted without success");
+    }
+
+    // Last resort (Martin's decision, 2026-11-13, option A): every provider
+    // failed, but a rate-limited one named how long to wait -- a few seconds
+    // against a minute-long window that a burst of calls (a research run's
+    // steps) used up. Wait it out and try THAT provider once more, through
+    // the same checks, rather than failing the whole step. Only a wait up to
+    // LAST_RESORT_MAX_WAIT_MS; only once per call; never when the loop was
+    // stopped by the redaction hard stop.
+    if (allowLastResort && !redactionAborted) {
+      const candidate = waitCandidates.filter((c) => c.waitMs <= LAST_RESORT_MAX_WAIT_MS).sort((a, b) => a.waitMs - b.waitMs)[0];
+      if (candidate) {
+        const waitMs = candidate.waitMs + LAST_RESORT_MARGIN_MS;
+        console.warn(`AiPolicyExecutor: last resort -- waiting ${waitMs}ms for ${candidate.provider.id}'s rate limit, then trying it once more for task ${task.taskId}`);
+        await countDownLiveStep(waitMs, AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
+        const retried = await this.runProviderChain(env, task, [candidate.provider], false, true);
+        if (retried.ok) return retried;
+      }
     }
     const reasons = [...gateReasons];
     if (gateBlocked > 0 && gateBlocked === processed) {
@@ -295,8 +387,65 @@ export class AiPolicyExecutor {
     if (malformed > 0 && infraFailures === 0) {
       return { ok: false, cause: "unparseable", gateReasons: reasons };
     }
-    return { ok: false, cause: "providers_exhausted", gateReasons: reasons };
+    return {
+      ok: false,
+      cause: "providers_exhausted",
+      gateReasons: reasons,
+      ...(earliestRetry !== null && (infraFailures > 0 || cooling > 0) ? { retryAt: new Date(earliestRetry).toISOString() } : {}),
+    };
+  }
+}
+
+/**
+ * The longest rate-limit wait the last resort will sit out, and the margin
+ * added to a provider's stated wait (Martin's decision, 2026-11-13). Raised
+ * from 30s to 60s (Martin, 2026-11-14): Groq's limit is a rolling one-minute
+ * window, so after a research run it asked for 33s and the draft failed; it
+ * can never ask for more than about a minute.
+ */
+export const LAST_RESORT_MAX_WAIT_MS = 60_000;
+const LAST_RESORT_MARGIN_MS = 500;
+/** How often the countdown line is edited (Martin, 2026-11-13: in place, inside the existing edit budget). */
+export const COUNTDOWN_TICK_MS = 5_000;
+
+function waitLabel(ms: number): string {
+  return `Waiting ${Math.ceil(ms / 1000)}s for an AI provider's rate limit`;
+}
+
+/**
+ * Waits `waitMs`, showing a countdown on the live status line that is edited
+ * in place every COUNTDOWN_TICK_MS ("Waiting 26s..." -> "Waiting 21s..."),
+ * then puts the line back to the step's own wording as the retry starts.
+ * Edits go through the live status's own throttle and budget.
+ */
+async function countDownLiveStep(waitMs: number, stepLabel: string): Promise<void> {
+  let label = waitLabel(waitMs);
+  reportLiveStep(label);
+  let remaining = waitMs;
+  while (remaining > 0) {
+    const tick = Math.min(COUNTDOWN_TICK_MS, remaining);
+    await new Promise((resolve) => setTimeout(resolve, tick));
+    remaining -= tick;
+    const next = remaining > 0 ? waitLabel(remaining) : stepLabel;
+    resolveLiveStep(label, next);
+    label = next;
   }
 }
 
 export const defaultPolicyExecutor = new AiPolicyExecutor();
+
+/**
+ * The Runtime services every AI call passes through before any provider is
+ * tried, in ascending `order`: the shared Consultancy Profile context
+ * (src/runtime/businessContext.ts, order 10, Martin 2026-11-13) and the
+ * universal web research tool (src/runtime/webResearch.ts, order 20, Martin
+ * 2026-11-11). Each module installs itself, so this layer stays free of
+ * runtime imports. The augmented task still goes through every boundary,
+ * gate and validation below; a failing augmenter is skipped, never fatal.
+ */
+type TaskAugmenter = (env: Env, task: AiTask) => Promise<AiTask>;
+const taskAugmenters = new Map<string, { order: number; fn: TaskAugmenter }>();
+export function setTaskAugmenter(id: string, order: number, fn: TaskAugmenter | undefined): void {
+  if (fn) taskAugmenters.set(id, { order, fn });
+  else taskAugmenters.delete(id);
+}

@@ -1,0 +1,620 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import {
+  RESULT_REVIEW_BLOCKED_STAGE,
+  applyResultReviewGate,
+  ensureResultReviewContract,
+  evaluateResultReviewGate,
+  hashResultReviewApproval,
+  hashResultReviewVerdict,
+  isSuccessfulResultStage,
+  recordCheckerVerdict,
+  recordOutputApprovalAsResultApproval,
+  recordResultEvidence,
+  resolveResultReviewApprovalDecision,
+  stageResultReviewApproval,
+} from "./resultReview";
+import type { WorkState } from "./types";
+
+/**
+ * BD-8 Result review gate -- direct tests for every refusal condition the
+ * issue requires (missing contract/criteria, missing or invalid Checker
+ * evidence, untrusted/mismatched approval, binding to a different
+ * Work/Result/criteria/evidence) plus the one legitimate path that must be
+ * unblocked.
+ *
+ * Why these call the gate directly: `WorkSession` extends DurableObject from
+ * `cloudflare:workers`, which cannot be imported under the Node test runner,
+ * so WorkSession internals are pinned by SOURCE-TEXT assertions at the bottom
+ * of this file (save() delegates to evaluateResultReviewGate; execute() loads
+ * the contract) while the gate itself is tested as a pure unit.
+ */
+
+function baseState(overrides: Partial<WorkState> = {}): WorkState {
+  return {
+    workId: "work-resultreview-1",
+    chatId: 1,
+    unit: "Strategy",
+    hat: "Strategy Analyst",
+    actionName: "diagnose",
+    stage: "delivered",
+    ...overrides,
+  } as WorkState;
+}
+
+const DECLARED_CONTRACT = {
+  expectedResult: "A completed diagnosis delivered to the Workspace.",
+  completionCriteria: ["All five elements present.", "Every fact traces to Call Notes."],
+} as const;
+
+/**
+ * The sanctioned happy path (2026-11-14, the Checker is advisory): contract ->
+ * recorded evidence -> staged approval -> Martin's recorded decision. No
+ * Checker verdict is involved.
+ */
+async function satisfiedState(): Promise<WorkState> {
+  const state = baseState();
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  const evidence = await recordResultEvidence(state, [{ kind: "activity", ref: "ACT-1", note: "diagnosis evidence", content: "The diagnosis." }]);
+  assert.ok(evidence.ok, "evidence recording should succeed on the sanctioned path");
+  const staged = await stageResultReviewApproval(state);
+  assert.ok(staged.ok, "staging should succeed once evidence is recorded");
+  const decision = await resolveResultReviewApprovalDecision(state, { approved: true, token: staged.pending.token });
+  assert.ok(decision.ok, "the staged decision should be recorded");
+  return state;
+}
+
+test("isSuccessfulResultStage: only delivered/complete are success stages", () => {
+  assert.strictEqual(isSuccessfulResultStage("complete"), true);
+  assert.strictEqual(isSuccessfulResultStage("delivered"), true);
+  assert.strictEqual(isSuccessfulResultStage("cancelled"), false);
+  assert.strictEqual(isSuccessfulResultStage("closed_not_qualified"), false);
+  assert.strictEqual(isSuccessfulResultStage("result_review_blocked"), false);
+  assert.strictEqual(RESULT_REVIEW_BLOCKED_STAGE, "result_review_blocked");
+});
+
+test("ensureResultReviewContract: loads the declared contract live from the Action", () => {
+  const state = baseState();
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  assert.strictEqual(state.resultReview?.expectedResult, DECLARED_CONTRACT.expectedResult);
+  assert.deepStrictEqual(state.resultReview?.completionCriteria, DECLARED_CONTRACT.completionCriteria);
+  assert.strictEqual(state.resultReview?.gateStatus, "pending");
+});
+
+test("ensureResultReviewContract: an Action declaring nothing leaves the Work contract-less (the gate then refuses)", () => {
+  const state = baseState();
+  ensureResultReviewContract(state, undefined);
+  assert.strictEqual(state.resultReview, undefined);
+  const state2 = baseState();
+  ensureResultReviewContract(state2, {});
+  assert.strictEqual(state2.resultReview, undefined);
+});
+
+test("ensureResultReviewContract: never overwrites recorded evidence or an approval, refreshes only missing contract fields", async () => {
+  const state = await satisfiedState();
+  ensureResultReviewContract(state, { expectedResult: "", completionCriteria: [] });
+  assert.ok(state.resultReview?.evidence?.length, "recorded evidence must survive a contract refresh");
+  assert.ok(state.resultReview?.approval, "a recorded approval must survive a contract refresh");
+  assert.strictEqual(state.resultReview?.expectedResult, DECLARED_CONTRACT.expectedResult);
+});
+
+test("gate: refuses a Work with no Result review contract at all, naming that reason", async () => {
+  const state = baseState({ actionName: undefined, hat: undefined, unit: undefined });
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /declares no expected Result or completion criteria/);
+  // Nothing is fabricated onto the Work: with no review record there is no
+  // status to set. Visibility for this case is WorkSession.save's own --
+  // stage flips to result_review_blocked and `state.blockedReason` carries
+  // this exact reason (pinned as source text below).
+  assert.strictEqual(state.resultReview, undefined, "the gate must not invent a review record");
+});
+
+test("gate: refuses a contract carrying no completion criteria", async () => {
+  const state = baseState();
+  state.resultReview = { expectedResult: "something", gateStatus: "pending" };
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /declares no completion criteria/);
+});
+
+test("gate: refuses a contract carrying no expected Result", async () => {
+  const state = baseState();
+  state.resultReview = { completionCriteria: ["a"], gateStatus: "pending" };
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /declares no expected Result/);
+});
+
+test("gate: refuses when Martin's Result approval is not recorded (the Checker is not consulted)", async () => {
+  const state = baseState();
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  await recordResultEvidence(state, [{ kind: "activity", ref: "ACT-1", content: "The diagnosis." }]);
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /no Result approval is recorded/);
+});
+
+test("gate: refuses a Result whose producing Unit recorded no evidence for Martin to approve", async () => {
+  const state = baseState();
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /recorded no Result evidence/);
+});
+
+test("gate: the independent Checker is ADVISORY -- a missing, failed, self-identified, hand-built or stale verdict never blocks a Result Martin approved", async () => {
+  // Martin's decision (2026-11-14): the Checker cannot block. Each of the
+  // conditions the old gate refused on is now simply not consulted.
+  const none = await satisfiedState();
+  assert.strictEqual((await evaluateResultReviewGate(none)).allowed, true, "no verdict at all");
+
+  const failed = await satisfiedState();
+  await recordCheckerVerdict(failed, { checkerId: "independent-checker", outcome: "failed", reason: "criteria not met: evidence missing", evidenceRefs: [{ kind: "activity", ref: "ACT-1" }] });
+  assert.strictEqual((await evaluateResultReviewGate(failed)).allowed, true, "a FAILED verdict does not block");
+  assert.ok(failed.resultReview?.approval, "recording a verdict never removes Martin's approval");
+
+  const handBuilt = await satisfiedState();
+  handBuilt.resultReview!.checker = { checkerId: handBuilt.hat!, outcome: "failed", checkedAt: new Date().toISOString(), evidenceRefs: [{ kind: "x", ref: "y" }], verdictHash: "" };
+  assert.strictEqual((await evaluateResultReviewGate(handBuilt)).allowed, true, "a hand-built, self-identified verdict is not consulted");
+
+  const stale = await satisfiedState();
+  await recordCheckerVerdict(stale, { checkerId: "independent-checker", outcome: "passed", evidenceRefs: [{ kind: "activity", ref: "ACT-1" }] });
+  stale.resultReview!.checker!.evidenceRefs = [{ kind: "activity", ref: "ACT-EVIL" }];
+  assert.strictEqual((await evaluateResultReviewGate(stale)).allowed, true, "a stale verdict is not consulted");
+});
+
+test("recordCheckerVerdict: still refuses a checker whose identity equals the Work's performer (Action or Hat)", async () => {
+  const byAction = baseState();
+  ensureResultReviewContract(byAction, DECLARED_CONTRACT);
+  const refused = await recordCheckerVerdict(byAction, { checkerId: "diagnose", outcome: "passed", evidenceRefs: [{ kind: "activity", ref: "ACT-1" }] });
+  assert.strictEqual(refused.ok, false, "recording must refuse a self-check outright");
+  if (!refused.ok) assert.match(refused.reason, /recorded performer/);
+  const byHat = baseState();
+  ensureResultReviewContract(byHat, DECLARED_CONTRACT);
+  const refusedHat = await recordCheckerVerdict(byHat, { checkerId: byHat.hat!, outcome: "passed", evidenceRefs: [{ kind: "activity", ref: "ACT-1" }] });
+  assert.strictEqual(refusedHat.ok, false);
+});
+
+test("gate: refuses an approval bound to different completion criteria than the Work now holds", async () => {
+  const state = await satisfiedState();
+  state.resultReview!.completionCriteria = ["A different criterion."];
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /bound to a different Work, Result, completion criteria or evidence/);
+});
+
+test("gate: refuses an approval bound to a different evidence set (the kind of evidence changed after Martin approved)", async () => {
+  const state = await satisfiedState();
+  state.resultReview!.evidence = [{ kind: "something_else", ref: "ACT-1", note: "diagnosis evidence", content: "The diagnosis." }];
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /bound to a different Work, Result, completion criteria or evidence/);
+});
+
+test("gate: refuses an approval whose hash was not produced for this Work's evidence", async () => {
+  const state = await satisfiedState();
+  state.resultReview!.approval!.reviewHash = await hashResultReviewApproval({
+    workId: state.workId,
+    expectedResult: state.resultReview!.expectedResult!,
+    completionCriteria: state.resultReview!.completionCriteria!,
+    evidenceHash: "some-other-evidence-hash",
+  });
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /bound to a different Work, Result, completion criteria or evidence/);
+});
+
+test("gate: refuses an approval carrying no token or timestamp", async () => {
+  const state = await satisfiedState();
+  state.resultReview!.approval!.token = "";
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /carries no approval token or timestamp/);
+});
+
+test("gate: refuses an approval whose approver is not Martin", async () => {
+  const state = await satisfiedState();
+  (state.resultReview!.approval as { approver: string }).approver = "someone-else";
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, false);
+  assert.match(gate.reason ?? "", /not Martin's Result approval/);
+});
+
+test("gate: the legitimate path -- declared contract, recorded evidence, Martin's bound approval -- is ALLOWED", async () => {
+  const state = await satisfiedState();
+  const gate = await evaluateResultReviewGate(state);
+  assert.strictEqual(gate.allowed, true, gate.reason);
+  assert.strictEqual(state.resultReview?.gateStatus, "passed");
+  assert.strictEqual(state.resultReview?.blockReason, undefined);
+});
+
+test("recordCheckerVerdict: refuses an empty evidence set and malformed refs", async () => {
+  const state = baseState();
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  const empty = await recordCheckerVerdict(state, { checkerId: "x", outcome: "passed", evidenceRefs: [] });
+  assert.strictEqual(empty.ok, false);
+  if (!empty.ok) assert.match(empty.reason, /empty evidence set/);
+  const malformed = await recordCheckerVerdict(state, {
+    checkerId: "x",
+    outcome: "passed",
+    evidenceRefs: [{ kind: "", ref: "" }],
+  });
+  assert.strictEqual(malformed.ok, false);
+  if (!malformed.ok) assert.match(malformed.reason, /malformed evidence reference/);
+});
+
+test("recordCheckerVerdict: an advisory verdict -- even a failed or superseding one -- never invalidates Martin's approval or reopens the gate", async () => {
+  const state = await satisfiedState();
+  assert.ok(state.resultReview?.approval);
+  const second = await recordCheckerVerdict(state, { checkerId: "another-checker", outcome: "failed", reason: "concerns", evidenceRefs: [{ kind: "activity", ref: "ACT-2" }] });
+  assert.ok(second.ok);
+  assert.ok(state.resultReview?.approval, "Martin's approval survives any advisory verdict");
+  assert.strictEqual(state.resultReview?.blockReason, undefined, "a verdict sets no block reason");
+  assert.strictEqual((await evaluateResultReviewGate(state)).allowed, true);
+});
+
+test("stageResultReviewApproval: needs a contract and recorded evidence -- and no Checker verdict", async () => {
+  const noContract = baseState();
+  const r0 = await stageResultReviewApproval(noContract);
+  assert.strictEqual(r0.ok, false);
+  const noEvidence = baseState();
+  ensureResultReviewContract(noEvidence, DECLARED_CONTRACT);
+  const r1 = await stageResultReviewApproval(noEvidence);
+  assert.strictEqual(r1.ok, false);
+  if (!r1.ok) assert.match(r1.reason, /recorded no Result evidence/);
+  const ok = baseState();
+  ensureResultReviewContract(ok, DECLARED_CONTRACT);
+  await recordResultEvidence(ok, [{ kind: "activity", ref: "ACT-1", content: "x" }]);
+  assert.ok((await stageResultReviewApproval(ok)).ok, "evidence is enough: no verdict required");
+  assert.equal(ok.resultReview?.checker, undefined);
+});
+
+test("resolveResultReviewApprovalDecision: wrong token refuses; replay finds nothing; rejection is recorded and visible", async () => {
+  // A decision whose token does not match the staged card records nothing.
+  const wrong = await satisfiedState();
+  const wrongResult = await resolveResultReviewApprovalDecision(wrong, { approved: true, token: "not-the-token" });
+  assert.strictEqual(wrongResult.ok, false, "a mismatched token must record nothing");
+
+  // Replay: stage a card, consume it, then press the same button again.
+  const replay = await satisfiedState();
+  const fresh = await stageResultReviewApproval(replay);
+  assert.ok(fresh.ok, "recorded evidence with no open card can stage one");
+  const first = await resolveResultReviewApprovalDecision(replay, { approved: true, token: fresh.pending.token });
+  assert.ok(first.ok, "the first decision is recorded");
+  const again = await resolveResultReviewApprovalDecision(replay, { approved: true, token: fresh.pending.token });
+  assert.strictEqual(again.ok, false, "the staged approval was consumed by the first decision -- a replay records nothing");
+
+  // Rejection: recorded, visible, and the Result must not close.
+  const rejected = await satisfiedState();
+  const rejectCard = await stageResultReviewApproval(rejected);
+  assert.ok(rejectCard.ok, "the satisfied state can stage a card for the rejection");
+  const rejectResult = await resolveResultReviewApprovalDecision(rejected, { approved: false, token: rejectCard.pending.token });
+  assert.ok(rejectResult.ok);
+  assert.strictEqual(rejected.resultReview?.approval, undefined);
+  assert.strictEqual(rejected.resultReview?.gateStatus, "blocked");
+  assert.match(rejected.resultReview?.blockReason ?? "", /rejected by Martin/);
+  const gate = await evaluateResultReviewGate(rejected);
+  assert.strictEqual(gate.allowed, false, "a rejected Result must not close");
+});
+
+test("hashes: canonical texts are order-stable and snapshot-specific", async () => {
+  const a = await hashResultReviewVerdict({
+    workId: "w1",
+    expectedResult: "r",
+    completionCriteria: ["c1"],
+    evidenceRefs: [{ kind: "activity", ref: "ACT-1" }],
+    outcome: "passed",
+  });
+  const b = await hashResultReviewVerdict({
+    workId: "w1",
+    expectedResult: "r",
+    completionCriteria: ["c1", "c2"],
+    evidenceRefs: [{ kind: "activity", ref: "ACT-1" }],
+    outcome: "passed",
+  });
+  const c = await hashResultReviewVerdict({
+    workId: "w2",
+    expectedResult: "r",
+    completionCriteria: ["c1"],
+    evidenceRefs: [{ kind: "activity", ref: "ACT-1" }],
+    outcome: "passed",
+  });
+  assert.notStrictEqual(a, b, "a criteria change must change the verdict hash");
+  assert.notStrictEqual(a, c, "a different Work must never hash the same");
+});
+
+// ---------------------------------------------------------------------------
+// WorkSession cannot be imported under the Node test runner (cloudflare:workers
+// DurableObject base), so its enforcement wiring is pinned as source text:
+// the enforcement points must exist exactly as the design says, and no Unit
+// handler may write a successful Handoff closure directly.
+// ---------------------------------------------------------------------------
+
+const read = (rel: string) => fs.readFileSync(path.join(import.meta.dirname, rel), "utf8");
+
+test("WorkSession.save delegates successful-closure enforcement to applyResultReviewGate and flips to the blocked stage", () => {
+  const src = read("session.ts");
+  assert.match(src, /await applyResultReviewGate\(state,/, "save() must delegate the gate to applyResultReviewGate");
+  assert.match(src, /private async reportResultReviewBlocked/, "the unresolved state and reason must be reported visibly, once per transition");
+  assert.match(src, /case \"resultreview\":/, "Martin's decision returns through the verified callback, never free text");
+  assert.doesNotMatch(src, /private evaluateResultReviewGate/, "the old private gate copy must be gone -- one gate, not two");
+  assert.match(src, /ensureResultReviewContract\(state, this\.recordedActionResult\(state\)\)/, "the contract must be loaded live from the Work's recorded Action");
+  assert.match(src, /findUnitManifest\(state\.unit\)/, "the recorded Action must be resolved through the Unit registry");
+});
+
+test("every successful Unit Handoff closure routes through closeHandoffOnResult (no direct success write remains in a Unit)", () => {
+  const gated = [
+    "units/sales/salesExecutive.ts",
+    "units/strategy/strategyAnalyst.ts",
+    "units/finance/valueBasedPricingAssessor.ts",
+    "units/marketing/marketingManifest.ts",
+    "units/sales/tokenSafeProposal.ts",
+  ];
+  for (const rel of gated) {
+    const src = read(rel);
+    assert.match(src, /closeHandoffOnResult\(/, `${rel} must route its successful closure through the generic gate`);
+  }
+  // The ONE direct `Status: select("Closed")` a Unit may still write is the
+  // Proposal Doc-verification-FAILURE write-back -- an explicit non-success
+  // closure that never claims a completed Result.
+  const tspNet = read("units/sales/tokenSafeProposal.ts");
+  const directClosed = (tspNet.match(/Status: select\("Closed"\)/g) ?? []).length;
+  assert.strictEqual(directClosed, 1, "tokenSafeProposal keeps exactly one direct Closed write: the non-success Doc-failure path");
+  assert.match(tspNet, /Doc failed to verify/, "that one direct write must be the Doc-failure non-success closure");
+
+  // Cancellation keeps its own route, untouched and ungated.
+  const lifecycle = read("handoffLifecycle.ts");
+  assert.match(lifecycle, /export async function closeHandoffIfOpen/, "cancellation must keep its existing helper");
+  const session = read("session.ts");
+  assert.match(session, /closeHandoffIfOpen/, "/cancel must still use the ungated route");
+});
+
+test("the closure-owning Actions declare their Result contract on their own Unit manifests (live, not hard-coded)", async () => {
+  const { salesManifest } = await import("./units/sales/salesManifest");
+  const { strategyManifest } = await import("./units/strategy/strategyManifest");
+  const { financeManifest } = await import("./units/finance/financeManifest");
+  const { marketingManifest } = await import("./units/marketing/marketingManifest");
+
+  const declared: Array<[string, typeof salesManifest]> = [
+    ["sales", salesManifest],
+    ["strategy", strategyManifest],
+    ["finance", financeManifest],
+    ["marketing", marketingManifest],
+  ];
+  const required: Record<string, string[]> = {
+    Sales: ["new_enquiry", "record_lead", "proposal_draft"],
+    Strategy: ["diagnose", "commit_diagnosis"],
+    Finance: ["price"],
+    Marketing: ["handle_request"],
+  };
+  for (const [label, manifest] of declared) {
+    const actionNames = required[manifest.unit];
+    assert.ok(actionNames, `${label}: unexpected unit ${manifest.unit}`);
+    for (const hat of Object.values(manifest.hats)) {
+      for (const name of actionNames) {
+        const action = hat.actions.find((a) => a.name === name);
+        if (!action) continue;
+        assert.ok(action.expectedResult?.trim(), `${manifest.unit}/${hat.name}/${name} must declare expectedResult`);
+        assert.ok(action.completionCriteria?.length, `${manifest.unit}/${hat.name}/${name} must declare completionCriteria`);
+      }
+    }
+    // At least one hat must carry each required action (fail-closed check).
+    for (const name of actionNames) {
+      const found = Object.values(manifest.hats).some((h) => h.actions.some((a) => a.name === name));
+      assert.ok(found, `${manifest.unit} must declare ${name} somewhere so its contract exists`);
+    }
+  }
+});
+
+test("WorkSession.save only evaluates the gate when a Result contract is declared (no contract = no gate)", () => {
+  const src = read("session.ts");
+  // save() delegates to applyResultReviewGate, which internally checks
+  // state.resultReview before firing -- Works whose Action declares no
+  // Result contract pass through save() unblocked.
+  assert.match(src, /await applyResultReviewGate\(state,/, "save() must delegate the gate to applyResultReviewGate");
+  // applyResultReviewGate (in resultReview.ts) checks state.resultReview
+  // before evaluating the gate -- no contract = no gate.
+  const rrSrc = read("resultReview.ts");
+  assert.match(rrSrc, /if \(!isSuccessfulResultStage\(state\.stage\) \|\| !state\.resultReview\)/, "applyResultReviewGate must return unblocked when there is no contract");
+  // closeHandoffOnResult still calls the gate directly (fail-closed for direct calls).
+  assert.match(read("handoffLifecycle.ts"), /await evaluateResultReviewGate\(state\)/, "closeHandoffOnResult still calls the shared gate directly");
+});
+
+test("applyResultReviewGate: successful Work without a declared Result contract is not blocked", async () => {
+  const state = baseState({ stage: "delivered" });
+  // No resultReview at all: the Action declares no Result contract, so the
+  // gate must not fire and the Work passes through save() unblocked.
+  const result = await applyResultReviewGate(state, async (_s, _reason) => {
+    throw new Error("reportBlocked must not be called when there is no contract");
+  });
+  assert.strictEqual(result.blocked, false, "a Work without a Result contract must not be blocked");
+  assert.strictEqual(state.stage, "delivered", "the stage must remain unchanged when there is no contract");
+  assert.strictEqual(state.blockedReason, undefined, "blockedReason must not be set when there is no contract");
+});
+
+test("applyResultReviewGate: successful Work with an unsatisfied review is blocked with blockedReason retained", async () => {
+  const state = baseState({ stage: "delivered" });
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  // Contract declared but no evidence and no Martin approval: gate refuses.
+  let reportCalled = false;
+  const result = await applyResultReviewGate(state, async (_s, reason) => {
+    reportCalled = true;
+    assert.match(reason ?? "", /Result evidence required/, "the report must name what is missing");
+  });
+  assert.strictEqual(result.blocked, true, "a successful Work with an unsatisfied review must be blocked");
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "the stage must be flipped to result_review_blocked");
+  assert.match(state.blockedReason ?? "", /Result evidence required/, "blockedReason must be retained");
+  assert.strictEqual(reportCalled, true, "reportBlocked must be called on the first transition into blocked");
+});
+
+test("applyResultReviewGate: already-blocked Work stays blocked, not re-reported", async () => {
+  const state = baseState({ stage: "delivered" });
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  // First call: blocks, flips stage, reports once.
+  let reportCount = 0;
+  const r1 = await applyResultReviewGate(state, async () => {
+    reportCount++;
+  });
+  assert.strictEqual(r1.blocked, true);
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "stage flipped to result_review_blocked");
+  assert.strictEqual(reportCount, 1, "reportBlocked called once on first block");
+  // Second call: result_review_blocked is not a success stage, so the gate
+  // does not re-fire and reportBlocked is not called again.
+  const r2 = await applyResultReviewGate(state, async () => {
+    reportCount++;
+  });
+  assert.strictEqual(r2.blocked, false, "a blocked-stage Work is not re-evaluated by the gate");
+  assert.strictEqual(reportCount, 1, "reportBlocked must NOT be called again");
+});
+
+test("applyResultReviewGate: non-success stages pass through while success stages are blocked (helper-level stage treatment)", async () => {
+  const state = baseState({ stage: "in_progress" });
+  ensureResultReviewContract(state, DECLARED_CONTRACT);
+  // A non-terminal stage (Result production in progress) is not a success
+  // stage, so the gate does not fire and the Work passes through unblocked.
+  // This tests how applyResultReviewGate treats supplied stages; it does not
+  // by itself prove full Work lifecycle progression (WorkSession extends the
+  // cloudflare:workers DurableObject and cannot be imported under Node).
+  let reportCalled = false;
+  const result = await applyResultReviewGate(state, async () => {
+    reportCalled = true;
+  });
+  assert.strictEqual(result.blocked, false, "a non-success stage must pass through the gate while review is pending");
+  assert.strictEqual(state.stage, "in_progress", "the stage must remain unchanged for non-success stages");
+  assert.strictEqual(reportCalled, false, "reportBlocked must not be called for non-success stages");
+
+  // But supplying a success stage while the review is still unsatisfied gets
+  // blocked -- the gate refuses successful closure, not production.
+  state.stage = "delivered";
+  const blocked = await applyResultReviewGate(state, async () => {});
+  assert.strictEqual(blocked.blocked, true, "a supplied success stage must be blocked while review is unsatisfied");
+  assert.strictEqual(state.stage, RESULT_REVIEW_BLOCKED_STAGE, "the supplied delivered stage must be flipped to blocked");
+});
+
+test("applyResultReviewGate: satisfied review allows successful closure", async () => {
+  const state = await satisfiedState();
+  state.stage = "delivered";
+  let reportCalled = false;
+  const result = await applyResultReviewGate(state, async () => {
+    reportCalled = true;
+  });
+  assert.strictEqual(result.blocked, false, "a satisfied review must allow successful closure");
+  assert.strictEqual(state.stage, "delivered", "the stage must remain delivered when the gate passes");
+  assert.strictEqual(reportCalled, false, "reportBlocked must not be called when the gate passes");
+});
+
+test("legitimate Handoff creation is not gated by Result review", () => {
+  // createHandoff (src/handoffWriter.ts) performs no Result review check:
+  // a Handoff can be created while a Work's review is pending. The gate
+  // only applies at successful closure (closeHandoffOnResult) and at save().
+  const src = read("handoffWriter.ts");
+  assert.doesNotMatch(src, /evaluateResultReviewGate/, "createHandoff must not call the Result review gate");
+  assert.doesNotMatch(src, /isResultReviewSatisfied/, "createHandoff must not call any Result review helper");
+});
+
+test("Result review buttons route to their Work and fit Telegram (2026-11-14): action:workId:value, under 64 bytes, bound to the card by token prefix", async () => {
+  const { resultReviewCallbackData } = await import("./resultReview");
+  const workId = "ed5013e0-98e7-4cce-addf-b868378823d9";
+  const token = "3f1c2b9a-0d4e-4f5a-9b8c-7d6e5f4a3b2c";
+  for (const data of [resultReviewCallbackData(workId, "a", token), resultReviewCallbackData(workId, "r", token), resultReviewCallbackData(workId, "c")]) {
+    const [action, routedWorkId, value] = data.split(":"); // exactly how index.ts routes a tap
+    assert.equal(action, "resultreview");
+    assert.equal(routedWorkId, workId, "the Work id sits in the slot index.ts routes on");
+    assert.ok(value && !value.includes(":"));
+    assert.ok(new TextEncoder().encode(data).length <= 64, `${data} fits Telegram's 64-byte callback_data`);
+  }
+  assert.equal(resultReviewCallbackData(workId, "a", token).split(":")[2], "a3f1c2b9a");
+  assert.equal(resultReviewCallbackData(workId, "c").split(":")[2], "c");
+});
+
+test("session wiring (2026-11-14): blocked message carries Re-check; Re-check re-presents the approval (no Checker); save no longer runs the Checker", async () => {
+  const fsx = await import("node:fs");
+  const src = fsx.readFileSync(new URL("./session.ts", import.meta.url), "utf8");
+  assert.match(src, /text: "🔁 Re-check", callback_data: resultReviewCallbackData\(state\.workId, "c"\)/);
+  assert.match(src, /if \(kind === "c"\) return this\.recheckResultReview\(state\);/);
+  assert.ok(!/runMachineryResultVerification/.test(src.slice(src.indexOf("private async save"), src.indexOf("private async reportResultReviewBlocked"))), "save() and Re-check no longer run the Checker as a prerequisite of closure");
+  assert.ok(!/callback_data: `resultreview:\$\{staged\.pending\.token\}/.test(src), "the old token-in-the-work-slot buttons are gone");
+});
+
+test("resume (2026-11-14): picking a blocked Work with no card pending offers Re-check", async () => {
+  const { resumeNotice } = await import("./workContinuation");
+  const state = { workId: "ed5013e0-98e7-4cce-addf-b868378823d9", stage: "result_review_blocked", resultReview: { blockReason: "Independent Checker verification required" } } as any;
+  const notice = resumeNotice(state, "Switched active context to work item x.");
+  assert.match(notice.text, /cannot close yet: Independent Checker verification required/);
+  assert.equal(notice.buttons?.[0][0].callback_data, "resultreview:ed5013e0-98e7-4cce-addf-b868378823d9:c");
+});
+
+
+// ---------------------------------------------------------------------------
+// Output approval closes the Work (Martin's decision, 2026-11-14).
+// ---------------------------------------------------------------------------
+
+async function outputApprovalState(opts: { declared?: boolean; approvalEvidence?: boolean; bound?: boolean; verdict?: "passed" | "failed" } = {}): Promise<WorkState> {
+  const { hashContent } = await import("./contentHash");
+  const state = baseState({ stage: "delivered" });
+  ensureResultReviewContract(state, { ...DECLARED_CONTRACT, ...(opts.declared === false ? {} : { outputApprovalClosesWork: true }) });
+  const draft = "The approved draft text.";
+  const evidence = [{ kind: "marketing_output", ref: "w-draft", note: "draft", content: draft }];
+  if (opts.approvalEvidence !== false) {
+    evidence.push({ kind: "operator_approval", ref: "w-approval", note: "approval", content: `Martin approved w-draft ... SHA-256: ${opts.bound === false ? "deadbeef" : await hashContent(draft)}.` });
+  }
+  state.resultReview!.evidence = evidence;
+  if (opts.verdict) {
+    // An advisory assessment may exist (or not); it plays no part either way.
+    await recordCheckerVerdict(state, {
+      checkerId: "independent-checker",
+      outcome: opts.verdict,
+      evidenceRefs: evidence.map((e) => ({ kind: e.kind, ref: e.ref, note: e.note })),
+      ...(opts.verdict === "failed" ? { reason: "concerns" } : {}),
+    });
+  }
+  return state;
+}
+
+test("output approval: declared + approval evidence bound to the output -> Martin's Result approval is recorded (via output_approval) and the gate allows closure -- with no Checker verdict, a passing one or a FAILED one", async () => {
+  for (const verdict of [undefined, "passed", "failed"] as const) {
+    const state = await outputApprovalState({ verdict });
+    const done = await recordOutputApprovalAsResultApproval(state);
+    assert.ok(done.ok, `verdict ${verdict}`);
+    assert.equal(state.resultReview?.approval?.via, "output_approval");
+    assert.equal(state.resultReview?.approval?.approver, "martin");
+    assert.deepEqual(await evaluateResultReviewGate(state), { allowed: true }, `the advisory Checker (${verdict}) never decides closure`);
+  }
+});
+
+test("output approval: refused -- and the Result approval card stays the path -- when not declared, no approval evidence (e.g. spend approval only), or approval not bound to the output", async () => {
+  for (const [label, opts] of [
+    ["not declared", { declared: false }],
+    ["no approval evidence (e.g. spend approval only)", { approvalEvidence: false }],
+    ["approval not bound to any evidence item", { bound: false }],
+  ] as const) {
+    const state = await outputApprovalState(opts);
+    const done = await recordOutputApprovalAsResultApproval(state);
+    assert.equal(done.ok, false, label);
+    assert.equal(state.resultReview?.approval, undefined, `${label}: nothing recorded`);
+    assert.equal((await evaluateResultReviewGate(state)).allowed, false, `${label}: the gate still refuses`);
+  }
+});
+
+test("output approval: never records a second approval, and evidence changed after the approval is refused by the gate", async () => {
+  const state = await outputApprovalState();
+  assert.ok((await recordOutputApprovalAsResultApproval(state)).ok);
+  assert.equal((await recordOutputApprovalAsResultApproval(state)).ok, false, "already recorded");
+  state.resultReview!.evidence = [...state.resultReview!.evidence!, { kind: "extra", ref: "x", content: "added after Martin approved" }];
+  const gate = await evaluateResultReviewGate(state);
+  assert.equal(gate.allowed, false, "the approval binds to the exact evidence it saw");
+  assert.match(gate.reason ?? "", /bound to a different Work, Result, completion criteria or evidence/);
+});
+
+test("output approval wiring: Marketing declares it; the kind constant matches Marketing's evidence; save and Re-check call the one recorder; spend approval keeps its card", async () => {
+  const { OPERATOR_APPROVAL_EVIDENCE_KIND } = await import("./resultReview");
+  assert.equal(OPERATOR_APPROVAL_EVIDENCE_KIND, "operator_approval");
+  const manifest = fs.readFileSync(new URL("./units/marketing/marketingManifest.ts", import.meta.url), "utf8");
+  assert.match(manifest, /outputApprovalClosesWork: true/);
+  assert.match(manifest, /"operator_approval" \| "spend_approval"/);
+  const session = fs.readFileSync(new URL("./session.ts", import.meta.url), "utf8");
+  assert.equal((session.match(/await recordOutputApprovalAsResultApproval\(state\)/g) ?? []).length, 2, "save() and Re-check each call the one recorder");
+});

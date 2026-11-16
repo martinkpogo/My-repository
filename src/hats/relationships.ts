@@ -27,20 +27,20 @@ export type MarketingRelationshipDefinition = RelationshipDefinition<MarketingHa
 
 export const REGISTERED_MARKETING_RELATIONSHIPS: MarketingRelationshipDefinition[] = [
   {
-    id: "brand-communications-strategist__positioning",
+    id: "campaign-marketing-communications-manager__marketing-direction",
     from: "Marketing Strategist",
-    to: "Brand & Communications Strategist",
+    to: "Campaign & Marketing Communications Manager",
     conditional: false,
     description:
-      "Overall marketing positioning established by Marketing Strategist before Brand & Communications Strategist translates that positioning into communication guidance.",
+      "Approved marketing direction established by Marketing Strategist before Campaign & Marketing Communications Manager translates that direction into campaign requirements and integrated marketing communications.",
   },
   {
-    id: "content-strategist__brand-guidance",
-    from: "Brand & Communications Strategist",
+    id: "content-strategist__campaign-requirements",
+    from: "Campaign & Marketing Communications Manager",
     to: "Content Strategist",
     conditional: false,
     description:
-      "Established brand and communications guidance that Content Strategist relies on when defining content direction.",
+      "Established campaign requirements and cross-channel consistency that Content Strategist relies on when defining content direction.",
   },
   {
     id: "content-manager__content-strategy",

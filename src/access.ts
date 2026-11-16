@@ -66,17 +66,17 @@ import { findManifestAction } from "./units/unitManifest";
  * comparing anything, so a manifest can never be stale about, or assert,
  * an environment-specific id.
  */
-export type GovernedSource = "entities" | "matters" | "proposals" | "handoffs" | "leads" | "activity_log" | "call_notes";
+export type GovernedSource = "entities" | "matters" | "proposals" | "handoffs" | "leads" | "activity_log" | "call_notes" | "payments";
 
-const allSources: readonly GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log", "call_notes"];
+const allSources: readonly GovernedSource[] = ["entities", "matters", "proposals", "handoffs", "leads", "activity_log", "call_notes", "payments"];
 
 /** The one operation an action can be approval-gated for. `create` and `update` are distinguished deliberately: an approval authorizes creating a governed record or changing an existing one, and these are different commitments. */
 export type GovernedOperation = "create" | "update";
 
 /** Which governed sources this kind of context is running under. */
-export type AccessContextKind = "work_session" | "user_lookup" | "discovery_cron" | "system";
+export type AccessContextKind = "work_session" | "user_lookup" | "discovery_cron" | "system" | "operator_research";
 
-const ACCESS_CONTEXT_KINDS: readonly AccessContextKind[] = ["work_session", "user_lookup", "discovery_cron", "system"];
+const ACCESS_CONTEXT_KINDS: readonly AccessContextKind[] = ["work_session", "user_lookup", "discovery_cron", "system", "operator_research"];
 
 /**
  * The explicit execution context every governed operation must carry. It is
@@ -211,6 +211,12 @@ export class AccessDeniedError extends Error {
   }
 }
 
+/** The governed source a concrete data source id is, in this Env -- or undefined when it is none of them. */
+export function governedSourceForDataSourceId(env: Env, dataSourceId: string): GovernedSource | undefined {
+  if (!dataSourceId) return undefined;
+  return allSources.find((source) => governedSourceDataSourceId(env, source) === dataSourceId);
+}
+
 /** Maps a symbolic GovernedSource to the concrete data source id in this Env. */
 export function governedSourceDataSourceId(env: Env, source: GovernedSource): string {
   switch (source) {
@@ -228,6 +234,11 @@ export function governedSourceDataSourceId(env: Env, source: GovernedSource): st
       return env.ACTIVITY_LOG_DATA_SOURCE_ID;
     case "call_notes":
       return env.CALL_NOTES_DATA_SOURCE_ID;
+    case "payments":
+      // Payment Business Object (ENIG HQ / 5. Data / Payment). Optional in
+      // Env: an environment without it simply has no Payments source, and an
+      // empty id is never admitted as a target (see governedDataSourceIds).
+      return env.PAYMENTS_DATA_SOURCE_ID ?? "";
   }
 }
 
@@ -428,7 +439,7 @@ function kernelOwnedWriteDataSourceIds(env: Env): readonly string[] {
 
 /** Every governed data source in this Env, in symbolic order. The only targets a Notion operation may name. */
 function governedDataSourceIds(env: Env): readonly string[] {
-  return allSources.map((source) => governedSourceDataSourceId(env, source));
+  return allSources.map((source) => governedSourceDataSourceId(env, source)).filter((id): id is string => typeof id === "string" && id.length > 0);
 }
 
 /**
@@ -499,6 +510,30 @@ function evaluateExternalEgress(request: AccessRequest, context: AccessContext):
 }
 
 /**
+ * Martin operating the shared Research Runtime directly (/research,
+ * /deep_research -- Build Decision, 15 Nov 2026): owned by no Unit or Hat, so
+ * it carries no Action and no proof, and its reach is fixed HERE rather than
+ * by any caller. It may read standalone (governance) pages and the Research
+ * database, and create or update pages in the Research database -- nothing
+ * else. Every Entity, Matter, Proposal, Handoff, Lead, Payment, Call Notes and
+ * Activity Log operation is a denial. Its public web search and page reads go
+ * through evaluateExternalEgress above, unchanged. The Research database is
+ * deliberately NOT a GovernedSource: no other context can name it, so no Hat
+ * reaches it by accident.
+ */
+function evaluateOperatorResearch(env: Env, request: AccessRequest, context: AccessContext): void {
+  if (context.actionName !== undefined || context.assertedActionName !== undefined || context.proof !== undefined) {
+    throw new AccessDeniedError(`an "operator_research" operation is owned by no Hat and must not carry a resolved action or an approval proof -- ${describe(request, context)}.`);
+  }
+  const research = env.RESEARCH_DATA_SOURCE_ID ?? "";
+  if (request.operation === "read" && request.dataSourceId === NON_GOVERNED_PAGE_TARGET) return;
+  if (research.length > 0 && request.dataSourceId === research) return;
+  throw new AccessDeniedError(
+    `an "operator_research" context may only read standalone pages and read or write the Research database -- ${describe(request, context)} is outside that reach.`,
+  );
+}
+
+/**
  * THE Access decision. Called by src/notion.ts immediately before any
  * network dispatch of a read or a mutation. Throws AccessDeniedError on
  * refusal; returns normally when the operation is permitted.
@@ -529,6 +564,10 @@ export function evaluateAccess(env: Env, request: AccessRequest, context: Access
   }
   if (request.dataSourceId === EXTERNAL_EGRESS_TARGET) {
     evaluateExternalEgress(request, context);
+    return;
+  }
+  if (context.kind === "operator_research") {
+    evaluateOperatorResearch(env, request, context);
     return;
   }
   // Every other target must be one of THIS Env's governed sources, or the
@@ -877,6 +916,15 @@ export function mintApprovalProof(input: MintApprovalProofInput): ApprovalProof 
  */
 export function systemContext(workId?: string): AccessContext {
   return { kind: "system", ...(workId ? { workId } : {}) };
+}
+
+/**
+ * Martin-started research (/research, /deep_research): the shared Research
+ * Runtime operated directly, owned by no Unit or Hat. See
+ * evaluateOperatorResearch for its fixed reach.
+ */
+export function operatorResearchContext(workId: string): AccessContext {
+  return { kind: "operator_research", workId };
 }
 
 /** A read answering a question about ENIG's own records. Read-only by construction. */

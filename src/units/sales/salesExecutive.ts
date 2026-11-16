@@ -35,7 +35,8 @@ import { advanceWorkStatus, finishWorkStatus, noteWorkStatus, startWorkStatus, w
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult, SemanticTaskId } from "../../dataBoundary/types";
-import { claimPendingHandoff } from "../../handoffLifecycle";
+import { claimPendingHandoff, closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { resolveEntityMatterFromTokens } from "../../identityResolution";
 import { retrieveAndConsumeCallNotes } from "../../records/callNotes/callNotesRecord";
 import { serializeCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
@@ -1374,10 +1375,34 @@ export async function handleCallNotesHandoffPickup(
 
   const { qualification, evidenceText } = result;
 
-  await updateHandoff(env, state.handoffId!, {
-    Status: select("Closed"),
-    "Work Completed": richText(`Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, 1900)),
-  }, workSessionContext(state));
+  // BD-13: record the Result evidence before the closure -- the independent
+  // Machinery Worker verification judges the declared criteria against
+  // exactly this set (captured before any transient copy is discarded).
+  await recordResultEvidence(state, [
+    {
+      kind: "qualification_result",
+      ref: `${state.workId}-qualification`,
+      note: "the completed call-notes qualification assessment this Result delivers",
+      content: `Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+    },
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Sales: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
+
+  // BD-8: the successful closure of this Work's own inbound Handoff routes
+  // through the one generic Result review gate (closeHandoffOnResult). A
+  // refusal leaves the Handoff exactly as it is (Picked-up) and is surfaced
+  // below -- never written and never hidden.
+  const closure = await closeHandoffOnResult(
+    env,
+    state,
+    state.handoffId!,
+    `Qualification: ${qualification.overall}\n\n${evidenceText}`.slice(0, 1900),
+    workSessionContext(state),
+  );
+  if (!closure.closed) {
+    console.error(`Sales: call-notes Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+  }
   await logActivity(env, {
     entry: `Call-notes Handoff closed — Qualification: ${qualification.overall}: ${displayToken}`,
     type: "Activity",

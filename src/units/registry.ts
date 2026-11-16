@@ -40,7 +40,9 @@ import { financeManifest } from "./finance/financeManifest";
  *   genuine dispatch, not because dispatchCowork's Marketing branch
  *   (still its own hardcoded branch, unchanged) ever calls
  *   findUnitManifest("Marketing") for Hat resolution itself.
- * - Strategy, Finance -- each a single-Hat Unit, same thin-wrap shape: one
+ * - Strategy, Finance -- Strategy a single-Hat Unit; Finance's pricing Hat the
+ *   same thin wrap (Finance gained a second Hat, Payments Clerk, on
+ *   2026-11-11 -- see financeManifest.ts). Each pricing/Strategy Hat has one
  *   declared action wrapping handleDirectRequest unchanged, plus that one
  *   approval-callback prefix (strategyhandoff/quote respectively).
  *   handlePickup (Handoff-originated) stays entirely outside each manifest

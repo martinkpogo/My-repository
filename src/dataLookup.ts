@@ -204,6 +204,7 @@ function buildDataLookupClassifierPrompt(): string {
     'If it is a lookup request, respond {"is_lookup": true, "source": "<one of the six names above, exactly>", "filter": "<a single status/unit/area value the message actually names, or omit this field entirely if none>"}.',
     'If it is not a lookup request, respond {"is_lookup": false}.',
     "Never invent a source outside the six named above. Never invent a filter value the message doesn't actually contain.",
+    "A request for NEW work is never a lookup, even when it mentions leads, businesses, matters or another database by name: going online, searching, researching or finding new businesses, prospects or leads; drafting, writing, creating, sending or pricing something; asking whether a Unit or Hat can do something. Those are for the Unit or Hat that does the work, not for reading what is already recorded -- respond {\"is_lookup\": false}.",
     "Examples:",
     '"Check matter Database and tell me if anything is there" -> {"is_lookup": true, "source": "matters"}',
     '"What\'s in the Leads database right now?" -> {"is_lookup": true, "source": "leads"}',
@@ -211,6 +212,9 @@ function buildDataLookupClassifierPrompt(): string {
     '"Is MAT-20 still Qualified?" -> {"is_lookup": true, "source": "matters", "filter": "Qualified"}',
     '"How\'s the business doing this week?" -> {"is_lookup": false}',
     '"Draft a proposal for the bakery chain enquiry" -> {"is_lookup": false}',
+    '"Can marketing go online and tell me what businesses might need to learn from me?" -> {"is_lookup": false}',
+    '"Find new leads in the hospitality sector" -> {"is_lookup": false}',
+    '"Which leads do we have at the moment?" -> {"is_lookup": true, "source": "leads"}',
   ].join("\n");
 }
 

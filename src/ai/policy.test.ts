@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AiPolicyExecutor } from "./policy";
+import { AiPolicyExecutor, DEFAULT_PROVIDER_IDS } from "./policy";
 import { aiJson, aiText, aiChat } from "../ai";
 import {
   AiProvider,
@@ -333,4 +333,119 @@ test("WP3. Success outcome is unchanged -- ok plus the very response executeTask
   const legacy = await executor.executeTask(fakeEnv, wp3JsonTask("plain situation text"));
   assert.equal(legacy?.rawText, '{"result": "ok"}', "executeTask returns the identical response on success");
   assert.equal(p1.attempts, 2, "both methods ran the same provider loop");
+});
+
+
+/** Advances mock timers in small steps, letting promise chains between timers run (the countdown waits in 5s ticks). */
+async function advance(t: any, ms: number): Promise<void> {
+  for (let done = 0; done < ms; done += 100) {
+    t.mock.timers.tick(Math.min(100, ms - done));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  }
+}
+
+test("Last resort (Martin, 2026-11-13, A): every provider failed but one named a short wait -> wait it out and try that provider once more", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const limited = new MockProvider("p1", (_task, attempt) =>
+    attempt === 1
+      ? { success: false, error: new InfrastructureError("p1", "429 try again in 25s", { statusCode: 429, retryAfterMs: 25_000 }) }
+      : { success: true, response: { rawText: '{"result": "after the wait"}' } },
+  );
+  const broken = new MockProvider("p2", () => ({ success: false, error: new InfrastructureError("p2", "402 payment required", { statusCode: 402 }) }));
+  const executor = new AiPolicyExecutor([limited, broken], testBoundaryEvaluator);
+  const pending = aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(limited.attempts, 1, "waiting, not yet retried");
+  await advance(t, 25_000);
+  assert.equal(limited.attempts, 1, "still inside the 0.5s margin");
+  await advance(t, 600);
+  assert.deepEqual(await pending, { result: "after the wait" });
+  assert.equal(limited.attempts, 2);
+  assert.equal(broken.attempts, 1, "the other provider is not tried again");
+});
+
+test("Last resort: a wait over 60s is not waited out; a failed retry is not repeated; the retry is once per call", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const tooLong = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 61_000 }) }));
+  const outcome = await new AiPolicyExecutor([tooLong], testBoundaryEvaluator).executeTaskWithOutcome(fakeEnv, {
+    taskId: "chat.general_reply",
+    type: "json",
+    messages: [{ role: "user", content: "u" }],
+    boundaryContext: { taskSensitivity: "public", segments: [{ type: "user", content: "u", provenance: "test" }] },
+  } as any);
+  assert.equal(outcome.ok, false);
+  assert.equal(tooLong.attempts, 1, "61s is over the last-resort cap: no wait, no retry");
+
+  const stillLimited = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 5_000 }) }));
+  const pending = new AiPolicyExecutor([stillLimited], testBoundaryEvaluator).executeTaskWithOutcome(fakeEnv, {
+    taskId: "chat.general_reply",
+    type: "json",
+    messages: [{ role: "user", content: "u" }],
+    boundaryContext: { taskSensitivity: "public", segments: [{ type: "user", content: "u", provenance: "test" }] },
+  } as any);
+  await advance(t, 6_000);
+  const second = await pending;
+  assert.equal(second.ok, false);
+  assert.equal(stillLimited.attempts, 2, "exactly one retry -- never a loop");
+});
+
+test("Last resort countdown (Martin, 2026-11-13): the wait counts down in place every 5s, then the line returns to the step's own wording", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const { withLiveStatus } = await import("../runtime/liveStatus");
+  const trail: string[] = [];
+  const sink = {
+    hatStatusOpen: () => true,
+    setDetail: (d: string | undefined) => void (d && trail.push(d)),
+    resolveDetail: (from: string, to: string) => {
+      const i = trail.lastIndexOf(from);
+      if (i >= 0) trail[i] = to;
+      else trail.push(to);
+    },
+    refresh: async () => {},
+  };
+  const limited = new MockProvider("p1", (_task, attempt) =>
+    attempt === 1
+      ? { success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 11_000 }) }
+      : { success: true, response: { rawText: '{"result": "ok"}' } },
+  );
+  const executor = new AiPolicyExecutor([limited], testBoundaryEvaluator);
+  const seen: string[] = [];
+  const pending = withLiveStatus({} as Env, { chatId: -1, header: "H" }, async () => {
+    const call = aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u" }, executor);
+    const flush = async () => {
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+    };
+    await flush();
+    seen.push(trail.at(-1)!);
+    for (const ms of [5_000, 5_000, 1_500]) {
+      await advance(t, ms);
+      await flush();
+      seen.push(trail.at(-1)!);
+    }
+    return call;
+  }, () => "succeeded", sink);
+  assert.deepEqual(await pending, { result: "ok" });
+  assert.deepEqual(seen, [
+    "Waiting 12s for an AI provider's rate limit",
+    "Waiting 7s for an AI provider's rate limit",
+    "Waiting 2s for an AI provider's rate limit",
+    "Writing the reply",
+  ]);
+  assert.equal(trail.filter((l) => l.startsWith("Waiting")).length, 0, "edited in place: no countdown line is left behind");
+});
+
+test("Last resort cap is 60s (Martin, 2026-11-14): Groq's 33s wait after a research run is waited out", async () => {
+  const { LAST_RESORT_MAX_WAIT_MS } = await import("./policy");
+  assert.equal(LAST_RESORT_MAX_WAIT_MS, 60_000);
+  assert.ok(33_210 <= LAST_RESORT_MAX_WAIT_MS);
+});
+
+test("fallback chain (Martin, 2026-11-14): Workers AI, Groq, OpenRouter, Gemini, then NVIDIA NIM last -- Cerebras and SambaNova are out", () => {
+  assert.deepEqual([...DEFAULT_PROVIDER_IDS], ["workers-ai", "groq", "openrouter", "gemini", "nvidia-nim"]);
 });

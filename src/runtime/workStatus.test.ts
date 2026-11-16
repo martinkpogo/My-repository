@@ -106,3 +106,15 @@ test("workStatus: Markdown entity characters are escaped, so Telegram accepts ea
 
   assert.strictEqual(calls[0].body.text, "Hat: H.\n\n🧭 H — x\n⏳ Running business\\_strategy, brand\\_strategy");
 });
+
+test("one line per Hat step, edited in place (Martin, 2026-11-13): inner steps replace the wording while it runs; success returns to the step's own wording with ✓; failure stays on the failing inner step with ✗", async () => {
+  const { renderWorkStatus } = await import("./workStatus");
+  const base = { hat: "H", header: "H — task", done: ["Loading the contract"], current: "Deciding within ownership" } as any;
+  assert.strictEqual(renderWorkStatus(base), "🧭 H — task\n✓ Loading the contract\n⏳ Deciding within ownership", "starts on the step's own wording");
+  const running = { ...base, trail: ["Choosing how to research", "Planning the searches", "Searching the web — nca.org.gh"] };
+  assert.strictEqual(renderWorkStatus(running), "🧭 H — task\n✓ Loading the contract\n⏳ Searching the web — nca.org.gh", "the latest inner step replaces the line");
+  assert.strictEqual(renderWorkStatus(running, { line: "✅ Draft ready", currentFailed: false }), "🧭 H — task\n✓ Loading the contract\n✓ Deciding within ownership\n✅ Draft ready", "back to the step's own wording with ✓");
+  const failing = { ...base, trail: ["Summarising what the sources say", "Writing the draft, or deciding to pass it on or ask you"] };
+  assert.strictEqual(renderWorkStatus(failing, { line: "⛔ No usable decision came back", currentFailed: true }), "🧭 H — task\n✓ Loading the contract\n✗ Writing the draft, or deciding to pass it on or ask you\n⛔ No usable decision came back", "the ✗ is on the step that failed");
+  assert.strictEqual(renderWorkStatus(base, { line: "⛔ Stopped", currentFailed: true }), "🧭 H — task\n✓ Loading the contract\n✗ Deciding within ownership\n⛔ Stopped", "no inner step: the step's own wording gets ✗");
+});

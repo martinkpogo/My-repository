@@ -4,6 +4,7 @@ import { classifyCandidateHats, classifyAction } from "../hats/intakeClassificat
 import { dispatchAction } from "../hats/actionRegistry";
 import { sendWorkspaceHatMessage, sendHatMessage, withWorkspaceTypingIndicator } from "../telegram";
 import { finishWorkStatus, startWorkStatus, type WorkStatusHolder } from "../runtime/workStatus";
+import { withLiveStatus } from "../runtime/liveStatus";
 import { logActivity } from "../log";
 import { findUnitManifest } from "./registry";
 import { findManifestAction } from "./unitManifest";
@@ -309,7 +310,15 @@ async function dispatchResolvedAction(
   let dispatchResult: Awaited<ReturnType<typeof dispatchAction>>;
   try {
     const run = () => dispatchAction(actionName, text, hat.actions, (name, t) => hat.readHandler(env, name, t, skills));
-    dispatchResult = isRead ? await withWorkspaceTypingIndicator(env, run) : await run();
+    // Chat-mode reads have no Work: they get the universal live status in
+    // their own chat/topic instead (src/runtime/liveStatus.ts), removed once
+    // the answer is ready.
+    const chatRead = declaredAction?.consequence === "read" && mode === "chat";
+    dispatchResult = isRead
+      ? await withWorkspaceTypingIndicator(env, run)
+      : chatRead
+        ? await withLiveStatus(env, { chatId: target.chatId, threadId: target.threadId, header: `${hatName} — ${actionName.replace(/_/g, " ")}` }, run)
+        : await run();
   } catch (err) {
     await finishWorkStatus(env, readStatus, "⛔ Failed.", "failed");
     throw err;

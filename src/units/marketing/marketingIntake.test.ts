@@ -162,17 +162,17 @@ test("a single plausible candidate resolves to that registered Hat and dispatche
 
 test("an unconditional registered relationship selects the expected downstream Hat", async (t) => {
   const h = makeHarness(t, [
-    json({ candidates: ["Marketing Strategist", "Brand & Communications Strategist"], establishing: false, reason: "translating positioning into communications" }),
+    json({ candidates: ["Marketing Strategist", "Campaign & Marketing Communications Manager"], establishing: false, reason: "translating positioning into communications" }),
     DRAFT_DECISION,
   ]);
   const state = workState();
 
   const result = await handleMarketingIntake(h.env, state, "Translate our positioning into communications guidance.");
 
-  assert.equal(result.hat, "Brand & Communications Strategist");
+  assert.equal(result.hat, "Campaign & Marketing Communications Manager");
   assertDispatchedToDraft(result);
   assert.ok(
-    h.logBodies.some((b) => b.includes("Marketing task routed to Brand & Communications Strategist") && b.includes("via relationship brand-communications-strategist__positioning")),
+    h.logBodies.some((b) => b.includes("Marketing task routed to Campaign & Marketing Communications Manager") && b.includes("via relationship campaign-marketing-communications-manager__marketing-direction")),
     "the Activity log must record the registered relationship that decided the Hat",
   );
 });
@@ -225,7 +225,7 @@ test("a conditional relationship with a missing establishing value fails closed 
 });
 
 test("conflicting candidate relationships fail closed to clarification", async (t) => {
-  const h = makeHarness(t, [json({ candidates: ["Marketing Strategist", "Brand & Communications Strategist", "Content Strategist"], establishing: true })]);
+  const h = makeHarness(t, [json({ candidates: ["Marketing Strategist", "Campaign & Marketing Communications Manager", "Content Strategist"], establishing: true })]);
   const state = workState({ hat: "Marketing" as any });
 
   const result = await handleMarketingIntake(h.env, state, "An unclear request spanning several Hats.");
@@ -237,7 +237,7 @@ test("conflicting candidate relationships fail closed to clarification", async (
 });
 
 test("candidates with no registered relationship between them fail closed to clarification", async (t) => {
-  const h = makeHarness(t, [json({ candidates: ["Brand & Communications Strategist", "Digital Marketer"], establishing: true })]);
+  const h = makeHarness(t, [json({ candidates: ["Campaign & Marketing Communications Manager", "Digital Marketer"], establishing: true })]);
   const state = workState({ hat: "Marketing" as any });
 
   const result = await handleMarketingIntake(h.env, state, "An unclear request spanning two unrelated Hats.");

@@ -32,6 +32,16 @@ export interface Env {
    * application logic, exactly like every other data source above.
    */
   CALL_NOTES_DATA_SOURCE_ID: string;
+  /** Payments database (Payment Business Object). Read-only for the Runtime until an approval-gated Finance action exists. */
+  PAYMENTS_DATA_SOURCE_ID?: string;
+  /**
+   * The Research database (Operation Records / Research): results of
+   * Martin-started research (/research, /deep_research -- Build Decision,
+   * 15 Nov 2026). Written only under the operator_research Access context.
+   * Optional: without it, research still runs and the result is only posted
+   * in Telegram, with a note that it was not saved.
+   */
+  RESEARCH_DATA_SOURCE_ID?: string;
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
@@ -99,6 +109,16 @@ export interface Env {
   /** The Operations stream topic message_thread_id in ENIG HQ Supergroup. */
   OPERATIONS_TOPIC_ID?: string;
 
+  /**
+   * ENIG's morning brief schedule (src/morningBrief.ts). IANA time zone,
+   * local hour 0-23 from which the day's brief is due, and comma-separated
+   * three-letter weekdays (Mon,Tue,...). Any missing/invalid value disables
+   * the brief rather than guessing a schedule.
+   */
+  MORNING_BRIEF_TIMEZONE?: string;
+  MORNING_BRIEF_HOUR?: string;
+  MORNING_BRIEF_DAYS?: string;
+
   /** Shared secret for the Gmail-polling Apps Script -> /email/webhook. */
   EMAIL_WEBHOOK_SECRET?: string;
 
@@ -129,6 +149,39 @@ export interface Env {
    * a provider or supply credentials.
    */
   TAVILY_API_KEY?: string;
+
+  /**
+   * Search fallback providers (BD-15, issue #338; Martin's choice 14 Nov
+   * 2026: Exa then Serper, Brave excluded). A fallback is used only when it
+   * is EXPLICITLY ENABLED in `SEARCH_FALLBACK_PROVIDERS` (a comma list, e.g.
+   * "exa,serper"), has its key secret set, and has a monthly budget
+   * (src/runtime/research/searchProviders.ts). Unset means Tavily alone, as
+   * before. Never selectable by a caller, Hat or Skill.
+   */
+  EXA_API_KEY?: string;
+  SERPER_API_KEY?: string;
+  SEARCH_FALLBACK_PROVIDERS?: string;
+  /**
+   * Monthly request budgets per search provider, each kept below the
+   * provider's free allowance so nothing is ever charged. Tavily and Serper
+   * have code defaults; Exa has none and stays ineligible until this is set
+   * from Martin's own Exa dashboard.
+   */
+  SEARCH_MONTHLY_BUDGET_TAVILY?: string;
+  SEARCH_MONTHLY_BUDGET_EXA?: string;
+  SEARCH_MONTHLY_BUDGET_SERPER?: string;
+
+  /**
+   * Web page read fallback readers (canonical spec "Web page read", Martin
+   * 15 Nov 2026): a comma list of "jina_reader", "tavily_extract". Direct
+   * fetch is always first and free. Jina needs JINA_API_KEY; its monthly
+   * budget defaults below its one-time free grant (override with
+   * PAGE_READ_MONTHLY_BUDGET_JINA). Tavily Extract shares Tavily's search
+   * budget. See src/runtime/research/webPageRead.ts.
+   */
+  PAGE_READ_FALLBACK_READERS?: string;
+  JINA_API_KEY?: string;
+  PAGE_READ_MONTHLY_BUDGET_JINA?: string;
 
   /**
    * Free-tier AI provider fallback keys (src/ai/openaiCompatible.ts),
@@ -450,6 +503,8 @@ export interface WorkState {
     | "finance_direct_request_matter"
     | "finance_direct_request_context"
     | "sales_proposal_revision"
+    /** A Martin-started research Work waiting for his topic or a brief answer (src/runtime/operatorResearch.ts). Owned by no Unit or Hat. */
+    | "operator_research_reply"
     /**
      * Set when a comment on a Proposal's Google Doc could not be classified
      * (ambiguous, mixed, malformed or failed classification): neither the
@@ -580,6 +635,24 @@ export interface WorkState {
   externalOperations?: Record<string, ExternalToolOperationRecord>;
 
   /**
+   * Compact research checkpoints for this Work, keyed by research job id
+   * (BD-15, canonical Search spec research_continuation). Written through the
+   * same durable flush as `externalOperations` (src/runtime/workPersistence.ts)
+   * so a resumed research job never repeats completed searches. Holds the
+   * approved question, plan, per-search statuses and references into the
+   * Search Tool's result cache -- never evidence payloads or conversation.
+   */
+  researchCheckpoints?: Record<string, import("./runtime/research/types").ResearchCheckpoint>;
+
+  /**
+   * Martin-started research on this Work (/research, /deep_research --
+   * Build Decision, 15 Nov 2026). Present only on a Work that IS such a
+   * research job: one owned by no Unit or Hat, run under the bounded
+   * operator_research Access context (src/runtime/operatorResearch.ts).
+   */
+  operatorResearch?: import("./runtime/operatorResearch").OperatorResearchState;
+
+  /**
    * A proposed new Matter's drafted title + stated need, shown to Martin
    * for approval before the record is created — per the Sales AI Project
    * Instructions' Matter identification rule ("pass through the applicable
@@ -674,6 +747,19 @@ export interface WorkState {
    * this exact call, queued a Handoff."
    */
   pendingHandoffAutoCheck?: boolean;
+
+  /**
+   * Result review lifecycle state (BD-8). Work owns generic enforcement;
+   * Actions declare their expected Result and completion criteria on their
+   * own manifests (loaded live from the registered Action, never
+   * hard-coded). A SUCCESSFUL closure requires the declared contract, a
+   * hash-bound independent Checker verdict over the exact evidence, and
+   * Martin's separate hash-bound Result approval -- and is refused, with
+   * the reason kept visible, until all three hold. Work itself is not
+   * paused meanwhile: execution continues and cancellation (`/cancel`) and
+   * explicit non-success closure are unaffected.
+   */
+  resultReview?: ResultReviewState;
 }
 
 /**
@@ -730,4 +816,170 @@ export interface SessionSummary {
   entityToken?: string;
   /** The Work's canonical Matter token (e.g. "MAT-20") -- same semantics as entityToken, Matter side. */
   matterToken?: string;
+}
+
+/**
+ * One reference to the evidence a Result rests on. The evidence SET is
+ * carried inside the Checker verdict and hashed into it (src/resultReview.ts),
+ * so a verdict can never be reinterpreted as covering a different set.
+ */
+export interface ResultReviewEvidenceRef {
+  kind: string;
+  ref: string;
+  note?: string;
+}
+
+/**
+ * A Checker verdict over one exact Result-review snapshot (BD-8 condition 2).
+ *
+ * `verdictHash` is a SHA-256 over the canonical text of THIS Work's id, its
+ * declared expected Result, its completion criteria, this exact evidence set,
+ * the outcome and the reason (src/resultReview.ts recomputes it at gate time).
+ * A verdict whose hash no longer matches the current snapshot -- because the
+ * Work, the Result, the criteria or the evidence changed after it was
+ * recorded -- is refused fail-closed; it is bound to what was checked and to
+ * nothing else.
+ *
+ * `checkerId` is the recorded identity of who performed the check. The gate
+ * enforces it be distinct from the Work's recorded performer (Action and Hat)
+ * as the minimum mechanical check; it is NOT proof of organizational
+ * independence, which remains an unresolved governance rule (see
+ * docs/enig-operating-model.md, Open questions).
+ */
+export interface ResultReviewCheckerVerdict {
+  checkerId: string;
+  outcome: "passed" | "failed";
+  reason?: string;
+  checkedAt: string;
+  evidenceRefs: readonly ResultReviewEvidenceRef[];
+  verdictHash: string;
+}
+
+/**
+ * Martin's Result approval (BD-8 condition 3), recorded only by the verified
+ * staged-approval consumption path (src/resultReview.ts) -- never by a field
+ * a caller wrote by hand.
+ *
+ * `reviewHash` is a SHA-256 over the exact snapshot Martin approved: this
+ * Work's id, its declared expected Result, its completion criteria, and the
+ * verdictHash of the Checker verdict in force at that moment. The gate
+ * recomputes it at closure time, so an approval never survives a change to
+ * what was approved. Like the Call Notes `record_approval` attestation, this
+ * is procedural assurance (a bound claim recorded through the sanctioned
+ * path), not cryptographic proof of the human approval event.
+ *
+ * `token` identifies this approval for the audit trail; the replay barrier is
+ * the consumption of the staged approval it was minted from, exactly as for
+ * ApprovalProof -- the same discipline, never a nonce store.
+ */
+export interface ResultReviewApproval {
+  approver: "martin";
+  token: string;
+  approvedAt: string;
+  reviewHash: string;
+  /**
+   * How Martin's Result approval was given: his own tap on the Result review
+   * card ("result_card", the default when absent), or his approval of the
+   * exact output being the last step of the Work, recorded as evidence and
+   * checked by the Checker ("output_approval", Martin's decision 2026-11-14).
+   */
+  via?: "result_card" | "output_approval";
+}
+
+/**
+ * A Result approval staged for Martin's decision, presented with the exact
+ * snapshot under review. Consumed (cleared) the moment the verified
+ * `resultreview` callback records the decision, so a replayed button finds
+ * nothing left to consume. `token` binds the button to THIS staged card.
+ */
+export interface PendingResultReviewApproval {
+  token: string;
+  reviewHash: string;
+  createdAt: string;
+}
+
+/**
+ * Result review lifecycle state (BD-8), owned and enforced generically by
+ * Work (src/resultReview.ts). The contract fields are loaded live from the
+ * Work's registered Action (never hand-written here); the checker verdict and
+ * the approval are recorded only through the sanctioned recorders, and both
+ * are hash-bound to this exact Work, Result, criteria and evidence.
+ */
+export interface ResultReviewState {
+  expectedResult?: string;
+  completionCriteria?: readonly string[];
+  /** Copied from the Action's declaration (ActionDefinition.outputApprovalClosesWork). */
+  outputApprovalClosesWork?: boolean;
+  /**
+   * Evidence the producing Unit recorded for THIS Result at the moment it
+   * produced it (src/resultReview.ts's `recordResultEvidence` -- the only
+   * sanctioned way evidence enters WorkState). The Machinery Worker
+   * verification (src/runtime/resultVerification.ts) judges the declared
+   * criteria against exactly this set; the set is hashed into the verdict,
+   * so evidence recorded after a verdict cannot silently backfill it.
+   */
+  evidence?: readonly ResultReviewEvidenceItem[];
+  /** The independent Checker's ADVISORY assessment (Martin's decision, 2026-11-14): never required for closure, never blocks. */
+  checker?: ResultReviewCheckerVerdict;
+  /** The Checker's advisory second opinion on the draft (src/runtime/advisoryAssessment.ts). */
+  assessment?: ResultReviewAssessment;
+  approval?: ResultReviewApproval;
+  pendingApproval?: PendingResultReviewApproval;
+  gateStatus: "pending" | "blocked" | "passed";
+  blockReason?: string;
+  /**
+   * The success stage this Work was refused FROM when the gate flipped it
+   * into `result_review_blocked`, remembered so Martin's recorded Result
+   * approval can restore it (the stage a Work closes at is a success stage,
+   * and a blocked stage is deliberately not one -- see
+   * RESULT_REVIEW_BLOCKED_STAGE in src/resultReview.ts).
+   */
+  preBlockStage?: string;
+  /**
+   * A successful Handoff closure the Result review gate refused, kept with
+   * the exact payload the Unit's handler supplied so the lifecycle can
+   * complete it the moment the review is satisfied (recorded by
+   * closeHandoffOnResult; retried by WorkSession.save). Never invented --
+   * it exists only when a real closure was actually refused.
+   */
+  pendingClosure?: { handoffId: string; resultNote: string };
+  /**
+   * The most recent Machinery Worker verification attempt (BD-13), recorded
+   * for audit visibility: which exact snapshot it judged, what it recorded,
+   * or why nothing could be recorded (fail closed). Procedural record, not
+   * authority -- the verdict itself is what the gate consumes.
+   */
+  verificationAttempt?: { snapshotKey: string; outcome: "passed" | "failed" | "unavailable"; reason?: string; at: string };
+}
+
+/**
+ * One piece of identifiable evidence a producing Unit recorded for its
+ * Result (see ResultReviewState.evidence). `content` is the bounded
+ * evidence text the Machinery Worker verification judges the declared
+ * completion criteria against; `kind`/`ref`/`note` are what the verdict
+ * hashes (src/resultReview.ts), so the recorded verdict can never be
+ * reinterpreted as covering a different evidence set.
+ */
+/**
+ * The independent Checker's ADVISORY assessment of a draft (Martin's decision,
+ * 2026-11-14), sent to him after the draft. Never required, never blocking.
+ * `outputHash` is the SHA-256 of the exact draft it assessed.
+ */
+export interface ResultReviewAssessment {
+  checkerId: string;
+  outputHash: string;
+  assessedAt: string;
+  assessment: string;
+  concerns: string[];
+  relevantToEnig: "yes" | "partly" | "no";
+  relevantToClient: "yes" | "partly" | "no" | "not_applicable";
+  recommended: "approve" | "redo" | "ask";
+  note?: string;
+}
+
+export interface ResultReviewEvidenceItem {
+  kind: string;
+  ref: string;
+  note?: string;
+  content: string;
 }

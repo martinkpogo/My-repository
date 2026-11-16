@@ -42,9 +42,9 @@ test("resolveCandidateRelationships (generic core): fails closed with NO_REGISTE
 });
 
 test("resolveMarketingCandidateRelationships is a thin wrapper over the generic core bound to REGISTERED_MARKETING_RELATIONSHIPS", () => {
-  const viaWrapper = resolveMarketingCandidateRelationships(["Marketing Strategist", "Brand & Communications Strategist"]);
+  const viaWrapper = resolveMarketingCandidateRelationships(["Marketing Strategist", "Campaign & Marketing Communications Manager"]);
   const viaGenericCore = resolveCandidateRelationships(
-    ["Marketing Strategist", "Brand & Communications Strategist"],
+    ["Marketing Strategist", "Campaign & Marketing Communications Manager"],
     REGISTERED_MARKETING_RELATIONSHIPS,
   );
   assert.deepEqual(viaWrapper, viaGenericCore);
@@ -53,8 +53,8 @@ test("resolveMarketingCandidateRelationships is a thin wrapper over the generic 
 test("REGISTERED_MARKETING_RELATIONSHIPS contains exactly the five unique approved IDs", () => {
   const ids = REGISTERED_MARKETING_RELATIONSHIPS.map((r) => r.id);
   const expected = [
-    "brand-communications-strategist__positioning",
-    "content-strategist__brand-guidance",
+    "campaign-marketing-communications-manager__marketing-direction",
+    "content-strategist__campaign-requirements",
     "content-manager__content-strategy",
     "digital-marketer__overall-marketing-strategy",
     "digital-marketer__strategic-channel-mix",
@@ -70,24 +70,24 @@ test("Single candidate resolves directly to that Hat", () => {
   assert.equal(result.relationshipId, undefined);
 });
 
-test("Unconditional relationship 1: Brand & Communications Strategist positioning from Marketing Strategist", () => {
+test("Unconditional relationship 1: Campaign & Marketing Communications Manager campaign requirements from Marketing Strategist", () => {
   const result = resolveMarketingCandidateRelationships([
     "Marketing Strategist",
-    "Brand & Communications Strategist",
+    "Campaign & Marketing Communications Manager",
   ]);
   assert.equal(result.resolved, true);
-  assert.equal(result.hat, "Brand & Communications Strategist");
-  assert.equal(result.relationshipId, "brand-communications-strategist__positioning");
+  assert.equal(result.hat, "Campaign & Marketing Communications Manager");
+  assert.equal(result.relationshipId, "campaign-marketing-communications-manager__marketing-direction");
 });
 
-test("Unconditional relationship 2: Content Strategist brand guidance from Brand & Communications Strategist", () => {
+test("Unconditional relationship 2: Content Strategist campaign requirements from Campaign & Marketing Communications Manager", () => {
   const result = resolveMarketingCandidateRelationships([
-    "Brand & Communications Strategist",
+    "Campaign & Marketing Communications Manager",
     "Content Strategist",
   ]);
   assert.equal(result.resolved, true);
   assert.equal(result.hat, "Content Strategist");
-  assert.equal(result.relationshipId, "content-strategist__brand-guidance");
+  assert.equal(result.relationshipId, "content-strategist__campaign-requirements");
 });
 
 test("Unconditional relationship 3: Content Manager content strategy from Content Strategist", () => {
@@ -128,7 +128,7 @@ test("Active conditional relationship resolves Marketing Strategist when establi
 
 test("Active relationships pointing to different upstream Hats fail closed with MULTIPLE_CONFLICTING_RELATIONSHIPS", () => {
   const result = resolveMarketingCandidateRelationships(
-    ["Marketing Strategist", "Brand & Communications Strategist", "Content Strategist"],
+    ["Marketing Strategist", "Campaign & Marketing Communications Manager", "Content Strategist"],
     true,
   );
   assert.equal(result.resolved, false);
@@ -136,7 +136,7 @@ test("Active relationships pointing to different upstream Hats fail closed with 
 });
 
 test("Hallucinated or unregistered relationship ID is inert and does not affect resolution", () => {
-  const result = resolveMarketingCandidateRelationships(["Brand & Communications Strategist", "Digital Marketer"], true);
+  const result = resolveMarketingCandidateRelationships(["Campaign & Marketing Communications Manager", "Digital Marketer"], true);
   assert.equal(result.resolved, false);
   assert.equal(result.reasonCode, "NO_REGISTERED_RELATIONSHIP");
   assert.equal(result.relationshipId, undefined);

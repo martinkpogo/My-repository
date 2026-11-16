@@ -74,9 +74,23 @@ function mockTelegramFetch(t: any) {
   });
 }
 
-test("financeManifest: declares exactly Finance's Value-Based Pricing Assessor Hat", () => {
+test("financeManifest: declares exactly Finance's two Hats, Value-Based Pricing Assessor and Payments Clerk", () => {
   assert.strictEqual(financeManifest.unit, "Finance");
-  assert.deepStrictEqual(Object.keys(financeManifest.hats), ["Value-Based Pricing Assessor"]);
+  assert.deepStrictEqual(Object.keys(financeManifest.hats), ["Value-Based Pricing Assessor", "Payments Clerk"]);
+  assert.strictEqual(financeManifest.intakeClassificationTaskId, "finance.intake_classification");
+});
+
+test("financeManifest: Payments Clerk declares exactly one action, record_payment, as 'write' requiring approval, entered only by direct request", () => {
+  const hat = financeManifest.hats["Payments Clerk"];
+  assert.strictEqual(hat.actions.length, 1);
+  assert.strictEqual(hat.actions[0].name, "record_payment");
+  assert.strictEqual(hat.actions[0].consequence, "write");
+  assert.strictEqual(hat.actions[0].requiresApproval, true);
+  assert.deepStrictEqual(hat.actions[0].applicability, {
+    mode: "any",
+    conditions: [{ source: "work", field: "origin", operator: "equals", value: "direct_request" }],
+  });
+  assert.ok(hat.callbackHandlers?.paymentrecord, "the Record/Cancel card's prefix is handled by this Hat");
 });
 
 test("financeManifest: Value-Based Pricing Assessor declares exactly one action, price, as 'write' requiring approval", () => {

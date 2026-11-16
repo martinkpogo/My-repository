@@ -69,6 +69,23 @@ crons = ["*/30 * * * *"]
 NOTION_VERSION = "2025-09-03"
 AI_MODEL_PRIMARY = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 AI_MODEL_LIGHT = "@cf/meta/llama-3.1-8b-instruct-fast"
+# Search fallback providers (BD-15, issue #338; Martin, 14 Nov 2026: Exa then
+# Serper, Brave excluded). Explicit enablement only -- each is used only once
+# its key secret is set (EXA_API_KEY / SERPER_API_KEY), and Exa also needs
+# SEARCH_MONTHLY_BUDGET_EXA set below its free allowance from the Exa
+# dashboard. Tavily (950/month) and Serper (200/month) have code defaults
+# below their free allowances; set SEARCH_MONTHLY_BUDGET_<ID> to override.
+SEARCH_FALLBACK_PROVIDERS = "exa,serper"
+# Exa's free tier is $10 a month: $4 per 1,000 searches plus $1 per 1,000
+# pages of content. At up to 10 results with highlights a search costs at
+# most about $0.014, so 600 searches stays under $10 with margin -- nothing
+# is ever charged (Martin, 15 Nov 2026).
+SEARCH_MONTHLY_BUDGET_EXA = "600"
+# Web page read fallbacks (Web page read Tool spec, 15 Nov 2026): when the
+# Worker's own direct fetch is blocked, Jina Reader (JINA_API_KEY; code
+# default 250 pages a month, below its one-time free grant) and then Tavily
+# Extract (shares Tavily's monthly budget). Each is used only while keyed.
+PAGE_READ_FALLBACK_READERS = "jina_reader,tavily_extract"
 ENTITY_DATA_SOURCE_ID = "437248f7-f6d8-4e70-873b-7b1eb0fdc519"
 MATTERS_DATA_SOURCE_ID = "0e68feef-224d-433d-a813-0f6ec5e1c036"
 PROPOSALS_DATA_SOURCE_ID = "3b7bf0fa-7664-4ef1-a91b-282316696b6c"
@@ -85,6 +102,14 @@ LEADS_DATA_SOURCE_ID = "6c202c4b-6b24-45e2-b2c3-b6907a8db687"
 # Worker; Runtime Sales only retrieves and consumes Call Notes. Distinct
 # from HANDOFFS_DATA_SOURCE_ID: call evidence is not a Handoff.
 CALL_NOTES_DATA_SOURCE_ID = "a2bf0fa6-7fd5-47ab-b5f2-1fc599f2d164"
+# Payments (Operation Records / Payments; spec ENIG HQ / 5. Data / Payment),
+# token-only. Read by ENIG's business snapshot; the Runtime writes nothing
+# here until an approval-gated Finance action exists (Martin, 2026-11-09).
+PAYMENTS_DATA_SOURCE_ID = "703a276e-2183-4f89-9627-9625b099a851"
+# Research (Operation Records / Research): results of Martin-started research
+# (/research, /deep_research -- Build Decision, 15 Nov 2026). Written only
+# under the operator_research Access context; never a client name.
+RESEARCH_DATA_SOURCE_ID = "419cb004-e583-81e5-ab45-000b0291e404"
 # Maps each Unit to its Telegram forum topic's message_thread_id in the
 # ENIG HQ Supergroup, simulating one dedicated AI Workspace per Unit.
 UNIT_TOPIC_MAP = '{"Marketing": 393, "Business Development": 397, "Sales": 399, "Finance": 6, "Strategy": 8, "Creative & Design": 12, "Operations": 14}'
@@ -101,6 +126,13 @@ WORKSPACE_TOPIC_ID = "604"
 # dashboard when the two-stream architecture shipped; declared here to
 # keep this file in sync with the deployed configuration.
 OPERATIONS_TOPIC_ID = "588"
+# ENIG's morning brief (src/morningBrief.ts), posted to the Workspace topic
+# from the existing */30 cron above -- no second scheduler. Martin's
+# schedule (2026-11-09): 10:00 Africa/Accra, every day except Sunday. The
+# brief lands within 30 minutes of the hour; once per local day.
+MORNING_BRIEF_TIMEZONE = "Africa/Accra"
+MORNING_BRIEF_HOUR = "10"
+MORNING_BRIEF_DAYS = "Mon,Tue,Wed,Thu,Fri,Sat"
 # Google OAuth client ID. Not confidential -- Google treats this as a
 # public identifier (visible in redirect URLs and front-end apps), unlike
 # the client secret, which stays a Cloudflare Secret (see below) and is
@@ -139,12 +171,14 @@ TURSO_DATABASE_URL = "libsql://enig-fallback-martinkpogo.aws-eu-west-1.turso.io"
 #   NOTION_WEBHOOK_SECRET (optional — only needed if you wire up the Notion webhook at /notion/webhook; unset means that endpoint fails closed)
 #   EMAIL_WEBHOOK_SECRET (optional — only needed if you wire up Gmail intake)
 #   TAVILY_API_KEY (optional — only needed for the research runtime's live web-search mechanism and Lead Generation discovery; unset means research stays closed-book)
+#   EXA_API_KEY, SERPER_API_KEY (optional — search fallbacks after Tavily; see SEARCH_FALLBACK_PROVIDERS)
+#   JINA_API_KEY (optional — Web page read fallback; see PAGE_READ_FALLBACK_READERS)
 #   NVIDIA_NIM_API_KEY (optional — free-tier AI provider fallback if Workers AI's daily quota is exhausted)
 #   GROQ_API_KEY (optional — same, additional fallback)
 #   OPENROUTER_API_KEY (optional — same, additional fallback)
 #   CEREBRAS_API_KEY (optional — same, additional fallback)
 #   GEMINI_API_KEY (optional — same, additional fallback)
-#   SAMBANOVA_API_KEY (optional — same, additional fallback)
+#   SAMBANOVA_API_KEY (unused since 2026-11-14 — SambaNova is out of the fallback chain)
 #   GOOGLE_OAUTH_CLIENT_SECRET (required for Google Workspace OAuth -- confidential, unlike GOOGLE_OAUTH_CLIENT_ID above, which is a plain var)
 #   TURSO_AUTH_TOKEN (required -- authenticates TURSO_DATABASE_URL above, the Turso fallback database `enig-fallback`; stored ONLY as a Cloudflare Secret, never committed to this file, source, logs or git)
 #

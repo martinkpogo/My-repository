@@ -7,6 +7,8 @@ import {
   SkillResolutionError,
   verifySkillIntegrity,
   type ResolvedActionSkillSet,
+  type ResolvedSkill,
+  type SkillId,
 } from "../platform/skillRegistry";
 import type { ResolvedActionSkill } from "./actionResolution";
 
@@ -101,4 +103,14 @@ export async function runWithRecordedActionSkills<T>(
     return { kind: "refused", reason: err.reason };
   }
   return { kind: "ran", result: await run(skills) };
+}
+
+/**
+ * A Skill the Runtime itself supplies to one of its own services, rather than
+ * one an Action declared (Martin, 2026-11-11: universal web research is a
+ * Runtime tool, so its methodology comes from the Runtime). Resolved and
+ * integrity-checked by the same Registry boundary as every declared Skill.
+ */
+export function resolveRuntimeSkill(id: SkillId): ResolvedSkill {
+  return resolveSkill(id);
 }

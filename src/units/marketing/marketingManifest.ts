@@ -16,8 +16,11 @@ import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
-import { richText, select } from "../../notion";
-import { updateHandoff } from "../../handoffWriter";
+import { closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordOutputApprovalAsResultApproval, recordResultEvidence } from "../../resultReview";
+import { hashContent } from "../../contentHash";
+import { researchPausedInRun } from "../../runtime/webLookupAllowance";
+import type { ResultReviewEvidenceItem } from "../../types";
 import { handleHandoffPickup } from "../../hats/executionEngine";
 import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
 
@@ -109,7 +112,33 @@ interface HatActionDecision {
   involves_spend?: boolean;
 }
 
-function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
+/**
+ * The shape of a problem brief (Martin's decision, 2026-11-13). When Martin
+ * asks a Marketing Hat to find what businesses struggle with -- a problem to
+ * build a strategy around -- and the step has web research attached, the
+ * draft follows these seven parts instead of a free paragraph. Never names a
+ * company: the subject is a TYPE of business, not a prospect (that is Lead
+ * Generation's work).
+ */
+export const MARKETING_PROBLEM_BRIEF_FORMAT = [
+  "=== PROBLEM BRIEF FORMAT (applies only when the task asks what businesses need, struggle with, or what problem to build a strategy around, AND a WEB RESEARCH block is present) ===",
+  "Write the draft as a problem brief with exactly these parts, each on its own line headed in plain text exactly as below (no #, * or other markup):",
+  "1. The problem -- one sentence naming a communication, positioning, brand or visual-identity problem that ENIG's services (see the Consultancy Profile) can solve. Not a general business problem such as finance, taxes or skills.",
+  "2. Evidence -- two or three findings from the WEB RESEARCH block that support it, each followed by its source link exactly as given there. Never invent a finding or a source.",
+  "3. Who has it most -- the TYPE of business where the problem hurts most (sector, size, stage). Never name a company.",
+  "4. Why it matters to them -- what the problem costs them (lost deals, price pressure, low trust, looking unprofessional).",
+  "5. Where ENIG fits -- the ENIG service from the Consultancy Profile that addresses it.",
+  "6. What's still unknown -- what the research could not establish; never fill it in.",
+  "7. Recommendation -- the one problem to build the strategy around, and why.",
+  "Evidence must show the problem itself -- businesses having it -- not only facts about their customers or market. If no finding shows the problem, say plainly in part 2: \"The research did not directly show this problem\", and treat part 1 as a hypothesis to test.",
+  "If the findings do not support a communication or brand problem, say so in part 1 and in part 6 instead of stretching them.",
+  "Part 7 must give the reason for choosing this problem, not repeat part 1.",
+  // 2026-11-13: with no research attached, the Hat asked Martin to "supply a
+  // WEB RESEARCH block" -- internal mechanics he cannot act on.
+  "If NO WEB RESEARCH block is present, ignore this format: never ask for research, a research block or data, and never mention this format. Write your normal draft from what you know, and say in one line that no current web research was available for it.",
+].join("\n");
+
+export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
     persona: `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
     behavior: ["=== UNIVERSAL ROLE CONTRACT (inherited by every Hat) ===", universalRoleContract].join("\n\n"),
@@ -122,6 +151,7 @@ function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract:
     ].join("\n\n"),
     context: [
       "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
+      MARKETING_PROBLEM_BRIEF_FORMAT,
       'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"..."}. Never guess past missing information or invent authority you don\'t have.',
     ].join("\n\n"),
   };
@@ -177,6 +207,17 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       outcome: "Blocked",
     });
     await sendWorkspaceHatMessage(env, state, `Couldn't determine how to handle this. Please try again or rephrase.`);
+    return state;
+  }
+
+  // Option B (Martin, 15 Nov 2026): a draft is the finished result of the
+  // analysis. If this step's web research paused because providers were
+  // busy, hold the draft: the research resumes on the Work's alarm, and
+  // "Continue to draft" re-runs this step with the completed findings.
+  if (researchPausedInRun()) {
+    state.stage = "awaiting_research";
+    state.awaiting = undefined;
+    await finishWorkStatus(env, state, "⏸ Research paused -- the draft is held until it is complete.", "succeeded");
     return state;
   }
 
@@ -442,12 +483,67 @@ export async function handleTransitionApproval(env: Env, state: WorkState, appro
 export const MARKET_DRAFT_CALLBACK_PREFIX = "marketdraft" as const;
 
 /**
+ * "🔁 Redo with this note" on the Checker's second opinion (Martin's
+ * decision, 2026-11-14). A verified tap of his sends the Checker's
+ * recommended note as the redo note -- the same path as typing it after
+ * Redo. Refuses unless the draft it was recommended for is still the one
+ * awaiting his decision (a replayed, stale or already-decided button does
+ * nothing). The note is labelled as the Checker's so the Hat is never told
+ * Martin wrote it.
+ */
+export const MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX = "marketredo" as const;
+
+export async function handleAssessmentRedo(env: Env, state: WorkState): Promise<WorkState> {
+  const assessment = state.resultReview?.assessment;
+  const draft = state.marketing?.draft;
+  if (state.stage !== "awaiting_marketing_draft_approval" || !draft) {
+    await sendWorkspaceHatMessage(env, state, "This draft has already been decided -- nothing to redo.");
+    return state;
+  }
+  if (!assessment || assessment.recommended !== "redo" || !assessment.note || assessment.outputHash !== (await hashContent(draft))) {
+    await sendWorkspaceHatMessage(env, state, "That recommendation no longer applies to the current draft -- nothing was sent.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+  state.awaiting = undefined;
+  await sendWorkspaceHatMessage(env, state, `Redoing with the Checker's note: ${assessment.note}`);
+  return handleMarketingFeedback(env, state, `(the Checker's recommended note, sent by Martin's tap) ${assessment.note}`);
+}
+
+/**
  * Resolves runMarketingHat's "draft" branch approve/reject callback --
  * relocated unchanged, byte-for-byte, from executionEngine.ts's former
  * handleDraftApproval. Rejecting asks Martin what to reconsider and holds
  * on marketing_feedback; approving closes the originating Handoff (if
  * any) and marks the work item complete.
  */
+/**
+ * The recorded fact of Martin's approval, as Result evidence (2026-11-14).
+ * Live: the independent Checker failed a Marketing Work on completion
+ * criterion 2 ("Martin's explicit approval ... is recorded for this exact
+ * output") because the only evidence recorded was the draft itself, whose
+ * note merely CLAIMED approval -- the Checker rightly treats the Work's own
+ * claim as no proof. The approval IS a real event: the approval handler is
+ * reached only from Martin's verified Approve-button callback (src/index.ts
+ * refuses every other sender). This records that event, bound to the exact
+ * output by its SHA-256, the same minter-style discipline as the other
+ * Result recorders: called only from the flow that established the fact.
+ */
+export async function approvalEvidence(
+  state: WorkState,
+  kind: "operator_approval" | "spend_approval",
+  output: { ref: string; content: string },
+): Promise<ResultReviewEvidenceItem> {
+  const hash = await hashContent(output.content);
+  const what = kind === "spend_approval" ? "spend approval for this paid-media action" : "approval of this output";
+  return {
+    kind,
+    ref: `${state.workId}-${kind === "spend_approval" ? "spend-approval" : "approval"}`,
+    note: `Martin's ${what}, recorded by the Marketing approval handler, which runs only from his verified Approve-button callback`,
+    content: `Martin approved ${output.ref} at ${new Date().toISOString()} through the verified Approve button for Work ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}). Approved content SHA-256: ${hash}.`,
+  };
+}
+
 export async function handleDraftApproval(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
   if (state.stage !== "awaiting_marketing_draft_approval") {
     await sendWorkspaceHatMessage(env, state, "This draft approval has already been resolved -- nothing to do.");
@@ -464,20 +560,46 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   // If this work item arrived via a Handoff (e.g. Strategy's approved
   // routing to Marketing Strategist), close it out as the
   // completion signal -- same pattern Finance/Sales already use.
+  // BD-13: record the Result evidence BEFORE the closure (and before the
+  // draft is cleared below) -- the independent Machinery Worker
+  // verification judges the declared criteria against exactly this set.
+  // Recorded unconditionally: this approval is the Result production point
+  // whether or not an inbound Handoff exists to close.
+  const approvedDraft = (state.marketing?.draft ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS);
+  await recordResultEvidence(state, [
+    {
+      kind: "marketing_output",
+      ref: `${state.workId}-draft`,
+      note: "the Martin-approved Marketing draft this Result delivers",
+      content: approvedDraft,
+    },
+    await approvalEvidence(state, "operator_approval", { ref: `${state.workId}-draft`, content: approvedDraft }),
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
+  // Martin's approval of this exact output is the last step of the Work
+  // (outputApprovalClosesWork, 2026-11-14): record it as his Result approval
+  // now, from the evidence just recorded, so the Handoff closure below
+  // passes the gate. The independent Checker is advisory and plays no part.
+  await recordOutputApprovalAsResultApproval(state);
   if (state.handoffId) {
     // Authorized as a `write`-consequence Action (handle_request), and
     // ungated because closing the Handoff THIS work item was picked up from is
     // execution bookkeeping on a record it already owns -- not the operation
     // handle_request's approval governs (producing Marketing's own output).
-    await updateHandoff(
+    // BD-8: that successful closure still routes through the one generic
+    // Result review gate, keeping the existing .catch -- a refusal (or a
+    // Notion error) only ever leaves the Handoff open, and the refusal
+    // reason is surfaced below.
+    await closeHandoffOnResult(
       env,
+      state,
       state.handoffId,
-      {
-        Status: select("Closed"),
-        "Work Completed": richText((state.marketing?.draft ?? "").slice(0, 1900)),
-      },
+      (state.marketing?.draft ?? "").slice(0, 1900),
       workSessionContext(state),
-    ).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
+    ).then((closure) => {
+      if (!closure.closed) console.error(`Marketing: Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+    }).catch((err) => console.error(`Marketing: failed to close Handoff ${state.handoffId}`, err));
   }
 
   await logActivity(env, {
@@ -537,6 +659,23 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
     decisionRationale: "Budget/spend approved by Martin.",
     outcome: "Complete",
   });
+  // BD-13: this approval is this path's Result production point (stage
+  // reaches `complete`, a success stage WorkSession.save gates) -- record
+  // the Result evidence before the transient copy is cleared, so the
+  // independent Machinery Worker verification has the exact approved spend
+  // action to judge the declared criteria against.
+  const approvedAction = (state.marketing?.pendingPaidMediaAction?.description ?? "").slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS);
+  await recordResultEvidence(state, [
+    {
+      kind: "paid_media_action",
+      ref: `${state.workId}-paid-media`,
+      note: "the Martin-approved paid-media action this Result delivers",
+      content: approvedAction,
+    },
+    await approvalEvidence(state, "spend_approval", { ref: `${state.workId}-paid-media`, content: approvedAction }),
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
   await sendWorkspaceHatMessage(env, state, `Spend approved.`);
   marketingOf(state).pendingPaidMediaAction = undefined;
   marketingOf(state).draft = undefined;
@@ -548,6 +687,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
 const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_TRANSITION_CALLBACK_PREFIX]: handleTransitionApproval,
   [MARKET_DRAFT_CALLBACK_PREFIX]: handleDraftApproval,
+  [MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX]: (env, state) => handleAssessmentRedo(env, state),
   [MARKET_PAID_CALLBACK_PREFIX]: handlePaidMediaApproval,
 };
 
@@ -592,7 +732,7 @@ async function marketingReadHandler(_env: Env, actionName: MarketingAction, _tex
  */
 const MARKETING_RESPONSIBILITY_IDS: Record<MarketingHatName, string> = {
   "Marketing Strategist": "own_marketing_strategy",
-  "Brand & Communications Strategist": "own_brand_and_communications",
+  "Campaign & Marketing Communications Manager": "coordinate_campaigns_and_marketing_communications",
   "Content Strategist": "own_content_strategy",
   "Content Manager": "produce_content",
   "Digital Marketer": "own_digital_demand",
@@ -632,6 +772,47 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       },
       description:
         "Decide whether to draft an output within this Hat's ownership, propose a transition to a better-suited Hat, or ask for clarification -- always gated on Martin's explicit approval (or, for Digital Marketer, explicit spend approval) before anything is treated as done.",
+      // BD-8: expected Result and completion criteria declared BEFORE
+      // execution, loaded live from this manifest by the Result review gate
+      // (src/resultReview.ts). This Action reaches success stages
+      // ("complete" after Martin's draft approval, and after a paid-media
+      // spend approval) and its Handoff-pickup flow closes the inbound
+      // Handoff -- both are gated: the closure through
+      // closeHandoffOnResult, the stage through WorkSession.save. Neither
+      // can complete until an independent Checker verifies the evidence
+      // against these criteria and Martin approves that exact Result. The
+      // output-approval buttons are Martin's approval of the DRAFT -- that
+      // gate is unchanged; this contract is the separate Result review BD-8
+      // requires behind it. Rejection, clarification and transition paths
+      // are non-success outcomes and are deliberately not gated.
+      expectedResult:
+        "A Marketing output drafted within this Hat's ownership and approved by Martin (or a paid-media action approved with explicit spend approval) -- produced under this Hat's governance, never produced before approval, and never claimed done under a better-suited Hat's authority.",
+      // Martin's decision, 2026-11-14: approving the draft is the last step of
+      // a Marketing Work, so it closes the Work once the independent Checker
+      // passes -- no second Result approval. Spend approval (paid media) records
+      // no operator_approval evidence, so it keeps the Result approval card.
+      outputApprovalClosesWork: true,
+      // The independent Checker's advisory second opinion, sent after the draft
+      // (Martin's decision, 2026-11-14). Content criteria only: his approval is
+      // checked mechanically at closing and does not exist while he reads the
+      // draft.
+      advisoryAssessment: {
+        output: (state) => state.marketing?.draft,
+        request: (state) => state.marketing?.taskText,
+        awaitingStage: "awaiting_marketing_draft_approval",
+        redoCallbackPrefix: "marketredo",
+        criteria: [
+          "The output was produced within THIS Hat's declared ownership and produced nothing outside it.",
+          "Anything the output asserts about the client or market traces to supplied or verifiable evidence (the sources it names), not to invented facts.",
+          // Martin, 2026-11-14: a draft came back as one run-on paragraph that called ENIG "the business".
+          "Where the request asks what problem businesses have, the output follows the seven-part problem brief -- the problem; evidence with source links; who has it most; why it matters to them; where ENIG fits; what is still unknown; one recommendation -- each part on its own line, and refers to ENIG by name rather than \"the business\".",
+        ],
+      },
+      completionCriteria: [
+        "The output (or paid-media action) was produced within THIS Hat's declared ownership and produced nothing outside it.",
+        "Martin's explicit approval (or explicit spend approval for Digital Marketer) is recorded for this exact output before it was treated as done.",
+        "Anything the output asserts about the client or market traces to supplied or verifiable evidence, not to invented facts.",
+      ],
     },
   ];
 
@@ -655,7 +836,23 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       marketing_clarification: handleMarketingClarification,
     },
     callbackHandlers: marketingCallbackHandlers,
+    // Option B (Martin, 15 Nov 2026): Marketing holds its draft while its
+    // research is paused, and continues through its own redo path -- the
+    // same re-run handleMarketingFeedback uses -- once WorkSession has fed
+    // the completed findings into the run.
+    continueAfterResearch: continueMarketingAfterResearch,
   };
+}
+
+/** Re-runs the Hat step after paused research completed (the findings are already in the run). */
+export async function continueMarketingAfterResearch(env: Env, state: WorkState): Promise<WorkState> {
+  if (state.stage !== "awaiting_research") {
+    await sendWorkspaceHatMessage(env, state, "This work isn't waiting on research -- nothing to continue.");
+    return state;
+  }
+  state.stage = "in_progress";
+  await sendWorkspaceHatMessage(env, state, "Research is complete -- drafting with it now.");
+  return dispatchMarketingHat(env, state);
 }
 
 export const marketingManifest: UnitManifest = {

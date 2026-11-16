@@ -1,6 +1,18 @@
 {
   "name": "enig-sales",
-  "version": "0.1.0",
-  "description": "ENIG Isolated Sales plugin foundation. Initial release; no prior plugin baseline exists in this repository.",
-  "author": "martinkpogo"
+  "displayName": "ENIG Sales",
+  "version": "3.3.0",
+  "description": "ENIG's Isolated Sales workspace: one governed skill per Sales stage (enquiry, correspondence, call prep, call evidence with Call Notes, fit assessment, progression with the Sales → Strategy Handoff, Proposal release, client agreements). Explicit approval gates, strict evidence discipline, identity kept to the Registry, and Runtime-conformant attestation scripts. Built on the canonical Isolated Sales specification (LOG-1110, LOG-1140, LOG-1149, LOG-1164).",
+  "author": {
+    "name": "Martin",
+    "email": "africonaikasa@gmail.com"
+  },
+  "keywords": [
+    "enig",
+    "sales",
+    "notion",
+    "gmail",
+    "governance",
+    "crm"
+  ]
 }

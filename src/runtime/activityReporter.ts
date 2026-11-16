@@ -25,13 +25,13 @@ export interface OperationContext {
   parentOperationId?: string;
 }
 
-export function startOperation(
-  _env: Env,
+export async function startOperation(
+  env: Env,
   holder: WorkStatusHolder,
   operationId: string,
   label: string,
   parentOperationId?: string,
-): OperationContext {
+): Promise<OperationContext> {
   const ctx: OperationContext = {
     runId: holder.workId ?? "run",
     holder,
@@ -45,6 +45,7 @@ export function startOperation(
     status.running = status.running ?? [];
     status.running.push({ operationId, label, startedAt: ctx.startedAt });
   }
+  await tryEdit(holder, env);
   return ctx;
 }
 

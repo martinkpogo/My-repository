@@ -1,6 +1,6 @@
 import type { MarketingHatDefinition, MarketingHatName } from "./types";
 import { MARKETING_STRATEGIST } from "../units/marketing/marketingStrategist";
-import { BRAND_COMMUNICATIONS_STRATEGIST } from "../units/marketing/brandCommunicationsStrategist";
+import { CAMPAIGN_MARKETING_COMMUNICATIONS_MANAGER } from "../units/marketing/campaignMarketingCommunicationsManager";
 import { CONTENT_STRATEGIST } from "../units/marketing/contentStrategist";
 import { CONTENT_MANAGER } from "../units/marketing/contentManager";
 import { DIGITAL_MARKETER } from "../units/marketing/digitalMarketer";
@@ -42,6 +42,10 @@ export const SALES_EXECUTIVE: HatIdentity = { name: "Sales Executive", unit: "Sa
 // never a qualification, never a proposal/quote. See leadDiscovery.ts.
 export const LEAD_GENERATION_SPECIALIST: HatIdentity = { name: "Lead Generation Specialist", unit: "Sales", specialization: "Lead Discovery" };
 export const VALUE_BASED_PRICING_ASSESSOR: HatIdentity = { name: "Value-Based Pricing Assessor", unit: "Finance" };
+// Finance's second Hat (2026-11-11): records a payment Martin reports as
+// received, by setting the matching Due Payment row to Paid on his approval
+// of the exact change (financeManifest.ts / paymentsClerk.ts).
+export const PAYMENTS_CLERK: HatIdentity = { name: "Payments Clerk", unit: "Finance", specialization: "Payment Recording" };
 // Strategy's composable-Skills model (ENIG Core Structure v3.0). Strategy
 // Analyst's specialization is "Strategic Assessment & Synthesis" and it is
 // the Unit's ONE organizational Hat: assessment, methodological selection,
@@ -80,7 +84,7 @@ export const BD_GROWTH_MARKET_DEVELOPMENT: HatIdentity = {
 
 export const MARKETING_HAT_REGISTRY: Record<MarketingHatName, MarketingHatDefinition> = {
   "Marketing Strategist": MARKETING_STRATEGIST,
-  "Brand & Communications Strategist": BRAND_COMMUNICATIONS_STRATEGIST,
+  "Campaign & Marketing Communications Manager": CAMPAIGN_MARKETING_COMMUNICATIONS_MANAGER,
   "Content Strategist": CONTENT_STRATEGIST,
   "Content Manager": CONTENT_MANAGER,
   "Digital Marketer": DIGITAL_MARKETER,
@@ -93,6 +97,7 @@ export const ALL_HATS: HatIdentity[] = [
   SALES_EXECUTIVE,
   LEAD_GENERATION_SPECIALIST,
   VALUE_BASED_PRICING_ASSESSOR,
+  PAYMENTS_CLERK,
   STRATEGY_ANALYST,
   BD_OPPORTUNITY_DEVELOPMENT,
   BD_PARTNERSHIP_DEVELOPMENT,

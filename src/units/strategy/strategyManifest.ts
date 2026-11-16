@@ -120,6 +120,22 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     },
     description:
       "Diagnose a Matter/Entity situation (Symptom -> Problem -> Cause -> Constraint -> Consequence) and either develop a governed intervention proposal or route the diagnosis to the responsible Unit. Performs the Matter operational-status advance and the inbound Handoff's own lifecycle progression; commits nothing on another Unit's behalf.",
+    // BD-8: expected Result and completion criteria declared BEFORE
+    // execution, loaded live from this manifest by the Result review gate
+    // (src/resultReview.ts). The no-recommendation diagnosis's successful
+    // inbound-Handoff closure routes through closeHandoffOnResult, and this
+    // Action's delivered stage is a success stage WorkSession.save gates, so
+    // neither can complete until an independent Checker verifies the evidence
+    // against these criteria and Martin approves that exact Result. A
+    // recommendation path never closes the Handoff here (it defers to the
+    // approved commit_diagnosis) and cancellation is unaffected.
+    expectedResult:
+      "A completed strategic diagnosis (Symptom -> Problem -> Cause -> Constraint -> Consequence) grounded only in the approved Call Notes record, delivered to the Workspace, with either a governed intervention proposal developed for Martin's decision or the diagnosis routed to the responsible Unit -- and nothing committed on another Unit's behalf.",
+    completionCriteria: [
+      "The diagnosis covers all five elements (Symptom, Problem, Cause, Constraint, Consequence) and every client fact traces to the approved Call Notes record, never to web research or assumed facts.",
+      "The Work performed only what this Action owns: the Matter operational-status advance and the inbound Handoff's own lifecycle progression -- no other Unit's work was committed.",
+      "A recommendation, when present, was developed into an intervention proposal for Martin's explicit approval; without one, the diagnosis was routed to the responsible Unit or recorded as evidence-insufficient.",
+    ],
     // Multi-Skill Responsibility (the model established for Responsibilities
     // that may be performed with zero, one or multiple Skills -- there is no
     // mandatory primary Skill). `strategy_analysis` is the planning and
@@ -152,6 +168,21 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
     },
     description:
       "Commit an approved Strategy decision as an outbound Work Handoff -- to Finance after an approved intervention proposal, or to the responsible Unit after an approved diagnosis routing. Martin's explicit approval is required: an approved diagnosis is not a routed diagnosis until this Action records it.",
+    // BD-8: expected Result and completion criteria declared BEFORE
+    // execution, loaded live from this manifest by the Result review gate
+    // (src/resultReview.ts). The originating-Handoff's successful closure at
+    // commit time routes through closeHandoffOnResult, so it cannot complete
+    // until an independent Checker verifies the evidence against these
+    // criteria and Martin approves that exact Result. The outbound Handoff
+    // create itself keeps its existing ApprovalProof gate -- this contract
+    // adds no second approval mechanism to it.
+    expectedResult:
+      "An approved Strategy decision recorded as a real outbound Work Handoff carrying the opaque Entity/Matter token entries and the acceptance criteria the responsible Unit needs -- and the originating Handoff closed only now that the approved decision has genuinely transferred onward.",
+    completionCriteria: [
+      "The outbound Work Handoff exists in Notion with its Sources payload carrying the opaque token entries (never a real name, contact detail or other identity-bearing value).",
+      "The commit ran under the staged Martin approval for THIS decision, consumed exactly once (the approval proof minted at commit time authorizes this create and nothing else).",
+      "The originating Handoff was closed only after the outbound Handoff actually exists -- a failed create leaves the originating Handoff open with the reason visible.",
+    ],
   },
 ];
 

@@ -1,5 +1,6 @@
 import { salesOperationStub } from "../../testSupport/salesOperationStub";
 import test from "node:test";
+import { ensureResultReviewContract, evaluateResultReviewGate, recordOutputApprovalAsResultApproval } from "../../resultReview";
 import assert from "node:assert";
 import {
   DISCOVERY_QUERIES,
@@ -1543,7 +1544,17 @@ test("handleLeadOpportunityApproval creates a Lead only on explicit approval", a
   });
 
   const state = fakeOpportunityState({ actionName: "record_lead", sales: { pendingLeadOpportunity: SAMPLE_OPPORTUNITY } });
+  // The Result contract the Work lifecycle loads from the registered Action.
+  const recordLead = salesManifest.hats["Lead Generation Specialist"].actions.find((a) => a.name === "record_lead");
+  ensureResultReviewContract(state, recordLead);
   const updated = await handleLeadOpportunityApproval(fakeEnv(), state, true);
+
+  // Regression (assessment finding, 2026-11-15): an approved Lead's Work must
+  // be able to close. It records the Lead and Martin's approval as Result
+  // evidence, and that approval closes the Work through the BD-8 gate.
+  assert.deepStrictEqual(updated.resultReview?.evidence?.map((e) => e.kind), ["lead_record", "operator_approval"]);
+  assert.strictEqual((await recordOutputApprovalAsResultApproval(updated)).ok, true);
+  assert.deepStrictEqual(await evaluateResultReviewGate(updated), { allowed: true });
 
   assert.strictEqual(updated.sales?.pendingLeadOpportunity, undefined, "pending state must be cleared once decided");
   // Martin's decision (2026-10-12): his approval of THIS candidate, on a Work
@@ -2087,7 +2098,7 @@ test("handleLeadOpportunityApproval: rejecting remembers the organisation for 18
   const memory = (env as any).__kv.get(leadCandidateMemoryKey(SAMPLE_OPPORTUNITY.organisation));
   assert.ok(memory, "the rejection is remembered");
   assert.strictEqual(JSON.parse(memory).status, "rejected");
-  assert.strictEqual(updated.stage, "complete");
+  assert.strictEqual(updated.stage, "cancelled");
 });
 
 test("handleLeadOpportunityApproval: a card whose Work does not record record_lead can never create a Lead (fails closed, nothing written)", async (t) => {

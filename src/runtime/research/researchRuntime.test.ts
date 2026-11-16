@@ -7,9 +7,9 @@ import {
   buildSynthesisPromptParts,
   capResearchText,
   capSuppliedEvidence,
-  executeResearch,
+  runResearchSkill,
   resolveSelectedProtocols,
-} from "./executor";
+} from "./researchRuntime";
 import { AccessDeniedError, discoveryCronContext, workSessionReadContext } from "../../access";
 import type { Env } from "../../types";
 import { RESEARCH_PROTOCOL_REGISTRY, RESEARCH_PROTOCOL_IDS, researchProtocolDetail, isResearchProtocolId, nameToProtocolId } from "./protocols";
@@ -502,12 +502,12 @@ test("EXEC 20. Token/privacy boundaries remain intact: the research-facing conte
 });
 
 // =====================================================================================
-// executeResearch: the stateless research pipeline -- fail-closed outcomes, completion,
+// runResearchSkill: the stateless research pipeline -- fail-closed outcomes, completion,
 // and the boundary guarantees that make it non-organizational.
 // =====================================================================================
 
-const SAFE_CONTEXT_KV_KEY = "governance:3ddcb004-e583-81e5-b30a-db8cba543823";
-const ROLE_CONTRACT_KV_KEY = "governance:3ddcb004-e583-8161-96ba-cdec357c5b5b";
+const SAFE_CONTEXT_KV_KEY = "governance:413cb004-e583-81aa-8dc0-d1e1576022db";
+const ROLE_CONTRACT_KV_KEY = "governance:413cb004-e583-817d-bdca-ede843a85033";
 const UNIVERSAL_CONTRACT_KV_KEY = "governance:3cecb004-e583-81ee-8f1e-f0d58532f4aa";
 
 function researchEnv(ai: unknown, governance: Record<string, string> = {}): Env {
@@ -528,8 +528,11 @@ function researchEnv(ai: unknown, governance: Record<string, string> = {}): Env 
 }
 
 interface ResearchScript {
-  relevance?: unknown;
+  /** Replaces the whole interpretation-and-selection answer. */
+  interpretation?: unknown;
+  /** Merged over a valid relevance: the selection fields only. */
   selection?: unknown;
+  interpretCalls?: number;
   plan?: unknown;
   synthesis?: unknown;
   seenSystemPrompts?: string[];
@@ -541,11 +544,15 @@ function scriptedAi(script: ResearchScript): unknown {
       const system = String(opts?.messages?.[0]?.content ?? "");
       script.seenSystemPrompts?.push(system);
       const respond = (value: unknown) => ({ response: JSON.stringify(value) });
-      if (system.includes("what the question means in relation to this authorized category")) {
-        return respond(script.relevance ?? { relevance: "A market-structure question for a strategy-led consultancy in Ghana." });
-      }
-      if (system.includes("You select research protocol(s)")) {
-        return respond(script.selection ?? { protocols: ["Market / Industry Research"], ambiguous: false, reason: "Broad market question." });
+      // One call interprets the question and selects protocol(s) (Martin's
+      // decision 2026-11-14, option D -- formerly two calls).
+      if (system.includes("You interpret a research question and select research protocol(s)")) {
+        script.interpretCalls = (script.interpretCalls ?? 0) + 1;
+        if (script.interpretation !== undefined) return respond(script.interpretation);
+        return respond({
+          relevance: "A market-structure question for a strategy-led consultancy in Ghana.",
+          ...((script.selection as object | undefined) ?? { protocols: ["Market / Industry Research"], ambiguous: false, reason: "Broad market question." }),
+        });
       }
       if (system.includes("You generate a bounded research plan")) {
         return respond(script.plan ?? { dimensions: [{ subQuestion: "What is the size of the consulting market in Ghana?" }] });
@@ -581,7 +588,7 @@ test("EXEC 10. Missing/invalid safe context blocks execution fail-closed -- SAFE
   };
   const env = researchEnv(forbiddenAi, { [SAFE_CONTEXT_KV_KEY]: "" });
 
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
 
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "SAFE_CONTEXT_UNAVAILABLE");
@@ -612,17 +619,38 @@ test("EXEC 10b. A cached-but-wrong safe context (log-entry-shaped text without t
   const env = researchEnv(forbiddenAi, { [SAFE_CONTEXT_KV_KEY]: logEntryShapedText });
 
   assert.strictEqual(isValidSafeContext(logEntryShapedText), false, "the fixture must fail the STRUCTURAL validation, not the length check");
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
 
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "SAFE_CONTEXT_UNAVAILABLE");
   assert.strictEqual(fetchCalls.length, 0, "a wrong cached context fails closed on what governance returned -- no silent Notion re-fetch, no substitute page");
 });
 
+test("EXEC 10c. Interpretation and protocol selection are ONE AI call (Martin, 2026-11-14, option D), and the interpretation still reaches the research plan", async () => {
+  const script: ResearchScript = { seenSystemPrompts: [] };
+  const outcome = await runResearchSkill(researchEnv(scriptedAi(script)), { question: QUESTION, context: "" }, discoveryCronContext());
+  assert.strictEqual(script.interpretCalls, 1);
+  assert.strictEqual(outcome.status, "completed");
+  const planPrompt = script.seenSystemPrompts!.find((p) => p.includes("You generate a bounded research plan")) ?? "";
+  assert.ok(planPrompt.includes("A market-structure question for a strategy-led consultancy in Ghana."), "the plan is grounded in the interpretation");
+});
+
+test("EXEC 10d. No usable interpretation still blocks as RELEVANCE_DERIVATION_FAILED; no protocol list still blocks as PROTOCOL_SELECTION_FAILED", async () => {
+  for (const [interpretation, code] of [
+    [{ protocols: ["Market / Industry Research"], ambiguous: false }, "RELEVANCE_DERIVATION_FAILED"],
+    [{ relevance: "   ", protocols: ["Market / Industry Research"] }, "RELEVANCE_DERIVATION_FAILED"],
+    [{ relevance: "A market question.", ambiguous: false }, "PROTOCOL_SELECTION_FAILED"],
+  ] as const) {
+    const outcome = await runResearchSkill(researchEnv(scriptedAi({ interpretation })), { question: QUESTION, context: "" }, discoveryCronContext());
+    assert.strictEqual(outcome.status, "blocked");
+    if (outcome.status === "blocked") assert.strictEqual(outcome.code, code);
+  }
+});
+
 test("EXEC 11. An ambiguous protocol selection blocks as AMBIGUOUS_PROTOCOL_SELECTION and carries the model's own reason -- never a guessed protocol", async () => {
   const env = researchEnv(scriptedAi({ selection: { protocols: ["Competitive Research"], ambiguous: true, reason: "Unclear whether this is about competitors or the whole market." } }));
 
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
 
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") {
@@ -633,14 +661,14 @@ test("EXEC 11. An ambiguous protocol selection blocks as AMBIGUOUS_PROTOCOL_SELE
 
 test("EXEC 12. A selection naming no registered protocol blocks as AMBIGUOUS_PROTOCOL_SELECTION rather than defaulting to the nearest one", async () => {
   const env = researchEnv(scriptedAi({ selection: { protocols: ["Random Keyword"], ambiguous: false } }));
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "AMBIGUOUS_PROTOCOL_SELECTION");
 });
 
 test("EXEC 13. A failed research plan blocks as PLAN_GENERATION_FAILED (the stage is load-bearing)", async () => {
   const env = researchEnv(scriptedAi({ plan: { dimensions: [] } }));
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "PLAN_GENERATION_FAILED");
 });
@@ -652,7 +680,7 @@ test("EXEC 14. Missing role governance blocks as GOVERNANCE_UNAVAILABLE instead 
     globalThis.fetch = originalFetch;
   });
   const env = researchEnv(scriptedAi({}), { [ROLE_CONTRACT_KV_KEY]: "" });
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "GOVERNANCE_UNAVAILABLE");
 });
@@ -661,7 +689,7 @@ test("EXEC 15. An honest, empty synthesis completes -- sources/findings empty wi
   const env = researchEnv(scriptedAi({}));
   const progress: string[] = [];
 
-  const outcome = await executeResearch(env, { question: QUESTION, context: "", onProgress: (text) => void progress.push(text) }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "", onProgress: (text) => void progress.push(text) }, discoveryCronContext());
 
   assert.strictEqual(outcome.status, "completed");
   if (outcome.status === "completed") {
@@ -682,7 +710,7 @@ test("EXEC 16. A synthesis citing a source absent from the supplied context is b
     limitations: [],
   };
   const env = researchEnv(scriptedAi({ synthesis: fabricated }));
-  const outcome = await executeResearch(env, { question: QUESTION, context: "Nothing relevant was supplied." }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "Nothing relevant was supplied." }, discoveryCronContext());
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "UNVERIFIABLE_SOURCES");
 });
@@ -696,7 +724,7 @@ test("EXEC 17. A well-grounded synthesis (source literally present in the suppli
     limitations: [],
   };
   const env = researchEnv(scriptedAi({ synthesis: grounded }));
-  const outcome = await executeResearch(env, { question: QUESTION, context: "Per the Ghana Services Survey 2024, consulting demand grew." }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "Per the Ghana Services Survey 2024, consulting demand grew." }, discoveryCronContext());
   assert.strictEqual(outcome.status, "completed");
   if (outcome.status === "completed") assert.strictEqual(outcome.synthesis.findings.length, 1);
 });
@@ -704,25 +732,25 @@ test("EXEC 17. A well-grounded synthesis (source literally present in the suppli
 test("EXEC 18. A synthesis with a broken citation chain is blocked as SYNTHESIS_INVALID", async () => {
   const broken = { sources: [], evidence: [], findings: [{ id: "f1", statement: "Unsupported conclusion", evidenceIds: [] }], implications: [], limitations: [] };
   const env = researchEnv(scriptedAi({ synthesis: broken }));
-  const outcome = await executeResearch(env, { question: QUESTION, context: "" }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "" }, discoveryCronContext());
   assert.strictEqual(outcome.status, "blocked");
   if (outcome.status === "blocked") assert.strictEqual(outcome.code, "SYNTHESIS_INVALID");
 });
 
 test("EXEC 19. Declared Skill methodology is passed through to synthesis when the caller supplies it, and absent otherwise -- the executor never resolves a Skill itself", async () => {
   const withSkill: string[] = [];
-  await executeResearch(researchEnv(scriptedAi({ seenSystemPrompts: withSkill })), { question: QUESTION, context: "", skillContent: "SKILL_METHODOLOGY_MARKER" }, discoveryCronContext());
+  await runResearchSkill(researchEnv(scriptedAi({ seenSystemPrompts: withSkill })), { question: QUESTION, context: "", skillContent: "SKILL_METHODOLOGY_MARKER" }, discoveryCronContext());
   assert.ok(withSkill.some((p) => p.includes("SKILL_METHODOLOGY_MARKER")), "caller-declared Skill content reaches the synthesis prompt");
 
   const withoutSkill: string[] = [];
-  await executeResearch(researchEnv(scriptedAi({ seenSystemPrompts: withoutSkill })), { question: QUESTION, context: "" }, discoveryCronContext());
+  await runResearchSkill(researchEnv(scriptedAi({ seenSystemPrompts: withoutSkill })), { question: QUESTION, context: "" }, discoveryCronContext());
   assert.ok(!withoutSkill.some((p) => p.includes("SKILL_METHODOLOGY_MARKER")));
   assert.ok(!withoutSkill.some((p) => p.includes("REUSABLE METHODOLOGY")), "no methodology section is invented when no Skill was declared");
 });
 
 test("EXEC 20. A throwing progress hook never fails the research it reports on", async () => {
   const env = researchEnv(scriptedAi({}));
-  const outcome = await executeResearch(env, { question: QUESTION, context: "", onProgress: () => { throw new Error("cosmetic hook failure"); } }, discoveryCronContext());
+  const outcome = await runResearchSkill(env, { question: QUESTION, context: "", onProgress: () => { throw new Error("cosmetic hook failure"); } }, discoveryCronContext());
   assert.strictEqual(outcome.status, "completed");
 });
 
@@ -756,7 +784,7 @@ test("EXEC 22. No protocol creates a second execution mechanism -- no per-protoc
 });
 
 test(
-  "EXEC 23. Access denial at the search egress propagates OUT of executeResearch as a typed AccessDeniedError -- the shared invocation boundary never converts it into a blocked/completed outcome or provider_failure, and no provider request leaves the runtime",
+  "EXEC 23. Access denial at the search egress propagates OUT of runResearchSkill as a typed AccessDeniedError -- the shared invocation boundary never converts it into a blocked/completed outcome or provider_failure, and no provider request leaves the runtime",
   async (t) => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: string[] = [];
@@ -772,7 +800,7 @@ test(
     // return provider_unavailable BEFORE Access runs -- the wrong outcome
     // under test. Governance KV is seeded exactly as EXEC 15's full-pipeline
     // run, so the pipeline executes all the way to the search egress
-    // (executeResearch's only use of `access`, at the gatherDimensionEvidence
+    // (runResearchSkill's only use of `access`, at the gatherDimensionEvidence
     // call) where the denial must surface.
     const env: Env = { ...researchEnv(scriptedAi({})), TAVILY_API_KEY: "key" };
 
@@ -780,10 +808,10 @@ test(
     // refusal: a Work that records no Action may read ENIG's own records but
     // is deliberately NOT authorized to disclose a query to a third party.
     await assert.rejects(
-      () => executeResearch(env, { question: QUESTION, context: "" }, workSessionReadContext("work-denied")),
+      () => runResearchSkill(env, { question: QUESTION, context: "" }, workSessionReadContext("work-denied")),
       (err: unknown) =>
         err instanceof AccessDeniedError && /records no Action|outbound read/.test(String((err as Error).message)),
-      "the typed denial must reach the executeResearch caller -- never swallowed into a blocked ResearchOutcome, an empty-but-completed run, or a provider_failure",
+      "the typed denial must reach the runResearchSkill caller -- never swallowed into a blocked ResearchOutcome, an empty-but-completed run, or a provider_failure",
     );
 
     // Distinguishability proof from this boundary's other results: any

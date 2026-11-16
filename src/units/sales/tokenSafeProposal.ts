@@ -25,6 +25,8 @@ import {
 import { mintApprovalProofForWork, workSessionContext, workSessionReadContext } from "../../access";
 import { recordWorkAction } from "../dispatch";
 import { updateHandoff, findIdentityViolation, type HandoffIdentity } from "../../handoffWriter";
+import { closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
 import { buildProposalDocLayout } from "../../proposalRedline";
@@ -1011,13 +1013,34 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     }
     salesOf(state).proposal = sp;
     if (status !== "Closed") {
-      await updateHandoff(
+      // BD-13: record the Result evidence before the closure -- the
+      // independent Machinery Worker verification judges the declared
+      // criteria against exactly this set.
+      await recordResultEvidence(state, [
+        {
+          kind: "proposal_record",
+          ref: sp.proposalId,
+          note: "the canonical token-safe Proposal this Result delivers (idempotent reprocess)",
+          content: `Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} (${sp.approvalStatus}). Handoff ${sp.handoffRef}.${sp.facts ? ` Quote ${formatMoney(sp.facts.quote.currency, sp.facts.quote.price)}.` : ""}`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+        },
+      ]).then((rec) => {
+        if (!rec.ok) console.error(`Runtime Sales Proposal: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+      });
+      // BD-8: this idempotent reprocess's successful closure routes through
+      // the one generic Result review gate. A refusal leaves the Handoff
+      // exactly as it is (it is not Closed), so a later reprocess simply
+      // retries -- and the refusal reason is surfaced below.
+      const closure = await closeHandoffOnResult(
         env,
+        state,
         handoffId,
-        { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} recorded (${sp.approvalStatus}).`) },
+        `Token-safe Proposal ${sp.proposalId} ${versionLabel(sp.currentVersion)} recorded (${sp.approvalStatus}).`,
         workSessionContext(state),
         tokens,
       );
+      if (!closure.closed) {
+        console.error(`Runtime Sales Proposal: Handoff ${handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+      }
     }
     await logActivity(env, {
       entry: `Runtime Sales Proposal reprocessed — no new record: ${sp.proposalId} ${versionLabel(sp.currentVersion)}`,
@@ -1187,13 +1210,37 @@ export async function handleProposalHandoffPickup(env: Env, state: WorkState, _s
     );
   }
 
-  await updateHandoff(
+  // BD-13: record the Result evidence before the closure -- the independent
+  // Machinery Worker verification judges the declared criteria against
+  // exactly this set (the canonical Doc verified as this exact Version is
+  // the load-bearing evidence).
+  await recordResultEvidence(state, [
+    {
+      kind: "proposal_record",
+      ref: proposalId,
+      note: "the created, Doc-verified, auto-approved token-safe Proposal this Result delivers",
+      content: `Proposal ${proposalId} ${versionLabel(1)}, Doc verified: ${outcome.url}. Content SHA-256 ${contentHash}. Handoff ${facts.handoffRef}. Quote ${formatMoney(facts.quote.currency, facts.quote.price)}.`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+    },
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Runtime Sales Proposal: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
+
+  // BD-8: this SUCCESSFUL closure (Doc verified, Proposal created) routes
+  // through the one generic Result review gate. A refusal leaves the Handoff
+  // exactly as it is and is surfaced below; the non-success Doc-failure
+  // closure above keeps its own direct write -- it never claims a completed
+  // Result and is deliberately not gated.
+  const successClosure = await closeHandoffOnResult(
     env,
+    state,
     handoffId,
-    { Status: select("Closed"), "Work Completed": richText(`Token-safe Proposal ${proposalId} ${versionLabel(1)} created, Doc verified, and auto-approved.`) },
+    `Token-safe Proposal ${proposalId} ${versionLabel(1)} created, Doc verified, and auto-approved.`,
     workSessionContext(state),
     tokens,
   );
+  if (!successClosure.closed) {
+    console.error(`Runtime Sales Proposal: Handoff ${handoffId} NOT closed -- Result review gate refused: ${successClosure.reason}`);
+  }
   await logActivity(env, {
     entry: `Runtime Sales Proposal created: ${proposalId} ${versionLabel(1)} — ${matterToken}`,
     type: "Activity",

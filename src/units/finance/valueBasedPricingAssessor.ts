@@ -10,7 +10,8 @@ import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import type { HandoffContextEvaluationResult } from "../../dataBoundary/types";
 import { resolveHandoffContextBinding, sourcesRichText } from "../../handoffSources";
-import { claimPendingHandoff } from "../../handoffLifecycle";
+import { claimPendingHandoff, closeHandoffOnResult } from "../../handoffLifecycle";
+import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { createHandoff, updateHandoff } from "../../handoffWriter";
 import { STRATEGY_BOUNDARY_START, STRATEGY_BOUNDARY_END } from "../../handoffContracts/strategyBoundary";
 import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContracts/financeJudgment";
@@ -690,16 +691,35 @@ async function judgeQuote(
   const currency = judgement!.currency!;
   const rationale = judgement!.rationale ?? "";
 
+  // BD-13: record the Result evidence before the closure -- the independent
+  // Machinery Worker verification judges the declared criteria against
+  // exactly this set (captured before any transient copy is discarded).
+  await recordResultEvidence(state, [
+    {
+      kind: "pricing_judgment",
+      ref: `${state.workId}-quote`,
+      note: "the value-based pricing judgment this Result delivers",
+      content: `Quoted price: ${currency} ${price}. Rationale: ${rationale}\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}`.slice(0, MAX_RESULT_EVIDENCE_CONTENT_CHARS),
+    },
+  ]).then((rec) => {
+    if (!rec.ok) console.error(`Finance: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
+  });
+
   if (state.handoffId) {
-    await updateHandoff(env, state.handoffId, {
-      Status: select("Closed"),
-      "Work Completed": richText(
-        `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(
-          0,
-          1900,
-        ),
-      ),
-    }, financeAccess(state));
+    // BD-8: the successful closure of this Work's own inbound Handoff routes
+    // through the one generic Result review gate. A refusal leaves the
+    // Handoff exactly as it is and is surfaced below -- the quote write-back
+    // below still happens, but the Handoff is never closed unchecked.
+    const closure = await closeHandoffOnResult(
+      env,
+      state,
+      state.handoffId,
+      `Quoted price: ${currency} ${price}. Rationale: ${rationale}\n\nEvidence quality: ${judgement!.evidence_quality_assessment ?? ""}\nIntervention assessed: ${judgement!.intervention_assessment ?? ""}\nDelivery floor: ${judgement!.delivery_floor_rationale ?? ""}\nMarket modifiers: ${judgement!.market_modifiers_applied ?? ""}`.slice(0, 1900),
+      financeAccess(state),
+    );
+    if (!closure.closed) {
+      console.error(`Finance: quote Handoff ${state.handoffId} NOT closed -- Result review gate refused: ${closure.reason}`);
+    }
   }
   await logActivity(env, {
     entry: `Quote judged: ${currency} ${price} — ${matterToken}`,

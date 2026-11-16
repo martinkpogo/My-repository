@@ -3,7 +3,7 @@ import type { Env, WorkState, SessionSummary, Unit } from "./types";
 import { handleMarketingIntake } from "./units/marketing/marketingManifest";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
-import { installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
+import { getResearchCheckpointStore, installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
 import {
   runGoogleDocsSmoke as runGoogleDocsSmokeOperation,
   GOOGLE_DOCS_SMOKE_CHAT_ID,
@@ -13,9 +13,31 @@ import {
 import { confirmGoogleDocsSmoke } from "./googleDocsSmokeFlow";
 import { SkillResolutionError, type ResolvedActionSkillSet } from "./platform/skillRegistry";
 import { sendMessage, sendOperationsMessage } from "./telegram";
+import { researchOnline, saveDeepResearchFindings, seedRunResearchFindings } from "./runtime/webResearch";
+import { RESEARCH_WORK_CALLBACK, retryTimeLabel } from "./runtime/webLookupAllowance";
+import { runDeepResearchSkill, runResearchSkill } from "./runtime/research/researchRuntime";
+import { resolveRuntimeSkill } from "./runtime/actionSkills";
+import {
+  beginOperatorResearch,
+  completeOperatorResearch,
+  DEFAULT_OPERATOR_RESEARCH_DEPS,
+  failOperatorResearch,
+  handleOperatorResearchButton,
+  handleOperatorResearchReply,
+  OPERATOR_RESEARCH_AWAITING,
+  OPERATOR_RESEARCH_CALLBACK,
+  type OperatorResearchMode,
+} from "./runtime/operatorResearch";
+import { summarizeResearchSynthesis } from "./runtime/actionResearch";
+import type { PendingResearch } from "./runtime/research/types";
+import { withLiveStatus } from "./runtime/liveStatus";
+import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./runtime/workStatus";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { migrateSavedWork } from "./workStateMigration";
+import { hashContent } from "./contentHash";
+import type { ActionDefinition } from "./hats/actionRegistry";
+import { advisoryAssessmentDeps, assessmentDelivery, formatAdvisoryMessage, runAdvisoryAssessment, summarizeAssessment } from "./runtime/advisoryAssessment";
 import { runUnitOperationOnWork } from "./units/unitOperations";
 import { resolveAwaitingHandler } from "./units/awaitingDispatch";
 import { logActivity } from "./log";
@@ -25,16 +47,49 @@ import {
   handleGoogleActionApproval,
 } from "./googleOAuth";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
-import { closeHandoffIfOpen } from "./handoffLifecycle";
+import { closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
+import {
+  applyResultReviewGate,
+  ensureResultReviewContract,
+  isSuccessfulResultStage,
+  resolveResultReviewApprovalDecision,
+  RESULT_REVIEW_BLOCKED_STAGE,
+  recordOutputApprovalAsResultApproval,
+  stageResultReviewApproval,
+  resultReviewCallbackData,
+} from "./resultReview";
+import type { InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
 import { recordWorkAction } from "./units/dispatch";
-import { workSessionContext } from "./access";
+import { operatorResearchContext, workSessionContext } from "./access";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 import { strategyOf } from "./units/strategy/strategyState";
+const RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE =
+  "✅ Result accepted. You approved this exact output as the last step, and the independent check passed, so no second Result approval is needed. The Work may close once saved.";
+
+/** The storage flag that arms the Checker's advisory assessment for alarm(). */
+const PENDING_ADVISORY_ASSESSMENT_KEY = "pendingAdvisoryAssessment";
+/** A paused research job this Work resumes on its alarm (option B). */
+const PENDING_RESEARCH_KEY = "pendingResearch";
+/** The last completed research job, for the Continue / Deep research buttons. */
+const COMPLETED_RESEARCH_KEY = "completedResearch";
+/** How long after the draft is saved the assessment's alarm fires. */
+const ADVISORY_ASSESSMENT_DELAY_MS = 2_000;
+
+/** Restores the success stage a Work was refused from, once its Result review is satisfied (shared by the approval callback, Re-check and the output-approval path). */
+function restoreResultReviewBlockedStage(state: WorkState): void {
+  const review = state.resultReview;
+  if (review?.preBlockStage && state.stage === RESULT_REVIEW_BLOCKED_STAGE) {
+    state.stage = review.preBlockStage;
+    review.preBlockStage = undefined;
+    state.blockedReason = undefined;
+  }
+}
+
 export class WorkSession extends DurableObject<Env> {
   /**
    * Creates the Work. `matterId`/`matterToken` are the ALREADY-RESOLVED
@@ -181,8 +236,22 @@ export class WorkSession extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Starts Martin-started research on this (Unit-less) Work: /research or
+   * /deep_research (Build Decision, 15 Nov 2026). The shared Research Runtime
+   * operated directly -- no Unit, Hat or Action; see operatorResearch.ts.
+   */
+  async startOperatorResearch(mode: OperatorResearchMode, topic: string): Promise<WorkState> {
+    return this.execute((state) => beginOperatorResearch(this.env, state, mode, topic, DEFAULT_OPERATOR_RESEARCH_DEPS));
+  }
+
   async handleTextReply(text: string): Promise<WorkState> {
     return this.execute((state) => {
+      // A Martin-started research Work is owned by no Hat, so its reply
+      // state is the shared research flow's own, not a manifest's.
+      if (state.operatorResearch && state.awaiting === OPERATOR_RESEARCH_AWAITING) {
+        return handleOperatorResearchReply(this.env, state, text, DEFAULT_OPERATOR_RESEARCH_DEPS);
+      }
       // Every awaiting state resolves through the owning Hat's own
       // awaitingHandlers in its Unit's manifest (the hardcoded switch is
       // gone -- each case was moved to its Unit's manifest entry first,
@@ -240,6 +309,139 @@ export class WorkSession extends DurableObject<Env> {
     } catch (err) {
       const state = await this.getState().catch(() => undefined);
       await notifyMartinOfDiscoveryFailure(this.env, state?.handoffId ?? "(unknown)", err);
+    }
+    // The Checker's advisory second opinion, scheduled by execute() (see
+    // scheduleAdvisoryAssessment). Never throws and never blocks a pickup.
+    await this.runPendingAdvisoryAssessment();
+    // A research job paused because providers were busy (option B). Never throws.
+    await this.runPendingResearch();
+  }
+
+  /**
+   * Records a research job to resume in the background and arms this Work's
+   * alarm for it (option B, Martin 15 Nov 2026). Only the research resumes --
+   * no Hat step is re-run. One alarm serves every pending task, so an earlier
+   * alarm is never pushed later.
+   */
+  private async schedulePendingResearch(pending: PendingResearch): Promise<void> {
+    await this.ctx.storage.put(PENDING_RESEARCH_KEY, pending);
+    const at = Math.max(Date.now() + 1000, pending.retryAt ? Date.parse(pending.retryAt) || 0 : 0);
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || existing > at) await this.ctx.storage.setAlarm(at);
+  }
+
+  /**
+   * Deep Research in the background, explicitly requested by Martin's tap
+   * (BD-16). Runs inside this Work's execution with its checkpoint store;
+   * interrupted again -> re-armed; complete -> findings saved for 24 hours.
+   */
+  private async resumeDeepResearch(state: WorkState, pending: PendingResearch): Promise<{ digest: string; gaps: string[] } | null> {
+    const checkpoints = getResearchCheckpointStore(String(state.workId));
+    const outcome = await runDeepResearchSkill(this.env, { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) }, workSessionContext(state));
+    if (outcome.status === "interrupted") {
+      await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
+      const when = retryTimeLabel(outcome.retryAt);
+      await sendMessage(this.env, state.chatId, `⏸ Deep research paused: providers are busy.${when ? ` It resumes on its own around ${when}.` : " It resumes on its own shortly."}`, undefined, state.threadId);
+      return null;
+    }
+    if (outcome.status !== "completed") {
+      await sendMessage(this.env, state.chatId, `Deep research could not be completed: ${outcome.reason}`, undefined, state.threadId);
+      return null;
+    }
+    const result = { digest: summarizeResearchSynthesis(outcome.synthesis), gaps: outcome.synthesis.limitations.map((l) => l.statement) };
+    await saveDeepResearchFindings(this.env, pending.question, result);
+    return result;
+  }
+
+  /**
+   * Martin's research buttons on this Work (option B / BD-16): "continue"
+   * feeds the completed findings into the run and continues through the
+   * Hat's own redo path; "deep" starts Deep Research on the same question in
+   * the background. Never selected automatically.
+   */
+  private async handleResearchButton(state: WorkState, value: string): Promise<WorkState> {
+    const say = (text: string) => sendMessage(this.env, state.chatId, text, undefined, state.threadId).then(() => state);
+    const completed = await this.ctx.storage.get<{ question: string; mode: PendingResearch["mode"] }>(COMPLETED_RESEARCH_KEY);
+    const pending = await this.ctx.storage.get<PendingResearch>(PENDING_RESEARCH_KEY);
+    if (value === "deep") {
+      const question = completed?.question ?? pending?.question;
+      if (!question) return say("There is no research question on this work to research more deeply.");
+      await this.schedulePendingResearch({ question, mode: "deep_research" });
+      return say("🔬 Deep research started in the background. You'll get a message when it's complete.");
+    }
+    if (value === "continue") {
+      const hat = state.unit && state.hat ? findUnitManifest(state.unit)?.hats[state.hat] : undefined;
+      if (!completed || state.stage !== "awaiting_research" || !hat?.continueAfterResearch) return say("This work isn't waiting to continue after research -- nothing was run.");
+      if (!(await seedRunResearchFindings(this.env, completed.question))) return say("The saved research has expired. Ask again to research it afresh.");
+      await this.ctx.storage.delete(COMPLETED_RESEARCH_KEY);
+      return this.runUnderRecordedSkills(state, () => hat.continueAfterResearch!(this.env, state));
+    }
+    return say("That research button is not recognised -- nothing was run.");
+  }
+
+  /**
+   * Runs (or resumes) a Martin-started research job under the bounded
+   * operator_research Access context. Interrupted -> re-armed on this Work's
+   * alarm, exactly as BD-19; complete -> findings card and Research page.
+   */
+  private async runOperatorResearch(state: WorkState, pending: PendingResearch): Promise<WorkState> {
+    const access = operatorResearchContext(String(state.workId));
+    const checkpoints = getResearchCheckpointStore(String(state.workId));
+    const input = { question: pending.question, context: pending.context ?? "", ...(checkpoints ? { checkpoints } : {}) };
+    const outcome =
+      pending.mode === "deep_research"
+        ? await runDeepResearchSkill(this.env, input, access)
+        : await runResearchSkill(this.env, { ...input, skillContent: resolveRuntimeSkill("research_signal").content }, access);
+    if (outcome.status === "interrupted") {
+      await this.schedulePendingResearch({ ...pending, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) });
+      const when = retryTimeLabel(outcome.retryAt);
+      await sendMessage(this.env, state.chatId, `⏸ Research paused: providers are busy (${outcome.completedOperations} of ${outcome.totalOperations} steps done).${when ? ` It resumes on its own around ${when}.` : " It resumes on its own shortly."}`, undefined, state.threadId);
+      return state;
+    }
+    if (outcome.status === "completed") return completeOperatorResearch(this.env, state, outcome.synthesis, DEFAULT_OPERATOR_RESEARCH_DEPS);
+    return failOperatorResearch(this.env, state, outcome.reason, DEFAULT_OPERATOR_RESEARCH_DEPS);
+  }
+
+  /**
+   * Resumes a paused research job from its checkpoint, inside this Work's own
+   * execution (so its checkpoint store, Access and live status apply). Still
+   * busy -> it pauses and re-arms itself (bounded by the 24-hour pause limit
+   * in the Research Runtime). Complete -> the findings are saved (24-hour
+   * research cache) and Martin is told they are ready for the draft.
+   */
+  private async runPendingResearch(): Promise<void> {
+    try {
+      const pending = await this.ctx.storage.get<PendingResearch>(PENDING_RESEARCH_KEY);
+      if (!pending) return;
+      const due = pending.retryAt ? Date.parse(pending.retryAt) : 0;
+      if (Number.isFinite(due) && due > Date.now() + 1000) {
+        // The alarm fired for another task first: wait for this job's own time.
+        await this.schedulePendingResearch(pending);
+        return;
+      }
+      await this.ctx.storage.delete(PENDING_RESEARCH_KEY); // a re-fired alarm never resumes twice
+      await this.execute(async (state) => {
+        if (state.operatorResearch) return this.runOperatorResearch(state, pending);
+        const found = pending.mode === "deep_research" ? await this.resumeDeepResearch(state, pending) : await researchOnline(this.env, pending.question, workSessionContext(state));
+        if (!found) return state;
+        await this.ctx.storage.put(COMPLETED_RESEARCH_KEY, { question: pending.question, mode: pending.mode });
+        const hat = state.unit && state.hat ? findUnitManifest(state.unit)?.hats[state.hat] : undefined;
+        const canContinue = state.stage === "awaiting_research" && Boolean(hat?.continueAfterResearch);
+        const buttons: InlineButton[][] = [
+          ...(canContinue ? [[{ text: "▶️ Continue to draft", callback_data: `${RESEARCH_WORK_CALLBACK}:${state.workId}:continue` }]] : []),
+          ...(pending.mode === "light_search" ? [[{ text: "🔬 Deep research", callback_data: `${RESEARCH_WORK_CALLBACK}:${state.workId}:deep` }]] : []),
+        ];
+        await sendMessage(
+          this.env,
+          state.chatId,
+          `✅ ${pending.mode === "deep_research" ? "Deep research" : "The web research"} for this work is complete and saved for 24 hours.\n\n${found.digest}\n\n${canContinue ? "Tap Continue to draft with it." : "Redo the draft (or ask again) and it will use these findings."}`,
+          buttons.length ? buttons : undefined,
+          state.threadId,
+        );
+        return state;
+      });
+    } catch (err) {
+      console.error(`WorkSession: resuming paused research failed`, err);
     }
   }
 
@@ -442,6 +644,69 @@ export class WorkSession extends DurableObject<Env> {
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
+        case RESEARCH_WORK_CALLBACK:
+          return this.handleResearchButton(state, value);
+        case OPERATOR_RESEARCH_CALLBACK:
+          // Martin-started research (owned by no Hat): its brief buttons.
+          return handleOperatorResearchButton(this.env, state, value, DEFAULT_OPERATOR_RESEARCH_DEPS).then(async ({ state: next, schedule }) => {
+            if (schedule) await this.schedulePendingResearch(schedule);
+            return next;
+          });
+        case "resultreview": {
+          // Kernel-owned Work lifecycle, same class as the three
+          // infrastructure prefixes above: Martin's Result-review decision
+          // (BD-8 condition 3) returns through this verified callback, never
+          // through free text. The value carries the staged card's own token
+          // plus the decision; resolveResultReviewApprovalDecision consumes
+          // the staged approval as it records the decision, so a replayed
+          // button finds nothing left to consume.
+          // The button carries the Work id in the routing slot (index.ts
+          // splits callback_data as action:workId:value) and, in the value,
+          // a one-letter kind plus the staged card's token prefix -- the
+          // earlier `resultreview:<token>:<decision>` shape put the token
+          // where the Work id belongs and could never reach this Work
+          // (2026-11-14). "c" is Martin's Re-check of a blocked Work.
+          const kind = value.charAt(0);
+          if (kind === "c") return this.recheckResultReview(state);
+          const fullToken = state.resultReview?.pendingApproval?.token;
+          const prefix = value.slice(1);
+          if ((kind !== "a" && kind !== "r") || !prefix) {
+            return sendMessage(this.env, state.chatId, "That Result review button is malformed -- nothing was recorded.", undefined, state.threadId).then(() => state);
+          }
+          // A prefix that does not match the staged card is passed through
+          // unchanged so the shared resolver refuses it with its own reason.
+          const token = fullToken && fullToken.startsWith(prefix) ? fullToken : prefix;
+          return resolveResultReviewApprovalDecision(state, { approved: kind === "a", token }).then(
+            (outcome) => {
+              if (!outcome.ok) {
+                return sendMessage(this.env, state.chatId, `This Result review decision was already resolved or does not match the current card -- nothing was recorded. (${outcome.reason})`, undefined, state.threadId).then(() => state);
+              }
+              state.pendingActionSummary = undefined;
+              if (outcome.approval) {
+                // BD-8/BD-13 recovery: a Work refused into
+                // `result_review_blocked` remembered the success stage it was
+                // refused FROM (preBlockStage, recorded by
+                // applyResultReviewGate). Martin's recorded Result approval
+                // is what restores it -- a blocked stage is deliberately not
+                // a success stage, so without this the gate would never look
+                // at the Work again after the one refusal and the refused
+                // Handoff closure (pendingClosure) would never be retried.
+                // The restored stage flows into save(), which re-evaluates
+                // the gate (now satisfied) and completes the pending
+                // closure.
+                restoreResultReviewBlockedStage(state);
+              }
+              const reply = outcome.approval
+                ? "✅ Result approved. The approval is recorded against this exact Result, criteria and Checker verdict; the Work may close once saved."
+                : "❌ Result rejected. The rejection is recorded and the Work stays open with the reason visible.";
+              return sendMessage(this.env, state.chatId, reply, undefined, state.threadId).then(() => state);
+            },
+            (err) => {
+              console.error(`WorkSession ${state.workId}: resultreview callback failed`, err);
+              return sendMessage(this.env, state.chatId, "The Result review decision could not be recorded -- nothing was changed.", undefined, state.threadId).then(() => state);
+            },
+          );
+        }
         default: {
           // Generic manifest lookup for an approval-callback prefix a Hat
           // has migrated onto HatManifest.callbackHandlers -- checked only
@@ -524,6 +789,19 @@ export class WorkSession extends DurableObject<Env> {
     return outcome.result;
   }
 
+  /**
+   * The Result contract (BD-8) the Work's OWN recorded Action declares, read
+   * live from the registered manifest -- never hard-coded, never asserted by
+   * the caller. Returns undefined for a Work that records no registered
+   * Action; the gate then refuses its successful closure with that reason.
+   */
+  private recordedActionResult(state: WorkState): { expectedResult?: string; completionCriteria?: readonly string[]; outputApprovalClosesWork?: boolean; advisoryAssessment?: NonNullable<ActionDefinition<string>["advisoryAssessment"]> } | undefined {
+    if (!state.unit || !state.hat || !state.actionName) return undefined;
+    const manifest = findUnitManifest(state.unit);
+    const hat = manifest ? manifest.hats[state.hat] : undefined;
+    return hat?.actions.find((a) => a.name === state.actionName);
+  }
+
   private async execute(fn: (state: WorkState) => Promise<WorkState>): Promise<WorkState> {
     const state = await this.require();
     // Reset every call -- see WorkState.pendingHandoffAutoCheck's doc
@@ -531,23 +809,48 @@ export class WorkSession extends DurableObject<Env> {
     // this true again, so a caller inspecting the returned state never
     // sees a stale signal left over from an earlier, unrelated call.
     state.pendingHandoffAutoCheck = false;
+    // Result review contract (BD-8): loaded once per mutation cycle, from
+    // the Work's OWN recorded Action as registered on its Unit's manifest --
+    // so dispatch entries and adopted Handoff pickups are covered by one
+    // mechanism, and the contract can never be hand-written onto state.
+    ensureResultReviewContract(state, this.recordedActionResult(state));
     // Durable operation persistence for THIS Work and THIS call only (see
     // src/runtime/workPersistence.ts): the Tool Registry persists its
     // execution intent and outcome into `state.externalOperations` and
     // flushes them straight to this Work's own DO storage, so the records
     // survive even when the handler throws and `save` below never runs --
-    // which is exactly the interruption window recovery exists for. The flush
+    // which is exactly the interruption window recovery exists for. Research
+    // checkpoints (`state.researchCheckpoints`, BD-15) ride the same flush, so
+    // a research job interrupted mid-run resumes without repeating completed
+    // searches. The flush
     // writes ONLY those operation records over the last saved state; a thrown
     // handler still rolls back its own partial state exactly as before.
     const release = installWorkPersistence(
       String(state.workId),
       workStatePersistence(state, async () => {
         const persisted = migrateSavedWork(await this.ctx.storage.get<WorkState>("state")) ?? state;
-        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations });
-      }),
+        await this.ctx.storage.put("state", { ...persisted, externalOperations: state.externalOperations, researchCheckpoints: state.researchCheckpoints });
+      }, (pending) => this.schedulePendingResearch(pending)),
     );
     try {
-      return await this.save(await fn(state));
+      // Universal live status (src/runtime/liveStatus.ts): every Work run
+      // reports what it is doing, from the shared chokepoints, with no
+      // per-Hat code. Where the Hat reports its own named steps, those lead.
+      // The run also carries this Work's own Access context, which the
+      // universal web research tool (src/runtime/webResearch.ts) uses.
+      const saved = await withLiveStatus(this.env, workLiveStatusTarget(state), async () => this.save(await fn(state)), workLiveOutcome, workStatusLiveSink(this.env, state), {
+        // A Martin-started research Work runs under its own bounded context.
+        access: () => (state.operatorResearch ? operatorResearchContext(String(state.workId)) : workSessionContext(state)),
+      });
+      // The independent Checker's advisory second opinion (Martin's decision,
+      // 2026-11-14): AFTER the draft is saved and with Martin, never before.
+      // It is only SCHEDULED here (a storage write and an alarm); it runs from
+      // alarm() in its own invocation, because run inline it shared this
+      // invocation's subrequest budget -- already spent by the research and the
+      // draft -- and failed ("Too many subrequests"), and it would have held
+      // the Telegram webhook open besides.
+      await this.scheduleAdvisoryAssessment(saved);
+      return saved;
     } catch (err) {
       console.error(`WorkSession ${state.workId} execution failed`, err);
       const detail = err instanceof Error ? err.message : String(err);
@@ -563,6 +866,49 @@ export class WorkSession extends DurableObject<Env> {
 
   private async save(state: WorkState): Promise<WorkState> {
     state.updatedAt = new Date().toISOString();
+    // The independent Checker is ADVISORY (Martin's decision, 2026-11-14): it
+    // is no longer run here as a prerequisite of closure. Its assessment of a
+    // draft is sent to Martin after the draft, separately, and never blocks,
+    // delays or invalidates his approval or redo (see runAdvisoryAssessment).
+    // Output approval closes the Work (Martin's decision, 2026-11-14): where
+    // the Action declares it and the evidence records Martin's approval of
+    // the exact output (the last step of the Work), that approval stands as
+    // his Result approval -- no second tap. Anything else leaves the Result
+    // approval card as the path.
+    if (state.resultReview?.outputApprovalClosesWork && (isSuccessfulResultStage(state.stage) || state.stage === RESULT_REVIEW_BLOCKED_STAGE)) {
+      const closed = await recordOutputApprovalAsResultApproval(state).catch((err) => {
+        console.error(`WorkSession ${state.workId}: output-approval Result approval failed`, err);
+        return { ok: false as const, reason: String(err) };
+      });
+      if (closed.ok) {
+        restoreResultReviewBlockedStage(state);
+        await sendMessage(this.env, state.chatId, RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE, undefined, state.threadId).catch((err) => console.error("output-approval notice failed", err));
+      }
+    }
+    // Result review gate (BD-8): a Work may not REMAIN recorded as
+    // successfully closed while its Result review is unsatisfied. This is
+    // defence in depth behind closeHandoffOnResult (the point where the
+    // Handoff itself is closed) -- here the Work's own stage is refused into
+    // `result_review_blocked` with the reason kept visible, and Martin is
+    // told once per transition with the staged Result approval card and its
+    // Approve/Reject buttons.
+    const gateResult = await applyResultReviewGate(state, (s, reason) => this.reportResultReviewBlocked(s, reason));
+    // BD-8 resumption: a successful Handoff closure the gate refused is kept
+    // on the review (pendingClosure, recorded by closeHandoffOnResult) and
+    // retried HERE the moment the review is actually satisfied -- a refusal
+    // is delay, never silent loss of the Unit's own completion write. Only
+    // when the gate just PASSED (gateStatus "passed" recomputed on this
+    // save's snapshot), so an unsatisfied review never re-attempts the
+    // closure; closeHandoffOnResult itself re-evaluates the gate before any
+    // Notion call and manages pendingClosure (cleared on success, refreshed
+    // on a fresh refusal).
+    if (!gateResult.blocked && state.resultReview?.gateStatus === "passed" && state.resultReview.pendingClosure) {
+      const pending = state.resultReview.pendingClosure;
+      const closure = await closeHandoffOnResult(this.env, state, pending.handoffId, pending.resultNote, workSessionContext(state));
+      if (!closure.closed) {
+        console.error(`WorkSession ${state.workId}: pending Handoff closure ${pending.handoffId} still refused after review satisfaction: ${closure.reason}`);
+      }
+    }
     // Derive this Work's canonical Matter identity (its page id) from its
     // token before it is persisted, so the Matter -> current Work pointer
     // can be keyed the same way no matter which Unit learned the Matter
@@ -572,6 +918,150 @@ export class WorkSession extends DurableObject<Env> {
     await this.ctx.storage.put("state", state);
     await this.updateRegistry(state);
     return state;
+  }
+
+  /**
+   * One-shot operational visibility when a Work transitions into
+   * `result_review_blocked` (BD-8: "the unresolved state and reason remain
+   * visible"). Either the Work awaits an independent Checker verification
+   * and says so with the exact reason, or a passing bound verdict already
+   * exists and Martin's Result approval card is staged -- its Approve and
+   * Reject buttons bound to this exact staged card by token, resolved only
+   * through the `resultreview` callback (never free text), with the staged
+   * approval consumed on the first decision so a replay finds nothing.
+   * Never throws: a failed notification must not fail the Work's save.
+   */
+  /**
+   * Martin's 🔁 Re-check of a Work refused into `result_review_blocked`
+   * (2026-11-14). The independent Checker is advisory and no longer part of
+   * closure, so this re-presents the one thing the Work is waiting on:
+   * where the Action declares output approval closes the Work and the
+   * evidence records that approval, it is recorded now; otherwise the Result
+   * approval card is staged (or the open one is pointed to). Nothing closes
+   * without his approval.
+   */
+  private async recheckResultReview(state: WorkState): Promise<WorkState> {
+    const say = (text: string) => sendMessage(this.env, state.chatId, text, undefined, state.threadId).then(() => state);
+    if (state.stage !== RESULT_REVIEW_BLOCKED_STAGE || !state.resultReview) return say("This Work is not waiting on a Result approval -- nothing to re-check.");
+    const closed = await recordOutputApprovalAsResultApproval(state);
+    if (closed.ok) {
+      restoreResultReviewBlockedStage(state);
+      return say(RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE);
+    }
+    const review = state.resultReview;
+    if (review.pendingApproval || review.approval) return say("Your Result approval card is already open above.");
+    await this.reportResultReviewBlocked(state, review.blockReason);
+    return state;
+  }
+
+  /**
+   * Arms the Checker's advisory second opinion for a draft awaiting Martin's
+   * decision, if the Work's Action declares `advisoryAssessment`: a storage
+   * flag and an alarm a couple of seconds out, nothing more. The assessment
+   * runs from alarm() in its own invocation with its own subrequest budget,
+   * after the cycle that produced the draft has SAVED, and never delays
+   * Approve, Redo or the webhook. Never throws.
+   */
+  private async scheduleAdvisoryAssessment(state: WorkState): Promise<void> {
+    try {
+      const declaration = this.recordedActionResult(state)?.advisoryAssessment;
+      if (!declaration || state.stage !== declaration.awaitingStage || !state.pendingActionSummary) return;
+      const output = declaration.output(state);
+      if (!output?.trim()) return;
+      if (state.resultReview?.assessment?.outputHash === (await hashContent(output))) return; // this exact draft was already assessed
+      await this.ctx.storage.put(PENDING_ADVISORY_ASSESSMENT_KEY, true);
+      // One alarm per Durable Object: if a pickup already armed it, that same
+      // firing runs both (alarm() handles the pickup, then the assessment).
+      if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + ADVISORY_ASSESSMENT_DELAY_MS);
+    } catch (err) {
+      console.error(`WorkSession ${state.workId}: could not schedule the advisory assessment (nothing is blocked)`, err);
+    }
+  }
+
+  /**
+   * Sends Martin the Checker's second opinion on a draft awaiting his
+   * decision. Runs from alarm(); holds no state while the AI call runs, and
+   * re-reads the Work before recording or sending -- so a decision Martin
+   * makes meanwhile is never overwritten (the read and the write below share
+   * no await) and an assessment of a draft he has moved on from is dropped.
+   * Never throws; a missing, late or failed assessment changes nothing.
+   */
+  private async runPendingAdvisoryAssessment(): Promise<void> {
+    try {
+      if (!(await this.ctx.storage.get(PENDING_ADVISORY_ASSESSMENT_KEY))) return;
+      await this.ctx.storage.delete(PENDING_ADVISORY_ASSESSMENT_KEY); // a re-fired alarm never assesses twice
+      const state = await this.getState();
+      if (!state) return;
+      const declaration = this.recordedActionResult(state)?.advisoryAssessment;
+      if (!declaration || state.stage !== declaration.awaitingStage || !state.pendingActionSummary) return;
+      const output = declaration.output(state);
+      if (!output?.trim()) return;
+      const outputHash = await hashContent(output);
+      if (state.resultReview?.assessment?.outputHash === outputHash) return;
+      const result = await runAdvisoryAssessment(
+        { output, request: declaration.request?.(state), criteria: declaration.criteria, unit: state.unit, hat: state.hat },
+        advisoryAssessmentDeps(this.env),
+      );
+      if (!result) return;
+      // Re-read the saved Work and record in ONE step (no await between the
+      // read and the write), so this can never overwrite a decision Martin
+      // made while the assessment ran.
+      const fresh = migrateSavedWork(await this.ctx.storage.get<WorkState>("state"));
+      if (!fresh) return;
+      const delivery = assessmentDelivery(fresh, output, declaration.output, declaration.awaitingStage);
+      if (delivery === "skip") return;
+      if (fresh.resultReview) {
+        fresh.resultReview.assessment = result;
+        await this.ctx.storage.put("state", fresh);
+      }
+      // "🔁 Redo with this note": only while the assessed draft still awaits his
+      // decision, only when the Checker recommends a redo with a note, and only
+      // where the Action's Hat declares the callback.
+      const redoButtons: InlineButton[][] | undefined =
+        delivery === "before" && result.recommended === "redo" && result.note && declaration.redoCallbackPrefix
+          ? [[{ text: "🔁 Redo with this note", callback_data: `${declaration.redoCallbackPrefix}:${fresh.workId}:go` }]]
+          : undefined;
+      await sendMessage(this.env, fresh.chatId, formatAdvisoryMessage(result, delivery), redoButtons, fresh.threadId);
+    } catch (err) {
+      console.error("WorkSession: advisory assessment failed (nothing is blocked)", err);
+    }
+  }
+
+  private async reportResultReviewBlocked(state: WorkState, reason?: string): Promise<void> {
+    try {
+      const review = state.resultReview;
+      if (review && !review.approval && !review.pendingApproval) {
+        const staged = await stageResultReviewApproval(state);
+        if (staged.ok) {
+          const message =
+            `📐 *Result review awaiting your approval*\n\nWork ${state.workId} (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}) completed its declared Result. BD-8 requires your Result approval before the Work may close.\n\n${review.assessment ? `\n\n${summarizeAssessment(review.assessment)}` : ""}\n\nApprove or Reject below; the decision is bound to this exact Result and its recorded evidence.`;
+          const buttons: InlineButton[][] = [
+            [
+              { text: "✅ Approve Result", callback_data: resultReviewCallbackData(state.workId, "a", staged.pending.token) },
+              { text: "❌ Reject", callback_data: resultReviewCallbackData(state.workId, "r", staged.pending.token) },
+            ],
+          ];
+          await sendMessage(this.env, state.chatId, message, buttons, state.threadId);
+          state.pendingActionSummary = {
+            label: "Result review: awaiting Martin's Result approval",
+            message,
+            buttons,
+            createdAt: staged.pending.createdAt,
+          };
+          return;
+        }
+        console.error(`WorkSession ${state.workId}: could not stage the Result approval card -- ${staged.reason}`);
+      }
+      await sendMessage(
+        this.env,
+        state.chatId,
+        `⛔ *Work ${state.workId} cannot close yet* (${state.unit ?? "unassigned"}/${state.hat ?? "unassigned"}).\n\n${reason ?? "The Result review gate refused successful closure."}\n\nThe Work stays open with the reason recorded; it keeps running and cancellation is unaffected. Successful closure (and the Handoff's own close) resumes once your Result approval is recorded against this exact Result.`,
+        [[{ text: "🔁 Re-check", callback_data: resultReviewCallbackData(state.workId, "c") }]],
+        state.threadId,
+      );
+    } catch (err) {
+      console.error(`WorkSession ${state.workId}: failed to report the Result review block`, err);
+    }
   }
 
   private async updateRegistry(state: WorkState): Promise<void> {

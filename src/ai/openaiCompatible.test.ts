@@ -208,3 +208,122 @@ test("a non-429 failure is never retried, even with rate-limit-shaped body text"
   assert.strictEqual(callCount, 1, "retry-after handling is scoped to 429 only");
   assert.strictEqual(result.success, false);
 });
+
+test("every provider uses the default 12s wait (the 25s Gemini trial of 2026-11-13 did not help and was reverted)", async () => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual(mod.DEFAULT_PROVIDER_TIMEOUT_MS, 12_000);
+  for (const p of [mod.GEMINI_PROVIDER, mod.GROQ_PROVIDER, mod.OPENROUTER_PROVIDER, mod.NVIDIA_NIM_PROVIDER, mod.CEREBRAS_PROVIDER, mod.SAMBANOVA_PROVIDER]) {
+    assert.strictEqual((p as any).config.timeoutMs, undefined, (p as any).config.id);
+  }
+  assert.strictEqual((mod as any).GEMINI_TIMEOUT_MS, undefined);
+});
+
+test("provider calls log timing and outcome, never the prompt or the answer", async (t) => {
+  const mod = await import("./openaiCompatible");
+  const logs: string[] = [];
+  t.mock.method(console, "log", (...a: unknown[]) => void logs.push(a.join(" ")));
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: "SECRET ANSWER" } }] }), { status: 200 })) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  const env = { GEMINI_API_KEY: "k" } as any;
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "SECRET PROMPT" }] } as any;
+  const r = await mod.GEMINI_PROVIDER.execute(env, task);
+  assert.ok(r.success);
+  const line = logs.find((l) => l.startsWith("AI provider call: gemini"))!;
+  assert.match(line, /marketing\.hat_action_decision answered \(13 chars\) after \d+ms/);
+  assert.ok(!logs.join("\n").includes("SECRET"));
+});
+
+test("OpenRouter uses Martin's chosen free models (2026-11-13)", async () => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual((mod.OPENROUTER_PROVIDER as any).config.model, "google/gemma-4-31b-it:free");
+  assert.strictEqual((mod.OPENROUTER_PROVIDER as any).config.lightModel, "google/gemma-4-26b-a4b-it:free");
+});
+
+test("Gemini is sent reasoning_effort none (Martin, 2026-11-13); a 400 retries once without it", async (t) => {
+  const mod = await import("./openaiCompatible");
+  const bodies: any[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: any, init: any) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    if ("reasoning_effort" in body) return new Response(JSON.stringify({ error: { message: "unsupported" } }), { status: 400 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "x" }] } as any;
+  const r = await mod.GEMINI_PROVIDER.execute({ GEMINI_API_KEY: "k" } as any, task);
+  assert.ok(r.success, "answered after the retry");
+  assert.strictEqual(bodies.length, 2);
+  assert.strictEqual(bodies[0].reasoning_effort, "none");
+  assert.ok(!("reasoning_effort" in bodies[1]));
+});
+
+test("only Gemini sends extra request settings; no other provider changes", async () => {
+  const mod = await import("./openaiCompatible");
+  for (const p of [mod.GROQ_PROVIDER, mod.OPENROUTER_PROVIDER, mod.NVIDIA_NIM_PROVIDER, mod.CEREBRAS_PROVIDER, mod.SAMBANOVA_PROVIDER]) {
+    assert.strictEqual((p as any).config.extraBody, undefined, (p as any).config.id);
+  }
+  assert.deepStrictEqual((mod.GEMINI_PROVIDER as any).config.extraBody, { reasoning_effort: "none" });
+});
+
+test("a 429 naming a 7.8s wait is waited out in full (cap raised 6s -> 10s, Martin 2026-11-13)", async (t) => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual(mod.MAX_RETRY_AFTER_WAIT_MS, 10_000);
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    return calls === 1
+      ? new Response('{"error":{"message":"Rate limit reached. Please try again in 7.807499999s."}}', { status: 429 })
+      : new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "x" }] } as any;
+  const pending = mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  t.mock.timers.tick(6_000);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.strictEqual(calls, 1, "still waiting at the old 6s cap");
+  t.mock.timers.tick(1_900);
+  const r = await pending;
+  assert.strictEqual(calls, 2, "retried after the full 7.8s");
+  assert.ok(r.success);
+});
+
+test("a 429 naming a wait over the 10s cap is not slept or retried inside the provider; its stated wait is attached for the executor", async (t) => {
+  const mod = await import("./openaiCompatible");
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response('{"error":{"message":"Rate limit reached. Please try again in 25.3725s."}}', { status: 429 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  const task = { taskId: "marketing.hat_action_decision", type: "json", messages: [{ role: "user", content: "x" }] } as any;
+  const r = await mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  assert.strictEqual(calls, 1, "no pointless wait-and-retry that the provider would refuse again");
+  assert.ok(!r.success);
+  assert.strictEqual((r as any).error.retryAfterMs, 25_372.5);
+});
+
+test("NVIDIA NIM (Martin, 2026-11-14, option A): requests go to the faster nemotron-3.5-lightning model, never the gpt-oss-20b that timed out", async () => {
+  const original = globalThis.fetch;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_url: any, init?: any) => {
+    bodies.push(JSON.parse(String(init?.body ?? "{}")));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as any;
+  try {
+    await NVIDIA_NIM_PROVIDER.execute({ NVIDIA_NIM_API_KEY: "key" } as any, { ...dummyTask, messages: [{ role: "user", content: "hi" }] } as any);
+  } catch {
+    // The response shape is not what this test checks.
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.strictEqual(bodies[0]?.model, "nvidia/nemotron-3.5-lightning-30b-a3b");
+});

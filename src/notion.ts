@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { reportOperationOutcome, type OperationContext } from "./runtime/activityReporter";
-import { evaluateAccess, NON_GOVERNED_PAGE_TARGET, type AccessContext } from "./access";
+import { evaluateAccess, governedSourceForDataSourceId, NON_GOVERNED_PAGE_TARGET, type AccessContext, type AccessRequest, type GovernedSource } from "./access";
+import { reportLiveStep } from "./runtime/liveStatus";
 
 const API = "https://api.notion.com/v1";
 
@@ -40,11 +41,36 @@ async function notionFetch(env: Env, path: string, init: RequestInit = {}, opera
     void body;
     const outcome = (res.status === 401 || res.status === 403) ? "denied" : "failed";
     if (operationContext) await reportOperationOutcome(env, operationContext, outcome);
-    throw new Error(`Notion API  failed:  `);
+    throw new Error(`Notion API ${path} failed: ${res.status} ${body}`);
   }
   const data = await res.json();
   if (operationContext) await reportOperationOutcome(env, operationContext, "succeeded");
   return data;
+}
+
+const SOURCE_LABELS: Record<GovernedSource, string> = {
+  entities: "Entities",
+  matters: "Matters",
+  proposals: "Proposals",
+  handoffs: "Handoffs",
+  leads: "Leads",
+  activity_log: "the Activity Log",
+  call_notes: "Call Notes",
+  payments: "Payments",
+};
+
+/**
+ * Every Notion operation in this file is authorized here, immediately before
+ * the network is touched. Once Access permits it, the operation is reported
+ * to the universal live status (src/runtime/liveStatus.ts) by the source's
+ * fixed name only -- never a page title or content.
+ */
+function authorize(env: Env, request: AccessRequest, access: AccessContext): void {
+  evaluateAccess(env, request, access);
+  const source = governedSourceForDataSourceId(env, request.dataSourceId);
+  const where = source ? SOURCE_LABELS[source] : request.dataSourceId === NON_GOVERNED_PAGE_TARGET ? "a definition page" : "Notion";
+  const verb = request.operation === "read" ? "Reading" : request.operation === "create" ? "Writing to" : "Updating";
+  reportLiveStep(`${verb} ${where}`);
 }
 
 export function title(text: string): NotionPropertyValue {
@@ -99,7 +125,7 @@ export async function queryDataSource(
   // unauthorized read never reaches Notion. `access` is a required
   // parameter precisely so no caller can reach this without declaring
   // which kind of execution context it is running under.
-  evaluateAccess(env, { operation: "read", dataSourceId }, access);
+  authorize(env, { operation: "read", dataSourceId }, access);
   const body: Record<string, unknown> = { page_size: options?.pageSize ?? 20 };
   if (filter) body.filter = filter;
   if (options?.sortByCreatedDescending) {
@@ -131,7 +157,7 @@ export async function createPage(
   // the authoritative target -- there is no page to resolve. Access
   // decides from the resolved ActionDefinition whether this particular
   // governed source is one Martin's approval was required for.
-  evaluateAccess(env, { operation: "create", dataSourceId }, access);
+  authorize(env, { operation: "create", dataSourceId }, access);
   const data = await notionFetch(env, `/pages`, {
     method: "POST",
     body: JSON.stringify({
@@ -171,7 +197,7 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
   // Access is evaluated against the page's REAL data source, so an
   // ApprovalProof's targetDataSourceId is compared against the actual
   // target rather than anything the caller asserted.
-  evaluateAccess(env, { operation: "update", dataSourceId, pageId }, access);
+  authorize(env, { operation: "update", dataSourceId, pageId }, access);
   const data = await notionFetch(env, `/pages/${pageId}`, {
     method: "PATCH",
     body: JSON.stringify({ properties }),
@@ -229,7 +255,7 @@ async function resolvePageTarget(env: Env, pageId: string, operation: string): P
  */
 export async function getPage(env: Env, pageId: string, access: AccessContext): Promise<NotionPage> {
   const { target, page } = await resolvePageTarget(env, pageId, "read");
-  evaluateAccess(env, { operation: "read", dataSourceId: target, pageId }, access);
+  authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
   return page;
 }
 
@@ -250,7 +276,7 @@ export async function appendTextBlocks(env: Env, pageId: string, heading: string
   // Authorized before the first network write, and against the page's real
   // data source rather than a caller-supplied one.
   const { target } = await resolvePageTarget(env, pageId, "update");
-  evaluateAccess(env, { operation: "update", dataSourceId: target, pageId }, access);
+  authorize(env, { operation: "update", dataSourceId: target, pageId }, access);
   const paragraphs: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
     paragraphs.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
@@ -288,7 +314,7 @@ export async function createVersionPage(
   access: AccessContext,
 ): Promise<{ id: string; url: string }> {
   const { target } = await resolvePageTarget(env, parentPageId, "update");
-  evaluateAccess(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access);
+  authorize(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access);
   const blocks: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
     blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
@@ -370,7 +396,7 @@ export async function getPageContent(env: Env, pageId: string, access: AccessCon
   // Same rule as getPage: the read is authorized against the page's real
   // target, resolved from Notion rather than asserted by the caller.
   const { target } = await resolvePageTarget(env, pageId, "read");
-  evaluateAccess(env, { operation: "read", dataSourceId: target, pageId }, access);
+  authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
   const parts: string[] = [];
   let cursor: string | undefined;
   do {

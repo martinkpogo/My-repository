@@ -86,15 +86,15 @@ test("marketingManifest: declares all five Marketing Hats", () => {
   assert.strictEqual(marketingManifest.unit, "Marketing");
   assert.deepStrictEqual(
     new Set(Object.keys(marketingManifest.hats)),
-    new Set(["Marketing Strategist", "Brand & Communications Strategist", "Content Strategist", "Content Manager", "Digital Marketer"]),
+    new Set(["Marketing Strategist", "Campaign & Marketing Communications Manager", "Content Strategist", "Content Manager", "Digital Marketer"]),
   );
 });
 
-test("marketingManifest: every Hat declares exactly markettransition, marketdraft, and marketpaid in callbackHandlers, all pointing to their shared handlers", () => {
+test("marketingManifest: every Hat declares exactly markettransition, marketdraft, marketpaid and marketredo (added 2026-11-14: the Checker's Redo-with-this-note button) in callbackHandlers, all pointing to their shared handlers", () => {
   for (const hat of Object.values(marketingManifest.hats)) {
     assert.deepStrictEqual(
       new Set(Object.keys(hat.callbackHandlers ?? {})),
-      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_PAID_CALLBACK_PREFIX]),
+      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_PAID_CALLBACK_PREFIX, "marketredo"]),
     );
     assert.strictEqual(hat.callbackHandlers?.[MARKET_TRANSITION_CALLBACK_PREFIX], handleTransitionApproval);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_DRAFT_CALLBACK_PREFIX], handleDraftApproval);
@@ -226,5 +226,82 @@ test("Status: a Marketing Hat run shows its real steps and ends on the draft awa
     const next = final.indexOf(step);
     assert.ok(next > at, `"${step}" in order, in:\n${final}`);
     at = next;
+  }
+});
+
+test("problem brief (Martin, 2026-11-13): every Marketing Hat's instructions carry the seven-part shape, used only with web research, never naming a company", async () => {
+  const { buildHatPromptParts, MARKETING_PROBLEM_BRIEF_FORMAT } = await import("./marketingManifest");
+  const { MARKETING_HAT_REGISTRY } = await import("../../hats/registry");
+  for (const hat of Object.values(MARKETING_HAT_REGISTRY)) {
+    assert.ok(buildHatPromptParts(hat, "contract").context!.includes(MARKETING_PROBLEM_BRIEF_FORMAT), hat.name);
+  }
+  for (const part of ["1. The problem", "2. Evidence", "3. Who has it most", "4. Why it matters", "5. Where ENIG fits", "6. What's still unknown", "7. Recommendation"]) {
+    assert.ok(MARKETING_PROBLEM_BRIEF_FORMAT.includes(part), part);
+  }
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /AND a WEB RESEARCH block is present/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Never name a company/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Never invent a finding or a source/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /no #, \* or other markup/, "headings are plain text -- Telegram showed a literal #");
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /The research did not directly show this problem/, "unsupported evidence is said plainly");
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /Part 7 must give the reason/);
+  assert.match(MARKETING_PROBLEM_BRIEF_FORMAT, /If NO WEB RESEARCH block is present, ignore this format: never ask for research/, "without research the Hat drafts normally instead of asking Martin for a research block");
+});
+
+test("approving a draft records Martin's approval as Result evidence beside the draft, bound to it by SHA-256 (2026-11-14: the Checker failed criterion 2 on the draft alone)", async (t) => {
+  mockTelegramFetch(t);
+  const { hashContent } = await import("../../contentHash");
+  const draft = "The problem -- SMEs struggle with consistent messaging.";
+  const state = fakeWorkState({
+    stage: "awaiting_marketing_draft_approval",
+    marketing: { draft },
+    resultReview: { expectedResult: "A draft approved by Martin", completionCriteria: ["Martin's approval is recorded"], gateStatus: "pending" },
+  } as any);
+  await handleDraftApproval(fakeEnv(), state, true);
+  const evidence = state.resultReview?.evidence ?? [];
+  assert.deepStrictEqual(evidence.map((e) => e.kind), ["marketing_output", "operator_approval"]);
+  const approval = evidence[1];
+  assert.equal(approval.ref, "work-1-approval");
+  assert.match(approval.content, /Martin approved work-1-draft at \d{4}-\d\d-\d\dT.*through the verified Approve button/);
+  assert.ok(approval.content.includes(await hashContent(draft)), "the approval is bound to the exact approved draft");
+  assert.equal(evidence[0].content, draft, "the draft evidence is unchanged");
+});
+
+test("approving a paid-media action records the spend approval as Result evidence", async (t) => {
+  mockTelegramFetch(t);
+  const state = fakeWorkState({
+    hat: "Digital Marketer",
+    stage: "awaiting_paid_media_approval",
+    marketing: { pendingPaidMediaAction: { description: "Boost a Facebook post, $200 budget" } },
+    resultReview: { expectedResult: "A paid-media action with spend approval", completionCriteria: ["Spend approval is recorded"], gateStatus: "pending" },
+  } as any);
+  const { handlePaidMediaApproval } = await import("./marketingManifest");
+  await handlePaidMediaApproval(fakeEnv(), state, true);
+  assert.deepStrictEqual((state.resultReview?.evidence ?? []).map((e) => e.kind), ["paid_media_action", "spend_approval"]);
+  assert.match(state.resultReview!.evidence![1].content, /Martin approved work-1-paid-media/);
+});
+
+test("rejecting a draft records no approval evidence", async (t) => {
+  mockTelegramFetch(t);
+  const state = fakeWorkState({ stage: "awaiting_marketing_draft_approval", marketing: { draft: "x" }, resultReview: { expectedResult: "e", completionCriteria: ["c"], gateStatus: "pending" } } as any);
+  await handleDraftApproval(fakeEnv(), state, false);
+  assert.equal(state.resultReview?.evidence, undefined);
+});
+
+test("option B: Marketing declares continueAfterResearch, and it refuses unless the Work is waiting on research", async () => {
+  const { marketingManifest, continueMarketingAfterResearch } = await import("./marketingManifest");
+  for (const hat of Object.values(marketingManifest.hats)) assert.strictEqual(typeof hat.continueAfterResearch, "function", hat.name);
+  const sent: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+    sent.push(JSON.parse(String(init?.body ?? "{}")).text ?? "");
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
+  }) as typeof fetch;
+  try {
+    const state = { workId: "w", chatId: 1, stage: "awaiting_marketing_draft_approval", unit: "Marketing", hat: Object.keys(marketingManifest.hats)[0] } as any;
+    const out = await continueMarketingAfterResearch({ TELEGRAM_BOT_TOKEN: "t" } as any, state);
+    assert.strictEqual(out.stage, "awaiting_marketing_draft_approval");
+    assert.deepStrictEqual(sent, [], "no draft or dispatch ran");
+  } finally {
+    globalThis.fetch = original;
   }
 });
