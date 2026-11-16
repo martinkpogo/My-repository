@@ -10,6 +10,7 @@ import {
   OPERATOR_RESEARCH_AWAITING,
   parseResearchCommand,
   validTypos,
+  BRIEF_QUESTION_INSTRUCTIONS,
   type BriefQuestionAnswer,
   type OperatorResearchDeps,
 } from "./operatorResearch";
@@ -264,6 +265,15 @@ test("a stale button changes nothing", async () => {
   const { schedule } = await handleOperatorResearchButton(env, state, "start", h.deps);
   assert.strictEqual(schedule, null);
   assert.match(h.sent.at(-1)!.text, /no longer current/);
+});
+
+test("the question-writing instructions aim at what Martin wants to find out, not at the subject's own details", () => {
+  const p = BRIEF_QUESTION_INSTRUCTIONS;
+  assert.match(p, /topic is often a description of a kind of business/);
+  assert.match(p, /not about the subject's own clients or operations/);
+  assert.match(p, /first question asks what they want to find out/);
+  assert.match(p, /Never ask a question that only narrows the wording of the previous answer/);
+  for (const field of ['"names_party"', '"enough"', '"question"', '"typos"']) assert.ok(p.includes(field), field);
 });
 
 // ---------------------------------------------------------------------------
