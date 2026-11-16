@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import type { OperationMetadata } from "../runtime/activityReporter";
+import { startOperation, finishOperation, type OperationContext, type OperationMetadata, type OperationOutcome } from "../runtime/activityReporter";
 import { AI_TASK_LIVE_LABELS } from "./liveLabels";
 import { DataBoundaryEvaluator, createBoundaryAuditEntry, defaultDataBoundaryEvaluator } from "../dataBoundary/policy";
 import { isSemanticTaskId, SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
@@ -166,7 +166,7 @@ export class AiPolicyExecutor {
   public async executeTaskWithOutcome(
     env: Env,
     task: AiTask,
-    _operationMetadata?: OperationMetadata,
+    operationMetadata?: OperationMetadata,
   ): Promise<AiCallOutcome> {
     if (!task || !task.taskId || !isSemanticTaskId(task.taskId) || !task.boundaryContext) {
       console.error("AiPolicyExecutor: Task missing valid taskId or boundaryContext");
@@ -180,10 +180,37 @@ export class AiPolicyExecutor {
         console.error(`AiPolicyExecutor: task augmenter "${id}" failed -- continuing without it`, err);
       }
     }
+    const label = AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`;
     // Universal live status: the registered task's fixed name, never the prompt.
-    reportLiveStep(AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
+    reportLiveStep(label);
 
-    return this.runProviderChain(env, task, this.providers, true);
+    const holder = operationMetadata?.holder;
+    const canReport = !!(holder?.workStatus);
+    let opCtx: OperationContext | undefined;
+    if (canReport) {
+      try {
+        opCtx = await startOperation(env, holder!, `ai:${task.taskId}:${Date.now()}`, operationMetadata?.label ?? label, operationMetadata?.parentOperationId);
+      } catch {
+        opCtx = undefined;
+      }
+    }
+    try {
+      const outcome = await this.runProviderChain(env, task, this.providers, true);
+      if (opCtx) {
+        const mapped: OperationOutcome = outcome.ok
+          ? "succeeded"
+          : outcome.cause === "outbound_gate_blocked"
+            ? "denied"
+            : outcome.cause === "unparseable"
+              ? "failed"
+              : (outcome.retryAt ? "unverified" : "failed");
+        await finishOperation(env, opCtx, mapped).catch(() => undefined);
+      }
+      return outcome;
+    } catch (err) {
+      if (opCtx) await finishOperation(env, opCtx, "failed").catch(() => undefined);
+      throw err;
+    }
   }
 
   /**

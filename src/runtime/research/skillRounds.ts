@@ -1,6 +1,7 @@
 import type { Env } from "../../types";
 import { generateWithOutcome } from "../../ai";
 import type { AccessContext } from "../../access";
+import { startOperation, finishOperation, type OperationMetadata } from "../../runtime/activityReporter";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { executeSearch, type SearchOutcome } from "./webSearch";
 import { readWebPage, unsafeUrlReason, type PageReadOutcome } from "./webPageRead";
@@ -147,23 +148,69 @@ export interface OperationResult {
 }
 
 /** Runs one round's batch in parallel through the canonical Tool handlers. Access denials propagate (never caught). */
-export async function dispatchOperations(env: Env, operations: readonly ResearchOperation[], access: AccessContext, limits: RoundLimits): Promise<OperationResult[]> {
+export async function dispatchOperations(env: Env, operations: readonly ResearchOperation[], access: AccessContext, limits: RoundLimits, operationMetadata?: OperationMetadata): Promise<OperationResult[]> {
   return Promise.all(
-    operations.map(async (operation): Promise<OperationResult> => {
+    operations.map(async (operation, i): Promise<OperationResult> => {
       if (operation.type === "search") {
-        const outcome = await executeSearch(env, { query: operation.query }, access);
-        if (outcome.kind === "success_with_results") {
-          const retrieved = outcome.results.map((r) => ({ url: r.url, text: `${r.title} ${r.snippet}` }));
-          const text = outcome.results.map((r) => `- ${r.title} (${r.url}): ${r.snippet}`).join("\n").slice(0, limits.maxResultChars);
-          return { operation, outcome: outcome.kind, text, retrieved };
+        const holder = operationMetadata?.holder;
+        const canReport = !!(holder?.workStatus);
+        let opCtx;
+        if (canReport) {
+          try {
+            opCtx = await startOperation(env, holder!, `research-search-${Date.now()}-${i}`, "Searching the web", operationMetadata?.parentOperationId);
+          } catch {
+            opCtx = undefined;
+          }
         }
-        return { operation, outcome: outcome.kind, text: "", retrieved: [], ...(outcome.kind === "interrupted" && outcome.retry_at ? { retryAt: outcome.retry_at } : {}) };
+        try {
+          // executeSearch has its own optional reporting hook; pass no context here
+          // so dispatch owns start/finish in the real research execution path.
+          const outcome = await executeSearch(env, { query: operation.query }, access);
+          const mapped = outcome.kind === "success_with_results" || outcome.kind === "success_no_results"
+            ? "succeeded"
+            : outcome.kind === "interrupted"
+              ? "unverified"
+              : "failed";
+          if (opCtx) await finishOperation(env, opCtx, mapped as any).catch(() => undefined);
+          if (outcome.kind === "success_with_results") {
+            const retrieved = outcome.results.map((r) => ({ url: r.url, text: `${r.title} ${r.snippet}` }));
+            const text = outcome.results.map((r) => `- ${r.title} (${r.url}): ${r.snippet}`).join("\n").slice(0, limits.maxResultChars);
+            return { operation, outcome: outcome.kind, text, retrieved };
+          }
+          return { operation, outcome: outcome.kind, text: "", retrieved: [], ...(outcome.kind === "interrupted" && outcome.retry_at ? { retryAt: outcome.retry_at } : {}) };
+        } catch (err) {
+          if (opCtx) await finishOperation(env, opCtx, "failed").catch(() => undefined);
+          throw err;
+        }
       }
-      const outcome = await readWebPage(env, { url: operation.url }, access);
-      if (outcome.kind === "success") {
-        return { operation, outcome: outcome.kind, text: outcome.result.text.slice(0, limits.maxResultChars), retrieved: [{ url: operation.url, text: outcome.result.text }] };
+      const holder = operationMetadata?.holder;
+      const canReport = !!(holder?.workStatus);
+      let opCtx;
+      if (canReport) {
+        try {
+          opCtx = await startOperation(env, holder!, `research-read-${Date.now()}-${i}`, "Reading a web page", operationMetadata?.parentOperationId);
+        } catch {
+          opCtx = undefined;
+        }
       }
-      return { operation, outcome: outcome.kind, text: "", retrieved: [], ...(outcome.kind === "interrupted" && outcome.retry_at ? { retryAt: outcome.retry_at } : {}) };
+      try {
+        const outcome = await readWebPage(env, { url: operation.url }, access);
+        const mapped = outcome.kind === "success"
+          ? "succeeded"
+          : outcome.kind === "empty_page" || outcome.kind === "blocked_by_site" || outcome.kind === "provider_unavailable" || outcome.kind === "provider_failure" || outcome.kind === "invalid_input" || outcome.kind === "internal_allowance_exhausted"
+            ? "failed"
+            : outcome.kind === "interrupted"
+              ? "unverified"
+              : "failed";
+        if (opCtx) await finishOperation(env, opCtx, mapped as any).catch(() => undefined);
+        if (outcome.kind === "success") {
+          return { operation, outcome: outcome.kind, text: outcome.result.text.slice(0, limits.maxResultChars), retrieved: [{ url: operation.url, text: outcome.result.text }] };
+        }
+        return { operation, outcome: outcome.kind, text: "", retrieved: [], ...(outcome.kind === "interrupted" && (outcome as any).retry_at ? { retryAt: (outcome as any).retry_at } : {}) };
+      } catch (err) {
+        if (opCtx) await finishOperation(env, opCtx, "failed").catch(() => undefined);
+        throw err;
+      }
     }),
   );
 }
@@ -211,6 +258,8 @@ export interface SkillRoundsInput {
    * the job runs once, and an interruption is still `interrupted`.
    */
   checkpoint?: { store: ResearchCheckpointStore; jobId: string };
+  /** Optional activity metadata propagated explicitly from the caller. */
+  operationMetadata?: OperationMetadata;
 }
 
 /** Notes are kept for 7 days under a hash key, beside the search and page-read caches (Research Runtime decision). */
@@ -303,12 +352,12 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
   let startRound = 0;
   if (rounds && (rounds.next_round > 0 || rounds.operations.length > 0)) {
     for (let r = 0; r < rounds.next_round; r++) {
-      lastResults = await dispatchOperations(env, rounds.operations[r] ?? [], access, input.limits);
+      lastResults = await dispatchOperations(env, rounds.operations[r] ?? [], access, input.limits, input.operationMetadata);
       absorb(lastResults);
     }
     const pending = rounds.operations[rounds.next_round];
     if (pending) {
-      lastResults = await dispatchOperations(env, pending, access, input.limits);
+      lastResults = await dispatchOperations(env, pending, access, input.limits, input.operationMetadata);
       operationsRun += lastResults.length;
       absorb(lastResults);
       const stop = interruptedOutcome(lastResults, rounds.next_round + 1);
@@ -345,7 +394,7 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
         situation,
       },
       maxTokens: 2048,
-    });
+    }, undefined, input.operationMetadata ? { ...input.operationMetadata, label: "research.skill_step" } : undefined);
     // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
     // pause, like busy search providers -- this step runs again on resume.
     if (!stepOutcome.ok && stepOutcome.cause === "providers_exhausted" && stepOutcome.retryAt) {
@@ -380,7 +429,7 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
       rounds.next_round = round;
       await persist("in_progress");
     }
-    lastResults = await dispatchOperations(env, parsed.answer.operations, access, input.limits);
+    lastResults = await dispatchOperations(env, parsed.answer.operations, access, input.limits, input.operationMetadata);
     operationsRun += lastResults.length;
     absorb(lastResults);
     const stop = interruptedOutcome(lastResults, round + 1);

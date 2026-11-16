@@ -506,8 +506,8 @@ export interface DimensionEvidence extends ResearchPlanDimension {
  * its own search outcome; Access denial still throws (it is not a
  * per-dimension evidence outcome).
  */
-export async function gatherDimensionEvidence(env: Env, plan: ResearchPlanDimension[], access: AccessContext): Promise<DimensionEvidence[]> {
-  return Promise.all(plan.map(async (dimension) => (await searchDimension(env, dimension, access)).evidence));
+export async function gatherDimensionEvidence(env: Env, plan: ResearchPlanDimension[], access: AccessContext, operationContext?: OperationContext): Promise<DimensionEvidence[]> {
+  return Promise.all(plan.map(async (dimension) => (await searchDimension(env, dimension, access, operationContext)).evidence));
 }
 
 /** The one search request a plan dimension makes -- deterministic, so a resumed job references the same saved results. */
@@ -525,9 +525,10 @@ export async function searchDimension(
   env: Env,
   dimension: ResearchPlanDimension,
   access: AccessContext,
+  operationContext?: OperationContext,
 ): Promise<{ evidence: DimensionEvidence; evidenceRef?: string; retryAt?: string }> {
   const request = dimensionSearchRequest(dimension);
-  const outcome = await executeSearch(env, request, access);
+  const outcome = await executeSearch(env, request, access, operationContext);
   const evidence: DimensionEvidence = {
     ...dimension,
     searchOutcome: outcome.kind,

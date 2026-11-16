@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { reportOperationOutcome, type OperationContext } from "./runtime/activityReporter";
+import { startOperation, finishOperation, reportOperationOutcome, type OperationContext, type OperationMetadata } from "./runtime/activityReporter";
 import { evaluateAccess, governedSourceForDataSourceId, NON_GOVERNED_PAGE_TARGET, type AccessContext, type AccessRequest, type GovernedSource } from "./access";
 import { reportLiveStep } from "./runtime/liveStatus";
 
@@ -26,26 +26,54 @@ export interface NotionPage {
   inTrash?: boolean;
 }
 
-async function notionFetch(env: Env, path: string, init: RequestInit = {}, operationContext?: OperationContext): Promise<any> {
-  const res = await fetch(`${API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${env.NOTION_TOKEN}`,
-      "Notion-Version": env.NOTION_VERSION,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    void body;
-    const outcome = (res.status === 401 || res.status === 403) ? "denied" : "failed";
-    if (operationContext) await reportOperationOutcome(env, operationContext, outcome);
-    throw new Error(`Notion API ${path} failed: ${res.status} ${body}`);
+function isOperationContext(v: any): v is OperationContext {
+  return !!v && typeof v.operationId === "string" && typeof v.startedAt === "number" && !!v.holder;
+}
+
+async function notionFetch(env: Env, path: string, init: RequestInit = {}, operation?: OperationContext | OperationMetadata | OperationMetadata): Promise<any> {
+  let ctx: OperationContext | undefined;
+  let owns = false;
+  if (operation && isOperationContext(operation)) {
+    ctx = operation;
+  } else if (operation && (operation as any).holder?.workStatus) {
+    try {
+      ctx = await startOperation(env, (operation as any).holder, `notion:${Date.now()}`, (operation as any).label ?? "Notion operation", (operation as any).parentOperationId);
+      owns = true;
+    } catch {
+      ctx = undefined;
+    }
   }
-  const data = await res.json();
-  if (operationContext) await reportOperationOutcome(env, operationContext, "succeeded");
-  return data;
+  try {
+    const res = await fetch(`${API}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${env.NOTION_TOKEN}`,
+        "Notion-Version": env.NOTION_VERSION,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      void body;
+      const outcome = (res.status === 401 || res.status === 403) ? "denied" : "failed";
+      if (ctx) {
+        if (owns) await finishOperation(env, ctx, outcome).catch(() => undefined);
+        else await reportOperationOutcome(env, ctx, outcome);
+      }
+      throw new Error(`Notion API ${path} failed: ${res.status} ${body}`);
+    }
+    const data = await res.json();
+    if (ctx) {
+      if (owns) await finishOperation(env, ctx, "succeeded").catch(() => undefined);
+      else await reportOperationOutcome(env, ctx, "succeeded");
+    }
+    return data;
+  } catch (err) {
+    // If fetch threw before response handling reported, ensure owned ctx closes.
+    if (ctx && owns) await finishOperation(env, ctx, "failed").catch(() => undefined);
+    throw err;
+  }
 }
 
 const SOURCE_LABELS: Record<GovernedSource, string> = {
@@ -120,6 +148,7 @@ export async function queryDataSource(
   access: AccessContext,
   filter?: Record<string, unknown>,
   options?: { pageSize?: number; sortByCreatedDescending?: boolean },
+  operationContext?: OperationContext | OperationMetadata,
 ): Promise<NotionPage[]> {
   // Access is evaluated before the network is touched at all -- an
   // unauthorized read never reaches Notion. `access` is a required
@@ -134,7 +163,7 @@ export async function queryDataSource(
   const data = await notionFetch(env, `/data_sources/${dataSourceId}/query`, {
     method: "POST",
     body: JSON.stringify(body),
-  });
+  }, operationContext);
   // Notion's data-source query does not reliably exclude archived/trashed
   // pages from results on its own (confirmed live: an archived Handoff was
   // returned by a Status=Pending discovery query, causing a WorkSession to
@@ -152,6 +181,7 @@ export async function createPage(
   dataSourceId: string,
   properties: NotionProperties,
   access: AccessContext,
+  operationContext?: OperationContext | OperationMetadata,
 ): Promise<NotionPage> {
   // A create targets the data source the caller named, so that name IS
   // the authoritative target -- there is no page to resolve. Access
@@ -164,7 +194,7 @@ export async function createPage(
       parent: { type: "data_source_id", data_source_id: dataSourceId },
       properties,
     }),
-  });
+  }, operationContext);
   return { id: data.id, url: data.url, properties: data.properties };
 }
 
@@ -181,8 +211,8 @@ export async function createPage(
  * source -- an unresolvable target is never treated as "whatever the
  * caller said".
  */
-async function resolvePageDataSourceId(env: Env, pageId: string): Promise<string> {
-  const page = await fetchPageUnchecked(env, pageId);
+async function resolvePageDataSourceId(env: Env, pageId: string, operationContext?: OperationContext | OperationMetadata): Promise<string> {
+  const page = await fetchPageUnchecked(env, pageId, operationContext);
   const parent = page.parent;
   if (parent?.type === "data_source_id" && parent.data_source_id) {
     return parent.data_source_id;
@@ -192,8 +222,8 @@ async function resolvePageDataSourceId(env: Env, pageId: string): Promise<string
   );
 }
 
-export async function updatePage(env: Env, pageId: string, properties: NotionProperties, access: AccessContext): Promise<NotionPage> {
-  const dataSourceId = await resolvePageDataSourceId(env, pageId);
+export async function updatePage(env: Env, pageId: string, properties: NotionProperties, access: AccessContext, operationContext?: OperationContext | OperationMetadata): Promise<NotionPage> {
+  const dataSourceId = await resolvePageDataSourceId(env, pageId, operationContext);
   // Access is evaluated against the page's REAL data source, so an
   // ApprovalProof's targetDataSourceId is compared against the actual
   // target rather than anything the caller asserted.
@@ -201,7 +231,7 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
   const data = await notionFetch(env, `/pages/${pageId}`, {
     method: "PATCH",
     body: JSON.stringify({ properties }),
-  });
+  }, operationContext);
   return { id: data.id, url: data.url, properties: data.properties };
 }
 
@@ -214,8 +244,8 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
  * module-private for exactly that reason, so that no call site outside this
  * file can reach a governed read that Access never saw.
  */
-async function fetchPageUnchecked(env: Env, pageId: string): Promise<NotionPage> {
-  const data = await notionFetch(env, `/pages/${pageId}`);
+async function fetchPageUnchecked(env: Env, pageId: string, operationContext?: OperationContext | OperationMetadata): Promise<NotionPage> {
+  const data = await notionFetch(env, `/pages/${pageId}`, {}, operationContext);
   return { id: data.id, url: data.url, properties: data.properties, parent: data.parent, archived: data.archived, inTrash: data.in_trash };
 }
 
@@ -230,8 +260,8 @@ async function fetchPageUnchecked(env: Env, pageId: string): Promise<NotionPage>
  * accept the marker (see evaluateAccess), because there is no such thing as a
  * governed mutation of a page that belongs to no governed source.
  */
-async function resolvePageTarget(env: Env, pageId: string, operation: string): Promise<{ target: string; page: NotionPage }> {
-  const page = await fetchPageUnchecked(env, pageId);
+async function resolvePageTarget(env: Env, pageId: string, operation: string, operationContext?: OperationContext | OperationMetadata): Promise<{ target: string; page: NotionPage }> {
+  const page = await fetchPageUnchecked(env, pageId, operationContext);
   const parent = page.parent;
   if (parent?.type === "data_source_id" && parent.data_source_id) {
     return { target: parent.data_source_id, page };
@@ -253,8 +283,8 @@ async function resolvePageTarget(env: Env, pageId: string, operation: string): P
  * a caller's claim about what it is touching would mean the read's scope was
  * whatever the caller said it was.
  */
-export async function getPage(env: Env, pageId: string, access: AccessContext): Promise<NotionPage> {
-  const { target, page } = await resolvePageTarget(env, pageId, "read");
+export async function getPage(env: Env, pageId: string, access: AccessContext, operationContext?: OperationContext | OperationMetadata): Promise<NotionPage> {
+  const { target, page } = await resolvePageTarget(env, pageId, "read", operationContext);
   authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
   return page;
 }
@@ -272,10 +302,10 @@ export async function getPage(env: Env, pageId: string, access: AccessContext): 
  * that can append a version snapshot is the Action that can change the
  * record, and no separate "just appending text" exemption exists.
  */
-export async function appendTextBlocks(env: Env, pageId: string, heading: string, text: string, access: AccessContext): Promise<void> {
+export async function appendTextBlocks(env: Env, pageId: string, heading: string, text: string, access: AccessContext, operationContext?: OperationContext | OperationMetadata): Promise<void> {
   // Authorized before the first network write, and against the page's real
   // data source rather than a caller-supplied one.
-  const { target } = await resolvePageTarget(env, pageId, "update");
+  const { target } = await resolvePageTarget(env, pageId, "update", operationContext);
   authorize(env, { operation: "update", dataSourceId: target, pageId }, access);
   const paragraphs: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
@@ -290,7 +320,7 @@ export async function appendTextBlocks(env: Env, pageId: string, heading: string
     await notionFetch(env, `/blocks/${pageId}/children`, {
       method: "PATCH",
       body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
-    });
+    }, operationContext);
   }
 }
 
@@ -312,8 +342,9 @@ export async function createVersionPage(
   pageTitle: string,
   text: string,
   access: AccessContext,
+  operationContext?: OperationContext | OperationMetadata,
 ): Promise<{ id: string; url: string }> {
-  const { target } = await resolvePageTarget(env, parentPageId, "update");
+  const { target } = await resolvePageTarget(env, parentPageId, "update", operationContext);
   authorize(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access);
   const blocks: Record<string, unknown>[] = [];
   for (let i = 0; i < text.length; i += 2000) {
@@ -326,12 +357,12 @@ export async function createVersionPage(
       properties: { title: { title: [{ text: { content: pageTitle.slice(0, 2000) } }] } },
       children: blocks.slice(0, 100),
     }),
-  });
+  }, operationContext);
   for (let i = 100; i < blocks.length; i += 100) {
     await notionFetch(env, `/blocks/${data.id}/children`, {
       method: "PATCH",
       body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
-    });
+    }, operationContext);
   }
   return { id: data.id, url: data.url };
 }
@@ -392,16 +423,16 @@ export function uniqueId(prop: any): string {
  * Not a general Notion renderer — just enough to make a page's own text usable
  * as context.
  */
-export async function getPageContent(env: Env, pageId: string, access: AccessContext): Promise<string> {
+export async function getPageContent(env: Env, pageId: string, access: AccessContext, operationContext?: OperationContext | OperationMetadata): Promise<string> {
   // Same rule as getPage: the read is authorized against the page's real
   // target, resolved from Notion rather than asserted by the caller.
-  const { target } = await resolvePageTarget(env, pageId, "read");
+  const { target } = await resolvePageTarget(env, pageId, "read", operationContext);
   authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
   const parts: string[] = [];
   let cursor: string | undefined;
   do {
     const query = `?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ""}`;
-    const data = await notionFetch(env, `/blocks/${pageId}/children${query}`);
+    const data = await notionFetch(env, `/blocks/${pageId}/children${query}`, {}, operationContext);
     for (const block of data.results ?? []) {
       const text = plainTextFromBlock(block);
       if (text) parts.push(text);

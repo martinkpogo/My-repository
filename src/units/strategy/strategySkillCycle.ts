@@ -311,7 +311,7 @@ async function runDomainSkill(
   skillId: StrategyDomainSkillId,
   question: string,
   input: { strategyQuestion: string; strategyContext: string; skillContent: string },
-  operationMetadata?: OperationMetadata,
+  _operationMetadata?: OperationMetadata,
 ): Promise<StrategySkillFinding> {
   const profile = DOMAIN_PROFILES[skillId];
   try {
@@ -356,7 +356,7 @@ async function runDomainSkill(
         ].join("\n"),
       },
       light: true,
-    }, operationMetadata ? { ...operationMetadata, label: "strategy.skill." + skillId } : undefined);
+    });
 
     if (!result || result.sufficient !== true) {
       return { skillId, status: "failed", failureReason: result?.blockedReason ?? "Could not produce a defensible finding from the supplied evidence." };
@@ -455,11 +455,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   const availableSkills = STRATEGY_DOMAIN_SKILL_IDS.filter((id) => skills.declared.includes(id));
 
   await onProgress?.("Planning which Strategy Skills (if any) this diagnosis needs...");
-  const planCtx = params.operationMetadata?.holder?.workStatus
-    ? await startOperation(env, params.operationMetadata.holder, "strategy-skill-plan", "Planning Strategy Skills")
-    : undefined;
   const planOutcome = await planStrategySkills(env, { strategyQuestion, strategyContext, availableSkills, strategyAnalysisContent: strategyAnalysis.content }, params.operationMetadata);
-  if (planCtx) await finishOperation(env, planCtx, planOutcome.plan === null ? "failed" : "succeeded");
   if (planOutcome.plan === null) {
     // Unchanged degradation: proceed to core diagnosis, only the CAUSE is
     // additionally carried for the caller's log and WorkState.
@@ -515,14 +511,7 @@ export async function runStrategySkillCycle(params: StrategySkillCycleParams): P
   }
 
   await onProgress?.("Reconciling Strategy Skill findings...");
-  const synthCtx = params.operationMetadata?.holder?.workStatus
-    ? await startOperation(env, params.operationMetadata.holder, "strategy-skill-synthesis", "Reconciling Strategy Skill findings")
-    : undefined;
   const synthesisOutcome = await synthesizeStrategyFindings(env, { strategyQuestion, strategyContext, findings, strategyAnalysisContent: strategyAnalysis.content }, params.operationMetadata);
-  if (synthCtx) {
-    const synthOutcome = synthesisOutcome.synthesis === null ? "failed" : synthesisOutcome.synthesis.sufficient ? "succeeded" : "partially_completed";
-    await finishOperation(env, synthCtx, synthOutcome);
-  }
   if (synthesisOutcome.synthesis === null) {
     if (synthesisOutcome.aiFailure) {
       // A failed synthesis call is phrased by cause (gate refusal vs
