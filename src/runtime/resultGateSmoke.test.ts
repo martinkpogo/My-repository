@@ -171,7 +171,7 @@ interface SmokeHarness {
   setEvidenceMode(mode: EvidenceMode): void;
 }
 
-function makeHarness(options: { existing?: boolean; evidence?: EvidenceMode } = {}): SmokeHarness {
+function makeHarness(options: { existing?: boolean; evidence?: EvidenceMode; delivery?: "delivered" | "failed" } = {}): SmokeHarness {
   const ensureCalls: Array<{ workId: string; chatId: number }> = [];
   const runCalls: string[] = [];
   const order: string[] = [];
@@ -245,7 +245,16 @@ function makeHarness(options: { existing?: boolean; evidence?: EvidenceMode } = 
             order.push("gate");
             blockedReasons.push(reason);
             if (s.resultReview?.checker?.outcome === "passed" && !s.resultReview?.approval && !s.resultReview?.pendingApproval) {
-              staged.push(await stageResultReviewApproval(s));
+              const stagedResult = await stageResultReviewApproval(s);
+              if (options.delivery === "failed") {
+                // Model a Telegram delivery failure: the production
+                // reportResultReviewBlocked rolls the staged approval back,
+                // so the persisted state accurately says no card reached
+                // Martin.
+                s.resultReview!.pendingApproval = undefined;
+              } else {
+                staged.push(stagedResult);
+              }
             }
           });
           state = after;
@@ -656,6 +665,37 @@ test("lifecycle: a PASS stages Martin's approval but never approves and never cl
 
   // The button token is deliberately not part of the report.
   assert.ok(!JSON.stringify(report).includes(state.resultReview!.pendingApproval!.token), "the approval token must not be reported");
+});
+
+test("report: a PASS reports the approval card as delivered, with Martin's approval still pending", async () => {
+  const { report } = await runHappy();
+  assert.equal(report.result_gate, "passed");
+  assert.equal(report.approval?.staged, true);
+  assert.deepEqual(report.approval_request, { attempted: true, delivered: true, reason: null });
+  assert.equal(report.martin_approval, null, "the harness runs before Martin decides");
+});
+
+test("report: a passing verdict whose approval card was not delivered reports delivered false, never pending", async () => {
+  const harness = makeHarness({ delivery: "failed" });
+  const report = await runResultGateSmoke(fakeEnv(), WORK_ID, harness.runner);
+
+  assert.equal(report.result_gate, "passed", "the verdict itself did pass");
+  assert.equal(report.approval?.staged, false, "no card is staged after the delivery failure");
+  assert.deepEqual(report.approval_request, {
+    attempted: true,
+    delivered: false,
+    reason: "the approval card was not delivered (delivery failed or the card could not be staged)",
+  });
+  assert.equal(report.martin_approval, null);
+  assert.equal(harness.staged.length, 0, "the failed delivery staged nothing");
+  assert.equal(harness.state()?.resultReview?.pendingApproval, undefined, "the failed delivery rolled the staged card back");
+});
+
+test("report: a failed verdict reports no approval attempt", async () => {
+  const { report } = await runHappy({ evidence: "omit" });
+  assert.equal(report.result_gate, "failed");
+  assert.deepEqual(report.approval_request, { attempted: false, delivered: null, reason: null });
+  assert.equal(report.martin_approval, null);
 });
 
 test("approval: the staged card binds to the exact verdict over this Work's snapshot", async () => {

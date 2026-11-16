@@ -424,10 +424,61 @@ export interface ResultGateSmokeReport {
   } | null;
   /** Martin's staged Result decision. The button token is deliberately NOT reported. */
   approval: { staged: boolean; review_hash: string | null } | null;
+  /**
+   * Whether the approval card was actually delivered. `attempted` is true
+   * only when a passing verdict caused the gate to try to stage one;
+   * `delivered` is true only when the card reached Martin, and `null` when
+   * no attempt was made (a failed/absent verdict). A passing verdict whose
+   * card could not be staged or delivered is `delivered: false` with a
+   * reason, never an approval pending on Martin.
+   */
+  approval_request: {
+    attempted: boolean;
+    delivered: boolean | null;
+    reason: string | null;
+  };
+  /**
+   * The approval Martin actually recorded through his normal callback, or
+   * `null` while it is still pending. A valid harness report runs before
+   * Martin decides, so this is `null`; the read-only inspection route is
+   * where his recorded decision is read after the callback.
+   */
+  martin_approval: {
+    approver: "martin";
+    approved_at: string;
+    review_hash: string;
+  } | null;
   blocked_reason: string | null;
+  /** The final Work state at the end of the run; closure is a separate fact from the verdict. */
   work_closed: boolean;
   /** Set only when the harness refused; never together with `ok: true`. */
   refusal?: string;
+}
+
+function approvalFields(
+  review: WorkState["resultReview"],
+): Pick<ResultGateSmokeReport, "approval" | "approval_request" | "martin_approval"> {
+  const attempted = review?.checker?.outcome === "passed";
+  const pending = review?.pendingApproval;
+  const delivered = attempted ? !!pending : null;
+  return {
+    approval: review?.checker ? { staged: !!pending, review_hash: pending?.reviewHash ?? null } : null,
+    approval_request: {
+      attempted,
+      delivered,
+      reason:
+        attempted && !delivered
+          ? "the approval card was not delivered (delivery failed or the card could not be staged)"
+          : null,
+    },
+    martin_approval: review?.approval
+      ? {
+          approver: review.approval.approver,
+          approved_at: review.approval.approvedAt,
+          review_hash: review.approval.reviewHash,
+        }
+      : null,
+  };
 }
 
 function refusalReport(workId: string, reason: string): ResultGateSmokeReport {
@@ -440,7 +491,7 @@ function refusalReport(workId: string, reason: string): ResultGateSmokeReport {
     stage: null,
     evidence: [],
     verification: null,
-    approval: null,
+    ...approvalFields(undefined),
     blocked_reason: null,
     work_closed: false,
     refusal: reason,
@@ -561,7 +612,7 @@ export async function runResultGateSmoke(
           snapshot_key: review?.verificationAttempt?.snapshotKey ?? null,
         }
       : null,
-    approval: checker ? { staged: !!review?.pendingApproval, review_hash: review?.pendingApproval?.reviewHash ?? null } : null,
+    ...approvalFields(review),
     blocked_reason: review?.blockReason ?? after.blockedReason ?? null,
     work_closed: isTerminalWorkStage(after.stage ?? ""),
   };

@@ -71,6 +71,8 @@ function passingReport(workId: string): ResultGateSmokeReport {
       snapshot_key: "b".repeat(64),
     },
     approval: { staged: true, review_hash: "c".repeat(64) },
+    approval_request: { attempted: true, delivered: true, reason: null },
+    martin_approval: null,
     blocked_reason: "Martin's Result approval required",
     work_closed: false,
   };
@@ -93,6 +95,8 @@ function failedVerdictReport(workId: string): ResultGateSmokeReport {
       snapshot_key: "e".repeat(64),
     },
     approval: { staged: false, review_hash: null },
+    approval_request: { attempted: false, delivered: null, reason: null },
+    martin_approval: null,
     blocked_reason: "Result verification failed -- successful closure blocked",
   };
 }
@@ -349,7 +353,7 @@ test("projection: the response is the harness report and carries no Telegram des
   assert.strictEqual(body.result_gate, "passed", "the Result Gate verdict is its own explicit field");
   assert.deepStrictEqual(
     Object.keys(body).sort(),
-    ["ok", "harness_execution", "result_gate", "work_id", "target", "stage", "evidence", "verification", "approval", "blocked_reason", "work_closed"].sort(),
+    ["ok", "harness_execution", "result_gate", "work_id", "target", "stage", "evidence", "verification", "approval", "approval_request", "martin_approval", "blocked_reason", "work_closed"].sort(),
     "the response is a fixed projection of the harness report",
   );
 });
@@ -366,6 +370,8 @@ test("refusal: a harness refusal is HTTP 500 carrying ok:false and the exact ref
     result_gate: "no_usable_verdict",
     verification: null,
     approval: null,
+    approval_request: { attempted: false, delivered: null, reason: null },
+    martin_approval: null,
     refusal: "verification_unavailable: the canonical Result verification authority page could not be read (page deleted)",
   };
   const { env, calls } = createFakeEnv({ report: refused });
