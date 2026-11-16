@@ -1,7 +1,6 @@
 import type { Env } from "./types";
-import { reportOperationOutcome, type OperationContext } from "./runtime/activityReporter";
 import { evaluateAccess, governedSourceForDataSourceId, NON_GOVERNED_PAGE_TARGET, type AccessContext, type AccessRequest, type GovernedSource } from "./access";
-import { reportLiveStep } from "./runtime/liveStatus";
+import { errorOperationOutcome, reportRefusedOperation, withLiveOperation, type OperationOutcome } from "./runtime/liveStatus";
 
 const API = "https://api.notion.com/v1";
 
@@ -26,7 +25,7 @@ export interface NotionPage {
   inTrash?: boolean;
 }
 
-async function notionFetch(env: Env, path: string, init: RequestInit = {}, operationContext?: OperationContext): Promise<any> {
+async function notionFetch(env: Env, path: string, init: RequestInit = {}): Promise<any> {
   const res = await fetch(`${API}${path}`, {
     ...init,
     headers: {
@@ -38,14 +37,20 @@ async function notionFetch(env: Env, path: string, init: RequestInit = {}, opera
   });
   if (!res.ok) {
     const body = await res.text();
-    void body;
-    const outcome = (res.status === 401 || res.status === 403) ? "denied" : "failed";
-    if (operationContext) await reportOperationOutcome(env, operationContext, outcome);
-    throw new Error(`Notion API ${path} failed: ${res.status} ${body}`);
+    throw new NotionApiError(`Notion API ${path} failed: ${res.status} ${body}`, res.status);
   }
-  const data = await res.json();
-  if (operationContext) await reportOperationOutcome(env, operationContext, "succeeded");
-  return data;
+  return res.json();
+}
+
+/** A Notion API call that returned a non-2xx status. The message is unchanged; the status lets the activity feed tell a refusal (401/403) from a failure. */
+export class NotionApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "NotionApiError";
+  }
 }
 
 const SOURCE_LABELS: Record<GovernedSource, string> = {
@@ -61,16 +66,30 @@ const SOURCE_LABELS: Record<GovernedSource, string> = {
 
 /**
  * Every Notion operation in this file is authorized here, immediately before
- * the network is touched. Once Access permits it, the operation is reported
- * to the universal live status (src/runtime/liveStatus.ts) by the source's
- * fixed name only -- never a page title or content.
+ * the network is touched, and reported to the universal live status
+ * (src/runtime/liveStatus.ts) as ONE operation by the source's fixed name
+ * only -- never a page title or content. The operation ends with what
+ * actually happened (#369): `succeeded`; `denied` when Access refuses it
+ * (nothing reaches Notion) or Notion answers 401/403; `failed` otherwise.
+ * Reporting never changes the result or the error.
  */
-function authorize(env: Env, request: AccessRequest, access: AccessContext): void {
-  evaluateAccess(env, request, access);
+async function governed<T>(env: Env, request: AccessRequest, access: AccessContext, run: () => Promise<T>): Promise<T> {
   const source = governedSourceForDataSourceId(env, request.dataSourceId);
   const where = source ? SOURCE_LABELS[source] : request.dataSourceId === NON_GOVERNED_PAGE_TARGET ? "a definition page" : "Notion";
   const verb = request.operation === "read" ? "Reading" : request.operation === "create" ? "Writing to" : "Updating";
-  reportLiveStep(`${verb} ${where}`);
+  const label = `${verb} ${where}`;
+  try {
+    evaluateAccess(env, request, access);
+  } catch (err) {
+    reportRefusedOperation(label);
+    throw err;
+  }
+  return withLiveOperation(label, run, () => "succeeded", { errorOutcome: notionErrorOutcome });
+}
+
+function notionErrorOutcome(err: unknown): OperationOutcome {
+  if (err instanceof NotionApiError && (err.status === 401 || err.status === 403)) return "denied";
+  return errorOperationOutcome(err);
 }
 
 export function title(text: string): NotionPropertyValue {
@@ -125,26 +144,27 @@ export async function queryDataSource(
   // unauthorized read never reaches Notion. `access` is a required
   // parameter precisely so no caller can reach this without declaring
   // which kind of execution context it is running under.
-  authorize(env, { operation: "read", dataSourceId }, access);
-  const body: Record<string, unknown> = { page_size: options?.pageSize ?? 20 };
-  if (filter) body.filter = filter;
-  if (options?.sortByCreatedDescending) {
-    body.sorts = [{ timestamp: "created_time", direction: "descending" }];
-  }
-  const data = await notionFetch(env, `/data_sources/${dataSourceId}/query`, {
-    method: "POST",
-    body: JSON.stringify(body),
+  return governed(env, { operation: "read", dataSourceId }, access, async () => {
+    const body: Record<string, unknown> = { page_size: options?.pageSize ?? 20 };
+    if (filter) body.filter = filter;
+    if (options?.sortByCreatedDescending) {
+      body.sorts = [{ timestamp: "created_time", direction: "descending" }];
+    }
+    const data = await notionFetch(env, `/data_sources/${dataSourceId}/query`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    // Notion's data-source query does not reliably exclude archived/trashed
+    // pages from results on its own (confirmed live: an archived Handoff was
+    // returned by a Status=Pending discovery query, causing a WorkSession to
+    // repeatedly fail trying to edit it -- "Can't edit block that is
+    // archived"). Filter them out here, once, so every caller (every
+    // discovery loop) is protected rather than each having to guard against
+    // this individually.
+    return (data.results ?? [])
+      .filter((p: any) => !p.archived && !p.in_trash)
+      .map((p: any) => ({ id: p.id, url: p.url, properties: p.properties }));
   });
-  // Notion's data-source query does not reliably exclude archived/trashed
-  // pages from results on its own (confirmed live: an archived Handoff was
-  // returned by a Status=Pending discovery query, causing a WorkSession to
-  // repeatedly fail trying to edit it -- "Can't edit block that is
-  // archived"). Filter them out here, once, so every caller (every
-  // discovery loop) is protected rather than each having to guard against
-  // this individually.
-  return (data.results ?? [])
-    .filter((p: any) => !p.archived && !p.in_trash)
-    .map((p: any) => ({ id: p.id, url: p.url, properties: p.properties }));
 }
 
 export async function createPage(
@@ -157,15 +177,16 @@ export async function createPage(
   // the authoritative target -- there is no page to resolve. Access
   // decides from the resolved ActionDefinition whether this particular
   // governed source is one Martin's approval was required for.
-  authorize(env, { operation: "create", dataSourceId }, access);
-  const data = await notionFetch(env, `/pages`, {
-    method: "POST",
-    body: JSON.stringify({
-      parent: { type: "data_source_id", data_source_id: dataSourceId },
-      properties,
-    }),
+  return governed(env, { operation: "create", dataSourceId }, access, async () => {
+    const data = await notionFetch(env, `/pages`, {
+      method: "POST",
+      body: JSON.stringify({
+        parent: { type: "data_source_id", data_source_id: dataSourceId },
+        properties,
+      }),
+    });
+    return { id: data.id, url: data.url, properties: data.properties };
   });
-  return { id: data.id, url: data.url, properties: data.properties };
 }
 
 /**
@@ -197,12 +218,13 @@ export async function updatePage(env: Env, pageId: string, properties: NotionPro
   // Access is evaluated against the page's REAL data source, so an
   // ApprovalProof's targetDataSourceId is compared against the actual
   // target rather than anything the caller asserted.
-  authorize(env, { operation: "update", dataSourceId, pageId }, access);
-  const data = await notionFetch(env, `/pages/${pageId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ properties }),
+  return governed(env, { operation: "update", dataSourceId, pageId }, access, async () => {
+    const data = await notionFetch(env, `/pages/${pageId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties }),
+    });
+    return { id: data.id, url: data.url, properties: data.properties };
   });
-  return { id: data.id, url: data.url, properties: data.properties };
 }
 
 /**
@@ -255,8 +277,9 @@ async function resolvePageTarget(env: Env, pageId: string, operation: string): P
  */
 export async function getPage(env: Env, pageId: string, access: AccessContext): Promise<NotionPage> {
   const { target, page } = await resolvePageTarget(env, pageId, "read");
-  authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
-  return page;
+  return governed(env, { operation: "read", dataSourceId: target, pageId }, access, async () => {
+    return page;
+  });
 }
 
 /**
@@ -276,22 +299,23 @@ export async function appendTextBlocks(env: Env, pageId: string, heading: string
   // Authorized before the first network write, and against the page's real
   // data source rather than a caller-supplied one.
   const { target } = await resolvePageTarget(env, pageId, "update");
-  authorize(env, { operation: "update", dataSourceId: target, pageId }, access);
-  const paragraphs: Record<string, unknown>[] = [];
-  for (let i = 0; i < text.length; i += 2000) {
-    paragraphs.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
-  }
-  const blocks = [
-    { object: "block", type: "heading_3", heading_3: { rich_text: [{ type: "text", text: { content: heading.slice(0, 2000) } }] } },
-    ...paragraphs,
-  ];
-  // Notion accepts at most 100 children per append request.
-  for (let i = 0; i < blocks.length; i += 100) {
-    await notionFetch(env, `/blocks/${pageId}/children`, {
-      method: "PATCH",
-      body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
-    });
-  }
+  return governed(env, { operation: "update", dataSourceId: target, pageId }, access, async () => {
+    const paragraphs: Record<string, unknown>[] = [];
+    for (let i = 0; i < text.length; i += 2000) {
+      paragraphs.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
+    }
+    const blocks = [
+      { object: "block", type: "heading_3", heading_3: { rich_text: [{ type: "text", text: { content: heading.slice(0, 2000) } }] } },
+      ...paragraphs,
+    ];
+    // Notion accepts at most 100 children per append request.
+    for (let i = 0; i < blocks.length; i += 100) {
+      await notionFetch(env, `/blocks/${pageId}/children`, {
+        method: "PATCH",
+        body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
+      });
+    }
+  });
 }
 
 /**
@@ -314,26 +338,27 @@ export async function createVersionPage(
   access: AccessContext,
 ): Promise<{ id: string; url: string }> {
   const { target } = await resolvePageTarget(env, parentPageId, "update");
-  authorize(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access);
-  const blocks: Record<string, unknown>[] = [];
-  for (let i = 0; i < text.length; i += 2000) {
-    blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
-  }
-  const data = await notionFetch(env, `/pages`, {
-    method: "POST",
-    body: JSON.stringify({
-      parent: { type: "page_id", page_id: parentPageId },
-      properties: { title: { title: [{ text: { content: pageTitle.slice(0, 2000) } }] } },
-      children: blocks.slice(0, 100),
-    }),
-  });
-  for (let i = 100; i < blocks.length; i += 100) {
-    await notionFetch(env, `/blocks/${data.id}/children`, {
-      method: "PATCH",
-      body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
+  return governed(env, { operation: "update", dataSourceId: target, pageId: parentPageId }, access, async () => {
+    const blocks: Record<string, unknown>[] = [];
+    for (let i = 0; i < text.length; i += 2000) {
+      blocks.push({ object: "block", type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: text.slice(i, i + 2000) } }] } });
+    }
+    const data = await notionFetch(env, `/pages`, {
+      method: "POST",
+      body: JSON.stringify({
+        parent: { type: "page_id", page_id: parentPageId },
+        properties: { title: { title: [{ text: { content: pageTitle.slice(0, 2000) } }] } },
+        children: blocks.slice(0, 100),
+      }),
     });
-  }
-  return { id: data.id, url: data.url };
+    for (let i = 100; i < blocks.length; i += 100) {
+      await notionFetch(env, `/blocks/${data.id}/children`, {
+        method: "PATCH",
+        body: JSON.stringify({ children: blocks.slice(i, i + 100) }),
+      });
+    }
+    return { id: data.id, url: data.url };
+  });
 }
 
 export function plainText(prop: any): string {
@@ -396,19 +421,20 @@ export async function getPageContent(env: Env, pageId: string, access: AccessCon
   // Same rule as getPage: the read is authorized against the page's real
   // target, resolved from Notion rather than asserted by the caller.
   const { target } = await resolvePageTarget(env, pageId, "read");
-  authorize(env, { operation: "read", dataSourceId: target, pageId }, access);
-  const parts: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const query = `?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ""}`;
-    const data = await notionFetch(env, `/blocks/${pageId}/children${query}`);
-    for (const block of data.results ?? []) {
-      const text = plainTextFromBlock(block);
-      if (text) parts.push(text);
-    }
-    cursor = data.has_more ? data.next_cursor : undefined;
-  } while (cursor);
-  return parts.join("\n\n");
+  return governed(env, { operation: "read", dataSourceId: target, pageId }, access, async () => {
+    const parts: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const query = `?page_size=100${cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const data = await notionFetch(env, `/blocks/${pageId}/children${query}`);
+      for (const block of data.results ?? []) {
+        const text = plainTextFromBlock(block);
+        if (text) parts.push(text);
+      }
+      cursor = data.has_more ? data.next_cursor : undefined;
+    } while (cursor);
+    return parts.join("\n\n");
+  });
 }
 
 function plainTextFromBlock(block: any): string {

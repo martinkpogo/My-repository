@@ -1,9 +1,8 @@
 import type { Env } from "../../types";
-import { reportOperationOutcome, type OperationContext } from "../../runtime/activityReporter";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
 import { RESEARCH_PROTOCOL_REGISTRY } from "./protocols";
-import { reportLiveStep, resolveLiveStep } from "../liveStatus";
+import { withLiveOperation, type OperationOutcome } from "../liveStatus";
 import { takeWebLookup } from "../webLookupAllowance";
 import { kvGet, kvPut } from "../../kvStore";
 import { hashContent } from "../../contentHash";
@@ -277,27 +276,19 @@ export function finishedSearchLabel(outcome: SearchOutcome): string {
   return `${SEARCH_STEP} — not completed`;
 }
 
-export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext, operationContext?: OperationContext): Promise<SearchOutcome> {
+/** How one search ended, for the activity feed. ENIG's own allowance refusing it is `denied`; a provider not completing it is `failed`. */
+export function searchOperationOutcome(outcome: SearchOutcome): OperationOutcome {
+  if (outcome.kind === "success_with_results" || outcome.kind === "success_no_results") return "succeeded";
+  return outcome.kind === "internal_allowance_exhausted" ? "denied" : "failed";
+}
+
+export async function executeSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {
   const invalidReason = validateSearchRequest(request, SEARCH_PROVIDER_ADAPTERS[PRIMARY_SEARCH_PROVIDER]);
-  if (invalidReason) {
-    if (operationContext) await reportOperationOutcome(env, operationContext, "failed");
-    return { kind: "invalid_input", reason: invalidReason };
-  }
-  // Universal live status: never the query text. The step shows ⏳ until
-  // the search returns, then names the site it found.
-  reportLiveStep(SEARCH_STEP);
-  const outcome = await runSearch(env, request, access);
-  resolveLiveStep(SEARCH_STEP, finishedSearchLabel(outcome));
-  if (operationContext) {
-    const opOutcome =
-      outcome.kind === "success_with_results" || outcome.kind === "success_no_results"
-        ? "succeeded"
-        : outcome.kind === "interrupted"
-          ? "unverified"
-          : "failed";
-    await reportOperationOutcome(env, operationContext, opOutcome);
-  }
-  return outcome;
+  if (invalidReason) return { kind: "invalid_input", reason: invalidReason };
+  // Universal live status: never the query text. The operation shows ⏳
+  // until the search returns, then names the site it found and how it ended
+  // (#369); an Access denial still throws, reported as refused.
+  return withLiveOperation(SEARCH_STEP, () => runSearch(env, request, access), searchOperationOutcome, { finalLabel: finishedSearchLabel });
 }
 
 async function runSearch(env: Env, request: SearchRequest, access: AccessContext): Promise<SearchOutcome> {

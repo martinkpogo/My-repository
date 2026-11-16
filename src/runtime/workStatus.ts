@@ -1,6 +1,18 @@
 import type { Env, WorkState } from "../types";
 import { editWorkspaceHatMessage, sendWorkspaceHatMessage } from "../telegram";
-import { resolvePendingStep, yieldLiveStatusToHat, type LiveStatusDetailSink, type LiveStatusOutcome, type LiveStatusTarget } from "./liveStatus";
+import {
+  OUTCOME_MARK,
+  OUTCOME_WORDS,
+  resolvePendingStep,
+  yieldLiveStatusToHat,
+  type LiveStatusDetailSink,
+  type LiveStatusOutcome,
+  type LiveStatusTarget,
+  type OperationEntry,
+  type OperationOutcome,
+} from "./liveStatus";
+
+export type { OperationEntry, OperationOutcome } from "./liveStatus";
 
 /**
  * Live work status -- a Runtime Service any Unit's Hat uses to show Martin
@@ -20,16 +32,6 @@ import { resolvePendingStep, yieldLiveStatusToHat, type LiveStatusDetailSink, ty
  * The holder is a WorkState, or -- for a run with no Work (a scheduled
  * sweep) -- any object carrying the same two fields plus a chatId.
  */
-export type OperationOutcome = "succeeded" | "failed" | "partially_completed" | "unverified" | "denied";
-
-export interface OperationEntry {
-  operationId: string;
-  label: string;
-  startedAt: number;
-  outcome?: OperationOutcome;
-  completedAt?: number;
-}
-
 export interface WorkStatus {
   /** The Hat the status bubble is labelled with ("Hat: <name>."). */
   hat: string;
@@ -38,8 +40,10 @@ export interface WorkStatus {
   current?: string;
   /** In-progress operations with start-time markers (truthful concurrency). */
   running?: OperationEntry[];
-  /** Completed operations in actual completion order. */
+  /** Completed operations in actual completion order (consecutive identical label + outcome merged). */
   completed?: OperationEntry[];
+  /** Finished operations no longer listed, to keep the message bounded. */
+  earlierOperations?: number;
   /** Intermediate Telegram edits made so far this run -- see MAX_INTERMEDIATE_EDITS. */
   edits?: number;
   /**
@@ -106,16 +110,33 @@ export function renderWorkStatus(status: WorkStatus, ending?: { line: string; cu
     const text = !ending || failed ? (inner ?? status.current) : status.current;
     lines.push(`${ending ? (failed ? "✗" : "✓") : "⏳"} ${step(text)}`);
   }
-  // Outcome-driven operation feed: in-progress operations shown with start
-  // markers (truthful concurrency, no implied sequence) and completed
-  // operations shown in actual completion order with their outcome.
-  for (const r of status.running ?? []) lines.push(`⏳ ${step(r.label)} (started ${new Date(r.startedAt).toISOString()})`);
-  for (const c of status.completed ?? []) {
-    const mark = c.outcome === "succeeded" ? "✓" : c.outcome === "denied" ? "⛔" : c.outcome === "failed" ? "✗" : "•";
-    lines.push(`${mark} ${step(c.label)} [${c.outcome}]`);
-  }
+  // Outcome-driven operation feed (#369), from the universal live run's
+  // chokepoints: what finished, in the order it finished, with how it
+  // actually ended; then what is running right now -- each running
+  // operation its own ⏳ line, so parallel work shows as parallel and no
+  // order is implied. An operation still running when the run ends never
+  // reported its end, so it is shown as not confirmed, never as done.
+  if (status.earlierOperations) lines.push(`… ${status.earlierOperations} earlier`);
+  for (const c of status.completed ?? []) lines.push(operationLine(c.label, c.outcome ?? "succeeded", c.count));
+  for (const r of mergeRunning(status.running ?? [])) lines.push(ending ? operationLine(r.label, "unverified", r.count) : `⏳ ${step(r.label)}${r.count > 1 ? ` ×${r.count}` : ""}`);
   if (ending) lines.push(ending.line);
   return lines.join("\n");
+}
+
+function operationLine(label: string, outcome: OperationOutcome, count = 1): string {
+  const words = OUTCOME_WORDS[outcome];
+  return `${OUTCOME_MARK[outcome]} ${label.replace(/(\.\.\.|…)$/, "")}${count > 1 ? ` ×${count}` : ""}${words ? ` — ${words}` : ""}`;
+}
+
+/** Running operations with the same label share one line ("Searching the web ×3"). */
+function mergeRunning(running: readonly OperationEntry[]): Array<{ label: string; count: number }> {
+  const out: Array<{ label: string; count: number }> = [];
+  for (const r of running) {
+    const same = out.find((o) => o.label === r.label);
+    if (same) same.count++;
+    else out.push({ label: r.label, count: 1 });
+  }
+  return out;
 }
 
 /** Sends a fresh status message for a new run, with `firstStep` running. */
@@ -123,7 +144,7 @@ export async function startWorkStatus(env: Env, holder: WorkStatusHolder, hat: s
   // One message per run: a universal live-status message already shown for
   // this run gives way to the Hat's own named steps.
   yieldLiveStatusToHat();
-  holder.workStatus = { hat, header, done: [], current: firstStep, running: [], completed: [], edits: 0, lastEditAt: Date.now() };
+  holder.workStatus = { hat, header, done: [], current: firstStep, edits: 0, lastEditAt: Date.now() };
   holder.workStatusMessageId = await sendWorkspaceHatMessage(env, { chatId: holder.chatId, hat, workId: holder.workId }, escapeTelegramMarkdown(renderWorkStatus(holder.workStatus)));
 }
 
@@ -210,6 +231,14 @@ export function workStatusLiveSink(env: Env, holder: WorkStatusHolder): LiveStat
       holder.workStatus.trail = steps.map((st) => (st.count > 1 ? `${st.label} ×${st.count}` : st.label));
     },
     refresh: () => refreshWorkStatus(env, holder),
+    // The run's operation feed (#369) shown on this message, through the same
+    // throttled, budgeted refresh as the detail line.
+    setOperations: (feed) => {
+      if (!holder.workStatus) return;
+      holder.workStatus.running = feed.running;
+      holder.workStatus.completed = feed.completed;
+      holder.workStatus.earlierOperations = feed.earlier || undefined;
+    },
   };
 }
 
