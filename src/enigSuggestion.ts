@@ -6,7 +6,21 @@ import { SALES_DIRECT_ENTRY_PAUSED } from "./sessionRouting";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 /**
- * ENIG suggests, Martin confirms (Martin's decision, 2026-11-09).
+ * ENIG routes work to the Hat that owns it (Martin's decision, 2026-11-16,
+ * replacing "ENIG suggests, Martin confirms" of 2026-11-09).
+ *
+ * When Martin asks ENIG for work without naming anyone, ENIG writes no plan
+ * of its own: it ends with one `ROUTE: <name>` line, and the runtime re-sends
+ * Martin's ORIGINAL message prefixed with that name ("Marketing, <text>")
+ * through routeIncomingText straight away -- exactly what would run had
+ * Martin typed the name himself: the same deterministic addressee match, the
+ * same Action Registry resolution, the same approval gates (every Hat's
+ * output still waits for Martin's approval, and the Result Gate for his
+ * Result approval). When more than one name could own the work, ENIG asks
+ * instead (`ASK: <A> | <B>`), and Martin picks with one tap. Only exact,
+ * startable names count; anything else is dropped and nothing starts.
+ *
+ * The 2026-11-09 text, kept for the Yes/No buttons still in the wild:
  *
  * When Martin asks ENIG for work without naming a Unit, ENIG may end its
  * reply with one `SUGGEST: <name>` line. This module validates that name
@@ -23,7 +37,10 @@ import { kvDelete, kvGet, kvPut } from "./kvStore";
  * suggestion is single-use (consumed on first tap) and expires in a day.
  */
 
-const SUGGEST_LINE = /^\s*SUGGEST:\s*(.+?)\s*$/i;
+/** `ROUTE:` (and the earlier `SUGGEST:`, still accepted) names the owner; `ASK:` lists candidates. */
+const SUGGEST_LINE = /^\s*(?:ROUTE|SUGGEST):\s*(.+?)\s*$/i;
+const ASK_LINE = /^\s*ASK:\s*(.+?)\s*$/i;
+const MAX_CHOICES = 3;
 const SUGGESTION_TTL_SECONDS = 24 * 60 * 60;
 export const ENIG_SUGGEST_CALLBACK = "enigsuggest";
 
@@ -47,40 +64,68 @@ export function suggestableAddressees(): string[] {
 
 /** The instruction ENIG's conversational turn carries; the brief never does. */
 export function suggestionInstruction(): string {
+  const names = suggestableAddressees().join("; ");
   return [
-    "SUGGESTION BUTTON: If, and only if, Martin is asking for work that one of the names below owns, end your reply with one final line, exactly:",
-    "SUGGEST: <name>",
-    `where <name> is copied exactly from this list: ${suggestableAddressees().join("; ")}.`,
-    "The runtime turns that line into a Yes/No button for Martin and removes it from what he sees; it starts nothing by itself. For anything else -- a question, a brief, or work no listed name owns -- write no SUGGEST line.",
+    "ROUTING (Martin's decision, 2026-11-16): you are the Chief of Staff, not the doer. When Martin asks for WORK -- a campaign, a strategy, a draft, a proposal, a diagnosis, a price, research for a piece of work -- that one of the names below owns, do NOT do the work and do NOT write a plan, steps or an example: the owning Hat does it.",
+    "Instead reply with exactly one line:",
+    "ROUTE: <name>",
+    "Prefer the most specific Hat whose responsibility covers the request over its Unit.",
+    "If two or three of the names could each own it and you cannot tell which, write one short question asking Martin which, and end with exactly one line:",
+    "ASK: <name> | <name>",
+    `Every <name> is copied exactly from this list: ${names}.`,
+    "For anything else -- a question, a status check, what is waiting on him, or work none of these names owns -- answer normally and write no ROUTE or ASK line.",
   ].join("\n");
 }
 
 export interface ParsedEnigReply {
-  /** The reply as Martin should see it, with any SUGGEST line removed. */
+  /** The reply as Martin should see it, with any ROUTE/SUGGEST/ASK line removed. */
   text: string;
-  /** A validated, exact addressee name, or undefined. */
+  /** A validated, exact addressee name to route to, or undefined. */
   addressee?: string;
+  /** Validated candidates ENIG asks Martin to choose between (an ASK line), or undefined. */
+  choices?: string[];
 }
 
-/** Strips every SUGGEST line; keeps the last one only if it names a suggestable addressee exactly (case-insensitive). */
+function exactName(candidate: string): string | undefined {
+  const clean = candidate.replace(/[*_`"'.]+$/g, "").replace(/^[*_`"']+/g, "").trim().toLowerCase();
+  return suggestableAddressees().find((name) => name.toLowerCase() === clean);
+}
+
+/** Strips every ROUTE/SUGGEST/ASK line; keeps the last route (or ask) only when it names exact, startable addressees. */
 export function parseEnigReply(reply: string): ParsedEnigReply {
-  const lines = reply.split("\n");
-  let candidate: string | undefined;
-  const kept = lines.filter((line) => {
-    const m = SUGGEST_LINE.exec(line);
-    if (!m) return true;
-    candidate = m[1].replace(/[*_`"'.]+$/g, "").replace(/^[*_`"']+/g, "").trim();
-    return false;
+  let route: string | undefined;
+  let ask: string | undefined;
+  const kept = reply.split("\n").filter((line) => {
+    const r = SUGGEST_LINE.exec(line);
+    if (r) {
+      route = r[1];
+      return false;
+    }
+    const a = ASK_LINE.exec(line);
+    if (a) {
+      ask = a[1];
+      return false;
+    }
+    return true;
   });
   const text = kept.join("\n").trim();
-  if (!candidate) return { text };
-  const match = suggestableAddressees().find((name) => name.toLowerCase() === candidate!.toLowerCase());
-  return match ? { text, addressee: match } : { text };
+  const addressee = route ? exactName(route) : undefined;
+  if (addressee) return { text, addressee };
+  const choices = ask ? [...new Set(ask.split("|").map(exactName).filter((n): n is string => Boolean(n)))].slice(0, MAX_CHOICES) : [];
+  return choices.length ? { text, choices } : { text };
+}
+
+/** The exact text Martin would have typed to start the work with `addressee` himself. */
+export function addressedText(addressee: string, text: string): string {
+  return `${addressee}, ${text}`;
 }
 
 interface StoredSuggestion {
   text: string;
-  addressee: string;
+  /** The 2026-11-09 Yes/No suggestion's one name. */
+  addressee?: string;
+  /** The names ENIG asked Martin to choose between (2026-11-16). */
+  choices?: string[];
   chatId: number;
   threadId?: number;
 }
@@ -106,6 +151,14 @@ export async function offerEnigSuggestion(
       { text: "No", callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:no` },
     ],
   ];
+}
+
+/** Stores ENIG's question and returns one button per candidate (value `c<index>`), plus "None of these". */
+export async function offerEnigChoices(env: Env, chatId: number, threadId: number | undefined, originalText: string, choices: string[]): Promise<InlineButton[][]> {
+  const id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  const record: StoredSuggestion = { text: originalText, choices, chatId, threadId };
+  await kvPut(env, suggestionKey(id), JSON.stringify(record), { expirationTtl: SUGGESTION_TTL_SECONDS });
+  return [...choices.map((name, i) => [{ text: name, callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:c${i}` }]), [{ text: "None of these", callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:no` }]];
 }
 
 export type ConsumedSuggestion =
@@ -136,8 +189,9 @@ export async function consumeEnigSuggestion(
     return { kind: "unavailable" };
   }
   if (record.chatId !== chatId || record.threadId !== threadId) return { kind: "unavailable" };
-  if (choice !== "yes") return { kind: "declined" };
+  const picked = choice === "yes" ? record.addressee : /^c\d$/.test(choice) ? record.choices?.[Number(choice.slice(1))] : undefined;
+  if (!picked) return { kind: "declined" };
   // Re-validate at tap time: a Unit paused or removed since the offer is refused, not routed.
-  if (!suggestableAddressees().includes(record.addressee)) return { kind: "unavailable" };
-  return { kind: "start", addressee: record.addressee, addressedText: `${record.addressee}, ${record.text}` };
+  if (!suggestableAddressees().includes(picked)) return { kind: "unavailable" };
+  return { kind: "start", addressee: picked, addressedText: addressedText(picked, record.text) };
 }

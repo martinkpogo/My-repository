@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { withLiveStatus } from "./runtime/liveStatus";
-import { sendMessage, sendOperationsMessage } from "./telegram";
+import { sendMessage, sendOperationsMessage, type InlineButton } from "./telegram";
 import { enigChatReply, generalChatReply } from "./chat";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { classifyDataLookupRequest, runConversationalDataLookup } from "./dataLookup";
@@ -51,6 +51,8 @@ export async function routeIncomingText(
   options: {
     forceNewEnquiry?: boolean;
     replyToMessageId?: number;
+    /** Set on the re-route of ENIG's ROUTE decision, so an unresolved addressed text never goes back to ENIG. */
+    routedByEnig?: boolean;
     // Test-only injection seam, mirroring the AiPolicyExecutor injection
     // pattern already used in ai/policy.ts. Production callers never pass
     // this -- the real resolveWorkspaceRouting always runs. It exists so
@@ -210,11 +212,15 @@ export async function routeIncomingText(
       }
     }
     if (!decision.unit) {
-      // No Unit addressed: ENIG answers, and may attach a Yes/No button
-      // suggesting the owning Unit/Hat (src/enigSuggestion.ts). A tap
-      // re-enters this function with the addressed text; nothing starts here.
+      // No Unit addressed: ENIG answers, or routes the work to the Hat that
+      // owns it (Martin, 2026-11-16; src/enigSuggestion.ts).
+      if (options.routedByEnig) {
+        // The addressed text ENIG routed did not resolve to a Unit: never ask ENIG again (no loop).
+        await sendMessage(env, chatId, "That could not be handed to a Hat automatically -- nothing was started.", undefined, threadId);
+        return;
+      }
       const enig = await enigChatReply(env, chatId, threadId, text);
-      await sendMessage(env, chatId, enig.text || AI_UNAVAILABLE_MESSAGE, enig.text ? enig.buttons : undefined, threadId);
+      await deliverEnigReply(enig, (t, b) => sendMessage(env, chatId, t, b, threadId).then(() => undefined), (routed) => routeIncomingText(env, chatId, routed, threadId, { forceNewEnquiry: true, routedByEnig: true }));
       return;
     }
     const reply = await generalChatReply(env, decision.unit, chatId, threadId, text);
@@ -224,6 +230,26 @@ export async function routeIncomingText(
 
   // decision.mode === "cowork" from here.
   await dispatchCowork(env, chatId, threadId, text, decision);
+}
+
+/**
+ * What happens to ENIG's reply (Martin, 2026-11-16): a route is announced in
+ * one line and the work is handed to the owning Hat at once, through the
+ * same routeIncomingText path Martin's own addressed message takes; anything
+ * else (ENIG's answer, or its question with one button per candidate) is
+ * sent as it is. `send` and `reroute` are the caller's.
+ */
+export async function deliverEnigReply(
+  enig: { text: string; buttons?: InlineButton[][]; route?: { addressee: string; addressedText: string } },
+  send: (text: string, buttons?: InlineButton[][]) => Promise<void>,
+  reroute: (addressedText: string) => Promise<void>,
+): Promise<void> {
+  if (enig.route) {
+    await send(enig.text);
+    await reroute(enig.route.addressedText);
+    return;
+  }
+  await send(enig.text || AI_UNAVAILABLE_MESSAGE, enig.text ? enig.buttons : undefined);
 }
 
 /**

@@ -9,7 +9,7 @@ import { kvGet, kvPut } from "./kvStore";
 import { findUnitManifest } from "./units/registry";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { businessSnapshot } from "./businessSnapshot";
-import { offerEnigSuggestion, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
+import { addressedText, offerEnigChoices, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
 import type { InlineButton } from "./telegram";
 import { withLiveStatus } from "./runtime/liveStatus";
 
@@ -301,19 +301,26 @@ export const ENIG_UNAVAILABLE_MESSAGE =
 export async function enigChatReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<EnigChatReply> {
   const reply = await runEnigTurn(env, chatId, threadId, userMessage, suggestionInstruction());
   if (reply === null) return { text: ENIG_UNAVAILABLE_MESSAGE };
-  // ENIG suggests, Martin confirms: a validated SUGGEST line becomes a
-  // Yes/No button (src/enigSuggestion.ts); anything else is dropped.
+  // ENIG routes work to its owning Hat (Martin, 2026-11-16; src/enigSuggestion.ts).
+  // A validated ROUTE line hands the work over: whatever else ENIG wrote is
+  // discarded, so ENIG never does the work itself. An ASK line becomes one
+  // button per candidate. Anything else is ENIG's own answer.
   const parsed = parseEnigReply(reply);
-  if (!parsed.addressee) return { text: parsed.text };
-  const buttons = await offerEnigSuggestion(env, chatId, threadId, userMessage, parsed.addressee);
-  return { text: parsed.text, buttons };
+  if (parsed.addressee) return { text: `Passing this to ${parsed.addressee}.`, route: { addressee: parsed.addressee, addressedText: addressedText(parsed.addressee, userMessage) } };
+  if (parsed.choices) {
+    const buttons = await offerEnigChoices(env, chatId, threadId, userMessage, parsed.choices);
+    return { text: parsed.text || "Which of these should handle this?", buttons };
+  }
+  return { text: parsed.text };
 }
 
 export interface EnigChatReply {
   /** What Martin sees; empty when no provider answered. */
   text: string;
-  /** A Yes/No suggestion button row, when ENIG proposed an owning Unit/Hat. */
+  /** One button per candidate, when ENIG asks Martin which Hat should own the work. */
   buttons?: InlineButton[][];
+  /** The owning Hat ENIG routes the work to, with the exact addressed text to route. */
+  route?: { addressee: string; addressedText: string };
 }
 
 /**
