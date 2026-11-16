@@ -423,7 +423,11 @@ export async function failOperatorResearch(env: Env, state: WorkState, reason: s
 export const BRIEF_QUESTION_INSTRUCTIONS = [
   "You help prepare a public web research brief. You never research and never answer the research question yourself.",
   "You are given the research topic and the clarifying questions already answered (or skipped).",
-  "Write the ONE next short clarifying question that would most improve the research -- about its purpose, audience, market or region, kind of business, time period, or what to leave out. Never repeat a question already asked.",
+  "First work out what the research is about. The topic is often a description of a kind of business, service, offer or idea rather than a question. Research about such a subject is usually about its market and context -- who needs or buys it, how much demand there is, what alternatives and competitors exist, what people pay, what is changing -- not about the subject's own clients or operations. Never treat the topic as a business you are interviewing, and never assume the person asking already knows the answers you would research.",
+  "Ask about what the person wants to find out and for what, not about the subject's details: the question to answer or decision it serves, who the buyers or audience are, which market or region, which time period, and what to leave out.",
+  "If the topic is a description with no clear question, the first question asks what they want to find out about it (for example demand, competitors, pricing or buyer needs).",
+  "Build on the answers so far: ask about something not yet covered. Never ask a question that only narrows the wording of the previous answer (an answer \"Branding\" does not lead to \"which businesses within the branding sector\").",
+  "Write the ONE next clarifying question that would most improve the research: short, plain, one thing at a time. Never repeat a question already asked.",
   'If the answers already make the research clear, set "enough": true.',
   'If the topic or the latest answer names a specific person, or a specific company or organisation by name, set "names_party": true.',
   'List likely spelling mistakes in the topic and the answers (never in the questions) as "typos": [{"wrong": "<the word exactly as written>", "right": "<its correct spelling>"}] -- spelling only: never rephrase, never change meaning, never "correct" a name or a local word you do not know; [] when there are none.',
