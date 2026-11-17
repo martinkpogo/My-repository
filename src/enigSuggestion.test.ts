@@ -154,7 +154,7 @@ test("enigChatReply: an ASK line becomes one button per valid candidate; a pick 
   mockNotionFetch(t);
   const env = fakeEnv({ AI: { run: async () => ({ response: "Is this a marketing campaign or a positioning question?\nASK: Marketing | Strategy | Nobody Real" }) } as any });
   const reply = await enigChatReply(env, -100, 604, "work out how we talk about diagnosis");
-  assert.strictEqual(reply.text, `Is this a marketing campaign or a positioning question?\n\n${ASK_PICK_EFFECT}`, "a bare candidate button says what a tap does");
+  assert.strictEqual(reply.text, `Is this a marketing campaign or a positioning question?\n\n• Marketing\n• Strategy\n\n${ASK_PICK_EFFECT}`, "a bare candidate button says what a tap does, and each candidate is listed");
   const rows = reply.buttons!;
   assert.deepStrictEqual(rows.map((r) => r[0].text), ["Marketing", "Strategy", "None of these"], "an unknown name is dropped");
   const [, id, value] = rows[1][0].callback_data.split(":");
@@ -247,4 +247,18 @@ test("ENIG's own turn never starts web research, even for a work request", async
   assert.strictEqual(reply.text, coworkOfferText("Marketing"));
   assert.ok(systems.length >= 1);
   assert.ok(!systems.some((s) => /PUBLIC WEB research/.test(s)), "the research check never ran");
+});
+
+test("a 'which Hat?' question says what each candidate does, so Martin can choose without knowing the Hats", async (t) => {
+  mockNotionFetch(t);
+  const env = fakeEnv({ AI: { run: async () => ({ response: "Strategy or content?\nASK: Marketing Strategist | Content Strategist" }) } as any });
+  const reply = await enigChatReply(env, -100, 604, "plan our marketing for next quarter");
+  assert.match(reply.text, /• Marketing Strategist -- Own ENIG's marketing direction/);
+  assert.match(reply.text, /• Content Strategist -- /);
+});
+
+test("withoutAddressee: the confirmed Hat works from Martin's own words, not the re-sent prefix", async () => {
+  const { withoutAddressee } = await import("./router");
+  assert.strictEqual(withoutAddressee("Marketing Strategist, create a campaign", "Marketing Strategist"), "create a campaign");
+  assert.strictEqual(withoutAddressee("create a campaign", "Marketing Strategist"), "create a campaign");
 });

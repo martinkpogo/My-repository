@@ -5,6 +5,7 @@ import { enigChatReply, generalChatReply } from "./chat";
 import { resolveWorkspaceRouting, type WorkspaceDecision } from "./workspaceRouter";
 import { classifyDataLookupRequest, runConversationalDataLookup } from "./dataLookup";
 import { findUnitManifest } from "./units/registry";
+import { isMarketingHat } from "./hats/registry";
 import { resolveUnitRequest, tryResolveUnitAction } from "./units/dispatch";
 import { continueExistingWork } from "./workContinuation";
 import {
@@ -241,7 +242,15 @@ export async function routeIncomingText(
   }
 
   // decision.mode === "cowork" from here.
-  await dispatchCowork(env, chatId, threadId, text, decision);
+  // routedByEnig is set only by Martin's confirmed ENIG offer: the Hat was
+  // matched once, on responsibilities, and he confirmed it, so it is final.
+  await dispatchCowork(env, chatId, threadId, text, decision, { confirmedHat: options.routedByEnig === true });
+}
+
+/** Martin's request without the "<Hat>, " the confirmed offer re-sent it with -- the task text the Hat works from. */
+export function withoutAddressee(text: string, hat: string): string {
+  const prefix = `${hat}, `;
+  return text.startsWith(prefix) ? text.slice(prefix.length) : text;
 }
 
 /**
@@ -303,7 +312,20 @@ export async function dispatchCowork(
   threadId: number | undefined,
   text: string,
   decision: Extract<WorkspaceDecision, { mode: "cowork" }>,
+  opts: { confirmedHat?: boolean } = {},
 ): Promise<void> {
+  if (decision.unit === "Marketing" && opts.confirmedHat && isMarketingHat(decision.hat)) {
+    // A Hat Martin confirmed on ENIG's offer (Martin, 2026-11-17): the match
+    // was made once, on responsibilities, and he confirmed it -- Marketing's
+    // intake does not match again. If the work turns out not to be this
+    // Hat's, its own step proposes a transition he approves.
+    const workId = newWorkId();
+    const stub = getSessionStub(env, workId);
+    await stub.init(workId, chatId, "Marketing", decision.hat, threadId);
+    await setActiveWorkId(env, chatId, threadId, workId);
+    await stub.handleConfirmedMarketingRequest(withoutAddressee(text, decision.hat));
+    return;
+  }
   if (decision.unit === "Marketing") {
     // COMPATIBILITY PATH -- Marketing is the one manifest Unit that does NOT
     // dispatch through the generic resolution path below: its own intake

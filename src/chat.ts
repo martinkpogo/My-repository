@@ -3,7 +3,8 @@ import { generate } from "./ai";
 import type { ChatTurn, GeneratePromptParts } from "./ai";
 import { plainText, queryDataSource } from "./notion";
 import type { SensitivityLevel } from "./dataBoundary/types";
-import { ALL_HATS } from "./hats/registry";
+import { ALL_HATS, isMarketingHat, MARKETING_HAT_REGISTRY } from "./hats/registry";
+import { RESULT_GATE_SMOKE_ACTION } from "./runtime/resultGateSmokeContract";
 import { systemContext } from "./access";
 import { kvGet, kvPut } from "./kvStore";
 import { findUnitManifest } from "./units/registry";
@@ -89,6 +90,38 @@ export const ENIG_HAT_DEFINITION_PAGE_ID = "413cb004-e583-8188-aad2-f36696f29d39
 // all three were built. Exists specifically because the chat invented six
 // Marketing job titles that don't exist (see EVIDENCE_RULE above) when asked
 // what roles are available.
+/**
+ * What a Hat does, in words ENIG can match a plain request against (Martin,
+ * 2026-11-17: he describes the work and never names a Hat, so the Hat is
+ * matched once, here, on its declared responsibilities). Computed from code
+ * declarations only -- a Marketing Hat's own definition (purpose and what it
+ * owns, transcribed from its Notion page), else the descriptions of the
+ * Actions its manifest declares, else its responsibility id. The test-only
+ * Result Gate smoke Action is never offered as a duty.
+ */
+export function hatDuties(hatName: string): string | undefined {
+  if (isMarketingHat(hatName)) {
+    const def = MARKETING_HAT_REGISTRY[hatName];
+    return `${def.purpose} Owns: ${def.owns.join("; ")}.`;
+  }
+  const hat = ALL_HATS.find((h) => h.name === hatName);
+  const manifestHat = hat ? findUnitManifest(hat.unit as Unit)?.hats[hatName] : undefined;
+  if (!manifestHat) return undefined;
+  const actions = manifestHat.actions
+    .filter((a) => a.name !== RESULT_GATE_SMOKE_ACTION && a.description?.trim())
+    .map((a) => a.description!.trim().replace(/\s+/g, " "));
+  const parts = [manifestHat.responsibility?.trim(), ...actions].filter((p): p is string => Boolean(p));
+  return parts.length ? parts.join(" ") : undefined;
+}
+
+/** One short line on what a Hat does, for a "which Hat?" choice Martin makes without knowing the Hats. */
+export function hatDutySummary(hatName: string): string | undefined {
+  const duty = hatDuties(hatName);
+  if (!duty) return undefined;
+  const first = duty.split(/(?<=[.!?])\s/)[0];
+  return first.length > 160 ? `${first.slice(0, 157)}...` : first;
+}
+
 export function buildStructureFacts(): string {
   const units = (Object.keys(UNIT_ORDER) as Unit[]).sort((a, b) => UNIT_ORDER[a] - UNIT_ORDER[b]);
   const unitLines = units.map((unit) => {
@@ -105,7 +138,7 @@ export function buildStructureFacts(): string {
     // online discovery of businesses is Lead Generation Specialist's, not
     // Marketing's) instead of guessing from names. Computed, never typed.
     const duties = ALL_HATS.filter((h) => h.unit === unit)
-      .map((h) => ({ name: h.name, duty: manifest?.hats[h.name]?.responsibility?.trim() }))
+      .map((h) => ({ name: h.name, duty: hatDuties(h.name) }))
       .filter((d): d is { name: string; duty: string } => !!d.duty)
       .map((d) => `    · ${d.name} does: ${d.duty}`);
     return [`- ${unit}: ${hatText}. ${startable ? "Governed work CAN be started from chat." : "Governed work can NOT be started from chat."}`, ...duties].join("\n");
@@ -329,7 +362,9 @@ export async function enigChatReply(env: Env, chatId: number, threadId: number |
   }
   if (parsed.choices) {
     const buttons = await offerEnigChoices(env, chatId, threadId, userMessage, parsed.choices);
-    return { text: [parsed.text || "Which of these should handle this?", ASK_PICK_EFFECT].join("\n\n"), buttons };
+    // What each candidate does, so Martin can choose without knowing the Hats.
+    const whoDoesWhat = parsed.choices.map((name) => `• ${name}${hatDutySummary(name) ? ` -- ${hatDutySummary(name)}` : ""}`).join("\n");
+    return { text: [parsed.text || "Which of these should handle this?", whoDoesWhat, ASK_PICK_EFFECT].join("\n\n"), buttons };
   }
   return { text: parsed.text };
 }

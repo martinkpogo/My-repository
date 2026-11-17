@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import test from "node:test";
 import assert from "node:assert/strict";
-import { handleMarketingIntake, handleMarketingClarification } from "./marketingManifest";
+import { handleMarketingIntake, handleMarketingClarification, startConfirmedMarketingHat } from "./marketingManifest";
 import type { Env, WorkState } from "../../types";
 
 /**
@@ -341,4 +341,30 @@ test("a clarification reply on a Work with no assigned Hat re-runs intake with t
     h.aiCalls[0].user.includes("Do the paid thing.") && h.aiCalls[0].user.includes("Additional detail: It is about the search ads budget."),
     "the re-run Stage 1 must classify the augmented task text, not the reply alone",
   );
+});
+
+// --- A Hat Martin confirmed on ENIG's offer (Martin, 2026-11-17) ------------
+
+test("a confirmed Marketing Hat starts directly: no second match, no clarification, the Hat's own decision runs", async (t) => {
+  const h = makeHarness(t, [DRAFT_DECISION]);
+  const state = workState({ hat: "Marketing Strategist" });
+
+  const result = await startConfirmedMarketingHat(h.env, state, "Want to create a marketing campaign and strategy to offer free consultancy to get an email list.");
+
+  assert.equal(result.hat, "Marketing Strategist", "the confirmed Hat is kept");
+  assertDispatchedToDraft(result);
+  assert.equal(h.aiCalls.length, 1, "only the Hat's own decision -- the intake's Stage 1 match never runs");
+  assert.ok(!h.sentMessages.some((m) => m.includes("I'm not sure which Marketing Hat")), "no clarification question");
+  assert.ok(h.logBodies.some((b) => b.includes("Marketing task started by Marketing Strategist (confirmed by Martin)")));
+  assert.equal(result.marketing?.taskText, "Want to create a marketing campaign and strategy to offer free consultancy to get an email list.");
+});
+
+test("a 'confirmed' Work without a registered Marketing Hat falls back to the normal intake -- never a guessed dispatch", async (t) => {
+  const h = makeHarness(t, [json({ candidates: [], establishing: false })]);
+  const state = workState({ hat: "Marketing" as any });
+
+  const result = await startConfirmedMarketingHat(h.env, state, "Something unclear.");
+
+  assertClarificationHeld(result);
+  assert.equal(h.aiCalls.length, 1, "the intake's Stage 1 ran");
 });
