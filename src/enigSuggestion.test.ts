@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { ASK_PICK_EFFECT, consumeEnigSuggestion, coworkOfferText, ENIG_ROUTE_REFUSED_MESSAGE, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestableAddressees } from "./enigSuggestion";
+import { ASK_PICK_EFFECT, consumeEnigSuggestion, consumeTypedOfferAnswer, coworkOfferText, ENIG_ROUTE_REFUSED_MESSAGE, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestableAddressees, typedOfferAnswer } from "./enigSuggestion";
 import { ENIG_HAT_DEFINITION_PAGE_ID, enigChatReply, runEnigTurn } from "./chat";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import type { Env } from "./types";
@@ -201,4 +201,50 @@ test("runEnigTurn without the instruction (the morning brief's path) never asks 
   });
   await runEnigTurn(env, -100, 604, "Scheduled morning brief");
   assert.doesNotMatch(capturedSystem, /ROUTING/);
+});
+
+// Martin, 2026-11-17: the buttons can appear late, so a typed yes/no answers
+// the waiting offer; and ENIG's own turn never runs web research.
+
+test("the offer says a typed yes or no works too", () => {
+  assert.match(coworkOfferText("Marketing"), /Tap a button below, or reply yes or no\./);
+});
+
+test("typedOfferAnswer: only a plain yes or no counts -- never a request that happens to start with one", () => {
+  for (const t of ["yes", "Yes!", " ok ", "go ahead", "Enter Cowork"]) assert.strictEqual(typedOfferAnswer(t), "yes", t);
+  for (const t of ["no", "Not now", "nope."]) assert.strictEqual(typedOfferAnswer(t), "no", t);
+  for (const t of ["yes, and also draft the email", "no idea what's waiting", "what's open?", ""]) assert.strictEqual(typedOfferAnswer(t), undefined, t);
+});
+
+test("a typed yes starts the waiting offer exactly like its button, once; a typed no declines it", async () => {
+  const env = fakeEnv();
+  await offerEnigSuggestion(env, -100, 604, "create a campaign", "Marketing");
+  assert.deepStrictEqual(await consumeTypedOfferAnswer(env, -100, 604, "yes"), { kind: "start", addressee: "Marketing", addressedText: "Marketing, create a campaign" });
+  assert.strictEqual(await consumeTypedOfferAnswer(env, -100, 604, "yes"), undefined, "single use: a second yes is just a message");
+
+  await offerEnigSuggestion(env, -100, 604, "x", "Finance");
+  assert.strictEqual(await consumeTypedOfferAnswer(env, -100, 999, "yes"), undefined, "another thread's offer is never answered");
+  assert.deepStrictEqual(await consumeTypedOfferAnswer(env, -100, 604, "no"), { kind: "declined" });
+
+  assert.strictEqual(await consumeTypedOfferAnswer(env, -100, 604, "yes"), undefined, "no offer waiting: handled as an ordinary message");
+  await offerEnigSuggestion(env, -100, 604, "y", "Strategy");
+  assert.strictEqual(await consumeTypedOfferAnswer(env, -100, 604, "yes please, and the proposal too"), undefined, "not a plain yes");
+});
+
+test("ENIG's own turn never starts web research, even for a work request", async (t) => {
+  mockNotionFetch(t);
+  const systems: string[] = [];
+  const env = fakeEnv({
+    AI: {
+      run: async (_m: any, opts: any) => {
+        systems.push(String(opts?.messages?.[0]?.content ?? ""));
+        return { response: "ROUTE: Marketing" };
+      },
+    } as any,
+  });
+  await import("./runtime/webResearch"); // installs the web research augmenter, as in production
+  const reply = await enigChatReply(env, -100, 604, "create a marketing campaign offering free consultancy to build an email list");
+  assert.strictEqual(reply.text, coworkOfferText("Marketing"));
+  assert.ok(systems.length >= 1);
+  assert.ok(!systems.some((s) => /PUBLIC WEB research/.test(s)), "the research check never ran");
 });

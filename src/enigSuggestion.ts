@@ -97,7 +97,7 @@ export function suggestionInstruction(): string {
  * whatever the request was.
  */
 export function coworkOfferText(addressee: string): string {
-  return `This is ${addressee}'s work. Enter Cowork as ${addressee} and start?`;
+  return `This is ${addressee}'s work. Enter Cowork as ${addressee} and start?\n\nTap a button below, or reply yes or no.`;
 }
 
 /** Appended to ENIG's ASK question so a bare candidate button says what a tap does. */
@@ -175,6 +175,36 @@ function suggestionKey(id: string): string {
   return `enig_suggest:${id}`;
 }
 
+function latestOfferKey(chatId: number, threadId: number | undefined): string {
+  return `enig_suggest_latest:${chatId}:${threadId ?? "dm"}`;
+}
+
+const TYPED_YES = /^\s*(y|yes|yeah|yep|yup|ok|okay|sure|go|go ahead|start|do it|enter cowork)\s*[.!]*\s*$/i;
+const TYPED_NO = /^\s*(n|no|nope|not now|no thanks|cancel)\s*[.!]*\s*$/i;
+
+/** "yes" / "no" when Martin's whole message is a plain yes or no, else undefined. */
+export function typedOfferAnswer(text: string): "yes" | "no" | undefined {
+  if (TYPED_YES.test(text)) return "yes";
+  if (TYPED_NO.test(text)) return "no";
+  return undefined;
+}
+
+/**
+ * A typed "yes" / "no" answering the thread's latest Enter-Cowork offer, with
+ * the same single-use, same-thread, tap-time checks as the button (it consumes
+ * the very same stored offer). Undefined when the message is not a plain
+ * yes/no or no offer is waiting -- the message is then handled as usual.
+ */
+export async function consumeTypedOfferAnswer(env: Env, chatId: number, threadId: number | undefined, text: string): Promise<ConsumedSuggestion | undefined> {
+  const answer = typedOfferAnswer(text);
+  if (!answer) return undefined;
+  const id = await kvGet(env, latestOfferKey(chatId, threadId));
+  if (!id) return undefined;
+  await kvDelete(env, latestOfferKey(chatId, threadId));
+  const consumed = await consumeEnigSuggestion(env, id, answer, chatId, threadId);
+  return consumed.kind === "unavailable" ? undefined : consumed;
+}
+
 /** Stores the pending confirmation and returns its Enter-Cowork/Not-now buttons. */
 export async function offerEnigSuggestion(
   env: Env,
@@ -186,6 +216,9 @@ export async function offerEnigSuggestion(
   const id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   const record: StoredSuggestion = { text: originalText, addressee, chatId, threadId };
   await kvPut(env, suggestionKey(id), JSON.stringify(record), { expirationTtl: SUGGESTION_TTL_SECONDS });
+  // The thread's latest Enter-Cowork offer, so a typed "yes" / "no" answers it
+  // like a tap (Martin, 2026-11-17: the buttons can appear late).
+  await kvPut(env, latestOfferKey(chatId, threadId), id, { expirationTtl: SUGGESTION_TTL_SECONDS });
   return [
     [
       { text: `🤝 Enter Cowork as ${addressee}`, callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:yes` },

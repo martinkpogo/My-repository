@@ -11,11 +11,14 @@ import {
   getActiveWorkId,
   getReplyMessageWorkId,
   getSessionStub,
+  markEnigCoworkOffer,
   newWorkId,
   resolveStreamForThread,
   SALES_DIRECT_ENTRY_PAUSED,
   setActiveWorkId,
+  setWorkspaceMode,
 } from "./sessionRouting";
+import { consumeTypedOfferAnswer, type ConsumedSuggestion } from "./enigSuggestion";
 
 // Every primitive previously defined directly in this file (newWorkId,
 // getActiveWorkId/setActiveWorkId, getReplyMessageWorkId/
@@ -221,6 +224,13 @@ export async function routeIncomingText(
         await sendMessage(env, chatId, "That could not be handed to a Hat automatically -- nothing was started.", undefined, threadId);
         return;
       }
+      // A plain typed "yes" / "no" answers a waiting Enter-Cowork offer, like
+      // its button (Martin, 2026-11-17).
+      const typed = await consumeTypedOfferAnswer(env, chatId, threadId, text);
+      if (typed) {
+        await actOnEnigOffer(env, chatId, threadId, typed);
+        return;
+      }
       const enig = await enigChatReply(env, chatId, threadId, text);
       await deliverEnigReply(enig, (t, b) => sendMessage(env, chatId, t, b, threadId).then(() => undefined));
       return;
@@ -232,6 +242,31 @@ export async function routeIncomingText(
 
   // decision.mode === "cowork" from here.
   await dispatchCowork(env, chatId, threadId, text, decision);
+}
+
+/**
+ * Martin's answer to ENIG's owning-Hat offer, by tap (index.ts) or typed
+ * yes/no (above). A start marks the thread as offer-entered, switches it to
+ * Cowork FIRST, then re-sends his original message addressed to that Hat --
+ * the exact path his own typed "<Hat>, <request>" takes in Cowork.
+ * routedByEnig: if it somehow resolves with no Unit, it never goes back to
+ * ENIG (no loop).
+ */
+export async function actOnEnigOffer(env: Env, chatId: number, threadId: number | undefined, consumed: ConsumedSuggestion): Promise<void> {
+  if (consumed.kind === "unavailable") {
+    await sendMessage(env, chatId, "That suggestion was already used or has expired. Nothing was started.", undefined, threadId);
+    return;
+  }
+  if (consumed.kind === "declined") {
+    await sendMessage(env, chatId, "OK, nothing started.", undefined, threadId);
+    return;
+  }
+  // Marked before the mode write: the marker is what lets the terminal Work
+  // send this thread back to Chat (sessionRouting.ts).
+  await markEnigCoworkOffer(env, chatId, threadId);
+  await setWorkspaceMode(env, chatId, threadId, "cowork");
+  await sendMessage(env, chatId, `Entering Cowork as ${consumed.addressee}…`, undefined, threadId);
+  await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true, routedByEnig: true });
 }
 
 /**
