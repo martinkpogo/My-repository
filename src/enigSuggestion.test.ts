@@ -1,14 +1,17 @@
 import test from "node:test";
 import assert from "node:assert";
-import { consumeEnigSuggestion, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestableAddressees } from "./enigSuggestion";
+import { ASK_PICK_EFFECT, consumeEnigSuggestion, coworkOfferText, ENIG_ROUTE_REFUSED_MESSAGE, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestableAddressees } from "./enigSuggestion";
 import { ENIG_HAT_DEFINITION_PAGE_ID, enigChatReply, runEnigTurn } from "./chat";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import type { Env } from "./types";
 
 /**
- * ENIG suggests, Martin confirms: ENIG may propose the owning Unit/Hat for an
- * unaddressed request; only an exact, startable name becomes a button; a tap
- * yields exactly the addressed text Martin could have typed himself, once.
+ * Martin confirms, then the route enters Cowork as the owning Hat: ENIG may
+ * propose the owning Unit/Hat for an unaddressed request, but only as a
+ * confirmation ("Enter Cowork as <Hat>?"); only an exact, startable name
+ * becomes a button, a tap yields exactly the addressed text Martin could
+ * have typed himself (resolved in Cowork), once, and a ROUTE line naming
+ * anything else refuses ENIG's whole reply.
  */
 
 function createMockKv(initial: Record<string, string> = {}) {
@@ -71,11 +74,12 @@ test("parseEnigReply: a valid SUGGEST line is removed from the text and returned
   assert.strictEqual(parseEnigReply("Ok.\nSUGGEST: **Content Manager**").addressee, "Content Manager", "markdown emphasis tolerated");
 });
 
-test("parseEnigReply: an unknown or paused name is dropped -- the line is still hidden, no button", () => {
+test("parseEnigReply: an unknown or paused name is dropped -- the line is still hidden, and the reply is refused", () => {
   for (const bad of ["Sales Executive", "Social Media Manager", "Operations", "Marketing, draft a post"]) {
     const parsed = parseEnigReply(`Here you go.\nSUGGEST: ${bad}`);
-    assert.strictEqual(parsed.text, "Here you go.");
+    assert.strictEqual(parsed.text, "Here you go.", bad);
     assert.strictEqual(parsed.addressee, undefined, bad);
+    assert.strictEqual(parsed.refused, true, `${bad}: fail-closed, the whole reply is refused`);
   }
   assert.deepStrictEqual(parseEnigReply("Just an answer."), { text: "Just an answer." });
 });
@@ -84,6 +88,8 @@ test("a suggestion is single-use and yields exactly the addressed text Martin co
   const env = fakeEnv();
   const buttons = await offerEnigSuggestion(env, -100, 604, "draft a LinkedIn post about diagnosis", "Marketing");
   const [yes, no] = buttons[0];
+  assert.strictEqual(yes.text, "🤝 Enter Cowork as Marketing", "the tap says what it does: enter Cowork as the owning Hat");
+  assert.strictEqual(no.text, "Not now");
   assert.match(yes.callback_data, /^enigsuggest:[0-9a-f]{12}:yes$/);
   assert.match(no.callback_data, /:no$/);
   assert.ok(yes.callback_data.length <= 64, "fits Telegram's callback_data limit");
@@ -105,7 +111,7 @@ test("No declines; a tap from another thread, or an unknown id, is refused", asy
   assert.deepStrictEqual(await consumeEnigSuggestion(env, "000000000000", "yes", -100, 604), { kind: "unavailable" });
 });
 
-test("enigChatReply: a ROUTE line hands the work to the Hat -- ENIG's own plan is discarded, nothing to tap (Martin, 2026-11-16)", async (t) => {
+test("enigChatReply: a ROUTE line asks Martin to enter Cowork as the owning Hat -- nothing starts, ENIG's own plan is discarded (Martin, 2026-11-17)", async (t) => {
   mockNotionFetch(t);
   let capturedSystem = "";
   const env = fakeEnv({
@@ -117,22 +123,38 @@ test("enigChatReply: a ROUTE line hands the work to the Hat -- ENIG's own plan i
     } as any,
   });
   const reply = await enigChatReply(env, -100, 604, "create a campaign offering free consultancy to build an email list");
-  assert.strictEqual(reply.text, "Passing this to Campaign & Marketing Communications Manager.", "ENIG never does the work itself");
-  assert.strictEqual(reply.buttons, undefined);
-  assert.deepStrictEqual(reply.route, {
+  assert.strictEqual(reply.text, coworkOfferText("Campaign & Marketing Communications Manager"), "the runtime's own confirmation question, never ENIG's words");
+  assert.strictEqual(reply.text.includes("landing page"), false, "ENIG's plan is discarded -- it never does the work");
+  assert.strictEqual((reply as { route?: unknown }).route, undefined, "nothing is dispatched before Martin taps");
+  const [[enter, notNow]] = reply.buttons!;
+  assert.strictEqual(enter.text, "🤝 Enter Cowork as Campaign & Marketing Communications Manager");
+  assert.strictEqual(notNow.text, "Not now");
+  const [, id, value] = enter.callback_data.split(":");
+  assert.deepStrictEqual(await consumeEnigSuggestion(env, id, value, -100, 604), {
+    kind: "start",
     addressee: "Campaign & Marketing Communications Manager",
     addressedText: "Campaign & Marketing Communications Manager, create a campaign offering free consultancy to build an email list",
   });
   assert.match(capturedSystem, /ROUTING/);
   assert.match(capturedSystem, /do NOT do the work/);
+  assert.match(capturedSystem, /Enter Cowork as <name> and start\?/, "the instruction says the line starts nothing by itself");
+  assert.doesNotMatch(capturedSystem, /give him the exact one-line message to send/, "ENIG's turn carries the ROUTE rule, not the Unit-chat hand-him-a-message rule");
 });
 
-test("enigChatReply: an ASK line becomes one button per valid candidate; a tap yields that Hat's addressed text, once", async (t) => {
+test("enigChatReply: a ROUTE line naming something the registry will not accept refuses the whole reply -- ENIG's work content is never delivered", async (t) => {
+  mockNotionFetch(t);
+  const env = fakeEnv({ AI: { run: async () => ({ response: "1. Find the audience\n2. Build the landing page\nROUTE: Social Media Manager" }) } as any });
+  const reply = await enigChatReply(env, -100, 604, "run a campaign");
+  assert.strictEqual(reply.text, ENIG_ROUTE_REFUSED_MESSAGE, "fail-closed: a hand-over the runtime cannot honour refuses the reply");
+  assert.strictEqual(reply.buttons, undefined, "no button: nothing can start");
+  assert.strictEqual(reply.text.includes("landing page"), false, "the work content never reaches Martin");
+});
+
+test("enigChatReply: an ASK line becomes one button per valid candidate; a pick starts immediately in Cowork, once", async (t) => {
   mockNotionFetch(t);
   const env = fakeEnv({ AI: { run: async () => ({ response: "Is this a marketing campaign or a positioning question?\nASK: Marketing | Strategy | Nobody Real" }) } as any });
   const reply = await enigChatReply(env, -100, 604, "work out how we talk about diagnosis");
-  assert.strictEqual(reply.route, undefined, "unsure: nothing starts");
-  assert.strictEqual(reply.text, "Is this a marketing campaign or a positioning question?");
+  assert.strictEqual(reply.text, `Is this a marketing campaign or a positioning question?\n\n${ASK_PICK_EFFECT}`, "a bare candidate button says what a tap does");
   const rows = reply.buttons!;
   assert.deepStrictEqual(rows.map((r) => r[0].text), ["Marketing", "Strategy", "None of these"], "an unknown name is dropped");
   const [, id, value] = rows[1][0].callback_data.split(":");
@@ -150,19 +172,20 @@ test("parseEnigReply: ROUTE (and the earlier SUGGEST) route only to an exact sta
   assert.strictEqual(parseEnigReply("Which?\nASK: Operations | Sales Executive").choices, undefined, "no valid candidate: no buttons");
 });
 
-test("deliverEnigReply: a route is announced in one line and re-routed as the addressed text; otherwise the reply is sent as is", async () => {
+test("deliverEnigReply: the confirmation carries its buttons and nothing is re-routed here; an answer is sent as is", async () => {
   const { deliverEnigReply } = await import("./router");
   const sent: Array<{ text: string; buttons?: unknown }> = [];
-  const rerouted: string[] = [];
   const send = async (text: string, buttons?: unknown) => void sent.push({ text, buttons });
-  await deliverEnigReply({ text: "Passing this to Marketing.", route: { addressee: "Marketing", addressedText: "Marketing, do X" } }, send, async (t) => void rerouted.push(t));
+  await deliverEnigReply(
+    { text: coworkOfferText("Marketing"), buttons: [[{ text: "🤝 Enter Cowork as Marketing", callback_data: "enigsuggest:abcdef123456:yes" }]] },
+    send,
+  );
   assert.strictEqual(sent.length, 1);
-  assert.strictEqual(sent[0].text, "Passing this to Marketing.");
-  assert.strictEqual(sent[0].buttons, undefined, "nothing to tap");
-  assert.deepStrictEqual(rerouted, ["Marketing, do X"]);
-  await deliverEnigReply({ text: "Two approvals are waiting." }, send, async (t) => void rerouted.push(t));
+  assert.strictEqual(sent[0].text, coworkOfferText("Marketing"));
+  assert.notStrictEqual(sent[0].buttons, undefined, "the confirmation buttons reach Martin; the tap is what dispatches");
+  await deliverEnigReply({ text: "Two approvals are waiting." }, send);
   assert.strictEqual(sent.at(-1)!.text, "Two approvals are waiting.");
-  assert.strictEqual(rerouted.length, 1, "an answer re-routes nothing");
+  assert.strictEqual(sent.at(-1)!.buttons, undefined, "an answer carries no buttons");
 });
 
 test("runEnigTurn without the instruction (the morning brief's path) never asks for a ROUTE line", async (t) => {

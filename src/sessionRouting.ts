@@ -102,6 +102,51 @@ export async function setWorkspaceMode(env: Env, chatId: number, threadId: numbe
   await kvPut(env, `mode:${chatId}:${threadId ?? "dm"}`, mode);
 }
 
+// ---------------------------------------------------------------------------
+// Cowork entered through ENIG's owning-Hat offer (src/enigSuggestion.ts).
+//
+// Martin's decision 2026-11-17: the offer asks "Enter Cowork as <Hat>?", so
+// the mode his tap sets belongs to THAT piece of work -- when the Work
+// closes, the thread goes back to Chat and ENIG is its conversational voice
+// again. A thread he set with /mode is his own standing choice and is never
+// reverted (the /mode handler clears this marker). One marker, one
+// authority: mode itself is still read only through getWorkspaceMode, and
+// this marker never resolves an owner or dispatches anything.
+// ---------------------------------------------------------------------------
+
+function modeEntryKey(chatId: number, threadId: number | undefined): string {
+  return `mode_entry:${chatId}:${threadId ?? "dm"}`;
+}
+
+const ENIG_OFFER_ENTRY = "enig_offer";
+
+/** Records that this thread's Cowork mode came from Martin's tap on ENIG's offer rather than from his own /mode toggle. */
+export async function markEnigCoworkOffer(env: Env, chatId: number, threadId: number | undefined): Promise<void> {
+  await kvPut(env, modeEntryKey(chatId, threadId), ENIG_OFFER_ENTRY);
+}
+
+/** Drops the offer marker: Martin's own /mode toggle makes him the author of this thread's mode again. */
+export async function clearEnigCoworkOffer(env: Env, chatId: number, threadId: number | undefined): Promise<void> {
+  await kvDelete(env, modeEntryKey(chatId, threadId));
+}
+
+/**
+ * Reverts a thread that entered Cowork through ENIG's offer back to Chat
+ * when its Work reaches a terminal stage (WorkSession.updateRegistry calls
+ * this). Best effort by contract: it runs inside the Work's own save, so it
+ * never throws into that save -- a failed revert leaves the thread in
+ * Cowork, which /mode still fixes. Unmarked threads are untouched.
+ */
+export async function revertEnigCoworkOffer(env: Env, chatId: number, threadId: number | undefined): Promise<void> {
+  try {
+    if ((await kvGet(env, modeEntryKey(chatId, threadId))) !== ENIG_OFFER_ENTRY) return;
+    await setWorkspaceMode(env, chatId, threadId, "chat");
+    await kvDelete(env, modeEntryKey(chatId, threadId));
+  } catch (err) {
+    console.error(`revertEnigCoworkOffer: chat ${chatId} thread ${threadId} stayed in Cowork -- /mode can still switch it back`, err);
+  }
+}
+
 /**
  * Marks that this thread is currently waiting on Martin's answer to a
  * responsibility-clarification question ("Who should own this work?").

@@ -38,7 +38,7 @@ import type { PendingResearch } from "./runtime/research/types";
 import { withLiveStatus } from "./runtime/liveStatus";
 import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./runtime/workStatus";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
-import { dispatchScheduledPickup, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
+import { dispatchScheduledPickup, revertEnigCoworkOffer, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
 import { migrateSavedWork } from "./workStateMigration";
 import { hashContent } from "./contentHash";
 import type { ActionDefinition } from "./hats/actionRegistry";
@@ -1245,6 +1245,12 @@ export class WorkSession extends DurableObject<Env> {
         const financeActive = await kvGet(this.env, financeActiveKey);
         if (financeActive === state.workId) await kvDelete(this.env, financeActiveKey);
       }
+      // A thread that entered Cowork only through ENIG's owning-Hat offer
+      // (src/enigSuggestion.ts, Martin 2026-11-17) goes back to Chat when
+      // its Work closes -- the offer was for this piece of work, not a
+      // standing mode. Threads Martin set with /mode carry no marker and are
+      // never touched. Best effort: it never throws into this save.
+      await revertEnigCoworkOffer(this.env, state.chatId, state.threadId);
     }
   }
 

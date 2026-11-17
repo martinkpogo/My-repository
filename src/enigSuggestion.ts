@@ -6,26 +6,37 @@ import { SALES_DIRECT_ENTRY_PAUSED } from "./sessionRouting";
 import { kvDelete, kvGet, kvPut } from "./kvStore";
 
 /**
- * ENIG routes work to the Hat that owns it (Martin's decision, 2026-11-16,
- * replacing "ENIG suggests, Martin confirms" of 2026-11-09).
+ * Martin confirms, then the route enters Cowork as the Hat that owns the
+ * work (Martin's decision, 2026-11-17, replacing the automatic re-send of
+ * 2026-11-16, which had replaced "ENIG suggests, Martin confirms" of
+ * 2026-11-09).
  *
  * When Martin asks ENIG for work without naming anyone, ENIG writes no plan
- * of its own: it ends with one `ROUTE: <name>` line, and the runtime re-sends
- * Martin's ORIGINAL message prefixed with that name ("Marketing, <text>")
- * through routeIncomingText straight away -- exactly what would run had
- * Martin typed the name himself: the same deterministic addressee match, the
- * same Action Registry resolution, the same approval gates (every Hat's
- * output still waits for Martin's approval, and the Result Gate for his
- * Result approval). When more than one name could own the work, ENIG asks
- * instead (`ASK: <A> | <B>`), and Martin picks with one tap. Only exact,
- * startable names count; anything else is dropped and nothing starts.
+ * of its own: it ends with one `ROUTE: <name>` line. Nothing starts on that
+ * line -- the runtime shows Martin one question (`coworkOfferText`) with an
+ * "Enter Cowork as <name>" button and a "Not now" button, and only his tap
+ * switches the thread to Cowork mode and re-sends Martin's ORIGINAL message
+ * prefixed with that name ("Marketing, <text>") through routeIncomingText.
+ * That is exactly what would run had Martin typed the name himself, now in
+ * Cowork: the same deterministic addressee match, the same Action Registry
+ * resolution, the same approval gates (every Hat's output still waits for
+ * Martin's approval, and the Result Gate for his Result approval). A thread
+ * entered this way goes back to Chat when its Work closes
+ * (`revertEnigCoworkOffer`, src/sessionRouting.ts); a thread Martin set
+ * with /mode himself is never touched. When more than one name could own
+ * the work, ENIG asks instead (`ASK: <A> | <B>`), and Martin's pick starts
+ * at once in Cowork as that Hat -- no second confirmation. Only exact,
+ * startable names count: a ROUTE line naming anything else refuses ENIG's
+ * whole reply (`ENIG_ROUTE_REFUSED_MESSAGE`), so work content never reaches
+ * Martin without a routable owner behind it.
  *
- * The 2026-11-09 text, kept for the Yes/No buttons still in the wild:
+ * The 2026-11-09 text, kept for the `SUGGEST:` line and the yes/no callback
+ * values still in the wild:
  *
  * When Martin asks ENIG for work without naming a Unit, ENIG may end its
  * reply with one `SUGGEST: <name>` line. This module validates that name
  * against the exact addressees that can start governed work from chat,
- * strips the line, and turns it into a Yes/No button. Yes re-sends
+ * strips the line, and turns it into a button. Tapping it re-sends
  * Martin's ORIGINAL message prefixed with that name ("Marketing, <text>")
  * through routeIncomingText -- so what runs is exactly what would run had
  * Martin typed the name himself: the same deterministic addressee match,
@@ -33,8 +44,9 @@ import { kvDelete, kvGet, kvPut } from "./kvStore";
  *
  * ENIG's suggestion selects nothing by itself. It is an input convenience,
  * never a second resolution mechanism: an invalid, unknown or paused name
- * is dropped silently, and nothing starts without Martin's tap. Each
- * suggestion is single-use (consumed on first tap) and expires in a day.
+ * refuses ENIG's whole reply instead of being routed or shown, and nothing
+ * starts without Martin's tap. Each suggestion is single-use (consumed on
+ * first tap) and expires in a day.
  */
 
 /** `ROUTE:` (and the earlier `SUGGEST:`, still accepted) names the owner; `ASK:` lists candidates. */
@@ -66,16 +78,39 @@ export function suggestableAddressees(): string[] {
 export function suggestionInstruction(): string {
   const names = suggestableAddressees().join("; ");
   return [
-    "ROUTING (Martin's decision, 2026-11-16): you are the Chief of Staff, not the doer. When Martin asks for WORK -- a campaign, a strategy, a draft, a proposal, a diagnosis, a price, research for a piece of work -- that one of the names below owns, do NOT do the work and do NOT write a plan, steps or an example: the owning Hat does it.",
+    "ROUTING (Martin's decision, 2026-11-17): you are the Chief of Staff, not the doer. When Martin asks for WORK -- a campaign, a strategy, a draft, a proposal, a diagnosis, a price, research for a piece of work -- that one of the names below owns, do NOT do the work and do NOT write a plan, steps or an example: the owning Hat does it.",
     "Instead reply with exactly one line:",
     "ROUTE: <name>",
+    "That line starts nothing by itself: the runtime shows Martin the question \"This is <name>'s work. Enter Cowork as <name> and start?\" with Enter Cowork and Not now buttons, and only his tap on Enter Cowork switches the thread to Cowork and starts the work as that Hat. Write nothing else on a ROUTE reply -- whatever you add beside the line is discarded.",
     "Prefer the most specific Hat whose responsibility covers the request over its Unit.",
     "If two or three of the names could each own it and you cannot tell which, write one short question asking Martin which, and end with exactly one line:",
     "ASK: <name> | <name>",
+    "There he picks with one tap and the work starts at once in Cowork as the Hat he picks -- no second confirmation.",
     `Every <name> is copied exactly from this list: ${names}.`,
     "For anything else -- a question, a status check, what is waiting on him, or work none of these names owns -- answer normally and write no ROUTE or ASK line.",
   ].join("\n");
 }
+
+/**
+ * The one question Martin taps to enter Cowork as the owning Hat. Written by
+ * the runtime, never by ENIG, so what he confirms is always the same words
+ * whatever the request was.
+ */
+export function coworkOfferText(addressee: string): string {
+  return `This is ${addressee}'s work. Enter Cowork as ${addressee} and start?`;
+}
+
+/** Appended to ENIG's ASK question so a bare candidate button says what a tap does. */
+export const ASK_PICK_EFFECT = "Pick one and it starts straight away in Cowork as that Hat.";
+
+/**
+ * Shown instead of ENIG's reply when it wrote a ROUTE/SUGGEST line naming
+ * something that is not an exact, startable addressee. Fail-closed: ENIG's
+ * own words on such a reply are work content with no routable owner behind
+ * them, so none of it is delivered and nothing is started.
+ */
+export const ENIG_ROUTE_REFUSED_MESSAGE =
+  "ENIG named something the runtime will not route to, so nothing was started. Name the Unit or Hat yourself (for example \"Marketing, <request>\") and it runs exactly as you typed it.";
 
 export interface ParsedEnigReply {
   /** The reply as Martin should see it, with any ROUTE/SUGGEST/ASK line removed. */
@@ -84,6 +119,8 @@ export interface ParsedEnigReply {
   addressee?: string;
   /** Validated candidates ENIG asks Martin to choose between (an ASK line), or undefined. */
   choices?: string[];
+  /** Set only when a ROUTE/SUGGEST line named something that is not an exact, startable addressee: the whole reply is refused. */
+  refused?: true;
 }
 
 function exactName(candidate: string): string | undefined {
@@ -91,7 +128,7 @@ function exactName(candidate: string): string | undefined {
   return suggestableAddressees().find((name) => name.toLowerCase() === clean);
 }
 
-/** Strips every ROUTE/SUGGEST/ASK line; keeps the last route (or ask) only when it names exact, startable addressees. */
+/** Strips every ROUTE/SUGGEST/ASK line; keeps the last route (or ask) only when it names exact, startable addressees, and refuses the reply outright when a ROUTE line names anything else. */
 export function parseEnigReply(reply: string): ParsedEnigReply {
   let route: string | undefined;
   let ask: string | undefined;
@@ -110,6 +147,10 @@ export function parseEnigReply(reply: string): ParsedEnigReply {
   });
   const text = kept.join("\n").trim();
   const addressee = route ? exactName(route) : undefined;
+  // Fail-closed on a ROUTE line the registry does not recognise: the reply
+  // carried an intent to hand work over that the runtime cannot honour, so
+  // it is refused as a whole rather than delivered without the hand-over.
+  if (route && !addressee) return { text, refused: true };
   if (addressee) return { text, addressee };
   const choices = ask ? [...new Set(ask.split("|").map(exactName).filter((n): n is string => Boolean(n)))].slice(0, MAX_CHOICES) : [];
   return choices.length ? { text, choices } : { text };
@@ -134,7 +175,7 @@ function suggestionKey(id: string): string {
   return `enig_suggest:${id}`;
 }
 
-/** Stores the pending suggestion and returns the Yes/No buttons for it. */
+/** Stores the pending confirmation and returns its Enter-Cowork/Not-now buttons. */
 export async function offerEnigSuggestion(
   env: Env,
   chatId: number,
@@ -147,13 +188,13 @@ export async function offerEnigSuggestion(
   await kvPut(env, suggestionKey(id), JSON.stringify(record), { expirationTtl: SUGGESTION_TTL_SECONDS });
   return [
     [
-      { text: `✅ Yes, start with ${addressee}`, callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:yes` },
-      { text: "No", callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:no` },
+      { text: `🤝 Enter Cowork as ${addressee}`, callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:yes` },
+      { text: "Not now", callback_data: `${ENIG_SUGGEST_CALLBACK}:${id}:no` },
     ],
   ];
 }
 
-/** Stores ENIG's question and returns one button per candidate (value `c<index>`), plus "None of these". */
+/** Stores ENIG's question and returns one button per candidate (value `c<index>`), plus "None of these". A candidate tap starts immediately in Cowork as that Hat (Martin, 2026-11-17) -- no second confirmation. */
 export async function offerEnigChoices(env: Env, chatId: number, threadId: number | undefined, originalText: string, choices: string[]): Promise<InlineButton[][]> {
   const id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
   const record: StoredSuggestion = { text: originalText, choices, chatId, threadId };
@@ -170,7 +211,8 @@ export type ConsumedSuggestion =
  * Consumes a suggestion on Martin's tap (single use: it is deleted before
  * anything else happens). A suggestion tapped from a different chat/thread
  * than it was offered in is refused. "start" carries the exact addressed
- * text the caller routes through routeIncomingText.
+ * text the caller first switches the thread to Cowork for and then routes
+ * through routeIncomingText.
  */
 export async function consumeEnigSuggestion(
   env: Env,

@@ -9,7 +9,7 @@ import { kvGet, kvPut } from "./kvStore";
 import { findUnitManifest } from "./units/registry";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { businessSnapshot } from "./businessSnapshot";
-import { addressedText, offerEnigChoices, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
+import { ASK_PICK_EFFECT, coworkOfferText, ENIG_ROUTE_REFUSED_MESSAGE, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
 import type { InlineButton } from "./telegram";
 import { withLiveStatus } from "./runtime/liveStatus";
 
@@ -144,8 +144,18 @@ If asked what roles/Hats/positions exist anywhere, your answer must use ONLY the
 // The reply itself still executes nothing -- what changed is that it now
 // says how the work actually starts, so a request ends with the exact
 // message Martin can send rather than a bare "I can't".
-const HOW_WORK_STARTS_RULE =
-  "This reply itself cannot perform any action — you cannot send messages to other topics, create or update Notion records, advance a Handoff, or run any workflow. The real system can: when Martin starts a message with the name of a Unit or Hat listed in AUTHORITATIVE FACTS as able to start governed work from chat (for example \"Marketing, draft a LinkedIn post about how we diagnose before we prescribe\" or \"Lead Generation Specialist, find leads in ...\"), the system routes it to that Unit's real workflow, which asks Martin's approval before anything is written or sent. Strategy and Finance requests must also name an existing Matter token (e.g. MAT-12). So when Martin asks for work one of those Units does, say which Unit or Hat owns it and give him the exact one-line message to send, starting with that name. When no listed Unit can start it from chat, say so plainly. Never narrate doing the work yourself, and never claim anything succeeded, landed, was created, sent, or completed unless it's drawn from the real snapshot or this conversation's own messages.";
+//
+// Split 2026-11-17: this closing rule ("give him the exact one-line message
+// to send") used to be sent to ENIG's turn as well, contradicting
+// suggestionInstruction()'s "reply with exactly one line: ROUTE: <name>" --
+// ENIG answered by handing Martin a message to type instead of routing. A
+// Unit's own topic chat still hands him that one-line message (nothing
+// routes for him there); ENIG's turn gets the ROUTE rule instead.
+const WORK_STARTS_BASE_RULE =
+  "This reply itself cannot perform any action — you cannot send messages to other topics, create or update Notion records, advance a Handoff, or run any workflow. The real system can: when Martin starts a message with the name of a Unit or Hat listed in AUTHORITATIVE FACTS as able to start governed work from chat (for example \"Marketing, draft a LinkedIn post about how we diagnose before we prescribe\" or \"Lead Generation Specialist, find leads in ...\"), the system routes it to that Unit's real workflow, which asks Martin's approval before anything is written or sent. Strategy and Finance requests must also name an existing Matter token (e.g. MAT-12). Never narrate doing the work yourself, and never claim anything succeeded, landed, was created, sent, or completed unless it's drawn from the real snapshot or this conversation's own messages.";
+
+const UNIT_CHAT_WORK_STARTS_RULE =
+  "So when Martin asks for work one of those Units does, say which Unit or Hat owns it and give him the exact one-line message to send, starting with that name. When no listed Unit can start it from chat, say so plainly.";
 
 // `unit` undefined reads across every Unit -- ENIG's view, which owns no
 // single Unit's log.
@@ -270,7 +280,7 @@ async function generalChatReplyInner(
     persona: buildStructureFacts(),
     behavior: UNIT_PERSONAS[unit],
     skillContent: EVIDENCE_RULE,
-    context: [HOW_WORK_STARTS_RULE, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries for ${unit} -- history, not current state:\n${snapshot}`].join("\n\n"),
+    context: [WORK_STARTS_BASE_RULE, UNIT_CHAT_WORK_STARTS_RULE, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries for ${unit} -- history, not current state:\n${snapshot}`].join("\n\n"),
   };
   return runChatTurn(env, chatId, threadId, parts, userMessage, chatSensitivityForUnit(unit));
 }
@@ -301,15 +311,25 @@ export const ENIG_UNAVAILABLE_MESSAGE =
 export async function enigChatReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<EnigChatReply> {
   const reply = await runEnigTurn(env, chatId, threadId, userMessage, suggestionInstruction());
   if (reply === null) return { text: ENIG_UNAVAILABLE_MESSAGE };
-  // ENIG routes work to its owning Hat (Martin, 2026-11-16; src/enigSuggestion.ts).
-  // A validated ROUTE line hands the work over: whatever else ENIG wrote is
-  // discarded, so ENIG never does the work itself. An ASK line becomes one
-  // button per candidate. Anything else is ENIG's own answer.
+  // Martin decides, then the route enters Cowork as the owning Hat (Martin,
+  // 2026-11-17; src/enigSuggestion.ts). A validated ROUTE line becomes a
+  // CONFIRMATION -- "Enter Cowork as <Hat>?" with Enter Cowork / Not now
+  // buttons -- and nothing is dispatched until he taps (index.ts's
+  // ENIG_SUGGEST_CALLBACK switches the thread to Cowork and re-sends his
+  // original message addressed to that Hat). An ASK line becomes one button
+  // per candidate; his pick starts immediately in Cowork. Anything else is
+  // ENIG's own answer. A ROUTE line naming anything the registry will not
+  // accept refuses the whole reply: ENIG's own words on it are work content
+  // with no routable owner behind them, so none of it is delivered.
   const parsed = parseEnigReply(reply);
-  if (parsed.addressee) return { text: `Passing this to ${parsed.addressee}.`, route: { addressee: parsed.addressee, addressedText: addressedText(parsed.addressee, userMessage) } };
+  if (parsed.refused) return { text: ENIG_ROUTE_REFUSED_MESSAGE };
+  if (parsed.addressee) {
+    const buttons = await offerEnigSuggestion(env, chatId, threadId, userMessage, parsed.addressee);
+    return { text: coworkOfferText(parsed.addressee), buttons };
+  }
   if (parsed.choices) {
     const buttons = await offerEnigChoices(env, chatId, threadId, userMessage, parsed.choices);
-    return { text: parsed.text || "Which of these should handle this?", buttons };
+    return { text: [parsed.text || "Which of these should handle this?", ASK_PICK_EFFECT].join("\n\n"), buttons };
   }
   return { text: parsed.text };
 }
@@ -317,10 +337,8 @@ export async function enigChatReply(env: Env, chatId: number, threadId: number |
 export interface EnigChatReply {
   /** What Martin sees; empty when no provider answered. */
   text: string;
-  /** One button per candidate, when ENIG asks Martin which Hat should own the work. */
+  /** The confirmation (Enter Cowork as <Hat>?) or one button per ASK candidate. */
   buttons?: InlineButton[][];
-  /** The owning Hat ENIG routes the work to, with the exact addressed text to route. */
-  route?: { addressee: string; addressedText: string };
 }
 
 /**
@@ -360,7 +378,7 @@ async function runEnigTurnInner(
   const parts = {
     persona: `You are ENIG. Your Hat Definition follows; act exactly within it.\n\n${hatDefinition}`,
     behavior: universalRoleContract,
-    skillContent: [buildStructureFacts(), HOW_WORK_STARTS_RULE, extraInstruction].filter(Boolean).join("\n\n"),
+    skillContent: [buildStructureFacts(), WORK_STARTS_BASE_RULE, extraInstruction].filter(Boolean).join("\n\n"),
     context: [snapshot, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries (all Units) -- history, not current state:\n${activity}`].join("\n\n"),
   };
   return runChatTurn(env, chatId, threadId, parts, situation, "business_sensitive");

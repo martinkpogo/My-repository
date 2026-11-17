@@ -2,6 +2,8 @@
 
 Status: **approved by Martin (16 Nov 2026)**, option 1a: automatic, and ENIG asks when it is unsure. Execution authority: implement, open a PR, watch it through merge. The PR auto-merges once CI passes, and merging deploys.
 
+> **Superseded for the confirm step (Martin, 17 Nov 2026).** A `ROUTE:` line no longer re-routes on its own: the runtime asks "Enter Cowork as <Hat>?" with Enter Cowork / Not now buttons, and only Martin's tap switches the thread to Cowork and starts the work as that Hat (an `ASK:` pick still starts immediately, in Cowork). A thread entered this way reverts to Chat when that Work closes. Acceptance criteria 1 and 2 above read "Passing this to <Hat>." and "a tap routes that Hat" as the 16 Nov behaviour; the confirmation replaced that wording only. Everything else in this instruction -- exact startable names only, ASK candidates, no loop back to ENIG, no new AI task, no data-boundary change -- stands. Current spec: the "ENIG names the owning Hat, Martin confirms entering Cowork as it" bullet in `docs/enig-operating-model.md`.
+
 1. **Problem.** An unaddressed work request ("create a marketing campaign offering free consultancy…") was answered by ENIG itself, with a full plan, instead of by the Hat that owns it. No owner was started. Martin doesn't want to name Hats.
 2. **Approved decision.** This replaces the 9 Nov "ENIG suggests, Martin confirms" rule.
    - ENIG never does the work. For a work request it routes to the owning Hat **automatically**, through the same dispatch a typed "<Hat>, <message>" takes.
