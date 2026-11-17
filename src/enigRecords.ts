@@ -11,9 +11,10 @@ import { kvDelete, kvGet, kvPut } from "./kvStore";
  * message, for a greeting as much as for a status question. Now ENIG's turn
  * reads them only when one of two things says so:
  *
- * 1. `recordsLikelyNeeded(message)` -- a deterministic word check, no AI
- *    call -- recognises an obvious status/money/recent-activity question and
- *    reads straight away, exactly as before. A false positive costs the same
+ * 1. `recordsLikelyNeeded(message)` -- a deterministic check, no AI call --
+ *    recognises an obvious status/money/recent-activity QUESTION (a records
+ *    word, asked as a question or a plain "show me / catch me up", and never
+ *    a request for work) and reads straight away, exactly as before. A false positive costs the same
  *    read as today; a false negative costs one tap, so the check errs towards
  *    reading.
  * 2. Otherwise the turn carries `RECORDS_NOT_READ_RULE` and, when its answer
@@ -57,9 +58,34 @@ export const RECORDS_CACHE_TTL_MS = 3 * 60 * 1000;
 const RECORDS_HINTS =
   /\b(overdue|invoice|invoices|payment|payments|paid|owe|owes|owed|owing|deposit|deposits|money|cash|revenue|amount|amounts|balance|how\s+much|how\s+many|open|waiting|pending|approval|approvals|handoff|handoffs|lead|leads|matter|matters|proposal|proposals|pipeline|stage|stages|status|latest|recent|recently|last|snapshot|activity|log|decision|decisions|brief|update|updates|summary|where\s+are\s+we|what(?:'s|\s+is)\s+(?:happening|going\s+on)|due|yesterday|today|this\s+week|this\s+month|since\s+we\s+last|standing)\b/i;
 
-/** True when Martin's message plainly asks about records -- read immediately, no offer. */
+/**
+ * A request for WORK ("draft a post to attract leads", "write a brief for the
+ * proposal"): it goes to the owning Hat, which reads what its own work needs,
+ * so ENIG's turn never reads the records for it -- even when it uses a
+ * records word. Leading politeness ("please", "can you", "ENIG,") is allowed.
+ */
+const WORK_REQUEST =
+  /^(?:(?:hey|hi|ok|okay|so|now|enig)[\s,.:;!-]+)*(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|i\s+(?:want|need|would\s+like)\s+(?:you\s+)?to\s+|let'?s\s+|help\s+me\s+(?:to\s+)?)?(?:draft|write|create|make|prepare|plan|design|build|develop|produce|generate|craft|compose|outline|propose|research|find|put\s+together|come\s+up\s+with|start|launch|run|set\s+up|organi[sz]e|review|analy[sz]e|improve|rewrite|edit|redo)\b/i;
+
+/** Asked as a question: ends with "?" or opens with a question word. */
+const QUESTION_FORM =
+  /\?\s*$|^(?:(?:hey|hi|ok|okay|so|and|now|enig)[\s,.:;!-]+)*(?:what|what's|whats|how|where|which|who|when|why|any|anything|is|are|was|were|do|does|did|has|have|had|should)\b/i;
+
+/** A plain request to be told the state: "show me the pipeline", "status", "catch me up". */
+const STATUS_REQUEST =
+  /^(?:(?:hey|hi|ok|okay|so|and|now|enig)[\s,.:;!-]+)*(?:please\s+)?(?:show|list|give\s+me|tell\s+me|remind\s+me|check|update\s+me|catch\s+me\s+up|brief\s+me|status|summary|snapshot|overview)\b/i;
+
+/**
+ * True when Martin's message plainly ASKS about records -- read immediately,
+ * no offer. A records word alone is not enough: the message must be a status
+ * question or a plain request to be told the state, and never a request for
+ * work (which routes to a Hat without reading).
+ */
 export function recordsLikelyNeeded(message: string): boolean {
-  return RECORDS_HINTS.test(message);
+  const text = message.trim();
+  if (!RECORDS_HINTS.test(text)) return false;
+  if (WORK_REQUEST.test(text)) return false;
+  return QUESTION_FORM.test(text) || STATUS_REQUEST.test(text);
 }
 
 /**

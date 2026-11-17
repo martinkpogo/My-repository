@@ -56,6 +56,30 @@ test("recordsLikelyNeeded: an obvious status/money/recent-activity question read
   }
 });
 
+test("recordsLikelyNeeded: a plain request to be told the state reads straight away", () => {
+  for (const message of ["show me the pipeline", "status", "catch me up on the leads", "give me a summary of open proposals", "ENIG, list the pending approvals"]) {
+    assert.ok(recordsLikelyNeeded(message), `"${message}" plainly asks for the state`);
+  }
+});
+
+test("recordsLikelyNeeded: a request for work never reads, even when it uses a records word -- it routes to the owning Hat", () => {
+  for (const message of [
+    "draft a post to attract leads",
+    "write a brief for the proposal",
+    "create a campaign to update our leads",
+    "can you draft a LinkedIn post about our latest case study?",
+    "please prepare a proposal for MAT-12",
+    "I want you to plan a launch for this month",
+    "help me write a follow-up to the open leads",
+    "find leads in Lagos",
+    "ENIG, develop a pricing strategy for the pipeline",
+    "we need more leads this month",
+    "a post about how we track payments",
+  ]) {
+    assert.ok(!recordsLikelyNeeded(message), `"${message}" is work or a statement, not a status question`);
+  }
+});
+
 test("recordsLikelyNeeded: an ordinary message reads nothing -- the offer, not the query, is what comes next", () => {
   for (const message of ["hi ENIG", "thanks, that helps", "what do you think about our positioning?", "create a campaign offering free consultancy", "ok"]) {
     assert.ok(!recordsLikelyNeeded(message), `"${message}" does not plainly need records`);
