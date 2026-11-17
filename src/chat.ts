@@ -125,6 +125,37 @@ export function hatDuties(hatName: string): string | undefined {
   return parts.length ? parts.join(" ") : undefined;
 }
 
+/**
+ * A Hat's duties as ENIG matches requests against them: the first sentence of
+ * its responsibility, and the first sentence of every Action it declares
+ * (a Marketing Hat: its purpose's first sentence and everything it owns). The full Action
+ * descriptions (hatDuties) made ENIG's prompt over 11,000 tokens -- past the
+ * 8,000 the free backup providers accept, so when Workers AI's daily
+ * allowance ran out none could answer (17 Nov 2026). The first sentence of a
+ * description says what the Action does; the rest is how it is governed,
+ * which ENIG does not need to name the owner.
+ */
+const firstSentence = (text: string) => text.split(/(?<=[.!?])\s/)[0];
+
+export function hatDutiesBrief(hatName: string): string | undefined {
+  if (isMarketingHat(hatName)) {
+    // Every owned area stays listed; only the purpose's elaboration is cut.
+    const def = MARKETING_HAT_REGISTRY[hatName];
+    return `${firstSentence(def.purpose)} Owns: ${def.owns.join("; ")}.`;
+  }
+  const hat = ALL_HATS.find((h) => h.name === hatName);
+  const manifestHat = hat ? findUnitManifest(hat.unit as Unit)?.hats[hatName] : undefined;
+  if (!manifestHat) return undefined;
+  const actions = manifestHat.actions
+    .filter((a) => a.name !== RESULT_GATE_SMOKE_ACTION && a.description?.trim())
+    .map((a) => firstSentence(a.description!.trim().replace(/\s+/g, " ")));
+  const responsibility = manifestHat.responsibility?.trim().replace(/\s+/g, " ");
+  // Every Action stays visible (Martin, 2026-11-17: the match is on every
+  // declared responsibility); only the responsibility's own elaboration is cut.
+  const parts = [responsibility ? firstSentence(responsibility) : undefined, ...new Set(actions)].filter((p): p is string => Boolean(p));
+  return parts.length ? parts.join(" ") : undefined;
+}
+
 /** One short line on what a Hat does, for a "which Hat?" choice Martin makes without knowing the Hats. */
 export function hatDutySummary(hatName: string): string | undefined {
   const duty = hatDuties(hatName);
@@ -149,7 +180,7 @@ export function buildStructureFacts(): string {
     // online discovery of businesses is Lead Generation Specialist's, not
     // Marketing's) instead of guessing from names. Computed, never typed.
     const duties = ALL_HATS.filter((h) => h.unit === unit)
-      .map((h) => ({ name: h.name, duty: hatDuties(h.name) }))
+      .map((h) => ({ name: h.name, duty: hatDutiesBrief(h.name) }))
       .filter((d): d is { name: string; duty: string } => !!d.duty)
       .map((d) => `    · ${d.name} does: ${d.duty}`);
     return [`- ${unit}: ${hatText}. ${startable ? "Governed work CAN be started from chat." : "Governed work can NOT be started from chat."}`, ...duties].join("\n");
@@ -268,6 +299,34 @@ export async function getChatHistory(env: Env, chatId: number, threadId?: number
   return raw ? JSON.parse(raw) : [];
 }
 
+/**
+ * The history a turn is sent with: the newest turns that fit in
+ * HISTORY_PROMPT_MAX_CHARS (about 1,000 tokens), oldest dropped first. Twenty
+ * full turns -- drafts included -- could alone pass the 8,000-token limit of
+ * the free backup providers (17 Nov 2026). The stored history is unchanged;
+ * only what is sent is trimmed. A single turn longer than the budget is cut,
+ * keeping its end.
+ */
+export const HISTORY_PROMPT_MAX_CHARS = 4000;
+
+export function historyForPrompt(history: ChatTurn[], maxChars = HISTORY_PROMPT_MAX_CHARS): ChatTurn[] {
+  const kept: ChatTurn[] = [];
+  let used = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const turn = history[i];
+    const room = maxChars - used;
+    if (room <= 0) break;
+    if (turn.content.length <= room) {
+      kept.unshift(turn);
+      used += turn.content.length;
+    } else {
+      if (kept.length === 0) kept.unshift({ ...turn, content: turn.content.slice(-room) });
+      break;
+    }
+  }
+  return kept;
+}
+
 async function appendChatHistory(env: Env, chatId: number, threadId: number | undefined, turns: ChatTurn[]): Promise<void> {
   const existing = await getChatHistory(env, chatId, threadId);
   const updated = [...existing, ...turns].slice(-MAX_HISTORY_TURNS);
@@ -282,7 +341,7 @@ async function runChatTurn(
   userMessage: string,
   sensitivity: SensitivityLevel | undefined,
 ): Promise<string> {
-  const history = await getChatHistory(env, chatId, threadId);
+  const history = historyForPrompt(await getChatHistory(env, chatId, threadId));
   const reply = await generate(env, {
     taskId: "chat.general_reply",
     mode: "text",
