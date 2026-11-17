@@ -106,7 +106,9 @@ export async function maybeSendMorningBrief(env: Env, now: Date = new Date()): P
   if (await kvGet(env, sentKey)) return;
   await kvPut(env, sentKey, now.toISOString(), { expirationTtl: 3 * 24 * 60 * 60 });
 
-  const brief = await runEnigTurn(env, chatId, threadId, BRIEF_SITUATION);
+  // The brief is a status digest: it always reads the records (force), never
+  // the on-demand path a conversational turn takes (src/enigRecords.ts).
+  const brief = await runEnigTurn(env, chatId, threadId, BRIEF_SITUATION, undefined, "force");
   if (!brief) {
     const reason = brief === null ? "ENIG couldn't read its Notion definition (Operations — ENIG)" : "no AI provider returned a brief";
     await sendOperationsMessage(env, `⚠️ No morning brief today (${dueDate}): ${reason}. Nothing was started.`).catch((err) =>
