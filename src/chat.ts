@@ -8,7 +8,7 @@ import { RESULT_GATE_SMOKE_ACTION } from "./runtime/resultGateSmokeContract";
 import { systemContext } from "./access";
 import { kvGet, kvPut } from "./kvStore";
 import { findUnitManifest } from "./units/registry";
-import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
+import { getGovernance, omitGovernanceSections, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { businessSnapshot, UNREADABLE as SNAPSHOT_UNREADABLE } from "./businessSnapshot";
 import { ASK_PICK_EFFECT, coworkOfferText, ENIG_ROUTE_REFUSED_MESSAGE, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
 import {
@@ -527,7 +527,9 @@ async function runEnigTurnResult(
   // records or hands work to a Hat, which researches once its work starts.
   // Researching here made the Telegram webhook run long enough to be
   // cancelled, leaving the live status stuck with no reply.
-  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction, recordsMode), undefined, undefined, { access: systemContext(), noWebResearch: true });
+  // The Consultancy Profile only when Martin asks about the business itself
+  // (Martin, 2026-11-17): a request for work goes to a Hat that reads it in full.
+  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction, recordsMode), undefined, undefined, { access: systemContext(), noWebResearch: true, noBusinessContext: !asksAboutTheBusiness(situation) });
 }
 
 /**
@@ -570,6 +572,36 @@ async function loadEnigRecords(env: Env): Promise<{ snapshot: string; activity: 
   return { snapshot, activity };
 }
 
+/**
+ * The Universal Role Contract sections ENIG's own turn does not receive
+ * (Martin, 2026-11-17), so its prompt fits the free backup providers' 8,000
+ * tokens: how the Architect operates under a Hat (testing, not ENIG's chat),
+ * understand-before-producing (ENIG drafts no substantial work; it hands work
+ * to a Hat, which reads the whole contract), and the human-readable
+ * explanation (the contract's own documentation_convention: prose is
+ * secondary and never creates a rule). Every Hat still receives all of it.
+ */
+export const ENIG_OMITTED_CONTRACT_SECTIONS = ["architect_hat_execution", "understand_before_producing"] as const;
+export const CONTRACT_PROSE_HEADING = "## HUMAN-READABLE EXPLANATION";
+
+/** ENIG's view of the Universal Role Contract (read live, in full; only those parts left out). */
+export function enigContract(contract: string): string {
+  return omitGovernanceSections(contract, ENIG_OMITTED_CONTRACT_SECTIONS, CONTRACT_PROSE_HEADING);
+}
+
+/**
+ * Whether Martin is asking about the business itself -- what ENIG sells, to
+ * whom, at what price, how it works -- so ENIG's turn needs the Consultancy
+ * Profile. A plain word check, no AI call; it errs towards including the
+ * Profile, whose only cost is size.
+ */
+const BUSINESS_QUESTION =
+  /\b(what|who|how|which|why|where|do|does|is|are|tell me|explain|describe)\b[^?]*\b(we|enig|our|us|the business|the consultancy)\b[^?]*\b(sell|offer|offers|do|charge|price|prices|pricing|cost|serve|clients?|customers?|services?|packages?|deliver|engagement|journey|positioning|brand|stand for|turn away|deposit|profile|work)\b|\b(consultancy profile|what (?:is|does) enig)\b/i;
+
+export function asksAboutTheBusiness(message: string): boolean {
+  return BUSINESS_QUESTION.test(message);
+}
+
 async function runEnigTurnInner(
   env: Env,
   chatId: number,
@@ -592,7 +624,7 @@ async function runEnigTurnInner(
   const records = recordsRead ? await loadEnigRecords(env) : undefined;
   const parts = {
     persona: `You are ENIG. Your Hat Definition follows; act exactly within it.\n\n${hatDefinition}`,
-    behavior: universalRoleContract,
+    behavior: enigContract(universalRoleContract),
     skillContent: [buildStructureFacts(), WORK_STARTS_BASE_RULE, records ? undefined : RECORDS_NOT_READ_RULE, extraInstruction].filter(Boolean).join("\n\n"),
     context: [records ? records.snapshot : RECORDS_NOT_READ_CONTEXT, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries (all Units) -- history, not current state:\n${records ? records.activity : RECORDS_NOT_READ_LOG}`].join("\n\n"),
   };

@@ -91,3 +91,34 @@ export async function getGovernance(env: Env, pageId: string, label: string): Pr
 function wrapGovernanceContent(content: string): string {
   return `${GOVERNANCE_CONTENT_START}\n${content}\n${GOVERNANCE_CONTENT_END}`;
 }
+
+/**
+ * A governance page with some of its sections left out, for a caller that a
+ * rule does not apply to -- the page is still read live, in full, and only
+ * the named parts are dropped before it is sent. `sections` are YAML keys
+ * nested one level under the page's root key (e.g. "architect_hat_execution"
+ * under universal_role_contract); `dropProseFrom` cuts everything from that
+ * heading on. A section that is not found is simply kept out of the list of
+ * removals -- nothing else is ever dropped.
+ */
+export function omitGovernanceSections(page: string, sections: readonly string[], dropProseFrom?: string): string {
+  let text = page;
+  if (dropProseFrom) {
+    const at = text.indexOf(dropProseFrom);
+    if (at >= 0) text = text.slice(0, at).trimEnd();
+  }
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)([A-Za-z_][\w]*):/.exec(lines[i]);
+    if (m && sections.includes(m[2])) {
+      const indent = m[1].length;
+      i++;
+      while (i < lines.length && (lines[i].trim() === "" || lines[i].search(/\S/) > indent)) i++;
+      i--;
+      continue;
+    }
+    out.push(lines[i]);
+  }
+  return out.join("\n");
+}

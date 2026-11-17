@@ -456,3 +456,46 @@ test("prompt size: Hat duties keep every declared Action but drop the responsibi
     assert.ok(brief && brief.length <= full.length, hat.name);
   }
 });
+
+// Martin, 2026-11-17: ENIG's own turn fits the free backup providers.
+test("ENIG's contract: the sections that do not apply to ENIG are left out, everything else is kept", async () => {
+  const { enigContract } = await import("./chat");
+  const contract = [
+    "```yaml",
+    "universal_role_contract:",
+    "  status: canonical",
+    "  gate_discipline:",
+    "    rule: >",
+    "      stop and resolve",
+    "  understand_before_producing:",
+    "    applies_to: \"Substantial work\"",
+    "    required_behavior:",
+    "      ask_result_format:",
+    "        rule: \"always ask\"",
+    "",
+    "    proportion: \"simple needs none\"",
+    "  hat_selection:",
+    "    chat_driven_request: match",
+    "  architect_hat_execution:",
+    "    rule: architect may operate",
+    "    failure:",
+    "      prohibited:",
+    "        - infer_operating_hat",
+    "```",
+    "",
+    "## HUMAN-READABLE EXPLANATION",
+    "",
+    "Every Hat inherits this contract.",
+  ].join("\n");
+  const out = enigContract(contract);
+  for (const kept of ["gate_discipline", "stop and resolve", "hat_selection", "chat_driven_request", "status: canonical"]) assert.ok(out.includes(kept), kept);
+  for (const dropped of ["understand_before_producing", "ask_result_format", "proportion", "architect_hat_execution", "infer_operating_hat", "HUMAN-READABLE", "Every Hat inherits"]) assert.ok(!out.includes(dropped), dropped);
+  assert.ok(out.trimEnd().endsWith("```"), "the YAML block stays closed");
+  assert.strictEqual(enigContract("a page with no such sections"), "a page with no such sections", "nothing else is ever dropped");
+});
+
+test("ENIG reads the Consultancy Profile only when Martin asks about the business itself", async () => {
+  const { asksAboutTheBusiness } = await import("./chat");
+  for (const m of ["what do we sell?", "Who do we serve?", "how much do we charge for a project?", "what is ENIG?", "tell me what our services are", "how does an engagement with us work?"]) assert.ok(asksAboutTheBusiness(m), m);
+  for (const m of ["Plan a campaign to get more clients", "hi ENIG", "any overdue invoices?", "draft a post to attract leads", "find leads in Lagos"]) assert.ok(!asksAboutTheBusiness(m), m);
+});
