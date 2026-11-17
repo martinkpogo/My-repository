@@ -434,3 +434,62 @@ test("a run marked noWebResearch (ENIG's own turn) never decides or researches; 
   await withLiveStatus(fakeEnv(), target, () => augmentTaskWithWebResearch(fakeEnv(), task("chat.general_reply"), { decide, research }), () => "succeeded", undefined, { access: systemContext() });
   assert.strictEqual(decided, 1, "a Unit chat (no flag) still researches");
 });
+
+// Martin, 2026-11-17: questions first, research after. A step that can ask
+// Martin itself has its research held while his answers are still needed.
+test("ask first: a step that can ask Martin searches nothing and is told to ask first; research runs on the run after his answers", async (t) => {
+  mockTelegram(t);
+  const { ASK_FIRST_BLOCK } = await import("./webResearch");
+  let researched = 0;
+  const researchFn = async () => (researched++, research());
+  let out: AiTask | undefined;
+  await withLiveStatus(fakeEnv(), target, async () => {
+    out = await augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision"), { decide: async () => ({ askFirst: true as const }), research: researchFn });
+  }, () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(researched, 0, "no search while Martin's answers are needed");
+  assert.ok(out!.messages[0].content.includes(ASK_FIRST_BLOCK), "the step is told to ask first");
+  assert.ok(out!.boundaryContext.segments.some((s) => s.provenance === "runtime:web_research_held"));
+
+  await withLiveStatus(fakeEnv(), target, async () => {
+    out = await augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision"), { decide: async () => "How do SMEs grow an email list with a free consultation offer?", research: researchFn });
+  }, () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(researched, 1, "once answered, research runs once");
+  assert.ok(!out!.messages[0].content.includes(ASK_FIRST_BLOCK));
+});
+
+test("ask first: a step that cannot ask Martin is never held -- it keeps today's behaviour", async (t) => {
+  mockTelegram(t);
+  const { ASK_FIRST_TASKS, ASK_FIRST_BLOCK } = await import("./webResearch");
+  assert.ok(ASK_FIRST_TASKS.has("marketing.hat_action_decision"));
+  for (const id of ["strategy.diagnosis", "business_development.develop_opportunity", "sales.call_prep_briefing", "chat.general_reply"]) assert.ok(!ASK_FIRST_TASKS.has(id as any), id);
+  let out: AiTask | undefined;
+  await withLiveStatus(fakeEnv(), target, async () => {
+    out = await augmentTaskWithWebResearch(fakeEnv(), task("strategy.diagnosis"), { decide: async () => ({ askFirst: true as const }), research });
+  }, () => "succeeded", undefined, { access: systemContext() });
+  assert.ok(!out!.messages[0].content.includes(ASK_FIRST_BLOCK));
+});
+
+test("ask first: the rule is read live from the Universal Role Contract's understand_before_producing section, never copied into code", async () => {
+  const { understandBeforeProducingSection, ASK_FIRST_INSTRUCTIONS } = await import("./webResearch");
+  const contract = [
+    "universal_role_contract:",
+    "  logging:",
+    "    rule: \"log it\"",
+    "  understand_before_producing:",
+    "    applies_to: \"Substantial work\"",
+    "    required_behavior:",
+    "      ask_result_format:",
+    "        rule: \"always ask\"",
+    "",
+    "    proportion: \"simple needs none\"",
+    "  hat_selection:",
+    "    chat_driven_request: x",
+  ].join("\n");
+  const section = understandBeforeProducingSection(contract)!;
+  assert.match(section, /^understand_before_producing:/);
+  assert.match(section, /ask_result_format/);
+  assert.match(section, /proportion/);
+  assert.doesNotMatch(section, /hat_selection|logging/, "only that section");
+  assert.strictEqual(understandBeforeProducingSection("universal_role_contract:\n  logging: x"), undefined, "no section: research is never held");
+  assert.doesNotMatch(ASK_FIRST_INSTRUCTIONS, /budget|timeframe|capacity|format and length/i, "what to ask lives in Notion, not here");
+});
