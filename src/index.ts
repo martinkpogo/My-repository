@@ -4,8 +4,8 @@ import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import {
   clearEnigCoworkOffer,
   getActiveWorkId,
+  actOnEnigOffer,
   getSessionStub,
-  markEnigCoworkOffer,
   newWorkId,
   resolveStreamForThread,
   getWorkspaceMode,
@@ -841,22 +841,8 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       // whatever Work this thread happens to point at. routedByEnig: if it
       // somehow resolves back to Chat with no Unit, it never goes back to
       // ENIG (no loop).
-      const consumed = await consumeEnigSuggestion(env, workId, value, chatId, threadId);
-      if (consumed.kind === "unavailable") {
-        await sendMessage(env, chatId, "That suggestion was already used or has expired. Nothing was started.", undefined, threadId);
-        return;
-      }
-      if (consumed.kind === "declined") {
-        await sendMessage(env, chatId, "OK, nothing started.", undefined, threadId);
-        return;
-      }
-      // Marked before the mode write: the marker is what lets the terminal
-      // Work send this thread back to Chat (sessionRouting.ts), and it must
-      // exist before the Cowork mode it describes does.
-      await markEnigCoworkOffer(env, chatId, threadId);
-      await setWorkspaceMode(env, chatId, threadId, "cowork");
-      await sendMessage(env, chatId, `Entering Cowork as ${consumed.addressee}…`, undefined, threadId);
-      await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true, routedByEnig: true });
+      // One shared sequence for a tap and a typed yes/no (router.ts actOnEnigOffer).
+      await actOnEnigOffer(env, chatId, threadId, await consumeEnigSuggestion(env, workId, value, chatId, threadId));
       return;
     }
 

@@ -358,7 +358,11 @@ export async function runEnigTurn(
   extraInstruction?: string,
 ): Promise<string | null> {
   // Universal live status for every ENIG turn (conversation and morning brief); removed once the turn has its answer.
-  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction), undefined, undefined, { access: systemContext() });
+  // No web research on ENIG's own turn (Martin, 2026-11-17): it answers from
+  // records or hands work to a Hat, which researches once its work starts.
+  // Researching here made the Telegram webhook run long enough to be
+  // cancelled, leaving the live status stuck with no reply.
+  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction), undefined, undefined, { access: systemContext(), noWebResearch: true });
 }
 
 async function runEnigTurnInner(

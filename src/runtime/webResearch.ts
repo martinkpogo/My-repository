@@ -343,6 +343,7 @@ export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: W
   if (!WEB_RESEARCH_TASKS.has(task.taskId)) return task;
   const run = currentRun();
   if (!run?.access) return task; // research needs the run's own Access context
+  if (run.noWebResearch) return task; // ENIG's own turn: the Hat it hands work to researches (Martin, 2026-11-17)
   const access = run.access;
   let pending = runResearch.get(run);
   if (!pending) {

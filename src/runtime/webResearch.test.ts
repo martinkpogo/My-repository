@@ -424,3 +424,13 @@ test("no deep proposal when the light research itself paused", async (t) => {
   assert.strictEqual(paused.proposal, undefined);
   assert.strictEqual(paused.held, "paused");
 });
+
+test("a run marked noWebResearch (ENIG's own turn) never decides or researches; other runs still do", async (t) => {
+  mockTelegram(t);
+  let decided = 0;
+  const decide = async () => (decided++, "What do SMEs need from marketing?");
+  await withLiveStatus(fakeEnv(), target, () => augmentTaskWithWebResearch(fakeEnv(), task("chat.general_reply"), { decide, research }), () => "succeeded", undefined, { access: systemContext(), noWebResearch: true });
+  assert.strictEqual(decided, 0);
+  await withLiveStatus(fakeEnv(), target, () => augmentTaskWithWebResearch(fakeEnv(), task("chat.general_reply"), { decide, research }), () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(decided, 1, "a Unit chat (no flag) still researches");
+});

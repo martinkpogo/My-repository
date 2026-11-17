@@ -145,11 +145,20 @@ export interface RunExtras {
    * Work yet) -- a function for the same reason as `access`. Absent: never.
    */
   offersDeepResearch?: () => boolean;
+  /**
+   * True for a run whose AI steps must never start web research (ENIG's own
+   * conversational turn and morning brief, Martin 2026-11-17): it either
+   * answers from records or hands work to a Hat that researches itself, and
+   * researching first made the webhook outlive Telegram's patience, so the
+   * run was cancelled with its status stuck.
+   */
+  noWebResearch?: boolean;
 }
 
 class LiveStatusRun {
   private readonly accessSource: AccessContext | (() => AccessContext) | undefined;
   private readonly deepResearchSource: (() => boolean) | undefined;
+  readonly noWebResearch: boolean;
   get offersDeepResearch(): boolean {
     return this.deepResearchSource?.() === true;
   }
@@ -182,6 +191,7 @@ class LiveStatusRun {
   ) {
     this.accessSource = extras.access;
     this.deepResearchSource = extras.offersDeepResearch;
+    this.noWebResearch = extras.noWebResearch === true;
   }
 
   step(label: string): void {
@@ -457,7 +467,7 @@ export async function withLiveStatus<T>(
 }
 
 /** The open run's Access context, target and lookup counters, for per-run Runtime services; undefined outside a run. */
-export function currentRun(): Pick<LiveStatusRun, "access" | "offersDeepResearch" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
+export function currentRun(): Pick<LiveStatusRun, "access" | "offersDeepResearch" | "noWebResearch" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
   return RUNS.getStore();
 }
 
