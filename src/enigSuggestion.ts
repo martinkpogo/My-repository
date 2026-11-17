@@ -87,7 +87,7 @@ export function suggestionInstruction(): string {
     "ASK: <name> | <name>",
     "There he picks with one tap and the work starts at once in Cowork as the Hat he picks -- no second confirmation.",
     `Every <name> is copied exactly from this list: ${names}.`,
-    "For anything else -- a question, a status check, what is waiting on him, or work none of these names owns -- answer normally and write no ROUTE or ASK line.",
+    "For anything else -- a question, a status check, what is waiting on him, or work none of these names owns -- answer normally and write no ROUTE or ASK line. When this turn was given no records, a status check you cannot answer without them follows the RECORDS rule instead of guessing.",
   ].join("\n");
 }
 

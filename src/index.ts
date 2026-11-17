@@ -3,6 +3,7 @@ import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import {
   clearEnigCoworkOffer,
+  deliverEnigReply,
   getActiveWorkId,
   getSessionStub,
   markEnigCoworkOffer,
@@ -44,6 +45,8 @@ import { continueExistingWork, resumeNotice } from "./workContinuation";
 import { CRON_STAMP_MIN_INTERVAL_MS, kvDelete, kvGet, kvList, kvPut, kvPutHeartbeat, maybeSweepKvFallback, kvFallbackStatus, sweepKvFallback } from "./kvStore";
 import { maybeSendMorningBrief } from "./morningBrief";
 import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
+import { consumeRecordsOffer, ENIG_RECORDS_CALLBACK } from "./enigRecords";
+import { enigChatReply } from "./chat";
 import { claimTelegramUpdate } from "./telegramDedup";
 // Installs universal web research on the shared AI executor (Martin, 2026-11-11).
 import { handleWebResearchCallback } from "./runtime/webResearch";
@@ -857,6 +860,29 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       await setWorkspaceMode(env, chatId, threadId, "cowork");
       await sendMessage(env, chatId, `Entering Cowork as ${consumed.addressee}…`, undefined, threadId);
       await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true, routedByEnig: true });
+      return;
+    }
+
+    if (action === ENIG_RECORDS_CALLBACK) {
+      // Martin's tap on ENIG's Read-records offer (src/enigRecords.ts): the
+      // turn that could not answer without records asked for them, and only
+      // his tap reads anything. Single-use; an offer tapped from another
+      // chat/thread is refused. His ORIGINAL message is re-run through
+      // enigChatReply with the records loaded (recordsAlreadyRead), so the
+      // answer goes through the same ROUTE/ASK handling as any other ENIG
+      // reply -- and a stray READ line on that turn is stripped, never
+      // offered again (no loop).
+      const consumed = await consumeRecordsOffer(env, workId, value, chatId, threadId);
+      if (consumed.kind === "unavailable") {
+        await sendMessage(env, chatId, "That offer was already used or has expired. Nothing was read.", undefined, threadId);
+        return;
+      }
+      if (consumed.kind === "declined") {
+        await sendMessage(env, chatId, "OK, nothing was read.", undefined, threadId);
+        return;
+      }
+      const enig = await enigChatReply(env, chatId, threadId, consumed.text, { recordsAlreadyRead: true });
+      await deliverEnigReply(enig, (t, b) => sendMessage(env, chatId, t, b, threadId).then(() => undefined));
       return;
     }
 
