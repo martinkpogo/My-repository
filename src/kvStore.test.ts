@@ -92,8 +92,11 @@ interface TursoFake {
 
 function makeTurso(): TursoFake {
   const fake: TursoFake = { rows: new Map(), calls: [], failAll: false, failDeletes: false, fetch: undefined as unknown as typeof fetch };
+  // Strict like the real /v2/pipeline: SQL NULL must be {type:"null"}; a bare
+  // JSON null is a request error (HTTP 400 in production, 2026-11-17).
   const argValue = (a: unknown): string | number | null => {
-    if (a === null || a === undefined) return null;
+    if (a === null || a === undefined) throw new Error("JSON parse error: invalid type: null, expected internally tagged enum Value");
+    if (typeof a === "object" && (a as { type?: string }).type === "null") return null;
     if (typeof a === "object") return (a as { value: string | number }).value;
     return a as string | number;
   };

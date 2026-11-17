@@ -231,7 +231,11 @@ interface TursoRow {
   updatedAt: number | null;
 }
 
-type TursoArg = { type: "text"; value: string } | { type: "integer"; value: string } | null;
+// Every argument is a typed Hrana value -- SQL NULL included, as {type:"null"}.
+// A bare JSON null is rejected by /v2/pipeline with HTTP 400 ("invalid type:
+// null, expected internally tagged enum Value"), which is why every fallback
+// write without an expiry failed in production until 2026-11-17.
+type TursoArg = { type: "text"; value: string } | { type: "integer"; value: string } | { type: "null" };
 
 function tursoConfig(env: Env): TursoConfig | null {
   const url = env.TURSO_DATABASE_URL?.trim();
@@ -281,6 +285,7 @@ function textArg(value: string): TursoArg {
 function intArg(value: number): TursoArg {
   return { type: "integer", value: String(Math.trunc(value)) };
 }
+const NULL_ARG: TursoArg = { type: "null" };
 
 async function tursoRequest(cfg: TursoConfig, requests: unknown[]): Promise<Array<Record<string, any>>> {
   const doFetch = tursoFetchOverride ?? fetch;
@@ -430,7 +435,7 @@ async function tursoUpsert(cfg: TursoConfig, key: string, value: string, expires
       stmt: {
         sql: `INSERT INTO ${TURSO_TABLE} ("key", "value", "expires_at", "updated_at") VALUES (?, ?, ?, ?)
               ON CONFLICT("key") DO UPDATE SET "value" = excluded."value", "expires_at" = excluded."expires_at", "updated_at" = excluded."updated_at"`,
-        args: [textArg(key), textArg(value), expiresAt === null ? null : intArg(expiresAt), intArg(now())],
+        args: [textArg(key), textArg(value), expiresAt === null ? NULL_ARG : intArg(expiresAt), intArg(now())],
       },
     },
   ]);
