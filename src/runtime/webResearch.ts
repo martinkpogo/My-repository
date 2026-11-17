@@ -14,6 +14,7 @@ import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps, noteRes
 export { deepResearchProposalInRun, researchHeldInRun, type DeepResearchProposal } from "./webLookupAllowance";
 import { getResearchCheckpointStore } from "./workPersistence";
 import { systemContext, type AccessContext } from "../access";
+import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../governance";
 
 /**
  * Universal web research (Martin's decision, 2026-11-11; supersedes the
@@ -73,6 +74,15 @@ export const WEB_RESEARCH_TASKS: ReadonlySet<SemanticTaskId> = new Set<SemanticT
   "business_development.develop_growth_opportunity",
 ]);
 
+/**
+ * The output steps that can ask Martin a question themselves (their response
+ * format has a clarify answer the Work turns into his question). Only these
+ * may have their research held until he has answered (Martin, 2026-11-17):
+ * holding it on a step that cannot ask would only take its research away. A
+ * step joins this set when it gains a clarify answer -- no other change.
+ */
+export const ASK_FIRST_TASKS: ReadonlySet<SemanticTaskId> = new Set<SemanticTaskId>(["marketing.hat_action_decision"]);
+
 const SENSITIVITY_ORDER: SensitivityLevel[] = ["public", "public_sourced", "internal", "business_sensitive", "client_confidential", "pii_restricted"];
 const CHECK_INPUT_LIMIT = 6000;
 
@@ -97,6 +107,12 @@ interface ResearchNeed {
   needs_web?: boolean;
   question?: string;
   deep?: unknown;
+  ask_first?: boolean;
+}
+
+/** The check's answer when Martin's answers are needed before any research. */
+export interface AskFirstDecision {
+  askFirst: true;
 }
 
 /** The check's decision: the light question, and optionally a deep-research proposal. */
@@ -178,10 +194,38 @@ export const RESEARCH_NEED_INSTRUCTIONS = [
     'Reply ONLY with JSON: {"needs_web": true, "question": "<one general research question>"}, optionally with "deep" as above, or {"needs_web": false}.',
 ].join("\n");
 
-async function decideResearchNeed(env: Env, task: AiTask): Promise<ResearchDecision | null> {
+/**
+ * The Universal Role Contract's understand_before_producing section, read live
+ * (getGovernance, cached), so the check applies the rule as Notion states it
+ * today -- never a copy in code. Undefined when the page or the section can't
+ * be read: then research is never held, exactly as before this rule.
+ */
+export function understandBeforeProducingSection(contract: string): string | undefined {
+  const lines = contract.split("\n");
+  const start = lines.findIndex((l) => /^\s*understand_before_producing:\s*$/.test(l));
+  if (start < 0) return undefined;
+  const indent = lines[start].search(/\S/);
+  let end = start + 1;
+  while (end < lines.length && (lines[end].trim() === "" || lines[end].search(/\S/) > indent)) end++;
+  return lines.slice(start, end).join("\n").trim();
+}
+
+/** Added to the check's instructions only for a step in ASK_FIRST_TASKS, with the live rule beneath it. */
+export const ASK_FIRST_INSTRUCTIONS = [
+  "This step can ask Martin a question before it produces anything. Apply the rule below (read live from ENIG's Universal Role Contract) to the step's request.",
+  'If, under that rule, the step must first ask Martin for something only he can supply and his answer is not already in the step, reply ONLY with {"ask_first": true}: no research yet -- research runs once he has answered, with his answers in the request.',
+  "Never reply ask_first when the step says Martin said that's enough questions, or when the request is not the kind of work the rule applies to.",
+].join("\n");
+
+async function decideResearchNeed(env: Env, task: AiTask): Promise<ResearchDecision | AskFirstDecision | null> {
   const level = callerSensitivity(task);
   if (!level) return null; // unresolved: never guess a level
-  const system = RESEARCH_NEED_INSTRUCTIONS;
+  let rule: string | undefined;
+  if (ASK_FIRST_TASKS.has(task.taskId)) {
+    const contract = await getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract");
+    rule = contract ? understandBeforeProducingSection(contract) : undefined;
+  }
+  const system = rule ? `${RESEARCH_NEED_INSTRUCTIONS}\n\n${ASK_FIRST_INSTRUCTIONS}\n\n=== RULE: understand_before_producing ===\n${rule}` : RESEARCH_NEED_INSTRUCTIONS;
   const user = stepText(task);
   const result = await aiJson<ResearchNeed>(env, {
     taskId: "runtime.research_need",
@@ -193,7 +237,8 @@ async function decideResearchNeed(env: Env, task: AiTask): Promise<ResearchDecis
     sensitivity: level,
   });
   // Diagnostic only: whether the check answered and what it decided -- never the question or the step's content.
-  console.log(`web research check for ${task.taskId}: ${!result ? "no usable answer" : result.needs_web === true ? "research needed" : "not needed"}`);
+  console.log(`web research check for ${task.taskId}: ${!result ? "no usable answer" : rule && result.ask_first === true ? "ask Martin first" : result.needs_web === true ? "research needed" : "not needed"}`);
+  if (rule && result?.ask_first === true) return { askFirst: true };
   if (!result || result.needs_web !== true || typeof result.question !== "string") return null;
   const question = scrubResearchQuestion(result.question);
   if (question.length < 8) return null;
@@ -325,7 +370,7 @@ export async function seedRunResearchFindings(env: Env, question: string): Promi
 /** The augmenter installed on the shared AI executor. Never throws past the executor's own guard. */
 export interface WebResearchDeps {
   /** The light question (a string, as before), or a decision that may carry a deep-research proposal. */
-  decide: (env: Env, task: AiTask) => Promise<string | ResearchDecision | null>;
+  decide: (env: Env, task: AiTask) => Promise<string | ResearchDecision | AskFirstDecision | null>;
   research: (env: Env, question: string, access: AccessContext) => Promise<{ digest: string; gaps: string[] } | null>;
 }
 const DEFAULT_DEPS: WebResearchDeps = { decide: decideResearchNeed, research: researchOnline };
@@ -339,6 +384,17 @@ const DEFAULT_DEPS: WebResearchDeps = { decide: decideResearchNeed, research: re
  */
 const runResearch = new WeakMap<object, Promise<string | null>>();
 
+/** The live-status line when research is held for Martin's answers. */
+export const ASK_FIRST_STEP = "No web search yet -- your answers first";
+
+/** Told to the step instead of findings when research is held for Martin's answers. */
+export const ASK_FIRST_BLOCK = [
+  "=== NO WEB RESEARCH YET ===",
+  "The request still needs Martin's answers before it is researched (Universal Role Contract, understand_before_producing). Ask him your one question first; web research runs once he has answered, with his answers in the request.",
+  "If you draft anyway, say plainly in the draft that no web research was used.",
+  "=== END ===",
+].join("\n");
+
 export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: WebResearchDeps = DEFAULT_DEPS): Promise<AiTask> {
   if (!WEB_RESEARCH_TASKS.has(task.taskId)) return task;
   const run = currentRun();
@@ -349,6 +405,15 @@ export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: W
   if (!pending) {
     pending = (async () => {
       const decision = await deps.decide(env, task);
+      // Martin's answers first (Martin, 2026-11-17): nothing is searched on
+      // this run; the step is told to ask, and research runs on the run
+      // after his answers, with them in the request.
+      if (typeof decision === "object" && decision && "askFirst" in decision) {
+        if (!ASK_FIRST_TASKS.has(task.taskId)) return null;
+        reportLiveStep(ASK_FIRST_STEP);
+        resolveLiveStep(ASK_FIRST_STEP, ASK_FIRST_STEP);
+        return ASK_FIRST_BLOCK;
+      }
       const decided = typeof decision === "string" ? decision : decision?.question;
       const question = decided ? scrubResearchQuestion(decided) : null;
       if (!question || question.length < 8) return null;
@@ -368,7 +433,7 @@ export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: W
   }
   const block = await pending;
   if (!block) return task;
-  const segment: ContextSegment = { type: "system", content: block, provenance: "runtime:web_research", sensitivity: "public_sourced" };
+  const segment: ContextSegment = { type: "system", content: block, provenance: block === ASK_FIRST_BLOCK ? "runtime:web_research_held" : "runtime:web_research", sensitivity: "public_sourced" };
   const messages = [...task.messages];
   const i = messages.findIndex((m) => m.role === "system");
   if (i >= 0) messages[i] = { ...messages[i], content: `${messages[i].content}\n\n${block}` };
