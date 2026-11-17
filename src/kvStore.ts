@@ -81,8 +81,10 @@ import type { Env } from "./types";
  *   rethrown (identical to pre-§5B behaviour; §5A's typed catches such as
  *   CommentMarkerPersistenceError keep working unchanged).
  * - Ineligible key -> the KV error always surfaces; nothing is sent.
- * - KV delete fails -> the Turso shadow copy is cleared too (a swept row
- *   must never resurrect a cleared pointer) and the KV error is rethrown.
+ * - KV delete fails (eligible key) -> a tombstone newer than the KV value
+ *   is written to Turso; reads treat the key as deleted and the sweep
+ *   applies the delete to KV later (2026-11-17). Only if that tombstone
+ *   write also fails is the KV error rethrown.
  *
  * RECONCILIATION: a successful KV put (or delete) of an eligible key also
  * removes its Turso shadow row, so in steady state the fallback holds
@@ -128,6 +130,20 @@ const SWEEP_DEFAULT_LIMIT = 100;
  * classification suite.
  */
 const FALLBACK_ELIGIBLE_PREFIXES: readonly string[] = [
+  // Chat and Cowork state (Martin's decision, 2026-11-17: "All chat and
+  // cowork stuff to be kept on Turso if Cloudflare limit hit"). These values
+  // DO carry Martin's own message text -- the conversation history, and the
+  // original message an offer re-sends when he taps -- so this is a deliberate
+  // widening of the boundary, not a value-level "no content" finding like the
+  // entries below. It covers Martin's chat with ENIG and the Unit topics and
+  // the Cowork offers only: lookup_history (database lookup results that may
+  // carry real client identity) stays Cloudflare-only.
+  "chat_history:",
+  "enig_suggest:",
+  "enig_suggest_latest:",
+  "enig_records:",
+  "mode_entry:",
+  "tg_update:",
   // sessionRouting.ts / matterContinuation.ts routing + interaction state
   // (values: workId / mode / "1" strings -- no content, no identity)
   "active:",
@@ -173,7 +189,6 @@ const FALLBACK_ELIGIBLE_EXACT: readonly string[] = ["sessions_index"];
  * reason is the VALUE it stores, audited at the value level.
  */
 const NEVER_FALLBACK_EXACT_PREFIXES: readonly string[] = [
-  "chat_history:", // conversation content (chat.ts)
   "lookup_history:", // lookup results that may carry real client identity (dataLookup.ts)
   "governance:", // cached Notion page content (governance.ts) -- refetchable, so never needed as a fallback
   "google_oauth_state:", // OAuth CSRF state (googleOAuth.ts)
@@ -583,6 +598,10 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
     const entry = decodeRow(row);
     const ttl = remainingTtlSeconds(row.expiresAt);
     if (entry.tombstone) {
+      // A delete KV refused (kvDelete): newer than the value KV still holds,
+      // so the key reads as deleted, and the row is kept for the sweep to
+      // apply. Otherwise (KV empty, or KV written since) it has done its job.
+      if (kvError || (kvEntry && entry.seq > kvEntry.seq)) return null;
       await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: failed to drop tombstone row ${key}`, err));
     } else if (ttl !== null && ttl <= 0) {
       await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: failed to drop expired fallback row ${key}`, err));
@@ -741,12 +760,22 @@ export async function kvDelete(env: Env, key: string): Promise<void> {
   try {
     await env.STATE_KV.delete(key);
   } catch (err) {
-    // Clear the fallback copy too -- a swept row must never resurrect a pointer this call just cleared --
-    // then surface the KV failure exactly as the pre-§5B code did. The KV
-    // key itself survives (the delete did not happen), so the caller both
-    // sees the error and keeps a consistent view of the still-present value.
-    await tursoDelete(cfg, key).catch((tursoErr) => console.error(`kvStore: fallback delete failed for ${key}`, tursoErr));
-    throw err;
+    // Deletes count against the same daily KV limit as writes. With KV
+    // refusing, record the delete in the fallback as a tombstone NEWER than
+    // the value KV still holds (2026-11-17, Martin: chat and Cowork state
+    // keeps working on Turso when the Cloudflare limit is hit -- a single-use
+    // offer must still be consumed). Reads honour a newer tombstone over the
+    // KV value, and the sweep applies it to KV once KV accepts deletes again.
+    // Only if the tombstone cannot be written either does the KV error
+    // surface, exactly as before.
+    console.error(`kvStore: KV delete failed for ${key} -- recording a tombstone in Turso: ${errorText(err)}`, err);
+    try {
+      await tursoUpsert(cfg, key, wrapTombstone(now()), null);
+      return;
+    } catch (tombstoneErr) {
+      console.error(`kvStore: tombstone write failed for ${key} -- both stores refused this delete: ${errorText(tombstoneErr)}`, tombstoneErr);
+      throw err;
+    }
   }
   try {
     await tursoDelete(cfg, key);
@@ -828,8 +857,26 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
   for (const row of rows.slice(0, limit)) {
     const entry = decodeRow(row);
     if (entry.tombstone) {
-      // A delete marker: its whole purpose was to destroy a stale value.
-      // Drop it so the table returns to its empty steady state.
+      // A delete marker. If KV still holds an older value (the delete KV
+      // refused, kvDelete), apply the delete to KV first; a KV value written
+      // since is newer and stays. Then drop the marker so the table returns
+      // to its empty steady state.
+      let kvTomb: string | null = null;
+      try {
+        kvTomb = await env.STATE_KV.get(row.key);
+      } catch (err) {
+        console.error(`kvStore: sweep cannot version-check tombstone ${row.key}; held for a later pass`, err);
+        break;
+      }
+      const kvTombEntry = kvTomb === null || kvTomb === undefined ? null : decodeStored(kvTomb);
+      if (kvTombEntry && kvTombEntry.seq < entry.seq) {
+        try {
+          await env.STATE_KV.delete(row.key);
+        } catch (err) {
+          console.error(`kvStore: sweep KV delete failed at ${row.key}; remaining rows held for a later pass`, err);
+          break;
+        }
+      }
       await tursoDelete(cfg, row.key).catch((err) => console.error(`kvStore: sweep tombstone drop failed for ${row.key}`, err));
       result.superseded += 1;
       continue;
