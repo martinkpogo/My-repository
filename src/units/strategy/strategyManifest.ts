@@ -152,6 +152,12 @@ const strategyAnalystActions: ActionDefinition<StrategyAction>[] = [
       { skill_id: "business_strategy" },
       { skill_id: "communication_strategy" },
     ],
+    // Martin's decision 2026-11-17: a completed strategy diagnosis is a
+    // deliverable report/plan -- once its output is approved, offer to file
+    // it into Google Drive as a Doc (prose, so doc is the likely-first
+    // format). The offer is Unit-free (src/outputDelivery.ts); the creation
+    // still runs through the Tool Registry, judged by Access on this Action.
+    deliverable: { formats: ["doc"] },
   },
   {
     name: "commit_diagnosis",

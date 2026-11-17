@@ -247,6 +247,7 @@ test("classification: coordination keys eligible, content/identity/OAuth/content
     "tg_update:42",
     "reply_msg:42",
     "matter_current_work:MAT-1",
+    "google_option:w-1:abc", // picker option staging: fallback-eligible by Martin's decision 2026-11-17
     "sessions_index",
     "pending_approval_backlog_last_alert",
     "google_comment_processed:c-1",
@@ -269,7 +270,6 @@ test("classification: coordination keys eligible, content/identity/OAuth/content
     "governance:page-1", // cached Notion page content
     "google_oauth_state:csrf", // OAuth CSRF state
     "google_oauth_tokens:default", // OAuth tokens
-    "google_option:w-1:abc", // approval-option staging: Doc bodies, Sheet rows, titles, account email
     "google_doc_watch:doc-1", // watch registry: account email + Doc title, required by the poll
     "google_sheet_watch:sheet-1", // watch registry: account email + Sheet title, required by the poll
     "google_drive_default_folder:me@example.com", // folder cache: the KEY embeds the account email
@@ -866,7 +866,7 @@ test("regression 6: KV exhaustion, Turso outage, both-fail, then retry -- each c
   await assert.rejects(() => kvGet(env, "active:1:dm"), /kv get boom/);
 });
 
-test("value boundary: document content and account email under google_option:/watch/folder keys never reach Turso (explicit failure instead)", async () => {
+test("value boundary: watch and folder-cache content and account email never reach Turso; google_option now falls back (Martin 2026-11-17)", async () => {
   reset();
   const kv = makeKv();
   const turso = makeTurso();
@@ -874,19 +874,24 @@ test("value boundary: document content and account email under google_option:/wa
   const env = makeEnv(kv, turso);
   kv.failPut = true; // quota window -- the case where a fallback would have been used
 
+  // google_option: is now fallback-eligible: the picker's saved choices
+  // survive the quota window instead of failing hard.
   const docContent = JSON.stringify({ kind: "doc", accountIdentifier: "me@acme.example", content: "ACME Corp renewal proposal body" });
-  await assert.rejects(() => kvPut(env, "google_option:w-1:abc", docContent), /kv put boom/, "the failure is explicit");
+  await kvPut(env, "google_option:w-1:abc", docContent);
+  assert.equal(unwrap(turso.rows.get("google_option:w-1:abc")?.value), docContent, "google_option must land in the Turso fallback");
+
+  // The watch registries and folder caches remain Cloudflare-only.
   await assert.rejects(() => kvPut(env, "google_doc_watch:doc-1", JSON.stringify({ accountIdentifier: "me@acme.example", title: "ACME Board Deck" })), /kv put boom/);
   await assert.rejects(() => kvPut(env, "google_sheet_watch:sheet-1", JSON.stringify({ accountIdentifier: "me@acme.example", title: "ACME Q3 forecast" })), /kv put boom/);
   await assert.rejects(() => kvPut(env, "google_drive_default_folder:me@acme.example", "folder-123"), /kv put boom/);
   await assert.rejects(() => kvPut(env, "google_proposal_docs_folder:me@acme.example", "folder-456"), /kv put boom/);
 
-  assert.equal(turso.calls.length, 0, "no Turso request was ever made for these keys");
-  assert.equal(turso.rows.size, 0);
+  // Only the eligible google_option write reached Turso; none of the excluded classes did.
+  assert.deepEqual([...turso.rows.keys()], ["google_option:w-1:abc"], "only the eligible google_option key may appear in Turso");
   for (const call of turso.calls) {
     const body = JSON.stringify(call.requests);
-    assert.equal(body.includes("ACME Corp renewal proposal body"), false, "document content must never appear in Turso-bound bytes");
-    assert.equal(body.includes("me@acme.example"), false, "account email must never appear in Turso-bound bytes");
+    assert.equal(body.includes("ACME Board Deck"), false, "watch content must never appear in Turso-bound bytes");
+    assert.equal(body.includes("ACME Q3 forecast"), false, "watch content must never appear in Turso-bound bytes");
   }
 });
 
