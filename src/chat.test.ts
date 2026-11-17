@@ -431,3 +431,28 @@ test("storage full: an offer whose buttons cannot be saved says so plainly, show
   assert.strictEqual(reply.text, ENIG_OFFER_NOT_SAVED_MESSAGE);
   assert.strictEqual(reply.buttons, undefined);
 });
+
+// 17 Nov 2026: ENIG's prompt passed the 8,000 tokens the free backup
+// providers accept, so when Workers AI's daily allowance ran out none could answer.
+test("prompt size: only the newest history that fits is sent; the stored history is unchanged", async () => {
+  const { historyForPrompt, HISTORY_PROMPT_MAX_CHARS } = await import("./chat");
+  const turns = Array.from({ length: 20 }, (_, i) => ({ role: (i % 2 ? "assistant" : "user") as "user" | "assistant", content: `${i}:${"x".repeat(900)}` }));
+  const sent = historyForPrompt(turns);
+  assert.ok(sent.reduce((n, t) => n + t.content.length, 0) <= HISTORY_PROMPT_MAX_CHARS);
+  assert.strictEqual(sent[sent.length - 1], turns[19], "the newest turn is always kept");
+  assert.ok(sent.length < turns.length && sent[0].content.startsWith(`${20 - sent.length}:`), "the oldest turns are dropped first, in order");
+  assert.strictEqual(turns.length, 20, "the stored history is not modified");
+  const huge = historyForPrompt([{ role: "assistant", content: "a".repeat(10_000) + "END" }]);
+  assert.strictEqual(huge[0].content.length, HISTORY_PROMPT_MAX_CHARS);
+  assert.ok(huge[0].content.endsWith("END"), "a single long turn keeps its end");
+});
+
+test("prompt size: Hat duties keep every declared Action but drop the responsibility's elaboration", async () => {
+  const { hatDuties, hatDutiesBrief } = await import("./chat");
+  for (const hat of ALL_HATS) {
+    const full = hatDuties(hat.name);
+    const brief = hatDutiesBrief(hat.name);
+    if (!full) continue;
+    assert.ok(brief && brief.length <= full.length, hat.name);
+  }
+});
