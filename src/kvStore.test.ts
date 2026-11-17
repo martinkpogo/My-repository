@@ -238,6 +238,13 @@ test("classification: coordination keys eligible, content/identity/OAuth/content
     "active:1:dm",
     "mode:-100:604",
     "cowork_pending:1:604",
+    // Martin, 2026-11-17: chat and Cowork state falls back too.
+    "chat_history:1:dm",
+    "enig_suggest:abc123",
+    "enig_suggest_latest:1:604",
+    "enig_records:abc123",
+    "mode_entry:1:604",
+    "tg_update:42",
     "reply_msg:42",
     "matter_current_work:MAT-1",
     "sessions_index",
@@ -258,8 +265,7 @@ test("classification: coordination keys eligible, content/identity/OAuth/content
   for (const key of eligible) assert.equal(isFallbackEligible(key), true, `${key} must be fallback-eligible`);
 
   const never = [
-    "chat_history:1:dm", // conversation content
-    "lookup_history:1:dm:matters", // lookup results that may carry real identity
+    "lookup_history:1:dm:matters", // lookup results that may carry real identity -- still excluded after the 2026-11-17 chat decision
     "governance:page-1", // cached Notion page content
     "google_oauth_state:csrf", // OAuth CSRF state
     "google_oauth_tokens:default", // OAuth tokens
@@ -296,7 +302,7 @@ test("KV write failure: an ineligible key never reaches Turso and the KV error s
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
   kv.failPut = true;
-  await assert.rejects(() => kvPut(env, "chat_history:1:dm", "[{...}]"), /kv put boom/);
+  await assert.rejects(() => kvPut(env, "lookup_history:1:dm:matters", "[{...}]"), /kv put boom/);
   await assert.rejects(() => kvPut(env, "google_oauth_tokens:default", "secret"), /kv put boom/);
   await assert.rejects(() => kvPut(env, "unknown_future_key", "value"), /kv put boom/);
   assert.equal(turso.calls.length, 0, "no Turso request may be made for ineligible keys");
@@ -408,18 +414,38 @@ test("successful eligible KV delete also clears the fallback copy", async () => 
   assert.equal(turso.rows.has("active:1:dm"), false);
 });
 
-test("KV delete failure: the fallback copy is cleared too, then the KV error is rethrown (no resurrection)", async () => {
+test("KV delete failure (2026-11-17): a tombstone newer than the KV value is recorded, the key reads as deleted, and the sweep applies the delete to KV", async () => {
   reset();
   const kv = makeKv();
   const turso = makeTurso();
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
-  seedRow(turso, "cowork_pending:1:604", "1");
+  kv.store.set("enig_suggest:abc123", JSON.stringify({ __enig_kv: 1, seq: 1_000, val: "offer" }));
+  kv.failDelete = true;
+  await kvDelete(env, "enig_suggest:abc123"); // no throw: the delete is recorded in the fallback
+  assert.ok(isTombstone(turso.rows.get("enig_suggest:abc123")?.value), "the delete is recorded as a tombstone");
+  assert.equal(kv.store.has("enig_suggest:abc123"), true, "KV still holds the old value -- it refused the delete");
+  assert.equal(await kvGet(env, "enig_suggest:abc123"), null, "a single-use offer reads as consumed -- never resurrected");
+  assert.ok(turso.rows.has("enig_suggest:abc123"), "the tombstone is kept until the sweep applies it");
+
+  kv.failDelete = false;
+  await sweepKvFallback(env);
+  assert.equal(kv.store.has("enig_suggest:abc123"), false, "the sweep applied the delete to KV");
+  assert.equal(turso.rows.size, 0, "and the table is back to empty");
+  assert.equal(await kvGet(env, "enig_suggest:abc123"), null);
+});
+
+test("KV delete failure with Turso refusing too: the KV error surfaces and the value is unchanged (no false claim)", async () => {
+  reset();
+  const kv = makeKv();
+  const turso = makeTurso();
+  __setTursoFetchForTests(turso.fetch);
+  const env = makeEnv(kv, turso);
   kv.store.set("cowork_pending:1:604", "1");
   kv.failDelete = true;
+  turso.failAll = true;
   await assert.rejects(() => kvDelete(env, "cowork_pending:1:604"), /kv delete boom/);
-  assert.equal(turso.rows.has("cowork_pending:1:604"), false, "a swept row must never resurrect a pointer this call cleared");
-  assert.equal(kv.store.get("cowork_pending:1:604"), "1", "KV is unchanged by the failed delete, exactly as before §5B");
+  assert.equal(kv.store.get("cowork_pending:1:604"), "1", "the delete did not happen, and the caller was told");
 });
 
 // ---------------------------------------------------------------------------
@@ -579,7 +605,7 @@ test("quota window end to end: outage absorbed for coordination state, recovery 
   await kvPut(env, "active:1:dm", "work-1"); // routing pointer
   await kvPut(env, "google_comment_processed:c-1", "1"); // dedup marker
   await kvPut(env, "sessions_index", JSON.stringify([{ workId: "work-1" }]));
-  await assert.rejects(() => kvPut(env, "chat_history:1:dm", '[{"user":"hi"}]'), /kv put boom/);
+  await assert.rejects(() => kvPut(env, "lookup_history:1:dm:matters", '[{"row":"x"}]'), /kv put boom/);
   assert.equal(turso.rows.size, 3, "exactly the three coordination keys are in the fallback");
   // Inspect the ACTUAL Turso-bound bytes (not just the key name): eligible
   // values travel as the versioned envelope around the caller's raw value.
@@ -601,7 +627,7 @@ test("quota window end to end: outage absorbed for coordination state, recovery 
   assert.equal(unwrap(kv.store.get("active:1:dm")), "work-1");
   assert.equal(unwrap(kv.store.get("google_comment_processed:c-1")), "1");
   assert.equal(turso.rows.size, 0, "steady state holds nothing in Turso");
-  assert.equal(kv.store.has("chat_history:1:dm"), false, "conversation content never left Cloudflare at any point");
+  assert.equal(kv.store.has("lookup_history:1:dm:matters"), false, "identity-bearing lookup results never left Cloudflare at any point");
 });
 
 test("Turso wire contract: only execute/close request types are sent and every pipeline ends with close (regression: the legacy 'query' type is rejected HTTP 400)", async () => {
@@ -776,16 +802,17 @@ test("regression 5: delete -- KV failure keeps the pointer and surfaces the erro
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
 
-  // (a) KV delete fails: the pointer genuinely survives, the fallback copy is
-  // cleared, and the caller sees the error -- no unsafe resume claim either way.
+  // (a) KV delete fails (2026-11-17): the delete is recorded as a newer
+  // tombstone, so the cleared pointer reads as cleared -- never resurrected.
   seedRow(turso, "active:1:dm", "work-1");
   kv.store.set("active:1:dm", "work-1");
   kv.failDelete = true;
-  await assert.rejects(() => kvDelete(env, "active:1:dm"), /kv delete boom/);
-  assert.equal(kv.store.get("active:1:dm"), "work-1", "the pointer is unchanged -- the delete did not happen");
-  assert.equal(turso.rows.has("active:1:dm"), false);
-  assert.equal(await kvGet(env, "active:1:dm"), "work-1", "the still-present pointer is readable; the error was explicit");
+  await kvDelete(env, "active:1:dm");
+  assert.ok(isTombstone(turso.rows.get("active:1:dm")?.value), "the delete is recorded in the fallback");
+  assert.equal(await kvGet(env, "active:1:dm"), null, "the cleared pointer must never come back");
   kv.failDelete = false;
+  await sweepKvFallback(env);
+  assert.equal(kv.store.has("active:1:dm"), false, "the sweep applied the delete to KV");
 
   // (b) KV delete succeeds but the shadow delete is refused: a tombstone
   // overwrites the stale value so no read can resurrect it.
@@ -925,4 +952,19 @@ test("kvPutHeartbeat: a failed write surfaces to the caller exactly as kvPut did
   const env = makeEnv(kv);
   kv.failPut = true;
   await assert.rejects(() => kvPutHeartbeat(env, "last_google_sheet_comment_poll_run", 15 * 60_000), /kv put boom/);
+});
+
+test("chat and Cowork state (Martin, 2026-11-17): with KV full, the history and the Enter-Cowork offer land in Turso and read back", async () => {
+  reset();
+  const kv = makeKv();
+  const turso = makeTurso();
+  __setTursoFetchForTests(turso.fetch);
+  const env = makeEnv(kv, turso);
+  kv.failPut = true;
+  await kvPut(env, "chat_history:1:604", '[{"role":"user","content":"Plan a campaign"}]');
+  await kvPut(env, "enig_suggest:abc123", '{"text":"Plan a campaign","chatId":1}', { expirationTtl: 86400 });
+  await kvPut(env, "enig_suggest_latest:1:604", "abc123", { expirationTtl: 86400 });
+  assert.equal(await kvGet(env, "chat_history:1:604"), '[{"role":"user","content":"Plan a campaign"}]');
+  assert.equal(await kvGet(env, "enig_suggest:abc123"), '{"text":"Plan a campaign","chatId":1}');
+  assert.equal(await kvGet(env, "enig_suggest_latest:1:604"), "abc123");
 });
