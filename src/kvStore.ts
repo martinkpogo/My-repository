@@ -658,6 +658,17 @@ function noteKvWrite(key: string, path: "put" | "repair" | "sweep"): void {
   console.log(`kv_write class=${kvKeyClass(key)} path=${path}`);
 }
 
+/**
+ * The error's own message, in the log line itself. Workers Logs showed only
+ * the stack for these two lines, never the message ("Turso HTTP 401: ...",
+ * "KV put() limit exceeded ..."), so when both stores refused writes on
+ * 2026-11-17 the cause could not be read from the logs. Secrets never reach
+ * it: tursoRequest's message carries only the status and Turso's reply.
+ */
+function errorText(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 300);
+}
+
 export async function kvPut(env: Env, key: string, value: string, opts?: { expirationTtl?: number }): Promise<void> {
   const cfg = tursoConfig(env);
   noteKvWrite(key, "put");
@@ -682,14 +693,14 @@ export async function kvPut(env: Env, key: string, value: string, opts?: { expir
     } catch (err) {
       kvError = err;
       circuitNoteFailure();
-      console.error(`kvStore: KV put failed for ${key} -- falling back to Turso`, err);
+      console.error(`kvStore: KV put failed for ${key} -- falling back to Turso: ${errorText(err)}`, err);
     }
   }
   const expiresAt = opts?.expirationTtl ? now() + opts.expirationTtl * 1000 : null;
   try {
     await tursoUpsert(cfg, key, bytes, expiresAt);
   } catch (tursoErr) {
-    console.error(`kvStore: Turso fallback write failed for ${key} -- both stores refused this write`, tursoErr);
+    console.error(`kvStore: Turso fallback write failed for ${key} -- both stores refused this write: ${errorText(tursoErr)}`, tursoErr);
     // Fail-closed continuity: the caller sees the same KV error it always saw when
     // this write could not persist (the Turso failure is logged context, not a new contract).
     if (kvError) throw kvError;

@@ -291,10 +291,14 @@ async function runChatTurn(
     maxTokens: 800,
     sensitivity,
   });
+  // Best-effort: a reply Martin is owed never fails because its history
+  // could not be saved (17 Nov 2026: with the day's KV writes used up, this
+  // save threw and ENIG answered "Something went wrong" instead of replying).
+  // The cost of a missed save is only that the next turn lacks this one.
   await appendChatHistory(env, chatId, threadId, [
     { role: "user", content: userMessage },
     { role: "assistant", content: reply || "(no response)" },
-  ]);
+  ]).catch((err) => console.error(`Chat history not saved for chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`));
   return reply;
 }
 
@@ -384,11 +388,13 @@ export async function enigChatReply(
   const parsed = parseEnigReply(result.reply);
   if (parsed.refused) return { text: ENIG_ROUTE_REFUSED_MESSAGE };
   if (parsed.addressee) {
-    const buttons = await offerEnigSuggestion(env, chatId, threadId, userMessage, parsed.addressee);
+    const buttons = await storedOffer(() => offerEnigSuggestion(env, chatId, threadId, userMessage, parsed.addressee!));
+    if (!buttons) return { text: ENIG_OFFER_NOT_SAVED_MESSAGE };
     return { text: coworkOfferText(parsed.addressee), buttons };
   }
   if (parsed.choices) {
-    const buttons = await offerEnigChoices(env, chatId, threadId, userMessage, parsed.choices);
+    const buttons = await storedOffer(() => offerEnigChoices(env, chatId, threadId, userMessage, parsed.choices!));
+    if (!buttons) return { text: ENIG_OFFER_NOT_SAVED_MESSAGE };
     // What each candidate does, so Martin can choose without knowing the Hats.
     const whoDoesWhat = parsed.choices.map((name) => `• ${name}${hatDutySummary(name) ? ` -- ${hatDutySummary(name)}` : ""}`).join("\n");
     return { text: [parsed.text || "Which of these should handle this?", whoDoesWhat, ASK_PICK_EFFECT].join("\n\n"), buttons };
@@ -402,10 +408,30 @@ export async function enigChatReply(
   // line is a model slip -- stripped, never offered again (no loop).
   const { text, requested } = stripReadLine(parsed.text);
   if (requested && !result.recordsRead) {
-    const buttons = await offerRecordsRead(env, chatId, threadId, userMessage);
+    const buttons = await storedOffer(() => offerRecordsRead(env, chatId, threadId, userMessage));
+    if (!buttons) return { text: ENIG_OFFER_NOT_SAVED_MESSAGE };
     return { text: recordsOfferText(), buttons };
   }
   return { text };
+}
+
+/**
+ * Said instead of an offer whose buttons could not be saved (17 Nov 2026:
+ * with the day's KV writes used up, saving the Enter-Cowork offer threw and
+ * Martin saw "Something went wrong"). Buttons that were never saved would do
+ * nothing when tapped, so none are shown, and nothing was started.
+ */
+export const ENIG_OFFER_NOT_SAVED_MESSAGE =
+  "I couldn't save the buttons for this right now, so nothing was started. ENIG's storage is refusing writes at the moment -- most often because the day's free storage allowance is used up, which resets at 00:00 UTC. Please try again later.";
+
+/** An offer's buttons, or undefined when they could not be saved. */
+async function storedOffer(save: () => Promise<InlineButton[][]>): Promise<InlineButton[][] | undefined> {
+  try {
+    return await save();
+  } catch (err) {
+    console.error(`ENIG offer not saved: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
 }
 
 export interface EnigChatReply {
