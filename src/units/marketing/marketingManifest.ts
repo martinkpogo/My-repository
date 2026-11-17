@@ -13,7 +13,7 @@ import {
 } from "../../hats/relationships";
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
-import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
+import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator, type InlineButton } from "../../telegram";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
@@ -110,6 +110,7 @@ interface HatActionDecision {
   target_hat?: string;
   reason?: string;
   involves_spend?: boolean;
+  suggestedAnswers?: string[];
 }
 
 /**
@@ -152,7 +153,7 @@ export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleCo
     context: [
       "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
       MARKETING_PROBLEM_BRIEF_FORMAT,
-      'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"..."}. Never guess past missing information or invent authority you don\'t have.',
+      'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} — one question only, with two to four short, concrete likely answers Martin can tap, and he may always type a different answer instead; never guess past missing information or invent authority you don\'t have.',
     ].join("\n\n"),
   };
 }
@@ -226,6 +227,35 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   }
 
   if (decision.action === "clarify") {
+    // Once Martin has said "that's enough", the Hat must not ask another
+    // question. If it still does, stop and tell him it couldn't draft --
+    // it can never loop forever asking the same kind of question.
+    if (state.marketing?.enoughSaid) {
+      marketingOf(state).pendingClarification = undefined;
+      state.pendingActionSummary = undefined;
+      // Close the live status (it would otherwise stay on ⏳) and wait for
+      // Martin's note: a typed note is a redo (handleMarketingFeedback),
+      // which resets the question count and enoughSaid.
+      state.awaiting = "marketing_feedback";
+      await finishWorkStatus(env, state, "⛔ Couldn't draft -- more information is still needed. See below.", "failed");
+      await sendWorkspaceHatMessage(env, state, "I couldn't draft this — I still need more information, but you said that's enough questions, so I won't keep asking. Type a note with what's missing and I'll redo it.");
+      return state;
+    }
+
+    const question = decision.reason ?? "I need more information before I can proceed.";
+    const suggested = (decision.suggestedAnswers ?? [])
+      .filter((answer): answer is string => typeof answer === "string" && answer.trim().length > 0)
+      .slice(0, 4);
+    const count = state.marketing?.clarificationCount ?? 0;
+
+    // One question at a time, with suggested answers to tap, plus a typed
+    // answer always accepted instead (write_in_allowed). From the sixth
+    // question on there is also a "That's enough" button Martin can tap to
+    // stop questioning and have the Hat draft with what it has.
+    marketingOf(state).pendingClarification = { question, suggestedAnswers: suggested, questionCount: count + 1 };
+    marketingOf(state).clarificationCount = count + 1;
+    state.stage = "marketing_ambiguous";
+    state.awaiting = "marketing_clarification";
     await finishWorkStatus(env, state, "⏸ Needs clarification -- the question is below.", "succeeded");
     await logActivity(env, {
       entry: `${hatName} needs clarification`,
@@ -234,9 +264,24 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: decision.reason ?? "Insufficient information to proceed.",
       outcome: "Blocked",
     });
-    await sendWorkspaceHatMessage(env, state, decision.reason ?? "I need more information before I can proceed.");
-    state.stage = "marketing_ambiguous";
-    state.awaiting = "marketing_clarification";
+    // Every button carries its question's number, so a button left on an
+    // earlier question can never answer a newer one.
+    const clarifyData = (choice: string | number) => `${MARKET_CLARIFY_CALLBACK}:${state.workId}:${count + 1}.${choice}`;
+    const answerButtons: InlineButton[][] = [];
+    suggested.forEach((answer, i) => answerButtons.push([{ text: answer, callback_data: clarifyData(i) }]));
+    answerButtons.push([{ text: "✏️ Type my own answer", callback_data: clarifyData("type") }]);
+    if (count + 1 >= 6) {
+      answerButtons.push([{ text: "✋ That's enough", callback_data: clarifyData("enough") }]);
+    }
+    const enoughLine = count + 1 >= 6 ? ' Tap "✋ That\'s enough" to stop questioning and have me draft with what I have.' : '';
+    const firstMessage = `${question}\n\nThe buttons are below — tap a suggested answer, tap "✏️ Type my own answer" to type one, or type your answer directly below.${enoughLine}`;
+    await sendWorkspaceHatMessage(env, state, firstMessage, answerButtons);
+    state.pendingActionSummary = {
+      label: `Clarification: ${state.hat}`,
+      message: firstMessage,
+      buttons: answerButtons,
+      createdAt: new Date().toISOString(),
+    };
     return state;
   }
 
@@ -433,17 +478,83 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
 /** Redo loop: append Martin's reasoning to the task text and re-run the current Hat's decision from scratch. */
 export async function handleMarketingFeedback(env: Env, state: WorkState, text: string): Promise<WorkState> {
   marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nMartin's feedback: ${text}`;
+  marketingOf(state).clarificationCount = 0;
+  marketingOf(state).enoughSaid = undefined;
+  marketingOf(state).pendingClarification = undefined;
   return dispatchMarketingHat(env, state);
 }
 
 /** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
 export async function handleMarketingClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  const trimmed = text.trim().toLowerCase().replace(/[.!\s]+$/, "").replace(/[’']/g, "");
+  if (/^(?:thats\s+)?enough$/.test(trimmed) && state.marketing?.pendingClarification) {
+    marketingOf(state).enoughSaid = true;
+    marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nMartin said that's enough questions. Draft with what you have and state your assumptions plainly.`;
+    marketingOf(state).pendingClarification = undefined;
+    state.pendingActionSummary = undefined;
+    return dispatchMarketingHat(env, state);
+  }
   const augmented = `${state.marketing?.taskText ?? ""}\n\nAdditional detail: ${text}`;
+  marketingOf(state).pendingClarification = undefined;
   if (isMarketingHat(state.hat)) {
     marketingOf(state).taskText = augmented;
     return dispatchMarketingHat(env, state);
   }
   return handleMarketingIntake(env, state, augmented);
+}
+
+/**
+ * Martin's tap on a suggested answer to a Hat's clarifying question -- one
+ * question at a time. A tapped answer and a typed answer are treated the
+ * same: appended to the task text, and the Hat re-runs. Stale or already-
+ * answered buttons are safe no-ops.
+ * value: "<question number>.<choice>", where choice is a suggested-answer
+ * index, "type" (Martin wants to type his own) or "enough" (Martin said
+ * that's enough questions -- draft with what we have, stating assumptions
+ * plainly). A button from an earlier question (a different number) is
+ * refused, so it can never answer a newer question.
+ */
+export async function handleClarifyAnswer(env: Env, state: WorkState, _approved: boolean, rawValue?: string): Promise<WorkState> {
+  const pending = state.marketing?.pendingClarification;
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, state, "This question has already been answered -- nothing to do.");
+    return state;
+  }
+  const dot = rawValue?.indexOf(".") ?? -1;
+  if (!rawValue || dot < 0 || Number(rawValue.slice(0, dot)) !== pending.questionCount) {
+    await sendWorkspaceHatMessage(env, state, "That button belongs to an earlier question -- nothing was recorded.");
+    return state;
+  }
+  const value = rawValue.slice(dot + 1);
+  state.pendingActionSummary = undefined;
+  if (value === "enough") {
+    marketingOf(state).enoughSaid = true;
+    marketingOf(state).pendingClarification = undefined;
+    marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nMartin said that's enough questions. Draft with what you have and state your assumptions plainly.`;
+    return dispatchMarketingHat(env, state);
+  }
+  if (value === "type") {
+    // Ask Martin to type his answer. We stay in marketing_clarification so
+    // his typed text is accepted as the answer; old buttons are cleared but
+    // the pending question is kept.
+    await sendWorkspaceHatMessage(env, state, `Type your answer below:\n${pending.question}`);
+    state.pendingActionSummary = {
+      label: `Clarification: ${state.hat}`,
+      message: `Type your answer below:\n${pending.question}`,
+      buttons: [],
+      createdAt: new Date().toISOString(),
+    };
+    return state;
+  }
+  const index = value === undefined ? NaN : Number(value);
+  const answer = Number.isFinite(index) && index >= 0 && index < pending.suggestedAnswers.length ? pending.suggestedAnswers[index] : undefined;
+  if (!answer) {
+    await sendWorkspaceHatMessage(env, state, "That answer is no longer current -- nothing was recorded.");
+    return state;
+  }
+  marketingOf(state).pendingClarification = undefined;
+  marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nAdditional detail: ${answer}`;
+  return dispatchMarketingHat(env, state);
 }
 
 // The callback_data prefix runMarketingHat's own "route" branch buttons
@@ -454,6 +565,9 @@ export async function handleMarketingClarification(env: Env, state: WorkState, t
 // home) to avoid a circular import, since this function's approval path
 // re-enters dispatchMarketingHat, defined in this same file.
 export const MARKET_TRANSITION_CALLBACK_PREFIX = "markettransition" as const;
+
+/** Martin's tap on a suggested answer to a Hat's clarifying question (one at a time). */
+export const MARKET_CLARIFY_CALLBACK = "marketclarify" as const;
 
 /**
  * Resolves runMarketingHat's "route" branch approve/reject callback --
@@ -713,6 +827,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
 const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_TRANSITION_CALLBACK_PREFIX]: handleTransitionApproval,
   [MARKET_DRAFT_CALLBACK_PREFIX]: handleDraftApproval,
+  [MARKET_CLARIFY_CALLBACK]: handleClarifyAnswer,
   [MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX]: (env, state) => handleAssessmentRedo(env, state),
   [MARKET_PAID_CALLBACK_PREFIX]: handlePaidMediaApproval,
 };

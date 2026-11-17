@@ -1,15 +1,18 @@
 import test from "node:test";
 import assert from "node:assert";
 import {
+  dispatchMarketingHat,
   marketingManifest,
   handleTransitionApproval,
   handleDraftApproval,
   handlePaidMediaApproval,
   handleMarketingFeedback,
   handleMarketingClarification,
+  handleClarifyAnswer,
   MARKET_TRANSITION_CALLBACK_PREFIX,
   MARKET_DRAFT_CALLBACK_PREFIX,
   MARKET_PAID_CALLBACK_PREFIX,
+  MARKET_CLARIFY_CALLBACK,
 } from "./marketingManifest";
 import { findCallbackHandler } from "../unitManifest";
 import type { Env, WorkState } from "../../types";
@@ -90,14 +93,15 @@ test("marketingManifest: declares all five Marketing Hats", () => {
   );
 });
 
-test("marketingManifest: every Hat declares exactly markettransition, marketdraft, marketpaid and marketredo (added 2026-11-14: the Checker's Redo-with-this-note button) in callbackHandlers, all pointing to their shared handlers", () => {
+test("marketingManifest: every Hat declares exactly markettransition, marketdraft, marketpaid, marketredo and marketclarify in callbackHandlers, all pointing to their shared handlers", () => {
   for (const hat of Object.values(marketingManifest.hats)) {
     assert.deepStrictEqual(
       new Set(Object.keys(hat.callbackHandlers ?? {})),
-      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_PAID_CALLBACK_PREFIX, "marketredo"]),
+      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_CLARIFY_CALLBACK, MARKET_PAID_CALLBACK_PREFIX, "marketredo"]),
     );
     assert.strictEqual(hat.callbackHandlers?.[MARKET_TRANSITION_CALLBACK_PREFIX], handleTransitionApproval);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_DRAFT_CALLBACK_PREFIX], handleDraftApproval);
+    assert.strictEqual(hat.callbackHandlers?.[MARKET_CLARIFY_CALLBACK], handleClarifyAnswer);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_PAID_CALLBACK_PREFIX], handlePaidMediaApproval);
   }
 });
@@ -309,4 +313,326 @@ test("option B: Marketing declares continueAfterResearch, and it refuses unless 
 test("resuming a held draft never claims research ran: it follows a skip or a failed run as well as a completed one", async () => {
   const { MARKETING_CONTINUE_MESSAGE } = await import("./marketingManifest");
   assert.doesNotMatch(MARKETING_CONTINUE_MESSAGE, /research|complete/i);
+});
+
+// ---------------------------------------------------------------------------
+// Clarify flow: one question at a time, suggested answers as tap buttons,
+// "Type my own answer" always available, "✋ That's enough" from Q6.
+// ---------------------------------------------------------------------------
+
+function clarifyFetchMock(t: any): { sentTexts: string[] } {
+  const sentTexts: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    const u = String(url);
+    const method = init?.method ?? "GET";
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      sentTexts.push(body.text ?? "");
+      if (body.reply_markup) sentTexts.push(JSON.stringify(body.reply_markup.inline_keyboard));
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (method === "GET" && u.includes("/v1/pages/")) {
+      return new Response(JSON.stringify({ id: "x", url: u, parent: { type: "page", page_id: "governance-root" }, properties: {} }), { status: 200 });
+    }
+    if (u.includes("/blocks/") && u.includes("/children")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }), { status: 200 });
+    }
+    if (method === "POST" && u.endsWith("/v1/pages")) {
+      return new Response(JSON.stringify({ id: "log", url: "https://notion.so/log", parent: { type: "data_source_id", data_source_id: "activity-log-ds" }, properties: {} }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in clarify test: ${method} ${u}`);
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  return { sentTexts };
+}
+
+test("Clarify: suggested answers come through as tap buttons, plus a 'Type my own answer' button; typing still works", async (t) => {
+  const { sentTexts } = clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        if (aiCalls === 1) {
+          return { response: JSON.stringify({ action: "clarify", reason: "What is the budget?", suggestedAnswers: ["$5k", "$10k", "$20k"] }) };
+        }
+        return { response: JSON.stringify({ action: "draft", draft: "Draft with the stated budget assumption." }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy for SMEs." } });
+  const out = await dispatchMarketingHat(env, state);
+
+  assert.strictEqual(out.stage, "marketing_ambiguous");
+  assert.strictEqual(out.awaiting, "marketing_clarification");
+  assert.deepStrictEqual(out.marketing?.pendingClarification, { question: "What is the budget?", suggestedAnswers: ["$5k", "$10k", "$20k"], questionCount: 1 });
+  assert.strictEqual(out.marketing?.clarificationCount, 1);
+  const keyboard = JSON.parse(sentTexts.find((s) => s.includes("marketclarify:work-1:1.0"))!);
+  assert.deepStrictEqual(keyboard, [
+    [{ text: "$5k", callback_data: "marketclarify:work-1:1.0" }],
+    [{ text: "$10k", callback_data: "marketclarify:work-1:1.1" }],
+    [{ text: "$20k", callback_data: "marketclarify:work-1:1.2" }],
+    [{ text: "✏️ Type my own answer", callback_data: "marketclarify:work-1:1.type" }],
+  ]);
+  assert.ok(sentTexts.some((s) => s.includes("What is the budget?")));
+  assert.ok(sentTexts.some((s) => s.includes("The buttons are below")));
+  assert.ok(sentTexts.some((s) => s.includes("type your answer directly below")));
+  assert.ok(!sentTexts.some((s) => s.includes("✋ That's enough")), "question 1 must not have 'That's enough'");
+
+  await handleClarifyAnswer(env, out, false, "1.0");
+  assert.strictEqual(out.marketing?.taskText!.includes("Additional detail: $5k"), true);
+  assert.strictEqual(out.marketing?.pendingClarification, undefined);
+  assert.strictEqual(out.stage, "awaiting_marketing_draft_approval", "hat re-ran and drafted after answer");
+});
+
+test("Clarify: no suggested answers means a 'Type my own answer' button only, no 'tap above' wording", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        if (aiCalls === 1) {
+          return { response: JSON.stringify({ action: "clarify", reason: "What is the deadline?" }) };
+        }
+        return { response: JSON.stringify({ action: "draft", draft: "Drafted." }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy for SMEs." } });
+  const out = await dispatchMarketingHat(env, state);
+  const pc = out.marketing?.pendingClarification;
+
+  assert.ok(pc, "pending clarification should be set");
+  assert.deepStrictEqual(pc.question, "What is the deadline?");
+  assert.deepStrictEqual(pc.suggestedAnswers, []);
+  assert.strictEqual(pc.questionCount, 1);
+
+  // Keyboard has only the type-my-own button.
+  const buttons = out.pendingActionSummary?.buttons ?? [];
+  assert.deepStrictEqual(buttons, [[{ text: "✏️ Type my own answer", callback_data: "marketclarify:work-1:1.type" }]]);
+
+  // Wording: buttons below, no "tap above", question present.
+  const message = out.pendingActionSummary?.message ?? "";
+  const hasDeadline = message.includes("What is the deadline?");
+  assert.ok(hasDeadline, "question text present");
+  const hasTypeBelow = message.includes("type your answer directly below");
+  assert.ok(hasTypeBelow, "type-below wording present");
+  const hasTapAbove = message.includes("Tap an answer above");
+  assert.ok(!hasTapAbove, "no 'tap above' wording when there are no suggested buttons");
+  const hasButtonsBelow = message.includes("The buttons are below");
+  assert.ok(hasButtonsBelow, "buttons-below wording present");
+
+  await handleMarketingClarification(env, out, "Next Friday.");
+  assert.strictEqual(out.marketing?.pendingClarification, undefined);
+  assert.ok(out.marketing?.taskText!.includes("Additional detail: Next Friday."));
+});
+
+test("Clarify: from the sixth question on there is also a 'That's enough' button", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        const reason = "Missing detail " + aiCalls + "?";
+        return { response: JSON.stringify({ action: "clarify", reason, suggestedAnswers: ["A", "B"] }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  let out = await dispatchMarketingHat(env, state);
+  // Questions 1-5: no "That's enough" button.
+  for (let i = 1; i <= 5; i++) {
+    const buttons = out.pendingActionSummary?.buttons ?? [];
+    const flattened = buttons.flat();
+    assert.ok(!flattened.some((b) => b.text === "✋ That's enough"), `question ${i} should not have 'That's enough'`);
+    assert.ok(flattened.some((b) => b.text === "✏️ Type my own answer"), `question ${i} should have 'Type my own answer'`);
+    out = await handleClarifyAnswer(env, out, false, `${i}.0`);
+  }
+  // After 5 answers, clarificationCount is 6 (each answer re-runs dispatch
+  // which triggers the next question). Question 6 is already pending.
+  assert.strictEqual(out.marketing?.clarificationCount, 6);
+  const buttons6 = out.pendingActionSummary?.buttons ?? [];
+  assert.ok(buttons6.some((row) => row.some((b) => b.text === "✋ That's enough")), "question 6 should have 'That's enough'");
+  assert.ok(out.pendingActionSummary?.message.includes('Tap "✋ That\'s enough" to stop questioning'));
+});
+
+test("Clarify: tapping 'That's enough' drafts with assumptions stated plainly and sets enoughSaid", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        if (aiCalls === 1) {
+          return { response: JSON.stringify({ action: "clarify", reason: "What is the region?", suggestedAnswers: ["US", "EU"] }) };
+        }
+        return { response: JSON.stringify({ action: "draft", draft: "Draft with regional assumption." }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  const out = await dispatchMarketingHat(env, state);
+  assert.deepStrictEqual(out.marketing?.enoughSaid, undefined);
+
+  const enoughResult = await handleClarifyAnswer(env, out, false, "1.enough");
+  assert.strictEqual(enoughResult.marketing?.enoughSaid, true);
+  assert.strictEqual(enoughResult.marketing?.pendingClarification, undefined);
+  assert.ok(enoughResult.marketing?.taskText!.includes("Martin said that's enough questions. Draft with what you have and state your assumptions plainly."));
+  assert.strictEqual(enoughResult.marketing?.enoughSaid, true);
+});
+
+test("Clarify: typing 'enough' works like the 'That's enough' button", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        if (aiCalls === 1) {
+          return { response: JSON.stringify({ action: "clarify", reason: "What is the region?", suggestedAnswers: ["US", "EU"] }) };
+        }
+        return { response: JSON.stringify({ action: "draft", draft: "Drafted with enough." }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  const out = await dispatchMarketingHat(env, state);
+
+  const typed = await handleMarketingClarification(env, out, "enough");
+  assert.strictEqual(typed.marketing?.enoughSaid, true);
+  assert.strictEqual(typed.marketing?.pendingClarification, undefined);
+  assert.ok(typed.marketing?.taskText!.includes("Martin said that's enough questions."));
+});
+
+test("Clarify: after enoughSaid, if the Hat still asks it stops and says it couldn't draft -- no loop", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        return { response: JSON.stringify({ action: "clarify", reason: "Still missing detail?", suggestedAnswers: ["A", "B"] }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy.", enoughSaid: true } });
+  const out = await dispatchMarketingHat(env, state);
+  assert.strictEqual(out.marketing?.pendingClarification, undefined);
+  assert.strictEqual(out.awaiting, "marketing_feedback", "waits for Martin's note, which redoes the work");
+  assert.strictEqual(aiCalls, 1, "the Hat is not re-run -- no loop");
+});
+
+test("Clarify: a button left on an earlier question can never answer a newer one", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        return { response: JSON.stringify({ action: "clarify", reason: `Question ${aiCalls}?`, suggestedAnswers: ["A", "B"] }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  let out = await dispatchMarketingHat(env, state);
+  out = await handleClarifyAnswer(env, out, false, "1.0");
+  assert.strictEqual(out.marketing?.pendingClarification?.questionCount, 2);
+  const before = out.marketing?.taskText;
+  out = await handleClarifyAnswer(env, out, false, "1.1");
+  assert.strictEqual(out.marketing?.taskText, before, "the stale tap recorded nothing");
+  assert.strictEqual(out.marketing?.pendingClarification?.questionCount, 2, "question 2 is still waiting");
+  assert.strictEqual(aiCalls, 2, "the Hat was not re-run");
+});
+
+test("Clarify: typing \"that's enough\" works like typing \"enough\"", async (t) => {
+  clarifyFetchMock(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "Drafted." }) }) } as any,
+  });
+  const state = fakeWorkState({
+    stage: "marketing_ambiguous",
+    awaiting: "marketing_clarification",
+    marketing: { taskText: "Draft a campaign strategy.", clarificationCount: 6, pendingClarification: { question: "Region?", suggestedAnswers: ["US"], questionCount: 6 } },
+  });
+  const out = await handleMarketingClarification(env, state, "That's enough.");
+  assert.strictEqual(out.marketing?.enoughSaid, true);
+  assert.ok(!out.marketing?.taskText!.includes("Additional detail"));
+});
+
+test("Clarify: answer taps are safe no-ops when nothing is pending", async (t) => {
+  clarifyFetchMock(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "Drafted." }) }) } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  const out = await handleClarifyAnswer(env, state, false, "0");
+  assert.strictEqual(out, state, "no-op returns state unchanged");
+});
+
+test("Clarify: redo resets the clarification count and enoughSaid", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        if (aiCalls === 1) {
+          return { response: JSON.stringify({ action: "clarify", reason: "What is the budget?", suggestedAnswers: ["$5k"] }) };
+        }
+        return { response: JSON.stringify({ action: "draft", draft: "Drafted after redo." }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  let out = await dispatchMarketingHat(env, state);
+  assert.strictEqual(out.marketing?.clarificationCount, 1);
+
+  out = await handleMarketingFeedback(env, out, "Redo with more detail.");
+  assert.strictEqual(out.marketing?.clarificationCount, 0);
+  assert.strictEqual(out.marketing?.enoughSaid, undefined);
+  assert.strictEqual(out.marketing?.pendingClarification, undefined);
 });
