@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { buildStructureFacts, enigChatReply, ENIG_HAT_DEFINITION_PAGE_ID, ENIG_UNAVAILABLE_MESSAGE, generalChatReply, runEnigTurn } from "./chat";
+import { buildStructureFacts, enigChatReply, ENIG_HAT_DEFINITION_PAGE_ID, ENIG_OFFER_NOT_SAVED_MESSAGE, ENIG_UNAVAILABLE_MESSAGE, generalChatReply, runEnigTurn } from "./chat";
 import { clearEnigRecordsCache, recordsOfferText } from "./enigRecords";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { ALL_HATS } from "./hats/registry";
@@ -394,4 +394,40 @@ test("runEnigTurn's force mode reads the records whatever the message says (the 
   assert.ok(queries() > 0, "the brief always reads");
   assert.match(capturedSystem, /LIVE BUSINESS SNAPSHOT/);
   assert.doesNotMatch(capturedSystem, /READ: <a few words/, "a forced turn is never asked to ask");
+});
+
+// 17 Nov 2026: the day's KV writes were used up and every save threw, so
+// ENIG answered "Something went wrong" instead of replying.
+function fullKv(initial: Record<string, string>) {
+  const kv = createMockKv(initial);
+  return { ...kv, put: async () => { throw new Error("KV put() limit exceeded for the day."); } };
+}
+
+test("storage full: ENIG still replies when its chat history cannot be saved", async (t) => {
+  clearEnigRecordsCache();
+  countingNotionFetch(t);
+  const env = envWithGovernance({
+    STATE_KV: fullKv({
+      [`governance:${ENIG_HAT_DEFINITION_PAGE_ID}`]: "hat:\n  name: ENIG",
+      [`governance:${UNIVERSAL_ROLE_CONTRACT_PAGE_ID}`]: "Universal Role Contract text",
+    }) as any,
+    AI: { run: async () => ({ response: "Hello Martin." }) } as any,
+  });
+  const reply = await enigChatReply(env, 1, 2, "hi ENIG");
+  assert.strictEqual(reply.text, "Hello Martin.");
+});
+
+test("storage full: an offer whose buttons cannot be saved says so plainly, shows no dead buttons, and starts nothing", async (t) => {
+  clearEnigRecordsCache();
+  countingNotionFetch(t);
+  const env = envWithGovernance({
+    STATE_KV: fullKv({
+      [`governance:${ENIG_HAT_DEFINITION_PAGE_ID}`]: "hat:\n  name: ENIG",
+      [`governance:${UNIVERSAL_ROLE_CONTRACT_PAGE_ID}`]: "Universal Role Contract text",
+    }) as any,
+    AI: { run: async () => ({ response: "ROUTE: Marketing Strategist" }) } as any,
+  });
+  const reply = await enigChatReply(env, 1, 2, "Plan a campaign to get more clients");
+  assert.strictEqual(reply.text, ENIG_OFFER_NOT_SAVED_MESSAGE);
+  assert.strictEqual(reply.buttons, undefined);
 });
