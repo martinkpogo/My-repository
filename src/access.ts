@@ -784,7 +784,12 @@ export function evaluateExternalMutationAccess(env: Env, request: ExternalMutati
     operationId: request.operationId,
     targetResourceId: request.targetResourceId,
   };
-  if (resolved.action.requiresApproval) {
+  // The shared save is authorized by Martin's final picker tap ALONE (his
+  // decision, 2026-11-17: "only on my final approve tap"), so when it runs
+  // under the exemption -- an Action that does not declare the operation -- a
+  // bound proof is required whatever the Action's own requiresApproval says.
+  // Without this, any ungated Work could write a Doc with no tap at all.
+  if (resolved.action.requiresApproval || (sharedOutputDelivery && !declared)) {
     if (!context.proof) {
       throw new AccessDeniedError(
         `action "${resolved.action.name}" requires Martin's explicit approval before ${describeExternalMutation(request, context)} may proceed, and no ApprovalProof was supplied.`,

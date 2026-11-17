@@ -156,15 +156,24 @@ test("Access: an approval-gated Action still REQUIRES a bound proof even for the
   );
 });
 
-test("Access: an ungated Action (diagnose) needs no proof -- the picker confirm is the approval event", () => {
+test("Access: even an ungated Action (diagnose) needs Martin's tap -- the shared save always requires a bound proof", () => {
   const state = workState({ actionName: "diagnose" });
-  // Must NOT throw: diagnose has requiresApproval: false, so the shared save
-  // proceeds without a proof (the user's final picker-confirmation tap is the
-  // approval). A supplied proof is still verified (see the wrong-folder test).
+  // diagnose has requiresApproval: false, but the shared save is authorized
+  // only by Martin's final picker tap (2026-11-17), so no proof means no save.
+  assert.throws(
+    () =>
+      evaluateExternalMutationAccess(
+        accessEnv(),
+        { toolId: "google_docs", operationId: "google_docs.create_and_verify", effect: "external_mutation", targetResourceId: DOCS_BINDING.targetResourceId },
+        workSessionContext(state),
+      ),
+    /no ApprovalProof was supplied/,
+  );
+  // With the tap's proof, bound to this folder, it is allowed.
   evaluateExternalMutationAccess(
     accessEnv(),
     { toolId: "google_docs", operationId: "google_docs.create_and_verify", effect: "external_mutation", targetResourceId: DOCS_BINDING.targetResourceId },
-    workSessionContext(state),
+    workSessionContext(state, mintExternalToolApprovalProof(state, DOCS_BINDING)),
   );
 });
 
