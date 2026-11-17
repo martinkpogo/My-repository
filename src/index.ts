@@ -2,8 +2,10 @@ import type { Env } from "./types";
 import type { TelegramUpdate, InlineButton } from "./telegram";
 import { answerCallbackQuery, sendMessage, setWebhook } from "./telegram";
 import {
+  clearEnigCoworkOffer,
   getActiveWorkId,
   getSessionStub,
+  markEnigCoworkOffer,
   newWorkId,
   resolveStreamForThread,
   getWorkspaceMode,
@@ -808,9 +810,13 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       // Handoff; only writes the thread-scoped mode marker (and clears any
       // stale clarification-pending marker, since switching away from
       // Cowork mid-clarification should not leave a dangling "waiting for
-      // an answer" state behind).
+      // an answer" state behind). Clearing the ENIG-offer marker too: his
+      // own toggle makes Martin the author of this thread's mode, so the
+      // terminal-Work revert (sessionRouting.revertEnigCoworkOffer) no
+      // longer applies to it.
       const newMode = value === "cowork" ? "cowork" : "chat";
       await setWorkspaceMode(env, chatId, threadId, newMode);
+      await clearEnigCoworkOffer(env, chatId, threadId);
       await setCoworkClarificationPending(env, chatId, threadId, false);
       await sendMessage(env, chatId, `Workspace mode switched to *${newMode}*.`, undefined, threadId);
       return;
@@ -825,12 +831,16 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
     }
 
     if (action === ENIG_SUGGEST_CALLBACK) {
-      // ENIG suggested an owning Unit/Hat for an unaddressed request
-      // (src/enigSuggestion.ts). Single-use; Yes re-sends Martin's original
-      // message prefixed with that name through routeIncomingText -- the
-      // exact path his own typed "<Unit>, <request>" takes, every gate intact.
+      // Martin's tap on ENIG's owning-Hat offer (src/enigSuggestion.ts): the
+      // ROUTE confirmation ("Enter Cowork as <Hat>?") or an ASK candidate.
+      // Single-use; a start switches this thread to Cowork FIRST, so the
+      // addressed text he is confirming resolves as Cowork -- resolveAddressee
+      // matches the Hat name deterministically and dispatchCowork passes it
+      // as priorHat, so the Hat is assumed structurally, never re-classified.
       // forceNewEnquiry: the tap is an explicit new request, not a reply to
-      // whatever Work this thread happens to point at.
+      // whatever Work this thread happens to point at. routedByEnig: if it
+      // somehow resolves back to Chat with no Unit, it never goes back to
+      // ENIG (no loop).
       const consumed = await consumeEnigSuggestion(env, workId, value, chatId, threadId);
       if (consumed.kind === "unavailable") {
         await sendMessage(env, chatId, "That suggestion was already used or has expired. Nothing was started.", undefined, threadId);
@@ -840,8 +850,13 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
         await sendMessage(env, chatId, "OK, nothing started.", undefined, threadId);
         return;
       }
-      await sendMessage(env, chatId, `Starting with ${consumed.addressee}…`, undefined, threadId);
-      await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true });
+      // Marked before the mode write: the marker is what lets the terminal
+      // Work send this thread back to Chat (sessionRouting.ts), and it must
+      // exist before the Cowork mode it describes does.
+      await markEnigCoworkOffer(env, chatId, threadId);
+      await setWorkspaceMode(env, chatId, threadId, "cowork");
+      await sendMessage(env, chatId, `Entering Cowork as ${consumed.addressee}…`, undefined, threadId);
+      await routeIncomingText(env, chatId, consumed.addressedText, threadId, { forceNewEnquiry: true, routedByEnig: true });
       return;
     }
 

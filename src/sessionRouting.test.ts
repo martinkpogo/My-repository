@@ -3,8 +3,13 @@ import assert from "node:assert";
 import { getReplyMessageWorkId, routeIncomingText, setReplyMessageWorkId } from "./router";
 import {
   PENDING_PICKUP_KIND_KEY,
+  clearEnigCoworkOffer,
   dispatchScheduledPickup,
+  getWorkspaceMode,
+  markEnigCoworkOffer,
+  revertEnigCoworkOffer,
   schedulePickupAlarm,
+  setWorkspaceMode,
   type PickupAlarmStorage,
   type PickupKind,
 } from "./sessionRouting";
@@ -372,4 +377,40 @@ test("WP1. a runner failure propagates out of dispatchScheduledPickup so alarm()
 
   await assert.rejects(() => dispatchScheduledPickup(storage, runners), boom, "the failure reaches alarm()'s catch, which reports it through notifyMartinOfDiscoveryFailure");
   assert.strictEqual(storage.store.has(PENDING_PICKUP_KIND_KEY), false, "the failed kind was already consumed -- the Handoff stays Pending and the next discovery cycle retries, it is not retried by a loop here");
+});
+
+test("ENIG offer entry: the confirm tap marks the thread, and the terminal Work sends it back to Chat (Martin, 2026-11-17)", async () => {
+  const env = fakeEnv();
+  await setWorkspaceMode(env, -100, 604, "cowork");
+  // No marker: this is a thread Martin set with /mode himself, so closing a
+  // Work must leave it exactly as he left it.
+  await revertEnigCoworkOffer(env, -100, 604);
+  assert.strictEqual(await getWorkspaceMode(env, -100, 604), "cowork", "a /mode thread is never reverted");
+
+  // Marked the way index.ts marks it on the Enter-Cowork tap, then the Work closes.
+  await markEnigCoworkOffer(env, -100, 604);
+  await revertEnigCoworkOffer(env, -100, 604);
+  assert.strictEqual(await getWorkspaceMode(env, -100, 604), "chat", "the offer was for that piece of work, so the thread goes back to Chat");
+
+  // The marker is consumed with the revert: a later Work closing in the
+  // same thread changes nothing.
+  await setWorkspaceMode(env, -100, 604, "cowork");
+  await revertEnigCoworkOffer(env, -100, 604);
+  assert.strictEqual(await getWorkspaceMode(env, -100, 604), "cowork", "the revert runs once per offer, not once per Work");
+});
+
+test("ENIG offer entry: Martin's own /mode toggle clears the marker, so his choice is the one that sticks", async () => {
+  const env = fakeEnv();
+  await markEnigCoworkOffer(env, -100, 604);
+  await clearEnigCoworkOffer(env, -100, 604);
+  await setWorkspaceMode(env, -100, 604, "cowork");
+  await revertEnigCoworkOffer(env, -100, 604);
+  assert.strictEqual(await getWorkspaceMode(env, -100, 604), "cowork", "he authored this mode himself -- no terminal Work takes it away");
+
+  // Thread-scoped: reverting one thread never touches another's marker.
+  await markEnigCoworkOffer(env, -100, 707);
+  await setWorkspaceMode(env, -100, 707, "cowork");
+  await revertEnigCoworkOffer(env, -100, 707);
+  assert.strictEqual(await getWorkspaceMode(env, -100, 707), "chat", "each thread reverts on its own marker");
+  assert.strictEqual(await getWorkspaceMode(env, -100, 604), "cowork", "the other thread's mode is untouched");
 });

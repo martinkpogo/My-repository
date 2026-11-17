@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
-import { buildStructureFacts, enigChatReply, ENIG_HAT_DEFINITION_PAGE_ID, ENIG_UNAVAILABLE_MESSAGE } from "./chat";
+import { buildStructureFacts, enigChatReply, ENIG_HAT_DEFINITION_PAGE_ID, ENIG_UNAVAILABLE_MESSAGE, generalChatReply } from "./chat";
 import { UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
 import { ALL_HATS } from "./hats/registry";
 import type { Env } from "./types";
@@ -123,8 +123,35 @@ test("ENIG: answers from its live definition, the business snapshot and the how-
   assert.match(capturedSystem, /MARKER_UNIVERSAL_ROLE_CONTRACT/);
   assert.match(capturedSystem, /LIVE BUSINESS SNAPSHOT/);
   assert.match(capturedSystem, /MAT-12 \[Qualified\]/);
-  assert.match(capturedSystem, /give him the exact one-line message to send/);
+  assert.match(capturedSystem, /ROUTE: <name>/, "ENIG's turn is given the ROUTE rule");
+  assert.doesNotMatch(capturedSystem, /give him the exact one-line message to send/, "that rule belongs to a Unit's own topic chat only -- both together made ENIG hand Martin a message to type instead of routing (split, 2026-11-17)");
   assert.doesNotMatch(capturedSystem, /say plainly you can't perform actions/, "the old talk-him-out-of-it rule is gone");
+});
+
+test("Unit topic chat still hands Martin the exact one-line message to send (the split half ENIG no longer gets)", async (t) => {
+  mockNotionFetch(t, {});
+  let unitSystem = "";
+  let enigSystem = "";
+  const env = fakeEnv({
+    STATE_KV: createMockKv({
+      [`governance:${ENIG_HAT_DEFINITION_PAGE_ID}`]: "purpose: Keep Martin oriented.",
+      [`governance:${UNIVERSAL_ROLE_CONTRACT_PAGE_ID}`]: "Universal Role Contract text",
+    }) as any,
+    AI: {
+      run: async (_m: any, opts: any) => {
+        const system = String(opts?.messages?.[0]?.content ?? "");
+        if (system.includes("Marketing staff AI")) unitSystem = system;
+        else enigSystem = system;
+        return { response: "ok" };
+      },
+    } as any,
+  });
+  await generalChatReply(env, "Marketing", 1, 2, "what do we do?");
+  await enigChatReply(env, 1, 2, "where are we?");
+  assert.match(unitSystem, /give him the exact one-line message to send/);
+  assert.match(unitSystem, /say so plainly/);
+  assert.doesNotMatch(enigSystem, /give him the exact one-line message to send/);
+  assert.match(enigSystem, /ROUTE: <name>/);
 });
 
 test("log is history (Martin, 2026-11-14): ENIG and Unit chat are told the Activity Log is the past, never the current state", async () => {

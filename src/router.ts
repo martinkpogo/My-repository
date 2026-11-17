@@ -51,7 +51,7 @@ export async function routeIncomingText(
   options: {
     forceNewEnquiry?: boolean;
     replyToMessageId?: number;
-    /** Set on the re-route of ENIG's ROUTE decision, so an unresolved addressed text never goes back to ENIG. */
+    /** Set when Martin's confirmed ENIG offer re-sends the addressed text, so it never goes back to ENIG. */
     routedByEnig?: boolean;
     // Test-only injection seam, mirroring the AiPolicyExecutor injection
     // pattern already used in ai/policy.ts. Production callers never pass
@@ -212,15 +212,17 @@ export async function routeIncomingText(
       }
     }
     if (!decision.unit) {
-      // No Unit addressed: ENIG answers, or routes the work to the Hat that
-      // owns it (Martin, 2026-11-16; src/enigSuggestion.ts).
+      // No Unit addressed: ENIG answers, or offers the Hat that owns the
+      // work for Martin's confirmation (Martin, 2026-11-17;
+      // src/enigSuggestion.ts). Nothing is dispatched here -- the tap on the
+      // confirmation is what enters Cowork and starts the work.
       if (options.routedByEnig) {
-        // The addressed text ENIG routed did not resolve to a Unit: never ask ENIG again (no loop).
+        // The addressed text Martin confirmed did not resolve to a Unit: never ask ENIG again (no loop).
         await sendMessage(env, chatId, "That could not be handed to a Hat automatically -- nothing was started.", undefined, threadId);
         return;
       }
       const enig = await enigChatReply(env, chatId, threadId, text);
-      await deliverEnigReply(enig, (t, b) => sendMessage(env, chatId, t, b, threadId).then(() => undefined), (routed) => routeIncomingText(env, chatId, routed, threadId, { forceNewEnquiry: true, routedByEnig: true }));
+      await deliverEnigReply(enig, (t, b) => sendMessage(env, chatId, t, b, threadId).then(() => undefined));
       return;
     }
     const reply = await generalChatReply(env, decision.unit, chatId, threadId, text);
@@ -233,22 +235,19 @@ export async function routeIncomingText(
 }
 
 /**
- * What happens to ENIG's reply (Martin, 2026-11-16): a route is announced in
- * one line and the work is handed to the owning Hat at once, through the
- * same routeIncomingText path Martin's own addressed message takes; anything
- * else (ENIG's answer, or its question with one button per candidate) is
- * sent as it is. `send` and `reroute` are the caller's.
+ * What happens to ENIG's reply (Martin, 2026-11-17): a ROUTE line is a
+ * CONFIRMATION -- "This is <Hat>'s work. Enter Cowork as <Hat> and start?"
+ * with Enter Cowork / Not now buttons -- and dispatch happens only when
+ * Martin taps it (index.ts's ENIG_SUGGEST_CALLBACK switches the thread to
+ * Cowork and re-sends his original message addressed to that Hat through
+ * routeIncomingText); an ASK line is his question with one button per
+ * candidate, a pick starting at once in Cowork; anything else is ENIG's
+ * answer, sent as it is. `send` is the caller's.
  */
 export async function deliverEnigReply(
-  enig: { text: string; buttons?: InlineButton[][]; route?: { addressee: string; addressedText: string } },
+  enig: { text: string; buttons?: InlineButton[][] },
   send: (text: string, buttons?: InlineButton[][]) => Promise<void>,
-  reroute: (addressedText: string) => Promise<void>,
 ): Promise<void> {
-  if (enig.route) {
-    await send(enig.text);
-    await reroute(enig.route.addressedText);
-    return;
-  }
   await send(enig.text || AI_UNAVAILABLE_MESSAGE, enig.text ? enig.buttons : undefined);
 }
 
