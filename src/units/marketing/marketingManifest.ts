@@ -380,6 +380,26 @@ export async function handleMarketingIntake(env: Env, state: WorkState, text: st
   // Stage 2: Deterministic, request-text-free evaluation of registered sequential relationships
   const stage2 = resolveMarketingCandidateRelationships(validCandidates, stage1.establishing);
 
+  // The Work's named Hat breaks a tie (Martin's decision, 2026-11-17): when
+  // Stage 2 cannot pick between the candidates and the Hat this Work was
+  // addressed to -- by Martin, or by his confirmed ENIG offer -- is one of
+  // them, that Hat takes it instead of asking. A clear re-route (a single
+  // candidate, or a registered relationship that decides) still wins over the
+  // named Hat, and a named Hat that is not a candidate still asks.
+  const namedHat = state.hat && isMarketingHat(state.hat) && validCandidates.includes(state.hat) ? state.hat : undefined;
+  if ((!stage2.resolved || !stage2.hat) && namedHat) {
+    state.hat = namedHat;
+    await logActivity(env, {
+      entry: `Marketing task routed to ${namedHat} via the Work's named Hat (tie-break)`,
+      type: "Activity",
+      area: "Marketing",
+      activity: text,
+      decisionRationale: `Stage 2 could not choose between ${validCandidates.join(", ")} (${stage2.reason ?? "ambiguous"}); the Work was addressed to ${namedHat}, one of the candidates, so it takes the work.`,
+      outcome: "Active",
+    });
+    return dispatchMarketingHat(env, state);
+  }
+
   if (!stage2.resolved || !stage2.hat) {
     const reasonCode = selectMarketingAmbiguityReasonCode(stage2);
     const reasonText = stage2.reason ?? stage1.reason ?? "Request could plausibly belong to more than one Marketing Hat.";

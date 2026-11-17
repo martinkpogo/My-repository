@@ -236,6 +236,39 @@ test("conflicting candidate relationships fail closed to clarification", async (
   assert.ok(h.logBodies.some((b) => b.includes("MULTIPLE_CONFLICTING_RELATIONSHIPS")), "the Activity log must record the fail-closed reason code");
 });
 
+test("the Work's named Hat breaks a tie: conflicting candidates that include it resolve to it instead of asking (Martin, 2026-11-17)", async (t) => {
+  const h = makeHarness(t, [json({ candidates: ["Marketing Strategist", "Campaign & Marketing Communications Manager", "Content Strategist"], establishing: true }), DRAFT_DECISION]);
+  const state = workState({ hat: "Marketing Strategist" });
+
+  const result = await handleMarketingIntake(h.env, state, "Want to create a marketing campaign and strategy to offer free consultancy to get an email list.");
+
+  assert.equal(result.hat, "Marketing Strategist");
+  assertDispatchedToDraft(result);
+  assert.ok(h.logBodies.some((b) => b.includes("routed to Marketing Strategist via the Work's named Hat (tie-break)")), "the Activity log records why the named Hat took it");
+  assert.ok(!h.sentMessages.some((m) => m.includes("I'm not sure which Marketing Hat")), "no clarification question");
+});
+
+test("a named Hat that is not among the conflicting candidates still asks -- it never takes work it does not plausibly own", async (t) => {
+  const h = makeHarness(t, [json({ candidates: ["Marketing Strategist", "Campaign & Marketing Communications Manager", "Content Strategist"], establishing: true })]);
+  const state = workState({ hat: "Digital Marketer" });
+
+  const result = await handleMarketingIntake(h.env, state, "An unclear request spanning several Hats.");
+
+  assert.equal(result.hat, "Digital Marketer");
+  assertClarificationHeld(result);
+  assert.equal(h.aiCalls.length, 1, "no dispatch");
+});
+
+test("a clear re-route still beats the named Hat: one plausible candidate wins even when the Work names another Hat", async (t) => {
+  const h = makeHarness(t, [json({ candidates: ["Content Manager"], establishing: false }), DRAFT_DECISION]);
+  const state = workState({ hat: "Marketing Strategist" });
+
+  const result = await handleMarketingIntake(h.env, state, "Turn the content direction into this month's editorial calendar.");
+
+  assert.equal(result.hat, "Content Manager");
+  assertDispatchedToDraft(result);
+});
+
 test("candidates with no registered relationship between them fail closed to clarification", async (t) => {
   const h = makeHarness(t, [json({ candidates: ["Campaign & Marketing Communications Manager", "Digital Marketer"], establishing: true })]);
   const state = workState({ hat: "Marketing" as any });
