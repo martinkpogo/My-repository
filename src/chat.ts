@@ -9,10 +9,21 @@ import { systemContext } from "./access";
 import { kvGet, kvPut } from "./kvStore";
 import { findUnitManifest } from "./units/registry";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "./governance";
-import { businessSnapshot } from "./businessSnapshot";
+import { businessSnapshot, UNREADABLE as SNAPSHOT_UNREADABLE } from "./businessSnapshot";
 import { ASK_PICK_EFFECT, coworkOfferText, ENIG_ROUTE_REFUSED_MESSAGE, offerEnigChoices, offerEnigSuggestion, parseEnigReply, suggestionInstruction } from "./enigSuggestion";
+import {
+  getCachedEnigRecords,
+  offerRecordsRead,
+  RECORDS_NOT_READ_CONTEXT,
+  RECORDS_NOT_READ_LOG,
+  RECORDS_NOT_READ_RULE,
+  recordsLikelyNeeded,
+  recordsOfferText,
+  setCachedEnigRecords,
+  stripReadLine,
+} from "./enigRecords";
 import type { InlineButton } from "./telegram";
-import { withLiveStatus } from "./runtime/liveStatus";
+import { withLiveStatus, reportLiveStep } from "./runtime/liveStatus";
 
 // Per the identity architecture decision (Notion, Sept 2026), real-world
 // identity lives exclusively in the Identity Resolution Registry -- Entity
@@ -192,6 +203,9 @@ const UNIT_CHAT_WORK_STARTS_RULE =
 
 // `unit` undefined reads across every Unit -- ENIG's view, which owns no
 // single Unit's log.
+/** What the log reads as when Notion cannot be reached; never cached (src/enigRecords.ts). */
+export const ACTIVITY_UNREADABLE = "(couldn't reach the Activity & Decision Log right now)";
+
 async function recentActivitySnapshot(env: Env, unit: Unit | undefined): Promise<string> {
   try {
     const entries = await queryDataSource(
@@ -213,7 +227,7 @@ async function recentActivitySnapshot(env: Env, unit: Unit | undefined): Promise
       .join("\n");
   } catch (err) {
     console.error("Failed to fetch Activity & Decision Log snapshot", err);
-    return "(couldn't reach the Activity & Decision Log right now)";
+    return ACTIVITY_UNREADABLE;
   }
 }
 
@@ -337,13 +351,26 @@ export const ENIG_UNAVAILABLE_MESSAGE =
  * cross-Unit Activity & Decision Log, the Unit/Hat structure, and the
  * conversation history runChatTurn carries.
  *
+ * Databases are read only when the request needs them (Martin's decision,
+ * 2026-11-17; src/enigRecords.ts): an obvious status/money/recent-activity
+ * question reads them as before, any other turn carries the no-records rule
+ * instead and asks Martin with one Read-records / Not now button when its
+ * answer would need them -- only his tap re-runs the turn with the records
+ * loaded (`recordsAlreadyRead`). The morning brief always reads.
+ *
  * Fails closed: if either governance page is unreadable, no AI call is
  * made and Martin is told so. ENIG declares no Actions and starts nothing;
  * work starts only through router.ts's existing addressed-Unit dispatch.
  */
-export async function enigChatReply(env: Env, chatId: number, threadId: number | undefined, userMessage: string): Promise<EnigChatReply> {
-  const reply = await runEnigTurn(env, chatId, threadId, userMessage, suggestionInstruction());
-  if (reply === null) return { text: ENIG_UNAVAILABLE_MESSAGE };
+export async function enigChatReply(
+  env: Env,
+  chatId: number,
+  threadId: number | undefined,
+  userMessage: string,
+  opts?: { recordsAlreadyRead?: boolean },
+): Promise<EnigChatReply> {
+  const result = await runEnigTurnResult(env, chatId, threadId, userMessage, suggestionInstruction(), opts?.recordsAlreadyRead ? "force" : "auto");
+  if (result === null) return { text: ENIG_UNAVAILABLE_MESSAGE };
   // Martin decides, then the route enters Cowork as the owning Hat (Martin,
   // 2026-11-17; src/enigSuggestion.ts). A validated ROUTE line becomes a
   // CONFIRMATION -- "Enter Cowork as <Hat>?" with Enter Cowork / Not now
@@ -354,7 +381,7 @@ export async function enigChatReply(env: Env, chatId: number, threadId: number |
   // ENIG's own answer. A ROUTE line naming anything the registry will not
   // accept refuses the whole reply: ENIG's own words on it are work content
   // with no routable owner behind them, so none of it is delivered.
-  const parsed = parseEnigReply(reply);
+  const parsed = parseEnigReply(result.reply);
   if (parsed.refused) return { text: ENIG_ROUTE_REFUSED_MESSAGE };
   if (parsed.addressee) {
     const buttons = await offerEnigSuggestion(env, chatId, threadId, userMessage, parsed.addressee);
@@ -366,21 +393,62 @@ export async function enigChatReply(env: Env, chatId: number, threadId: number |
     const whoDoesWhat = parsed.choices.map((name) => `• ${name}${hatDutySummary(name) ? ` -- ${hatDutySummary(name)}` : ""}`).join("\n");
     return { text: [parsed.text || "Which of these should handle this?", whoDoesWhat, ASK_PICK_EFFECT].join("\n\n"), buttons };
   }
-  return { text: parsed.text };
+  // A READ line when this turn did NOT read the records is a CONFIRMATION
+  // ("Read them now?") with Read records / Not now buttons, and ENIG's own
+  // words on it are discarded -- the runtime writes the question, so what
+  // Martin confirms is the same words whatever the request was. Routing
+  // wins over reading (a ROUTE/ASK line is handled above): the owning Hat
+  // reads what its own work needs. When the records WERE read, a stray READ
+  // line is a model slip -- stripped, never offered again (no loop).
+  const { text, requested } = stripReadLine(parsed.text);
+  if (requested && !result.recordsRead) {
+    const buttons = await offerRecordsRead(env, chatId, threadId, userMessage);
+    return { text: recordsOfferText(), buttons };
+  }
+  return { text };
 }
 
 export interface EnigChatReply {
   /** What Martin sees; empty when no provider answered. */
   text: string;
-  /** The confirmation (Enter Cowork as <Hat>?) or one button per ASK candidate. */
+  /** The Enter-Cowork / ASK / Read-records confirmation buttons, when one is due. */
   buttons?: InlineButton[][];
+}
+
+/** `force` reads the records for every turn (the morning brief, Martin's tap); `auto` only when the message plainly needs them. */
+export type EnigRecordsMode = "auto" | "force";
+
+interface EnigTurnResult {
+  reply: string;
+  /** True when this turn actually loaded the snapshot and the Activity Log. */
+  recordsRead: boolean;
 }
 
 /**
  * One ENIG turn for `situation` in this chat/thread, recorded in that
- * thread's rolling history like any other turn. Returns null -- with no AI
- * call made -- when either governance page is unreadable, so each caller
- * decides how to say so (enigChatReply replies with
+ * thread's rolling history like any other turn, wrapped in the universal
+ * live status. Returns null -- with no AI call made -- when either
+ * governance page is unreadable.
+ */
+async function runEnigTurnResult(
+  env: Env,
+  chatId: number,
+  threadId: number | undefined,
+  situation: string,
+  extraInstruction?: string,
+  recordsMode: EnigRecordsMode = "auto",
+): Promise<EnigTurnResult | null> {
+  // No web research on ENIG's own turn (Martin, 2026-11-17): it answers from
+  // records or hands work to a Hat, which researches once its work starts.
+  // Researching here made the Telegram webhook run long enough to be
+  // cancelled, leaving the live status stuck with no reply.
+  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction, recordsMode), undefined, undefined, { access: systemContext(), noWebResearch: true });
+}
+
+/**
+ * One ENIG turn for `situation`, returning only its reply. Returns null --
+ * with no AI call made -- when either governance page is unreadable, so each
+ * caller decides how to say so (enigChatReply replies with
  * ENIG_UNAVAILABLE_MESSAGE; the morning brief reports to Operations). An
  * empty string means the provider produced nothing, exactly as
  * runChatTurn reports it.
@@ -391,13 +459,30 @@ export async function runEnigTurn(
   threadId: number | undefined,
   situation: string,
   extraInstruction?: string,
+  recordsMode: EnigRecordsMode = "auto",
 ): Promise<string | null> {
-  // Universal live status for every ENIG turn (conversation and morning brief); removed once the turn has its answer.
-  // No web research on ENIG's own turn (Martin, 2026-11-17): it answers from
-  // records or hands work to a Hat, which researches once its work starts.
-  // Researching here made the Telegram webhook run long enough to be
-  // cancelled, leaving the live status stuck with no reply.
-  return withLiveStatus(env, { chatId, threadId, header: "ENIG" }, () => runEnigTurnInner(env, chatId, threadId, situation, extraInstruction), undefined, undefined, { access: systemContext(), noWebResearch: true });
+  const result = await runEnigTurnResult(env, chatId, threadId, situation, extraInstruction, recordsMode);
+  return result === null ? null : result.reply;
+}
+
+/**
+ * The business snapshot + cross-Unit Activity & Decision Log for one ENIG
+ * turn, served from the in-memory TTL cache (src/enigRecords.ts) while a
+ * fully successful read is still fresh, so a rapid follow-up does not re-read
+ * the same rows. A read with any failed section is used for this turn but
+ * never cached: a transient Notion failure must not be frozen for the whole
+ * TTL.
+ */
+async function loadEnigRecords(env: Env): Promise<{ snapshot: string; activity: string }> {
+  const now = Date.now();
+  const hit = getCachedEnigRecords(now);
+  if (hit) return { snapshot: hit.snapshot, activity: hit.activity };
+  reportLiveStep("Reading live records…");
+  const [snapshot, activity] = await Promise.all([businessSnapshot(env), recentActivitySnapshot(env, undefined)]);
+  if (!snapshot.includes(SNAPSHOT_UNREADABLE) && activity !== ACTIVITY_UNREADABLE) {
+    setCachedEnigRecords(snapshot, activity, now);
+  }
+  return { snapshot, activity };
 }
 
 async function runEnigTurnInner(
@@ -406,19 +491,26 @@ async function runEnigTurnInner(
   threadId: number | undefined,
   situation: string,
   extraInstruction?: string,
-): Promise<string | null> {
+  recordsMode: EnigRecordsMode = "auto",
+): Promise<EnigTurnResult | null> {
   const [hatDefinition, universalRoleContract] = await Promise.all([
     getGovernance(env, ENIG_HAT_DEFINITION_PAGE_ID, "Operations — ENIG Hat Definition"),
     getGovernance(env, UNIVERSAL_ROLE_CONTRACT_PAGE_ID, "Universal Role Contract"),
   ]);
   if (!hatDefinition || !universalRoleContract) return null;
 
-  const [snapshot, activity] = await Promise.all([businessSnapshot(env), recentActivitySnapshot(env, undefined)]);
+  // Databases are read only when the request needs them (Martin, 2026-11-17):
+  // a status/money/recent-activity question reads them as before, anything
+  // else carries the no-records rule and asks Martin with one button instead
+  // of reading seven data sources behind every message.
+  const recordsRead = recordsMode === "force" || recordsLikelyNeeded(situation);
+  const records = recordsRead ? await loadEnigRecords(env) : undefined;
   const parts = {
     persona: `You are ENIG. Your Hat Definition follows; act exactly within it.\n\n${hatDefinition}`,
     behavior: universalRoleContract,
-    skillContent: [buildStructureFacts(), WORK_STARTS_BASE_RULE, extraInstruction].filter(Boolean).join("\n\n"),
-    context: [snapshot, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries (all Units) -- history, not current state:\n${activity}`].join("\n\n"),
+    skillContent: [buildStructureFacts(), WORK_STARTS_BASE_RULE, records ? undefined : RECORDS_NOT_READ_RULE, extraInstruction].filter(Boolean).join("\n\n"),
+    context: [records ? records.snapshot : RECORDS_NOT_READ_CONTEXT, LOG_IS_HISTORY_RULE, `Recent Activity & Decision Log entries (all Units) -- history, not current state:\n${records ? records.activity : RECORDS_NOT_READ_LOG}`].join("\n\n"),
   };
-  return runChatTurn(env, chatId, threadId, parts, situation, "business_sensitive");
+  const reply = await runChatTurn(env, chatId, threadId, parts, situation, "business_sensitive");
+  return { reply, recordsRead };
 }

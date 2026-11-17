@@ -210,10 +210,16 @@ function formatCounts(section: StatusSection, noun: string): string {
   return `${counts}${scope}`;
 }
 
-const UNREADABLE = "(couldn't read this right now -- say so if asked; do not guess)";
+// Exported so a caller that caches the formatted snapshot (src/enigRecords.ts
+// records the ENIG turn reads) can tell a fully successful read from one with
+// an unreadable section -- a failure must never be frozen in a TTL cache.
+export const UNREADABLE = "(couldn't read this right now -- say so if asked; do not guess)";
 
 export function formatBusinessSnapshot(data: BusinessSnapshotData): string {
-  const lines: string[] = ["=== LIVE BUSINESS SNAPSHOT (read just now; record tokens, statuses and counts only) ==="];
+  // "at most a few minutes old", not "read just now": ENIG's turn serves a
+  // cached read for up to RECORDS_CACHE_TTL_MS (src/enigRecords.ts), so the
+  // header must stay true on a cache hit too.
+  const lines: string[] = ["=== LIVE BUSINESS SNAPSHOT (read live from Notion, at most a few minutes old; record tokens, statuses and counts only) ==="];
 
   lines.push("Waiting on Martin's approval:");
   if (!data.pendingApprovals.ok) lines.push(`  ${UNREADABLE}`);
