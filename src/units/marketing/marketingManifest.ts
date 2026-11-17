@@ -139,6 +139,22 @@ export const MARKETING_PROBLEM_BRIEF_FORMAT = [
   "If NO WEB RESEARCH block is present, ignore this format: never ask for research, a research block or data, and never mention this format. Write your normal draft from what you know, and say in one line that no current web research was available for it.",
 ].join("\n");
 
+/**
+ * How the Hat picks draft, route or clarify (execution mechanics). It points
+ * at the Universal Role Contract's rules by name rather than restating them
+ * -- the rules themselves are read live from Notion. Before 2026-11-17 the
+ * order put "draft" first and allowed a question only when the Hat "cannot
+ * proceed", so "Plan a campaign to get more clients" drew a generic draft
+ * with no questions and no use of the research (Martin's live test).
+ */
+export const MARKETING_DECISION_FORMAT = [
+  "Decide in this order:",
+  '1. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} -- never do the other Hat\'s work yourself.',
+  '2. Otherwise, before drafting, apply the Universal Role Contract\'s understand_before_producing rule above to this task. If it calls for a question whose answer is not already in the task text, or you cannot determine ownership, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} -- one question only, with two to four short, concrete likely answers Martin can tap (he may always type a different answer instead). Answers he has already given appear in the task text as "Additional detail:" lines: never ask again what they answer. If the task text says Martin said that\'s enough questions, do not ask: draft, stating each remaining assumption plainly.',
+  '3. Otherwise return {"action":"draft","draft":"...", "involves_spend": true|false}, following the contract\'s decide_dont_list and evidence_over_generalities rules. When a WEB RESEARCH block is present, rest claims about markets, buyers or what works on its findings, each with its source link exactly as given; if none of the findings is relevant to the task, say so plainly in one line rather than presenting general advice as established. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend -- spend always requires explicit human approval regardless of whether it is tactical or strategic.',
+  "Never guess past missing information or invent authority you don't have.",
+].join("\n");
+
 export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
     persona: `You are executing the ${hat.name} Hat for ENIG's Marketing specialization (within the Sales, Marketing & Business Development Unit), retrieved from ENIG's canonical governance. The Universal Role Contract is authoritative for ambiguity handling, authority, and stop conditions — follow it exactly.`,
@@ -153,7 +169,7 @@ export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleCo
     context: [
       "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
       MARKETING_PROBLEM_BRIEF_FORMAT,
-      'If this task is within what this Hat owns, return {"action":"draft","draft":"...", "involves_spend": true|false}. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend — spend always requires explicit human approval regardless of whether it is tactical or strategic. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} — never do the other Hat\'s work yourself. If you cannot determine ownership or the task lacks the information needed to proceed, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} — one question only, with two to four short, concrete likely answers Martin can tap, and he may always type a different answer instead; never guess past missing information or invent authority you don\'t have.',
+      MARKETING_DECISION_FORMAT,
     ].join("\n\n"),
   };
 }
