@@ -232,8 +232,13 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     // it can never loop forever asking the same kind of question.
     if (state.marketing?.enoughSaid) {
       marketingOf(state).pendingClarification = undefined;
-      state.awaiting = undefined;
-      await sendWorkspaceHatMessage(env, state, "I couldn't draft this — I still need more information, but you said that's enough questions, so I won't keep asking. Try redoing with a different note, or tell me what's missing.");
+      state.pendingActionSummary = undefined;
+      // Close the live status (it would otherwise stay on ⏳) and wait for
+      // Martin's note: a typed note is a redo (handleMarketingFeedback),
+      // which resets the question count and enoughSaid.
+      state.awaiting = "marketing_feedback";
+      await finishWorkStatus(env, state, "⛔ Couldn't draft -- more information is still needed. See below.", "failed");
+      await sendWorkspaceHatMessage(env, state, "I couldn't draft this — I still need more information, but you said that's enough questions, so I won't keep asking. Type a note with what's missing and I'll redo it.");
       return state;
     }
 
@@ -259,11 +264,14 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       decisionRationale: decision.reason ?? "Insufficient information to proceed.",
       outcome: "Blocked",
     });
+    // Every button carries its question's number, so a button left on an
+    // earlier question can never answer a newer one.
+    const clarifyData = (choice: string | number) => `${MARKET_CLARIFY_CALLBACK}:${state.workId}:${count + 1}.${choice}`;
     const answerButtons: InlineButton[][] = [];
-    suggested.forEach((answer) => answerButtons.push([{ text: answer, callback_data: `${MARKET_CLARIFY_CALLBACK}:${state.workId}:${answerButtons.length}` }]));
-    answerButtons.push([{ text: "✏️ Type my own answer", callback_data: `${MARKET_CLARIFY_CALLBACK}:${state.workId}:type` }]);
+    suggested.forEach((answer, i) => answerButtons.push([{ text: answer, callback_data: clarifyData(i) }]));
+    answerButtons.push([{ text: "✏️ Type my own answer", callback_data: clarifyData("type") }]);
     if (count + 1 >= 6) {
-      answerButtons.push([{ text: "✋ That's enough", callback_data: `${MARKET_CLARIFY_CALLBACK}:${state.workId}:enough` }]);
+      answerButtons.push([{ text: "✋ That's enough", callback_data: clarifyData("enough") }]);
     }
     const enoughLine = count + 1 >= 6 ? ' Tap "✋ That\'s enough" to stop questioning and have me draft with what I have.' : '';
     const firstMessage = `${question}\n\nThe buttons are below — tap a suggested answer, tap "✏️ Type my own answer" to type one, or type your answer directly below.${enoughLine}`;
@@ -478,8 +486,8 @@ export async function handleMarketingFeedback(env: Env, state: WorkState, text: 
 
 /** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
 export async function handleMarketingClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
-  const trimmed = text.trim().toLowerCase();
-  if (trimmed === "enough" && state.marketing?.pendingClarification) {
+  const trimmed = text.trim().toLowerCase().replace(/[.!\s]+$/, "").replace(/[’']/g, "");
+  if (/^(?:thats\s+)?enough$/.test(trimmed) && state.marketing?.pendingClarification) {
     marketingOf(state).enoughSaid = true;
     marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nMartin said that's enough questions. Draft with what you have and state your assumptions plainly.`;
     marketingOf(state).pendingClarification = undefined;
@@ -500,16 +508,24 @@ export async function handleMarketingClarification(env: Env, state: WorkState, t
  * question at a time. A tapped answer and a typed answer are treated the
  * same: appended to the task text, and the Hat re-runs. Stale or already-
  * answered buttons are safe no-ops.
- * value: a suggested-answer index, "type" (Martin wants to type his own),
- * or "enough" (Martin said that's enough questions -- draft with what we
- * have, stating assumptions plainly).
+ * value: "<question number>.<choice>", where choice is a suggested-answer
+ * index, "type" (Martin wants to type his own) or "enough" (Martin said
+ * that's enough questions -- draft with what we have, stating assumptions
+ * plainly). A button from an earlier question (a different number) is
+ * refused, so it can never answer a newer question.
  */
-export async function handleClarifyAnswer(env: Env, state: WorkState, _approved: boolean, value?: string): Promise<WorkState> {
+export async function handleClarifyAnswer(env: Env, state: WorkState, _approved: boolean, rawValue?: string): Promise<WorkState> {
   const pending = state.marketing?.pendingClarification;
   if (!pending) {
     await sendWorkspaceHatMessage(env, state, "This question has already been answered -- nothing to do.");
     return state;
   }
+  const dot = rawValue?.indexOf(".") ?? -1;
+  if (!rawValue || dot < 0 || Number(rawValue.slice(0, dot)) !== pending.questionCount) {
+    await sendWorkspaceHatMessage(env, state, "That button belongs to an earlier question -- nothing was recorded.");
+    return state;
+  }
+  const value = rawValue.slice(dot + 1);
   state.pendingActionSummary = undefined;
   if (value === "enough") {
     marketingOf(state).enoughSaid = true;

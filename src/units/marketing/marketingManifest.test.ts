@@ -374,19 +374,19 @@ test("Clarify: suggested answers come through as tap buttons, plus a 'Type my ow
   assert.strictEqual(out.awaiting, "marketing_clarification");
   assert.deepStrictEqual(out.marketing?.pendingClarification, { question: "What is the budget?", suggestedAnswers: ["$5k", "$10k", "$20k"], questionCount: 1 });
   assert.strictEqual(out.marketing?.clarificationCount, 1);
-  const keyboard = JSON.parse(sentTexts.find((s) => s.includes("marketclarify:work-1:0"))!);
+  const keyboard = JSON.parse(sentTexts.find((s) => s.includes("marketclarify:work-1:1.0"))!);
   assert.deepStrictEqual(keyboard, [
-    [{ text: "$5k", callback_data: "marketclarify:work-1:0" }],
-    [{ text: "$10k", callback_data: "marketclarify:work-1:1" }],
-    [{ text: "$20k", callback_data: "marketclarify:work-1:2" }],
-    [{ text: "✏️ Type my own answer", callback_data: "marketclarify:work-1:type" }],
+    [{ text: "$5k", callback_data: "marketclarify:work-1:1.0" }],
+    [{ text: "$10k", callback_data: "marketclarify:work-1:1.1" }],
+    [{ text: "$20k", callback_data: "marketclarify:work-1:1.2" }],
+    [{ text: "✏️ Type my own answer", callback_data: "marketclarify:work-1:1.type" }],
   ]);
   assert.ok(sentTexts.some((s) => s.includes("What is the budget?")));
   assert.ok(sentTexts.some((s) => s.includes("The buttons are below")));
   assert.ok(sentTexts.some((s) => s.includes("type your answer directly below")));
   assert.ok(!sentTexts.some((s) => s.includes("✋ That's enough")), "question 1 must not have 'That's enough'");
 
-  await handleClarifyAnswer(env, out, false, "0");
+  await handleClarifyAnswer(env, out, false, "1.0");
   assert.strictEqual(out.marketing?.taskText!.includes("Additional detail: $5k"), true);
   assert.strictEqual(out.marketing?.pendingClarification, undefined);
   assert.strictEqual(out.stage, "awaiting_marketing_draft_approval", "hat re-ran and drafted after answer");
@@ -421,7 +421,7 @@ test("Clarify: no suggested answers means a 'Type my own answer' button only, no
 
   // Keyboard has only the type-my-own button.
   const buttons = out.pendingActionSummary?.buttons ?? [];
-  assert.deepStrictEqual(buttons, [[{ text: "✏️ Type my own answer", callback_data: "marketclarify:work-1:type" }]]);
+  assert.deepStrictEqual(buttons, [[{ text: "✏️ Type my own answer", callback_data: "marketclarify:work-1:1.type" }]]);
 
   // Wording: buttons below, no "tap above", question present.
   const message = out.pendingActionSummary?.message ?? "";
@@ -463,7 +463,7 @@ test("Clarify: from the sixth question on there is also a 'That's enough' button
     const flattened = buttons.flat();
     assert.ok(!flattened.some((b) => b.text === "✋ That's enough"), `question ${i} should not have 'That's enough'`);
     assert.ok(flattened.some((b) => b.text === "✏️ Type my own answer"), `question ${i} should have 'Type my own answer'`);
-    out = await handleClarifyAnswer(env, out, false, "0");
+    out = await handleClarifyAnswer(env, out, false, `${i}.0`);
   }
   // After 5 answers, clarificationCount is 6 (each answer re-runs dispatch
   // which triggers the next question). Question 6 is already pending.
@@ -495,7 +495,7 @@ test("Clarify: tapping 'That's enough' drafts with assumptions stated plainly an
   const out = await dispatchMarketingHat(env, state);
   assert.deepStrictEqual(out.marketing?.enoughSaid, undefined);
 
-  const enoughResult = await handleClarifyAnswer(env, out, false, "enough");
+  const enoughResult = await handleClarifyAnswer(env, out, false, "1.enough");
   assert.strictEqual(enoughResult.marketing?.enoughSaid, true);
   assert.strictEqual(enoughResult.marketing?.pendingClarification, undefined);
   assert.ok(enoughResult.marketing?.taskText!.includes("Martin said that's enough questions. Draft with what you have and state your assumptions plainly."));
@@ -547,7 +547,52 @@ test("Clarify: after enoughSaid, if the Hat still asks it stops and says it coul
   const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy.", enoughSaid: true } });
   const out = await dispatchMarketingHat(env, state);
   assert.strictEqual(out.marketing?.pendingClarification, undefined);
-  assert.strictEqual(out.awaiting, undefined);
+  assert.strictEqual(out.awaiting, "marketing_feedback", "waits for Martin's note, which redoes the work");
+  assert.strictEqual(aiCalls, 1, "the Hat is not re-run -- no loop");
+});
+
+test("Clarify: a button left on an earlier question can never answer a newer one", async (t) => {
+  clarifyFetchMock(t);
+  let aiCalls = 0;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async () => {
+        aiCalls++;
+        return { response: JSON.stringify({ action: "clarify", reason: `Question ${aiCalls}?`, suggestedAnswers: ["A", "B"] }) };
+      },
+    } as any,
+  });
+
+  const state = fakeWorkState({ marketing: { taskText: "Draft a campaign strategy." } });
+  let out = await dispatchMarketingHat(env, state);
+  out = await handleClarifyAnswer(env, out, false, "1.0");
+  assert.strictEqual(out.marketing?.pendingClarification?.questionCount, 2);
+  const before = out.marketing?.taskText;
+  out = await handleClarifyAnswer(env, out, false, "1.1");
+  assert.strictEqual(out.marketing?.taskText, before, "the stale tap recorded nothing");
+  assert.strictEqual(out.marketing?.pendingClarification?.questionCount, 2, "question 2 is still waiting");
+  assert.strictEqual(aiCalls, 2, "the Hat was not re-run");
+});
+
+test("Clarify: typing \"that's enough\" works like typing \"enough\"", async (t) => {
+  clarifyFetchMock(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "Drafted." }) }) } as any,
+  });
+  const state = fakeWorkState({
+    stage: "marketing_ambiguous",
+    awaiting: "marketing_clarification",
+    marketing: { taskText: "Draft a campaign strategy.", clarificationCount: 6, pendingClarification: { question: "Region?", suggestedAnswers: ["US"], questionCount: 6 } },
+  });
+  const out = await handleMarketingClarification(env, state, "That's enough.");
+  assert.strictEqual(out.marketing?.enoughSaid, true);
+  assert.ok(!out.marketing?.taskText!.includes("Additional detail"));
 });
 
 test("Clarify: answer taps are safe no-ops when nothing is pending", async (t) => {

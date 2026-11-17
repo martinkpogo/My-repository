@@ -17,7 +17,7 @@ export interface MarketingWorkState {
   pendingPaidMediaAction?: { description: string };
   /** The clarifying question the Hat asked Martin, plus suggested tap answers and the question number. Set when the Hat returns clarify; cleared when Martin answers. */
   pendingClarification?: { question: string; suggestedAnswers: string[]; questionCount: number };
-  /** How many clarifying questions this Hat has asked on this Work (cap 5). Reset on redo/feedback. */
+  /** How many clarifying questions this Hat has asked on this Work; from the sixth, each question also offers "That's enough". Reset on redo/feedback. */
   clarificationCount?: number;
   /** Martin tapped "✋ That's enough" or typed "enough" -- the Hat must not ask another question. Reset on redo/feedback. */
   enoughSaid?: boolean;
