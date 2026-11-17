@@ -202,6 +202,28 @@ const AUTHORIZED_EXTERNAL_READ_TARGETS: readonly string[] = [EXTERNAL_EGRESS_TAR
  */
 export const EXTERNAL_TOOL_TARGET = "external:tool";
 
+/**
+ * The ONE shared save feature's operation (Martin's decision, 2026-11-17):
+ * any Hat may save its OWN approved output as a Google Doc through
+ * `google_docs.create_and_verify`, WITHOUT declaring the operation on its
+ * Action. This is the only exemption from the per-Action declaration rule
+ * (step 5 of evaluateExternalMutationAccess), and it is deliberately narrow:
+ *
+ *  - it is a single, named operation -- not a class, not a prefix, never
+ *    "any Tool". A different operation is still refused unless declared;
+ *  - every OTHER safeguard is unchanged: the context must be a work_session,
+ *    the Action's consequence must be "write", and a bound ApprovalProof is
+ *    required (minted from Martin's final picker confirmation tap and bound
+ *    to the exact picked folder as the external target);
+ *  - the content is token-only (the same identity check the Sales Doc path
+ *    uses) before it can reach Google.
+ *
+ * It exists so saving a deliverable is a universal capability offered after
+ * approval (src/outputDelivery.ts) rather than a per-Action Tool declaration
+ * -- the same "one shared install point" reasoning as the Research Runtime.
+ */
+export const SHARED_OUTPUT_DELIVERY_OPERATION_ID = "google_docs.create_and_verify";
+
 export class AccessDeniedError extends Error {
   readonly reason: string;
   constructor(reason: string) {
@@ -742,7 +764,14 @@ export function evaluateExternalMutationAccess(env: Env, request: ExternalMutati
   const declared = (resolved.action.tool_operations ?? []).some(
     (declaration) => declaration.tool_id === request.toolId && declaration.operation_id === request.operationId,
   );
-  if (!declared) {
+  // The one exemption (Martin, 2026-11-17): the shared save feature may file
+  // any Work's own approved output as a Google Doc without a per-Action
+  // declaration. Narrow by construction -- one exact operation, and every
+  // other safeguard above and below still applies (work_session context,
+  // write consequence, bound ApprovalProof to the picked folder).
+  const sharedOutputDelivery =
+    request.toolId === "google_docs" && request.operationId === SHARED_OUTPUT_DELIVERY_OPERATION_ID;
+  if (!declared && !sharedOutputDelivery) {
     throw new AccessDeniedError(
       `action "${resolved.action.name}" does not declare Tool operation ${request.operationId} -- a Tool operation is permitted only when the Work's own resolved Action declares it, and availability of the Tool grants nothing.`,
     );
@@ -755,7 +784,12 @@ export function evaluateExternalMutationAccess(env: Env, request: ExternalMutati
     operationId: request.operationId,
     targetResourceId: request.targetResourceId,
   };
-  if (resolved.action.requiresApproval) {
+  // The shared save is authorized by Martin's final picker tap ALONE (his
+  // decision, 2026-11-17: "only on my final approve tap"), so when it runs
+  // under the exemption -- an Action that does not declare the operation -- a
+  // bound proof is required whatever the Action's own requiresApproval says.
+  // Without this, any ungated Work could write a Doc with no tap at all.
+  if (resolved.action.requiresApproval || (sharedOutputDelivery && !declared)) {
     if (!context.proof) {
       throw new AccessDeniedError(
         `action "${resolved.action.name}" requires Martin's explicit approval before ${describeExternalMutation(request, context)} may proceed, and no ApprovalProof was supplied.`,

@@ -1689,6 +1689,13 @@ export async function handleGoogleAccountSelection(
 
   const { accountIdentifier, title, content, rows } = option;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
+  // Shared output-delivery flow (src/outputDelivery.ts): the account option
+  // was staged by handleOutputDeliveryCallback carrying `delivery: true`.
+  // The account/folder pickers are reused exactly, but the folder stage must
+  // carry the flag forward so handleGoogleFolderSelection routes to the final
+  // explicit confirmation (which mints the proof and creates) rather than the
+  // legacy pendingGoogleAction approval path.
+  const delivery = option.delivery === true;
   // Tool Registry SMOKE flow discriminator (src/googleDocsSmokeFlow.ts): the
   // account option was staged by the /googledocssmoke flow carrying
   // `smoke: true`. Smoke selection reuses this picker exactly -- same
@@ -1775,16 +1782,28 @@ export async function handleGoogleAccountSelection(
               folderId: folder.id,
               folderName: folder.name,
             }
-          : {
-              kind: "folder",
-              docType,
-              accountIdentifier,
-              title,
-              content,
-              rows,
-              folderId: folder.id,
-              folderName: folder.name,
-            },
+          : delivery
+            ? {
+                kind: "folder",
+                delivery: true,
+                docType,
+                accountIdentifier,
+                title,
+                content,
+                rows,
+                folderId: folder.id,
+                folderName: folder.name,
+              }
+            : {
+                kind: "folder",
+                docType,
+                accountIdentifier,
+                title,
+                content,
+                rows,
+                folderId: folder.id,
+                folderName: folder.name,
+              },
       );
       buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
     }
@@ -1816,7 +1835,9 @@ export async function handleGoogleAccountSelection(
   }
 
   const actionLabel = docType === "sheet" ? "Create Google Sheet" : "Create Google Doc";
-  const messageText = `*Google Workspace Action*: ${actionLabel}\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
+  const messageText = delivery
+    ? `*Save approved output to Google Drive*\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder -- you will confirm once more before anything is created:`
+    : `*Google Workspace Action*: ${actionLabel}\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
@@ -1853,6 +1874,11 @@ export async function handleGoogleFolderSelection(
 
   const { accountIdentifier, title, content, rows, folderId, folderName } = option;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
+  // Shared output-delivery flow (src/outputDelivery.ts): the folder option
+  // carries `delivery: true`. Route to the final explicit confirmation, which
+  // mints the ApprovalProof (bound to this exact folder) and creates through
+  // the shared Tool Registry -- never the legacy pendingGoogleAction path.
+  const delivery = option.delivery === true;
 
   // Tool Registry SMOKE flow (src/googleDocsSmokeFlow.ts): the folder option
   // was staged carrying `smoke: true`. Instead of the normal creation
@@ -1914,6 +1940,58 @@ export async function handleGoogleFolderSelection(
       workId: state.workId,
     });
 
+    return state;
+  }
+
+  if (delivery) {
+    // Re-stage the picked target as a delivery_confirm option so the final
+    // confirm callback can recover the exact account + folder it is bound to
+    // (Telegram callback_data cannot carry the folder id within its 64-byte
+    // limit, so the binding lives in the opaque option, not the button).
+    let confirmOpaqueId: string;
+    try {
+      confirmOpaqueId = await saveOpaqueOption(env, state.workId, {
+        kind: "delivery_confirm",
+        delivery: true,
+        accountIdentifier,
+        folderId,
+        folderName,
+        title,
+      });
+    } catch (err) {
+      console.error(`Output delivery: confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        "⚠️ Could not persist the output-delivery confirmation (storage write refused -- likely the daily KV quota). Nothing was created -- please try again after the quota window resets.",
+      );
+      return state;
+    }
+    // Final explicit confirmation before creation. The confirm button carries
+    // only the opaque id (the account + folder binding lives there, within the
+    // callback byte limit); the handler mints the proof bound to that folder.
+    const confirmButtons = [
+      [
+        { text: "✅ Confirm & create Doc", callback_data: `outputdelivery:${state.workId}:${confirmOpaqueId}` },
+        { text: "❌ Cancel", callback_data: `outputdelivery:${state.workId}:dismiss` },
+      ],
+    ];
+    const messageText =
+      `*Save approved output to Google Drive* -- confirm\n\n` +
+      `*Account*: ${accountIdentifier}\n` +
+      `*Folder*: ${folderName} (\`${folderId}\`)\n` +
+      `*Title*: ${title}\n\n` +
+      "Confirming creates exactly ONE Google Doc in this folder through the shared Tool Registry " +
+      "(`google_docs.create_and_verify`, proved by read-back). Nothing has been created yet.\n\nConfirm?";
+    await sendWorkspaceHatMessage(env, target, messageText, confirmButtons);
+    await logActivity(env, {
+      entry: "Output delivery confirmation presented",
+      type: "Activity",
+      area: state.unit ?? "Operations",
+      activity: `Output delivery target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
+      outcome: "Active",
+      workId: state.workId,
+    });
     return state;
   }
 

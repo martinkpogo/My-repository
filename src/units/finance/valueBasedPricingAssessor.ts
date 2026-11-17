@@ -4,6 +4,7 @@ import { getPage, plainText, richText, richTextLong, select, title } from "../..
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
+import { captureApprovedOutput } from "../../outputDelivery";
 import { advanceWorkStatus, continueWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { setActiveWorkId } from "../../sessionRouting";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -968,6 +969,10 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
     );
     state.stage = "quote_approved";
     state.awaiting = undefined;
+    await captureApprovedOutput(env, state, {
+      title: `Finance Quote -- ${state.matterToken ?? state.entityToken ?? state.workId}`,
+      text: `Approved quote: ${state.finance?.quote?.currency ?? ""} ${state.finance?.quote?.price ?? ""}\nRationale: ${state.finance?.quote?.rationale ?? ""}`,
+    });
     return state;
   }
 
@@ -1121,6 +1126,10 @@ export async function handleQuoteApproval(env: Env, state: WorkState, approved: 
 
   state.stage = "quote_approved";
   state.awaiting = undefined;
+  await captureApprovedOutput(env, state, {
+    title: `Finance Quote -- ${state.matterToken ?? state.entityToken ?? state.workId}`,
+    text: `Approved quote: ${state.finance?.quote?.currency ?? ""} ${state.finance?.quote?.price ?? ""}\nRationale: ${state.finance?.quote?.rationale ?? ""}`,
+  });
   return state;
 }
 

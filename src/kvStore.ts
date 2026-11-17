@@ -41,9 +41,11 @@ import type { Env } from "./types";
  *   generic metadata only (sessionsIndex.ts deriveSessionLabel /
  *   sanitizeSessionsIndex rewrite every entry on every save). Human
  *   names, enquiry text and free-text approval labels are never stored.
- * - `google_option:` is Cloudflare-only: optionData is arbitrary and
- *   carries Google Doc bodies, Sheet rows and the account email
- *   (googleOAuth.ts saveOpaqueOption call sites).
+ * - `google_option:` is now fallback-eligible (Martin's decision 2026-11-17):
+ *   the picker's saved choices must survive a Cloudflare quota window. This
+ *   is a deliberate widening of the boundary -- optionData is arbitrary and
+ *   carries Google Doc bodies, Sheet rows, the account email -- recorded in
+ *   FALLBACK_ELIGIBLE_PREFIXES, not a value-level "no content" finding.
  * - `google_doc_watch:` / `google_sheet_watch:` are Cloudflare-only: the
  *   records carry the account email and file titles, and the poll cannot
  *   function without them, so no minimal Turso representation exists.
@@ -144,6 +146,16 @@ const FALLBACK_ELIGIBLE_PREFIXES: readonly string[] = [
   "enig_records:",
   "mode_entry:",
   "tg_update:",
+  // Picker option staging (googleOAuth.ts saveOpaqueOption): the saved
+  // account/folder selections behind the interactive account -> folder ->
+  // confirm pickers (google_option:). Martin's decision 2026-11-17: the
+  // picker's saved choices fall back to Turso when the Cloudflare limit is
+  // hit, so an in-progress pick survives a quota window. NOTE (data
+  // boundary): unlike every other eligible class, optionData is arbitrary
+  // and can carry Google Doc bodies, Sheet rows, titles and the account
+  // email -- this entry deliberately widens that boundary for availability,
+  // by explicit Architect decision (see the never-fallback note below).
+  "google_option:",
   // sessionRouting.ts / matterContinuation.ts routing + interaction state
   // (values: workId / mode / "1" strings -- no content, no identity)
   "active:",
@@ -195,9 +207,11 @@ const NEVER_FALLBACK_EXACT_PREFIXES: readonly string[] = [
   "google_oauth_tokens:", // OAuth tokens (googleOAuth.ts)
   // Approval-option staging (googleOAuth.ts saveOpaqueOption): optionData is
   // arbitrary -- Google Doc bodies, Sheet rows, titles and the account email
-  // (call sites :1430/:1516/:1628). No minimal safe contract exists at every
-  // writer, so the class is Cloudflare-only and a failed save stays explicit.
-  "google_option:",
+  // (call sites :1430/:1516/:1628). Historically Cloudflare-only; as of
+  // Martin's decision 2026-11-17 `google_option:` is now FALLBACK-ELIGIBLE
+  // (see FALLBACK_ELIGIBLE_PREFIXES) so the picker's saved choices survive a
+  // Cloudflare quota window. It is intentionally NOT repeated in the
+  // never-fallback list below.
   // Watch registries (googleOAuth.ts): records carry the account email and
   // the file title, and the comment poll cannot run without them -- there is
   // no reduced schema that would still function, so they stay Cloudflare-only.

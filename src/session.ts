@@ -50,7 +50,9 @@ import {
   handleGoogleAccountSelection,
   handleGoogleFolderSelection,
   handleGoogleActionApproval,
+  consumeOpaqueOption,
 } from "./googleOAuth";
+import { handleOutputDeliveryCallback, confirmOutputDelivery } from "./outputDelivery";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
 import {
@@ -662,6 +664,41 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * The shared output-delivery callback (src/outputDelivery.ts). Runs inside
+   * this Work's execute cycle so a final confirmation's governed Tool
+   * Registry invocation has the session's durable operation persistence
+   * installed (same reason as the smoke confirmation). `value` is
+   * `dismiss`, `start`, or the opaque id of a staged `delivery_confirm`
+   * option (the final confirmation tap).
+   */
+  async runOutputDeliveryCallback(value: string): Promise<WorkState> {
+    const current = await this.require();
+    const workId = String(current.workId);
+    if (value === "dismiss" || value === "start") {
+      return this.execute((s) => handleOutputDeliveryCallback(this.env, s, value));
+    }
+    // Confirm: consume the staged delivery_confirm option (account + folder
+    // binding), then create. A missing/mismatched option changes nothing.
+    const option = await consumeOpaqueOption(this.env, workId, value);
+    if (
+      !option ||
+      option.kind !== "delivery_confirm" ||
+      option.delivery !== true ||
+      typeof option.accountIdentifier !== "string" ||
+      typeof option.folderId !== "string"
+    ) {
+      return this.execute(async (s) => {
+        await sendMessage(this.env, s.chatId, "⚠️ That output-delivery confirmation is invalid or expired. Nothing was created.", undefined, s.threadId);
+        return s;
+      });
+    }
+    const accountIdentifier = option.accountIdentifier;
+    const folderId = option.folderId;
+    const folderName = typeof option.folderName === "string" ? option.folderName : folderId;
+    return this.execute((s) => confirmOutputDelivery(this.env, s, accountIdentifier, folderId, folderName));
+  }
+
+  /**
    * The ONE generic entry for what a Unit lets a caller do to a Work it owns
    * (UnitManifest.operations): Sales's Proposal-Doc comment handling and Lead
    * cards, for example, which used to be a named method each on this class.
@@ -737,6 +774,13 @@ export class WorkSession extends DurableObject<Env> {
     // changes behaviour here.
     if (action === "googlesmokeconfirm") {
       return this.runGoogleDocsSmokeConfirmation(value);
+    }
+    // Shared output delivery (src/outputDelivery.ts): its confirm step runs a
+    // governed Tool Registry invocation, which needs this session's durable
+    // operation persistence installed -- so it runs inside the execute cycle
+    // like the smoke confirmation, not in the plain switch below.
+    if (action === "outputdelivery") {
+      return this.runOutputDeliveryCallback(value);
     }
     return this.execute((state) => {
       switch (action) {

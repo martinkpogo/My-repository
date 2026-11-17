@@ -346,11 +346,50 @@ test("J. an incompatible effect classification is denied: a read Action cannot c
   await expectDenied(env, readContext, /declared "read" and cannot carry effect "external_mutation"/, t);
 });
 
-test("K. an Action that does not declare the operation is denied (undeclared Action-to-Tool combination)", async (t) => {
+test("K. the shared output-delivery save is allowed for an undeclared Action, but any OTHER operation is still denied (undeclared Action-to-Tool combination)", async (t) => {
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
-  const undeclaredContext = workSessionContext(toolState({ actionName: "new_enquiry" }));
-  await expectDenied(env, undeclaredContext, /does not declare Tool operation google_docs\.create_and_verify/, t);
+  const { calls } = installGoogleFake(t, docServer());
+  // new_enquiry is a write Action that declares NO Tool operations. Under the
+  // shared output-delivery exemption (Martin, 2026-11-17) the one named
+  // google_docs.create_and_verify operation is allowed for ANY Work's own
+  // output -- so it now reaches Google instead of being denied.
+  // Without Martin's tap (no proof) the shared save is refused, before any request.
+  const noProof = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    workSessionContext(toolState({ actionName: "new_enquiry" })),
+  );
+  assert.equal(noProof.state, "denied", "the shared save always needs Martin's tap (a bound proof)");
+  assert.match(noProof.reason ?? "", /no ApprovalProof was supplied/);
+  assert.equal(calls.length, 0, "a refused save never reaches Google");
+
+  const undeclaredState = toolState({ actionName: "new_enquiry" });
+  const tap = mintExternalToolApprovalProof(undeclaredState, { toolId: GOOGLE_DOCS_TOOL_ID, operationId: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, targetResourceId: "gdrive:folder:folder-1" });
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, input: VALID_INPUT },
+    workSessionContext(undeclaredState, tap),
+  );
+  assert.equal(outcome.state, "succeeded", `the shared save is allowed for an undeclared Action with Martin's tap: ${outcome.reason}`);
+
+  // The exemption is ONE operation: a different operation is still denied for
+  // the same undeclared Action, before any request.
+  const otherContext = workSessionContext(toolState({ actionName: "new_enquiry" }));
+  const other = await invokeTool(
+    env,
+    {
+      tool_id: GOOGLE_DOCS_TOOL_ID,
+      operation_id: "google_docs.update_and_verify",
+      input: { document_id: "doc-1", account_identifier: "martin@example.com", proposal_id: "PROP-1", versions: [{ version: 1, content: "v1" }] },
+    },
+    otherContext,
+  );
+  assert.equal(other.state, "denied");
+  assert.match(other.reason ?? "", /does not declare Tool operation google_docs\.update_and_verify/);
+  // No Drive mutation beyond the shared create's own create+insert+verify
+  // sequence: the denied update never issued a PATCH (the update method).
+  assert.equal(calls.some((c) => c.method === "PATCH"), false, "the denied update must not issue any request");
 });
 
 test("L. a caller cannot substitute a different Action: an asserted-Action mismatch fails closed", async (t) => {

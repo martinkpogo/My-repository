@@ -323,17 +323,21 @@ test("a Work that cannot be established (already exists) blocks with the runner'
 // The Authorization boundary at the invocation itself.
 // ---------------------------------------------------------------------------
 
-test("an Action that does not declare the operation is denied with ZERO Drive mutations, and the clean denial closes the Work", async (t: any) => {
+test("an approval-gated Action that does not declare the operation is still denied -- on approval evidence (Martin 2026-11-17: the shared-save exemption does not drop the proof requirement)", async (t: any) => {
   const env = configuredEnv();
-  // create_entity is a declared Sales Executive WRITE Action -- but it
-  // declares no Tool operations, so Access must refuse before any request.
+  // create_entity is a declared Sales Executive WRITE Action that declares no
+  // Tool operations AND is approval-gated. Under the shared output-delivery
+  // exemption the one google_docs.create_and_verify operation is permitted
+  // without a declaration -- but the Action's requiresApproval still stands,
+  // so with no ApprovalProof the invocation is denied BEFORE any request, now
+  // on approval evidence rather than on declaration.
   const harness = smokeRunner(smokeState(WORK_ID, { actionName: "create_entity" }));
   const { calls } = installGoogleFake(t, () => json({}));
 
   const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
 
   assert.equal(result.outcome?.state, "denied");
-  assert.match(result.outcome?.reason ?? "", /does not declare Tool operation google_docs\.create_and_verify/);
+  assert.match(result.outcome?.reason ?? "", /requires Martin's explicit approval/);
   assert.equal(driveCreates(calls).length, 0);
   assert.equal(result.rewrite_outcome, null, "no Doc was ever proved, so no rewrite may exist");
   assert.deepEqual(harness.closes, [WORK_ID], "a denial proved no remote effect, so the smoke Work closes cleanly");
