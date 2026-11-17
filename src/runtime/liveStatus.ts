@@ -153,12 +153,19 @@ export interface RunExtras {
    * run was cancelled with its status stuck.
    */
   noWebResearch?: boolean;
+  /**
+   * True for a run whose AI steps do not need the ENIG Consultancy Profile
+   * (ENIG's own turn when Martin is not asking about the business itself,
+   * Martin 2026-11-17): the Hat a request goes to reads the full Profile.
+   */
+  noBusinessContext?: boolean;
 }
 
 class LiveStatusRun {
   private readonly accessSource: AccessContext | (() => AccessContext) | undefined;
   private readonly deepResearchSource: (() => boolean) | undefined;
   readonly noWebResearch: boolean;
+  readonly noBusinessContext: boolean;
   get offersDeepResearch(): boolean {
     return this.deepResearchSource?.() === true;
   }
@@ -192,6 +199,7 @@ class LiveStatusRun {
     this.accessSource = extras.access;
     this.deepResearchSource = extras.offersDeepResearch;
     this.noWebResearch = extras.noWebResearch === true;
+    this.noBusinessContext = extras.noBusinessContext === true;
   }
 
   step(label: string): void {
@@ -467,7 +475,7 @@ export async function withLiveStatus<T>(
 }
 
 /** The open run's Access context, target and lookup counters, for per-run Runtime services; undefined outside a run. */
-export function currentRun(): Pick<LiveStatusRun, "access" | "offersDeepResearch" | "noWebResearch" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
+export function currentRun(): Pick<LiveStatusRun, "access" | "offersDeepResearch" | "noWebResearch" | "noBusinessContext" | "target" | "searches" | "searchLimit" | "endHooks"> | undefined {
   return RUNS.getStore();
 }
 

@@ -3,7 +3,7 @@ import type { AiTask } from "../ai/types";
 import type { ContextSegment, SemanticTaskId } from "../dataBoundary/types";
 import { setTaskAugmenter } from "../ai/policy";
 import { getGovernance } from "../governance";
-import { reportLiveStep } from "./liveStatus";
+import { currentRun, reportLiveStep } from "./liveStatus";
 import { callerSensitivity, WEB_RESEARCH_TASKS } from "./webResearch";
 
 /**
@@ -41,6 +41,7 @@ export const BUSINESS_CONTEXT_TASKS: ReadonlySet<SemanticTaskId> = new Set<Seman
 
 export async function augmentTaskWithBusinessContext(env: Env, task: AiTask): Promise<AiTask> {
   if (!BUSINESS_CONTEXT_TASKS.has(task.taskId)) return task;
+  if (currentRun()?.noBusinessContext) return task; // ENIG's turn, not about the business (Martin, 2026-11-17)
   const profile = await getGovernance(env, CONSULTANCY_PROFILE_PAGE_ID, "ENIG Consultancy Profile");
   if (!profile) {
     console.error(`businessContext: the ENIG Consultancy Profile could not be read for ${task.taskId} -- the step runs without it`);

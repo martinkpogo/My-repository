@@ -70,3 +70,19 @@ test("an unreadable Profile never stops the step: it runs unchanged", async (t) 
   const t0 = task("chat.general_reply");
   assert.strictEqual(await augmentTaskWithBusinessContext(env(null), t0), t0);
 });
+
+test("a run marked noBusinessContext (ENIG's turn, not about the business) gets no Profile; other runs still do", async (t) => {
+  const { withLiveStatus } = await import("./liveStatus");
+  const { systemContext } = await import("../access");
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 })) as any;
+  t.after(() => { globalThis.fetch = original; });
+  const e = { ...env("ENIG solves positioning problems."), TELEGRAM_BOT_TOKEN: "t" } as Env;
+  const target = { chatId: -1, threadId: 2, header: "ENIG" };
+  let skipped: AiTask | undefined;
+  let included: AiTask | undefined;
+  await withLiveStatus(e, target, async () => { skipped = await augmentTaskWithBusinessContext(e, task("chat.general_reply")); }, () => "succeeded", undefined, { access: systemContext(), noBusinessContext: true });
+  await withLiveStatus(e, target, async () => { included = await augmentTaskWithBusinessContext(e, task("chat.general_reply")); }, () => "succeeded", undefined, { access: systemContext() });
+  assert.doesNotMatch(skipped!.messages[0].content, /CONSULTANCY PROFILE/);
+  assert.match(included!.messages[0].content, /CONSULTANCY PROFILE/);
+});
