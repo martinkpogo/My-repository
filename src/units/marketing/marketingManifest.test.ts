@@ -233,6 +233,24 @@ test("Status: a Marketing Hat run shows its real steps and ends on the draft awa
   }
 });
 
+test("decision order (Martin, 2026-11-17): route, then the contract's understand_before_producing question, then a draft that uses the research -- pointed to by name, never restated", async () => {
+  const { buildHatPromptParts, MARKETING_DECISION_FORMAT } = await import("./marketingManifest");
+  const { MARKETING_HAT_REGISTRY } = await import("../../hats/registry");
+  for (const hat of Object.values(MARKETING_HAT_REGISTRY)) {
+    assert.ok(buildHatPromptParts(hat, "contract").context!.includes(MARKETING_DECISION_FORMAT), hat.name);
+  }
+  const route = MARKETING_DECISION_FORMAT.indexOf('"action":"route"');
+  const clarify = MARKETING_DECISION_FORMAT.indexOf('"action":"clarify"');
+  const draft = MARKETING_DECISION_FORMAT.indexOf('"action":"draft"');
+  assert.ok(route >= 0 && route < clarify && clarify < draft, "the question is considered before a draft, not only when the Hat cannot proceed");
+  assert.match(MARKETING_DECISION_FORMAT, /understand_before_producing/);
+  assert.match(MARKETING_DECISION_FORMAT, /evidence_over_generalities/);
+  assert.match(MARKETING_DECISION_FORMAT, /source link exactly as given/);
+  assert.match(MARKETING_DECISION_FORMAT, /never ask again what they answer/);
+  assert.match(MARKETING_DECISION_FORMAT, /that's enough questions, do not ask/);
+  assert.doesNotMatch(MARKETING_DECISION_FORMAT, /budget|timeframe|capacity/i, "the questions themselves come from the live Notion rule, not from code");
+});
+
 test("problem brief (Martin, 2026-11-13): every Marketing Hat's instructions carry the seven-part shape, used only with web research, never naming a company", async () => {
   const { buildHatPromptParts, MARKETING_PROBLEM_BRIEF_FORMAT } = await import("./marketingManifest");
   const { MARKETING_HAT_REGISTRY } = await import("../../hats/registry");
