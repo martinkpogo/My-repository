@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, WorkState, SessionSummary, Unit } from "./types";
-import { handleMarketingIntake } from "./units/marketing/marketingManifest";
+import { handleMarketingIntake, startConfirmedMarketingHat } from "./units/marketing/marketingManifest";
 import type { ActionExecutionContext } from "./runtime/actionResolution";
 import { bindExecutionSkills, runWithRecordedActionSkills } from "./runtime/actionSkills";
 import { getResearchCheckpointStore, installWorkPersistence, workStatePersistence } from "./runtime/workPersistence";
@@ -158,6 +158,14 @@ export class WorkSession extends DurableObject<Env> {
     return this.execute((state) => {
       recordWorkAction(state, "handle_request");
       return handleMarketingIntake(this.env, state, text);
+    });
+  }
+
+  /** A Marketing Hat Martin confirmed on ENIG's offer: started directly, no second match (Martin, 2026-11-17). */
+  async handleConfirmedMarketingRequest(text: string): Promise<WorkState> {
+    return this.execute((state) => {
+      recordWorkAction(state, "handle_request");
+      return startConfirmedMarketingHat(this.env, state, text);
     });
   }
 

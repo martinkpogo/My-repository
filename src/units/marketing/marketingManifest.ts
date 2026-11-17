@@ -346,6 +346,28 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
  * - Stage 1 identifies genuinely plausible candidate Hats and whether establishing is needed.
  * - Stage 2 evaluates specific registered sequential relationships between candidates deterministically.
  */
+/**
+ * Starts the Marketing Hat Martin confirmed on ENIG's offer (Martin,
+ * 2026-11-17): the Hat was matched once, on its declared responsibilities,
+ * and he confirmed it, so the intake's own Stage 1/2 match does not run
+ * again. The Hat's own step still proposes a transition (Martin approves it)
+ * if the work turns out not to be its own. Anything but a registered Marketing
+ * Hat falls back to the normal intake -- never a guessed dispatch.
+ */
+export async function startConfirmedMarketingHat(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  if (!isMarketingHat(state.hat)) return handleMarketingIntake(env, state, text);
+  marketingOf(state).taskText = text;
+  await logActivity(env, {
+    entry: `Marketing task started by ${state.hat} (confirmed by Martin)`,
+    type: "Activity",
+    area: "Marketing",
+    activity: text,
+    decisionRationale: "Matched on declared responsibilities by ENIG and confirmed by Martin; not re-matched by the Marketing intake.",
+    outcome: "Active",
+  });
+  return dispatchMarketingHat(env, state);
+}
+
 export async function handleMarketingIntake(env: Env, state: WorkState, text: string): Promise<WorkState> {
   marketingOf(state).taskText = text;
 
