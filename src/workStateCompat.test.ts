@@ -40,7 +40,7 @@ const PERSISTED_FIELDS = [
   "actionName", "awaiting", "bd", "blockedReason", "callNotes", "candidateEntities", "candidateMatters", "chatId", "commercialEvidence",
   "createdAt", "enquiryText", "entityDraft", "entityId", "entityName", "entityToken", "entryType", "externalOperations", "finance",
   "handoffId", "hat", "investmentToleranceContext", "marketing", "matterDraft", "matterId", "matterIdUnresolved", "matterName",
-  "matterToken", "measurementBaseline", "pendingActionSummary", "pendingApproval", "pendingGoogleAction", "pendingHandoffAutoCheck",
+  "matterToken", "measurementBaseline", "outputDelivery", "pendingActionSummary", "pendingApproval", "pendingGoogleAction", "pendingHandoffAutoCheck",
   "pendingSmokeSelection", "proposalDraft", "proposalRevisionCount", "proposedIntervention", "qualification", "sales", "stage",
   "strategy", "threadId", "unit", "updatedAt", "workId", "workStatus", "workStatusMessageId",
 ];

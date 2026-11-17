@@ -14,6 +14,7 @@ import {
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator, type InlineButton } from "../../telegram";
+import { captureApprovedOutput } from "../../outputDelivery";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
@@ -767,6 +768,13 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     outcome: "Complete",
   });
   await sendWorkspaceHatMessage(env, state, `Approved.`);
+  // Shared output delivery (src/outputDelivery.ts): capture the approved
+  // draft so the user may file it as a Google Doc. Token-safety is checked
+  // inside captureApprovedOutput (fails closed).
+  await captureApprovedOutput(env, state, {
+    title: `Marketing Draft -- ${state.hat}`,
+    text: approvedDraft,
+  });
   marketingOf(state).draft = undefined;
   state.stage = "complete";
   state.awaiting = undefined;

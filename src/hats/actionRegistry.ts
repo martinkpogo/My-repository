@@ -77,31 +77,6 @@ export interface ActionToolOperation {
   required: boolean;
 }
 
-/**
- * Declares that an Action produces a DELIVERABLE artifact -- a report,
- * strategy, plan or similar document the user may want filed into Google
- * Drive when the output is approved (Martin's decision, 2026-11-17).
- *
- * This is a per-Action FACT read by generic, Unit-free code
- * (src/outputDelivery.ts): the offer to "Save as Doc" is made after approval
- * for exactly the Actions that declare it, so the capability is available to
- * every Hat by construction without any Hat branching in generic code. An
- * Action that produces a quick answer or a status check declares nothing and
- * is never offered delivery.
- *
- * `formats` lists the artifact kinds this Action's output can be filed as,
- * most-likely first (deterministic ordering -- no AI decides). "doc" maps to
- * the governed `google_docs.create_and_verify` operation; "sheet" is reserved
- * for a future registered Sheets-create operation and is not offered until
- * that operation exists. Delivery NEVER grants execution authority: the
- * creation still runs through the Tool Registry invocation boundary, judged
- * by Access on this same Action.
- */
-export interface ActionDeliverable {
-  /** Ordered artifact kinds, most-likely first. Only "doc" is currently offered. */
-  formats: readonly ("doc" | "sheet")[];
-}
-
 export interface ActionDefinition<A extends string> {
   /** The action's own registered name -- e.g. "status_check". Never invented on the spot; always one of a Unit's own declared verbs. */
   name: A;
@@ -224,16 +199,6 @@ export interface ActionDefinition<A extends string> {
    * requests are served.
    */
   tool_operations?: readonly ActionToolOperation[];
-  /**
-   * Declares that this Action produces a deliverable artifact (report,
-   * strategy, plan, ...) that the user may file into Google Drive once the
-   * output is approved. Read by the Unit-free output-delivery offer
-   * (src/outputDelivery.ts); absent means the Action's output is never
-   * offered for delivery. Declaration only -- it grants no permission and
-   * never bypasses the approval gate or the Tool Registry invocation
-   * boundary. See ActionDeliverable.
-   */
-  deliverable?: ActionDeliverable;
   /**
    * THE declared deterministic applicability of this Action (ENIG
    * Operating Model, "Action Resolution"): the conditions under which this
@@ -420,23 +385,6 @@ export function validateActionDefinition(action: ActionDefinition<string>): stri
       return `${action.name}: declares Tool operation ${key} more than once -- a declaration is stated exactly once`;
     }
     declaredToolOperations.add(key);
-  }
-  if (action.deliverable !== undefined) {
-    if (typeof action.deliverable !== "object" || action.deliverable === null) {
-      return `${action.name}: deliverable must be an object declaring its artifact formats`;
-    }
-    const formats = action.deliverable.formats;
-    if (!Array.isArray(formats) || formats.length === 0) {
-      return `${action.name}: a declared deliverable must list at least one artifact format ("doc" or "sheet") -- omission is never "no deliverable"`;
-    }
-    for (const format of formats) {
-      if (format !== "doc" && format !== "sheet") {
-        return `${action.name}: deliverable format must be "doc" or "sheet", got "${String(format)}"`;
-      }
-    }
-    if (new Set(formats).size !== formats.length) {
-      return `${action.name}: deliverable lists a format more than once -- each artifact kind is declared once`;
-    }
   }
   const applicabilityDefect = validateApplicability(action.name, action.applicability);
   if (applicabilityDefect) return applicabilityDefect;

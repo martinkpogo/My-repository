@@ -699,6 +699,28 @@ export interface WorkState {
   pendingGoogleAction?: import("./googleOAuth").PendingGoogleAction;
 
   /**
+   * The shared output-delivery flow (src/outputDelivery.ts, Martin's
+   * decision 2026-11-17): once any Hat's output is approved, this holds the
+   * exact approved output text so the shared save feature can offer to file
+   * it as a Google Doc. It is set ONLY from a Hat's own approval-success
+   * point (never from text parsing or AI output), and the text is
+   * token-checked (the same identity check as the Sales Doc path) before it
+   * is shown or created. The creation runs through the Tool Registry
+   * (`google_docs.create_and_verify`) under the one shared Access rule; the
+   * ApprovalProof is minted from Martin's final picker-confirmation tap and
+   * bound to the exact folder he picks. Cleared when the flow is consumed,
+   * cancelled, or superseded by a newer approved output.
+   */
+  outputDelivery?: {
+    /** The exact approved output text, token-checked before storage. */
+    text: string;
+    /** A short human label for the artifact (e.g. the Action name or proposal id). */
+    title: string;
+    /** When this approved output was captured. */
+    capturedAt: string;
+  };
+
+  /**
    * The target Martin selected but has NOT yet confirmed in the interactive
    * Google Docs Tool Registry SMOKE flow (src/googleDocsSmokeFlow.ts): the
    * authorized account and the disposable Drive folder, held until he presses

@@ -32,6 +32,7 @@ import {
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
+import { captureApprovedOutput } from "../../outputDelivery";
 
 import { strategyOf } from "./strategyState";
 /**
@@ -1786,6 +1787,32 @@ function formatProposalPreview(state: WorkState, proposal: StrategyProposal): st
 }
 
 /**
+ * Plain-text rendering of the APPROVED Strategy proposal, used only for the
+ * shared output-delivery feature (src/outputDelivery.ts) -- the artifact the
+ * user may save as a Google Doc after approving. No markdown emphasis (a Doc
+ * is plain text); same facts as the preview, minus the "not yet approved"
+ * trailer. Token-safety is checked downstream before storage.
+ */
+export function formatApprovedProposalOutput(state: WorkState, proposal: StrategyProposal): string {
+  const lines = [
+    `Strategy Proposal (v${proposal.proposalVersion}) -- APPROVED`,
+    `Entity: ${state.matterToken || state.entityToken || state.workId}`,
+    `Strategic problem: ${proposal.executiveSummary.strategicProblem}`,
+    `Recommended direction: ${proposal.recommendedDirection.direction || proposal.executiveSummary.recommendedDirection}`,
+    `Proposed intervention: ${proposal.proposedIntervention.interventionName} -- ${proposal.proposedIntervention.interventionSummary}`,
+    proposal.commercialScope.included.length ? `Scope (included): ${proposal.commercialScope.included.join("; ")}` : null,
+    proposal.deliverables.length ? `Deliverables: ${proposal.deliverables.map((d) => d.name).join("; ")}` : null,
+    `Timeline (${proposal.timeline.status}): ${proposal.timeline.totalDuration}`,
+    `Expected business effect: ${proposal.executiveSummary.expectedBusinessEffect}`,
+    proposal.assumptions.length ? `Key assumptions: ${proposal.assumptions.map((a) => a.assumption).join("; ")}` : null,
+    proposal.risksAndConstraints.risks.length || proposal.risksAndConstraints.constraints.length
+      ? `Key risks/constraints: ${[...proposal.risksAndConstraints.risks.map((r) => r.risk), ...proposal.risksAndConstraints.constraints.map((c) => c.constraint)].join("; ")}`
+      : null,
+  ].filter(Boolean);
+  return lines.join("\n").slice(0, 3900);
+}
+
+/**
  * Deterministic post-check on the AI-drafted proposal -- mirrors
  * evaluateCausationDiscipline's role for the diagnosis step: the AI's own
  * output is never taken on trust merely because it parsed as valid JSON. A
@@ -2536,6 +2563,15 @@ export async function handleInterventionApproval(
       outcome: "Complete",
     });
     await sendWorkspaceHatMessage(env, { ...state, hat: HAT_NAME }, `Approved -- routed to Finance for pricing. I'll let you know once Finance responds.`);
+
+    // Shared output delivery (src/outputDelivery.ts): capture this approved
+    // output so the user may file it as a Google Doc. Token-safety is checked
+    // inside captureApprovedOutput (fails closed -- nothing offered if the
+    // text is not clean). One shared feature, no per-Action Tool declaration.
+    state = await captureApprovedOutput(env, state, {
+      title: `Strategy Proposal -- ${proposal!.proposedIntervention.interventionName}`,
+      text: formatApprovedProposalOutput(state, proposal!),
+    });
     // See WorkState.pendingHandoffAutoCheck's doc comment.
     state.pendingHandoffAutoCheck = true;
 

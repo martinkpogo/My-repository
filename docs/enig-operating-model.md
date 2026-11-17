@@ -680,6 +680,16 @@ Declarations live on the Action: `tool_operations` is the permitted allowlist wi
 
 This is deliberately **not** the rejected uniform Tool interface: concrete clients stay concrete, Notion/Telegram/AI and every external *read* still run directly, and the Registry decides no business policy -- it is the authorization-and-retry boundary for external state changes, nothing more.
 
+### Shared output delivery (save an approved output to Google Drive)
+
+**Martin's decision, 2026-11-17.** Saving a deliverable is a universal capability offered after approval, available to **every Hat** without a per-Action declaration -- the same "one shared install point" reasoning as the Research Runtime, not a per-Hat feature. `src/outputDelivery.ts` is the one shared implementation.
+
+* **Capture (the only producer).** A Hat's own approval-success point calls `captureApprovedOutput(env, state, { title, text })` with the exact approved output. Nothing parses text or trusts AI output; the text is **token-checked** (the same `findIdentityViolation` check as the Sales Doc path) before it is stored on `WorkState.outputDelivery`. An empty or identity-bearing output is refused fail-closed and never offered -- nothing that could leak identity into a Doc reaches the offer.
+* **The offer is advisory.** After approval the user sees one quiet choice -- `📄 Save as Doc` (likely-first) / `💬 Keep in chat`. Doing nothing keeps the text; the offer never blocks, delays or invalidates the approval that already happened.
+* **The governed flow.** "Save as Doc" reuses the existing account -> folder picker (staged options carry a `delivery` flag so the flow is structurally separate from the legacy `pendingGoogleAction` path), then a **final explicit confirmation tap**. That tap mints the `ApprovalProof` (bound to the exact picked folder as the external target) and runs `google_docs.create_and_verify` through the shared Tool Registry invocation boundary in one step -- so the proof can never authorize a different folder, and an uncertain effect keeps its durable operation record for reconciliation (never a blind retry).
+* **The one Access exemption.** `evaluateExternalMutationAccess` (`src/access.ts`) normally requires the Work's own Action to *declare* the exact operation. The single, named exemption `SHARED_OUTPUT_DELIVERY_OPERATION_ID` lets **any** Work save its own approved output with `google_docs.create_and_verify` without a per-Action declaration. It is narrow by construction: one exact operation (not a class, not a prefix), and every other safeguard is unchanged -- the context must be a `work_session`, the Action's consequence must be `write`, and a bound proof is required wherever the Action is approval-gated (and verified whenever supplied). A different operation, a non-`work_session` context, or a mis-bound proof is still denied.
+* **Docs only for now.** Sheets are offered only once a registered Sheets-create operation exists in the Google tool (none does today). Sales proposals move onto this same shared feature in a later PR with **no behaviour change** (their existing Doc path is untouched here).
+
 ---
 
 ## Worker
