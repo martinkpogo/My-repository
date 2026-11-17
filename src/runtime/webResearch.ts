@@ -161,6 +161,11 @@ export const RESEARCH_NEED_MAX_TOKENS = 600;
 export const RESEARCH_NEED_INSTRUCTIONS = [
     "You decide whether a step in ENIG's work needs PUBLIC WEB research before it answers.",
     "Say yes only when current, public, external information (markets, sectors, trends, what businesses commonly struggle with or ask about, public facts about an industry) would materially improve the answer, and it is not already in the step's own context.",
+    // Martin, 2026-11-13: a campaign-strategy request was judged "not needed"
+    // and the draft was written from general knowledge with no evidence.
+    // Substantial work always gets light web research -- automatic, never
+    // offered as a choice. Deep research stays a proposal Martin approves.
+    "Substantial work -- a campaign, a strategy, a proposal, a diagnosis, a pricing recommendation, or any multi-part plan -- ALWAYS needs light web research: answer {\"needs_web\": true, \"question\": \"<one general research question on the work's subject>\"}. Light research is automatic: never ask Martin whether to research it. Deep research (the \"deep\" field) is only ever proposed, never automatic, and runs only after Martin approves its brief.",
     // Martin, 2026-11-13: with a weaker model answering, a request for market
     // evidence was judged "not needed" and the draft was written from
     // general knowledge.

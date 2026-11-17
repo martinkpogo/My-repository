@@ -495,6 +495,7 @@ export interface WorkState {
     | "entity_redo_reason"
     | "marketing_feedback"
     | "marketing_clarification"
+    | "marketing_clarify_more"
     | "strategy_clarification"
     | "strategy_feedback"
     | "strategy_refinement_reason"

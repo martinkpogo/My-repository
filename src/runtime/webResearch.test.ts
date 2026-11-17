@@ -231,6 +231,14 @@ test("research check (Martin, 2026-11-13): a reasoning model gets room to answer
   assert.match(RESEARCH_NEED_INSTRUCTIONS, /Say no for questions about ENIG's own records/, "the exclusions are unchanged");
 });
 
+test("research check: substantial work (campaign, strategy, proposal) always gets automatic light research; deep research stays a Martin-approved proposal", async () => {
+  const { RESEARCH_NEED_INSTRUCTIONS } = await import("./webResearch");
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /campaign, a strategy, a proposal/);
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /Light research is automatic: never ask Martin whether to research it/);
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /Deep research \(the "deep" field\) is only ever proposed, never automatic/);
+  assert.match(RESEARCH_NEED_INSTRUCTIONS, /runs only after Martin approves its brief/);
+});
+
 test("research cache (Martin, 2026-11-14, option C): the same question within 24 hours reuses the saved findings with no AI call or search; the key is a hash, never the question", async () => {
   const { researchOnline, RESEARCH_CACHE_TTL_SECONDS } = await import("./webResearch");
   const { hashContent } = await import("../contentHash");

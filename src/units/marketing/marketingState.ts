@@ -15,6 +15,10 @@ export interface MarketingWorkState {
   pendingTransition?: { toHat: string; reason: string };
   /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
   pendingPaidMediaAction?: { description: string };
+  /** The clarifying question the Hat is waiting on Martin for (one at a time), with any suggested answers he can tap, plus how many questions have been asked so far. */
+  pendingClarification?: { question: string; suggestedAnswers: string[]; questionCount?: number };
+  /** How many clarifying questions this Hat has asked on this Work (capped, so it does not keep questioning). */
+  clarificationCount?: number;
 }
 
 /** The Marketing slice of a Work, created on first write. Reads use `state.marketing?.field` and never create it. */
