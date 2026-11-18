@@ -544,7 +544,13 @@ test("Clarify: suggested answers come through as tap buttons, plus a 'Type my ow
   assert.ok(!sentTexts.some((s) => s.includes("✋ That's enough")), "question 1 must not have 'That's enough'");
 
   await handleClarifyAnswer(env, out, false, "1.0");
-  assert.strictEqual(out.marketing?.taskText!.includes("Additional detail: $5k"), true);
+  // A tapped answer is recorded with its question ("Q: ... A: ..."), not as a
+  // bare "Additional detail:" line, so a later run of the Hat can see what
+  // has already been answered and never asks it again.
+  assert.ok(out.marketing?.taskText!.includes("Q: What is the budget?"));
+  assert.ok(out.marketing?.taskText!.includes("A: $5k"));
+  assert.ok(!out.marketing?.taskText!.includes("Additional detail: $5k"), "the bare detail line must not be used for a tapped answer");
+  assert.deepStrictEqual(out.marketing?.qaPairs, ["Q: What is the budget? A: $5k"]);
   assert.strictEqual(out.marketing?.pendingClarification, undefined);
   assert.strictEqual(out.stage, "awaiting_marketing_draft_approval", "hat re-ran and drafted after answer");
 });
@@ -593,7 +599,13 @@ test("Clarify: no suggested answers means a 'Type my own answer' button only, no
 
   await handleMarketingClarification(env, out, "Next Friday.");
   assert.strictEqual(out.marketing?.pendingClarification, undefined);
-  assert.ok(out.marketing?.taskText!.includes("Additional detail: Next Friday."));
+  // A typed reply to a pending question is recorded with its question
+  // ("Q: ... A: ..."), not as a bare "Additional detail:" line, so a later
+  // run of the Hat can see what has already been answered.
+  assert.ok(out.marketing?.taskText!.includes("Q: What is the deadline?"));
+  assert.ok(out.marketing?.taskText!.includes("A: Next Friday."));
+  assert.ok(!out.marketing?.taskText!.includes("Additional detail: Next Friday."), "the bare detail line must not be used for a pending question's answer");
+  assert.deepStrictEqual(out.marketing?.qaPairs, ["Q: What is the deadline? A: Next Friday."]);
 });
 
 test("Clarify: from the sixth question on there is also a 'That's enough' button", async (t) => {

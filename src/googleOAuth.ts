@@ -1,7 +1,7 @@
 import type { Env, WorkState } from "./types";
 import { buildProposalDocStyleRequests, type ProposalDocLayout } from "./proposalRedline";
 import { logActivity } from "./log";
-import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage } from "./telegram";
+import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage, type InlineButton } from "./telegram";
 import { generate } from "./ai";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
@@ -1810,8 +1810,6 @@ export async function handleGoogleAccountSelection(
   // changes). The 10 most recently modified folders are shown first; a
   // "📂 More folders" button reveals the rest.
   const folderList = folders.map((f) => ({ id: f.id, name: f.name }));
-  const shown = folderList.slice(0, FOLDER_PICKER_PAGE_SIZE);
-  const rest = folderList.slice(FOLDER_PICKER_PAGE_SIZE);
   const baseOption = smoke
     ? { kind: "folderlist", smoke: true, accountIdentifier, folders: folderList }
     : delivery
@@ -1819,7 +1817,7 @@ export async function handleGoogleAccountSelection(
       : { kind: "folderlist", docType, accountIdentifier, title, content, rows, folders: folderList };
   let listOpaqueId: string;
   try {
-    listOpaqueId = await saveOpaqueOption(env, state.workId, baseOption);
+    listOpaqueId = await saveOpaqueOption(env, state.workId, { ...baseOption, _listOpaqueId: "" });
   } catch (err) {
     console.error(`Google folder picker: option staging failed for work ${state.workId} -- no picker was sent`, err);
     await sendWorkspaceHatMessage(
@@ -1829,47 +1827,12 @@ export async function handleGoogleAccountSelection(
     );
     return state;
   }
-
-  const buttons = [];
-  for (let i = 0; i < shown.length; i++) {
-    const folder = shown[i]!;
-    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${listOpaqueId}:${i}` }]);
-  }
-  if (rest.length) {
-    buttons.push([{ text: "📂 More folders", callback_data: `googlefolder:${state.workId}:${listOpaqueId}:more` }]);
-  }
-
-  if (smoke) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`,
-      buttons,
-    );
-    await logActivity(env, {
-      entry: "Google Docs Registry smoke: folder picker presented",
-      type: "Activity",
-      activity: `Registry smoke Drive folder picker presented for account '${accountIdentifier}'`,
-      outcome: "Active",
-      workId: state.workId,
-    });
-    return state;
-  }
-
-  const actionLabel = docType === "sheet" ? "Create Google Sheet" : "Create Google Doc";
-  const messageText = delivery
-    ? `*Save approved output to Google Drive*\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder -- you will confirm once more before anything is created:`
-    : `*Google Workspace Action*: ${actionLabel}\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
-  await sendWorkspaceHatMessage(env, target, messageText, buttons);
-
-  await logActivity(env, {
-    entry: "Google Drive folders presented",
-    type: "Activity",
-    activity: `Drive folder picker presented for account '${accountIdentifier}'`,
-    outcome: "Active",
-  });
-
-  return state;
+  // The id is stamped onto the staged object so a page re-render can rebuild
+  // its own buttons without the caller passing it; renderFolderPage (below)
+  // builds every page from the same staged list, so paging costs no extra
+  // writes -- the list itself is consumed only when a folder is actually picked.
+  await kvPut(env, `google_option:${state.workId}:${listOpaqueId}`, JSON.stringify({ ...baseOption, _listOpaqueId: listOpaqueId }), { expirationTtl: 600 });
+  return renderFolderPage(env, state, target, { ...baseOption, _listOpaqueId: listOpaqueId }, 0);
 }
 
 /**
@@ -1931,7 +1894,15 @@ export async function handleGoogleFolderSelection(
     workId: state.workId,
   };
 
-  const option = await peekOpaqueOption(env, state.workId, opaqueOptionId);
+  // The callback value is "<opaqueId>:<position>|more": index.ts splits
+  // callback_data on ":" into [action, workId, value], and opaqueIds are
+  // 8 hex characters with no colon of their own, so the position is the last
+  // segment and the opaque id is everything before it.
+  const colon = opaqueOptionId.lastIndexOf(":");
+  const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
+  const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
+
+  const option = await peekOpaqueOption(env, state.workId, opaqueId);
   if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
     await sendWorkspaceHatMessage(
       env,
@@ -1941,14 +1912,12 @@ export async function handleGoogleFolderSelection(
     return state;
   }
 
-  // A folder button carries its POSITION in the staged list (see
-  // handleGoogleAccountSelection). "more" re-renders the same list from the
-  // next page; anything else consumes the list and picks that folder.
-  const position = opaqueOptionId.includes(":") ? opaqueOptionId.split(":").pop() : undefined;
+  // "more" re-renders the same list from the next page; anything else consumes
+  // the list and picks that folder.
   if (position === "more") {
     return renderFolderPage(env, state, target, option, FOLDER_PICKER_PAGE_SIZE);
   }
-  const index = Number(position);
+  const index = position === undefined ? NaN : Number(position);
   const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
   if (!picked) {
     await sendWorkspaceHatMessage(
@@ -1961,7 +1930,7 @@ export async function handleGoogleFolderSelection(
   // Consuming the list makes the pick single-use: a replayed button cannot
   // re-pick the same folder (the same discipline as the old per-folder
   // consume, which deleted each option on tap).
-  await kvDelete(env, `google_option:${state.workId}:${opaqueOptionId}`);
+  await kvDelete(env, `google_option:${state.workId}:${opaqueId}`);
   const { accountIdentifier, title, content, rows } = option;
   const folderId = picked.id;
   const folderName = picked.name;
