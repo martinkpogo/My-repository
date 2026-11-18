@@ -66,7 +66,7 @@ import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
  * So this manifest covers ONLY what happens once Marketing's own Stage
  * 1/2 (handleMarketingIntake below, relocated from executionEngine.ts)
  * has already resolved which Hat owns the work -- the per-Hat execution
- * step (decide to draft/route/clarify), not Hat resolution itself.
+ * step (decide to draft/route/name a prerequisite/clarify), not Hat resolution itself.
  * Every call site (executionEngine.ts's handleHandoffPickup, and this
  * file's handleMarketingIntake success path, handleMarketingFeedback,
  * handleMarketingClarification) is now routed through this manifest's
@@ -106,12 +106,20 @@ import { marketingOf, migrateLegacyMarketingState } from "./marketingState";
 type MarketingAction = "handle_request";
 
 interface HatActionDecision {
-  action: "draft" | "route" | "clarify";
+  action: "draft" | "route" | "clarify" | "prerequisite";
   draft?: string;
   target_hat?: string;
+  /** Set with `action: "prerequisite"`: the Hat that owns the missing prerequisite. */
+  prerequisite_hat?: string;
   reason?: string;
   involves_spend?: boolean;
   suggestedAnswers?: string[];
+  /**
+   * Set with `action: "draft"`: the usual next step, chosen only from this
+   * Hat's `handsOverTo` notes. Offered to Martin after he approves the draft;
+   * never automatic.
+   */
+  next_step?: { to_hat?: string; for_what?: string };
 }
 
 /**
@@ -141,18 +149,26 @@ export const MARKETING_PROBLEM_BRIEF_FORMAT = [
 ].join("\n");
 
 /**
- * How the Hat picks draft, route or clarify (execution mechanics). It points
- * at the Universal Role Contract's rules by name rather than restating them
- * -- the rules themselves are read live from Notion. Before 2026-11-17 the
- * order put "draft" first and allowed a question only when the Hat "cannot
- * proceed", so "Plan a campaign to get more clients" drew a generic draft
- * with no questions and no use of the research (Martin's live test).
+ * How the Hat picks draft, route, prerequisite or clarify (execution
+ * mechanics). It points at the Universal Role Contract's rules by name
+ * rather than restating them -- the rules themselves are read live from
+ * Notion. Before 2026-11-17 the order put "draft" first and allowed a
+ * question only when the Hat "cannot proceed", so "Plan a campaign to get
+ * more clients" drew a generic draft with no questions and no use of the
+ * research (Martin's live test).
+ *
+ * Martin, 2026-11-18: a Hat must do its own part of what was asked, never
+ * hand the whole job on because a later step belongs to another Hat, and
+ * never treat a service named in the Consultancy Profile as work to deliver.
+ * The usual next step is offered after approval, not taken by the Hat.
  */
 export const MARKETING_DECISION_FORMAT = [
   "Decide in this order:",
-  '1. If this task belongs to a responsibility this Hat does NOT own, return {"action":"route","target_hat":"<name from the authorized routing targets>","reason":"..."} -- never do the other Hat\'s work yourself.',
-  '2. Otherwise, before drafting, apply the Universal Role Contract\'s understand_before_producing rule above to this task. If it calls for a question whose answer is not already in the task text, or you cannot determine ownership, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} -- one question only, with two to four short, concrete likely answers Martin can tap (he may always type a different answer instead). Answers he has already given appear in the task text as "Additional detail:" lines: never ask again what they answer. If the task text says Martin said that\'s enough questions, do not ask: draft, stating each remaining assumption plainly.',
-  '3. Otherwise return {"action":"draft","draft":"...", "involves_spend": true|false}, following the contract\'s decide_dont_list and evidence_over_generalities rules. When a WEB RESEARCH block is present, rest claims about markets, buyers or what works on its findings, each with its source link exactly as given; if none of the findings is relevant to the task, say so plainly in one line rather than presenting general advice as established. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend -- spend always requires explicit human approval regardless of whether it is tactical or strategic.',
+  '1. If this request is WHOLLY another Hat\'s work -- not this Hat\'s own part plus a later step -- return {"action":"route","target_hat":"<name from the Hats this Hat usually hands over to>","reason":"..."}. Never do the other Hat\'s work yourself, and never hand on the whole request just because a later step belongs to another Hat: do this Hat\'s own part now and offer the later step after Martin approves.',
+  '2. If the request needs something another Hat owns that does not exist yet, return {"action":"prerequisite","prerequisite_hat":"<that Hat>","reason":"<what is missing and why this Hat needs it>"}. The runtime then asks Martin whether to do that first, carry on with stated assumptions, or hand the whole request over -- never decide for him.',
+  '3. Otherwise, before drafting, apply the Universal Role Contract\'s understand_before_producing rule above to this task. If it calls for a question whose answer is not already in the task text, or you cannot determine ownership, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} -- one question only, with two to four short, concrete likely answers Martin can tap (he may always type a different answer instead). Answers he has already given appear in the task text as "Additional detail:" lines: never ask again what they answer. If the task text says Martin said that\'s enough questions, do not ask: draft, stating each remaining assumption plainly.',
+  '4. Otherwise return {"action":"draft","draft":"...", "involves_spend": true|false, "next_step":{"to_hat":"<one of the Hats this Hat usually hands over to>","for_what":"<the next part>"}}, following the contract\'s decide_dont_list and evidence_over_generalities rules. Set next_step only when this Hat\'s output is what a later Hat usually needs; omit it when this Hat\'s output is the end of what Martin asked for. The next step is only suggested to Martin after he approves -- never do it yourself. When a WEB RESEARCH block is present, rest claims about markets, buyers or what works on its findings, each with its source link exactly as given; if none of the findings is relevant to the task, say so plainly in one line rather than presenting general advice as established. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend -- spend always requires explicit human approval regardless of whether it is tactical or strategic.',
+  "The Consultancy Profile describes what ENIG sells. A request to market ENIG promotes those services; it does not ask you to deliver them. Never treat a service named in the Consultancy Profile (for example brand strategy or visual identity) as work you must do now, and never confuse marketing those services with producing them.",
   "Never guess past missing information or invent authority you don't have.",
   // Martin, 2026-11-18: a draft claimed "We helped a Ghanaian fintech double
   // its inbound leads" -- a client result that exists nowhere. The rule is the
@@ -163,11 +179,11 @@ export const MARKETING_DECISION_FORMAT = [
 
 /**
  * Added to the Hat's deciding pass only (Martin, 2026-11-18): that pass decides
- * whether to draft, route or ask, without web research; the draft itself is
- * written by the next pass, which has the research.
+ * whether to draft, route, name a prerequisite or ask, without web research;
+ * the draft itself is written by the next pass, which has the research.
  */
 export const MARKETING_DECIDE_ONLY_NOTE =
-  'THIS PASS ONLY DECIDES. No web research has been run yet. If you would draft, reply {"action":"draft","draft":""} with an empty draft and nothing else -- the draft is written in the next pass, with research. Route or clarify exactly as described above.';
+  'THIS PASS ONLY DECIDES. No web research has been run yet. If you would draft, reply {"action":"draft","draft":""} with an empty draft and nothing else -- the draft is written in the next pass, with research. Route, name a prerequisite or clarify exactly as described above.';
 
 export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
@@ -178,7 +194,7 @@ export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleCo
       `Purpose: ${hat.purpose}`,
       `Owns:\n${hat.owns.map((o) => `- ${o}`).join("\n")}`,
       `Does NOT own (route/escalate instead of doing this work yourself):\n${hat.doesNotOwn.map((o) => `- ${o}`).join("\n")}`,
-      `Authorized routing targets from this Hat: ${hat.routesTo.length ? hat.routesTo.join(", ") : "none — if this isn't yours, ask for clarification instead."}`,
+      `Usually hands over to (the usual next step, not a required process -- do your own part first, and offer the next step only after Martin approves):\n${hat.handsOverTo.length ? hat.handsOverTo.map((h) => `- ${h.toHat} -- to ${h.forWhat}`).join("\n") : "none -- if this isn't yours, ask for clarification instead."}`,
     ].join("\n\n"),
     context: [
       "=== RESPONSE FORMAT (execution mechanics — not part of the governance above) ===",
@@ -189,14 +205,33 @@ export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleCo
 }
 
 /**
+ * Validates a draft's proposed `next_step` against the Hat's own
+ * `handsOverTo` notes. The target must be one of them; `for_what` falls back
+ * to the note's own wording so the suggestion always reads as the Hat
+ * definition describes it. Returns undefined when the model proposed nothing
+ * usable — the draft is still delivered, with no next-step offer.
+ */
+function normalizeNextStep(
+  hat: MarketingHatDefinition,
+  raw: HatActionDecision["next_step"],
+): { toHat: MarketingHatName; forWhat: string } | undefined {
+  const toHat = raw?.to_hat as MarketingHatName | undefined;
+  if (!toHat || !isMarketingHat(toHat)) return undefined;
+  const note = hat.handsOverTo.find((h) => h.toHat === toHat);
+  if (!note) return undefined;
+  const forWhat = typeof raw?.for_what === "string" && raw.for_what.trim() ? raw.for_what.trim() : note.forWhat;
+  return { toHat, forWhat };
+}
+
+/**
  * Shared per-Hat execution, used by every one of the five Marketing Hats
  * -- relocated unchanged from executionEngine.ts's former runMarketingHat.
  * Loads only the current Hat's own full definition (never the other
  * four's) plus the Universal Role Contract. Asks the model to decide:
  * draft an output within this Hat's own ownership, propose a transition
- * to another Hat, or stop and ask for clarification. None of these is
- * itself authorization — each branch still requires Martin's explicit
- * approval before anything is treated as done.
+ * to another Hat, name a missing prerequisite, or stop and ask for
+ * clarification. None of these is itself authorization — each branch still
+ * requires Martin's explicit approval before anything is treated as done.
  */
 async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   const hatName = state.hat as MarketingHatName;
@@ -333,9 +368,58 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
     return state;
   }
 
+  if (decision.action === "prerequisite") {
+    const prerequisiteHat = decision.prerequisite_hat as MarketingHatName | undefined;
+    if (!prerequisiteHat || !isMarketingHat(prerequisiteHat)) {
+      // The model named a prerequisite Hat that does not exist -- never
+      // invent one. Fail closed to a clarification rather than guessing.
+      console.error(`Marketing (${hatName}) named an invalid prerequisite Hat: ${decision.prerequisite_hat}`);
+      await finishWorkStatus(env, state, "⛔ The missing prerequisite isn't one of ENIG's Marketing Hats -- see below.", "failed");
+      await logActivity(env, {
+        entry: `${hatName} named an invalid prerequisite Hat`,
+        type: "Blocker",
+        area: "Marketing",
+        decisionRationale: `Prerequisite Hat "${decision.prerequisite_hat}" is not a registered Marketing Hat. Refusing to guess.`,
+        outcome: "Blocked",
+      });
+      await sendWorkspaceHatMessage(env, state, `Couldn't determine what's needed first — please clarify what's missing.`);
+      state.stage = "marketing_ambiguous";
+      state.awaiting = "marketing_clarification";
+      return state;
+    }
+
+    const reason = decision.reason ?? "This needs something another Hat owns that doesn't exist yet.";
+    marketingOf(state).pendingPrerequisite = { hat: prerequisiteHat, reason };
+    state.stage = "marketing_ambiguous";
+    state.awaiting = "marketing_clarification";
+    await finishWorkStatus(env, state, `⏸ Needs ${prerequisiteHat} first -- choose below.`, "succeeded");
+    await logActivity(env, {
+      entry: `${hatName} needs a prerequisite from ${prerequisiteHat}`,
+      type: "Blocker",
+      area: "Marketing",
+      decisionRationale: reason,
+      outcome: "Blocked",
+    });
+    const message = `This needs *${prerequisiteHat}* first — ${reason}\n\nDo you want to do that first, carry on with stated assumptions, or hand the whole request over?`;
+    const buttons: InlineButton[][] = [
+      [{ text: `✅ Do ${prerequisiteHat} first`, callback_data: `${MARKET_PREREQUISITE_CALLBACK}:${state.workId}:first` }],
+      [{ text: "➡️ Carry on with stated assumptions", callback_data: `${MARKET_PREREQUISITE_CALLBACK}:${state.workId}:assume` }],
+      [{ text: "🔁 Hand it over", callback_data: `${MARKET_PREREQUISITE_CALLBACK}:${state.workId}:handover` }],
+    ];
+    await sendWorkspaceHatMessage(env, state, message, buttons);
+    state.pendingActionSummary = {
+      label: `Prerequisite: ${prerequisiteHat}`,
+      message,
+      buttons,
+      createdAt: new Date().toISOString(),
+    };
+    return state;
+  }
+
   if (decision.action === "route") {
     const target = decision.target_hat as MarketingHatName | undefined;
-    if (!target || !isMarketingHat(target) || !hat.routesTo.includes(target)) {
+    const authorized = hat.handsOverTo.map((h) => h.toHat);
+    if (!target || !isMarketingHat(target) || !authorized.includes(target)) {
       // The model proposed a transition outside this Hat's authorized
       // routing list (or an invalid/hallucinated target) — code-level
       // gate: never trust it, fail closed rather than route anywhere.
@@ -386,6 +470,10 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   // action === "draft"
   const isPaidMedia = hatName === "Digital Marketer" && decision.involves_spend === true;
   marketingOf(state).draft = decision.draft ?? "";
+  // The usual next step is only offered after Martin approves the draft (or,
+  // for Digital Marketer, approves the spend). The model chooses it from this
+  // Hat's own `handsOverTo` notes; normalizeNextStep rejects any other target.
+  marketingOf(state).pendingNextStep = normalizeNextStep(hat, decision.next_step);
 
   await finishWorkStatus(
     env,
@@ -530,11 +618,25 @@ export async function handleMarketingFeedback(env: Env, state: WorkState, text: 
   marketingOf(state).clarificationCount = 0;
   marketingOf(state).enoughSaid = undefined;
   marketingOf(state).pendingClarification = undefined;
+  marketingOf(state).pendingPrerequisite = undefined;
+  marketingOf(state).pendingNextStep = undefined;
   return dispatchMarketingHat(env, state);
 }
 
 /** Clarification loop: re-runs intake classification if no Hat is assigned yet, otherwise re-runs the current Hat. */
 export async function handleMarketingClarification(env: Env, state: WorkState, text: string): Promise<WorkState> {
+  // A typed reply to the missing-prerequisite question is treated as a
+  // choice, exactly like tapping one of its buttons. "First" and "hand it
+  // over" route to the Hat that owns the missing prerequisite; anything else
+  // carries on with stated assumptions, keeping the typed text as detail.
+  if (state.marketing?.pendingPrerequisite) {
+    const choice = text.trim().toLowerCase();
+    if (/hand|over|take\s+it|route/.test(choice)) return handlePrerequisiteChoice(env, state, "handover");
+    if (/first|do\s+it|produce|prereq/.test(choice)) return handlePrerequisiteChoice(env, state, "first");
+    marketingOf(state).pendingPrerequisite = undefined;
+    marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nAdditional detail: ${text}\n\nMartin chose to carry on with stated assumptions. State each assumption plainly.`;
+    return dispatchMarketingHat(env, state);
+  }
   const trimmed = text.trim().toLowerCase().replace(/[.!\s]+$/, "").replace(/[’']/g, "");
   if (/^(?:thats\s+)?enough$/.test(trimmed) && state.marketing?.pendingClarification) {
     marketingOf(state).enoughSaid = true;
@@ -741,10 +843,13 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
   state.pendingActionSummary = undefined;
 
   if (!approved) {
+    marketingOf(state).pendingNextStep = undefined;
     await sendWorkspaceHatMessage(env, state, "Got it — what should change? Tell me what's off or what to take into account, and I'll redo it.");
     state.awaiting = "marketing_feedback";
     return state;
   }
+
+  const fullDraft = state.marketing?.draft ?? "";
 
   // If this work item arrived via a Handoff (e.g. Strategy's approved
   // routing to Marketing Strategist), close it out as the
@@ -799,7 +904,6 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     decisionRationale: "Approved by Martin.",
     outcome: "Complete",
   });
-  await sendWorkspaceHatMessage(env, state, `Approved.`);
   // Shared output delivery (src/outputDelivery.ts): capture the approved
   // draft so the user may file it as a Google Doc. Token-safety is checked
   // inside captureApprovedOutput (fails closed).
@@ -807,10 +911,131 @@ export async function handleDraftApproval(env: Env, state: WorkState, approved: 
     title: `Marketing Draft -- ${state.hat}`,
     text: approvedDraft,
   });
+  const next = marketingOf(state).pendingNextStep;
   marketingOf(state).draft = undefined;
   state.stage = "complete";
   state.awaiting = undefined;
+
+  if (next) {
+    // Martin's approval is the end of THIS Hat's part. Offer the usual next
+    // step, but never take it: only his tap on Yes hands it on.
+    const pending = { ...next, fromHat: state.hat, approvedOutput: fullDraft };
+    marketingOf(state).pendingNextStep = pending;
+    const message = `Approved.\n\nNext: Hand this to *${pending.toHat}* to ${pending.forWhat}?`;
+    const buttons: InlineButton[][] = [
+      [
+        { text: "✅ Yes", callback_data: `${MARKET_NEXT_CALLBACK}:${state.workId}:approve` },
+        { text: "Not now", callback_data: `${MARKET_NEXT_CALLBACK}:${state.workId}:later` },
+      ],
+    ];
+    await sendWorkspaceHatMessage(env, state, message, buttons);
+    state.pendingActionSummary = {
+      label: `Next step: ${pending.toHat}`,
+      message,
+      buttons,
+      createdAt: new Date().toISOString(),
+    };
+  } else {
+    await sendWorkspaceHatMessage(env, state, `Approved.`);
+  }
   return state;
+}
+
+// The callback_data prefix for the post-approval next-step offer. Distinct
+// from markettransition (which happens BEFORE a draft, when the whole request
+// is another Hat's): this one is offered only AFTER Martin approves this Hat's
+// own output, and only his tap on Yes hands it on.
+export const MARKET_NEXT_CALLBACK = "marketnext" as const;
+
+/**
+ * Resolves the post-approval next-step offer: "Hand this to <Hat> to <for
+ * what>?" with Yes / Not now. It never runs automatically. Yes continues the
+ * SAME Work under the next Hat with the approved output as its input; Not now
+ * leaves the approved output as the end of the work.
+ */
+export async function handleNextStep(env: Env, state: WorkState, approved: boolean): Promise<WorkState> {
+  const pending = state.marketing?.pendingNextStep;
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, state, "This next step has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+
+  if (!approved) {
+    marketingOf(state).pendingNextStep = undefined;
+    await sendWorkspaceHatMessage(env, state, "Okay — leaving it here.");
+    return state;
+  }
+
+  const fromHat = pending.fromHat ?? state.hat ?? "the previous Hat";
+  state.hat = pending.toHat;
+  marketingOf(state).pendingNextStep = undefined;
+  marketingOf(state).draft = undefined;
+  marketingOf(state).taskText = `${pending.approvedOutput ?? ""}\n\nApproved output from ${fromHat}. Next step: ${pending.forWhat}.`;
+  state.stage = "in_progress";
+  state.awaiting = undefined;
+  await logActivity(env, {
+    entry: `Marketing work continued: ${fromHat} -> ${pending.toHat} (next step)`,
+    type: "Decision",
+    area: "Marketing",
+    decisions: `Martin tapped Yes on the post-approval next-step offer.`,
+    decisionRationale: pending.forWhat,
+    outcome: "Active",
+  });
+  await sendWorkspaceHatMessage(env, state, `Handed to *${pending.toHat}* to ${pending.forWhat}.`);
+  return dispatchMarketingHat(env, state);
+}
+
+// The callback_data prefix for the missing-prerequisite choice: Do it first /
+// Carry on with stated assumptions / Hand it over. Set by runMarketingHat's
+// `action: "prerequisite"` branch.
+export const MARKET_PREREQUISITE_CALLBACK = "marketprereq" as const;
+
+/**
+ * Resolves Martin's choice when a request needs something another Hat owns
+ * that does not exist yet:
+ * - first: route to the prerequisite's owner to produce it first;
+ * - handover: route the whole request to that owner;
+ * - assume: keep the current Hat and draft with the assumptions stated.
+ * A typed reply is accepted through the same marketing_clarification
+ * continuation (see handleMarketingClarification).
+ */
+export async function handlePrerequisiteChoice(env: Env, state: WorkState, choice: string): Promise<WorkState> {
+  const pending = state.marketing?.pendingPrerequisite;
+  if (!pending) {
+    await sendWorkspaceHatMessage(env, state, "This prerequisite question has already been resolved -- nothing to do.");
+    return state;
+  }
+  state.pendingActionSummary = undefined;
+  marketingOf(state).pendingPrerequisite = undefined;
+
+  if (choice === "assume") {
+    marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nMartin chose to carry on with stated assumptions. State each assumption plainly.`;
+    await sendWorkspaceHatMessage(env, state, "Carrying on with stated assumptions.");
+    return dispatchMarketingHat(env, state);
+  }
+
+  if (choice !== "first" && choice !== "handover") {
+    await sendWorkspaceHatMessage(env, state, "That choice is no longer current -- nothing was recorded.");
+    return state;
+  }
+
+  const fromHat = state.hat;
+  state.hat = pending.hat;
+  marketingOf(state).taskText =
+    choice === "first"
+      ? `${state.marketing?.taskText ?? ""}\n\nProduce the missing prerequisite first: ${pending.reason}`
+      : `${state.marketing?.taskText ?? ""}\n\nTake this request over: ${pending.reason}`;
+  await logActivity(env, {
+    entry: `Marketing work routed: ${fromHat} -> ${pending.hat} (${choice === "first" ? "prerequisite first" : "whole request handed over"})`,
+    type: "Decision",
+    area: "Marketing",
+    decisions: `Martin chose "${choice}" on the prerequisite question.`,
+    decisionRationale: pending.reason,
+    outcome: "Active",
+  });
+  await sendWorkspaceHatMessage(env, state, `Routed to *${pending.hat}*.`);
+  return dispatchMarketingHat(env, state);
 }
 
 // The callback_data prefix runMarketingHat's own paid-media spend gate
@@ -843,6 +1068,7 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
   if (!approved) {
     await sendWorkspaceHatMessage(env, state, "Got it — what should change about this spend/action? Tell me what to reconsider and I'll redo it.");
     marketingOf(state).pendingPaidMediaAction = undefined;
+    marketingOf(state).pendingNextStep = undefined;
     state.awaiting = "marketing_feedback";
     return state;
   }
@@ -873,10 +1099,29 @@ export async function handlePaidMediaApproval(env: Env, state: WorkState, approv
     if (!rec.ok) console.error(`Marketing: Result evidence NOT recorded for ${state.workId} -- ${rec.reason}`);
   });
   await sendWorkspaceHatMessage(env, state, `Spend approved.`);
+  const next = marketingOf(state).pendingNextStep;
   marketingOf(state).pendingPaidMediaAction = undefined;
   marketingOf(state).draft = undefined;
   state.stage = "complete";
   state.awaiting = undefined;
+  if (next) {
+    const pending = { ...next, fromHat: state.hat, approvedOutput: approvedAction };
+    marketingOf(state).pendingNextStep = pending;
+    const message = `Spend approved.\n\nNext: Hand this to *${pending.toHat}* to ${pending.forWhat}?`;
+    const buttons: InlineButton[][] = [
+      [
+        { text: "✅ Yes", callback_data: `${MARKET_NEXT_CALLBACK}:${state.workId}:approve` },
+        { text: "Not now", callback_data: `${MARKET_NEXT_CALLBACK}:${state.workId}:later` },
+      ],
+    ];
+    await sendWorkspaceHatMessage(env, state, message, buttons);
+    state.pendingActionSummary = {
+      label: `Next step: ${pending.toHat}`,
+      message,
+      buttons,
+      createdAt: new Date().toISOString(),
+    };
+  }
   return state;
 }
 
@@ -886,6 +1131,8 @@ const marketingCallbackHandlers: Record<string, ApprovalCallbackHandler> = {
   [MARKET_CLARIFY_CALLBACK]: handleClarifyAnswer,
   [MARKET_ASSESSMENT_REDO_CALLBACK_PREFIX]: (env, state) => handleAssessmentRedo(env, state),
   [MARKET_PAID_CALLBACK_PREFIX]: handlePaidMediaApproval,
+  [MARKET_NEXT_CALLBACK]: handleNextStep,
+  [MARKET_PREREQUISITE_CALLBACK]: (env, state, _approved, value) => handlePrerequisiteChoice(env, state, value ?? ""),
 };
 
 /**

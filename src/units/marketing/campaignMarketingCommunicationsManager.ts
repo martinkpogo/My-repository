@@ -15,7 +15,7 @@ export const CAMPAIGN_MARKETING_COMMUNICATIONS_MANAGER: MarketingHatDefinition =
   unit: "Marketing",
   specialization: "Marketing",
   purpose:
-    "Coordinate integrated campaigns and marketing communications after approved marketing direction exists: translate that direction into campaign requirements, coordinate content, digital, and creative contributors, and maintain campaign consistency across channels — without assuming any contributor's specialist authority.",
+    "Turn approved marketing direction into campaign requirements and coordinate them: translate that direction into campaign requirements, coordinate content, digital, and creative contributors, and maintain campaign consistency across channels -- without assuming any contributor's specialist authority.",
   owns: [
     "Translation of approved marketing direction into campaign requirements",
     "Campaign objectives and execution requirements",
@@ -35,5 +35,10 @@ export const CAMPAIGN_MARKETING_COMMUNICATIONS_MANAGER: MarketingHatDefinition =
     "Digital channel execution (Digital Marketer)",
     "Brand strategy, communication strategy, or creative direction and production (Strategy / Creative & Design)",
   ],
-  routesTo: ["Marketing Strategist", "Content Strategist", "Content Manager", "Digital Marketer"],
+  handsOverTo: [
+    { toHat: "Content Strategist", forWhat: "define the content themes and briefs for the campaign" },
+    { toHat: "Content Manager", forWhat: "build the content calendar and production" },
+    { toHat: "Digital Marketer", forWhat: "handle channel execution" },
+    { toHat: "Marketing Strategist", forWhat: "set or change the marketing direction when the request is direction rather than campaign coordination" },
+  ],
 };

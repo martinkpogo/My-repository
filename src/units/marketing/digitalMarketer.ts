@@ -5,15 +5,15 @@ import type { MarketingHatDefinition } from "../../hats/types";
  * Transcribed one-time from the canonical, Martin-approved Hat Definition
  * page already in Notion (ENIG HQ > 2. Units & Hats > "Sales, Marketing &
  * Business Development — Digital Marketer"; see Activity Log "Digital
- * Marketer Hat defined", LOG-242). Not fetched live — see
- * executionEngine.ts for why.
+ * Marketer Hat defined", LOG-242). Not fetched live — see executionEngine.ts
+ * for why.
  */
 export const DIGITAL_MARKETER: MarketingHatDefinition = {
   name: "Digital Marketer",
   unit: "Marketing",
   specialization: "Marketing",
   purpose:
-    "Execute ENIG's approved digital marketing strategy: manage digital campaigns and distribution, and use performance evidence to optimize digital activity, without taking ownership of marketing strategy, brand messaging, content strategy, or human production.",
+    "Run and optimise ENIG's approved digital marketing channels: manage digital campaigns and distribution, use performance evidence to optimise digital activity, and report performance back to Marketing Strategist -- without taking ownership of marketing strategy, brand messaging, content strategy, or human production.",
   owns: [
     "Execution of approved digital marketing strategy",
     "Digital campaign planning within approved strategy",
@@ -33,5 +33,9 @@ export const DIGITAL_MARKETER: MarketingHatDefinition = {
     "Human visual production (Martin)",
     "Material spend without the required human approval",
   ],
-  routesTo: ["Marketing Strategist", "Content Strategist", "Campaign & Marketing Communications Manager"],
+  handsOverTo: [
+    { toHat: "Marketing Strategist", forWhat: "report performance back" },
+    { toHat: "Content Strategist", forWhat: "define the content direction when the work needs it" },
+    { toHat: "Campaign & Marketing Communications Manager", forWhat: "coordinate the campaign when the work needs it" },
+  ],
 };

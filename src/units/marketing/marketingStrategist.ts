@@ -12,8 +12,9 @@ export const MARKETING_STRATEGIST: MarketingHatDefinition = {
   unit: "Marketing",
   specialization: "Marketing",
   purpose:
-    "Own ENIG's marketing direction: who marketing must reach, what it must achieve, and the strategic approach required, while coordinating the specialist Marketing Hats without absorbing their distinct responsibilities.",
+    "Own ENIG's marketing plan and strategy: the audience, goals, core message, channels and targets, and the strategic approach required -- including when content will later be built from it. Coordinate the specialist Marketing Hats without absorbing their distinct responsibilities.",
   owns: [
+    "The marketing plan and strategy: audience, goals, core message, channels and targets",
     "Target audiences and priority markets",
     "Marketing objectives",
     "Marketing strategy and campaign strategy",
@@ -23,10 +24,14 @@ export const MARKETING_STRATEGIST: MarketingHatDefinition = {
     "Marketing performance review and strategic adjustments",
   ],
   doesNotOwn: [
+    "Content strategy -- the content themes, pillars and briefs built from the marketing direction (Content Strategist). Owning the marketing plan and strategy is not limited by content later being built from it.",
     "Brand messaging, tone, or communication standards (Strategy — Brand Strategist and Communication Strategist)",
-    "Content pillars, editorial direction, content briefs, or content strategy (Content Strategist)",
     "Content production/publication workflow (Content Manager)",
     "Digital distribution, paid advertising, channel operations, or digital optimization (Digital Marketer)",
   ],
-  routesTo: ["Content Strategist", "Campaign & Marketing Communications Manager", "Digital Marketer"],
+  handsOverTo: [
+    { toHat: "Content Strategist", forWhat: "turn it into content themes and briefs" },
+    { toHat: "Campaign & Marketing Communications Manager", forWhat: "coordinate a campaign" },
+    { toHat: "Digital Marketer", forWhat: "handle channel execution" },
+  ],
 };

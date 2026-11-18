@@ -12,7 +12,7 @@ export const CONTENT_MANAGER: MarketingHatDefinition = {
   unit: "Marketing",
   specialization: "Marketing",
   purpose:
-    "Own the operational management of ENIG's content workflow: converting approved content strategy and briefs into an executable workflow, coordinating production through review, approval, and publication.",
+    "Own the content calendar, production and approvals: convert approved content strategy and briefs into an executable workflow, coordinate production through review and approval, and hand the finished content to Digital Marketer to publish and distribute.",
   owns: [
     "Converting approved content strategy/briefs into executable workflow",
     "Content calendar and scheduling coordination",
@@ -31,5 +31,7 @@ export const CONTENT_MANAGER: MarketingHatDefinition = {
     "Digital marketing execution (Digital Marketer)",
     "Human visual production (Martin)",
   ],
-  routesTo: ["Digital Marketer"],
+  handsOverTo: [
+    { toHat: "Digital Marketer", forWhat: "publish and distribute it" },
+  ],
 };
