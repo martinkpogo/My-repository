@@ -722,11 +722,17 @@ export async function kvPut(env: Env, key: string, value: string, opts?: { expir
     try {
       await env.STATE_KV.put(key, bytes, opts);
       circuitNoteSuccess();
-      // Clear any stale shadow so it cannot linger as a conflict candidate.
-      // Best-effort by design: correctness no longer depends on this delete
-      // succeeding -- reads and the sweep compare versions, so a surviving
-      // (older) row is superseded instead of resurrected.
-      await tursoDelete(cfg, key).catch((err) => console.error(`kvStore: shadow delete failed for ${key}`, err));
+      // DELIBERATE: no Turso call here. A successful KV write used to clear its
+      // own shadow row with a tursoDelete -- best-effort, and correctness never
+      // depended on it (reads and the sweep compare version stamps and use the
+      // newer copy, so a surviving older row is superseded rather than
+      // resurrected). That delete was a steady-state Turso request on EVERY
+      // eligible write, and on the free plan it was pure overhead: Turso is
+      // empty in steady state, so the request spent one of the 50 subrequests
+      // a single Worker invocation may make (Workers Logs, 18 Nov 2026) for a
+      // write that KV already accepted. Nothing is removed by dropping it --
+      // a refused write still falls back to Turso, deletes keep their
+      // tombstone behaviour, and the sweep reconciles whatever is left.
       return;
     } catch (err) {
       kvError = err;
