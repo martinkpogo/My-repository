@@ -323,14 +323,11 @@ test("a research step waits out a rate limit up to RESEARCH_MAX_WAIT_MS and retr
   }) as typeof fetch;
   t.after(() => void (globalThis.fetch = original));
   t.mock.method(console, "log", () => {});
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // Real time, not a mocked clock: the provider asks for 0.01 s, so the two
+  // waits take ~20 ms. (A mocked setTimeout ticked before the wait was
+  // scheduled left this test hanging in CI.)
   const task = { taskId: "research.skill_step", type: "json", messages: [{ role: "user", content: "x" }], resumable: true } as any;
-  const pending = mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  t.mock.timers.tick(20);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  t.mock.timers.tick(20);
-  const r = await pending;
+  const r = await mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
   assert.strictEqual(calls, 3, "the rate-limited provider is retried until it answers");
   assert.ok(r.success);
 });
@@ -347,13 +344,11 @@ test("a research step treats an empty reply as a failed attempt and retries it",
   }) as typeof fetch;
   t.after(() => void (globalThis.fetch = original));
   t.mock.method(console, "log", () => {});
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // Real time: one EMPTY_REPLY_RETRY_MS (1.5 s) wait before the retry.
   const task = { taskId: "research.skill_step", type: "json", messages: [{ role: "user", content: "x" }], resumable: true } as any;
-  const pending = mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  t.mock.timers.tick(1_500);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  const r = await pending;
+  const started = Date.now();
+  const r = await mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  assert.ok(Date.now() - started >= mod.EMPTY_REPLY_RETRY_MS - 50, "it waited before retrying");
   assert.strictEqual(calls, 2, "the empty reply is retried, not accepted");
   assert.ok(r.success);
 });
