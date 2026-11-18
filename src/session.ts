@@ -1166,7 +1166,14 @@ export class WorkSession extends DurableObject<Env> {
       const outputHash = await hashContent(output);
       if (state.resultReview?.assessment?.outputHash === outputHash) return;
       const result = await runAdvisoryAssessment(
-        { output, request: declaration.request?.(state), criteria: declaration.criteria, unit: state.unit, hat: state.hat },
+        {
+          output,
+          request: declaration.request?.(state),
+          criteria: declaration.criteria,
+          unit: state.unit,
+          hat: state.hat,
+          answeredQuestions: state.marketing?.qaPairs,
+        },
         advisoryAssessmentDeps(this.env),
       );
       if (!result) return;
