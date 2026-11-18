@@ -13,6 +13,19 @@ export interface MarketingWorkState {
   draft?: string;
   /** A proposed transition to another Marketing Hat (routing or escalation), pending Martin's confirmation. */
   pendingTransition?: { toHat: string; reason: string };
+  /**
+   * A missing prerequisite owned by another Hat (the Hat returned
+   * `action: "prerequisite"`). Martin then chooses: do it first, carry on with
+   * stated assumptions, or hand the whole request over. Cleared on his choice.
+   */
+  pendingPrerequisite?: { hat: string; reason: string };
+  /**
+   * The next step the Hat proposed for its own approved output, offered to
+   * Martin only after he approves the draft (Yes / Not now). Never automatic.
+   * `approvedOutput` is attached at approval time; `fromHat` is the Hat whose
+   * output this continues from.
+   */
+  pendingNextStep?: { toHat: string; forWhat: string; fromHat?: string; approvedOutput?: string };
   /** A proposed paid-media/spend action, pending Martin's explicit budget/spend approval. */
   pendingPaidMediaAction?: { description: string };
   /** The clarifying question the Hat asked Martin, plus suggested tap answers and the question number. Set when the Hat returns clarify; cleared when Martin answers. */

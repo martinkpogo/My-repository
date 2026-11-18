@@ -39,6 +39,7 @@ import { withLiveStatus } from "./runtime/liveStatus";
 import { workLiveOutcome, workLiveStatusTarget, workStatusLiveSink } from "./runtime/workStatus";
 import { notifyMartinOfDiscoveryFailure, unitsWithHandoffPickup } from "./checkHandoffs";
 import { dispatchScheduledPickup, revertEnigCoworkOffer, schedulePickupAlarm, type PickupKind } from "./sessionRouting";
+import { startFollowOnWork } from "./followOnWork";
 import { migrateSavedWork } from "./workStateMigration";
 import { hashContent } from "./contentHash";
 import type { ActionDefinition } from "./hats/actionRegistry";
@@ -767,6 +768,22 @@ export class WorkSession extends DurableObject<Env> {
 
 
   async handleCallback(action: string, value: string): Promise<WorkState> {
+    const result = await this.handleCallbackCore(action, value);
+    // A follow-on Martin asked for (the post-approval next step): start it as
+    // a NEW Work for that Hat, exactly as a Hat he confirms on ENIG's offer is
+    // started (router.ts dispatchCowork, confirmedHat) -- never by reopening
+    // this finished Work. Marketing is the one Unit with a next-step offer
+    // today, and handleConfirmedMarketingRequest is its documented entry.
+    if (!result.followOnWork) return result;
+    const cleared = await this.execute(async (s) => {
+      s.followOnWork = undefined;
+      return s;
+    });
+    await startFollowOnWork(this.env, result);
+    return cleared;
+  }
+
+  private async handleCallbackCore(action: string, value: string): Promise<WorkState> {
     // "✅ Approve and save to Google Drive" (src/outputDelivery.ts): the Hat's
     // own approval runs unchanged; if it captured an output, the shared save
     // picker opens at once. A suffix on any other value does nothing extra.

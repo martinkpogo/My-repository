@@ -253,7 +253,7 @@ test("a 'which Hat?' question says what each candidate does, so Martin can choos
   mockNotionFetch(t);
   const env = fakeEnv({ AI: { run: async () => ({ response: "Strategy or content?\nASK: Marketing Strategist | Content Strategist" }) } as any });
   const reply = await enigChatReply(env, -100, 604, "plan our marketing for next quarter");
-  assert.match(reply.text, /• Marketing Strategist -- Own ENIG's marketing direction/);
+  assert.match(reply.text, /• Marketing Strategist -- Own ENIG's marketing plan and strategy/);
   assert.match(reply.text, /• Content Strategist -- /);
 });
 

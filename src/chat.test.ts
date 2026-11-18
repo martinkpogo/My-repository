@@ -167,7 +167,7 @@ test("log is history (Martin, 2026-11-14): ENIG and Unit chat are told the Activ
 test("the Hat match is informed by each Hat's full declared responsibilities -- never the test-only smoke Action (Martin, 2026-11-17)", async () => {
   const { hatDuties, hatDutySummary } = await import("./chat");
   const facts = buildStructureFacts();
-  assert.match(facts, /· Marketing Strategist does: Own ENIG's marketing direction[^\n]*Owns: Target audiences and priority markets/);
+  assert.match(facts, /· Marketing Strategist does: Own ENIG's marketing plan and strategy[^\n]*Owns: The marketing plan and strategy/);
   assert.match(facts, /· Business Development Manager does: [^\n]*Commit to the next concrete action for an active opportunity/);
   assert.doesNotMatch(facts, /TEST ONLY|result_gate_smoke/i, "the smoke-test Action is never offered as work a Hat does");
   assert.match(hatDuties("Content Manager") ?? "", /Owns:/);

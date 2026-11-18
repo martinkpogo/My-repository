@@ -119,6 +119,8 @@ const CALLBACKS: [string, string, string][] = [
   ["Marketing", "Content Manager", "markettransition"],
   ["Marketing", "Content Manager", "marketdraft"],
   ["Marketing", "Content Manager", "marketpaid"],
+  ["Marketing", "Content Manager", "marketnext"],
+  ["Marketing", "Content Manager", "marketprereq"],
   ["Strategy", "Strategy Analyst", "strategyhandoff"],
   ["Strategy", "Strategy Analyst", "sprop"],
   ["Finance", "Value-Based Pricing Assessor", "quote"],

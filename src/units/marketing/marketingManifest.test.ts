@@ -6,6 +6,8 @@ import {
   handleTransitionApproval,
   handleDraftApproval,
   handlePaidMediaApproval,
+  handleNextStep,
+  handlePrerequisiteChoice,
   handleMarketingFeedback,
   handleMarketingClarification,
   handleClarifyAnswer,
@@ -13,6 +15,8 @@ import {
   MARKET_DRAFT_CALLBACK_PREFIX,
   MARKET_PAID_CALLBACK_PREFIX,
   MARKET_CLARIFY_CALLBACK,
+  MARKET_NEXT_CALLBACK,
+  MARKET_PREREQUISITE_CALLBACK,
 } from "./marketingManifest";
 import { findCallbackHandler } from "../unitManifest";
 import type { Env, WorkState } from "../../types";
@@ -60,9 +64,19 @@ function fakeWorkState(overrides: Partial<WorkState> = {}): WorkState {
 
 function mockTelegramFetch(t: any) {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string) => {
+  const sentTexts: string[] = [];
+  globalThis.fetch = (async (url: string, init?: any) => {
     if (String(url).includes("api.telegram.org")) {
+      try {
+        const body = JSON.parse(init?.body ?? "{}");
+        if (body.text) sentTexts.push(body.text);
+      } catch {
+        // editMessageText and text-less actions carry no capturable text
+      }
       return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    if (String(url).includes("/blocks/") && String(url).includes("/children")) {
+      return new Response(JSON.stringify({ results: [{ type: "paragraph", paragraph: { rich_text: [{ plain_text: "Governance content." }] } }] }), { status: 200 });
     }
     if (url.includes("/v1/pages/") && /^[0-9a-f-]{32,36}$/i.test(url.split("/v1/pages/").pop()!.split("?")[0])) {
       // A standalone governance page (Hat Definition, Universal
@@ -83,6 +97,7 @@ function mockTelegramFetch(t: any) {
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
+  return sentTexts;
 }
 
 test("marketingManifest: declares all five Marketing Hats", () => {
@@ -93,16 +108,17 @@ test("marketingManifest: declares all five Marketing Hats", () => {
   );
 });
 
-test("marketingManifest: every Hat declares exactly markettransition, marketdraft, marketpaid, marketredo and marketclarify in callbackHandlers, all pointing to their shared handlers", () => {
+test("marketingManifest: every Hat declares exactly markettransition, marketdraft, marketpaid, marketredo, marketclarify, marketnext and marketprereq in callbackHandlers, all pointing to their shared handlers", () => {
   for (const hat of Object.values(marketingManifest.hats)) {
     assert.deepStrictEqual(
       new Set(Object.keys(hat.callbackHandlers ?? {})),
-      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_CLARIFY_CALLBACK, MARKET_PAID_CALLBACK_PREFIX, "marketredo"]),
+      new Set([MARKET_TRANSITION_CALLBACK_PREFIX, MARKET_DRAFT_CALLBACK_PREFIX, MARKET_CLARIFY_CALLBACK, MARKET_PAID_CALLBACK_PREFIX, "marketredo", MARKET_NEXT_CALLBACK, MARKET_PREREQUISITE_CALLBACK]),
     );
     assert.strictEqual(hat.callbackHandlers?.[MARKET_TRANSITION_CALLBACK_PREFIX], handleTransitionApproval);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_DRAFT_CALLBACK_PREFIX], handleDraftApproval);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_CLARIFY_CALLBACK], handleClarifyAnswer);
     assert.strictEqual(hat.callbackHandlers?.[MARKET_PAID_CALLBACK_PREFIX], handlePaidMediaApproval);
+    assert.strictEqual(hat.callbackHandlers?.[MARKET_NEXT_CALLBACK], handleNextStep);
   }
 });
 
@@ -249,6 +265,129 @@ test("decision order (Martin, 2026-11-17): route, then the contract's understand
   assert.match(MARKETING_DECISION_FORMAT, /never ask again what they answer/);
   assert.match(MARKETING_DECISION_FORMAT, /that's enough questions, do not ask/);
   assert.doesNotMatch(MARKETING_DECISION_FORMAT, /budget|timeframe|capacity/i, "the questions themselves come from the live Notion rule, not from code");
+});
+
+test("Hat definitions carry generic 'usually hands over to' notes -- target and purpose together -- and the prompt uses them instead of a bare target list (Martin, 2026-11-18)", async () => {
+  const { buildHatPromptParts } = await import("./marketingManifest");
+  const { MARKETING_HAT_REGISTRY } = await import("../../hats/registry");
+  const { isMarketingHat } = await import("../../hats/registry");
+  for (const hat of Object.values(MARKETING_HAT_REGISTRY)) {
+    assert.ok(Array.isArray(hat.handsOverTo), `${hat.name}: handsOverTo must be declared`);
+    assert.ok(hat.handsOverTo.length > 0, `${hat.name}: every Marketing Hat has a usual next step`);
+    for (const handover of hat.handsOverTo) {
+      assert.ok(isMarketingHat(handover.toHat), `${hat.name}: ${handover.toHat} must be a registered Marketing Hat`);
+      assert.ok(handover.forWhat.trim().length > 0, `${hat.name}: ${handover.toHat} needs a "for what"`);
+    }
+    const skillContent = buildHatPromptParts(hat, "contract").skillContent!;
+    assert.match(skillContent, /Usually hands over to/, `${hat.name}: the prompt must present the notes`);
+    assert.doesNotMatch(skillContent, /Authorized routing targets from this Hat:/, `${hat.name}: the bare routing-target list is gone`);
+    for (const handover of hat.handsOverTo) {
+      assert.ok(skillContent.includes(`${handover.toHat} -- to ${handover.forWhat}`), `${hat.name}: the note for ${handover.toHat} must reach the prompt`);
+    }
+  }
+});
+
+test("the decision format tells a Hat to do its own part, never hand on a later step, and never deliver a Consultancy Profile service (Martin, 2026-11-18)", async () => {
+  const { MARKETING_DECISION_FORMAT } = await import("./marketingManifest");
+  assert.match(MARKETING_DECISION_FORMAT, /WHOLLY another Hat's work/);
+  assert.match(MARKETING_DECISION_FORMAT, /never hand on the whole request just because a later step belongs to another Hat/);
+  assert.match(MARKETING_DECISION_FORMAT, /action":"prerequisite/);
+  assert.match(MARKETING_DECISION_FORMAT, /next_step/);
+  assert.match(MARKETING_DECISION_FORMAT, /The Consultancy Profile describes what ENIG sells/);
+  assert.match(MARKETING_DECISION_FORMAT, /never confuse marketing those services with producing them/);
+  assert.match(MARKETING_DECISION_FORMAT, /only suggested to Martin after he approves/);
+});
+
+test("after a draft is approved, the Hat offers its usual next step with Yes / Not now -- never automatically", async (t) => {
+  const sentTexts = mockTelegramFetch(t);
+  const state = fakeWorkState({
+    stage: "awaiting_marketing_draft_approval",
+    marketing: {
+      draft: "The marketing strategy: audience, goals, core message, channels, targets.",
+      pendingNextStep: { toHat: "Content Strategist", forWhat: "turn it into content themes and briefs" },
+    },
+    resultReview: { expectedResult: "A draft approved by Martin", completionCriteria: ["Martin's approval is recorded"], gateStatus: "pending" } as any,
+  });
+  await handleDraftApproval(fakeEnv(), state, true);
+  assert.strictEqual(state.stage, "complete");
+  const offer = sentTexts.find((m) => m.includes("Hand this to *Content Strategist*"));
+  assert.ok(offer, `the next-step offer must be sent after approval:\n${sentTexts.join("\n")}`);
+  assert.match(offer!, /turn it into content themes and briefs/);
+  assert.match(offer!, /\?$/);
+  const pending = state.marketing?.pendingNextStep;
+  assert.strictEqual(pending?.toHat, "Content Strategist");
+  assert.match(pending?.approvedOutput ?? "", /audience, goals, core message/);
+});
+
+test("the post-approval next step is never automatic: Not now leaves it; Yes asks for a NEW Work for the next Hat, never reopening this finished one", async (t) => {
+  const sentTexts = mockTelegramFetch(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "Content themes drafted.", involves_spend: false }) }) } as any,
+  });
+  const make = () => fakeWorkState({
+    stage: "complete" as const,
+    marketing: {
+      pendingNextStep: {
+        toHat: "Content Strategist",
+        forWhat: "turn it into content themes and briefs",
+        fromHat: "Marketing Strategist",
+        approvedOutput: "The approved marketing strategy.",
+      },
+    },
+  });
+  const notNow = make();
+  const left = await handleNextStep(env, notNow, false);
+  assert.strictEqual(left.hat, "Marketing Strategist", "Not now must not change the Hat");
+  assert.strictEqual(left.marketing?.pendingNextStep, undefined);
+  assert.ok(sentTexts.some((m) => m.includes("leaving it here")));
+
+  // Yes (2026-11-18 review): the approved Work is finished -- its Result
+  // review recorded Martin's approval -- so it stays finished under its own
+  // Hat, and the next Hat's part is requested as a NEW Work (the session
+  // starts it from followOnWork), carrying the approved output as its input.
+  const yes = make();
+  const continued = await handleNextStep(env, yes, true);
+  assert.strictEqual(continued.hat, "Marketing Strategist", "this finished Work keeps its own Hat");
+  assert.strictEqual(continued.stage, "complete", "this finished Work is not reopened");
+  assert.strictEqual(continued.followOnWork?.hat, "Content Strategist");
+  assert.match(continued.followOnWork?.text ?? "", /The approved marketing strategy/);
+  assert.match(continued.followOnWork?.text ?? "", /turn it into content themes and briefs/);
+  assert.strictEqual(continued.marketing?.pendingNextStep, undefined, "the offer is single-use");
+  assert.ok(sentTexts.some((m) => m.includes("new piece of work")));
+});
+
+test("a missing prerequisite asks Martin to do it first, carry on with assumptions, or hand it over -- each choice routes or proceeds explicitly", async (t) => {
+  mockTelegramFetch(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "Content themes drafted from stated assumptions.", involves_spend: false }) }) } as any,
+  });
+  const make = () => fakeWorkState({
+    stage: "marketing_ambiguous" as const,
+    hat: "Content Strategist" as const,
+    marketing: {
+      taskText: "Turn the approved strategy into content themes.",
+      pendingPrerequisite: { hat: "Marketing Strategist", reason: "no marketing strategy exists yet" },
+    },
+  });
+  const assumed = make();
+  const carried = await handlePrerequisiteChoice(env, assumed, "assume");
+  assert.strictEqual(carried.hat, "Content Strategist", "carry on keeps the current Hat");
+  assert.match(carried.marketing?.taskText ?? "", /carry on with stated assumptions/);
+  assert.strictEqual(carried.stage, "awaiting_marketing_draft_approval");
+
+  const first = make();
+  const doneFirst = await handlePrerequisiteChoice(env, first, "first");
+  assert.strictEqual(doneFirst.hat, "Marketing Strategist", "do it first routes to the prerequisite's owner");
+  assert.match(doneFirst.marketing?.taskText ?? "", /Produce the missing prerequisite first/);
+
+  const handover = make();
+  const handed = await handlePrerequisiteChoice(env, handover, "handover");
+  assert.strictEqual(handed.hat, "Marketing Strategist", "hand over routes the whole request to the prerequisite's owner");
+  assert.match(handed.marketing?.taskText ?? "", /Take this request over/);
 });
 
 test("problem brief (Martin, 2026-11-13): every Marketing Hat's instructions carry the seven-part shape, used only with web research, never naming a company", async () => {

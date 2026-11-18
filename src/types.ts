@@ -711,6 +711,14 @@ export interface WorkState {
    * bound to the exact folder he picks. Cleared when the flow is consumed,
    * cancelled, or superseded by a newer approved output.
    */
+  /**
+   * A new piece of work Martin asked to start from this one (the post-approval
+   * "Next: hand this to <Hat>?" Yes). The session starts it as a NEW Work for
+   * that Hat, in the same chat/thread, and clears this field -- a finished
+   * Work is never reopened under another Hat (its Result review stays its own).
+   */
+  followOnWork?: { hat: string; text: string };
+
   outputDelivery?: {
     /** The exact approved output text, token-checked before storage. */
     text: string;
