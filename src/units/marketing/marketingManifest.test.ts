@@ -654,3 +654,20 @@ test("Clarify: redo resets the clarification count and enoughSaid", async (t) =>
   assert.strictEqual(out.marketing?.enoughSaid, undefined);
   assert.strictEqual(out.marketing?.pendingClarification, undefined);
 });
+
+test("approving a draft shows the shared Save as Doc offer (2026-11-18: Martin approved and no button appeared)", async (t) => {
+  const sent: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: any) => {
+    if (String(url).includes("api.telegram.org")) {
+      if (init?.body) sent.push(String(init.body));
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }) as any;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const state = fakeWorkState({ stage: "awaiting_marketing_draft_approval", marketing: { draft: "A clean token-only campaign plan." } } as any);
+  await handleDraftApproval(fakeEnv(), state, true);
+  assert.ok(state.outputDelivery, "the approved draft is held for saving");
+  assert.ok(sent.some((b) => b.includes("Save as Doc") && b.includes("outputdelivery:")), "the offer with its button was sent");
+});
