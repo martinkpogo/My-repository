@@ -13,7 +13,7 @@ import {
   type GoogleDocsSmokeResult,
   type GoogleDocsSmokeWorkRunner,
 } from "./googleDocsSmoke";
-import { buildProposalDocLayout } from "../../proposalRedline";
+
 
 /**
  * The governed Google Docs smoke contract (LOG-1069), proven at its own
@@ -708,7 +708,7 @@ test("an interrupted rewrite whose effect ALREADY landed is settled by a read an
   const env = configuredEnv();
   const harness = smokeRunner(smokeState(), inProgressRewriteSeed());
   const rewriteInput = googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT);
-  const desired = buildProposalDocLayout(rewriteInput.proposal_id, rewriteInput.versions).text;
+  const desired = rewriteInput.layout.text;
   const server = docServer();
   let documentReads = 0;
   const { calls } = installGoogleFake(t, (call) => {
@@ -718,7 +718,7 @@ test("an interrupted rewrite whose effect ALREADY landed is settled by a read an
     if (call.url.includes("/documents/doc-smoke-1") && call.method === "GET") {
       documentReads += 1;
       if (documentReads > 1) {
-        return json({ title: rewriteInput.proposal_id, body: { content: [{ endIndex: desired.length + 1, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
+        return json({ title: "dummy", body: { content: [{ endIndex: desired.length + 1, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
       }
     }
     return server.handle(call);

@@ -139,30 +139,35 @@ export function googleDocsSmokeInput(workId: string, folderId: string, accountId
   };
 }
 
+import { buildProposalDocLayout } from "../../proposalRedline";
+
 /**
  * The governed rewrite invocation's exact input: THE disposable Doc this
  * run just created and verified (its id comes from the create outcome, is
  * passed in here by the invocation core, and is re-validated by the
- * operation's own opaque-id contract), and a rewrite content that is
+ * operation's own opaque-id contract), and a rewrite layout that is
  * deliberately DIFFERENT from the creation content so the batchUpdate is a
  * real rewrite (delete + insert + styling) whose read-back proves the new
- * text -- not a no-op restatement of what the Doc already holds. Proposal
- * id and content are token-free by construction.
+ * text -- not a no-op restatement of what the Doc already holds.
  */
 export function googleDocsSmokeRewriteInput(workId: string, documentId: string, accountIdentifier: string) {
+  const layout = buildProposalDocLayout(`REGISTRY-SMOKE-${smokeSuffix(workId)}`, [
+    {
+      version: 1,
+      // The `- ` line maps to a `bullet` block (currentZoneBlockKind), so
+      // the rewrite exercises the corrected #269 `createParagraphBullets`
+      // preset as well as the corrected `updateParagraphStyle` shapes.
+      content: `ENIG Tool Registry live smoke REWRITE pass.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_UPDATE_OPERATION_ID}\n- Governed rewrite bullet marker.\nDisposable verification content. No client data.\n`,
+    },
+  ]);
   return {
     document_id: documentId,
     account_identifier: accountIdentifier,
-    proposal_id: `REGISTRY-SMOKE-${smokeSuffix(workId)}`,
-    versions: [
-      {
-        version: 1,
-        // The `- ` line maps to a `bullet` block (currentZoneBlockKind), so
-        // the rewrite exercises the corrected #269 `createParagraphBullets`
-        // preset as well as the corrected `updateParagraphStyle` shapes.
-        content: `ENIG Tool Registry live smoke REWRITE pass.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_UPDATE_OPERATION_ID}\n- Governed rewrite bullet marker.\nDisposable verification content. No client data.\n`,
-      },
-    ],
+    layout: {
+      text: layout.text,
+      blocks: layout.blocks,
+      styles: layout.styles,
+    },
   };
 }
 

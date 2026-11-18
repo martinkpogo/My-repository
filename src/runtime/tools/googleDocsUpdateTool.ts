@@ -1,26 +1,20 @@
 /**
  * Registered Google Docs WRITE operation over an EXISTING document --
  * `google_docs.update_and_verify`, version 1.0, effect `external_mutation`:
- * bring THE document to the exact requested Proposal-version content plus the
- * canonical styling (delete + insert + style in one batchUpdate), then read
- * it back and claim success only when it verifies.
+ * bring THE document to the exact requested content and styling (delete +
+ * insert + style in one batchUpdate), then read it back and claim success
+ * only when it verifies.
  *
- * This is the mutation `ensureProposalDoc` previously issued as a direct
- * Docs batchUpdate call, in both of its paths: bringing an existing Doc up
- * to a newer Version (a revision), and the canonical styling pass that
- * immediately follows creation. It now runs through the shared invocation
- * boundary (src/runtime/toolRegistry.ts): exact operation, strict input
- * contract, trusted target (validated document identity + an account this
- * Worker is actually authorized for), Access on the Work's own Action,
- * durable intent/outcome records, and the canonical five outcomes.
+ * This operation is business-neutral: the caller supplies the exact document
+ * content (text), paragraph-level styling (blocks), and inline styling
+ * (styles). The operation validates those instructions, translates them into
+ * Google Docs batchUpdate requests, executes them, and verifies the result.
+ * It does not decide what a document should contain or how it should be
+ * structured -- that is the responsibility of the calling Action.
  *
- * The input carries pure business data only -- the Proposal id and the exact
- * Version content -- and the operation rebuilds the canonical layout itself
- * (buildProposalDocLayout), so no provider request structures and no styling
- * details ever enter the input contract. The document is targeted by its
- * opaque Drive id, validated here and bound by Access to any approval
- * evidence; account selection is resolved from this Worker's authorized
- * accounts, never taken from a caller.
+ * The document is targeted by its opaque Drive id, validated here and bound
+ * by Access to any approval evidence; account selection is resolved from this
+ * Worker's authorized accounts, never taken from a caller.
  *
  * Reconciliation is operation-specific: this operation acts on a KNOWN
  * document id (its target), so an interrupted attempt is settled by reading
@@ -34,37 +28,36 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { extractDocText, getValidGoogleAccessToken, listAuthorizedGoogleAccounts, rewriteGoogleDoc } from "../../googleOAuth";
-import { buildProposalDocLayout } from "../../proposalRedline";
+import type { ProposalDocLayout } from "../../proposalRedline";
 
 export const GOOGLE_DOCS_UPDATE_OPERATION_ID = "google_docs.update_and_verify";
 
-/** Exactly the declared input contract: the document to act on and the Proposal content it must hold. */
-const ALLOWED_INPUT_KEYS: readonly string[] = ["document_id", "account_identifier", "proposal_id", "versions"];
+/** Exactly the declared input contract: the document to act on and the exact layout it must hold. */
+const ALLOWED_INPUT_KEYS: readonly string[] = ["document_id", "account_identifier", "layout"];
 
 /** An opaque url-safe Google document id -- never a path, URL or blank. */
 const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-/** One Proposal version's content, as the layout builder consumes it. */
-interface DocWriteVersion {
-  version: number;
-  content: string;
+/** The business-neutral document layout: text, paragraph blocks, and inline style ranges. */
+interface DocLayoutInput {
+  text: string;
+  blocks: ProposalDocLayout["blocks"];
+  styles: ProposalDocLayout["styles"];
 }
 
 interface DocWriteInput {
   document_id: string;
   account_identifier: string;
-  proposal_id: string;
-  versions: DocWriteVersion[];
+  layout: DocLayoutInput;
 }
 
 const BASE = { tool_id: "google_docs", operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID };
 
 /**
- * Validates the input contract exactly: an object with precisely the four
- * declared fields; an opaque document id; a non-empty Proposal id; and a
- * non-empty list of well-formed versions (integer number >= 1 + non-empty
- * content, no extra keys per entry, bounded count). Returns the typed input
- * or the defect that made it invalid.
+ * Validates the input contract exactly: an object with precisely the three
+ * declared fields; an opaque document id; a non-empty account identifier;
+ * and a valid layout object with text, blocks, and styles. Returns the typed
+ * input or the defect that made it invalid.
  */
 function parseInput(input: unknown): DocWriteInput | string {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return "input must be an object";
@@ -81,33 +74,46 @@ function parseInput(input: unknown): DocWriteInput | string {
   if (typeof record.account_identifier !== "string" || record.account_identifier.trim().length === 0) {
     return "account_identifier must be a non-empty string";
   }
-  if (typeof record.proposal_id !== "string" || record.proposal_id.trim().length === 0) {
-    return "proposal_id must be a non-empty string";
+  // Validate layout
+  const layout = record.layout as DocLayoutInput | undefined;
+  if (!layout || typeof layout !== "object") {
+    return "layout must be an object with {text, blocks, styles}";
   }
-  if (!Array.isArray(record.versions) || record.versions.length === 0) {
-    return "versions must be a non-empty array of the Proposal's versions in order";
+  if (typeof layout.text !== "string" || layout.text.trim().length === 0) {
+    return "layout.text must be a non-empty string";
   }
-  if (record.versions.length > 200) return "versions carries more than 200 entries -- a document update input of that size is not a Proposal version list";
-  const versions: DocWriteVersion[] = [];
-  for (let i = 0; i < record.versions.length; i++) {
-    const entry = record.versions[i];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return `versions[${i}] must be an object with {version, content}`;
-    const versionRecord = entry as Record<string, unknown>;
-    const unexpected = Object.keys(versionRecord).find((key) => key !== "version" && key !== "content");
-    if (unexpected !== undefined) return `versions[${i}] has unknown field "${unexpected}" -- each entry is exactly {version, content}`;
-    if (typeof versionRecord.version !== "number" || !Number.isInteger(versionRecord.version) || versionRecord.version < 1) {
-      return `versions[${i}].version must be an integer >= 1`;
+  if (!Array.isArray(layout.blocks)) {
+    return "layout.blocks must be an array";
+  }
+  if (!Array.isArray(layout.styles)) {
+    return "layout.styles must be an array";
+  }
+  // Validate each block
+  for (let i = 0; i < layout.blocks.length; i++) {
+    const block = layout.blocks[i];
+    if (!block || typeof block !== "object") return `blocks[${i}] must be an object`;
+    if (typeof block.start !== "number" || block.start < 1) return `blocks[${i}].start must be a positive number`;
+    if (typeof block.end !== "number" || block.end <= block.start) return `blocks[${i}].end must be greater than start`;
+    if (typeof block.kind !== "string") return `blocks[${i}].kind must be a string`;
+  }
+  // Validate each style
+  for (let i = 0; i < layout.styles.length; i++) {
+    const style = layout.styles[i];
+    if (!style || typeof style !== "object") return `styles[${i}] must be an object`;
+    if (typeof style.start !== "number" || style.start < 1) return `styles[${i}].start must be a positive number`;
+    if (typeof style.end !== "number" || style.end <= style.start) return `styles[${i}].end must be greater than start`;
+    if (!["heading", "del", "add", "label"].includes(style.kind)) {
+      return `styles[${i}].kind must be one of: heading, del, add, label`;
     }
-    if (typeof versionRecord.content !== "string" || versionRecord.content.trim().length === 0) {
-      return `versions[${i}].content must be a non-empty string`;
-    }
-    versions.push({ version: versionRecord.version, content: versionRecord.content });
   }
   return {
     document_id: record.document_id.trim(),
     account_identifier: record.account_identifier.trim(),
-    proposal_id: record.proposal_id.trim(),
-    versions,
+    layout: {
+      text: layout.text,
+      blocks: layout.blocks,
+      styles: layout.styles,
+    },
   };
 }
 
@@ -192,12 +198,7 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
   }
   const remote = { document_id: parsed.document_id, url: documentUrl(parsed.document_id) };
   const uncertain = (reason: string): ToolInvocationOutcome => ({ ...BASE, state: "unverified", reason, remote_resource: remote, reconciliation_required: true });
-  let desired: string;
-  try {
-    desired = buildProposalDocLayout(parsed.proposal_id, parsed.versions).text;
-  } catch (error) {
-    return { outcome: uncertain(`the requested document state could not be rebuilt to compare against (${error instanceof Error ? error.message : "unknown error"}) -- no new write may start`) };
-  }
+  const desired = parsed.layout.text;
   try {
     const token = await getValidGoogleAccessToken(env, parsed.account_identifier);
     if (!token) {
@@ -248,7 +249,7 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
   }
 }
 
-/** `google_docs.update_and_verify`: bring THE document to the exact requested content + canonical styling, verified by read-back. */
+/** `google_docs.update_and_verify`: bring THE document to the exact requested content + styling, verified by read-back. */
 export const googleDocsUpdateToolOperation: ToolOperationDefinition = {
   toolId: "google_docs",
   operationId: GOOGLE_DOCS_UPDATE_OPERATION_ID,
@@ -268,7 +269,11 @@ export const googleDocsUpdateToolOperation: ToolOperationDefinition = {
       // Defensive: validateInput already ran. A failure here makes no request.
       return { ...BASE, state: "failed", stage: "validation", reason: `validation: ${parsed}` };
     }
-    const layout = buildProposalDocLayout(parsed.proposal_id, parsed.versions);
+    const layout: ProposalDocLayout = {
+      text: parsed.layout.text,
+      blocks: parsed.layout.blocks,
+      styles: parsed.layout.styles,
+    };
     const result = await rewriteGoogleDoc(env, parsed.account_identifier, parsed.document_id, layout);
     return mapUpdateResult(result, parsed.document_id);
   },

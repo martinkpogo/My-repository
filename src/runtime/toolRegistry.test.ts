@@ -381,7 +381,7 @@ test("K. the shared output-delivery save is allowed for an undeclared Action, bu
     {
       tool_id: GOOGLE_DOCS_TOOL_ID,
       operation_id: "google_docs.update_and_verify",
-      input: { document_id: "doc-1", account_identifier: "martin@example.com", proposal_id: "PROP-1", versions: [{ version: 1, content: "v1" }] },
+      input: { document_id: "doc-1", account_identifier: "martin@example.com", layout: { text: "test", blocks: [], styles: [] } },
     },
     otherContext,
   );
@@ -1050,8 +1050,7 @@ test("AP. an execution intent that cannot be persisted fails closed -- the effec
 const UPDATE_INPUT = {
   document_id: "doc-1",
   account_identifier: "martin@example.com",
-  proposal_id: "PROP-7",
-  versions: [{ version: 1, content: "Version one, exactly as Martin approved it." }],
+  layout: buildProposalDocLayout("PROP-7", [{ version: 1, content: "Version one, exactly as Martin approved it." }]),
 };
 
 const FOLDER_INPUT = {
@@ -1182,7 +1181,7 @@ test("AU. an interrupted update is settled by reading THE document it targeted: 
   const key = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
 
   // 1. Content already matches: recovered, never rewritten.
-  const desired = buildProposalDocLayout(UPDATE_INPUT.proposal_id, UPDATE_INPUT.versions).text;
+  const desired = UPDATE_INPUT.layout.text;
   workRecords[key] = seededRecord({ operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, target_resource_id: UPDATE_TARGET });
   let writes = 0;
   const matching = installGoogleFake(t, (call) => {
@@ -1235,7 +1234,8 @@ test("AV0. a verified success recorded for ONE requested content never suppresse
       remote_resource: { document_id: "doc-1" },
     },
   });
-  const revised = { ...UPDATE_INPUT, versions: [{ version: 2, content: "Version two, revised with Martin's change." }] };
+  const revisedLayout = buildProposalDocLayout("PROP-7", [{ version: 2, content: "Version two, revised with Martin's change." }]);
+  const revised = { ...UPDATE_INPUT, layout: { text: revisedLayout.text, blocks: revisedLayout.blocks, styles: revisedLayout.styles } };
   const secondKey = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, revised);
   assert.notEqual(secondKey, firstKey, "different requested content is a different logical operation");
 
@@ -1361,16 +1361,13 @@ test("AY. the folder operation's input contract is exact and its reconciliation 
 // ---------------------------------------------------------------------------
 
 /** Deliberately free of "Label: value" lines and (single-version) redline marks, so the canonical layout carries paragraph styling only. */
+const FORMAT_LAYOUT = buildProposalDocLayout("PROP-7", [{ version: 1, content: "The scope covers two workshops.\nThe timeline is six weeks." }]);
 const FORMAT_INPUT = {
   document_id: "doc-1",
   account_identifier: "martin@example.com",
-  proposal_id: "PROP-7",
-  versions: [{ version: 1, content: "The scope covers two workshops.\nThe timeline is six weeks." }],
+  layout: { text: FORMAT_LAYOUT.text, blocks: FORMAT_LAYOUT.blocks, styles: FORMAT_LAYOUT.styles },
 };
 const FORMAT_TARGET = `gdrive:document:${FORMAT_INPUT.document_id}`;
-
-/** The canonical layout, rebuilt from the Proposal's OWN Version data -- never from a request. */
-const FORMAT_LAYOUT = buildProposalDocLayout(FORMAT_INPUT.proposal_id, FORMAT_INPUT.versions);
 
 /**
  * A Docs server for the formatting operation. The document always carries
@@ -1599,7 +1596,7 @@ test("BH. an interrupted styling pass is reconciled by reading the Doc's ACTUAL 
   const outcome = await invokeTool(env, formatCall(), submitContext());
   assert.equal(outcome.state, "succeeded", outcome.reason ?? "");
   assert.equal(outcome.verified, true);
-  assert.match(outcome.reason ?? "", /already shows the canonical styling/);
+  assert.match(outcome.reason ?? "", /already shows the requested styling/);
   assert.equal(counters.batchUpdates, 0, "the effect already exists: it is recovered, never repeated");
 });
 

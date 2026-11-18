@@ -29,7 +29,7 @@ import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
-import { buildProposalDocLayout } from "../../proposalRedline";
+import { buildInternalDocLayout } from "../../proposalRedline";
 import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc, getValidGoogleAccessToken, extractDocText } from "../../googleOAuth";
 import { classifyProposalCommentIntent, markProposalDocCommentProcessed, CommentMarkerPersistenceError } from "../../googleDocComments";
 import { invokeTool } from "../../runtime/toolRegistry";
@@ -1850,38 +1850,41 @@ const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
 const PROPOSAL_DOCS_FOLDER_KV_KEY = "google_proposal_docs_folder";
 
 /**
- * The `google_docs.update_and_verify` input for THIS Proposal's Doc. It
- * carries business data only -- the opaque document id, the trusted account,
- * the Proposal id and this Proposal's exact Version content in order -- and
- * the registered operation rebuilds the canonical layout itself, so no
- * provider request structure and no styling detail ever enters the contract.
+ * The `google_docs.update_and_verify` input for THIS Proposal's Doc.
+ * The Action builds the document specification (text, blocks, styles) and
+ * passes it to the business-neutral Tool, which validates and executes it.
+ * The stored Version content stays in the protected identity form; the
+ * layout is built with restored identities for the human-readable Doc.
  */
 function docWriteInput(sp: RuntimeSalesProposal, documentId: string, accountIdentifier: string) {
+  const layout = buildInternalDocLayout(sp.proposalId, docVersions(sp));
   return {
     document_id: documentId,
     account_identifier: accountIdentifier,
-    proposal_id: sp.proposalId,
-    versions: sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
+    layout: {
+      text: layout.text,
+      blocks: layout.blocks,
+      styles: layout.styles,
+    },
   };
 }
 
 /**
- * Creates a Google Doc holding exactly the current version's token-safe
- * content, in a folder this system keeps for them, on Martin's tap of the
- * "Create Google Doc" button (that tap is the approval for this Doc). The
- * Doc is registered for comment watching, bound to this exact Proposal
- * version: a comment on it requests a change (applyProposalDocComment), it
- * never edits the Doc in place. Real-identity documents are built by
- * Isolated Sales from the approved version -- never here.
+ * Every version's content up to the current one, in order -- last is current
+ * (see proposalRedline.ts). The stored content stays in its protected identity form.
  */
-type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
+function docVersions(sp: RuntimeSalesProposal) {
+  return sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content }));
+}
 
-/** The canonical Doc layout for the Proposal's current version: every version's content in order, last is current (see proposalRedline.ts). */
+/**
+ * The layout the Doc ITSELF holds: the canonical layout with identity
+ * placeholders restored (a Doc is a final internal, human-readable draft).
+ * Used to verify what the Doc reads back as; the tool input keeps the
+ * protected form.
+ */
 function currentDocLayout(sp: RuntimeSalesProposal) {
-  return buildProposalDocLayout(
-    sp.proposalId,
-    sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
-  );
+  return buildInternalDocLayout(sp.proposalId, docVersions(sp));
 }
 
 /**
@@ -2015,6 +2018,8 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
   sp.doc = { documentId, url: documentUrl, accountIdentifier, version };
   return { ok: true, url: documentUrl };
 }
+
+type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
 
 /** Retry path: the "Create Google Doc" button, shown only while the Doc is missing or behind the current version (updating it at presentation failed). */
 async function createProposalVersionDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal, version: number): Promise<WorkState> {

@@ -1,40 +1,89 @@
 /**
- * Mandatory, fail-closed identity redaction for every AI-bound prompt.
+ * Mandatory, fail-closed identity protection for every AI-bound prompt, with
+ * a local restoration step for final internal output.
  *
  * Distinct from and in addition to the DataBoundaryEvaluator's sensitivity
  * transformations: sensitivity gates *whether* a segment may reach a
- * provider at all, while this gates *what the business is called* once it
- * does. Applied unconditionally to every provider (not just workers-ai) --
- * redacting a business name costs nothing even against a fully trusted
- * provider, and the guarantee is stronger for never having a provider-
- * conditional bypass.
+ * provider at all, while this gates *what the consultancy and its operator
+ * are called* once it does. Applied unconditionally to every provider (not
+ * just workers-ai) -- protecting the two names costs nothing even against a
+ * fully trusted provider, and the guarantee is stronger for never having a
+ * provider-conditional bypass.
+ *
+ * Two halves, one capability (Martin's decision, 2026-11-18):
+ *
+ *  1. Provider-bound representation. `redactIdentityTerms` replaces the two
+ *     real names with opaque, stable placeholders -- "[ENIG_CONSULTANCY]" and
+ *     "[ENIG_OPERATOR]" -- so a provider never receives the real names while
+ *     the text still reads as natural language about a specific consultancy
+ *     and a specific person. The placeholders are ordinary tokens, so they
+ *     survive primary/fallback providers, multi-step AI workflows and any
+ *     intermediate AI-generated content passed between providers, and
+ *     `redactIdentityTerms` is idempotent over them (it never rewrites its
+ *     own placeholder).
+ *  2. Final internal output. `restoreIdentityPlaceholders` turns the
+ *     placeholders back into "ENIG" and "Martin" for text about to be shown
+ *     to the operator. It is the ONLY restoration function, deliberately
+ *     separate from redaction so each caller states which boundary it is at:
+ *     stored records, intermediate AI payloads and anything that may be sent
+ *     to a provider again keep the protected representation.
  *
  * The guarantee this exists to provide: redact() is best-effort (a plain
  * word-boundary substitution can miss an unusual phrasing), so it is never
  * trusted alone. findLeftoverBannedTerms() re-scans the redacted text
  * immediately before it's sent, and AiPolicyExecutor treats any match there
- * as a hard stop -- the call is blocked, not sent with a residual leak.
+ * as a hard stop -- the call is blocked, not sent with a residual leak. That
+ * scan is independent of the placeholders: it looks for the real names, so a
+ * restoration that leaked back into a provider payload would still be caught.
  */
 
 interface BannedTerm {
   /** Human-readable label for logs/alerts. */
   label: string;
   pattern: RegExp;
+  /** The opaque placeholder the real value is replaced by on the way out. */
   replacement: string;
 }
 
-// Word-boundary + case-insensitive: catches "ENIG's" -> "the business's"
+/**
+ * The two placeholders, exported so tests and the restoration step can name
+ * them instead of spelling the strings out again.
+ */
+export const IDENTITY_PLACEHOLDERS = {
+  consultancy: "[ENIG_CONSULTANCY]",
+  operator: "[ENIG_OPERATOR]",
+} as const;
+
+// Word-boundary + case-insensitive: catches "ENIG's" -> "[ENIG_CONSULTANCY]'s"
 // (the trailing "'s" isn't part of the match, so possessives fall out
 // correctly with no special-casing) and "Martin" mid-sentence, without
 // over-matching inside an unrelated identifier that happens to contain the
 // same letters glued to other word characters (e.g. "enig_hq_ops_bot" is
 // one token to \b and won't match "ENIG" alone; "enig-agent" would, but
-// that internal service name never appears in prompt content).
+// that internal service name never appears in prompt content). The same
+// precision rule keeps the placeholders themselves intact: "_" is a word
+// character, so \bENIG\b never matches inside "[ENIG_CONSULTANCY]" or
+// "[ENIG_OPERATOR]" -- protection is idempotent and never corrupts its own
+// output.
 const BANNED_TERMS: BannedTerm[] = [
-  { label: "ENIG", pattern: /\bENIG\b/gi, replacement: "the business" },
-  { label: "Martin", pattern: /\bMartin\b/gi, replacement: "the operator" },
+  { label: "ENIG", pattern: /\bENIG\b/gi, replacement: IDENTITY_PLACEHOLDERS.consultancy },
+  { label: "Martin", pattern: /\bMartin\b/gi, replacement: IDENTITY_PLACEHOLDERS.operator },
 ];
 
+/**
+ * The inverse mapping, used only by `restoreIdentityPlaceholders` at a final
+ * internal-presentation boundary. Each pattern matches the exact bracketed
+ * token (case-insensitively, so a provider that lowercased a placeholder is
+ * still restored) and nothing else: a partial, malformed or unknown
+ * placeholder-like span is left byte-for-byte untouched rather than guessed
+ * at, so restoration can never damage unrelated content.
+ */
+const PLACEHOLDER_RESTORATIONS: Array<{ pattern: RegExp; value: string }> = [
+  { pattern: /\[ENIG_CONSULTANCY\]/gi, value: "ENIG" },
+  { pattern: /\[ENIG_OPERATOR\]/gi, value: "Martin" },
+];
+
+/** Replaces the real names with their opaque placeholders (provider-bound form). */
 export function redactIdentityTerms(text: string): string {
   let result = text;
   for (const term of BANNED_TERMS) {
@@ -53,4 +102,33 @@ export function findLeftoverBannedTerms(text: string): string[] {
     if (probe.test(text)) found.push(term.label);
   }
   return found;
+}
+
+/**
+ * Restores the real names for FINAL INTERNAL OUTPUT ONLY -- text about to be
+ * shown to the operator (the Telegram presentation boundary, `telegram.ts`).
+ *
+ * Deliberately not applied in the AI layer: an intermediate AI payload, a
+ * stored record, a Handoff or a Proposal's token-safe content keeps the
+ * protected representation, so it can never be forwarded to a provider with
+ * the real names in it. Anything restored here is protected again by
+ * `redactIdentityTerms` if it is ever sent back out, because the executor
+ * redacts every message unconditionally.
+ *
+ * Safe by construction: missing placeholders (nothing to do), repeated calls
+ * (idempotent), partially restored text (only the surviving token is
+ * replaced), and malformed or unknown placeholder-like spans (left exactly
+ * as they are -- never partially rewritten, never confused with real
+ * content). Only the exact bracketed tokens are matched, so no unrelated word
+ * is touched.
+ */
+export function restoreIdentityPlaceholders(text: string): string {
+  if (!text) return text;
+  let result = text;
+  for (const { pattern, value } of PLACEHOLDER_RESTORATIONS) {
+    // Fresh RegExp per call: the module-level patterns are `g`-flagged and
+    // must never carry state between callers.
+    result = result.replace(new RegExp(pattern.source, pattern.flags), value);
+  }
+  return result;
 }

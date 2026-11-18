@@ -1,25 +1,25 @@
 import test from "node:test";
 import assert from "node:assert";
-import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedaction";
+import { redactIdentityTerms, findLeftoverBannedTerms, IDENTITY_PLACEHOLDERS } from "./identityRedaction";
 
-test("redactIdentityTerms replaces ENIG with a generic term, case-insensitively", () => {
-  assert.strictEqual(redactIdentityTerms("ENIG is a consultancy."), "the business is a consultancy.");
-  assert.strictEqual(redactIdentityTerms("Welcome to enig."), "Welcome to the business.");
+test("redactIdentityTerms replaces ENIG with the placeholder, case-insensitively", () => {
+  assert.strictEqual(redactIdentityTerms("ENIG is a consultancy."), `${IDENTITY_PLACEHOLDERS.consultancy} is a consultancy.`);
+  assert.strictEqual(redactIdentityTerms("Welcome to enig."), `Welcome to ${IDENTITY_PLACEHOLDERS.consultancy}.`);
 });
 
 test("redactIdentityTerms handles possessive forms correctly by leaving the 's attached", () => {
-  assert.strictEqual(redactIdentityTerms("ENIG's marketing plan"), "the business's marketing plan");
-  assert.strictEqual(redactIdentityTerms("Martin's call to make"), "the operator's call to make");
+  assert.strictEqual(redactIdentityTerms("ENIG's marketing plan"), `${IDENTITY_PLACEHOLDERS.consultancy}'s marketing plan`);
+  assert.strictEqual(redactIdentityTerms("Martin's call to make"), `${IDENTITY_PLACEHOLDERS.operator}'s call to make`);
 });
 
-test("redactIdentityTerms replaces Martin with a generic role term", () => {
-  assert.strictEqual(redactIdentityTerms("Martin decides."), "the operator decides.");
+test("redactIdentityTerms replaces Martin with the placeholder", () => {
+  assert.strictEqual(redactIdentityTerms("Martin decides."), `${IDENTITY_PLACEHOLDERS.operator} decides.`);
 });
 
 test("redactIdentityTerms replaces multiple occurrences and multiple distinct terms in one pass", () => {
   const input = "Martin runs ENIG. ENIG is Martin's business.";
   const result = redactIdentityTerms(input);
-  assert.strictEqual(result, "the operator runs the business. the business is the operator's business.");
+  assert.strictEqual(result, `${IDENTITY_PLACEHOLDERS.operator} runs ${IDENTITY_PLACEHOLDERS.consultancy}. ${IDENTITY_PLACEHOLDERS.consultancy} is ${IDENTITY_PLACEHOLDERS.operator}'s business.`);
 });
 
 test("redactIdentityTerms does not corrupt unrelated identifiers sharing the same letters glued by word characters", () => {
@@ -28,7 +28,7 @@ test("redactIdentityTerms does not corrupt unrelated identifiers sharing the sam
 });
 
 test("findLeftoverBannedTerms returns [] for already-redacted text", () => {
-  assert.deepStrictEqual(findLeftoverBannedTerms("the business and the operator discussed pricing."), []);
+  assert.deepStrictEqual(findLeftoverBannedTerms(`${IDENTITY_PLACEHOLDERS.consultancy} and ${IDENTITY_PLACEHOLDERS.operator} discussed pricing.`), []);
 });
 
 test("findLeftoverBannedTerms detects a term redaction missed, case-insensitively", () => {
