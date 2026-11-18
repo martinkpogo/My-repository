@@ -336,12 +336,15 @@ test("normal account selection regression: without the smoke flag the staged fol
   const opaqueId = await stageOption(env, workId, { kind: "account", accountIdentifier: ACCOUNT, title: "My Doc", content: "Body text" });
   await handleGoogleAccountSelection(env, state, opaqueId);
 
-  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folder");
+  // The whole folder list is staged as ONE folderlist option (Martin,
+  // 2026-11-18), not one per folder; the creation payload rides on it.
+  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folderlist");
   assert.equal(folderOptions.length, 1);
   assert.equal(folderOptions[0].smoke, undefined, "the normal path must never see the smoke discriminator");
   assert.equal(folderOptions[0].title, "My Doc");
   assert.equal(folderOptions[0].content, "Body text");
   assert.equal(folderOptions[0].docType, "doc");
+  assert.ok(Array.isArray(folderOptions[0].folders) && folderOptions[0].folders.length >= 1, "the list carries the Drive folders");
   assert.equal(driveCreates(calls).length, 0);
 });
 
@@ -402,8 +405,19 @@ test("normal folder selection regression: without the smoke flag the approval pa
   const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
   const { calls, telegram } = installFake(t, () => json({}));
 
-  const opaqueId = await stageOption(env, workId, { kind: "folder", docType: "doc", accountIdentifier: ACCOUNT, title: "My Doc", content: "Body", folderId: FOLDER_ID, folderName: FOLDER_NAME });
-  const next = await handleGoogleFolderSelection(env, state, opaqueId);
+  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
+  // callback carries the list's opaque id plus the picked folder's POSITION,
+  // so the handler resolves the pick from the list rather than from a
+  // per-folder option.
+  const listOpaqueId = await stageOption(env, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: ACCOUNT,
+    title: "My Doc",
+    content: "Body",
+    folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
+  });
+  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`);
 
   assert.equal(next.pendingSmokeSelection, undefined, "the normal path must never touch the smoke state");
   assert.equal(next.pendingGoogleAction?.type, "create_doc");
@@ -734,11 +748,15 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
   capture("googlefolder");
 
   // Stage 3 -- confirmation (shared handleGoogleFolderSelection, smoke
-  // branch): googlesmokeconfirm:<workId>:<opaqueId> + ...:<workId>:cancel
-  const folderOptionKey = optionKeys(env, workId).find((k) => JSON.parse(store(env).get(k) as string).kind === "folder");
-  assert.ok(folderOptionKey, "the folder option must have been staged");
+  // branch): googlesmokeconfirm:<workId>:<opaqueId> + ...:<workId>:cancel.
+  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
+  // callback carries the list's opaque id plus the picked folder's POSITION,
+  // so the handler resolves the pick from the list rather than from a
+  // per-folder option.
+  const folderOptionKey = optionKeys(env, workId).find((k) => JSON.parse(store(env).get(k) as string).kind === "folderlist");
+  assert.ok(folderOptionKey, "the folder list option must have been staged");
   const folderOptionId = String(folderOptionKey.split(":").pop());
-  await handleGoogleFolderSelection(env, state, folderOptionId);
+  await handleGoogleFolderSelection(env, state, `${folderOptionId}:0`);
   capture("googlesmokeconfirm");
 
   // Stage 4 -- the /sessions row for this still-open smoke Work, built in
