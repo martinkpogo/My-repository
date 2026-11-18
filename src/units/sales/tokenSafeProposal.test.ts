@@ -2427,3 +2427,32 @@ test("Lifecycle 14. A new substantive comment AFTER a cycle-completion approval 
   assert.strictEqual(sp.approvedVersion, 2);
   assert.strictEqual(text(rec["Approved Version"]), "v2");
 });
+
+// ---------------------------------------------------------------------------
+// Identity restoration at the Doc writing boundary (Martin's decision,
+// 2026-11-18): the Proposal's Google Doc is a final internal, human-readable
+// draft, so it shows "Martin" and "ENIG"; the stored Proposal Content, the
+// Work's own copy and every provider-bound payload keep the protected
+// [ENIG_OPERATOR]/[ENIG_CONSULTANCY] form.
+// ---------------------------------------------------------------------------
+
+test("Google Doc identity: the Doc is written with Martin and ENIG restored, while the stored Proposal Content keeps the protected placeholders", async (t) => {
+  const direction = "[ENIG_OPERATOR] should review [ENIG_CONSULTANCY]'s proposed direction.";
+  const strategy = approvedStrategyProposal();
+  strategy.executiveSummary = { ...strategy.executiveSummary, recommendedDirection: direction };
+  const { world, state } = await createV1(
+    t,
+    {},
+    { ho64: ho64Props({ "Verified Facts & Sources": rt(combinedHo64Facts(strategy)) }) },
+    { googleDoc: true },
+  );
+
+  const docText = (world as any).googleCalls.text();
+  assert.ok(docText.includes("Martin should review ENIG's proposed direction."), `the Doc must hold the restored, human-readable draft -- got: ${docText}`);
+  assert.ok(!docText.includes("[ENIG_"), "no identity placeholder may reach the Doc");
+
+  const stored = text(proposals(world)[0].properties["Proposal Content"]);
+  assert.ok(stored.includes(direction), "the stored Proposal Content keeps the protected representation");
+  assert.ok(!stored.includes("Martin"), "the stored record is never restored");
+  assert.strictEqual(state.sales!.proposal!.versions[0].content, stored, "the Work's own version copy stays protected");
+});

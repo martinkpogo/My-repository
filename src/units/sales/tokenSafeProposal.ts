@@ -29,7 +29,7 @@ import { closeHandoffOnResult } from "../../handoffLifecycle";
 import { MAX_RESULT_EVIDENCE_CONTENT_CHARS, recordResultEvidence } from "../../resultReview";
 import { logActivity } from "../../log";
 import { getWorkspaceTarget, sendOperationsMessage, sendWorkspaceHatMessage, type InlineButton } from "../../telegram";
-import { buildProposalDocLayout } from "../../proposalRedline";
+import { buildInternalDocLayout, buildProposalDocLayout } from "../../proposalRedline";
 import { listAuthorizedGoogleAccounts, registerWatchedGoogleDoc, getValidGoogleAccessToken, extractDocText } from "../../googleOAuth";
 import { classifyProposalCommentIntent, markProposalDocCommentProcessed, CommentMarkerPersistenceError } from "../../googleDocComments";
 import { invokeTool } from "../../runtime/toolRegistry";
@@ -1855,6 +1855,9 @@ const PROPOSAL_DOCS_FOLDER_KV_KEY = "google_proposal_docs_folder";
  * the Proposal id and this Proposal's exact Version content in order -- and
  * the registered operation rebuilds the canonical layout itself, so no
  * provider request structure and no styling detail ever enters the contract.
+ * The stored Version content stays in the protected identity form; the
+ * operation restores the real names when it assembles the human-readable Doc
+ * (buildInternalDocLayout), the same layout the read-back verification uses.
  */
 function docWriteInput(sp: RuntimeSalesProposal, documentId: string, accountIdentifier: string) {
   return {
@@ -1876,12 +1879,14 @@ function docWriteInput(sp: RuntimeSalesProposal, documentId: string, accountIden
  */
 type EnsureDocResult = { ok: true; url: string } | { ok: false; error: string };
 
-/** The canonical Doc layout for the Proposal's current version: every version's content in order, last is current (see proposalRedline.ts). */
+/** Every version's content up to the current one, in order -- last is current (see proposalRedline.ts). The stored content stays in its protected identity form. */
+function docVersions(sp: RuntimeSalesProposal) {
+  return sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content }));
+}
+
+/** The layout the Doc ITSELF holds: the canonical layout with identity placeholders restored (a Doc is a final internal, human-readable draft). Used to verify what the Doc reads back as; the tool input keeps the protected form. */
 function currentDocLayout(sp: RuntimeSalesProposal) {
-  return buildProposalDocLayout(
-    sp.proposalId,
-    sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
-  );
+  return buildInternalDocLayout(sp.proposalId, docVersions(sp));
 }
 
 /**
@@ -1903,7 +1908,6 @@ function currentDocLayout(sp: RuntimeSalesProposal) {
 async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesProposal): Promise<EnsureDocResult> {
   const version = sp.currentVersion;
   if (sp.doc && sp.doc.version === version) return { ok: true, url: sp.doc.url };
-  const layout = currentDocLayout(sp);
   const binding = { workId: state.workId, proposalNumber: sp.proposalNumber, proposalId: sp.proposalId, version };
 
   if (sp.doc) {
@@ -1970,14 +1974,18 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
   // decision, exact input validation, the trusted account/folder target,
   // and the canonical five outcomes. Holding Google OAuth access was never
   // authorization, and the boundary is what supplies it now. `title` and
-  // `content` are this Version's exact, token-safe layout text; nothing
-  // identity-bearing ever enters this Doc (Isolated Sales owns that).
+  // `content` are this Version's canonical layout text in its PROTECTED
+  // identity form: the input is persisted as the operation's durable intent
+  // record, so it must never carry the real names. The operation restores
+  // them itself when it assembles the human-readable Doc
+  // (buildInternalDocLayout), which is also what its read-back verifies.
+  // No client identity ever enters it (Isolated Sales owns that).
   const outcome = await invokeTool(
     env,
     {
       tool_id: "google_docs",
       operation_id: "google_docs.create_and_verify",
-      input: { title: sp.proposalId, content: layout.text, folder_id: folderId, account_identifier: accountIdentifier },
+      input: { title: sp.proposalId, content: buildProposalDocLayout(sp.proposalId, docVersions(sp)).text, folder_id: folderId, account_identifier: accountIdentifier },
     },
     workSessionContext(state),
   );

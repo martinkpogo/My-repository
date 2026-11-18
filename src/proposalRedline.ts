@@ -13,6 +13,8 @@
  * `styles` carry inline styling only. The redline zone below "Changes"
  * keeps its word-level del/add marks and is never bulletized or re-headed.
  */
+import { restoreIdentityPlaceholders } from "./ai/identityRedaction";
+
 export type DiffKind = "same" | "del" | "add";
 export interface DiffSegment {
   kind: DiffKind;
@@ -141,6 +143,10 @@ function currentZoneBlockKind(line: string, isFirstLine: boolean): DocBlockKind 
 /**
  * Builds the Doc body. `versions` are every version's Proposal Content in
  * order; the last is the current one. Version 1 alone has no changes section.
+ *
+ * This builder is content-agnostic: it lays out exactly the strings it is
+ * given. Provider-bound/internal representations pass through unchanged --
+ * use `buildInternalDocLayout` for the human-readable Doc itself.
  */
 export function buildProposalDocLayout(proposalId: string, versions: { version: number; content: string }[]): ProposalDocLayout {
   let text = "";
@@ -177,6 +183,31 @@ export function buildProposalDocLayout(proposalId: string, versions: { version: 
     }
   }
   return { text, styles, blocks };
+}
+
+/**
+ * The canonical Proposal Doc layout for the HUMAN-READABLE Doc: exactly
+ * `buildProposalDocLayout`, with identity placeholders restored in each
+ * version's content BEFORE the layout is computed.
+ *
+ * The Google Doc is a final internal draft, so it shows the real names
+ * ("Martin", "ENIG"), while every stored/internal representation -- Proposal
+ * Content, WorkState, the `google_docs.update_and_verify` input -- keeps the
+ * protected `[ENIG_OPERATOR]`/`[ENIG_CONSULTANCY]` form. Restoration happens
+ * here, once, at the point the document content is assembled, so the text,
+ * the style ranges and the read-back verification all describe the same
+ * string; doing it afterwards would leave the ranges describing a different
+ * length of text.
+ *
+ * Only the shared `restoreIdentityPlaceholders` is used -- there is no second
+ * identity mechanism for Docs. Content that later reaches an AI provider is
+ * protected again by the AI executor's unconditional redaction.
+ */
+export function buildInternalDocLayout(proposalId: string, versions: { version: number; content: string }[]): ProposalDocLayout {
+  return buildProposalDocLayout(
+    proposalId,
+    versions.map((version) => ({ version: version.version, content: restoreIdentityPlaceholders(version.content) })),
+  );
 }
 
 /** Paragraph styling per block kind: the ONE canonical Proposal layout. */

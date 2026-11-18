@@ -16,8 +16,11 @@
  *
  * The input carries pure business data only -- the Proposal id and the exact
  * Version content -- and the operation rebuilds the canonical layout itself
- * (buildProposalDocLayout), so no provider request structures and no styling
- * details ever enter the input contract. The document is targeted by its
+ * (buildInternalDocLayout: the ONE shared layout builder, applied to the
+ * version content with identity placeholders restored for the human-readable
+ * Doc), so no provider request structures and no styling details ever enter
+ * the input contract. The stored Version content stays protected; only the
+ * document content this operation assembles and writes is restored. The document is targeted by its
  * opaque Drive id, validated here and bound by Access to any approval
  * evidence; account selection is resolved from this Worker's authorized
  * accounts, never taken from a caller.
@@ -34,7 +37,7 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { extractDocText, getValidGoogleAccessToken, listAuthorizedGoogleAccounts, rewriteGoogleDoc } from "../../googleOAuth";
-import { buildProposalDocLayout } from "../../proposalRedline";
+import { buildInternalDocLayout } from "../../proposalRedline";
 
 export const GOOGLE_DOCS_UPDATE_OPERATION_ID = "google_docs.update_and_verify";
 
@@ -194,7 +197,7 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
   const uncertain = (reason: string): ToolInvocationOutcome => ({ ...BASE, state: "unverified", reason, remote_resource: remote, reconciliation_required: true });
   let desired: string;
   try {
-    desired = buildProposalDocLayout(parsed.proposal_id, parsed.versions).text;
+    desired = buildInternalDocLayout(parsed.proposal_id, parsed.versions).text;
   } catch (error) {
     return { outcome: uncertain(`the requested document state could not be rebuilt to compare against (${error instanceof Error ? error.message : "unknown error"}) -- no new write may start`) };
   }
@@ -268,7 +271,7 @@ export const googleDocsUpdateToolOperation: ToolOperationDefinition = {
       // Defensive: validateInput already ran. A failure here makes no request.
       return { ...BASE, state: "failed", stage: "validation", reason: `validation: ${parsed}` };
     }
-    const layout = buildProposalDocLayout(parsed.proposal_id, parsed.versions);
+    const layout = buildInternalDocLayout(parsed.proposal_id, parsed.versions);
     const result = await rewriteGoogleDoc(env, parsed.account_identifier, parsed.document_id, layout);
     return mapUpdateResult(result, parsed.document_id);
   },

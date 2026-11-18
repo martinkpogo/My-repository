@@ -38,7 +38,7 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { getValidGoogleAccessToken, listAuthorizedGoogleAccounts, readGoogleDocStyling, restyleGoogleDoc } from "../../googleOAuth";
-import { buildProposalDocLayout, expectedDocParagraphStyles, type ProposalDocLayout } from "../../proposalRedline";
+import { buildInternalDocLayout, expectedDocParagraphStyles, type ProposalDocLayout } from "../../proposalRedline";
 
 export const GOOGLE_DOCS_FORMAT_OPERATION_ID = "google_docs.format_and_verify";
 
@@ -137,9 +137,9 @@ function documentUrl(documentId: string): string {
   return `https://docs.google.com/document/d/${documentId}/edit`;
 }
 
-/** The canonical layout for a validated input: rebuilt from the Proposal's OWN Version data, never from a comment. */
+/** The canonical layout for a validated input: rebuilt from the Proposal's OWN Version data, never from a comment -- and in the human-readable form the Doc itself holds (identity placeholders restored), so the drift gate, the style ranges and the read-back all describe the same text. */
 function layoutFor(parsed: DocFormatInput): ProposalDocLayout {
-  return buildProposalDocLayout(parsed.proposal_id, parsed.versions);
+  return buildInternalDocLayout(parsed.proposal_id, parsed.versions);
 }
 
 /**

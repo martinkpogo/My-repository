@@ -20,6 +20,7 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { createGoogleDoc, getValidGoogleAccessToken, listAuthorizedGoogleAccounts } from "../../googleOAuth";
+import { restoreIdentityPlaceholders } from "../../ai/identityRedaction";
 
 export const GOOGLE_DOCS_TOOL_ID = "google_docs";
 export const GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID = "google_docs.create_and_verify";
@@ -63,6 +64,20 @@ function parseInput(input: unknown): GoogleDocsCreateAndVerifyInput | string {
     folder_id: (record.folder_id as string).trim(),
     account_identifier: (record.account_identifier as string).trim(),
   };
+}
+
+/**
+ * The content this operation actually writes to the Doc: the requested
+ * content with identity placeholders restored (the ONE shared restoration
+ * function). A Doc is a final internal, human-readable draft, so it shows the
+ * real names; the input the caller assembled -- and every stored/internal
+ * representation it came from -- keeps the protected
+ * `[ENIG_OPERATOR]`/`[ENIG_CONSULTANCY]` form. Applied once here, before the
+ * write and the read-back comparison, so creation and reconciliation compare
+ * against exactly the text the Doc holds.
+ */
+function docContent(parsed: GoogleDocsCreateAndVerifyInput): string {
+  return restoreIdentityPlaceholders(parsed.content);
 }
 
 /** Maps the existing createGoogleDoc stage result onto the five canonical outcome states -- honestly: a verification failure is never reported as "nothing happened". */
@@ -227,7 +242,7 @@ async function reconcileGoogleDocCreation(
       }
       const data: unknown = await readResponse.json();
       const text = extractGoogleDocText(data);
-      if (text !== null && text.includes(parsed.content)) {
+      if (text !== null && text.includes(docContent(parsed))) {
         return {
           outcome: {
             ...BASE,
@@ -262,7 +277,7 @@ async function reconcileGoogleDocCreation(
     const data: unknown = await response.json();
     const title = (data as { title?: unknown })?.title;
     const text = extractGoogleDocText(data);
-    if (typeof title === "string" && title === parsed.title && text !== null && text.includes(parsed.content)) {
+    if (typeof title === "string" && title === parsed.title && text !== null && text.includes(docContent(parsed))) {
       return {
         outcome: {
           ...BASE,
@@ -334,7 +349,7 @@ export const googleDocsToolOperation: ToolOperationDefinition = {
     const result = await createGoogleDoc(env, {
       type: "create_doc",
       title: parsed.title,
-      content: parsed.content,
+      content: docContent(parsed),
       folderId: parsed.folder_id,
       accountIdentifier: parsed.account_identifier,
     });

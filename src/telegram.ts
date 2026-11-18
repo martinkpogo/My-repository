@@ -241,8 +241,15 @@ async function attemptOf(res: Response, parseMode: TelegramSendAttempt["parseMod
  * providers in the protected `[ENIG_CONSULTANCY]`/`[ENIG_OPERATOR]` form,
  * and the real names are restored here, on the way to the operator's own
  * chat -- never earlier, so nothing that is still a record or a provider
- * payload ever carries them. Restoration only rewrites those exact tokens;
- * it changes nothing in an ordinary message.
+ * payload ever carries them.
+ *
+ * Every Telegram send is routed through here, so Workspace and Operations
+ * messages alike are covered: whichever stream an AI-authored message is
+ * written to, the operator reads it with the real names. Restoration only
+ * rewrites those exact tokens, so an ordinary message (no placeholders) is
+ * byte-identical to what the caller passed, and no stream's behaviour
+ * changes. `editMessageText` restores at the same boundary, so a live
+ * progress message reads the same way after it updates.
  */
 async function sendMessageCore(
   env: Env,
