@@ -355,8 +355,17 @@ test("smoke folder selection records the pending selection and stages only the e
   const state = smokeState(workId);
   const { calls, telegram } = installFake(t, () => json({}));
 
-  const opaqueId = await stageOption(env, workId, { kind: "folder", smoke: true, accountIdentifier: ACCOUNT, folderId: FOLDER_ID, folderName: FOLDER_NAME });
-  const next = await handleGoogleFolderSelection(env, state, opaqueId);
+  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
+  // callback carries the list's opaque id plus the picked folder's POSITION,
+  // so the handler resolves the pick from the list rather than from a
+  // per-folder option.
+  const listOpaqueId = await stageOption(env, workId, {
+    kind: "folderlist",
+    smoke: true,
+    accountIdentifier: ACCOUNT,
+    folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
+  });
+  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`);
 
   // The discriminator is now ALSO in Work state, bound to this target.
   assert.deepEqual(
