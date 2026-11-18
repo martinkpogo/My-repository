@@ -34,6 +34,15 @@ export interface MarketingWorkState {
   clarificationCount?: number;
   /** Martin tapped "✋ That's enough" or typed "enough" -- the Hat must not ask another question. Reset on redo/feedback. */
   enoughSaid?: boolean;
+  /**
+   * Every question Martin has already answered on this Work, in order, as
+   * "Q: <question> A: <answer>" -- saved with the question that produced it,
+   * not as a bare "Additional detail:" line. The Hat is told never to ask
+   * again what an earlier entry already covers, and the independent Checker
+   * is handed the same pairs so it can judge whether the draft uses them and
+   * whether it contradicts any of them. Reset on redo/feedback.
+   */
+  qaPairs?: string[];
 }
 
 /** The Marketing slice of a Work, created on first write. Reads use `state.marketing?.field` and never create it. */

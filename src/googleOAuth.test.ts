@@ -6,7 +6,6 @@ import {
   cleanupDefaultGoogleAccount,
   codeChallengeFromVerifier,
   columnLetter,
-  consumeOpaqueOption,
   createGoogleDoc,
   createGoogleSheet,
   generateCodeVerifier,
@@ -34,6 +33,7 @@ import {
   saveOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
+  peekOpaqueOption,
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import type { WorkState } from "./types";
@@ -301,14 +301,26 @@ test("Folder picker queries drive folders using selected account and uses opaque
     assert.strictEqual(driveQueryCalled, true);
     assert.ok(sentButtons.length >= 2);
 
-    // Verify callback data contains ONLY opaque folder option IDs (no raw folder ID)
+    // Verify callback data carries the staged list's opaque id plus a POSITION
+    // into it -- never the raw folder id (Martin, 2026-11-18: the list is
+    // staged as ONE option, not one per folder).
     const folderCallback = sentButtons[0][0].callback_data;
-    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+$/);
+    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+:\d+$/);
     assert.strictEqual(folderCallback.includes("folder-id-abc"), false);
 
-    // Verify option is consumed / single-use
-    const replayOption = await consumeOpaqueOption(fakeEnv, workId, opaqueOptionId);
-    assert.strictEqual(replayOption, null);
+    // The callback carries the staged list's own opaque id (the account
+    // option was consumed by handleGoogleAccountSelection, so peek the LIST
+    // id, not the account id). The list survives paging: peek, not consume.
+    const listOpaqueId = folderCallback.split(":")[2]!;
+    const replayOption = await peekOpaqueOption(fakeEnv, workId, listOpaqueId);
+    assert.ok(replayOption, "the folder list survives paging (peek, not consume)");
+    assert.ok(Array.isArray(replayOption.folders) && replayOption.folders.length === 2);
+    // Tapping a folder consumes the list: a replayed button cannot re-pick. The
+    // handler receives the value segment (index.ts splits callback_data as
+    // action:workId:value), i.e. "<listOpaqueId>:<position>".
+    await handleGoogleFolderSelection(fakeEnv, state, folderCallback.split(":").slice(2).join(":"));
+    const gone = await peekOpaqueOption(fakeEnv, workId, listOpaqueId);
+    assert.strictEqual(gone, null, "the list is consumed once a folder is picked");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -319,13 +331,17 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   const originalFetch = globalThis.fetch;
 
   const workId = "work-proposal-200";
-  const opaqueFolderId = await saveOpaqueOption(fakeEnv, workId, {
-    kind: "folder",
+  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
+  // callback carries the list's opaque id plus the picked folder's POSITION,
+  // so the handler resolves the pick from the list rather than from a
+  // per-folder option.
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
     accountIdentifier: "selected@enig.com",
     title: "Brand Guidelines",
     content: "Guidelines for ENIG brand assets.",
-    folderId: "folder-999",
-    folderName: "Brand Assets",
+    folders: [{ id: "folder-999", name: "Brand Assets" }],
   });
 
   const state: WorkState = {
@@ -350,7 +366,9 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   }) as typeof fetch;
 
   try {
-    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, opaqueFolderId);
+    // index.ts splits callback_data as action:workId:value, so the handler
+    // receives "<listOpaqueId>:0" -- the list id followed by the position.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
 
     assert.ok(updatedState.pendingGoogleAction);
     assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");

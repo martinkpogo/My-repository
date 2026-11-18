@@ -166,7 +166,7 @@ export const MARKETING_DECISION_FORMAT = [
   "Decide in this order:",
   '1. If this request is WHOLLY another Hat\'s work -- not this Hat\'s own part plus a later step -- return {"action":"route","target_hat":"<name from the Hats this Hat usually hands over to>","reason":"..."}. Never do the other Hat\'s work yourself, and never hand on the whole request just because a later step belongs to another Hat: do this Hat\'s own part now and offer the later step after Martin approves.',
   '2. If the request needs something another Hat owns that does not exist yet, return {"action":"prerequisite","prerequisite_hat":"<that Hat>","reason":"<what is missing and why this Hat needs it>"}. The runtime then asks Martin whether to do that first, carry on with stated assumptions, or hand the whole request over -- never decide for him.',
-  '3. Otherwise, before drafting, apply the Universal Role Contract\'s understand_before_producing rule above to this task. If it calls for a question whose answer is not already in the task text, or you cannot determine ownership, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} -- one question only, with two to four short, concrete likely answers Martin can tap (he may always type a different answer instead). Answers he has already given appear in the task text as "Additional detail:" lines: never ask again what they answer. If the task text says Martin said that\'s enough questions, do not ask: draft, stating each remaining assumption plainly.',
+  '3. Otherwise, before drafting, apply the Universal Role Contract\'s understand_before_producing rule above to this task. If it calls for a question whose answer is not already in the task text, or you cannot determine ownership, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} -- one question only, with two to four short, concrete likely answers Martin can tap (he may always type a different answer instead). Answers he has already given appear in the task text as "Q: ... A: ..." lines AND in the QUESTIONS MARTIN HAS ALREADY ANSWERED block: never ask again what they answer, and never ask a question whose answer they already cover. If the task text says Martin said that\'s enough questions, do not ask: draft, stating each remaining assumption plainly.',
   '4. Otherwise return {"action":"draft","draft":"...", "involves_spend": true|false, "next_step":{"to_hat":"<one of the Hats this Hat usually hands over to>","for_what":"<the next part>"}}, following the contract\'s decide_dont_list and evidence_over_generalities rules. Set next_step only when this Hat\'s output is what a later Hat usually needs; omit it when this Hat\'s output is the end of what Martin asked for. The next step is only suggested to Martin after he approves -- never do it yourself. When a WEB RESEARCH block is present, rest claims about markets, buyers or what works on its findings, each with its source link exactly as given; if none of the findings is relevant to the task, say so plainly in one line rather than presenting general advice as established. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend -- spend always requires explicit human approval regardless of whether it is tactical or strategic.',
   "The Consultancy Profile describes what ENIG sells. A request to market ENIG promotes those services; it does not ask you to deliver them. Never treat a service named in the Consultancy Profile (for example brand strategy or visual identity) as work you must do now, and never confuse marketing those services with producing them.",
   "Never guess past missing information or invent authority you don't have.",
@@ -174,6 +174,13 @@ export const MARKETING_DECISION_FORMAT = [
   // its inbound leads" -- a client result that exists nowhere. The rule is the
   // contract's evidence rule; this states how it applies to a draft.
   "Never invent evidence (the contract's evidence rule): no client results, case studies, testimonials, quotes, statistics, rates or market figures that are not in the task, the records, the Consultancy Profile or a cited WEB RESEARCH finding. Where an example would help, write a clearly marked placeholder such as [add a real client result] instead. A target Martin can change (e.g. a number of calls to aim for) may be proposed only when labelled as a proposed target.",
+  // Martin, 2026-11-18: the draft must be BUILT FROM what Martin has actually
+  // answered. Every line of the QUESTIONS MARTIN HAS ALREADY ANSWERED block is
+  // a settled input to this draft -- use it, and say plainly what still has to
+  // be assumed because he has not answered.
+  "Build the draft from the QUESTIONS MARTIN HAS ALREADY ANSWERED block. Every answer there is a settled input: work it in, and never re-ask it or act as though it were still open.",
+  "Never recommend anything that assumes what Martin does not have. That means no past clients, no testimonials, no case studies, no references to work ENIG has done for anyone, and no 'social proof' of any kind unless the task, the records or a cited WEB RESEARCH finding supplies it -- if he has no clients yet, the draft may not suggest leaning on testimonials from past clients. It also means no sum of money, no channel and no period of time he has ruled out or never given: if he said no paid ads, the draft does not recommend paid ads, and a channel he has not mentioned is proposed only as a labelled option, never as the plan.",
+  "Where the draft needs a number, a channel or a period of time Martin has not supplied, propose it explicitly as a proposed target or option and say it is his to change -- never present an unmarked guess as settled.",
   "Refer to Martin by name, never as \"the operator\" or \"the user\".",
 ].join("\n");
 
@@ -261,7 +268,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   // route or clarify; only when it would draft does the drafting pass run,
   // with research (and any deep-research proposal). Same task, same data.
   const promptParts = buildHatPromptParts(hat, universalRoleContract);
-  const situation = state.marketing?.taskText ?? "";
+  const situation = [state.marketing?.taskText ?? "", qaPairsBlock(state)].filter(Boolean).join("\n\n");
   let decision = await withWorkspaceTypingIndicator(env, () =>
     generate<HatActionDecision>(env, {
       taskId: "marketing.hat_action_decision",
@@ -620,6 +627,9 @@ export async function handleMarketingFeedback(env: Env, state: WorkState, text: 
   marketingOf(state).pendingClarification = undefined;
   marketingOf(state).pendingPrerequisite = undefined;
   marketingOf(state).pendingNextStep = undefined;
+  // A redo starts the questions over: the old Q/A pairs were inputs to the
+  // draft Martin rejected, and re-asking them on the redo would be noise.
+  marketingOf(state).qaPairs = undefined;
   return dispatchMarketingHat(env, state);
 }
 
@@ -645,8 +655,17 @@ export async function handleMarketingClarification(env: Env, state: WorkState, t
     state.pendingActionSummary = undefined;
     return dispatchMarketingHat(env, state);
   }
+  // A typed reply to a pending clarifying question is the answer to THAT
+  // question: record it with the question, exactly like a tapped answer.
+  if (state.marketing?.pendingClarification) {
+    const question = state.marketing.pendingClarification.question;
+    recordQaPair(state, question, text);
+    marketingOf(state).pendingClarification = undefined;
+    marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nQ: ${question}\nA: ${text}`;
+    if (isMarketingHat(state.hat)) return dispatchMarketingHat(env, state);
+    return handleMarketingIntake(env, state, `${state.marketing?.taskText ?? ""}\n\nQ: ${question}\nA: ${text}`);
+  }
   const augmented = `${state.marketing?.taskText ?? ""}\n\nAdditional detail: ${text}`;
-  marketingOf(state).pendingClarification = undefined;
   if (isMarketingHat(state.hat)) {
     marketingOf(state).taskText = augmented;
     return dispatchMarketingHat(env, state);
@@ -703,8 +722,9 @@ export async function handleClarifyAnswer(env: Env, state: WorkState, _approved:
     await sendWorkspaceHatMessage(env, state, "That answer is no longer current -- nothing was recorded.");
     return state;
   }
+  recordQaPair(state, pending.question, answer);
   marketingOf(state).pendingClarification = undefined;
-  marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nAdditional detail: ${answer}`;
+  marketingOf(state).taskText = `${state.marketing?.taskText ?? ""}\n\nQ: ${pending.question}\nA: ${answer}`;
   return dispatchMarketingHat(env, state);
 }
 
@@ -716,6 +736,17 @@ export async function handleClarifyAnswer(env: Env, state: WorkState, _approved:
 // home) to avoid a circular import, since this function's approval path
 // re-enters dispatchMarketingHat, defined in this same file.
 export const MARKET_TRANSITION_CALLBACK_PREFIX = "markettransition" as const;
+
+/**
+ * The block of every question Martin has already answered, for the prompt and
+ * the independent Checker. Each line is "Q: <question> A: <answer>".
+ */
+export function qaPairsBlock(state: WorkState): string {
+  const pairs = state.marketing?.qaPairs ?? [];
+  return pairs.length
+    ? `=== QUESTIONS MARTIN HAS ALREADY ANSWERED (never ask again about what these cover; build the draft from them) ===\n${pairs.join("\n")}`
+    : "";
+}
 
 /** Martin's tap on a suggested answer to a Hat's clarifying question (one at a time). */
 export const MARKET_CLARIFY_CALLBACK = "marketclarify" as const;
@@ -808,6 +839,20 @@ export async function handleAssessmentRedo(env: Env, state: WorkState): Promise<
  * on marketing_feedback; approving closes the originating Handoff (if
  * any) and marks the work item complete.
  */
+/**
+ * Records one of Martin's answers with the question it answered, so a later
+ * run of the same Hat can see what has already been settled and the
+ * independent Checker can judge the draft against it. Stored as the literal
+ * "Q: <question> A: <answer>" line, which is also what reaches the prompt.
+ */
+export function recordQaPair(state: WorkState, question: string, answer: string): void {
+  const q = question.trim();
+  const a = answer.trim();
+  if (!q || !a) return;
+  const slice = marketingOf(state);
+  slice.qaPairs = [...(slice.qaPairs ?? []), `Q: ${q} A: ${a}`];
+}
+
 /**
  * The recorded fact of Martin's approval, as Result evidence (2026-11-14).
  * Live: the independent Checker failed a Marketing Work on completion
@@ -1245,6 +1290,7 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       advisoryAssessment: {
         output: (state) => state.marketing?.draft,
         request: (state) => state.marketing?.taskText,
+        answeredQuestions: (state) => state.marketing?.qaPairs,
         awaitingStage: "awaiting_marketing_draft_approval",
         redoCallbackPrefix: "marketredo",
         criteria: [

@@ -183,3 +183,11 @@ test("the Checker is told who exists at ENIG -- Martin and every registered Hat 
   for (const hat of ALL_HATS) assert.ok(parts.context.includes(hat.name), hat.name);
   assert.ok(parts.context.includes("Content Strategist") && parts.context.includes("Digital Marketer"));
 });
+
+test("the Checker's prompt carries Martin's answers and asks whether the draft uses or contradicts them (2026-11-18)", async () => {
+  const { buildAdvisoryPromptParts } = await import("./advisoryAssessment");
+  const parts = buildAdvisoryPromptParts({ output: "x", criteria: ["c"], request: "r", answeredQuestions: ["Q: Paid ads? A: No paid ads"] } as any, "checker-1");
+  assert.match(parts.context, /QUESTIONS MARTIN HAS ALREADY ANSWERED/);
+  assert.match(parts.context, /Q: Paid ads\? A: No paid ads/);
+  assert.match(parts.context, /USES what Martin has already answered/);
+});

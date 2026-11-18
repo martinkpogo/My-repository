@@ -40,6 +40,13 @@ export interface AdvisoryAssessmentInput {
   criteria: readonly string[];
   unit?: string;
   hat?: string;
+  /**
+   * Every question Martin has already answered, as "Q: ... A: ..." lines.
+   * The Checker is handed these so it can judge whether the draft actually
+   * uses what he answered and whether it contradicts any of them -- the
+   * second opinion that caught a draft ignoring his "no paid ads" answer.
+   */
+  answeredQuestions?: string[];
 }
 
 const RELEVANCE = ["yes", "partly", "no"] as const;
@@ -77,8 +84,12 @@ export function buildAdvisoryPromptParts(input: AdvisoryAssessmentInput, checker
     context: [
       ENIG_ROLES_FACT(),
       `REQUEST: ${input.request?.trim() || "(not recorded)"}`,
+      input.answeredQuestions?.length
+        ? `QUESTIONS MARTIN HAS ALREADY ANSWERED (each is a settled input to this draft):\n${input.answeredQuestions.join("\n")}`
+        : "QUESTIONS MARTIN HAS ALREADY ANSWERED: none recorded.",
       `CRITERIA:\n${input.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
       ADVISORY_RESPONSE_FORMAT,
+      "CHECKER-ONLY CHECK (Martin, 2026-11-18): in your assessment and concerns, say plainly whether the draft actually USES what Martin has already answered, and whether it CONTRADICTS any of it -- for example recommending a channel or a budget he ruled out, or leaning on testimonials or case studies when he has no past clients. This is a content judgement, not a new approval criterion: it feeds your recommended_next_action and your note, never Martin's decision.",
     ].join("\n\n"),
     situation: `DRAFT (${input.unit ?? "unassigned"}/${input.hat ?? "unassigned"}):\n\n${input.output}`,
   };
