@@ -167,6 +167,13 @@ export interface ActionDefinition<A extends string> {
      * entry) sends the Checker's note as Martin's redo note, only on his tap.
      */
     redoCallbackPrefix?: string;
+    /**
+     * The questions Martin has already answered on this Work, as "Q: … A: …"
+     * lines (2026-11-18): the Checker judges whether the draft uses them and
+     * whether it contradicts any. Declared by the Unit that records them, so
+     * the shared session never reads a Unit's own state.
+     */
+    answeredQuestions?: (state: WorkState) => readonly string[] | undefined;
   };
   /**
    * Exact Skills the Worker must follow while performing this Action.

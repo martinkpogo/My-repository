@@ -6,7 +6,6 @@ import {
   cleanupDefaultGoogleAccount,
   codeChallengeFromVerifier,
   columnLetter,
-  consumeOpaqueOption,
   createGoogleDoc,
   createGoogleSheet,
   generateCodeVerifier,

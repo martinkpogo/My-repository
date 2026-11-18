@@ -320,16 +320,20 @@ test("KV and Turso both failing: the original KV error is rethrown (fail-closed,
   await assert.rejects(() => kvPut(env, "sessions_index", "[]"), /kv put boom/);
 });
 
-test("successful eligible KV write clears its own stale shadow row (sweep can never resurrect it)", async () => {
+test("successful eligible KV write makes no Turso call; an older stale row is superseded on read and swept, never resurrected (2026-11-18)", async () => {
   reset();
   const kv = makeKv();
   const turso = makeTurso();
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
-  seedRow(turso, "sessions_index", "[]");
+  seedRow(turso, "sessions_index", JSON.stringify({ __enig_kv: 1, seq: 1, val: "[]" }));
+  const before = turso.calls.length;
   await kvPut(env, "sessions_index", "[fresh]");
+  assert.equal(turso.calls.length, before, "a write Cloudflare accepted spends no Turso subrequest");
   assert.equal(unwrap(kv.store.get("sessions_index")), "[fresh]");
-  assert.equal(turso.rows.has("sessions_index"), false, "the shadow row must be deleted after a successful KV write");
+  assert.equal(await kvGet(env, "sessions_index"), "[fresh]", "the newer KV value wins over the stale row");
+  await sweepKvFallback(env);
+  assert.equal(unwrap(kv.store.get("sessions_index")), "[fresh]", "the sweep never restores the older row over it");
 });
 
 // ---------------------------------------------------------------------------

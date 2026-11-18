@@ -307,11 +307,12 @@ test("smoke account selection stages smoke-flagged folder options with no creati
   const opaqueId = await stageOption(env, workId, { kind: "account", smoke: true, accountIdentifier: ACCOUNT });
   const next = await handleGoogleAccountSelection(env, state, opaqueId);
 
-  // Folder options carry the discriminator forward and drop all creation payload.
-  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folder");
+  // The smoke-flagged folder list is ONE staged option (2026-11-18: one write,
+  // not one per folder) and drops all creation payload.
+  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folderlist");
   assert.equal(folderOptions.length, 1);
   assert.equal(folderOptions[0].smoke, true);
-  assert.equal(folderOptions[0].folderId, FOLDER_ID);
+  assert.equal(folderOptions[0].folders?.[0]?.id, FOLDER_ID, "the list carries the Drive folder");
   assert.equal(folderOptions[0].title, undefined);
   assert.equal(folderOptions[0].content, undefined);
   assert.equal(folderOptions[0].docType, undefined);
@@ -884,4 +885,25 @@ test("an immediately delivered picker records the successful initiation exactly 
   assert.equal(activities[0].type, "Activity");
   assert.equal(activities[0].outcome, "Active");
   assert.match(activities[0].activity ?? "", /authorized-account selection presented/);
+});
+
+test("50 Drive folders cost ONE storage write, and the first page shows 10 plus More folders (2026-11-18: one write per folder hit the subrequest limit)", async (t: any) => {
+  const workId = "8a1d4c2e-0000-4000-8000-000000000050";
+  const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
+  const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
+  const files = Array.from({ length: 50 }, (_, i) => ({ id: `folder-${i}`, name: `Folder ${i}` }));
+  const { telegram } = installFake(t, (call) => (call.url.includes("/drive/v3/files") ? json({ files }) : json({})));
+  const opaqueId = await stageOption(env, workId, { kind: "account", accountIdentifier: ACCOUNT, title: "Plan", content: "Body" });
+  const store: Map<string, string> = (env as any).__store;
+  const originalSet = store.set.bind(store);
+  let optionWrites = 0;
+  store.set = (k: string, v: string) => {
+    if (k.startsWith(`google_option:${workId}:`)) optionWrites++;
+    return originalSet(k, v);
+  };
+  await handleGoogleAccountSelection(env, state, opaqueId);
+  assert.equal(optionWrites, 1, "the whole folder list is one staged option");
+  const folderButtons = callbackDatas(telegram).filter((d) => d.startsWith(`googlefolder:${workId}:`));
+  assert.ok(folderButtons.length <= 11, `at most 10 folders plus More folders on the first page, got ${folderButtons.length}`);
+  assert.ok(telegramTexts(telegram).includes("More folders") || JSON.stringify(telegram).includes("More folders"), "a More folders button is offered");
 });

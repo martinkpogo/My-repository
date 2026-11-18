@@ -1815,9 +1815,12 @@ export async function handleGoogleAccountSelection(
     : delivery
       ? { kind: "folderlist", delivery: true, docType, accountIdentifier, title, content, rows, folders: folderList }
       : { kind: "folderlist", docType, accountIdentifier, title, content, rows, folders: folderList };
-  let listOpaqueId: string;
+  // The id is chosen first and stamped onto the staged list, so a page
+  // re-render can rebuild its own buttons -- in ONE write (staging and then
+  // re-writing the list to add its id was a second write for nothing).
+  const listOpaqueId = crypto.randomUUID().slice(0, 8);
   try {
-    listOpaqueId = await saveOpaqueOption(env, state.workId, { ...baseOption, _listOpaqueId: "" });
+    await kvPut(env, `google_option:${state.workId}:${listOpaqueId}`, JSON.stringify({ ...baseOption, _listOpaqueId: listOpaqueId }), { expirationTtl: 600 });
   } catch (err) {
     console.error(`Google folder picker: option staging failed for work ${state.workId} -- no picker was sent`, err);
     await sendWorkspaceHatMessage(
@@ -1827,11 +1830,9 @@ export async function handleGoogleAccountSelection(
     );
     return state;
   }
-  // The id is stamped onto the staged object so a page re-render can rebuild
-  // its own buttons without the caller passing it; renderFolderPage (below)
-  // builds every page from the same staged list, so paging costs no extra
-  // writes -- the list itself is consumed only when a folder is actually picked.
-  await kvPut(env, `google_option:${state.workId}:${listOpaqueId}`, JSON.stringify({ ...baseOption, _listOpaqueId: listOpaqueId }), { expirationTtl: 600 });
+  // renderFolderPage (below) builds every page from the same staged list, so
+  // paging costs no extra writes -- the list itself is consumed only when a
+  // folder is actually picked.
   return renderFolderPage(env, state, target, { ...baseOption, _listOpaqueId: listOpaqueId }, 0);
 }
 

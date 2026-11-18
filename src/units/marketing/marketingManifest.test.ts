@@ -871,3 +871,38 @@ test("the draft approval card carries the shared Approve and save to Google Driv
   assert.ok(buttons.some((b) => b.text === "✅ Approve and save to Google Drive" && b.callback_data === `marketdraft:${out.workId}:approve~save`));
   void sentTexts;
 });
+
+test("a re-run of the Hat sees every earlier question with its answer, so it never re-asks them (2026-11-18: it asked the goal four times)", async (t) => {
+  clarifyFetchMock(t);
+  const systems: string[] = [];
+  const users: string[] = [];
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async (_m: any, opts: any) => {
+        systems.push(String(opts?.messages?.[0]?.content ?? ""));
+        users.push(String(opts?.messages?.at(-1)?.content ?? ""));
+        return { response: JSON.stringify({ action: "clarify", reason: "Which channels?", suggestedAnswers: ["LinkedIn", "Email"] }) };
+      },
+    } as any,
+  });
+  const state = fakeWorkState({
+    marketing: { taskText: "Get my first leads.", qaPairs: ["Q: What is the goal? A: 10,000 cedis a month", "Q: Paid ads? A: No paid ads"] },
+  });
+  await dispatchMarketingHat(env, state);
+  const prompt = systems[0] + "\n" + users[0];
+  // The outbound identity filter renders "Martin" as "the operator" before any
+  // provider sees the prompt, so match the block by its stable part.
+  assert.match(prompt, /HAS ALREADY ANSWERED \(never ask again/);
+  assert.match(prompt, /Q: What is the goal\? A: 10,000 cedis a month/);
+  assert.match(prompt, /Q: Paid ads\? A: No paid ads/);
+});
+
+test("the Checker is declared to receive the answered questions (the shared session reads them through the declaration, never Marketing's own state)", async () => {
+  const { marketingManifest } = await import("./marketingManifest");
+  const action = marketingManifest.hats["Marketing Strategist"].actions.find((a) => a.advisoryAssessment);
+  const pairs = ["Q: Goal? A: 10,000 cedis a month"];
+  assert.deepStrictEqual(action?.advisoryAssessment?.answeredQuestions?.(fakeWorkState({ marketing: { qaPairs: pairs } })), pairs);
+});

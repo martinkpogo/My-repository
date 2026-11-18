@@ -1290,6 +1290,7 @@ function buildMarketingHatManifest(def: MarketingHatDefinition): HatManifest<Mar
       advisoryAssessment: {
         output: (state) => state.marketing?.draft,
         request: (state) => state.marketing?.taskText,
+        answeredQuestions: (state) => state.marketing?.qaPairs,
         awaitingStage: "awaiting_marketing_draft_approval",
         redoCallbackPrefix: "marketredo",
         criteria: [

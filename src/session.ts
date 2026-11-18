@@ -1189,7 +1189,7 @@ export class WorkSession extends DurableObject<Env> {
           criteria: declaration.criteria,
           unit: state.unit,
           hat: state.hat,
-          answeredQuestions: state.marketing?.qaPairs,
+          answeredQuestions: declaration.answeredQuestions?.(state)?.slice(),
         },
         advisoryAssessmentDeps(this.env),
       );
