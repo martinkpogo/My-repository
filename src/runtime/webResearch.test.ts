@@ -493,3 +493,26 @@ test("ask first: the rule is read live from the Universal Role Contract's unders
   assert.strictEqual(understandBeforeProducingSection("universal_role_contract:\n  logging: x"), undefined, "no section: research is never held");
   assert.doesNotMatch(ASK_FIRST_INSTRUCTIONS, /budget|timeframe|capacity|format and length/i, "what to ask lives in Notion, not here");
 });
+
+test("a call marked noWebResearch (a Hat's deciding pass, 2026-11-18) never decides or researches; the drafting pass still does", async (t) => {
+  mockTelegram(t);
+  let decided = 0;
+  const decide = async () => (decided++, "How do SMEs grow an email list with a free consultation offer?");
+  await withLiveStatus(fakeEnv(), target, () => augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision", { noWebResearch: true } as any), { decide, research }), () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(decided, 0, "the deciding pass spends no research check and no search");
+  await withLiveStatus(fakeEnv(), target, () => augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision"), { decide, research }), () => "succeeded", undefined, { access: systemContext() });
+  assert.strictEqual(decided, 1, "the drafting pass researches as before");
+});
+
+test("ask first: the status line hands back to the step's own label, so 'No web search yet' is never left as the running line", async (t) => {
+  const calls = mockTelegram(t);
+  const { ASK_FIRST_STEP } = await import("./webResearch");
+  const { AI_TASK_LIVE_LABELS } = await import("../ai/liveLabels");
+  await withLiveStatus(fakeEnv(), target, async () => {
+    await augmentTaskWithWebResearch(fakeEnv(), task("marketing.hat_action_decision"), { decide: async () => ({ askFirst: true as const }), research });
+  }, () => "succeeded", undefined, { access: systemContext() });
+  const shown = calls.map((c) => String(c.body.text ?? "")).filter((x) => x.includes("No web search yet")).at(-1) ?? "";
+  const label = AI_TASK_LIVE_LABELS["marketing.hat_action_decision"]!;
+  assert.match(shown, new RegExp(`✓ ${ASK_FIRST_STEP.slice(0, 18)}`), "the note is shown as done");
+  assert.ok(shown.includes(`⏳ ${label}`), "the running line is the step's own label, not the note");
+});

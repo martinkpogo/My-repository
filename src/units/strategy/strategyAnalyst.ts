@@ -32,7 +32,7 @@ import {
 import { serializeStrategyBoundaryRepresentation, buildStrategyBoundaryRepresentation, type StrategyProposal } from "../../handoffContracts/strategyBoundary";
 import { parseCommercialValueEvidenceBlock } from "../../handoffContracts/commercialValueEvidence";
 import { kvPut } from "./../../kvStore";
-import { captureApprovedOutput } from "../../outputDelivery";
+import { approveAndSaveRow, captureApprovedOutput } from "../../outputDelivery";
 
 import { strategyOf } from "./strategyState";
 /**
@@ -2693,6 +2693,7 @@ function strategyProposalButtons(workId: string, proposalVersion: number): Inlin
       { text: "🔁 Refine", callback_data: `sprop:${workId}:${proposalVersion}.r` },
       { text: "❌ Reject", callback_data: `sprop:${workId}:${proposalVersion}.j` },
     ],
+    approveAndSaveRow(`sprop:${workId}:${proposalVersion}.a`),
   ];
 }
 

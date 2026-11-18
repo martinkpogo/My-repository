@@ -27,6 +27,7 @@
  * operation exists in the Google tool (none does today). Sales proposals move
  * onto this same shared feature in a later PR with no behaviour change.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Env, WorkState } from "./types";
 import type { InlineButton } from "./telegram";
 import { HatMessageTarget, sendWorkspaceHatMessage } from "./telegram";
@@ -115,6 +116,12 @@ export async function captureApprovedOutput(
     title: approvedOutput.title?.trim() || "Untitled",
     capturedAt: new Date().toISOString(),
   };
+  // "Approve and save to Google Drive": the session opens the picker right
+  // after this approval, so no separate offer is shown.
+  if (SAVE_ON_APPROVAL.getStore() === true) {
+    state.outputDelivery.saveRequested = true;
+    return state;
+  }
   // Show the offer. (Until 2026-11-18 the output was captured but the offer
   // was never sent, so Martin approved a draft and saw no save button.) The
   // offer is advisory: a failed send never undoes or blocks the approval.
@@ -130,6 +137,28 @@ export async function captureApprovedOutput(
  * keeps the text as-is. This message is advisory: it never blocks, delays or
  * invalidates the approval that already happened.
  */
+/**
+ * "✅ Approve and save to Google Drive" (Martin, 2026-11-18): one shared
+ * button a Hat adds to its own approval card beside its Approve. Its callback
+ * is that Hat's own approve callback plus SAVE_ON_APPROVAL_SUFFIX: the session
+ * strips the suffix, runs the Hat's normal approval unchanged, and -- only if
+ * that approval captured an output -- opens the same account/folder picker.
+ * Nothing is saved before the approval, and the picker's final tap still
+ * decides the Doc.
+ */
+export const SAVE_ON_APPROVAL_SUFFIX = "~save";
+
+export function approveAndSaveRow(approveCallbackData: string): InlineButton[] {
+  return [{ text: "✅ Approve and save to Google Drive", callback_data: `${approveCallbackData}${SAVE_ON_APPROVAL_SUFFIX}` }];
+}
+
+const SAVE_ON_APPROVAL = new AsyncLocalStorage<boolean>();
+
+/** Runs a Hat's approval with "save to Google Drive" requested (see approveAndSaveRow). */
+export function runWithSaveOnApproval<T>(fn: () => Promise<T>): Promise<T> {
+  return SAVE_ON_APPROVAL.run(true, fn);
+}
+
 export function outputDeliveryOfferButtons(workId: string): InlineButton[][] {
   // "doc" is the only offered format today; "sheet" is added here only once a
   // registered Sheets-create operation exists.

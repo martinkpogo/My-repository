@@ -8,6 +8,7 @@ import { runResearchSkill } from "./research/researchRuntime";
 import { summarizeResearchSynthesis } from "./actionResearch";
 import { resolveRuntimeSkill } from "./actionSkills";
 import { currentRun, reportLiveStep, resolveLiveStep } from "./liveStatus";
+import { AI_TASK_LIVE_LABELS } from "../ai/liveLabels";
 import { kvGet, kvPut } from "../kvStore";
 import { hashContent } from "../contentHash";
 import { RUN_EXTENSION, DAILY_EXTENSION, readDaily, writeDaily, runGaps, noteResearchInterrupted, researchPausedInRun, noteDeepResearchProposal, type DeepResearchProposal } from "./webLookupAllowance";
@@ -400,6 +401,7 @@ export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: W
   const run = currentRun();
   if (!run?.access) return task; // research needs the run's own Access context
   if (run.noWebResearch) return task; // ENIG's own turn: the Hat it hands work to researches (Martin, 2026-11-17)
+  if (task.noWebResearch) return task; // a Hat's deciding pass: research runs on the pass that drafts (Martin, 2026-11-18)
   const access = run.access;
   let pending = runResearch.get(run);
   if (!pending) {
@@ -412,6 +414,11 @@ export async function augmentTaskWithWebResearch(env: Env, task: AiTask, deps: W
         if (!ASK_FIRST_TASKS.has(task.taskId)) return null;
         reportLiveStep(ASK_FIRST_STEP);
         resolveLiveStep(ASK_FIRST_STEP, ASK_FIRST_STEP);
+        // Hand the status line back to what the step is doing now, so "No web
+        // search yet" is shown as done, never left as the running line (it
+        // stayed on screen as ⏳ for the rest of the step, 2026-11-17).
+        const resumes = AI_TASK_LIVE_LABELS[task.taskId];
+        if (resumes) reportLiveStep(resumes);
         return ASK_FIRST_BLOCK;
       }
       const decided = typeof decision === "string" ? decision : decision?.question;

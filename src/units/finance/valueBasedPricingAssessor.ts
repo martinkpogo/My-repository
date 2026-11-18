@@ -4,7 +4,7 @@ import { getPage, plainText, richText, richTextLong, select, title } from "../..
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator } from "../../telegram";
-import { captureApprovedOutput } from "../../outputDelivery";
+import { approveAndSaveRow, captureApprovedOutput } from "../../outputDelivery";
 import { advanceWorkStatus, continueWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { setActiveWorkId } from "../../sessionRouting";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
@@ -754,8 +754,9 @@ async function judgeQuote(
           { text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` },
           { text: "🔁 Redo", callback_data: `quote:${state.workId}:redo` },
         ],
+        approveAndSaveRow(`quote:${state.workId}:approve`),
       ]
-    : [[{ text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` }]];
+    : [[{ text: "✅ Approve quote", callback_data: `quote:${state.workId}:approve` }], approveAndSaveRow(`quote:${state.workId}:approve`)];
   await finishWorkStatus(env, state, "✅ Quote ready below -- awaiting your approval.", "succeeded");
   await sendWorkspaceHatMessage(env, { ...state, hat: "Value-Based Pricing Assessor" }, quoteMessage, quoteButtons);
   state.pendingActionSummary = {

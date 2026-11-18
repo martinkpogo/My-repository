@@ -265,8 +265,8 @@ test("the manifest entryHandler captures the request text the generic path never
   const result = await hat.entryHandler(h.env, state, "handle_request", "Build the editorial calendar.", NO_ACTION_SKILLS);
 
   assert.strictEqual(result.marketing?.taskText, "Build the editorial calendar.", "the generic entry must capture the task text the compatibility path captures");
-  assert.strictEqual(h.aiCalls.length, 1, "exactly the Hat run's decision may run");
-  assert.ok(h.aiCalls[0].user.includes("Build the editorial calendar."), "the Hat decision must see the captured task text, not an empty situation");
+  assert.strictEqual(h.aiCalls.length, 2, "exactly the Hat's deciding and drafting passes may run (decide first, research after -- 2026-11-18)");
+  assert.ok(h.aiCalls.every((c) => c.user.includes("Build the editorial calendar.")), "both Hat passes must see the captured task text, not an empty situation");
   assert.strictEqual(result.stage, "awaiting_marketing_draft_approval", "the same execution reaches the same approval gate as the compatibility path");
   assert.ok(h.sentMessages.some((m) => m.includes("Hat: Content Manager.")), "the Hat run must announce itself in the Workspace stream");
   assert.ok(h.sentMessages.some((m) => m.includes("Approve this?")), "the approval gate must be presented");

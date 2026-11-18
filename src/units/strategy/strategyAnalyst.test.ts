@@ -4199,12 +4199,14 @@ test("Discuss 1. The proposal offers Approve, Discuss, Refine and Reject, each b
   const buttons = log.sentButtons.at(-1)!.flat();
   assert.deepStrictEqual(
     buttons.map((b: any) => b.callback_data),
-    [`sprop:${state.workId}:1.a`, `sprop:${state.workId}:1.d`, `sprop:${state.workId}:1.r`, `sprop:${state.workId}:1.j`],
+    // Plus the shared "Approve and save to Google Drive" (2026-11-18): the same approval, then the save picker.
+    [`sprop:${state.workId}:1.a`, `sprop:${state.workId}:1.d`, `sprop:${state.workId}:1.r`, `sprop:${state.workId}:1.j`, `sprop:${state.workId}:1.a~save`],
   );
   // The production workId is a 36-character UUID.
   const uuidWork = `sprop:${"x".repeat(36)}:99.d`;
   assert.ok(new TextEncoder().encode(uuidWork).length <= 64);
-  assert.deepStrictEqual(state.pendingActionSummary!.buttons, log.sentButtons.at(-1), "the /sessions resend carries the same four buttons");
+  assert.ok(new TextEncoder().encode(`sprop:${"x".repeat(36)}:99.a~save`).length <= 64, "the Approve-and-save button fits too");
+  assert.deepStrictEqual(state.pendingActionSummary!.buttons, log.sentButtons.at(-1), "the /sessions resend carries the same buttons");
 });
 
 test("Discuss 2. Opening a discussion makes no AI call and no Notion write, leaves the approval exactly as staged, and claims the Workspace reply pointer", async (t) => {

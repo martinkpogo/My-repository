@@ -152,7 +152,8 @@ test("a single plausible candidate resolves to that registered Hat and dispatche
   assert.equal(result.marketing?.taskText, "Turn the content direction into this month's editorial calendar.", "the request text is captured on the Work");
   assert.ok(h.sentMessages.some((m) => m.includes("Hat: Content Manager.")), "the Content Manager Hat run must announce itself in the Workspace stream");
   assert.ok(h.sentMessages.some((m) => m.includes("Approve this?")), "the resolved Hat's draft approval gate must be presented");
-  assert.ok(h.aiCalls.length === 2, `Stage 1 plus the Hat run decision must be the only AI calls, got ${h.aiCalls.length}`);
+  // Stage 1, then the Hat's deciding pass and its drafting pass (decide first, research after -- 2026-11-18).
+  assert.ok(h.aiCalls.length === 3, `Stage 1 plus the Hat's deciding and drafting passes must be the only AI calls, got ${h.aiCalls.length}`);
   assert.ok(
     h.logBodies.some((b) => b.includes("Marketing task routed to Content Manager") && !b.includes("via relationship")),
     "the Activity log must record the direct single-candidate routing without a relationship id",
@@ -319,8 +320,8 @@ test("a clarification reply on an assigned-Hat Work re-runs that Hat's decision 
     "Draft something about the new positioning.\n\nAdditional detail: Focus it on the retail segment.",
     "the clarification detail is appended to the captured task text",
   );
-  assert.ok(h.aiCalls.length === 1, "only the Hat run decision runs -- intake classification is not re-run when a Hat is assigned");
-  assert.ok(h.aiCalls[0].user.includes("Focus it on the retail segment"), "the Hat decision must see the augmented task text");
+  assert.ok(h.aiCalls.length === 2, "only the Hat's own deciding and drafting passes run -- intake classification is not re-run when a Hat is assigned");
+  assert.ok(h.aiCalls.every((c) => c.user.includes("Focus it on the retail segment")), "both Hat passes must see the augmented task text");
 });
 
 test("a clarification reply on a Work with no assigned Hat re-runs intake with the augmented text and still fails closed rather than guessing", async (t) => {
@@ -353,7 +354,7 @@ test("a confirmed Marketing Hat starts directly: no second match, no clarificati
 
   assert.equal(result.hat, "Marketing Strategist", "the confirmed Hat is kept");
   assertDispatchedToDraft(result);
-  assert.equal(h.aiCalls.length, 1, "only the Hat's own decision -- the intake's Stage 1 match never runs");
+  assert.equal(h.aiCalls.length, 2, "only the Hat's own deciding and drafting passes -- the intake's Stage 1 match never runs");
   assert.ok(!h.sentMessages.some((m) => m.includes("I'm not sure which Marketing Hat")), "no clarification question");
   assert.ok(h.logBodies.some((b) => b.includes("Marketing task started by Marketing Strategist (confirmed by Martin)")));
   assert.equal(result.marketing?.taskText, "Want to create a marketing campaign and strategy to offer free consultancy to get an email list.");

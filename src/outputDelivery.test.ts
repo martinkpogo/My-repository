@@ -226,3 +226,21 @@ test("Access: a non-work_session context is still denied (the exemption is not a
     /requires a "work_session" context/,
   );
 });
+test("Approve and save (2026-11-18): the button reuses the Hat's own approve callback, fits Telegram's limit, and an approval under it opens the picker instead of offering", async () => {
+  const { approveAndSaveRow, runWithSaveOnApproval, SAVE_ON_APPROVAL_SUFFIX } = await import("./outputDelivery");
+  const uuid = "x".repeat(36);
+  for (const approve of [`marketdraft:${uuid}:approve`, `sprop:${uuid}:99.a`, `quote:${uuid}:approve`]) {
+    const [button] = approveAndSaveRow(approve);
+    assert.equal(button.callback_data, `${approve}${SAVE_ON_APPROVAL_SUFFIX}`);
+    assert.ok(new TextEncoder().encode(button.callback_data).length <= 64, approve);
+  }
+  const state = workState();
+  const sent: string[] = [];
+  await runWithSaveOnApproval(() =>
+    captureApprovedOutput(fakeEnv(), state, { title: "Plan", text: "A clean token-only plan body." }, {
+      send: (async (_e: Env, _t: unknown, text: string) => { sent.push(text); }) as any,
+    }),
+  );
+  assert.equal(state.outputDelivery?.saveRequested, true, "the session will open the picker");
+  assert.ok(!sent.includes(OUTPUT_DELIVERY_OFFER_TEXT), "no separate offer when Martin already asked to save");
+});
