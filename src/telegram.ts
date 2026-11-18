@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { logActivity } from "./log";
 import { kvPut } from "./kvStore";
+import { restoreIdentityPlaceholders } from "./ai/identityRedaction";
 
 const API = "https://api.telegram.org/bot";
 
@@ -234,6 +235,14 @@ async function attemptOf(res: Response, parseMode: TelegramSendAttempt["parseMod
  * and the structured-outcome callers go through exactly this path -- there
  * is no second send implementation. Fetch rejections propagate exactly as
  * before; provider rejections are recorded, never thrown.
+ *
+ * This is also the one final internal-presentation boundary (Martin's
+ * decision, 2026-11-18): AI output is produced, stored and passed between
+ * providers in the protected `[ENIG_CONSULTANCY]`/`[ENIG_OPERATOR]` form,
+ * and the real names are restored here, on the way to the operator's own
+ * chat -- never earlier, so nothing that is still a record or a provider
+ * payload ever carries them. Restoration only rewrites those exact tokens;
+ * it changes nothing in an ordinary message.
  */
 async function sendMessageCore(
   env: Env,
@@ -242,7 +251,7 @@ async function sendMessageCore(
   buttons?: InlineButton[][],
   threadId?: number,
 ): Promise<TelegramSendResult> {
-  const chunks = splitText(text);
+  const chunks = splitText(restoreIdentityPlaceholders(text));
   const attempts: TelegramSendAttempt[] = [];
   let lastMessageId: number | undefined;
   let delivered = true;
@@ -322,7 +331,7 @@ export async function sendMessage(
  * entities") -- confirmed live on Strategy's Skill progress line.
  */
 export async function editMessageText(env: Env, chatId: number, messageId: number, text: string): Promise<void> {
-  const payload = { chat_id: chatId, message_id: messageId, text, parse_mode: "Markdown" };
+  const payload = { chat_id: chatId, message_id: messageId, text: restoreIdentityPlaceholders(text), parse_mode: "Markdown" };
   let res = await call(env, "editMessageText", payload);
   if (!res.ok) {
     res = await call(env, "editMessageText", { ...payload, parse_mode: undefined });

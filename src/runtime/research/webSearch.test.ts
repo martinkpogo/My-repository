@@ -13,6 +13,7 @@ import {
 } from "./webSearch";
 import type { DimensionEvidence, SearchRequest } from "./webSearch";
 import { AccessDeniedError, discoveryCronContext, workSessionContext, EXTERNAL_EGRESS_TARGET, evaluateAccess, type AccessContext } from "../../access";
+import { findLeftoverBannedTerms } from "../../ai/identityRedaction";
 
 /** Calls the egress rule directly, so the refusal is proven at the boundary and not only through executeSearch's read path. */
 function evaluateAccessForTest(env: any, operation: "read" | "create" | "update", access: AccessContext): void {
@@ -497,9 +498,9 @@ test("gatherDimensionEvidence redacts identity terms from every outbound query -
   );
 
   assert.strictEqual(queries.length, 1);
-  assert.ok(!queries[0].includes("ENIG"), `identity must not leave the runtime: ${queries[0]}`);
-  assert.ok(!queries[0].includes("Martin"), `identity must not leave the runtime: ${queries[0]}`);
-  assert.ok(queries[0].includes("the business"), "the canonical redaction replacement must be applied");
+  assert.deepStrictEqual(findLeftoverBannedTerms(queries[0]), [], `identity must not leave the runtime: ${queries[0]}`);
+  assert.ok(queries[0].includes("[ENIG_CONSULTANCY]"), "the canonical protected representation must be applied");
+  assert.ok(queries[0].includes("[ENIG_OPERATOR]"), "the operator placeholder must be applied");
 });
 
 function memoryKv() {

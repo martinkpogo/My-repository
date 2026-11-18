@@ -12,6 +12,7 @@ import {
 } from "./types";
 import type { Env } from "../types";
 import { DataBoundaryEvaluator } from "../dataBoundary/policy";
+import { findLeftoverBannedTerms } from "./identityRedaction";
 
 class MockProvider implements AiProvider {
   public attempts = 0;
@@ -491,4 +492,115 @@ test("a resumable step waits out a rate limit under the 90s research cap and ret
   await advance(t, 5_500);
   assert.deepEqual(await pending, { result: "after the research wait" });
   assert.equal(limited.attempts, 2, "the rate-limited provider is retried after the research wait");
+});
+
+// ---------------------------------------------------------------------------
+// Identity protection at the provider boundary (Martin's decision,
+// 2026-11-18): the real names are replaced by opaque placeholders before ANY
+// provider sees a request, primary and fallback alike; they survive
+// multi-step AI workflows; and restored internal text is protected again if
+// it is ever sent back out.
+// ---------------------------------------------------------------------------
+
+/** The exact text one provider attempt received (every message, concatenated). */
+function captureSent(seen: string[]): (task: AiTask) => ProviderAdapterResult {
+  return (task) => {
+    seen.push(task.messages.map((m) => m.content).join("\n"));
+    return { success: true, response: { rawText: '{"ok": true}' } };
+  };
+}
+
+test("identity protection: the primary provider receives the protected representation, never the real names", async () => {
+  const sent: string[] = [];
+  const primary = new MockProvider("p1", captureSent(sent));
+  const executor = new AiPolicyExecutor([primary], testBoundaryEvaluator);
+
+  await aiJson(
+    fakeEnv,
+    {
+      taskId: "chat.general_reply",
+      system: "You are ENIG's assistant, acting for Martin.",
+      user: "Martin should review ENIG's proposed direction.",
+    },
+    executor,
+  );
+
+  assert.strictEqual(primary.attempts, 1);
+  assert.deepStrictEqual(findLeftoverBannedTerms(sent[0]), [], "neither real name may reach the provider");
+  assert.ok(sent[0].includes("[ENIG_CONSULTANCY]"), "the consultancy placeholder is what the provider sees");
+  assert.ok(sent[0].includes("[ENIG_OPERATOR]"), "the operator placeholder is what the provider sees");
+});
+
+test("identity protection: a fallback provider receives the protected representation too", async () => {
+  const fallbackSent: string[] = [];
+  const primary = new MockProvider("p1", () => ({
+    success: false,
+    error: new InfrastructureError("p1", "500 Internal Server Error", { statusCode: 500 }),
+  }));
+  const fallback = new MockProvider("p2", captureSent(fallbackSent));
+  const executor = new AiPolicyExecutor([primary, fallback], testBoundaryEvaluator);
+
+  await aiText(
+    fakeEnv,
+    "chat.general_reply",
+    "You represent ENIG.",
+    "Martin wants ENIG's next move.",
+    {},
+    executor,
+  );
+
+  assert.strictEqual(primary.attempts, 1);
+  assert.strictEqual(fallback.attempts, 1, "the fallback must be attempted after the primary's infrastructure failure");
+  assert.deepStrictEqual(findLeftoverBannedTerms(fallbackSent[0]), [], "neither real name may reach the fallback provider");
+  assert.ok(fallbackSent[0].includes("[ENIG_CONSULTANCY]"));
+  assert.ok(fallbackSent[0].includes("[ENIG_OPERATOR]"));
+});
+
+test("identity protection: placeholders survive a multi-step workflow -- the later provider receives them, not real names", async () => {
+  const stepOneSent: string[] = [];
+  const stepTwoSent: string[] = [];
+  const stepOne = new MockProvider("p1", (task) => {
+    stepOneSent.push(task.messages.map((m) => m.content).join("\n"));
+    // A provider only ever knows the placeholders, so the AI-generated
+    // intermediate content carries them forward.
+    return { success: true, response: { rawText: "[ENIG_OPERATOR] should review [ENIG_CONSULTANCY]'s direction." } };
+  });
+  const stepTwo = new MockProvider("p2", captureSent(stepTwoSent));
+
+  const stepOneResult = await aiText(
+    fakeEnv,
+    "chat.general_reply",
+    "You represent ENIG.",
+    "Draft a next step for Martin.",
+    {},
+    new AiPolicyExecutor([stepOne], testBoundaryEvaluator),
+  );
+  assert.strictEqual(stepOneResult, "[ENIG_OPERATOR] should review [ENIG_CONSULTANCY]'s direction.");
+
+  await aiText(
+    fakeEnv,
+    "chat.general_reply",
+    "Continue from the previous draft.",
+    stepOneResult,
+    {},
+    new AiPolicyExecutor([stepTwo], testBoundaryEvaluator),
+  );
+
+  assert.ok(stepTwoSent[0].includes("[ENIG_OPERATOR]"), "the placeholder from step one survives into step two");
+  assert.ok(stepTwoSent[0].includes("[ENIG_CONSULTANCY]"));
+  assert.deepStrictEqual(findLeftoverBannedTerms(stepTwoSent[0]), [], "no real name reaches the later provider");
+});
+
+test("identity protection: restored internal text is protected again before any later provider request", async () => {
+  const sent: string[] = [];
+  const provider = new MockProvider("p1", captureSent(sent));
+  const executor = new AiPolicyExecutor([provider], testBoundaryEvaluator);
+
+  // The text a human sees (final internal output) has the real names back.
+  const restored = "Martin should review ENIG's proposed direction.";
+  await aiText(fakeEnv, "chat.general_reply", "s", restored, {}, executor);
+
+  assert.deepStrictEqual(findLeftoverBannedTerms(sent[0]), [], "restored content must be re-protected on the way out");
+  assert.ok(sent[0].includes("[ENIG_OPERATOR]"));
+  assert.ok(sent[0].includes("[ENIG_CONSULTANCY]"));
 });

@@ -1810,11 +1810,11 @@ test("LeadOpportunityDiscoveryCapability generates a search strategy and holds p
   // interleaved with (never replaced by) the bounded retrieval a presented
   // candidate's own synthesis performs: ONE candidate-specific public search
   // plus the bounded social step. Nothing else may leave the runtime.
-  const generated = outboundQueries.filter((q) => q.query.includes("the business") || q.query.includes("the operator"));
+  const generated = outboundQueries.filter((q) => q.query.includes("[ENIG_CONSULTANCY]") || q.query.includes("[ENIG_OPERATOR]"));
   assert.deepStrictEqual(
     generated.map((q) => q.query),
-    ["positioning problem like the business has", "struggling brands the operator would notice"],
-    "both generated queries are searched in order, with the canonical redaction replacement applied",
+    ["positioning problem like [ENIG_CONSULTANCY] has", "struggling brands [ENIG_OPERATOR] would notice"],
+    "both generated queries are searched in order, with the canonical protected representation applied",
   );
   const socialSearches = outboundQueries.filter((q) => q.domainScoped || q.query.endsWith("official social media"));
   const candidateSearches = outboundQueries.filter((q) => !q.domainScoped && q.query === '"Acme Corp"');

@@ -893,7 +893,7 @@ test("a re-run of the Hat sees every earlier question with its answer, so it nev
   });
   await dispatchMarketingHat(env, state);
   const prompt = systems[0] + "\n" + users[0];
-  // The outbound identity filter renders "Martin" as "the operator" before any
+  // The outbound identity filter renders "Martin" as "[ENIG_OPERATOR]" before any
   // provider sees the prompt, so match the block by its stable part.
   assert.match(prompt, /HAS ALREADY ANSWERED \(never ask again/);
   assert.match(prompt, /Q: What is the goal\? A: 10,000 cedis a month/);

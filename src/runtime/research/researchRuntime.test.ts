@@ -18,7 +18,7 @@ import type { ResearchSynthesis } from "./types";
 import { applyEvidenceSourceValidationGate, findUnverifiableSources, validateSynthesis } from "../evidence/validation";
 import { evaluateHandoffContext } from "../../dataBoundary/policy";
 import { extractAuthorizedContextSummary, isValidSafeContext } from "./safeContext";
-import { redactIdentityTerms } from "../../ai/identityRedaction";
+import { redactIdentityTerms, findLeftoverBannedTerms } from "../../ai/identityRedaction";
 import { applyProtocolSelectionGuardrails } from "./protocolGuardrails";
 import { buildResearchPlanPromptParts, capResearchPlan } from "./researchPlan";
 import { assessDimensionCoverage, formatDimensionEvidenceForContext, formatUncoveredDimensionsWarning } from "./webSearch";
@@ -244,8 +244,9 @@ test("17. Privacy enforcement: excluded fields cannot be reconstructed from the 
 test("18. Privacy enforcement: even if identity leaked into the effective context, the universal redaction gate (applied to every provider call) still strips it before reaching a provider", () => {
   const leaked = "Research ENIG's own market position; Martin wants a quick answer.";
   const redacted = redactIdentityTerms(leaked);
-  assert.ok(!redacted.includes("ENIG"));
-  assert.ok(!redacted.includes("Martin"));
+  assert.deepStrictEqual(findLeftoverBannedTerms(redacted), [], "neither real name may survive protection");
+  assert.ok(redacted.includes("[ENIG_CONSULTANCY]"));
+  assert.ok(redacted.includes("[ENIG_OPERATOR]"));
 });
 
 test("19. Research quality: the previously-failed live case (fabricated competitors/report/URLs with no supplied context) is now rejected by findUnverifiableSources", () => {
