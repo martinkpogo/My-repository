@@ -332,13 +332,17 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   const originalFetch = globalThis.fetch;
 
   const workId = "work-proposal-200";
-  const opaqueFolderId = await saveOpaqueOption(fakeEnv, workId, {
-    kind: "folder",
+  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
+  // callback carries the list's opaque id plus the picked folder's POSITION,
+  // so the handler resolves the pick from the list rather than from a
+  // per-folder option.
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
     accountIdentifier: "selected@enig.com",
     title: "Brand Guidelines",
     content: "Guidelines for ENIG brand assets.",
-    folderId: "folder-999",
-    folderName: "Brand Assets",
+    folders: [{ id: "folder-999", name: "Brand Assets" }],
   });
 
   const state: WorkState = {
@@ -363,7 +367,9 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   }) as typeof fetch;
 
   try {
-    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, opaqueFolderId);
+    // index.ts splits callback_data as action:workId:value, so the handler
+    // receives "<listOpaqueId>:0" -- the list id followed by the position.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
 
     assert.ok(updatedState.pendingGoogleAction);
     assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");
