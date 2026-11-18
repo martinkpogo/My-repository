@@ -1,5 +1,6 @@
 import type { Env } from "../../types";
 import { generateWithOutcome } from "../../ai";
+import { RESEARCH_PROVIDER_TIMEOUT_MS } from "../../ai/openaiCompatible";
 import type { AccessContext } from "../../access";
 import { redactIdentityTerms } from "../../ai/identityRedaction";
 import { executeSearch, type SearchOutcome } from "./webSearch";
@@ -344,7 +345,18 @@ export async function runSkillRounds(env: Env, input: SkillRoundsInput, access: 
         context: [input.context ? `=== FRAMING (not a source) ===\n${input.context}` : "", SKILL_STEP_RESPONSE_FORMAT].filter(Boolean).join("\n\n"),
         situation,
       },
-      maxTokens: 2048,
+      // Research steps run on the Work's alarm, not in the Telegram webhook:
+      // they may wait out a provider's per-minute rate limit and retry that
+      // provider, and they may take longer than a webhook-time reply can
+      // afford. Chat and every other webhook-time step keep today's
+      // timeouts: they pass no resumable flag. The reply allowance is raised
+      // too: reasoning models on the free tiers spend part of their output
+      // budget on an invisible chain-of-thought field, so a 2048-token ceiling
+      // let the reasoning eat the whole allowance and leave the JSON answer
+      // empty, which the step now treats as a failed attempt and retries.
+      resumable: true,
+      timeoutMs: RESEARCH_PROVIDER_TIMEOUT_MS,
+      maxTokens: 4096,
     });
     // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
     // pause, like busy search providers -- this step runs again on resume.

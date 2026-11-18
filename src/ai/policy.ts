@@ -10,6 +10,7 @@ import { redactIdentityTerms, findLeftoverBannedTerms } from "./identityRedactio
 import { OutboundDataGateEvaluator, defaultOutboundDataGateEvaluator, type OutboundGateReasonCategory } from "./outboundGate";
 import { sendMessage } from "../telegram";
 import { clearCooldown, cooldownUntil, startCooldown } from "../runtime/research/searchProviders";
+import { RESEARCH_MAX_WAIT_MS } from "./openaiCompatible";
 
 /**
  * Resumable AI calls (Martin's decision, 15 Nov 2026): the executor remembers
@@ -191,7 +192,7 @@ export class AiPolicyExecutor {
    * retry below, so every eligibility check, boundary evaluation, redaction
    * verification, gate evaluation and validation applies identically to both.
    */
-  private async runProviderChain(env: Env, task: AiTask, providers: AiProvider[], allowLastResort: boolean, ignoreCooldown = false): Promise<AiCallOutcome> {
+  private async runProviderChain(env: Env, task: AiTask, providers: AiProvider[], allowLastResort: boolean, ignoreCooldown = false, resumable = task.resumable === true): Promise<AiCallOutcome> {
     const eligible = providers.filter((p) => p.isEligible(env, task));
     if (eligible.length === 0) {
       console.error("AiPolicyExecutor: No eligible AI provider available");
@@ -368,15 +369,19 @@ export class AiPolicyExecutor {
     // against a minute-long window that a burst of calls (a research run's
     // steps) used up. Wait it out and try THAT provider once more, through
     // the same checks, rather than failing the whole step. Only a wait up to
-    // LAST_RESORT_MAX_WAIT_MS; only once per call; never when the loop was
-    // stopped by the redaction hard stop.
+    // LAST_RESORT_MAX_WAIT_MS (60s) for a webhook-time step; a research step
+    // that runs on the Work's alarm may wait up to RESEARCH_MAX_WAIT_MS
+    // (90s) -- Groq's rolling one-minute window is the case that should wait
+    // it out, and a short wait is fine there. Only once per call; never when
+    // the loop was stopped by the redaction hard stop.
     if (allowLastResort && !redactionAborted) {
-      const candidate = waitCandidates.filter((c) => c.waitMs <= LAST_RESORT_MAX_WAIT_MS).sort((a, b) => a.waitMs - b.waitMs)[0];
+      const cap = resumable ? RESEARCH_MAX_WAIT_MS : LAST_RESORT_MAX_WAIT_MS;
+      const candidate = waitCandidates.filter((c) => c.waitMs <= cap).sort((a, b) => a.waitMs - b.waitMs)[0];
       if (candidate) {
         const waitMs = candidate.waitMs + LAST_RESORT_MARGIN_MS;
         console.warn(`AiPolicyExecutor: last resort -- waiting ${waitMs}ms for ${candidate.provider.id}'s rate limit, then trying it once more for task ${task.taskId}`);
         await countDownLiveStep(waitMs, AI_TASK_LIVE_LABELS[task.taskId] ?? `Thinking (${SEMANTIC_TASK_REGISTRY[task.taskId].name})`);
-        const retried = await this.runProviderChain(env, task, [candidate.provider], false, true);
+        const retried = await this.runProviderChain(env, task, [candidate.provider], false, true, resumable);
         if (retried.ok) return retried;
       }
     }

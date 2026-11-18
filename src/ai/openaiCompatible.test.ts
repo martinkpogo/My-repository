@@ -311,6 +311,55 @@ test("a 429 naming a wait over the 10s cap is not slept or retried inside the pr
   assert.strictEqual((r as any).error.retryAfterMs, 25_372.5);
 });
 
+test("a research step waits out a rate limit up to RESEARCH_MAX_WAIT_MS and retries the same provider until it answers (bounded)", async (t) => {
+  const mod = await import("./openaiCompatible");
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    return calls < 3
+      ? new Response('{"error":{"message":"Rate limit reached. Please try again in 0.01s."}}', { status: 429 })
+      : new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  // Real time, not a mocked clock: the provider asks for 0.01 s, so the two
+  // waits take ~20 ms. (A mocked setTimeout ticked before the wait was
+  // scheduled left this test hanging in CI.)
+  const task = { taskId: "research.skill_step", type: "json", messages: [{ role: "user", content: "x" }], resumable: true } as any;
+  const r = await mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  assert.strictEqual(calls, 3, "the rate-limited provider is retried until it answers");
+  assert.ok(r.success);
+});
+
+test("a research step treats an empty reply as a failed attempt and retries it", async (t) => {
+  const mod = await import("./openaiCompatible");
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    calls++;
+    return calls === 1
+      ? new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), { status: 200 })
+      : new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  }) as typeof fetch;
+  t.after(() => void (globalThis.fetch = original));
+  t.mock.method(console, "log", () => {});
+  // Real time: one EMPTY_REPLY_RETRY_MS (1.5 s) wait before the retry.
+  const task = { taskId: "research.skill_step", type: "json", messages: [{ role: "user", content: "x" }], resumable: true } as any;
+  const started = Date.now();
+  const r = await mod.GROQ_PROVIDER.execute({ GROQ_API_KEY: "k" } as any, task);
+  assert.ok(Date.now() - started >= mod.EMPTY_REPLY_RETRY_MS - 50, "it waited before retrying");
+  assert.strictEqual(calls, 2, "the empty reply is retried, not accepted");
+  assert.ok(r.success);
+});
+
+test("a research step uses the longer RESEARCH_PROVIDER_TIMEOUT_MS, not the 12s default", async () => {
+  const mod = await import("./openaiCompatible");
+  assert.strictEqual(mod.DEFAULT_PROVIDER_TIMEOUT_MS, 12_000);
+  assert.strictEqual(mod.RESEARCH_PROVIDER_TIMEOUT_MS, 60_000);
+  assert.ok(mod.RESEARCH_MAX_WAIT_MS > 60_000);
+});
+
 test("NVIDIA NIM (Martin, 2026-11-14, option A): requests go to the faster nemotron-3.5-lightning model, never the gpt-oss-20b that timed out", async () => {
   const original = globalThis.fetch;
   const bodies: any[] = [];

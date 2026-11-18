@@ -17,6 +17,22 @@ export interface AiTask {
   maxTokens?: number;
   light?: boolean;
   /**
+   * True when this call runs on a Work's alarm rather than inside a
+   * Telegram webhook (deep research and the research runtime). The
+   * executor may then wait out a provider's per-minute rate limit and
+   * retry that provider instead of moving straight on, and the call may
+   * take longer than a webhook-time reply can afford. Absent: webhook
+   * time, today's behaviour unchanged.
+   */
+  resumable?: boolean;
+  /**
+   * Per-call provider timeout, overriding the provider's default. Research
+   * steps get a longer one than chat replies (they run on the alarm); the
+   * default stays the provider's own (12 s for the OpenAI-compatible
+   * fallbacks), so chat and every other webhook-time step are unchanged.
+   */
+  timeoutMs?: number;
+  /**
    * Optional response-shape check, independent of provider infrastructure
    * health. When set and a provider's response fails it (e.g. aiJson's
    * requested-but-unparsable JSON), the executor treats that provider as

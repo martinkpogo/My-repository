@@ -449,3 +449,46 @@ test("Last resort cap is 60s (Martin, 2026-11-14): Groq's 33s wait after a resea
 test("fallback chain (Martin, 2026-11-14): Workers AI, Groq, OpenRouter, Gemini, then NVIDIA NIM last -- Cerebras and SambaNova are out", () => {
   assert.deepEqual([...DEFAULT_PROVIDER_IDS], ["workers-ai", "groq", "openrouter", "gemini", "nvidia-nim"]);
 });
+
+test("a resumable step's last-resort wait uses the 90s research cap, not the 60s webhook cap", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const limited = new MockProvider("p1", () => ({ success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 95_000 }) }));
+  const executor = new AiPolicyExecutor([limited], testBoundaryEvaluator);
+  const pending = executor.executeTaskWithOutcome(fakeEnv, {
+    taskId: "chat.general_reply",
+    type: "json",
+    messages: [{ role: "user", content: "u" }],
+    resumable: true,
+    boundaryContext: { taskSensitivity: "public", segments: [{ type: "user", content: "u", provenance: "test" }] },
+  } as any);
+  await advance(t, 96_000);
+  const outcome = await pending;
+  assert.equal(outcome.ok, false);
+  assert.equal(limited.attempts, 1, "95s is over the 90s research cap: no wait, no retry");
+});
+
+// A resumable step waits out a rate limit under its 90s research cap and
+// retries the provider once. The wait is kept short (5s) so the mock-timer
+// test resolves instantly; the 90s cap itself is what the 95s-over-cap test
+// above asserts, and the 60s webhook cap is what the 61s test asserts. The
+// 5s wait is under BOTH caps, so this test proves the resumable path waits
+// and retries at all -- it does not need to sit in the 60s-90s band to do so.
+test("a resumable step waits out a rate limit under the 90s research cap and retries the provider once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  const limited = new MockProvider("p1", (_task, attempt) =>
+    attempt === 1
+      ? { success: false, error: new InfrastructureError("p1", "429", { statusCode: 429, retryAfterMs: 5_000 }) }
+      : { success: true, response: { rawText: '{"result": "after the research wait"}' } },
+  );
+  const executor = new AiPolicyExecutor([limited], testBoundaryEvaluator);
+  const pending = aiJson(fakeEnv, { taskId: "chat.general_reply", system: "s", user: "u", resumable: true }, executor);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(limited.attempts, 1, "waiting, not yet retried");
+  await advance(t, 5_500);
+  assert.deepEqual(await pending, { result: "after the research wait" });
+  assert.equal(limited.attempts, 2, "the rate-limited provider is retried after the research wait");
+});

@@ -13,11 +13,30 @@ export interface AiJsonOptions {
   maxTokens?: number;
   /** When given, stamped onto every segment -- overriding the task's default level, as aiChat's own `sensitivity` does. */
   sensitivity?: SensitivityLevel;
+  /**
+   * True when this call runs on a Work's alarm rather than inside a
+   * Telegram webhook (the research runtime). The executor may then wait
+   * out a provider's per-minute rate limit and retry that provider instead
+   * of moving straight on, and the call may take longer than a webhook-time
+   * reply can afford. Absent: webhook time, today's behaviour unchanged.
+   */
+  resumable?: boolean;
+  /**
+   * Per-call provider timeout, overriding the provider's default. Research
+   * steps get a longer one than chat replies (they run on the alarm); the
+   * default stays the provider's own, so chat and every other webhook-time
+   * step are unchanged.
+   */
+  timeoutMs?: number;
 }
 
 export interface AiTextOptions {
   light?: boolean;
   maxTokens?: number;
+  /** True for a research step (runs on the Work's alarm, not the webhook). */
+  resumable?: boolean;
+  /** Per-call provider timeout, overriding the provider's default. */
+  timeoutMs?: number;
 }
 
 export interface ChatTurn {
@@ -64,8 +83,21 @@ function buildJsonTask(opts: AiJsonOptions): AiTask {
     // 1024 was too tight for this class of model; raised as a shared
     // safety margin for every aiJson caller, not a license to request
     // more than a JSON object actually needs.
-    maxTokens: opts.maxTokens ?? 2048,
+    //
+    // A research step (resumable, runs on the Work's alarm) gets a higher
+    // floor still: the reasoning field is the same invisible chain of
+    // thought, and on a research step -- where the answer is a structured
+    // JSON object with sources, evidence, findings, implications and
+    // limitations, and where an empty reply is now treated as a failed
+    // attempt and retried -- a 2048-token ceiling let the reasoning eat
+    // the whole allowance and leave content empty, which the step then
+    // retried until every provider was exhausted and the run ended "the
+    // research step returned no usable answer". 4096 is the floor for
+    // resumable steps; callers may still pass a smaller explicit value.
+    maxTokens: opts.maxTokens ?? (opts.resumable ? 4096 : 2048),
     light: opts.light,
+    resumable: opts.resumable,
+    timeoutMs: opts.timeoutMs,
     validateResponse: isParsableJson,
   };
 
@@ -118,6 +150,8 @@ export async function aiText(
     temperature: 0.4,
     maxTokens: options.maxTokens ?? 1536,
     light: options.light,
+    resumable: options.resumable,
+    timeoutMs: options.timeoutMs,
   };
 
   const response = await executor.executeTask(env, task);
@@ -205,6 +239,14 @@ interface BaseGenerateOptions {
   sensitivity?: SensitivityLevel;
   light?: boolean;
   maxTokens?: number;
+  /**
+   * True for a research step (runs on the Work's alarm, not the webhook):
+   * the executor may wait out a provider's per-minute rate limit and retry
+   * that provider, and the call may take longer than a webhook-time reply.
+   */
+  resumable?: boolean;
+  /** Per-call provider timeout, overriding the provider's default. */
+  timeoutMs?: number;
 }
 
 function assembleSystemPrompt(parts: GeneratePromptParts): string {
@@ -229,12 +271,14 @@ export async function generate(env: Env, options: BaseGenerateOptions & { mode: 
   const system = assembleSystemPrompt(options.parts);
   const situation = options.parts.situation;
   if (options.mode === "json") {
-    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens });
+    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens, resumable: options.resumable, timeoutMs: options.timeoutMs });
   }
   if (options.history) {
+    // aiChat is a webhook-time chat reply: it never takes a resumable flag
+    // or a per-call timeout (research steps use aiText/aiJson instead).
     return aiChat(env, options.taskId, system, options.history, situation, options.maxTokens ?? 800, options.sensitivity);
   }
-  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens });
+  return aiText(env, options.taskId, system, situation, { light: options.light, maxTokens: options.maxTokens, resumable: options.resumable, timeoutMs: options.timeoutMs });
 }
 
 /**
@@ -272,6 +316,8 @@ export async function generateWithOutcome<T = Record<string, unknown>>(
     user: options.parts.situation,
     light: options.light,
     maxTokens: options.maxTokens,
+    resumable: options.resumable,
+    timeoutMs: options.timeoutMs,
   }));
   if (!outcome.ok) {
     return { ok: false, cause: outcome.cause, gateReasons: outcome.gateReasons, ...(outcome.retryAt ? { retryAt: outcome.retryAt } : {}) };
