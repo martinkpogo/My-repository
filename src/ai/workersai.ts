@@ -6,6 +6,7 @@ import {
   ProviderAdapterResult,
   ProviderId,
 } from "./types";
+import { EMPTY_REPLY_RETRY_MS } from "./openaiCompatible";
 
 export class WorkersAiProvider implements AiProvider {
   public readonly id: ProviderId = "workers-ai";
@@ -15,33 +16,94 @@ export class WorkersAiProvider implements AiProvider {
   }
 
   public async execute(env: Env, task: AiTask): Promise<ProviderAdapterResult> {
+    const resumable = task.resumable === true;
+    const timeoutMs = task.timeoutMs;
+    let attempt = 0;
+    while (attempt < (resumable ? MAX_WORKERS_AI_ATTEMPTS : 1)) {
+      attempt++;
+      const result = await this.call(env, task, timeoutMs);
+      if (result.success) return result;
+      // A research step treats an empty reply as a failed attempt, not an
+      // answer: some Workers AI models spend their reply allowance on an
+      // invisible chain-of-thought field, so a too-tight token budget leaves
+      // the content empty and the step reports "no usable answer". The step
+      // retries it (with a raised reply allowance -- see ai.ts) instead of
+      // moving on. Chat and every other webhook-time step keep today's
+      // behaviour: they pass no resumable flag, so this branch is never
+      // reached for them.
+      if (resumable && result.error.code === "EMPTY_REPLY") {
+        await new Promise((resolve) => setTimeout(resolve, EMPTY_REPLY_RETRY_MS));
+        continue;
+      }
+      return result;
+    }
+    return {
+      success: false,
+      error: new InfrastructureError(this.id, "Workers AI execution failed after retries", { code: "MAX_ATTEMPTS" }),
+    };
+  }
+
+  private async call(env: Env, task: AiTask, timeoutMs?: number): Promise<ProviderAdapterResult> {
     const model = task.light ? env.AI_MODEL_LIGHT : env.AI_MODEL_PRIMARY;
+    const startedAt = Date.now();
+    if (typeof env.AI?.run !== "function") {
+      console.error("Workers AI call failed: env.AI.run is not a function");
+      return {
+        success: false,
+        error: new InfrastructureError(this.id, "Workers AI binding is not callable", { code: "NO_RUN_BINDING" }),
+      };
+    }
     try {
-      const result = await env.AI.run(
-        model as any,
-        {
-          messages: task.messages,
-          temperature: task.temperature ?? 0.2,
-          max_tokens: task.maxTokens ?? 1024,
-        } as any,
-      );
+      const result: unknown =
+        timeoutMs && timeoutMs > 0
+          ? await this.withTimeout(env.AI.run(model as any, {
+              messages: task.messages,
+              temperature: task.temperature ?? 0.2,
+              max_tokens: task.maxTokens ?? 1024,
+            } as any), timeoutMs)
+          : await env.AI.run(model as any, {
+              messages: task.messages,
+              temperature: task.temperature ?? 0.2,
+              max_tokens: task.maxTokens ?? 1024,
+            } as any);
       const rawText = coerceToText(result);
+      console.log(`AI provider call: workers-ai ${model} ${task.taskId} answered (${rawText.length} chars) after ${Date.now() - startedAt}ms`);
+      if (rawText.trim() === "") {
+        return {
+          success: false,
+          error: new InfrastructureError(this.id, "Workers AI answered with an empty reply (reasoning consumed the reply allowance)", { code: "EMPTY_REPLY" }),
+        };
+      }
       return { success: true, response: { rawText } };
     } catch (err: any) {
       console.error("Workers AI call failed", err);
-      const statusCode = extractStatusCode(err);
-      const code = err?.code || (err?.name !== "Error" ? err?.name : undefined);
+      const timedOut = err?.name === "AbortError" || /timed out/i.test(err?.message || "");
       return {
         success: false,
         error: new InfrastructureError(
           this.id,
-          err?.message || "Workers AI execution failed",
-          { statusCode, code },
+          timedOut ? `timed out after ${timeoutMs ?? 0}ms` : err?.message || "Workers AI execution failed",
+          { statusCode: extractStatusCode(err), code: err?.code || (err?.name !== "Error" ? err?.name : undefined) },
         ),
       };
     }
   }
+
+  private async withTimeout<T>(p: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    try {
+      return await Promise.race([p, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 }
+
+/** How many times a research step retries Workers AI after an empty reply. Bounded: never a loop. */
+const MAX_WORKERS_AI_ATTEMPTS = 3;
 
 function coerceToText(result: unknown): string {
   if (typeof result === "string") return result;

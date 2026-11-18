@@ -1,5 +1,6 @@
 import type { Env } from "../../types";
 import { generate, generateWithOutcome, type GeneratePromptParts } from "../../ai";
+import { RESEARCH_PROVIDER_TIMEOUT_MS } from "../../ai/openaiCompatible";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import type { AccessContext } from "../../access";
 import { applyEvidenceSourceValidationGate, removeUnsupportedFindings } from "../evidence/validation";
@@ -258,6 +259,14 @@ Return JSON:
       situation: question,
     },
     light: true,
+    // Research steps run on the Work's alarm, not in the Telegram webhook:
+    // they may wait out a provider's per-minute rate limit and retry that
+    // provider, and they may take longer than a webhook-time reply can
+    // afford (Gemini's free tier answers some requests only after more than
+    // the 12 s a webhook-time step allows). Chat and every other webhook-time
+    // step keep today's timeouts: they pass no resumable flag.
+    resumable: true,
+    timeoutMs: RESEARCH_PROVIDER_TIMEOUT_MS,
   });
 
   const relevance = result?.relevance?.trim();
@@ -585,6 +594,11 @@ async function runResearch(env: Env, input: ResearchExecutionInput, access: Acce
     // explicit "cite selectively, don't enumerate everything" instruction
     // so this is a safety margin, not a license to pad the response.
     maxTokens: 4096,
+    // Research steps run on the Work's alarm: they may wait out a
+    // provider's per-minute rate limit and retry that provider, and they
+    // may take longer than a webhook-time reply can afford.
+    resumable: true,
+    timeoutMs: RESEARCH_PROVIDER_TIMEOUT_MS,
   });
   // Resumable AI calls (Martin, 15 Nov 2026): every AI provider busy is a
   // pause, not a failure -- the evidence stays checkpointed and the job
@@ -705,6 +719,8 @@ export async function runDeepResearchSkill(env: Env, input: ResearchExecutionInp
     taskId: STANDARD_RESEARCH_PROFILE.synthesis,
     parts: { ...buildSynthesisPromptParts(researchRoleContract, universalRoleContract, [], rounds.notes.length > 0, discipline), situation: synthesisContext },
     maxTokens: 4096,
+    resumable: true,
+    timeoutMs: RESEARCH_PROVIDER_TIMEOUT_MS,
   });
   if (!synthesisOutcome.ok && synthesisOutcome.cause === "providers_exhausted" && synthesisOutcome.retryAt) {
     // The rounds are complete and their notes saved; a resume replays them from the caches and goes straight to synthesis.

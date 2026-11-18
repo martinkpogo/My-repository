@@ -75,6 +75,42 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 12_000;
  */
 export const MAX_RETRY_AFTER_WAIT_MS = 10_000;
 
+/**
+ * The per-provider timeout for research steps (deep research and the
+ * research runtime), which run on a Work's alarm rather than inside the
+ * Telegram webhook. Confirmed live: Gemini's free tier answers some
+ * requests only after more than the 12 s a webhook-time reply can wait,
+ * and a research step that times out at 12 s burns a fallback attempt
+ * for nothing. A longer timeout lets a slow-but-answering provider finish
+ * instead of failing over; chat and every other webhook-time step keep
+ * the 12 s default (they pass no `timeoutMs`, so this constant never
+ * touches them).
+ */
+export const RESEARCH_PROVIDER_TIMEOUT_MS = 60_000;
+
+/**
+ * The longest rate-limit wait a research step will sit out before
+ * retrying the same provider, instead of moving on. Deep research runs
+ * on the Work's alarm, so a short wait is fine; Groq's per-minute
+ * window asks for up to about a minute, and a research run that just
+ * exhausted it is exactly the case that should wait it out. A wait
+ * beyond this cap is NOT slept: the step moves on, and the existing
+ * interrupted/resume path (the Work's own alarm) retries it later.
+ */
+export const RESEARCH_MAX_WAIT_MS = 90_000;
+
+/** How many times a research step retries the same provider after a rate limit before moving on. Bounded: never a loop. */
+export const MAX_RESEARCH_ATTEMPTS = 3;
+
+/**
+ * The wait a research step observes before retrying a provider that answered
+ * with 0 characters (reasoning consumed the reply allowance). Short: the
+ * same reasoning budget is available again immediately, so a quick retry is
+ * what the model needs, not a backoff. Absent for webhook-time steps, which
+ * treat an empty reply as a normal failure and move on.
+ */
+export const EMPTY_REPLY_RETRY_MS = 1_500;
+
 function parseRetryAfterMs(res: Response, bodyText: string): number | undefined {
   const header = res.headers.get("retry-after");
   if (header) {
@@ -122,31 +158,59 @@ export class OpenAiCompatibleProvider implements AiProvider {
    * with no parseable wait, or a second consecutive failure) returns
    * immediately so the policy executor's own fallback loop can move on
    * to the next eligible provider without delay.
+   *
+   * A research step (task.resumable) is different: it runs on a Work's
+   * alarm, not in the webhook, so it may wait out a rate limit up to
+   * RESEARCH_MAX_WAIT_MS and retry the same provider until it answers
+   * (the provider's per-minute window is short, and every other provider
+   * in the chain is likely busy from the same burst). It also treats an
+   * empty reply as a failed attempt and retries it: reasoning models on
+   * the free tiers (gpt-oss on groq/nvidia-nim, among others) spend
+   * their reply allowance on an invisible chain-of-thought field, so a
+   * too-tight token budget leaves "content" empty and the step reports
+   * "no usable answer". Chat and every other webhook-time step keep
+   * today's behaviour: they pass no resumable flag, so this branch is
+   * never reached for them.
    */
   public async execute(env: Env, task: AiTask): Promise<ProviderAdapterResult> {
-    const first = await this.attempt(env, task, true);
+    const resumable = task.resumable === true;
+    const first = await this.attempt(env, task, true, resumable);
     if (first.result.success) return first.result;
     if (this.config.extraBody && first.status === 400) {
       // The provider may not accept the extra fields: retry once without them.
       console.log(`AI provider call: ${this.id} rejected the extra request settings (HTTP 400); retrying without them`);
-      return (await this.attempt(env, task, false)).result;
+      return (await this.attempt(env, task, false, resumable)).result;
     }
     if (first.retryAfterMs === undefined) return first.result;
+
+    const cap = resumable ? RESEARCH_MAX_WAIT_MS : MAX_RETRY_AFTER_WAIT_MS;
     // A wait longer than the cap is not slept here (a retry after the cap
     // would still be refused, as the live Groq run showed): the stated wait
     // is attached so the executor can move on at once and, as a last resort,
     // come back after it (src/ai/policy.ts).
-    if (first.retryAfterMs > MAX_RETRY_AFTER_WAIT_MS) return withRetryAfter(first.result, first.retryAfterMs);
+    if (first.retryAfterMs > cap) return withRetryAfter(first.result, first.retryAfterMs);
 
-    await sleep(first.retryAfterMs);
-    const second = await this.attempt(env, task, true);
-    return second.retryAfterMs === undefined ? second.result : withRetryAfter(second.result, second.retryAfterMs);
+    // A research step retries a rate-limited provider until it answers or
+    // the cap is hit; a webhook-time step retries once, as before.
+    const maxAttempts = resumable ? MAX_RESEARCH_ATTEMPTS : 2;
+    let attempt = 1;
+    let last = first;
+    while (attempt < maxAttempts) {
+      await sleep(last.retryAfterMs!);
+      const next = await this.attempt(env, task, true, resumable);
+      if (next.result.success) return next.result;
+      last = next;
+      if (last.retryAfterMs === undefined || last.retryAfterMs > cap) break;
+      attempt++;
+    }
+
+    return last.retryAfterMs === undefined ? last.result : withRetryAfter(last.result, last.retryAfterMs);
   }
 
-  private async attempt(env: Env, task: AiTask, withExtras: boolean): Promise<{ result: ProviderAdapterResult; retryAfterMs?: number; status?: number }> {
+  private async attempt(env: Env, task: AiTask, withExtras: boolean, resumable: boolean): Promise<{ result: ProviderAdapterResult; retryAfterMs?: number; status?: number }> {
     const apiKey = env[this.config.apiKeyEnvVar];
     const model = task.light && this.config.lightModel ? this.config.lightModel : this.config.model;
-    const timeoutMs = this.config.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
+    const timeoutMs = task.timeoutMs ?? this.config.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
     const timeoutController = new AbortController();
     const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
     const startedAt = Date.now();
@@ -185,6 +249,23 @@ export class OpenAiCompatibleProvider implements AiProvider {
       const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const rawText = data.choices?.[0]?.message?.content ?? "";
       logCall(`answered (${rawText.length} chars)`);
+      // A research step treats an empty reply as a failed attempt, not an
+      // answer: reasoning models on the free tiers (gpt-oss on groq/nvidia-nim,
+      // among others) spend their reply allowance on an invisible
+      // chain-of-thought field, so a too-tight token budget leaves "content"
+      // empty and the step reports "no usable answer", burning a fallback
+      // attempt for nothing. The step retries it (with a raised reply
+      // allowance -- see ai.ts's buildJsonTask) instead of moving on.
+      if (resumable && rawText.trim() === "") {
+        logCall("answered with 0 chars -- treating as a failed attempt");
+        return {
+          result: {
+            success: false,
+            error: new InfrastructureError(this.id, `${this.id} answered with an empty reply (reasoning consumed the reply allowance)`, { statusCode: res.status }),
+          },
+          retryAfterMs: EMPTY_REPLY_RETRY_MS,
+        };
+      }
       return { result: { success: true, response: { rawText } } };
     } catch (err: any) {
       logCall(err?.name === "AbortError" ? "timed out" : "failed");
