@@ -968,22 +968,24 @@ export async function handleNextStep(env: Env, state: WorkState, approved: boole
   }
 
   const fromHat = pending.fromHat ?? state.hat ?? "the previous Hat";
-  state.hat = pending.toHat;
   marketingOf(state).pendingNextStep = undefined;
-  marketingOf(state).draft = undefined;
-  marketingOf(state).taskText = `${pending.approvedOutput ?? ""}\n\nApproved output from ${fromHat}. Next step: ${pending.forWhat}.`;
-  state.stage = "in_progress";
-  state.awaiting = undefined;
+  // This Work is finished (Martin approved its output and its Result review
+  // recorded that). The next Hat's part is a NEW Work, started by the session
+  // from followOnWork -- never this one reopened under another Hat.
+  state.followOnWork = {
+    hat: pending.toHat,
+    text: `${pending.approvedOutput ?? ""}\n\nApproved output from ${fromHat}. Next step: ${pending.forWhat}.`,
+  };
   await logActivity(env, {
-    entry: `Marketing work continued: ${fromHat} -> ${pending.toHat} (next step)`,
+    entry: `Marketing next step started: ${fromHat} -> ${pending.toHat} (new Work)`,
     type: "Decision",
     area: "Marketing",
     decisions: `Martin tapped Yes on the post-approval next-step offer.`,
     decisionRationale: pending.forWhat,
     outcome: "Active",
   });
-  await sendWorkspaceHatMessage(env, state, `Handed to *${pending.toHat}* to ${pending.forWhat}.`);
-  return dispatchMarketingHat(env, state);
+  await sendWorkspaceHatMessage(env, state, `Starting *${pending.toHat}* on a new piece of work to ${pending.forWhat}.`);
+  return state;
 }
 
 // The callback_data prefix for the missing-prerequisite choice: Do it first /

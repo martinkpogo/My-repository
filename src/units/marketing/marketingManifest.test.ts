@@ -319,7 +319,7 @@ test("after a draft is approved, the Hat offers its usual next step with Yes / N
   assert.match(pending?.approvedOutput ?? "", /audience, goals, core message/);
 });
 
-test("the post-approval next step is never automatic: Not now leaves it, Yes continues under the next Hat with the approved output", async (t) => {
+test("the post-approval next step is never automatic: Not now leaves it; Yes asks for a NEW Work for the next Hat, never reopening this finished one", async (t) => {
   const sentTexts = mockTelegramFetch(t);
   const env = fakeEnv({
     AI_MODEL_PRIMARY: "test-model",
@@ -343,12 +343,19 @@ test("the post-approval next step is never automatic: Not now leaves it, Yes con
   assert.strictEqual(left.marketing?.pendingNextStep, undefined);
   assert.ok(sentTexts.some((m) => m.includes("leaving it here")));
 
+  // Yes (2026-11-18 review): the approved Work is finished -- its Result
+  // review recorded Martin's approval -- so it stays finished under its own
+  // Hat, and the next Hat's part is requested as a NEW Work (the session
+  // starts it from followOnWork), carrying the approved output as its input.
   const yes = make();
   const continued = await handleNextStep(env, yes, true);
-  assert.strictEqual(continued.hat, "Content Strategist");
-  assert.match(continued.marketing?.taskText ?? "", /The approved marketing strategy/);
-  assert.match(continued.marketing?.taskText ?? "", /turn it into content themes and briefs/);
-  assert.strictEqual(continued.stage, "awaiting_marketing_draft_approval", "the next Hat still waits for Martin's approval");
+  assert.strictEqual(continued.hat, "Marketing Strategist", "this finished Work keeps its own Hat");
+  assert.strictEqual(continued.stage, "complete", "this finished Work is not reopened");
+  assert.strictEqual(continued.followOnWork?.hat, "Content Strategist");
+  assert.match(continued.followOnWork?.text ?? "", /The approved marketing strategy/);
+  assert.match(continued.followOnWork?.text ?? "", /turn it into content themes and briefs/);
+  assert.strictEqual(continued.marketing?.pendingNextStep, undefined, "the offer is single-use");
+  assert.ok(sentTexts.some((m) => m.includes("new piece of work")));
 });
 
 test("a missing prerequisite asks Martin to do it first, carry on with assumptions, or hand it over -- each choice routes or proceeds explicitly", async (t) => {
