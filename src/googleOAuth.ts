@@ -1474,6 +1474,35 @@ export async function consumeOpaqueOption(
   }
 }
 
+/**
+ * Read a staged option WITHOUT consuming it. Paging the folder picker needs
+ * this: the "📂 More folders" button re-renders from the same list, so the
+ * option must survive the tap (consume deletes it, which is what makes a
+ * folder pick single-use -- you cannot pick the same list twice).
+ */
+export async function peekOpaqueOption(
+  env: Env,
+  workId: string,
+  opaqueId: string,
+): Promise<Record<string, any> | null> {
+  const key = `google_option:${workId}:${opaqueId}`;
+  const raw = await kvGet(env, key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How many Drive folders the picker shows per page before a "More folders"
+ * button. The full list is staged as ONE option (see
+ * handleGoogleFolderSelection); the buttons carry positions into it, so
+ * paging costs no extra writes.
+ */
+const FOLDER_PICKER_PAGE_SIZE = 10;
+
 export const GoogleDocCreationCapability = {
   id: "workspace.google_doc_creation",
   name: "Google Doc Creation Capability",
@@ -1768,45 +1797,29 @@ export async function handleGoogleAccountSelection(
   // Folder-option staging is Cloudflare-only too: a refused write is
   // surfaced explicitly (no picker sent, nothing pretended persisted)
   // instead of throwing after the flow has already shown partial state.
-  const buttons = [];
+  //
+  // ONE write, not one per folder (Martin, 2026-11-18). The picker used to
+  // call saveOpaqueOption once per folder -- up to 50 writes, and with
+  // google_option: Turso-eligible that was up to 50 Turso calls inside a
+  // single Worker invocation, which Cloudflare cut off ("Too many
+  // subrequests by single Worker invocation", Workers Logs 18 Nov 2026
+  // 14:08:25). The whole folder list is now saved as a single option, and
+  // every button carries its folder's POSITION in that list (Telegram's
+  // 64-byte callback_data limit cannot carry a folder id, so the binding
+  // lives in the option, exactly as before -- only the number of writes
+  // changes). The 10 most recently modified folders are shown first; a
+  // "📂 More folders" button reveals the rest.
+  const folderList = folders.map((f) => ({ id: f.id, name: f.name }));
+  const shown = folderList.slice(0, FOLDER_PICKER_PAGE_SIZE);
+  const rest = folderList.slice(FOLDER_PICKER_PAGE_SIZE);
+  const baseOption = smoke
+    ? { kind: "folderlist", smoke: true, accountIdentifier, folders: folderList }
+    : delivery
+      ? { kind: "folderlist", delivery: true, docType, accountIdentifier, title, content, rows, folders: folderList }
+      : { kind: "folderlist", docType, accountIdentifier, title, content, rows, folders: folderList };
+  let listOpaqueId: string;
   try {
-    for (const folder of folders) {
-      const opaqueFolderId = await saveOpaqueOption(
-        env,
-        state.workId,
-        smoke
-          ? {
-              kind: "folder",
-              smoke: true,
-              accountIdentifier,
-              folderId: folder.id,
-              folderName: folder.name,
-            }
-          : delivery
-            ? {
-                kind: "folder",
-                delivery: true,
-                docType,
-                accountIdentifier,
-                title,
-                content,
-                rows,
-                folderId: folder.id,
-                folderName: folder.name,
-              }
-            : {
-                kind: "folder",
-                docType,
-                accountIdentifier,
-                title,
-                content,
-                rows,
-                folderId: folder.id,
-                folderName: folder.name,
-              },
-      );
-      buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
-    }
+    listOpaqueId = await saveOpaqueOption(env, state.workId, baseOption);
   } catch (err) {
     console.error(`Google folder picker: option staging failed for work ${state.workId} -- no picker was sent`, err);
     await sendWorkspaceHatMessage(
@@ -1815,6 +1828,15 @@ export async function handleGoogleAccountSelection(
       "⚠️ Could not persist the folder-selection options (storage write refused -- likely the daily KV quota), so no folder picker was sent and nothing was staged. Please retry after the quota window resets.",
     );
     return state;
+  }
+
+  const buttons = [];
+  for (let i = 0; i < shown.length; i++) {
+    const folder = shown[i]!;
+    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${listOpaqueId}:${i}` }]);
+  }
+  if (rest.length) {
+    buttons.push([{ text: "📂 More folders", callback_data: `googlefolder:${state.workId}:${listOpaqueId}:more` }]);
   }
 
   if (smoke) {
@@ -1850,6 +1872,53 @@ export async function handleGoogleAccountSelection(
   return state;
 }
 
+/**
+ * Renders one page of the folder picker from a staged folder list. The list
+ * itself is consumed only when a folder is actually picked; paging keeps it.
+ */
+async function renderFolderPage(
+  env: Env,
+  state: WorkState,
+  target: HatMessageTarget,
+  option: Record<string, any>,
+  offset: number,
+): Promise<WorkState> {
+  const folders: Array<{ id: string; name: string }> = option.folders;
+  const page = folders.slice(offset, offset + FOLDER_PICKER_PAGE_SIZE);
+  const buttons: InlineButton[][] = [];
+  for (let i = 0; i < page.length; i++) {
+    const folder = page[i]!;
+    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:${offset + i}` }]);
+  }
+  if (offset + page.length < folders.length) {
+    buttons.push([{ text: "📂 More folders", callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:more` }]);
+  }
+  const isSmoke = option.smoke === true;
+  const messageText = isSmoke
+    ? `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${option.accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`
+    : option.delivery === true
+      ? `*Save approved output to Google Drive*\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder -- you will confirm once more before anything is created:`
+      : `*Google Workspace Action*: ${option.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc"}\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder:`;
+  await sendWorkspaceHatMessage(env, target, messageText, buttons);
+  if (isSmoke) {
+    await logActivity(env, {
+      entry: "Google Docs Registry smoke: folder picker presented",
+      type: "Activity",
+      activity: `Registry smoke Drive folder picker presented for account '${option.accountIdentifier}'`,
+      outcome: "Active",
+      workId: state.workId,
+    });
+  } else {
+    await logActivity(env, {
+      entry: "Google Drive folders presented",
+      type: "Activity",
+      activity: `Drive folder picker presented for account '${option.accountIdentifier}'`,
+      outcome: "Active",
+    });
+  }
+  return state;
+}
+
 export async function handleGoogleFolderSelection(
   env: Env,
   state: WorkState,
@@ -1862,8 +1931,8 @@ export async function handleGoogleFolderSelection(
     workId: state.workId,
   };
 
-  const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
-  if (!option || option.kind !== "folder" || !option.folderId) {
+  const option = await peekOpaqueOption(env, state.workId, opaqueOptionId);
+  if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
     await sendWorkspaceHatMessage(
       env,
       target,
@@ -1872,7 +1941,30 @@ export async function handleGoogleFolderSelection(
     return state;
   }
 
-  const { accountIdentifier, title, content, rows, folderId, folderName } = option;
+  // A folder button carries its POSITION in the staged list (see
+  // handleGoogleAccountSelection). "more" re-renders the same list from the
+  // next page; anything else consumes the list and picks that folder.
+  const position = opaqueOptionId.includes(":") ? opaqueOptionId.split(":").pop() : undefined;
+  if (position === "more") {
+    return renderFolderPage(env, state, target, option, FOLDER_PICKER_PAGE_SIZE);
+  }
+  const index = Number(position);
+  const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
+  if (!picked) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ That folder selection is no longer current -- nothing was recorded.",
+    );
+    return state;
+  }
+  // Consuming the list makes the pick single-use: a replayed button cannot
+  // re-pick the same folder (the same discipline as the old per-folder
+  // consume, which deleted each option on tap).
+  await kvDelete(env, `google_option:${state.workId}:${opaqueOptionId}`);
+  const { accountIdentifier, title, content, rows } = option;
+  const folderId = picked.id;
+  const folderName = picked.name;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
   // Shared output-delivery flow (src/outputDelivery.ts): the folder option
   // carries `delivery: true`. Route to the final explicit confirmation, which
