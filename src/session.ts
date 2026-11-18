@@ -52,7 +52,7 @@ import {
   handleGoogleActionApproval,
   consumeOpaqueOption,
 } from "./googleOAuth";
-import { handleOutputDeliveryCallback, confirmOutputDelivery } from "./outputDelivery";
+import { handleOutputDeliveryCallback, confirmOutputDelivery, runWithSaveOnApproval, SAVE_ON_APPROVAL_SUFFIX } from "./outputDelivery";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
 import {
@@ -767,6 +767,13 @@ export class WorkSession extends DurableObject<Env> {
 
 
   async handleCallback(action: string, value: string): Promise<WorkState> {
+    // "✅ Approve and save to Google Drive" (src/outputDelivery.ts): the Hat's
+    // own approval runs unchanged; if it captured an output, the shared save
+    // picker opens at once. A suffix on any other value does nothing extra.
+    if (value.endsWith(SAVE_ON_APPROVAL_SUFFIX)) {
+      const approved = await runWithSaveOnApproval(() => this.handleCallback(action, value.slice(0, -SAVE_ON_APPROVAL_SUFFIX.length)));
+      return approved.outputDelivery?.saveRequested ? this.runOutputDeliveryCallback("start") : approved;
+    }
     // The interactive Tool Registry smoke confirmation is handled OUTSIDE
     // the generic execute below: its invocation installs its own durable
     // operation persistence through this session's execute cycle, and

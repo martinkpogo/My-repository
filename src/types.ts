@@ -718,6 +718,8 @@ export interface WorkState {
     title: string;
     /** When this approved output was captured. */
     capturedAt: string;
+    /** Martin tapped "Approve and save to Google Drive": open the picker at once instead of offering. */
+    saveRequested?: boolean;
   };
 
   /**

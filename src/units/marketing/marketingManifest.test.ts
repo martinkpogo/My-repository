@@ -671,3 +671,52 @@ test("approving a draft shows the shared Save as Doc offer (2026-11-18: Martin a
   assert.ok(state.outputDelivery, "the approved draft is held for saving");
   assert.ok(sent.some((b) => b.includes("Save as Doc") && b.includes("outputdelivery:")), "the offer with its button was sent");
 });
+
+test("decide first, research after (2026-11-18): a question costs one call with no web research; a draft adds one drafting call with it", async (t) => {
+  clarifyFetchMock(t);
+  const calls: string[] = [];
+  let ask = true;
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: {
+      run: async (_m: any, opts: any) => {
+        const system = String(opts?.messages?.[0]?.content ?? "");
+        calls.push(system.includes("THIS PASS ONLY DECIDES") ? "decide" : "draft");
+        return { response: JSON.stringify(ask ? { action: "clarify", reason: "Budget?", suggestedAnswers: ["None", "$500"] } : { action: "draft", draft: calls.at(-1) === "draft" ? "The plan." : "" }) };
+      },
+    } as any,
+  });
+  await dispatchMarketingHat(env, fakeWorkState({ marketing: { taskText: "Plan a campaign." } }));
+  assert.deepStrictEqual(calls, ["decide"], "asking a question needs only the deciding pass");
+
+  calls.length = 0;
+  ask = false;
+  const out = await dispatchMarketingHat(env, fakeWorkState({ marketing: { taskText: "Plan a campaign." } }));
+  assert.deepStrictEqual(calls, ["decide", "draft"], "a draft is written by the drafting pass");
+  assert.strictEqual(out.marketing?.draft, "The plan.", "the draft comes from the drafting pass, not the empty deciding one");
+});
+
+test("no invented evidence (2026-11-18): the decision format forbids made-up client results and figures, and names Martin", async () => {
+  const { MARKETING_DECISION_FORMAT } = await import("./marketingManifest");
+  assert.match(MARKETING_DECISION_FORMAT, /Never invent evidence/);
+  assert.match(MARKETING_DECISION_FORMAT, /no client results, case studies, testimonials/);
+  assert.match(MARKETING_DECISION_FORMAT, /\[add a real client result\]/);
+  assert.match(MARKETING_DECISION_FORMAT, /proposed target/);
+  assert.match(MARKETING_DECISION_FORMAT, /Refer to Martin by name/);
+});
+
+test("the draft approval card carries the shared Approve and save to Google Drive button (2026-11-18)", async (t) => {
+  const { sentTexts } = clarifyFetchMock(t);
+  const env = fakeEnv({
+    AI_MODEL_PRIMARY: "test-model",
+    AI_MODEL_LIGHT: "test-model-light",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "activity-log-ds",
+    AI: { run: async () => ({ response: JSON.stringify({ action: "draft", draft: "The plan." }) }) } as any,
+  });
+  const out = await dispatchMarketingHat(env, fakeWorkState({ marketing: { taskText: "Plan a campaign." } }));
+  const buttons = (out.pendingActionSummary?.buttons ?? []).flat();
+  assert.ok(buttons.some((b) => b.text === "✅ Approve and save to Google Drive" && b.callback_data === `marketdraft:${out.workId}:approve~save`));
+  void sentTexts;
+});

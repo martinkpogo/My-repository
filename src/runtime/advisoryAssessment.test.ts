@@ -174,3 +174,12 @@ test("redo handler: refuses unless the recommended draft is still the one awaiti
   const src = fs.readFileSync(new URL("../units/marketing/marketingManifest.ts", import.meta.url), "utf8");
   assert.match(src, /handleMarketingFeedback\(env, state, `\(the Checker's recommended note, sent by Martin's tap\) \$\{assessment\.note\}`\)/, "the Hat is told the note is the Checker's, sent by his tap");
 });
+
+test("the Checker is told who exists at ENIG -- Martin and every registered Hat -- so it never flags a real Hat as missing (2026-11-18)", async () => {
+  const { buildAdvisoryPromptParts } = await import("./advisoryAssessment");
+  const { ALL_HATS } = await import("../hats/registry");
+  const parts = buildAdvisoryPromptParts({ output: "x", criteria: ["c"], request: "r" } as any, "checker-1");
+  assert.match(parts.context, /WHO EXISTS AT ENIG: Martin, the founder, is the only person/);
+  for (const hat of ALL_HATS) assert.ok(parts.context.includes(hat.name), hat.name);
+  assert.ok(parts.context.includes("Content Strategist") && parts.context.includes("Digital Marketer"));
+});

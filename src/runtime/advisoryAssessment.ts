@@ -1,6 +1,7 @@
 import type { Env, ResultReviewAssessment, WorkState } from "../types";
 import { generate } from "../ai";
 import { hashContent } from "../contentHash";
+import { ALL_HATS } from "../hats/registry";
 import { getPageContent } from "../notion";
 import { systemContext } from "../access";
 import { RESULT_VERIFICATION_AUTHORITY_PAGE_ID, RESULT_VERIFICATION_TASK_ID, parseResultVerificationAuthority } from "./resultVerification";
@@ -52,6 +53,16 @@ export const ADVISORY_RESPONSE_FORMAT = [
   'Use "not_applicable" for relevant_to_client_situation when the request and context supply no client situation. "concerns" may be empty. No other key names, no other values.',
 ].join("\n");
 
+/**
+ * Who exists at ENIG, from the Hat registry (never typed): Martin, the only
+ * person, and the AI roles (Hats). The Checker had flagged real Hats a draft
+ * assigned work to -- "Content Strategist", "Digital Marketer" -- as roles
+ * that do not exist (2026-11-18), because it was never told which do.
+ */
+export function ENIG_ROLES_FACT(): string {
+  return `WHO EXISTS AT ENIG: Martin, the founder, is the only person. The AI roles (Hats) are: ${ALL_HATS.map((h) => h.name).join("; ")}. A draft that assigns work to one of these Hats is naming a real role; only a role outside this list does not exist.`;
+}
+
 /** The Checker's prompt parts. Pure and exported so the rubric is testable. */
 export function buildAdvisoryPromptParts(input: AdvisoryAssessmentInput, checkerId: string) {
   return {
@@ -64,6 +75,7 @@ export function buildAdvisoryPromptParts(input: AdvisoryAssessmentInput, checker
       "Judge only against what you were given. You cannot know whether a claim is true in the world, only whether the draft's claims are supported by the sources it names. Be concrete and brief; do not pad. Then recommend ONE next action: approve (good to use), redo (with a concrete note Martin could send), or ask (a question to settle first).",
     ].join("\n"),
     context: [
+      ENIG_ROLES_FACT(),
       `REQUEST: ${input.request?.trim() || "(not recorded)"}`,
       `CRITERIA:\n${input.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
       ADVISORY_RESPONSE_FORMAT,

@@ -28,6 +28,12 @@ export interface AiJsonOptions {
    * step are unchanged.
    */
   timeoutMs?: number;
+  /**
+   * True for a call that must not start web research even though its task
+   * is eligible (Martin, 2026-11-18): a Hat's deciding pass while it may
+   * still ask Martin questions. Research runs on the pass that drafts.
+   */
+  noWebResearch?: boolean;
 }
 
 export interface AiTextOptions {
@@ -98,6 +104,7 @@ function buildJsonTask(opts: AiJsonOptions): AiTask {
     light: opts.light,
     resumable: opts.resumable,
     timeoutMs: opts.timeoutMs,
+    noWebResearch: opts.noWebResearch,
     validateResponse: isParsableJson,
   };
 
@@ -247,6 +254,12 @@ interface BaseGenerateOptions {
   resumable?: boolean;
   /** Per-call provider timeout, overriding the provider's default. */
   timeoutMs?: number;
+  /**
+   * True for a call that must not start web research even though its task
+   * is eligible (Martin, 2026-11-18): a Hat's deciding pass while it may
+   * still ask Martin questions. Research runs on the pass that drafts.
+   */
+  noWebResearch?: boolean;
 }
 
 function assembleSystemPrompt(parts: GeneratePromptParts): string {
@@ -271,7 +284,7 @@ export async function generate(env: Env, options: BaseGenerateOptions & { mode: 
   const system = assembleSystemPrompt(options.parts);
   const situation = options.parts.situation;
   if (options.mode === "json") {
-    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens, resumable: options.resumable, timeoutMs: options.timeoutMs });
+    return aiJson(env, { taskId: options.taskId, system, user: situation, light: options.light, maxTokens: options.maxTokens, resumable: options.resumable, timeoutMs: options.timeoutMs, noWebResearch: options.noWebResearch });
   }
   if (options.history) {
     // aiChat is a webhook-time chat reply: it never takes a resumable flag

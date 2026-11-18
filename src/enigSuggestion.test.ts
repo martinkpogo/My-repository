@@ -262,3 +262,11 @@ test("withoutAddressee: the confirmed Hat works from Martin's own words, not the
   assert.strictEqual(withoutAddressee("Marketing Strategist, create a campaign", "Marketing Strategist"), "create a campaign");
   assert.strictEqual(withoutAddressee("create a campaign", "Marketing Strategist"), "create a campaign");
 });
+
+test("routing (2026-11-18): work that still needs its direction decided goes to the Hat owning direction, never by naming a Hat in code", async () => {
+  const { suggestionInstruction } = await import("./enigSuggestion");
+  const text = suggestionInstruction();
+  assert.match(text, /still needs its direction decided/);
+  assert.match(text, /not to a Hat that carries out or coordinates work once the direction is set/);
+  assert.doesNotMatch(text.split("Every <name> is copied exactly")[0], /Marketing Strategist|Campaign & Marketing/, "the rule names no Hat; the list of names comes from the registry");
+});

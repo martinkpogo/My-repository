@@ -83,6 +83,10 @@ export function suggestionInstruction(): string {
     "ROUTE: <name>",
     "That line starts nothing by itself: the runtime shows Martin the question \"This is <name>'s work. Enter Cowork as <name> and start?\" with Enter Cowork and Not now buttons, and only his tap on Enter Cowork switches the thread to Cowork and starts the work as that Hat. Write nothing else on a ROUTE reply -- whatever you add beside the line is discarded.",
     "Prefer the most specific Hat whose responsibility covers the request over its Unit.",
+    // Martin, 2026-11-18: "Plan a campaign to get more clients" went to the
+    // Hat that coordinates campaigns, which handed it straight on to the Hat
+    // that owns marketing direction -- an extra step and an extra tap.
+    "When the request still needs its direction decided -- what it should achieve, who it is for, the plan or strategy (\"plan a campaign\", \"how do we get more clients\") -- route it to the Hat that owns that direction or strategy, not to a Hat that carries out or coordinates work once the direction is set. Route to an executing Hat only when Martin's request already names what to produce (\"write the post\", \"schedule the calendar\").",
     "If two or three of the names could each own it and you cannot tell which, write one short question asking Martin which, and end with exactly one line:",
     "ASK: <name> | <name>",
     "There he picks with one tap and the work starts at once in Cowork as the Hat he picks -- no second confirmation.",

@@ -24,6 +24,12 @@ export interface AiTask {
    * take longer than a webhook-time reply can afford. Absent: webhook
    * time, today's behaviour unchanged.
    */
+  /**
+   * True for a call that must not start web research even though its task
+   * is eligible (Martin, 2026-11-18): a Hat's deciding pass while it may
+   * still ask Martin questions. Research runs on the pass that drafts.
+   */
+  noWebResearch?: boolean;
   resumable?: boolean;
   /**
    * Per-call provider timeout, overriding the provider's default. Research

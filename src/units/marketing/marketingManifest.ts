@@ -14,7 +14,7 @@ import {
 import { generate, type GeneratePromptParts } from "../../ai";
 import { logActivity } from "../../log";
 import { sendWorkspaceHatMessage, withWorkspaceTypingIndicator, type InlineButton } from "../../telegram";
-import { captureApprovedOutput } from "../../outputDelivery";
+import { approveAndSaveRow, captureApprovedOutput } from "../../outputDelivery";
 import { advanceWorkStatus, finishWorkStatus, startWorkStatus, workStatusHeader } from "../../runtime/workStatus";
 import { getGovernance, UNIVERSAL_ROLE_CONTRACT_PAGE_ID } from "../../governance";
 import { closeHandoffOnResult } from "../../handoffLifecycle";
@@ -154,7 +154,20 @@ export const MARKETING_DECISION_FORMAT = [
   '2. Otherwise, before drafting, apply the Universal Role Contract\'s understand_before_producing rule above to this task. If it calls for a question whose answer is not already in the task text, or you cannot determine ownership, return {"action":"clarify","reason":"<one short, specific question>","suggestedAnswers":["<answer 1>","<answer 2>","<answer 3>"]} -- one question only, with two to four short, concrete likely answers Martin can tap (he may always type a different answer instead). Answers he has already given appear in the task text as "Additional detail:" lines: never ask again what they answer. If the task text says Martin said that\'s enough questions, do not ask: draft, stating each remaining assumption plainly.',
   '3. Otherwise return {"action":"draft","draft":"...", "involves_spend": true|false}, following the contract\'s decide_dont_list and evidence_over_generalities rules. When a WEB RESEARCH block is present, rest claims about markets, buyers or what works on its findings, each with its source link exactly as given; if none of the findings is relevant to the task, say so plainly in one line rather than presenting general advice as established. Set involves_spend true only if this Hat is Digital Marketer and the action involves paid advertising or committing spend -- spend always requires explicit human approval regardless of whether it is tactical or strategic.',
   "Never guess past missing information or invent authority you don't have.",
+  // Martin, 2026-11-18: a draft claimed "We helped a Ghanaian fintech double
+  // its inbound leads" -- a client result that exists nowhere. The rule is the
+  // contract's evidence rule; this states how it applies to a draft.
+  "Never invent evidence (the contract's evidence rule): no client results, case studies, testimonials, quotes, statistics, rates or market figures that are not in the task, the records, the Consultancy Profile or a cited WEB RESEARCH finding. Where an example would help, write a clearly marked placeholder such as [add a real client result] instead. A target Martin can change (e.g. a number of calls to aim for) may be proposed only when labelled as a proposed target.",
+  "Refer to Martin by name, never as \"the operator\" or \"the user\".",
 ].join("\n");
+
+/**
+ * Added to the Hat's deciding pass only (Martin, 2026-11-18): that pass decides
+ * whether to draft, route or ask, without web research; the draft itself is
+ * written by the next pass, which has the research.
+ */
+export const MARKETING_DECIDE_ONLY_NOTE =
+  'THIS PASS ONLY DECIDES. No web research has been run yet. If you would draft, reply {"action":"draft","draft":""} with an empty draft and nothing else -- the draft is written in the next pass, with research. Route or clarify exactly as described above.';
 
 export function buildHatPromptParts(hat: MarketingHatDefinition, universalRoleContract: string): Pick<GeneratePromptParts, "persona" | "behavior" | "skillContent" | "context"> {
   return {
@@ -206,13 +219,31 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
   }
 
   await advanceWorkStatus(env, state, `Deciding within ${hatName}'s ownership: draft, route to another Hat, or ask for clarification`);
-  const decision = await withWorkspaceTypingIndicator(env, () =>
+  // Decide first, research after (Martin, 2026-11-18): while the Hat may still
+  // ask Martin a question, no web search runs -- every answer used to re-run
+  // this step with a fresh round of searches that the next question threw
+  // away. This deciding pass runs without web research and only says draft,
+  // route or clarify; only when it would draft does the drafting pass run,
+  // with research (and any deep-research proposal). Same task, same data.
+  const promptParts = buildHatPromptParts(hat, universalRoleContract);
+  const situation = state.marketing?.taskText ?? "";
+  let decision = await withWorkspaceTypingIndicator(env, () =>
     generate<HatActionDecision>(env, {
       taskId: "marketing.hat_action_decision",
       mode: "json",
-      parts: { ...buildHatPromptParts(hat, universalRoleContract), situation: state.marketing?.taskText ?? "" },
+      noWebResearch: true,
+      parts: { ...promptParts, context: [promptParts.context, MARKETING_DECIDE_ONLY_NOTE].filter(Boolean).join("\n\n"), situation },
     }),
   );
+  if (decision?.action === "draft") {
+    decision = await withWorkspaceTypingIndicator(env, () =>
+      generate<HatActionDecision>(env, {
+        taskId: "marketing.hat_action_decision",
+        mode: "json",
+        parts: { ...promptParts, situation },
+      }),
+    );
+  }
 
   if (!decision) {
     console.error(`Marketing (${hatName}) action decision failed for work ${state.workId}`);
@@ -389,6 +420,7 @@ async function runMarketingHat(env: Env, state: WorkState): Promise<WorkState> {
       { text: "✅ Approve", callback_data: `marketdraft:${state.workId}:approve` },
       { text: "🔁 Redo", callback_data: `marketdraft:${state.workId}:redo` },
     ],
+    approveAndSaveRow(`marketdraft:${state.workId}:approve`),
   ];
   await sendWorkspaceHatMessage(env, state, draftMessage, draftButtons);
   state.pendingActionSummary = {
