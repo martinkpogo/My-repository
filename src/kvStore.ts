@@ -63,10 +63,11 @@ import type { Env } from "./types";
  * an unwrapped (legacy) value decodes to seq 0, and a legacy Turso row's
  * seq is its updated_at column (actual write-time evidence). Reads compare
  * versions: the higher seq wins, a TIE goes to KV (the store that accepted
- * the write), and Turso is consulted on every eligible read so a fallback
- * row written for a failed KV write can never be shadowed by the older KV
- * value -- including after an isolate restart (versions live in the stored
- * bytes, not in isolate memory). Deleting a key clears both stores; when
+ * the write), and -- while the backup-in-use marker below is set -- Turso
+ * is consulted on every eligible read so a fallback row written for a
+ * failed KV write can never be shadowed by the older KV value -- including
+ * after an isolate restart (versions live in the stored bytes, not in
+ * isolate memory). Deleting a key clears both stores; when
  * the KV delete succeeds but the shadow delete fails, the row is
  * OVERWRITTEN with a tombstone so no read or sweep can resurrect it.
  * Sweep and read-repair apply the same version comparison and skip (and
@@ -75,6 +76,20 @@ import type { Env } from "./types";
  * millisecond can lose the loser (bounded, pre-existing); and a shadow
  * delete that fails with Turso entirely down survives as a resurrection
  * window until the tombstone write retries or the key's next write.
+ *
+ * BACKUP-IN-USE MARKER (Martin, 2026-11-18, free-plan cut): Turso is only
+ * touched while the backup is actually in use. One KV marker
+ * (`kv_fallback_in_use` -- Cloudflare-only, deliberately NOT in the
+ * eligibility allowlist, so the marker itself can never fall back) is set
+ * on every Turso write (kvPut's fallback, kvDelete's tombstone) and cleared
+ * once the sweep empties the table. While the marker is off, reads and
+ * writes skip Turso entirely: in steady state the backup holds no rows, so
+ * every eligible read/write would otherwise spend one of the 50 subrequests
+ * a single Worker invocation may make on an empty-table probe. Writes still
+ * fall back to Turso when Cloudflare refuses them, and the sweep (throttled,
+ * unconditional) drains any row stranded by a marker write that itself
+ * failed, so no data is lost -- only the read-side shortcut is deferred
+ * until the marker is set again.
  *
  * FAILURE SEMANTICS:
  * - KV put fails, key eligible, Turso write succeeds -> no error; the
@@ -88,21 +103,33 @@ import type { Env } from "./types";
  *   applies the delete to KV later (2026-11-17). Only if that tombstone
  *   write also fails is the KV error rethrown.
  *
- * RECONCILIATION: a successful KV put (or delete) of an eligible key also
- * removes its Turso shadow row, so in steady state the fallback holds
- * nothing -- and because reads/sweeps are version-aware, losing that
- * best-effort delete can no longer corrupt state: the stale row is either
- * superseded by the newer KV value or (post-delete) overwritten by a
- * tombstone. Rows that accumulated during an outage are swept back into KV
- * by sweepKvFallback (throttled, called from the doc-comment poll -- the
- * runtime's de-facto heartbeat -- and from scheduled()), and a KV read
- * whose fallback row is newer repairs KV opportunistically on the spot.
- * The previously documented v1 staleness window (an isolate restart
- * letting a stale shadow row be copied over an older KV value) is closed
- * by the versioned envelope -- the version travels in the stored bytes.
+ * RECONCILIATION: a successful KV delete of an eligible key also removes
+ * its Turso shadow row (or overwrites it with a tombstone when the plain
+ * delete fails). A successful KV put NO LONGER deletes its own shadow row
+ * (Martin, 2026-11-18 free-plan cut: that delete was pure overhead -- Turso
+ * is empty in steady state, and the subrequest cost 1 of the 50 a single
+ * Worker invocation may make). Correctness does not depend on dropping it:
+ * reads and the sweep compare version stamps and use the newer copy, so a
+ * surviving older row is superseded rather than resurrected. Rows that
+ * accumulated during an outage are swept back into KV by sweepKvFallback
+ * (throttled, called from the doc-comment poll -- the runtime's de-facto
+ * heartbeat -- and from scheduled()), and a KV read whose fallback row is
+ * newer repairs KV opportunistically on the spot. The previously documented
+ * v1 staleness window (an isolate restart letting a stale shadow row be
+ * copied over an older KV value) is closed by the versioned envelope -- the
+ * version travels in the stored bytes.
  */
 
 const TURSO_TABLE = "kv_fallback";
+
+/**
+ * The Cloudflare-only marker that says whether the Turso backup currently
+ * holds rows (see BACKUP-IN-USE MARKER in the header). Deliberately not an
+ * eligible key: it is read and written straight through env.STATE_KV, never
+ * through kvGet/kvPut, so it can never fall back to itself.
+ */
+const BACKUP_IN_USE_KEY = "kv_fallback_in_use";
+export { BACKUP_IN_USE_KEY };
 
 /** Consecutive KV put failures before the circuit opens and writes go straight to Turso. */
 const KV_CIRCUIT_FAILURE_THRESHOLD = 2;
@@ -306,6 +333,44 @@ function runtimeState(): KvStoreRuntimeState {
 export function __resetKvStoreStateForTests(): void {
   const g = globalThis as Record<string, unknown>;
   delete g.__enigKvStoreState;
+}
+
+// ---------------------------------------------------------------------------
+// Backup-in-use marker (see BACKUP-IN-USE MARKER in the header)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the Turso backup currently holds rows. Read straight from KV so
+ * the check costs no Turso subrequest. Unreadable KV (an outage) fails
+ * CLOSED: assume the backup is in use so no stranded row can be hidden from
+ * a reader -- the worst case is one empty-table probe, never lost data.
+ */
+async function backupInUse(env: Env): Promise<boolean> {
+  try {
+    const flag = await env.STATE_KV.get(BACKUP_IN_USE_KEY);
+    return flag === "1";
+  } catch (err) {
+    console.error("kvStore: backup-in-use marker read failed -- assuming in use", err);
+    return true;
+  }
+}
+
+/** Set the marker after any Turso write. Best-effort: the data is already durable in Turso; the marker is only the read-side shortcut. */
+async function markBackupInUse(env: Env): Promise<void> {
+  try {
+    await env.STATE_KV.put(BACKUP_IN_USE_KEY, "1");
+  } catch (err) {
+    console.error("kvStore: backup-in-use marker set failed", err);
+  }
+}
+
+/** Clear the marker once the sweep empties the table. Best-effort for the same reason. */
+async function clearBackupInUse(env: Env): Promise<void> {
+  try {
+    await env.STATE_KV.delete(BACKUP_IN_USE_KEY);
+  } catch (err) {
+    console.error("kvStore: backup-in-use marker clear failed", err);
+  }
 }
 
 function textArg(value: string): TursoArg {
@@ -533,7 +598,7 @@ async function tursoCount(cfg: TursoConfig): Promise<number | null> {
       { type: "execute", stmt: { sql: `SELECT COUNT(*) FROM ${TURSO_TABLE}`, args: [] } },
     ]);
     const rows = execRows(results);
-    return rows.length ? decodeInteger(rows[0][0]) : 0;
+    return rows.length ? decodeInteger(rows[0][0]) : null;
   } catch (err) {
     console.error("kvStore: Turso row count failed", err);
     return null;
@@ -552,6 +617,9 @@ async function tursoCount(cfg: TursoConfig): Promise<number | null> {
 
 function circuitIsOpen(): boolean {
   return now() < runtimeState().circuitOpenUntil;
+}
+function circuitHasFailures(): boolean {
+  return runtimeState().circuitFailures > 0;
 }
 function circuitNoteFailure(): void {
   const state = runtimeState();
@@ -580,6 +648,20 @@ function remainingTtlSeconds(expiresAt: number | null): number | null {
 export async function kvGet(env: Env, key: string): Promise<string | null> {
   const cfg = tursoConfig(env);
   if (!cfg || !isFallbackEligible(key)) return env.STATE_KV.get(key);
+
+  // Backup-in-use gate (Martin, 2026-11-18 free-plan cut): with no fallback
+  // rows pending, Turso cannot hold a newer copy, so serve straight from KV
+  // and spend no Turso subrequest. The marker is set on every Turso write
+  // and cleared once the sweep empties the table; while off, reads skip
+  // Turso entirely. EXCEPT during a KV write outage: the marker write
+  // itself goes through KV, so it can fail while rows sit in Turso -- any
+  // recent KV put failure (circuit open OR failures recorded) forces the
+  // Turso consult until a sweep or a successful write re-establishes
+  // steady state.
+  if (!circuitIsOpen() && !circuitHasFailures() && !(await backupInUse(env))) {
+    const raw = await env.STATE_KV.get(key);
+    return raw === null || raw === undefined ? null : decodeStored(raw).value;
+  }
 
   // Both stores are consulted on EVERY eligible read (conflict-resolution
   // contract in the header): a fallback row can be newer than a KV value
@@ -743,6 +825,9 @@ export async function kvPut(env: Env, key: string, value: string, opts?: { expir
   const expiresAt = opts?.expirationTtl ? now() + opts.expirationTtl * 1000 : null;
   try {
     await tursoUpsert(cfg, key, bytes, expiresAt);
+    // The backup now holds a row: raise the marker so reads stop skipping
+    // Turso until the sweep empties it again.
+    await markBackupInUse(env);
   } catch (tursoErr) {
     console.error(`kvStore: Turso fallback write failed for ${key} -- both stores refused this write: ${errorText(tursoErr)}`, tursoErr);
     // Fail-closed continuity: the caller sees the same KV error it always saw when
@@ -791,6 +876,7 @@ export async function kvDelete(env: Env, key: string): Promise<void> {
     console.error(`kvStore: KV delete failed for ${key} -- recording a tombstone in Turso: ${errorText(err)}`, err);
     try {
       await tursoUpsert(cfg, key, wrapTombstone(now()), null);
+      await markBackupInUse(env);
       return;
     } catch (tombstoneErr) {
       console.error(`kvStore: tombstone write failed for ${key} -- both stores refused this delete: ${errorText(tombstoneErr)}`, tombstoneErr);
@@ -810,6 +896,7 @@ export async function kvDelete(env: Env, key: string): Promise<void> {
     console.error(`kvStore: shadow delete failed for ${key} -- overwriting with a tombstone`, err);
     try {
       await tursoUpsert(cfg, key, wrapTombstone(now()), null);
+      await markBackupInUse(env);
     } catch (tombstoneErr) {
       console.error(
         `kvStore: tombstone write failed for ${key} -- a stale shadow row may survive Turso recovery until this key's next write`,
@@ -836,6 +923,9 @@ export async function kvList(env: Env, opts: { prefix: string; cursor?: string }
   const cfg = tursoConfig(env);
   const page = (await env.STATE_KV.list(opts)) as unknown as KvListResult;
   if (!cfg || !isFallbackEligible(opts.prefix)) return page;
+  // Backup-in-use gate (see kvGet): with no fallback rows pending the merge
+  // cannot add anything, so skip the Turso subrequest.
+  if (!(await backupInUse(env)) && !circuitIsOpen() && !circuitHasFailures()) return page;
   try {
     const extraKeys = await tursoListKeys(cfg, opts.prefix);
     const seen = new Set(page.keys.map((k) => k.name));
@@ -874,6 +964,9 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
     return result;
   }
   result.remaining = rows.length > limit;
+  // Set when a held row forces the pass to stop early -- the marker must not
+  // clear in that case (the backup still holds unreconciled rows).
+  let held = false;
   for (const row of rows.slice(0, limit)) {
     const entry = decodeRow(row);
     if (entry.tombstone) {
@@ -886,6 +979,7 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
         kvTomb = await env.STATE_KV.get(row.key);
       } catch (err) {
         console.error(`kvStore: sweep cannot version-check tombstone ${row.key}; held for a later pass`, err);
+        held = true;
         break;
       }
       const kvTombEntry = kvTomb === null || kvTomb === undefined ? null : decodeStored(kvTomb);
@@ -894,6 +988,7 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
           await env.STATE_KV.delete(row.key);
         } catch (err) {
           console.error(`kvStore: sweep KV delete failed at ${row.key}; remaining rows held for a later pass`, err);
+          held = true;
           break;
         }
       }
@@ -921,6 +1016,7 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
     }
     if (kvError) {
       console.error(`kvStore: sweep cannot version-check ${row.key}; row held for a later pass`, kvError);
+      held = true;
       break;
     }
     const kvEntry = kvRaw === null || kvRaw === undefined ? null : decodeStored(kvRaw);
@@ -937,12 +1033,20 @@ export async function sweepKvFallback(env: Env, limit = SWEEP_DEFAULT_LIMIT): Pr
       await env.STATE_KV.put(row.key, bytes, ttl !== null ? { expirationTtl: Math.max(ttl, 60) } : undefined);
     } catch (err) {
       console.error(`kvStore: sweep KV write failed at ${row.key}; remaining rows held for a later pass`, err);
+      held = true;
       break;
     }
     // If this delete fails, both stores now hold the SAME version+value --
     // a tie the contract resolves to KV -- so nothing stale can be restored.
     await tursoDelete(cfg, row.key).catch((err) => console.error(`kvStore: sweep row delete failed for ${row.key}`, err));
     result.swept += 1;
+  }
+  // Once the pass is genuinely empty the backup is no longer in use, so the
+  // marker clears and reads/writes stop touching Turso again (Martin,
+  // 2026-11-18). A pass that held a row for a later try, or that stopped with
+  // more rows waiting, must leave the marker set.
+  if (!held && !result.remaining) {
+    await clearBackupInUse(env);
   }
   runtimeState().lastSweepAt = now();
   return result;
@@ -966,13 +1070,23 @@ export async function maybeSweepKvFallback(env: Env): Promise<SweepResult | null
 /** Diagnostics for /admin/turso-fallback. Never returns the auth token. */
 export async function kvFallbackStatus(env: Env): Promise<Record<string, unknown>> {
   const cfg = tursoConfig(env);
+  if (!cfg) return { configured: false, circuit_open: false, consecutive_kv_failures: 0, circuit_open_until: null, last_sweep_at: null, fallback_rows: null };
+  // Backup-in-use gate: if the marker is off the backup is known-empty, so
+  // no Turso COUNT is needed (the /admin endpoint serves a zero row-count
+  // to avoid an unnecessary subrequest when the free-plan shortcut is active).
+  // During a KV write outage the marker cannot be trusted (its own write
+  // failed), so the circuit state overrides it.
+  if (!(await backupInUse(env)) && !circuitIsOpen() && !circuitHasFailures()) {
+    const state = runtimeState();
+    return { configured: true, circuit_open: circuitIsOpen(), consecutive_kv_failures: state.circuitFailures, circuit_open_until: state.circuitOpenUntil ? new Date(state.circuitOpenUntil).toISOString() : null, last_sweep_at: state.lastSweepAt ? new Date(state.lastSweepAt).toISOString() : null, fallback_rows: 0 };
+  }
   const state = runtimeState();
   return {
-    configured: Boolean(cfg),
+    configured: true,
     circuit_open: circuitIsOpen(),
     consecutive_kv_failures: state.circuitFailures,
     circuit_open_until: state.circuitOpenUntil ? new Date(state.circuitOpenUntil).toISOString() : null,
     last_sweep_at: state.lastSweepAt ? new Date(state.lastSweepAt).toISOString() : null,
-    fallback_rows: cfg ? await tursoCount(cfg) : null,
+    fallback_rows: backupInUse(env) ? 0 : await tursoCount(cfg),
   };
 }

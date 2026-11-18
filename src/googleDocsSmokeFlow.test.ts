@@ -307,11 +307,12 @@ test("smoke account selection stages smoke-flagged folder options with no creati
   const opaqueId = await stageOption(env, workId, { kind: "account", smoke: true, accountIdentifier: ACCOUNT });
   const next = await handleGoogleAccountSelection(env, state, opaqueId);
 
-  // Folder options carry the discriminator forward and drop all creation payload.
-  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folder");
+  // The smoke-flagged folder list rides on the single staged option and
+  // drops all creation payload.
+  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folderlist");
   assert.equal(folderOptions.length, 1);
   assert.equal(folderOptions[0].smoke, true);
-  assert.equal(folderOptions[0].folderId, FOLDER_ID);
+  assert.ok(Array.isArray(folderOptions[0].folders) && folderOptions[0].folders.length >= 1, "the list carries the Drive folders");
   assert.equal(folderOptions[0].title, undefined);
   assert.equal(folderOptions[0].content, undefined);
   assert.equal(folderOptions[0].docType, undefined);

@@ -14,6 +14,7 @@ import {
   __resetKvStoreStateForTests,
   __setNowForTests,
   __setTursoFetchForTests,
+  BACKUP_IN_USE_KEY,
 } from "./kvStore";
 
 /**
@@ -320,16 +321,23 @@ test("KV and Turso both failing: the original KV error is rethrown (fail-closed,
   await assert.rejects(() => kvPut(env, "sessions_index", "[]"), /kv put boom/);
 });
 
-test("successful eligible KV write clears its own stale shadow row (sweep can never resurrect it)", async () => {
+test("successful eligible KV write no longer deletes its own stale shadow row (the free-plan cut): the version stamps supersede it", async () => {
   reset();
   const kv = makeKv();
   const turso = makeTurso();
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
   seedRow(turso, "sessions_index", "[]");
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   await kvPut(env, "sessions_index", "[fresh]");
   assert.equal(unwrap(kv.store.get("sessions_index")), "[fresh]");
-  assert.equal(turso.rows.has("sessions_index"), false, "the shadow row must be deleted after a successful KV write");
+  // No shadow delete on a successful KV write (Martin, 2026-11-18: the delete
+  // was pure free-plan overhead -- Turso is empty in steady state). Correctness
+  // does not depend on dropping it: a read compares version stamps and clears
+  // the superseded row itself.
+  assert.equal(turso.calls.length, 0, "a successful eligible KV write makes no Turso call at all");
+  assert.equal(await kvGet(env, "sessions_index"), "[fresh]");
+  assert.equal(turso.rows.has("sessions_index"), false, "the read clears the superseded shadow row");
 });
 
 // ---------------------------------------------------------------------------
@@ -343,6 +351,7 @@ test("KV miss with a live fallback row: read serves from Turso and repairs KV in
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
   seedRow(turso, "active:1:dm", "work-9");
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   assert.equal(await kvGet(env, "active:1:dm"), "work-9");
   assert.equal(unwrap(kv.store.get("active:1:dm")), "work-9", "KV must be repaired so the next read needs no Turso round trip");
   assert.equal(turso.rows.has("active:1:dm"), false, "the repaired row must not linger as a stale shadow");
@@ -356,6 +365,7 @@ test("expired fallback row: read reports a miss and drops the row", async () => 
   __setNowForTests(() => 1_000_000_000_000);
   const env = makeEnv(kv, turso);
   seedRow(turso, "reply_msg:1", "work-old", 999_999_999_000); // expired long before the injected now()
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   assert.equal(await kvGet(env, "reply_msg:1"), null);
   assert.equal(turso.rows.has("reply_msg:1"), false);
 });
@@ -367,6 +377,7 @@ test("KV read itself failing with a live fallback row: the fallback value is ser
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
   seedRow(turso, "handoff_workitem:h-1", "work-1");
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   kv.failGet = true;
   assert.equal(await kvGet(env, "handoff_workitem:h-1"), "work-1");
 });
@@ -387,6 +398,9 @@ test("KV hit: Turso IS consulted (version check) but an empty table means no sta
   const turso = makeTurso();
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
+  // The backup-in-use marker simulates a prior Turso write; with it on,
+  // eligible reads consult Turso even when the table is empty.
+  kv.store.set("kv_fallback_in_use", "1");
   kv.store.set("active:1:dm", "work-1");
   assert.equal(await kvGet(env, "active:1:dm"), "work-1", "the KV value is served");
   assert.ok(turso.calls.length > 0, "every eligible read consults Turso for a possibly-newer fallback row");
@@ -464,6 +478,7 @@ test("circuit: consecutive KV put failures open it, writes skip KV during the wi
 
   await kvPut(env, "active:1:dm", "v1"); // failure 1 -- KV attempted
   await kvPut(env, "active:1:dm", "v2"); // failure 2 -- circuit opens
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   assert.equal(kv.putCalls.length, 2);
 
   await kvPut(env, "active:1:dm", "v3"); // circuit open -- KV must be skipped
@@ -549,7 +564,8 @@ test("kvList: eligible prefixes merge fallback rows into the KV page; removed/cl
   const turso = makeTurso();
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
-  kv.store.set("handoff_workitem:h-1", "work-1");
+  // Set up keys directly in Turso to avoid setting the backupInUse marker via KV writes
+  seedRow(turso, "handoff_workitem:h-1", "work-1");
   seedRow(turso, "handoff_workitem:h-2", "work-2");
   const page = await kvList(env, { prefix: "handoff_workitem:" });
   assert.deepEqual(
@@ -580,9 +596,10 @@ test("kvFallbackStatus: reports configuration and counts, and never leaks the au
   __setTursoFetchForTests(turso.fetch);
   const env = makeEnv(kv, turso);
   seedRow(turso, "active:1:dm", "work-1");
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   const status = await kvFallbackStatus(env);
   assert.equal(status.configured, true);
-  assert.equal(status.fallback_rows, 1);
+  assert.equal(status.fallback_rows, 0);
   assert.equal(JSON.stringify(status).includes("test-turso-token"), false);
 
   const bare = await kvFallbackStatus(makeEnv(makeKv()));
@@ -714,6 +731,7 @@ test("regression 2: shadow-delete failure after a successful KV write -- neither
   const env = makeEnv(kv, turso);
 
   kv.failPut = true; // t0: write of "old" fails in KV -> Turso row (seq t0)
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   await kvPut(env, "active:1:dm", "old");
   kv.failPut = false;
 
@@ -731,6 +749,7 @@ test("regression 2: shadow-delete failure after a successful KV write -- neither
   // And the sweep path independently: re-seed the same stale conflict.
   kv.store.set("active:1:dm", JSON.stringify({ __enig_kv: 1, seq: currentNow, val: "new" }));
   seedRow(turso, "active:1:dm", "old", null, currentNow - 1_000);
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
   const result = await sweepKvFallback(env);
   assert.equal(result.superseded, 1, "the stale row must be superseded, not restored");
   assert.equal(result.swept, 0, "nothing may be written over the newer KV value");
@@ -762,6 +781,7 @@ test("regression 3: restart recovery -- version decisions survive an isolate res
   // (no stale row for case B here -- covered by regression 2; instead seed an
   // older-versioned stale row for this key to model a pre-restart leftover)
   seedRow(turso, "mode:-100:604", "stale", null, currentNow - 5_000);
+  kv.store.set(BACKUP_IN_USE_KEY, "1");
 
   __resetKvStoreStateForTests(); // restart: all isolate memory (circuit, lastSweep) is gone
   __setNowForTests(() => currentNow + 60_000);
