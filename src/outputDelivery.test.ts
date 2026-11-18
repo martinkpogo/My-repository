@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { Env, WorkState } from "./types";
-import { captureApprovedOutput, isDeliveryTokenSafe, outputDeliveryOfferButtons, OUTPUT_DELIVERY_CALLBACK } from "./outputDelivery";
+import { captureApprovedOutput, isDeliveryTokenSafe, outputDeliveryOfferButtons, OUTPUT_DELIVERY_CALLBACK, OUTPUT_DELIVERY_OFFER_TEXT } from "./outputDelivery";
 import { evaluateExternalMutationAccess, mintExternalToolApprovalProof, workSessionContext } from "./access";
 import { findUnitManifest } from "./units/registry";
 
@@ -58,6 +58,28 @@ test("captureApprovedOutput stores a clean approved output", async () => {
   assert.ok(next.outputDelivery, "the approved output is captured");
   assert.equal(next.outputDelivery!.title, "Plan");
   assert.match(next.outputDelivery!.text, /token-only plan body/);
+});
+
+test("captureApprovedOutput sends the save offer with its buttons right after approval (2026-11-18: it was captured but never offered)", async () => {
+  const state = workState({ entityToken: "ENT-1", matterToken: "MAT-1" });
+  const sent: Array<{ text: string; buttons?: unknown }> = [];
+  await captureApprovedOutput(fakeEnv(), state, { title: "Plan", text: "A clean token-only plan body." }, {
+    send: (async (_env: Env, _target: unknown, text: string, buttons?: unknown) => {
+      sent.push({ text, buttons });
+    }) as any,
+  });
+  assert.strictEqual(sent.length, 1, "exactly one offer is sent");
+  assert.strictEqual(sent[0].text, OUTPUT_DELIVERY_OFFER_TEXT);
+  assert.deepStrictEqual(sent[0].buttons, outputDeliveryOfferButtons(state.workId));
+});
+
+test("captureApprovedOutput never offers a refused output", async () => {
+  const state = workState({ entityDraft: { email: "real@acme.example" } as any });
+  const sent: string[] = [];
+  await captureApprovedOutput(fakeEnv(), state, { title: "Plan", text: "Contact real@acme.example" }, {
+    send: (async (_e: Env, _t: unknown, text: string) => { sent.push(text); }) as any,
+  });
+  assert.ok(!sent.includes(OUTPUT_DELIVERY_OFFER_TEXT), "no save buttons for an output that failed the identity check");
 });
 
 test("captureApprovedOutput refuses an empty output (nothing offered)", async () => {

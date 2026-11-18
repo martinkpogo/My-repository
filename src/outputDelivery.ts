@@ -115,6 +115,12 @@ export async function captureApprovedOutput(
     title: approvedOutput.title?.trim() || "Untitled",
     capturedAt: new Date().toISOString(),
   };
+  // Show the offer. (Until 2026-11-18 the output was captured but the offer
+  // was never sent, so Martin approved a draft and saw no save button.) The
+  // offer is advisory: a failed send never undoes or blocks the approval.
+  await send(env, target, OUTPUT_DELIVERY_OFFER_TEXT, outputDeliveryOfferButtons(state.workId)).catch((err) =>
+    console.error(`Output delivery: the save offer could not be sent for work ${state.workId}`, err),
+  );
   return state;
 }
 
