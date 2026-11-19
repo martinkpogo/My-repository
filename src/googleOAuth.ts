@@ -497,7 +497,10 @@ export async function createGoogleDoc(
   }
 
   const title = action.title.trim();
-  const content = action.content.trim();
+  // Preserve the Action's declared content exactly: no trimming, normalisation
+  // or other modification. Validation above already rejects empty/whitespace-only
+  // content; the exact value is what gets written and exactly verified.
+  const content = action.content;
   const folderId = action.folderId.trim();
   const accountIdentifier = action.accountIdentifier.trim();
 

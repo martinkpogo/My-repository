@@ -753,6 +753,181 @@ test("createGoogleDoc fails closed when creation, insertion, or verification sta
   }
 });
 
+test("createGoogleDoc preserves leading and trailing spaces in declared content exactly", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "doc-preserve-spaces-token",
+      refresh_token: "doc-preserve-spaces-refresh",
+      expires_in: 3600,
+    },
+    "preserve-creator@enig.com",
+  );
+
+  const docTitle = "Spaces Doc";
+  // Leading/trailing spaces must be preserved exactly, not trimmed.
+  const docContent = "  scoped content with edges  ";
+  const folderId = "target-folder-spaces";
+  const createdDocId = "new-doc-id-spaces";
+
+  let insertedText = "";
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      return new Response(JSON.stringify({ id: createdDocId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (urlStr === `https://docs.googleapis.com/v1/documents/${createdDocId}:batchUpdate`) {
+      const body = JSON.parse(String(init?.body));
+      insertedText = body.requests[0].insertText.text;
+      assert.strictEqual(insertedText, docContent, "content written must preserve leading/trailing spaces exactly");
+      return new Response(JSON.stringify({ documentId: createdDocId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (urlStr === `https://docs.googleapis.com/v1/documents/${createdDocId}`) {
+      return new Response(
+        JSON.stringify({
+          title: docTitle,
+          body: {
+            content: [
+              {
+                paragraph: {
+                  elements: [{ textRun: { content: `${insertedText}\n` } }],
+                },
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const action: PendingGoogleAction = {
+      type: "create_doc",
+      title: docTitle,
+      content: docContent,
+      folderId,
+      accountIdentifier: "preserve-creator@enig.com",
+    };
+
+    const res = await createGoogleDoc(fakeEnv, action);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.documentId, createdDocId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createGoogleDoc preserves declared newlines in content exactly", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    {
+      access_token: "doc-preserve-newlines-token",
+      refresh_token: "doc-preserve-newlines-refresh",
+      expires_in: 3600,
+    },
+    "preserve-newlines-creator@enig.com",
+  );
+
+  const docTitle = "Newlines Doc";
+  // Declared newlines must be preserved exactly.
+  const docContent = "line one\nline two\nline three";
+  const folderId = "target-folder-newlines";
+  const createdDocId = "new-doc-id-newlines";
+
+  let insertedText = "";
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+
+    if (urlStr === "https://www.googleapis.com/drive/v3/files") {
+      return new Response(JSON.stringify({ id: createdDocId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (urlStr === `https://docs.googleapis.com/v1/documents/${createdDocId}:batchUpdate`) {
+      const body = JSON.parse(String(init?.body));
+      insertedText = body.requests[0].insertText.text;
+      assert.strictEqual(insertedText, docContent, "content written must preserve declared newlines exactly");
+      return new Response(JSON.stringify({ documentId: createdDocId }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    if (urlStr === `https://docs.googleapis.com/v1/documents/${createdDocId}`) {
+      return new Response(
+        JSON.stringify({
+          title: docTitle,
+          body: {
+            content: [
+              {
+                paragraph: {
+                  elements: [{ textRun: { content: `${insertedText}\n` } }],
+                },
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const action: PendingGoogleAction = {
+      type: "create_doc",
+      title: docTitle,
+      content: docContent,
+      folderId,
+      accountIdentifier: "preserve-newlines-creator@enig.com",
+    };
+
+    const res = await createGoogleDoc(fakeEnv, action);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.documentId, createdDocId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createGoogleDoc rejects empty or whitespace-only content at validation (without trimming the write value)", async () => {
+  const { fakeEnv } = createFakeEnv();
+
+  const action: PendingGoogleAction = {
+    type: "create_doc",
+    title: "Whitespace Doc",
+    content: "   ",
+    folderId: "target-folder",
+    accountIdentifier: "creator@enig.com",
+  };
+
+  const res = await createGoogleDoc(fakeEnv, action);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.stage, "validation");
+  assert.strictEqual(res.error, "Missing or invalid Google Doc creation parameters");
+});
+
 test("rewriteGoogleDoc surfaces Google's rejection detail without leaking the token, and still verifies the read-back", async () => {
   const { fakeEnv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
