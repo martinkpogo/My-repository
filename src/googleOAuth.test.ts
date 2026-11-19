@@ -28,6 +28,7 @@ import {
   persistGoogleTokens,
   proposeGoogleDocCreation,
   handleGoogleActionApproval,
+  type GoogleFolderPickerInput,
   registerWatchedGoogleDoc,
   registerWatchedGoogleSheet,
   rewriteGoogleDoc,
@@ -309,6 +310,83 @@ test("Folder picker queries drive folders using selected account and uses opaque
     // Verify option is consumed / single-use
     const replayOption = await consumeOpaqueOption(fakeEnv, workId, opaqueOptionId);
     assert.strictEqual(replayOption, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Account selection defers the folder picker to the Work's own alarm when background deps are supplied", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  const workId = "work-deferred-picker";
+  const opaqueOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "user@enig.com",
+    title: "Project Strategy",
+    content: "Content of strategy document",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    threadId: 777,
+    hat: "Marketing Strategist",
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let driveListed = false;
+  let pickerSent = false;
+  const stashed: GoogleFolderPickerInput[] = [];
+  let armedAt: number | null = null;
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("googleapis.com/drive/v3/files")) {
+      driveListed = true;
+      return new Response(JSON.stringify({ files: [{ id: "folder-1", name: "Client Proposals" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      if (body.text?.includes("Select the target Drive folder")) pickerSent = true;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const before = Date.now();
+    const result = await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId, {
+      stashPickerInput: (input) => {
+        stashed.push(input);
+        return Promise.resolve();
+      },
+      armAlarm: (ms) => {
+        armedAt = ms;
+        return Promise.resolve();
+      },
+    });
+    assert.strictEqual(result, state, "returns state unchanged -- the picker follows from the alarm");
+    assert.strictEqual(driveListed, false, "the account-selection request must not list Drive folders");
+    assert.strictEqual(pickerSent, false, "no picker message is sent in this request");
+    assert.strictEqual(stashed.length, 1, "the picker input was stashed");
+    assert.strictEqual(stashed[0].workId, workId);
+    assert.strictEqual(stashed[0].accountIdentifier, "user@enig.com");
+    assert.strictEqual(stashed[0].title, "Project Strategy");
+    assert.strictEqual(stashed[0].content, "Content of strategy document");
+    assert.strictEqual(stashed[0].chatId, 12345);
+    assert.strictEqual(stashed[0].threadId, 777);
+    assert.strictEqual(stashed[0].docType, "doc");
+    assert.strictEqual(stashed[0].smoke, false);
+    assert.ok(armedAt !== null && armedAt >= before + 1_900 && armedAt <= before + 2_100, `alarm armed ~2s out, got armedAt=${armedAt} now=${before}`);
   } finally {
     globalThis.fetch = originalFetch;
   }

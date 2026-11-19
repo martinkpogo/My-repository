@@ -11,6 +11,54 @@ import { isAdminAuthorized } from "./adminAuth";
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
+/**
+ * The deferred Drive folder picker runs in the Work's own alarm invocation
+ * (~2 s after Martin picks his account), so the folder listing and option
+ * staging get their own subrequest allowance and cannot consume the
+ * approval request's free-plan subrequest budget.
+ */
+export const GOOGLE_FOLDER_PICKER_DELAY_MS = 2_000;
+
+/** How many folders to show on a single Telegram folder-picker page. */
+export const GOOGLE_FOLDER_PICKER_PAGE_SIZE = 10;
+
+/** Everything the deferred folder picker needs to rebuild the picker in its own request. */
+export interface GoogleFolderPickerInput {
+  workId: string;
+  chatId: number;
+  threadId: number | undefined;
+  hat: string | undefined;
+  accountIdentifier: string;
+  title: string;
+  content: string;
+  rows: string[][] | undefined;
+  docType: "doc" | "sheet";
+  smoke: boolean;
+}
+
+/** Staged option representing a paginated folder list for "More folders" navigation. */
+interface StagedFolderList {
+  kind: "folder_list";
+  folders: Array<{ id: string; name: string }>;
+  pageIndex: number;
+  pageSize: number;
+  accountIdentifier: string;
+  title: string;
+  content: string;
+  rows: string[][] | undefined;
+  docType: "doc" | "sheet";
+  smoke: boolean;
+  workId: string;
+  chatId: number;
+  threadId: number | undefined;
+  hat: string | undefined;
+}
+
+interface GooglePickerBackgroundDeps {
+  stashPickerInput: (input: GoogleFolderPickerInput) => Promise<void>;
+  armAlarm: (ms: number) => Promise<void>;
+}
+
 export const GOOGLE_OAUTH_SCOPES = [
   // Google only returns an id_token (needed by
   // parseAccountIdentifierFromIdToken to resolve a real email instead of
@@ -1669,6 +1717,7 @@ export async function handleGoogleAccountSelection(
   env: Env,
   state: WorkState,
   opaqueOptionId: string,
+  deps?: GooglePickerBackgroundDeps,
 ): Promise<WorkState> {
   const target: HatMessageTarget = {
     chatId: state.chatId,
@@ -1707,126 +1756,280 @@ export async function handleGoogleAccountSelection(
     return state;
   }
 
-  let folderRes: Response;
-  try {
-    folderRes = await fetch(
-      "https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities)&pageSize=50",
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      },
-    );
-  } catch (err) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      `⚠️ Network error listing Google Drive folders for account '${accountIdentifier}'.`,
-    );
-    return state;
-  }
+  const input: GoogleFolderPickerInput = {
+    workId: state.workId,
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    accountIdentifier,
+    title,
+    content,
+    rows,
+    docType,
+    smoke,
+  };
 
-  if (!folderRes.ok) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
-    );
-    return state;
-  }
-
-  let folderData: { files?: Array<{ id: string; name: string }> };
-  try {
-    folderData = await folderRes.json();
-  } catch {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ Invalid JSON response from Google Drive folder query.",
-    );
-    return state;
-  }
-
-  const folders = (folderData.files ?? []).sort((a, b) => a.name.localeCompare(b.name));
-  if (folders.length === 0) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      `⚠️ No accessible Drive folders found for account '${accountIdentifier}'.`,
-    );
-    return state;
-  }
-
-  // Folder-option staging is Cloudflare-only too: a refused write is
-  // surfaced explicitly (no picker sent, nothing pretended persisted)
-  // instead of throwing after the flow has already shown partial state.
-  const buttons = [];
-  try {
-    for (const folder of folders) {
-      const opaqueFolderId = await saveOpaqueOption(
-        env,
-        state.workId,
-        smoke
-          ? {
-              kind: "folder",
-              smoke: true,
-              accountIdentifier,
-              folderId: folder.id,
-              folderName: folder.name,
-            }
-          : {
-              kind: "folder",
-              docType,
-              accountIdentifier,
-              title,
-              content,
-              rows,
-              folderId: folder.id,
-              folderName: folder.name,
-            },
-      );
-      buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${opaqueFolderId}` }]);
+  // The picker is prepared in the Work's own alarm invocation (see
+  // WorkSession.runPendingGoogleFolderPicker), so the Drive folder listing
+  // and option staging get their own subrequest allowance and cannot consume
+  // this approval request's free-plan subrequest budget. If anything about
+  // the background path fails, prepare the picker inline instead -- Martin
+  // still sees the picker, just in this request.
+  if (deps) {
+    try {
+      await deps.stashPickerInput(input);
+      await deps.armAlarm(Date.now() + GOOGLE_FOLDER_PICKER_DELAY_MS);
+      return state;
+    } catch (err) {
+      console.error(`Google folder picker background failed for work ${state.workId} -- preparing it inline instead`, err);
     }
+  }
+
+  await sendGoogleFolderPicker(env, target, state.workId, input);
+  return state;
+}
+
+/**
+ * Lists the account's Drive folders, stages one opaque folder option per
+ * folder, and presents the folder picker -- the second half of the account
+ * selection flow. Runs either inline (legacy path) or from the Work's own
+ * alarm (deferred path), each in its own request with its own call
+ * allowance.
+ */
+/**
+ * Fetches EVERY folder the account can see from Google Drive, following the
+ * API's `nextPageToken` across pages until none remains. Returns the
+ * accumulated, name-sorted list. This is Google Drive API pagination only --
+ * it has nothing to do with Telegram's folder-picker pagination, which is
+ * handled separately in `showFolderPickerPage`.
+ */
+async function fetchAllDriveFolders(
+  env: Env,
+  accountIdentifier: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const token = await getValidGoogleAccessToken(env, accountIdentifier);
+  if (!token) {
+    throw new Error(`No valid Google access token for account '${accountIdentifier}'`);
+  }
+
+  const allFolders: Array<{ id: string; name: string }> = [];
+  let nextPageToken: string | undefined;
+  const seenTokens = new Set<string>();
+
+  do {
+    const url = new URL("https://www.googleapis.com/drive/v3/files");
+    url.searchParams.set("q", "mimeType='application/vnd.google-apps.folder' and trashed=false");
+    url.searchParams.set("fields", "files(id,name),nextPageToken");
+    url.searchParams.set("pageSize", "100");
+    if (nextPageToken) url.searchParams.set("pageToken", nextPageToken);
+
+    let folderRes: Response;
+    try {
+      folderRes = await fetch(url.toString(), {
+        method: "GET",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err) {
+      throw new Error(`Network error listing Google Drive folders: ${err}`);
+    }
+
+    if (!folderRes.ok) {
+      throw new Error(`Drive API returned HTTP ${folderRes.status}`);
+    }
+
+    let data: { files?: Array<{ id: string; name: string }>; nextPageToken?: string };
+    try {
+      data = await folderRes.json();
+    } catch {
+      throw new Error("Invalid JSON response from Google Drive folder query.");
+    }
+
+    allFolders.push(...(data.files ?? []));
+    nextPageToken = data.nextPageToken;
+    if (nextPageToken && seenTokens.has(nextPageToken)) {
+      break;
+    }
+    if (nextPageToken) seenTokens.add(nextPageToken);
+  } while (nextPageToken !== undefined);
+
+  return allFolders.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function sendGoogleFolderPicker(
+  env: Env,
+  target: HatMessageTarget,
+  workId: string,
+  input: GoogleFolderPickerInput,
+): Promise<void> {
+  // Fetch every folder from Drive, following nextPageToken across all API pages.
+  let allFolders: Array<{ id: string; name: string }>;
+  try {
+    allFolders = await fetchAllDriveFolders(env, input.accountIdentifier);
   } catch (err) {
-    console.error(`Google folder picker: option staging failed for work ${state.workId} -- no picker was sent`, err);
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      `⚠️ Failed to list Google Drive folders for account '${input.accountIdentifier}'.`,
+    );
+    return;
+  }
+
+  if (allFolders.length === 0) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      `⚠️ No accessible Drive folders found for account '${input.accountIdentifier}'.`,
+    );
+    return;
+  }
+
+  // Stage the complete folder list + input as a folder_list option so the
+  // "More folders" callback can resume pagination without losing any data.
+  try {
+    await saveOpaqueOption(env, workId, {
+      kind: "folder_list",
+      folders: allFolders,
+      pageIndex: 0,
+      pageSize: GOOGLE_FOLDER_PICKER_PAGE_SIZE,
+      accountIdentifier: input.accountIdentifier,
+      title: input.title,
+      content: input.content,
+      rows: input.rows,
+      docType: input.docType,
+      smoke: input.smoke,
+      workId: input.workId,
+      chatId: input.chatId,
+      threadId: input.threadId,
+      hat: input.hat,
+    });
+  } catch (err) {
+    console.error(`Google folder picker: option staging failed for work ${workId} -- no picker was sent`, err);
     await sendWorkspaceHatMessage(
       env,
       target,
       "⚠️ Could not persist the folder-selection options (storage write refused -- likely the daily KV quota), so no folder picker was sent and nothing was staged. Please retry after the quota window resets.",
     );
-    return state;
+    return;
   }
 
-  if (smoke) {
+  await showFolderPickerPage(env, target, workId, input, allFolders, 0, GOOGLE_FOLDER_PICKER_PAGE_SIZE);
+}
+
+/**
+ * Renders one Telegram page of folders from an already-fetched list, stages
+ * one opaque option per folder on this page, and (when more pages remain)
+ * stages a `folder_list` option and appends a "More folders" button that
+ * references it. Only readable folder names and legitimate user actions ever
+ * appear in the card -- no page tokens, no serialized objects, no raw IDs.
+ */
+async function showFolderPickerPage(
+  env: Env,
+  target: HatMessageTarget,
+  workId: string,
+  input: GoogleFolderPickerInput,
+  allFolders: Array<{ id: string; name: string }>,
+  pageIndex: number,
+  pageSize: number,
+): Promise<void> {
+  const start = pageIndex * pageSize;
+  const end = start + pageSize;
+  const pageFolders = allFolders.slice(start, end);
+  const hasMorePages = end < allFolders.length;
+
+  // Stage one opaque option per folder on this page.
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+  try {
+    for (const folder of pageFolders) {
+      const opaqueFolderId = await saveOpaqueOption(
+        env,
+        workId,
+        input.smoke
+          ? {
+              kind: "folder",
+              smoke: true,
+              accountIdentifier: input.accountIdentifier,
+              folderId: folder.id,
+              folderName: folder.name,
+            }
+          : {
+              kind: "folder",
+              docType: input.docType,
+              accountIdentifier: input.accountIdentifier,
+              title: input.title,
+              content: input.content,
+              rows: input.rows,
+              folderId: folder.id,
+              folderName: folder.name,
+            },
+      );
+      // Callback data carries only opaque references: workId + option id.
+      // No folder ID, no page token, no implementation data leaks here.
+      buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${workId}:${opaqueFolderId}` }]);
+    }
+  } catch (err) {
+    console.error(`Google folder picker: option staging failed for work ${workId} -- no picker was sent`, err);
     await sendWorkspaceHatMessage(
       env,
       target,
-      `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`,
+      "⚠️ Could not persist the folder-selection options (storage write refused -- likely the daily KV quota), so no folder picker was sent and nothing was staged. Please retry after the quota window resets.",
+    );
+    return;
+  }
+
+  // When more pages remain, stage a fresh folder_list option for the next
+  // page and append a single "More folders" button referencing it. On the
+  // final page there is no "More folders" action at all.
+  if (hasMorePages) {
+    try {
+      const nextListOpaqueId = await saveOpaqueOption(env, workId, {
+        kind: "folder_list",
+        folders: allFolders,
+        pageIndex: pageIndex + 1,
+        pageSize,
+        accountIdentifier: input.accountIdentifier,
+        title: input.title,
+        content: input.content,
+        rows: input.rows,
+        docType: input.docType,
+        smoke: input.smoke,
+        workId: input.workId,
+        chatId: input.chatId,
+        threadId: input.threadId,
+        hat: input.hat,
+      });
+      buttons.push([{ text: "📂 More folders", callback_data: `googlefolder:${workId}:${nextListOpaqueId}` }]);
+    } catch (err) {
+      console.error(`Google folder picker: failed to stage 'More folders' option for work ${workId}`, err);
+    }
+  }
+
+  if (input.smoke) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${input.accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`,
       buttons,
     );
     await logActivity(env, {
       entry: "Google Docs Registry smoke: folder picker presented",
       type: "Activity",
-      activity: `Registry smoke Drive folder picker presented for account '${accountIdentifier}'`,
+      activity: `Registry smoke Drive folder picker presented for account '${input.accountIdentifier}'`,
       outcome: "Active",
-      workId: state.workId,
+      workId,
     });
-    return state;
+    return;
   }
 
-  const actionLabel = docType === "sheet" ? "Create Google Sheet" : "Create Google Doc";
-  const messageText = `*Google Workspace Action*: ${actionLabel}\n\n*Account*: ${accountIdentifier}\n*Title*: ${title}\n\nSelect the target Drive folder:`;
+  const actionLabel = input.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc";
+  const messageText = `*Google Workspace Action*: ${actionLabel}\n\n*Account*: ${input.accountIdentifier}\n*Title*: ${input.title}\n\nSelect the target Drive folder:`;
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   await logActivity(env, {
     entry: "Google Drive folders presented",
     type: "Activity",
-    activity: `Drive folder picker presented for account '${accountIdentifier}'`,
+    activity: `Drive folder picker presented for account '${input.accountIdentifier}'`,
     outcome: "Active",
   });
-
-  return state;
 }
 
 export async function handleGoogleFolderSelection(
@@ -1842,6 +2045,28 @@ export async function handleGoogleFolderSelection(
   };
 
   const option = await consumeOpaqueOption(env, state.workId, opaqueOptionId);
+
+  // A "folder_list" option is a "More folders" page turn: re-render the next
+  // page of the same complete folder list without losing the account, title,
+  // content, or any other staged input.
+  if (option && option.kind === "folder_list") {
+    const { folders, pageIndex, pageSize, accountIdentifier, title, content, rows, docType, smoke, workId, chatId, threadId, hat } = option as StagedFolderList;
+    const pickerInput: GoogleFolderPickerInput = {
+      workId,
+      chatId,
+      threadId,
+      hat,
+      accountIdentifier,
+      title,
+      content,
+      rows,
+      docType,
+      smoke,
+    };
+    await showFolderPickerPage(env, target, workId, pickerInput, folders, pageIndex, pageSize);
+    return state;
+  }
+
   if (!option || option.kind !== "folder" || !option.folderId) {
     await sendWorkspaceHatMessage(
       env,
