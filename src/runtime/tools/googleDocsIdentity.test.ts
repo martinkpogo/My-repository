@@ -103,11 +103,29 @@ function installGoogleFake(t: any) {
 const TARGET = { resourceId: "gdrive:doc:doc-1" };
 
 function createInput(content: string) {
-  return { title: "PROP-9 v1", content, folder_id: "folder-1", account_identifier: ACCOUNT };
+  return {
+    title: "PROP-9 v1",
+    // The Action's specification carries the PROTECTED draft (the input is
+    // the durable intent record) and declares the presentation the Doc needs;
+    // the Tool applies the shared restoration at the write.
+    document_specification: { text: content, presentation: { restore_identity_placeholders: true } },
+    folder_id: "folder-1",
+    account_identifier: ACCOUNT,
+  };
 }
 
 function updateInput(content: string) {
-  return { document_id: "doc-1", account_identifier: ACCOUNT, proposal_id: "PROP-9", versions: [{ version: 1, content }] };
+  const layout = buildProposalDocLayout("PROP-9", [{ version: 1, content }]);
+  return {
+    document_id: "doc-1",
+    account_identifier: ACCOUNT,
+    document_specification: {
+      text: layout.text,
+      styles: layout.styles,
+      blocks: layout.blocks,
+      presentation: { restore_identity_placeholders: true },
+    },
+  };
 }
 
 test("Google Docs creation writes the human-readable draft: real names restored, no placeholders in the document", async (t) => {

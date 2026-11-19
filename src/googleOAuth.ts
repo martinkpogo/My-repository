@@ -1,5 +1,5 @@
 import type { Env, WorkState } from "./types";
-import { buildProposalDocStyleRequests, type ProposalDocLayout } from "./proposalRedline";
+import { buildDocStyleRequests, type GoogleDocLayout } from "./googleDocSpec";
 import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage, type InlineButton } from "./telegram";
 import { generate } from "./ai";
@@ -1123,17 +1123,18 @@ async function describeGoogleApiFailure(res: Response): Promise<string> {
 
 /**
  * Replaces the whole body of a Doc this system created with `layout.text` and
- * applies the canonical Proposal layout styling (buildProposalDocStyleRequests:
- * paragraph hierarchy, bullets, bold headings/labels, struck removed text,
- * underlined added text), then reads the Doc back and confirms the text is
- * exactly what was written. Used to bring a Proposal's single Doc up to its
- * newest version.
+ * applies the layout's styling (buildDocStyleRequests: paragraph hierarchy,
+ * bullets, bold headings/labels, struck removed text, underlined added
+ * text), then reads the Doc back and confirms the text is exactly what was
+ * written. The layout is whatever the resolved Action's validated
+ * `document_specification` resolved to -- this established Google layer
+ * executes it and never chooses content or structure of its own.
  */
 export async function rewriteGoogleDoc(
   env: Env,
   accountIdentifier: string,
   documentId: string,
-  layout: ProposalDocLayout,
+  layout: GoogleDocLayout,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
@@ -1145,7 +1146,7 @@ export async function rewriteGoogleDoc(
   // The body always ends in a protected newline at endIndex-1; delete everything before it.
   if (before.endIndex > 2) requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: before.endIndex - 1 } } });
   requests.push({ insertText: { location: { index: 1 }, text: layout.text } });
-  requests.push(...buildProposalDocStyleRequests(layout));
+  requests.push(...buildDocStyleRequests(layout));
   let res: Response;
   try {
     res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, { method: "POST", headers, body: JSON.stringify({ requests }) });
@@ -1159,32 +1160,32 @@ export async function rewriteGoogleDoc(
 }
 
 /**
- * Applies the canonical Proposal layout styling to a Doc WITHOUT touching a
- * single character of its text: reads the Doc, refuses (nothing applied) when
- * its text no longer matches the layout it should show, sends only style
- * requests, and reads back to confirm the text is still byte-identical.
- * Used by the formatting-only path for "presentation-only" comments on a
- * Proposal's Doc (tokenSafeProposal.ts's applyProposalDocFormatting).
+ * Applies a layout's styling to a Doc WITHOUT touching a single character
+ * of its text: reads the Doc, refuses (nothing applied) when its text no
+ * longer matches the layout it should show, sends only style requests
+ * (buildDocStyleRequests), and reads back to confirm the text is still
+ * byte-identical. The layout comes from the resolved Action's validated
+ * `document_specification`; this layer executes it and decides nothing.
  */
 export async function restyleGoogleDoc(
   env: Env,
   accountIdentifier: string,
   documentId: string,
-  layout: ProposalDocLayout,
+  layout: GoogleDocLayout,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
   const before = await readGoogleDocBody(token, documentId);
   if (!before) return { ok: false, error: "the Doc could not be read" };
   if (before.text.trimEnd() !== layout.text.trimEnd()) {
-    return { ok: false, error: "the Doc's text no longer matches the current version, so formatting was refused rather than applied to drifted content" };
+    return { ok: false, error: "the Doc's text no longer matches the specification it is bound to, so formatting was refused rather than applied to drifted content" };
   }
   let res: Response;
   try {
     res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ requests: buildProposalDocStyleRequests(layout) }),
+      body: JSON.stringify({ requests: buildDocStyleRequests(layout) }),
     });
   } catch {
     return { ok: false, error: "network error formatting the Doc" };

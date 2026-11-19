@@ -27,6 +27,11 @@
  *     separate from redaction so each caller states which boundary it is at:
  *     stored records, intermediate AI payloads and anything that may be sent
  *     to a provider again keep the protected representation.
+ *     `restoreIdentityPlaceholdersWithRanges` is that same restoration for
+ *     callers whose text carries index ranges (the Google Docs document
+ *     specification): it restores with the ONE function above and shifts the
+ *     ranges onto the restored text, refusing rather than guessing when a
+ *     range would split a placeholder. It adds no second restoration rule.
  *
  * The guarantee this exists to provide: redact() is best-effort (a plain
  * word-boundary substitution can miss an unusual phrasing), so it is never
@@ -131,4 +136,79 @@ export function restoreIdentityPlaceholders(text: string): string {
     result = result.replace(new RegExp(pattern.source, pattern.flags), value);
   }
   return result;
+}
+
+/** A 1-based, end-exclusive index range over a document's text (the shape every Docs style/block range uses). */
+export interface IndexRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * The one placeholder occurrence, as the remap needs it: its span in the
+ * protected text and how much shorter (negative) or longer (positive) it
+ * becomes once restored.
+ */
+interface PlaceholderOccurrence {
+  start: number;
+  end: number;
+  delta: number;
+}
+
+/** Every placeholder occurrence in `text`, oldest first (fresh RegExp per pattern: they are `g`-flagged and must never carry state). */
+function placeholderOccurrences(text: string): PlaceholderOccurrence[] {
+  const occurrences: PlaceholderOccurrence[] = [];
+  for (const { pattern, value } of PLACEHOLDER_RESTORATIONS) {
+    const probe = new RegExp(pattern.source, pattern.flags);
+    let match: RegExpExecArray | null;
+    while ((match = probe.exec(text)) !== null) {
+      occurrences.push({ start: match.index, end: match.index + match[0].length, delta: value.length - match[0].length });
+      if (match[0].length === 0) probe.lastIndex += 1; // defensive: these patterns cannot match empty, but never spin
+    }
+  }
+  return occurrences.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * Restores the real names in `text` AND remaps index ranges that describe
+ * the protected text onto the restored text -- the same single restoration,
+ * so a range never has to be recomputed by a second identity mechanism.
+ *
+ * A restoration shortens the text ("[ENIG_OPERATOR]" is 15 code units,
+ * "Martin" is 6), so every range boundary after a restored placeholder moves
+ * by the accumulated delta; boundaries before it do not move, and a boundary
+ * sitting exactly where a placeholder ends moves with it. A range that would
+ * SPLIT a placeholder (a boundary strictly inside it) is refused rather than
+ * guessed at: no partial range is ever rewritten, and the caller fails closed
+ * instead of styling or verifying a span that no longer addresses what it
+ * was meant to address.
+ *
+ * Returns the restored text with the remapped ranges, or the reason the
+ * ranges could not be remapped faithfully.
+ */
+export function restoreIdentityPlaceholdersWithRanges<T extends IndexRange>(
+  text: string,
+  ranges: readonly T[],
+): { ok: true; text: string; ranges: T[] } | { ok: false; reason: string } {
+  const occurrences = placeholderOccurrences(text);
+  // Boundary coordinates are 0-based (position p in the range coordinate
+  // system sits just before character p+1), which is how the spans above are
+  // recorded.
+  const splits = (boundary: number): boolean => occurrences.some((o) => o.start < boundary && boundary < o.end);
+  const shift = (boundary: number): number =>
+    boundary + occurrences.reduce((delta, o) => (o.end <= boundary ? delta + o.delta : delta), 0);
+
+  const remapped: T[] = [];
+  for (const range of ranges) {
+    const start = range.start - 1;
+    const end = range.end - 1;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > text.length) {
+      return { ok: false, reason: `range ${range.start}-${range.end} does not address the protected text (length ${text.length})` };
+    }
+    if (splits(start) || splits(end)) {
+      return { ok: false, reason: `range ${range.start}-${range.end} splits an identity placeholder -- it cannot be remapped onto the restored text` };
+    }
+    remapped.push({ ...range, start: shift(start) + 1, end: shift(end) + 1 });
+  }
+  return { ok: true, text: restoreIdentityPlaceholders(text), ranges: remapped };
 }

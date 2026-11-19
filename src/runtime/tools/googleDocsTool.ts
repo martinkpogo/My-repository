@@ -5,7 +5,10 @@
  *
  * This module owns the CONCRETE operation: input contract, trusted target
  * resolution, the mapped outcomes of the existing creation sequence, and the
- * reconciliation read for uncertain outcomes. It deliberately reuses the
+ * reconciliation read for uncertain outcomes. The document body is the
+ * resolved Action's `document_specification` (validated and executed through
+ * `src/googleDocSpec.ts`) -- this operation invents no content and imposes
+ * no structure. It deliberately reuses the
  * established Google implementation -- `createGoogleDoc` (create the Drive
  * file, insert the content, read it back and verify title/content),
  * `listAuthorizedGoogleAccounts`, `getValidGoogleAccessToken` -- rather than
@@ -20,30 +23,41 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { createGoogleDoc, getValidGoogleAccessToken, listAuthorizedGoogleAccounts } from "../../googleOAuth";
-import { restoreIdentityPlaceholders } from "../../ai/identityRedaction";
+import { materializeDocumentSpecification, parseDocumentSpecification, type DocumentSpecification, type GoogleDocLayout } from "../../googleDocSpec";
 
 export const GOOGLE_DOCS_TOOL_ID = "google_docs";
 export const GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID = "google_docs.create_and_verify";
 
-/** The exact input contract of google_docs.create_and_verify (canonical spec: title, content, folder_id, account_identifier). */
-const ALLOWED_INPUT_KEYS: readonly string[] = ["title", "content", "folder_id", "account_identifier"];
+/**
+ * The exact input contract of google_docs.create_and_verify (canonical spec:
+ * title, document_specification, folder_id, account_identifier). The document
+ * specification is the resolved Action's declarative description of what the
+ * Doc must hold; this operation writes body text only, so a specification
+ * carrying structure or styling is an explicit validation failure, never a
+ * silently dropped instruction.
+ */
+const ALLOWED_INPUT_KEYS: readonly string[] = ["title", "document_specification", "folder_id", "account_identifier"];
 
 /** A Drive folder id is opaque and url-safe; anything else (paths, blanks, separators) is not a resolvable folder. */
 const FOLDER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 interface GoogleDocsCreateAndVerifyInput {
   title: string;
-  content: string;
+  document_specification: DocumentSpecification;
   folder_id: string;
   account_identifier: string;
+  /** The specification resolved to the exact body this operation writes and verifies (presentation applied, ranges remapped). */
+  layout: GoogleDocLayout;
 }
 
 const BASE = { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID };
 
 /**
  * Validates the input contract exactly: an object with precisely the four
- * declared non-empty string fields, nothing more. Returns the typed input or
- * the defect that made it invalid.
+ * declared fields, a non-empty title/folder/account, and a `document_specification`
+ * this operation supports ({text, presentation}) resolved to a writable body.
+ * Returns the typed input (with its resolved layout) or the defect that made
+ * it invalid.
  */
 function parseInput(input: unknown): GoogleDocsCreateAndVerifyInput | string {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -54,30 +68,25 @@ function parseInput(input: unknown): GoogleDocsCreateAndVerifyInput | string {
   if (unknownKey !== undefined) {
     return `unknown input field "${unknownKey}" -- the ${GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID} input contract is exactly ${ALLOWED_INPUT_KEYS.join(", ")}`;
   }
-  const defect = ALLOWED_INPUT_KEYS.find((key) => typeof record[key] !== "string" || (record[key] as string).trim().length === 0);
+  const defect = ["title", "folder_id", "account_identifier"].find((key) => typeof record[key] !== "string" || (record[key] as string).trim().length === 0);
   if (defect !== undefined) {
     return `input field "${defect}" must be a non-empty string`;
   }
+  const specification = parseDocumentSpecification(record.document_specification, { allow_layout: false });
+  if (typeof specification === "string") {
+    return `document_specification is invalid: ${specification}`;
+  }
+  const materialized = materializeDocumentSpecification(specification);
+  if (!materialized.ok) {
+    return `document_specification is invalid: ${materialized.reason}`;
+  }
   return {
     title: (record.title as string).trim(),
-    content: record.content as string,
+    document_specification: specification,
     folder_id: (record.folder_id as string).trim(),
     account_identifier: (record.account_identifier as string).trim(),
+    layout: materialized.layout,
   };
-}
-
-/**
- * The content this operation actually writes to the Doc: the requested
- * content with identity placeholders restored (the ONE shared restoration
- * function). A Doc is a final internal, human-readable draft, so it shows the
- * real names; the input the caller assembled -- and every stored/internal
- * representation it came from -- keeps the protected
- * `[ENIG_OPERATOR]`/`[ENIG_CONSULTANCY]` form. Applied once here, before the
- * write and the read-back comparison, so creation and reconciliation compare
- * against exactly the text the Doc holds.
- */
-function docContent(parsed: GoogleDocsCreateAndVerifyInput): string {
-  return restoreIdentityPlaceholders(parsed.content);
 }
 
 /** Maps the existing createGoogleDoc stage result onto the five canonical outcome states -- honestly: a verification failure is never reported as "nothing happened". */
@@ -242,7 +251,7 @@ async function reconcileGoogleDocCreation(
       }
       const data: unknown = await readResponse.json();
       const text = extractGoogleDocText(data);
-      if (text !== null && text.includes(docContent(parsed))) {
+      if (text !== null && text.includes(parsed.layout.text)) {
         return {
           outcome: {
             ...BASE,
@@ -277,7 +286,7 @@ async function reconcileGoogleDocCreation(
     const data: unknown = await response.json();
     const title = (data as { title?: unknown })?.title;
     const text = extractGoogleDocText(data);
-    if (typeof title === "string" && title === parsed.title && text !== null && text.includes(docContent(parsed))) {
+    if (typeof title === "string" && title === parsed.title && text !== null && text.includes(parsed.layout.text)) {
       return {
         outcome: {
           ...BASE,
@@ -349,7 +358,10 @@ export const googleDocsToolOperation: ToolOperationDefinition = {
     const result = await createGoogleDoc(env, {
       type: "create_doc",
       title: parsed.title,
-      content: docContent(parsed),
+      // The Action's specification resolved to the exact body to write: its
+      // declared text with its declared presentation applied (the ONE shared
+      // identity restoration at this final internal-presentation boundary).
+      content: parsed.layout.text,
       folderId: parsed.folder_id,
       accountIdentifier: parsed.account_identifier,
     });

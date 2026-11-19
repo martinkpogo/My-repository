@@ -27,7 +27,8 @@ import { GOOGLE_DOCS_FORMAT_OPERATION_ID } from "./tools/googleDocsFormatTool";
 import { GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, GOOGLE_DRIVE_TOOL_ID } from "./tools/googleDriveFolderTool";
 import { GOOGLE_DRIVE_REPLY_OPERATION_ID } from "./tools/googleDriveReplyTool";
 import { installStatePersistence } from "./workPersistence";
-import { buildProposalDocLayout, buildProposalDocStyleRequests, expectedDocParagraphStyles } from "../proposalRedline";
+import { buildProposalDocLayout } from "../proposalRedline";
+import { buildDocStyleRequests, expectedDocParagraphStyles, type GoogleDocLayout } from "../googleDocSpec";
 
 /**
  * The Tool Registry contract, proven at the invocation boundary:
@@ -148,9 +149,17 @@ function docServer() {
   };
 }
 
+/** A document specification exactly as the Sales Action supplies it: the declared layout plus the presentation requirement the Doc needs. */
+const specOf = (layout: GoogleDocLayout) => ({
+  text: layout.text,
+  styles: layout.styles,
+  blocks: layout.blocks,
+  presentation: { restore_identity_placeholders: true },
+});
+
 const VALID_INPUT = {
   title: "PROP-7",
-  content: "Token-safe Proposal body for the Tool Registry tests.",
+  document_specification: { text: "Token-safe Proposal body for the Tool Registry tests." },
   folder_id: "folder-1",
   account_identifier: "martin@example.com",
 };
@@ -263,8 +272,11 @@ test("E. invalid inputs are denied before any Google call (non-object, missing f
   const { calls } = installGoogleFake(t, docServer());
   const cases: unknown[] = [
     "just a string",
-    { title: "PROP-7", content: "body", folder_id: "folder-1" },
-    { title: "PROP-7", content: "   ", folder_id: "folder-1", account_identifier: "martin@example.com" },
+    { title: "PROP-7", document_specification: { text: "body" }, folder_id: "folder-1" },
+    { title: "PROP-7", document_specification: { text: "   " }, folder_id: "folder-1", account_identifier: "martin@example.com" },
+    { title: "PROP-7", content: "body", folder_id: "folder-1", account_identifier: "martin@example.com" },
+    { ...VALID_INPUT, document_specification: "body" },
+    { ...VALID_INPUT, document_specification: { text: "body", styles: [{ start: 1, end: 2, kind: "heading" }] } },
     { ...VALID_INPUT, account_identifier: "someone-else@example.com", extra: "field" },
     { ...VALID_INPUT, folder_id: 123 },
   ];
@@ -381,7 +393,7 @@ test("K. the shared output-delivery save is allowed for an undeclared Action, bu
     {
       tool_id: GOOGLE_DOCS_TOOL_ID,
       operation_id: "google_docs.update_and_verify",
-      input: { document_id: "doc-1", account_identifier: "martin@example.com", proposal_id: "PROP-1", versions: [{ version: 1, content: "v1" }] },
+      input: { document_id: "doc-1", account_identifier: "martin@example.com", document_specification: { text: "v1" } },
     },
     otherContext,
   );
@@ -641,7 +653,7 @@ test("Y. a prior uncertain outcome whose document already holds the content retu
     if (call.url.endsWith("/documents/doc-1") && call.method === "GET") {
       return json({
         title: VALID_INPUT.title,
-        body: { content: [{ paragraph: { elements: [{ textRun: { content: VALID_INPUT.content } }] } }] },
+        body: { content: [{ paragraph: { elements: [{ textRun: { content: VALID_INPUT.document_specification.text } }] } }] },
       });
     }
     return docServer()(call);
@@ -908,7 +920,7 @@ test("AK. an interruption (intent durable, outcome never written) is reconciled 
       return json({ files: [{ id: "recovered-doc", name: VALID_INPUT.title }] });
     }
     if (call.url.includes("/documents/recovered-doc") && call.method === "GET") {
-      return json({ title: VALID_INPUT.title, body: { content: [{ paragraph: { elements: [{ textRun: { content: VALID_INPUT.content } }] } }] } });
+      return json({ title: VALID_INPUT.title, body: { content: [{ paragraph: { elements: [{ textRun: { content: VALID_INPUT.document_specification.text } }] } }] } });
     }
     return docServer()(call);
   });
@@ -1047,11 +1059,13 @@ test("AP. an execution intent that cannot be persisted fails closed -- the effec
 // the five outcomes, and their own operation-specific reconciliation.
 // ---------------------------------------------------------------------------
 
+/** The layout the Sales Action declares for this test's document (the same builder the Proposal flow uses). */
+const UPDATE_LAYOUT = buildProposalDocLayout("PROP-7", [{ version: 1, content: "Version one, exactly as Martin approved it." }]);
+
 const UPDATE_INPUT = {
   document_id: "doc-1",
   account_identifier: "martin@example.com",
-  proposal_id: "PROP-7",
-  versions: [{ version: 1, content: "Version one, exactly as Martin approved it." }],
+  document_specification: specOf(UPDATE_LAYOUT),
 };
 
 const FOLDER_INPUT = {
@@ -1119,7 +1133,7 @@ test("AQ. all five registered Google Workspace operations resolve exactly -- id,
   assert.equal(resolveToolOperation(GOOGLE_DRIVE_TOOL_ID, GOOGLE_DOCS_UPDATE_OPERATION_ID), null, "operations never resolve across Tools");
 });
 
-test("AR. the update operation's input contract is exact -- unknown fields, an unusable document id and a malformed version list are all denied with zero Google calls", async (t) => {
+test("AR. the update operation's input contract is exact -- unknown fields, an unusable document id and a malformed document specification are all denied with zero Google calls", async (t) => {
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
   const { calls } = installGoogleFake(t, updateServer());
@@ -1127,12 +1141,14 @@ test("AR. the update operation's input contract is exact -- unknown fields, an u
     { ...UPDATE_INPUT, extra: "field" },
     { ...UPDATE_INPUT, document_id: "https://docs.google.com/document/d/doc-1" },
     { ...UPDATE_INPUT, document_id: "" },
-    { ...UPDATE_INPUT, proposal_id: "  " },
-    { ...UPDATE_INPUT, versions: [] },
-    { ...UPDATE_INPUT, versions: [{ version: 0, content: "x" }] },
-    { ...UPDATE_INPUT, versions: [{ version: 1.5, content: "x" }] },
-    { ...UPDATE_INPUT, versions: [{ version: 1, content: "   " }] },
-    { ...UPDATE_INPUT, versions: [{ version: 1, content: "x", note: "extra" }] },
+    { ...UPDATE_INPUT, document_specification: "body" },
+    { ...UPDATE_INPUT, document_specification: { styles: [], blocks: [] } },
+    { ...UPDATE_INPUT, document_specification: { text: "   " } },
+    { ...UPDATE_INPUT, document_specification: { text: "body", styles: [{ start: 0, end: 4, kind: "heading" }] } },
+    { ...UPDATE_INPUT, document_specification: { text: "body", styles: [{ start: 1, end: 9, kind: "heading" }] } },
+    { ...UPDATE_INPUT, document_specification: { text: "body", styles: [{ start: 1, end: 2, kind: "shout" }] } },
+    { ...UPDATE_INPUT, document_specification: { text: "body", blocks: [{ start: 1, end: 2, kind: "paragraph", note: "extra" }] } },
+    { ...UPDATE_INPUT, document_specification: { text: "body", presentation: { restore_identity_placeholders: "yes" } } },
     "not an object",
   ];
   for (const input of cases) {
@@ -1182,7 +1198,7 @@ test("AU. an interrupted update is settled by reading THE document it targeted: 
   const key = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
 
   // 1. Content already matches: recovered, never rewritten.
-  const desired = buildProposalDocLayout(UPDATE_INPUT.proposal_id, UPDATE_INPUT.versions).text;
+  const desired = UPDATE_LAYOUT.text;
   workRecords[key] = seededRecord({ operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, target_resource_id: UPDATE_TARGET });
   let writes = 0;
   const matching = installGoogleFake(t, (call) => {
@@ -1235,7 +1251,10 @@ test("AV0. a verified success recorded for ONE requested content never suppresse
       remote_resource: { document_id: "doc-1" },
     },
   });
-  const revised = { ...UPDATE_INPUT, versions: [{ version: 2, content: "Version two, revised with Martin's change." }] };
+  const revised = {
+    ...UPDATE_INPUT,
+    document_specification: specOf(buildProposalDocLayout("PROP-7", [{ version: 2, content: "Version two, revised with Martin's change." }])),
+  };
   const secondKey = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, revised);
   assert.notEqual(secondKey, firstKey, "different requested content is a different logical operation");
 
@@ -1360,17 +1379,20 @@ test("AY. the folder operation's input contract is exact and its reconciliation 
 // were applied.
 // ---------------------------------------------------------------------------
 
-/** Deliberately free of "Label: value" lines and (single-version) redline marks, so the canonical layout carries paragraph styling only. */
+/**
+ * The layout the Sales Action declares for this test's document -- rebuilt
+ * from the Proposal's OWN Version data, never from a request. Deliberately
+ * free of "Label: value" lines and (single-version) redline marks, so it
+ * carries paragraph styling only.
+ */
+const FORMAT_LAYOUT = buildProposalDocLayout("PROP-7", [{ version: 1, content: "The scope covers two workshops.\nThe timeline is six weeks." }]);
+
 const FORMAT_INPUT = {
   document_id: "doc-1",
   account_identifier: "martin@example.com",
-  proposal_id: "PROP-7",
-  versions: [{ version: 1, content: "The scope covers two workshops.\nThe timeline is six weeks." }],
+  document_specification: specOf(FORMAT_LAYOUT),
 };
 const FORMAT_TARGET = `gdrive:document:${FORMAT_INPUT.document_id}`;
-
-/** The canonical layout, rebuilt from the Proposal's OWN Version data -- never from a request. */
-const FORMAT_LAYOUT = buildProposalDocLayout(FORMAT_INPUT.proposal_id, FORMAT_INPUT.versions);
 
 /**
  * A Docs server for the formatting operation. The document always carries
@@ -1442,7 +1464,7 @@ const formatCall = (input: unknown = FORMAT_INPUT) => ({
   input,
 });
 
-test("AZ. the formatting operation's input contract is exact -- unknown fields, a URL for a document id and a malformed version list are all denied with zero Google calls", async (t) => {
+test("AZ. the formatting operation's input contract is exact -- unknown fields, a URL for a document id and a malformed document specification are all denied with zero Google calls", async (t) => {
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
   const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
@@ -1451,11 +1473,11 @@ test("AZ. the formatting operation's input contract is exact -- unknown fields, 
     { ...FORMAT_INPUT, extra: "field" },
     { ...FORMAT_INPUT, document_id: "https://docs.google.com/document/d/doc-1" },
     { ...FORMAT_INPUT, document_id: "" },
-    { ...FORMAT_INPUT, proposal_id: "   " },
-    { ...FORMAT_INPUT, versions: [] },
-    { ...FORMAT_INPUT, versions: [{ version: 0, content: "x" }] },
-    { ...FORMAT_INPUT, versions: [{ version: 1, content: "   " }] },
-    { ...FORMAT_INPUT, versions: [{ version: 1, content: "x", note: "extra" }] },
+    { ...FORMAT_INPUT, document_specification: "body" },
+    { ...FORMAT_INPUT, document_specification: { styles: [] } },
+    { ...FORMAT_INPUT, document_specification: { text: "   " } },
+    { ...FORMAT_INPUT, document_specification: { text: "body", styles: [{ start: 1, end: 2, kind: "shout" }] } },
+    { ...FORMAT_INPUT, document_specification: { text: "body", blocks: [{ start: 5, end: 2, kind: "paragraph" }] } },
     "not an object",
   ];
   for (const input of cases) {
@@ -1490,8 +1512,8 @@ test("BB. a formatting pass sends ONLY style requests -- never an insert or a de
   assert.ok(requests.length > 0, "the canonical styling must actually be sent");
   assert.deepEqual(
     requests,
-    buildProposalDocStyleRequests(FORMAT_LAYOUT),
-    "the styling applied is exactly the canonical set derived from the Proposal's own Versions",
+    buildDocStyleRequests(FORMAT_LAYOUT),
+    "the styling applied is exactly the declared set derived from the Action's own layout",
   );
   assert.equal(
     requests.filter((request: any) => request.insertText || request.deleteContentRange).length,
@@ -1508,7 +1530,7 @@ test("BC. a Doc whose text has drifted from the Version it is bound to is refuse
   const outcome = await invokeTool(env, formatCall(), submitContext());
   assert.equal(outcome.state, "failed");
   assert.equal(outcome.stage, "baseline");
-  assert.match(outcome.reason ?? "", /no longer matches the current version/);
+  assert.match(outcome.reason ?? "", /no longer matches the specification it is bound to/);
   assert.equal(counters.batchUpdates, 0, "drifted content is never styled");
 });
 

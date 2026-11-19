@@ -1850,21 +1850,31 @@ const PROPOSAL_DOCS_FOLDER_NAME = "ENIG Proposals (token-safe)";
 const PROPOSAL_DOCS_FOLDER_KV_KEY = "google_proposal_docs_folder";
 
 /**
- * The `google_docs.update_and_verify` input for THIS Proposal's Doc. It
- * carries business data only -- the opaque document id, the trusted account,
- * the Proposal id and this Proposal's exact Version content in order -- and
- * the registered operation rebuilds the canonical layout itself, so no
- * provider request structure and no styling detail ever enters the contract.
- * The stored Version content stays in the protected identity form; the
- * operation restores the real names when it assembles the human-readable Doc
- * (buildInternalDocLayout), the same layout the read-back verification uses.
+ * The `google_docs.update_and_verify` (and `format_and_verify`) input for
+ * THIS Proposal's Doc. It carries the document to act on, the trusted
+ * account, and the Action's declarative `document_specification`: the
+ * canonical Proposal layout built over this Proposal's exact Version content
+ * in order (business content, sections, ordering, structure and presentation
+ * -- the SALES side of the boundary, src/proposalRedline.ts), with the
+ * presentation requirement the Doc needs declared on it. The Tool validates
+ * that specification and maps it to provider requests through
+ * `src/googleDocSpec.ts`; it contains no Proposal layout logic of its own.
+ * The stored Version content stays in the protected identity form, so the
+ * specification carries the protected form too -- the declared
+ * `restore_identity_placeholders` is what makes the Tool apply the one
+ * shared restoration at the write, the same body its read-back verifies.
  */
 function docWriteInput(sp: RuntimeSalesProposal, documentId: string, accountIdentifier: string) {
+  const layout = buildProposalDocLayout(sp.proposalId, docVersions(sp));
   return {
     document_id: documentId,
     account_identifier: accountIdentifier,
-    proposal_id: sp.proposalId,
-    versions: sp.versions.filter((v) => v.version <= sp.currentVersion).sort((x, y) => x.version - y.version).map((v) => ({ version: v.version, content: v.content })),
+    document_specification: {
+      text: layout.text,
+      styles: layout.styles,
+      blocks: layout.blocks,
+      presentation: { restore_identity_placeholders: true },
+    },
   };
 }
 
@@ -1973,19 +1983,31 @@ async function ensureProposalDoc(env: Env, state: WorkState, sp: RuntimeSalesPro
   // proposal_submit -- see salesManifest), Access's external-mutation
   // decision, exact input validation, the trusted account/folder target,
   // and the canonical five outcomes. Holding Google OAuth access was never
-  // authorization, and the boundary is what supplies it now. `title` and
-  // `content` are this Version's canonical layout text in its PROTECTED
-  // identity form: the input is persisted as the operation's durable intent
-  // record, so it must never carry the real names. The operation restores
-  // them itself when it assembles the human-readable Doc
-  // (buildInternalDocLayout), which is also what its read-back verifies.
-  // No client identity ever enters it (Isolated Sales owns that).
+  // authorization, and the boundary is what supplies it now. `title` and the
+  // `document_specification` carry this Version's canonical layout text in
+  // its PROTECTED identity form: the input is persisted as the operation's
+  // durable intent record, so it must never carry the real names. The
+  // declared `presentation.restore_identity_placeholders` is what makes the
+  // operation restore them itself when it writes the human-readable Doc (the
+  // ONE shared restoration, applied to the body its read-back verifies).
+  // The create operation writes body text only, so the specification carries
+  // text and that presentation instruction -- structure and styling are
+  // applied by the update pass below. No client identity ever enters it
+  // (Isolated Sales owns that).
   const outcome = await invokeTool(
     env,
     {
       tool_id: "google_docs",
       operation_id: "google_docs.create_and_verify",
-      input: { title: sp.proposalId, content: buildProposalDocLayout(sp.proposalId, docVersions(sp)).text, folder_id: folderId, account_identifier: accountIdentifier },
+      input: {
+        title: sp.proposalId,
+        document_specification: {
+          text: buildProposalDocLayout(sp.proposalId, docVersions(sp)).text,
+          presentation: { restore_identity_placeholders: true },
+        },
+        folder_id: folderId,
+        account_identifier: accountIdentifier,
+      },
     },
     workSessionContext(state),
   );

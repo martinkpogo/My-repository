@@ -13,7 +13,6 @@ import {
   type GoogleDocsSmokeResult,
   type GoogleDocsSmokeWorkRunner,
 } from "./googleDocsSmoke";
-import { buildProposalDocLayout } from "../../proposalRedline";
 
 /**
  * The governed Google Docs smoke contract (LOG-1069), proven at its own
@@ -481,7 +480,7 @@ test("retry reconciliation: an interrupted attempt that already created the doc 
   const input = googleDocsSmokeInput(WORK_ID, SMOKE_FOLDER, ACCOUNT);
   // The remote world left by the interrupted attempt: the doc exists in the
   // disposable folder, holding exactly the requested content.
-  const server = docServer({ title: input.title, text: input.content, folder: SMOKE_FOLDER });
+  const server = docServer({ title: input.title, text: input.document_specification.text, folder: SMOKE_FOLDER });
   const { calls } = installGoogleFake(t, (call) => server.handle(call));
 
   const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
@@ -573,7 +572,7 @@ test("the rewrite reaches google_docs.update_and_verify over the created Doc wit
   const insertAt = reqs.findIndex((r) => r.insertText);
   assert.ok(deleteAt >= 0 && insertAt > deleteAt, "the old body is deleted before the new content is inserted");
   // A REAL rewrite: the inserted content differs from what creation wrote.
-  assert.notEqual(reqs[insertAt].insertText.text, googleDocsSmokeInput(WORK_ID, SMOKE_FOLDER, ACCOUNT).content);
+  assert.notEqual(reqs[insertAt].insertText.text, googleDocsSmokeInput(WORK_ID, SMOKE_FOLDER, ACCOUNT).document_specification.text);
   assert.match(reqs[insertAt].insertText.text, /REWRITE pass/);
 
   // PR #269 correction 1: updateParagraphStyle carries `paragraphStyle`
@@ -708,7 +707,7 @@ test("an interrupted rewrite whose effect ALREADY landed is settled by a read an
   const env = configuredEnv();
   const harness = smokeRunner(smokeState(), inProgressRewriteSeed());
   const rewriteInput = googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT);
-  const desired = buildProposalDocLayout(rewriteInput.proposal_id, rewriteInput.versions).text;
+  const desired = rewriteInput.document_specification.text;
   const server = docServer();
   let documentReads = 0;
   const { calls } = installGoogleFake(t, (call) => {
@@ -718,7 +717,7 @@ test("an interrupted rewrite whose effect ALREADY landed is settled by a read an
     if (call.url.includes("/documents/doc-smoke-1") && call.method === "GET") {
       documentReads += 1;
       if (documentReads > 1) {
-        return json({ title: rewriteInput.proposal_id, body: { content: [{ endIndex: desired.length + 1, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
+        return json({ title: "ENIG-REGISTRY-SMOKE-ABCD1234", body: { content: [{ endIndex: desired.length + 1, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
       }
     }
     return server.handle(call);

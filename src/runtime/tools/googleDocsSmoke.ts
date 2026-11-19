@@ -57,6 +57,7 @@ import { workSessionContext } from "../../access";
 import { listAuthorizedGoogleAccounts } from "../../googleOAuth";
 import { kvGet } from "../../kvStore";
 import { invokeTool, type ToolInvocationOutcome } from "../toolRegistry";
+import type { DocBlockRange, DocStyleRange } from "../../googleDocSpec";
 import { GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID, GOOGLE_DOCS_TOOL_ID } from "./googleDocsTool";
 import { GOOGLE_DOCS_UPDATE_OPERATION_ID } from "./googleDocsUpdateTool";
 
@@ -125,44 +126,65 @@ function smokeSuffix(workId: string): string {
 }
 
 /**
- * The exact invocation input for one smoke run. Title and content are
- * token-free by construction (a smoke marker, the Work id and the operation
- * id -- nothing identity-bearing), and the title's unique suffix keeps each
- * run's reconciliation-by-title search exact.
+ * The exact invocation input for one smoke run. The title and the
+ * `document_specification` text are token-free by construction (a smoke
+ * marker, the Work id and the operation id -- nothing identity-bearing), so
+ * no presentation instruction is declared: there is no placeholder to
+ * restore. The title's unique suffix keeps each run's
+ * reconciliation-by-title search exact.
  */
 export function googleDocsSmokeInput(workId: string, folderId: string, accountIdentifier: string) {
   return {
     title: `ENIG-REGISTRY-SMOKE-${smokeSuffix(workId)}`,
-    content: `ENIG Tool Registry live smoke test.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID}\nDisposable verification content. No client data.\n`,
+    document_specification: {
+      text: `ENIG Tool Registry live smoke test.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_CREATE_AND_VERIFY_OPERATION_ID}\nDisposable verification content. No client data.\n`,
+    },
     folder_id: folderId,
     account_identifier: accountIdentifier,
   };
 }
 
 /**
+ * The rewrite's document specification: its token-free text plus the
+ * structure THIS smoke declares for it -- the first line as the title block
+ * (bolded), the "- " line as a bullet, every other line a plain paragraph --
+ * so the pass exercises the paragraph-style, bullet and inline-style request
+ * shapes (PR #269's corrected shapes) while borrowing no business layout
+ * builder: the specification's supplier owns the structure, exactly as it
+ * does for any other Action. No presentation instruction is declared -- the
+ * content carries no identity placeholder to restore.
+ */
+function smokeRewriteSpecification(workId: string) {
+  const text = `ENIG Tool Registry live smoke REWRITE pass.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_UPDATE_OPERATION_ID}\n- Governed rewrite bullet marker.\nDisposable verification content. No client data.\n`;
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop(); // the trailing newline ends the last paragraph; it is not one of its own
+  const blocks: DocBlockRange[] = [];
+  const styles: DocStyleRange[] = [];
+  let index = 1;
+  lines.forEach((line, position) => {
+    const end = index + line.length + 1; // the block covers the paragraph's terminating newline, as the Docs API requires
+    blocks.push({ start: index, end, kind: position === 0 ? "title" : line.startsWith("- ") ? "bullet" : "paragraph" });
+    if (position === 0) styles.push({ start: index, end: index + line.length, kind: "heading" });
+    index = end;
+  });
+  return { text, blocks, styles };
+}
+
+/**
  * The governed rewrite invocation's exact input: THE disposable Doc this
  * run just created and verified (its id comes from the create outcome, is
  * passed in here by the invocation core, and is re-validated by the
- * operation's own opaque-id contract), and a rewrite content that is
- * deliberately DIFFERENT from the creation content so the batchUpdate is a
- * real rewrite (delete + insert + styling) whose read-back proves the new
- * text -- not a no-op restatement of what the Doc already holds. Proposal
- * id and content are token-free by construction.
+ * operation's own opaque-id contract), and a rewrite specification whose
+ * text is deliberately DIFFERENT from the creation content so the
+ * batchUpdate is a real rewrite (delete + insert + styling) whose read-back
+ * proves the new text -- not a no-op restatement of what the Doc already
+ * holds. Its content is token-free by construction.
  */
 export function googleDocsSmokeRewriteInput(workId: string, documentId: string, accountIdentifier: string) {
   return {
     document_id: documentId,
     account_identifier: accountIdentifier,
-    proposal_id: `REGISTRY-SMOKE-${smokeSuffix(workId)}`,
-    versions: [
-      {
-        version: 1,
-        // The `- ` line maps to a `bullet` block (currentZoneBlockKind), so
-        // the rewrite exercises the corrected #269 `createParagraphBullets`
-        // preset as well as the corrected `updateParagraphStyle` shapes.
-        content: `ENIG Tool Registry live smoke REWRITE pass.\nWork: ${workId}\nOperation: ${GOOGLE_DOCS_UPDATE_OPERATION_ID}\n- Governed rewrite bullet marker.\nDisposable verification content. No client data.\n`,
-      },
-    ],
+    document_specification: smokeRewriteSpecification(workId),
   };
 }
 

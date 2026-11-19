@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildProposalDocLayout, buildProposalDocStyleRequests, diffWords } from "./proposalRedline";
+import { buildProposalDocLayout, diffWords } from "./proposalRedline";
+import { buildDocStyleRequests } from "./googleDocSpec";
 
 test("diffWords: unchanged text is 'same', removed words 'del', new words 'add'", () => {
   const segs = diffWords("The fee is GHS 8000 per day.", "The fee is GHS 9600 per day.");
@@ -102,12 +103,12 @@ test("buildProposalDocLayout: a v1-only layout already carries the canonical blo
   assert.ok(l.blocks.some((b) => b.kind === "subBullet"));
 });
 
-test("buildProposalDocStyleRequests: style-only requests with valid indexes -- never a text mutation", () => {
+test("buildDocStyleRequests: style-only requests with valid indexes -- never a text mutation", () => {
   const l = buildProposalDocLayout("PROP-7", [
     { version: 1, content: CONTENT },
     { version: 2, content: V2_CONTENT },
   ]);
-  const requests = buildProposalDocStyleRequests(l) as any[];
+  const requests = buildDocStyleRequests(l) as any[];
   for (const r of requests) {
     assert.ok(r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets, "only style requests");
     assert.ok(!r.insertText && !r.deleteContentRange && !r.replaceAllText, "never a text mutation");
@@ -139,12 +140,12 @@ test("buildProposalDocStyleRequests: style-only requests with valid indexes -- n
 // `BulletGlyphPreset` value. The allowed keys and enum values below are taken
 // verbatim from the Docs API v1 discovery schema, so this test fails if either
 // shape ever drifts back to a request Google would reject.
-test("buildProposalDocStyleRequests: every request matches the Docs API v1 schema -- updateParagraphStyle uses paragraphStyle and bulletPreset is a real BulletGlyphPreset value", () => {
+test("buildDocStyleRequests: every request matches the Docs API v1 schema -- updateParagraphStyle uses paragraphStyle and bulletPreset is a real BulletGlyphPreset value", () => {
   const l = buildProposalDocLayout("PROP-7", [
     { version: 1, content: CONTENT },
     { version: 2, content: V2_CONTENT },
   ]);
-  const requests = buildProposalDocStyleRequests(l) as any[];
+  const requests = buildDocStyleRequests(l) as any[];
 
   // The exact property sets of the Docs API v1 request messages (discovery schema).
   const allowedKeys: Record<string, string[]> = {
