@@ -28,7 +28,8 @@ import { GOOGLE_DRIVE_ENSURE_FOLDER_OPERATION_ID, GOOGLE_DRIVE_TOOL_ID } from ".
 import { GOOGLE_DRIVE_REPLY_OPERATION_ID } from "./tools/googleDriveReplyTool";
 import { installStatePersistence } from "./workPersistence";
 import { buildProposalDocLayout } from "../proposalRedline";
-import { buildDocStyleRequests, expectedDocParagraphStyles, type GoogleDocLayout } from "../googleDocSpec";
+import { buildDocStyleRequests, type GoogleDocLayout } from "../googleDocSpec";
+import { FakeGoogleDoc, fakeDocShowingLayout } from "../testSupport/fakeGoogleDocs";
 
 /**
  * The Tool Registry contract, proven at the invocation boundary:
@@ -1077,17 +1078,22 @@ const FOLDER_INPUT = {
 const FOLDER_TARGET = `gdrive:folder:${FOLDER_INPUT.account_identifier}:${FOLDER_INPUT.folder_name}`;
 const UPDATE_TARGET = `gdrive:document:${UPDATE_INPUT.document_id}`;
 
-/** A Docs server for the UPDATE operation: pre-read, batchUpdate, read-back. */
+/**
+ * A Docs server for the UPDATE operation: pre-read, batchUpdate, read-back.
+ * The document is the shared styling-aware fake, so the batchUpdate really
+ * applies the write AND its styling, and the verification read sees the
+ * complete specification back -- text and formatting -- exactly as the real
+ * API would report it.
+ */
 function updateServer() {
-  let text = "";
+  const doc = new FakeGoogleDoc();
   return (call: GoogleCall): Response => {
     if (call.url.includes(":batchUpdate")) {
-      const insert = (call.body?.requests ?? []).find((request: any) => request.insertText);
-      text = insert?.insertText?.text ?? text;
+      doc.applyRequests(call.body?.requests ?? []);
       return json({});
     }
     if (call.url.endsWith("/documents/doc-1") && call.method === "GET") {
-      return json({ body: { content: [{ endIndex: Math.max(text.length + 2, 3), paragraph: { elements: [{ textRun: { content: text } }] } }] } });
+      return json(doc.toDocumentJson());
     }
     throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
   };
@@ -1192,13 +1198,13 @@ test("AT. a successful update writes the exact version content once and claims s
   assert.equal(workRecords[key]?.status, "succeeded", "the update's own durable record is persisted under its own target");
 });
 
-test("AU. an interrupted update is settled by reading THE document it targeted: content match recovers as verified success with no new write, differing content permits exactly one fresh write", async (t) => {
+test("AU. an interrupted update is settled by reading THE document it targeted: a document showing the complete specification recovers as verified success with no new write, differing content permits exactly one fresh write", async (t) => {
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
   const key = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
 
-  // 1. Content already matches: recovered, never rewritten.
-  const desired = UPDATE_LAYOUT.text;
+  // 1. The document already shows the COMPLETE specification (text AND its
+  // declared styling): recovered as a verified success, never rewritten.
   workRecords[key] = seededRecord({ operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, target_resource_id: UPDATE_TARGET });
   let writes = 0;
   const matching = installGoogleFake(t, (call) => {
@@ -1207,7 +1213,7 @@ test("AU. an interrupted update is settled by reading THE document it targeted: 
       return json({});
     }
     if (call.url.endsWith("/documents/doc-1")) {
-      return json({ body: { content: [{ endIndex: desired.length + 2, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
+      return json(fakeDocShowingLayout(UPDATE_LAYOUT).toDocumentJson());
     }
     throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
   });
@@ -1233,6 +1239,68 @@ test("AU. an interrupted update is settled by reading THE document it targeted: 
   );
   assert.equal(fresh.state, "succeeded", `expected a fresh write, got ${fresh.state}: ${fresh.reason ?? ""}`);
   assert.equal(workRecords[key]?.status, "succeeded");
+});
+
+test("AU2. an interrupted update whose document matches only in TEXT is never reconciled as success -- exactly one fresh write runs and no reason claims a recovery", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const key = operationRecordKey(GOOGLE_DOCS_UPDATE_OPERATION_ID, UPDATE_TARGET, UPDATE_INPUT);
+  workRecords[key] = seededRecord({ operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, target_resource_id: UPDATE_TARGET });
+  // The exact requested TEXT, but none of its declared formatting: the
+  // earlier attempt did not produce the complete specification.
+  const doc = new FakeGoogleDoc({ text: UPDATE_LAYOUT.text });
+  let writes = 0;
+  installGoogleFake(t, (call) => {
+    if (call.url.includes(":batchUpdate")) {
+      writes += 1;
+      doc.applyRequests(call.body?.requests ?? []);
+      return json({});
+    }
+    if (call.url.endsWith("/documents/doc-1")) return json(doc.toDocumentJson());
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  });
+
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: UPDATE_INPUT },
+    submitContext(),
+  );
+
+  assert.equal(outcome.state, "succeeded", `a fresh write must run, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(writes, 1, "matching text alone is not the requested effect: exactly one fresh write runs");
+  assert.doesNotMatch(outcome.reason ?? "", /reconciled/, "nothing was recovered -- a text-only match is never claimed as the earlier attempt's success");
+  assert.equal(workRecords[key]?.status, "succeeded");
+});
+
+test("AU3. an update whose read-back carries the exact requested text but the wrong formatting is partially_completed -- never a verified success", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const doc = new FakeGoogleDoc();
+  let writes = 0;
+  installGoogleFake(t, (call) => {
+    if (call.url.includes(":batchUpdate")) {
+      writes += 1;
+      // The write's TEXT lands, but its styling requests do not take effect:
+      // the read-back shows the right body with none of its declared styles.
+      doc.applyRequests((call.body?.requests ?? []).filter((request: any) => request.insertText || request.deleteContentRange));
+      return json({});
+    }
+    if (call.url.endsWith("/documents/doc-1")) return json(doc.toDocumentJson());
+    throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
+  });
+
+  const outcome = await invokeTool(
+    env,
+    { tool_id: GOOGLE_DOCS_TOOL_ID, operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID, input: UPDATE_INPUT },
+    submitContext(),
+  );
+
+  assert.equal(outcome.state, "partially_completed", `matching text must not verify, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(outcome.stage, "verification");
+  assert.equal(outcome.reconciliation_required, true, "the partial effect must be reconciled before any retry");
+  assert.equal(outcome.remote_resource?.document_id, "doc-1", "the document id is preserved so the attempt can be reconciled");
+  assert.match(outcome.reason ?? "", /wrong formatting/);
+  assert.equal(writes, 1, "the write was sent exactly once -- it is its RESULT that failed verification");
 });
 
 test("AV0. a verified success recorded for ONE requested content never suppresses a DIFFERENT requested content for the same document -- each requested remote state is its own logical operation", async (t) => {
@@ -1397,62 +1465,30 @@ const FORMAT_TARGET = `gdrive:document:${FORMAT_INPUT.document_id}`;
 /**
  * A Docs server for the formatting operation. The document always carries
  * the exact canonical TEXT (a formatting pass may never change it) and
- * either already shows the canonical styling or is plain. The body ends with
- * the API's own required empty paragraph, exactly as the real one does.
+ * either already shows the canonical styling or is plain. A batchUpdate is
+ * really applied through the shared styling-aware fake, so a pass that ran
+ * shows its declared styling on the read-back; `ignoreStyleRequests` is the
+ * seam for a pass whose styling did NOT take effect (the request was
+ * accepted, the document stayed plain). The body ends with the API's own
+ * required empty paragraph, exactly as the real one does.
  */
 function formatServer(
   counters: { batchUpdates: number; requests?: unknown[] },
-  opts: { styled: boolean; text?: string; unreadable?: boolean; changeTextAfterUpdate?: boolean } = { styled: false },
+  opts: { styled: boolean; text?: string; unreadable?: boolean; changeTextAfterUpdate?: boolean; ignoreStyleRequests?: boolean } = { styled: false },
 ) {
-  let text = opts.text ?? FORMAT_LAYOUT.text;
+  const doc = new FakeGoogleDoc({ text: opts.text ?? FORMAT_LAYOUT.text });
+  if (opts.styled) doc.applyLayout(FORMAT_LAYOUT);
   return (call: GoogleCall): Response => {
     if (call.url.includes(":batchUpdate")) {
       counters.batchUpdates += 1;
       counters.requests = call.body?.requests ?? [];
-      if (opts.changeTextAfterUpdate) text = `${text}A handwritten client note.\n`;
+      if (!opts.ignoreStyleRequests) doc.applyRequests(counters.requests ?? []);
+      if (opts.changeTextAfterUpdate) doc.setText(`${doc.text}A handwritten client note.\n`);
       return json({});
     }
     if (call.url.endsWith("/documents/doc-1") && call.method === "GET") {
       if (opts.unreadable) return new Response("upstream sad", { status: 500 });
-      const expected = expectedDocParagraphStyles(FORMAT_LAYOUT);
-      const lines = text.split("\n");
-      // Every newline is a paragraph separator, so the body ends with one
-      // required empty paragraph after the text's final newline.
-      const paragraphTexts = lines.slice(0, -1).map((line) => `${line}\n`);
-      const content: any[] = [];
-      let index = 1;
-      paragraphTexts.forEach((paragraphText, paragraphIndex) => {
-        const startIndex = index;
-        index += paragraphText.length;
-        const want = expected[paragraphIndex] ?? { namedStyleType: "NORMAL_TEXT", bulleted: false, indentStartPt: 0 };
-        // Runs are split at the layout's inline-style boundaries, exactly as
-        // the real API reports them, so the read-back verification sees the
-        // canonical bold heading rather than one plain run per paragraph.
-        const boundaries = [startIndex, index];
-        for (const style of FORMAT_LAYOUT.styles) {
-          for (const edge of [style.start, style.end]) {
-            if (edge > startIndex && edge < index) boundaries.push(edge);
-          }
-        }
-        const marks = [...new Set(boundaries)].sort((a, b) => a - b);
-        const elements = marks.slice(0, -1).map((start, markIndex) => {
-          const end = marks[markIndex + 1];
-          const covering = FORMAT_LAYOUT.styles.find((style) => start >= style.start && end <= style.end);
-          return { textRun: { content: text.slice(start - 1, end - 1), ...(covering ? { textStyle: { bold: true } } : {}) } };
-        });
-        content.push({
-          startIndex,
-          endIndex: index,
-          paragraph: {
-            namedStyleType: opts.styled ? want.namedStyleType : "NORMAL_TEXT",
-            ...(opts.styled && want.bulleted ? { bullet: {} } : {}),
-            ...(opts.styled && want.indentStartPt ? { paragraphStyle: { indentStart: { magnitude: want.indentStartPt } } } : {}),
-            elements,
-          },
-        });
-      });
-      content.push({ startIndex: index, endIndex: index, paragraph: { namedStyleType: "NORMAL_TEXT", elements: [] } });
-      return json({ body: { content } });
+      return json(doc.toDocumentJson());
     }
     throw new Error(`Unexpected Google call: ${call.method} ${call.url}`);
   };
@@ -1621,7 +1657,7 @@ test("BH. an interrupted styling pass is reconciled by reading the Doc's ACTUAL 
   const outcome = await invokeTool(env, formatCall(), submitContext());
   assert.equal(outcome.state, "succeeded", outcome.reason ?? "");
   assert.equal(outcome.verified, true);
-  assert.match(outcome.reason ?? "", /already shows the canonical styling/);
+  assert.match(outcome.reason ?? "", /already shows the declared styling/);
   assert.equal(counters.batchUpdates, 0, "the effect already exists: it is recovered, never repeated");
 });
 
@@ -1673,4 +1709,18 @@ test("BK. a persisted verified formatting success is returned as-is -- a repeate
   assert.equal(outcome.state, "succeeded");
   assert.equal(outcome.verified, true);
   assert.equal(googleCalls(calls).length, 0, "the stored verified outcome is returned with no request at all");
+});
+
+test("BL. a formatting pass whose styling did not take effect is partially_completed -- matching text is never a verified success", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const counters: { batchUpdates: number; requests?: any[] } = { batchUpdates: 0 };
+  installGoogleFake(t, formatServer(counters, { styled: false, ignoreStyleRequests: true }));
+  const outcome = await invokeTool(env, formatCall(), submitContext());
+  assert.equal(outcome.state, "partially_completed", `the unchanged text alone must not verify, got ${outcome.state}: ${outcome.reason ?? ""}`);
+  assert.equal(outcome.stage, "verification");
+  assert.equal(outcome.reconciliation_required, true, "the partial effect must be reconciled by reading the actual styling before any retry");
+  assert.equal(outcome.remote_resource?.document_id, FORMAT_INPUT.document_id, "the document id is preserved so the attempt can be reconciled");
+  assert.match(outcome.reason ?? "", /does not match the specification after the styling pass/);
+  assert.equal(counters.batchUpdates, 1, "the pass was sent exactly once -- it is its result that failed verification");
 });

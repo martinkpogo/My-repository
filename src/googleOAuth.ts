@@ -1,5 +1,9 @@
 import type { Env, WorkState } from "./types";
-import { buildDocStyleRequests, type GoogleDocLayout } from "./googleDocSpec";
+import { buildDocStyleRequests, observedStylingMatches, type GoogleDocLayout, type ObservedDocParagraph, type ObservedDocStyling, type ObservedDocTextStyle } from "./googleDocSpec";
+// The observed read-back shapes are declared by the neutral specification
+// module (the one vocabulary for a document's declared and actual styling);
+// re-exported here so this layer's existing consumers keep their import site.
+export type { ObservedDocParagraph, ObservedDocStyling, ObservedDocTextStyle };
 import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage, type InlineButton } from "./telegram";
 import { generate } from "./ai";
@@ -1125,10 +1129,14 @@ async function describeGoogleApiFailure(res: Response): Promise<string> {
  * Replaces the whole body of a Doc this system created with `layout.text` and
  * applies the layout's styling (buildDocStyleRequests: paragraph hierarchy,
  * bullets, bold headings/labels, struck removed text, underlined added
- * text), then reads the Doc back and confirms the text is exactly what was
- * written. The layout is whatever the resolved Action's validated
- * `document_specification` resolved to -- this established Google layer
- * executes it and never chooses content or structure of its own.
+ * text), then reads the Doc back and confirms the COMPLETE specification:
+ * the text is exactly what was written AND every declared paragraph style,
+ * bullet, indent and inline mark is actually shown (the one shared matcher,
+ * `observedStylingMatches`). Matching text alone is never proof of success --
+ * a body written without its declared formatting does not verify. The layout
+ * is whatever the resolved Action's validated `document_specification`
+ * resolved to -- this established Google layer executes it and never chooses
+ * content or structure of its own.
  */
 export async function rewriteGoogleDoc(
   env: Env,
@@ -1154,8 +1162,13 @@ export async function rewriteGoogleDoc(
     return { ok: false, error: "network error rewriting the Doc" };
   }
   if (!res.ok) return { ok: false, error: `Google Docs rewrite failed (${await describeGoogleApiFailure(res)})` };
-  const after = await readGoogleDocBody(token, documentId);
-  if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc did not read back as written" };
+  const after = await readGoogleDocStyling(token, documentId);
+  if (!after || after.text.trimEnd() !== layout.text.trimEnd()) {
+    return { ok: false, error: "the Doc did not read back as written" };
+  }
+  if (!observedStylingMatches(layout, after)) {
+    return { ok: false, error: "the Doc read back with the wrong formatting: the declared paragraph styles, bullets, indentation or inline marks are missing or wrong" };
+  }
   return { ok: true };
 }
 
@@ -1163,8 +1176,11 @@ export async function rewriteGoogleDoc(
  * Applies a layout's styling to a Doc WITHOUT touching a single character
  * of its text: reads the Doc, refuses (nothing applied) when its text no
  * longer matches the layout it should show, sends only style requests
- * (buildDocStyleRequests), and reads back to confirm the text is still
- * byte-identical. The layout comes from the resolved Action's validated
+ * (buildDocStyleRequests), and reads back to confirm BOTH halves of the
+ * specification: the text is still byte-identical AND the declared styling
+ * is actually shown (the one shared matcher, `observedStylingMatches`) --
+ * a pass whose requests did not take effect is never claimed as verified.
+ * The layout comes from the resolved Action's validated
  * `document_specification`; this layer executes it and decides nothing.
  */
 export async function restyleGoogleDoc(
@@ -1191,30 +1207,70 @@ export async function restyleGoogleDoc(
     return { ok: false, error: "network error formatting the Doc" };
   }
   if (!res.ok) return { ok: false, error: `Google Docs formatting failed (${await describeGoogleApiFailure(res)})` };
-  const after = await readGoogleDocBody(token, documentId);
+  const after = await readGoogleDocStyling(token, documentId);
   if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc's text changed while it was being formatted" };
+  if (!observedStylingMatches(layout, after)) {
+    return { ok: false, error: "the Doc's formatting does not match the specification after the styling pass" };
+  }
   return { ok: true };
 }
 
-/** One paragraph's ACTUAL styling, as the Docs API reports it. */
-export interface ObservedDocParagraph {
-  /** The named style the paragraph carries ("TITLE", "HEADING_1", "HEADING_2", "HEADING_3", "NORMAL_TEXT", ...). */
-  namedStyleType: string;
-  /** True when the paragraph carries a bullet. */
-  bulleted: boolean;
-  /** The paragraph's actual start indent, in points (0 when unset). */
-  indentStartPt: number;
-  /** The paragraph's own text, including its terminating newline. Needed to tell the body's required trailing empty paragraph from a real one. */
-  text: string;
-}
-
-/** One text run's ACTUAL inline styling, over its own Doc index range (1-based UTF-16 units, end exclusive). */
-export interface ObservedDocTextStyle {
-  start: number;
-  end: number;
-  bold: boolean;
-  strikethrough: boolean;
-  underline: boolean;
+/**
+ * Parses a Docs document response into the neutral observed shapes the ONE
+ * shared matcher verifies against: the text it spells out, every paragraph's
+ * own index, named style, bullet and indent, and every text run's inline
+ * marks over its own index range. Pure (no I/O) so the read-back of a write
+ * and the read-back of a reconciliation parse through exactly the same
+ * code, and a malformed body degrades to empty observations rather than
+ * throwing.
+ */
+export function parseGoogleDocStyling(doc: unknown): ObservedDocStyling {
+  const body = (doc as {
+    body?: {
+      content?: {
+        startIndex?: number;
+        paragraph?: {
+          namedStyleType?: string;
+          bullet?: unknown;
+          paragraphStyle?: { indentStart?: { magnitude?: number } };
+          elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean } } }[];
+        };
+      }[];
+    };
+  } | null)?.body;
+  const paragraphs: ObservedDocParagraph[] = [];
+  const runs: ObservedDocTextStyle[] = [];
+  let text = "";
+  for (const structural of body?.content ?? []) {
+    const paragraph = structural.paragraph;
+    if (!paragraph) continue;
+    const paragraphStart = structural.startIndex ?? 0;
+    let index = paragraphStart;
+    let paragraphText = "";
+    for (const element of paragraph.elements ?? []) {
+      const run = element.textRun;
+      const value = run?.content ?? "";
+      if (!value) continue;
+      runs.push({
+        start: index,
+        end: index + value.length,
+        bold: run?.textStyle?.bold === true,
+        strikethrough: run?.textStyle?.strikethrough === true,
+        underline: run?.textStyle?.underline === true,
+      });
+      text += value;
+      paragraphText += value;
+      index += value.length;
+    }
+    paragraphs.push({
+      start: paragraphStart,
+      namedStyleType: paragraph.namedStyleType ?? "",
+      bulleted: paragraph.bullet !== undefined && paragraph.bullet !== null,
+      indentStartPt: paragraph.paragraphStyle?.indentStart?.magnitude ?? 0,
+      text: paragraphText,
+    });
+  }
+  return { text, paragraphs, runs };
 }
 
 /**
@@ -1223,63 +1279,21 @@ export interface ObservedDocTextStyle {
  * own index range -- together with the text those runs spell out, or null
  * when the Doc cannot be read at all.
  *
- * This is what makes an interrupted FORMATTING attempt reconcilable: unlike
- * a rewrite, a styling pass leaves the text untouched, so text alone can
- * never show whether the styles were applied. Reconciliation reads them.
+ * This is what makes an interrupted FORMATTING attempt reconcilable and a
+ * completed write verifiable beyond its text: text alone can never show
+ * whether the styles were applied. Reconciliation and read-back verification
+ * both read them, through the one shared parser above.
  */
 export async function readGoogleDocStyling(
   token: string,
   documentId: string,
-): Promise<{ text: string; paragraphs: ObservedDocParagraph[]; runs: ObservedDocTextStyle[] } | null> {
+): Promise<ObservedDocStyling | null> {
   try {
     const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
-    const doc = (await res.json()) as {
-      body?: {
-        content?: {
-          startIndex?: number;
-          paragraph?: {
-            namedStyleType?: string;
-            bullet?: unknown;
-            paragraphStyle?: { indentStart?: { magnitude?: number } };
-            elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean } } }[];
-          };
-        }[];
-      };
-    };
-    const paragraphs: ObservedDocParagraph[] = [];
-    const runs: ObservedDocTextStyle[] = [];
-    let text = "";
-    for (const structural of doc.body?.content ?? []) {
-      const paragraph = structural.paragraph;
-      if (!paragraph) continue;
-      let index = structural.startIndex ?? 0;
-      let paragraphText = "";
-      for (const element of paragraph.elements ?? []) {
-        const run = element.textRun;
-        const value = run?.content ?? "";
-        if (!value) continue;
-        runs.push({
-          start: index,
-          end: index + value.length,
-          bold: run?.textStyle?.bold === true,
-          strikethrough: run?.textStyle?.strikethrough === true,
-          underline: run?.textStyle?.underline === true,
-        });
-        text += value;
-        paragraphText += value;
-        index += value.length;
-      }
-      paragraphs.push({
-        namedStyleType: paragraph.namedStyleType ?? "",
-        bulleted: paragraph.bullet !== undefined && paragraph.bullet !== null,
-        indentStartPt: paragraph.paragraphStyle?.indentStart?.magnitude ?? 0,
-        text: paragraphText,
-      });
-    }
-    return { text, paragraphs, runs };
+    return parseGoogleDocStyling(await res.json());
   } catch {
     return null;
   }

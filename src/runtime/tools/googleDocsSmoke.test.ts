@@ -4,6 +4,8 @@ import { afterEach, test } from "node:test";
 import type { Env, ExternalToolOperationRecord, WorkState } from "../../types";
 import { operationRecordKey } from "../toolRegistry";
 import { installStatePersistence } from "../workPersistence";
+import { materializeDocumentSpecification, parseDocumentSpecification } from "../../googleDocSpec";
+import { FakeGoogleDoc } from "../../testSupport/fakeGoogleDocs";
 import {
   GOOGLE_DOCS_SMOKE_FOLDER_KEY_PREFIX,
   GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX,
@@ -180,14 +182,14 @@ const json = (payload: unknown, status = 200) => new Response(JSON.stringify(pay
 
 const driveCreates = (calls: GoogleCall[]) => calls.filter((c) => c.url.endsWith("/drive/v3/files") && c.method === "POST");
 
-/** The happy document server: remembers what was created (title, text, folder) so read-backs and reconciliation searches verify against it. */
+/** The happy document server: remembers what was created (title, folder) so read-backs and reconciliation searches verify against it. The body itself is the shared styling-aware fake, so a batchUpdate really applies text AND styling and every verification read sees the complete specification back. */
 function docServer(initial?: { title?: string; text?: string; folder?: string }) {
   let title = initial?.title ?? "";
-  let text = initial?.text ?? "";
   let folder = initial?.folder ?? "";
+  const doc = new FakeGoogleDoc({ text: initial?.text ?? "" });
   return {
     get created() {
-      return { title, text, folder };
+      return { title, text: doc.text, folder };
     },
     handle(call: GoogleCall): Response {
       const { url, method, body } = call;
@@ -203,24 +205,34 @@ function docServer(initial?: { title?: string; text?: string; folder?: string })
         return json({ files: found });
       }
       if (url.includes(":batchUpdate")) {
-        // Apply the INSERT wherever it sits in the list: the creation's
-        // batchUpdate opens with insertText, the rewrite's opens with
-        // deleteContentRange and only then inserts -- applying requests[0]
-        // blindly would blank the Doc on every rewrite. "Delete all, then
-        // insert" is exactly what Google does with the rewrite's list.
-        const insert = (body.requests ?? []).find((r: any) => r.insertText);
-        if (insert) text = insert.insertText.text;
+        // The shared fake executes the WHOLE request list in order -- the
+        // creation's batchUpdate opens with insertText, the rewrite's opens
+        // with deleteContentRange and only then inserts and styles -- exactly
+        // as Google applies it, so the read-back shows the applied result.
+        doc.applyRequests(body.requests ?? []);
         return json({});
       }
       if (url.includes("/documents/doc-smoke-1") && method === "GET") {
-        // Realistic `endIndex` (a real Docs GET always carries it): without
-        // it readGoogleDocBody reports endIndex 1 and the rewrite would
-        // wrongly skip its deleteContentRange, diverging from production.
-        return json({ title, body: { content: [{ endIndex: text ? text.length + 1 : 1, paragraph: { elements: [{ textRun: { content: text } }] } }] } });
+        // Realistic `endIndex` and paragraph structure (a real Docs GET
+        // always carries them): without them readGoogleDocBody reports
+        // endIndex 1 and the rewrite would wrongly skip its
+        // deleteContentRange, diverging from production.
+        return json({ title, ...doc.toDocumentJson() });
       }
       throw new Error(`Unexpected Google call: ${method} ${url}`);
     },
   };
+}
+
+/** A Doc read-back that shows EXACTLY the declared specification -- its text with every style applied through the production mapping -- as a rewrite that already landed remotely would. */
+function docShowingSpecification(specification: unknown): FakeGoogleDoc {
+  const parsed = parseDocumentSpecification(specification, { allow_layout: true });
+  if (typeof parsed === "string") throw new Error(`the smoke's rewrite specification is invalid: ${parsed}`);
+  const materialized = materializeDocumentSpecification(parsed);
+  if (!materialized.ok) throw new Error(`the smoke's rewrite specification cannot be resolved: ${materialized.reason}`);
+  const doc = new FakeGoogleDoc({ text: materialized.layout.text });
+  doc.applyLayout(materialized.layout);
+  return doc;
 }
 
 afterEach(() => {
@@ -552,7 +564,7 @@ test("the rewrite reaches google_docs.update_and_verify over the created Doc wit
   const result = await runGoogleDocsSmoke(env, WORK_ID, harness.runner);
 
   assert.equal(result.outcome?.state, "succeeded");
-  assert.equal(result.rewrite_outcome?.state, "succeeded");
+  assert.equal(result.rewrite_outcome?.state, "succeeded", `the governed rewrite must verify: ${result.rewrite_outcome?.reason ?? ""}`);
   assert.equal(result.rewrite_outcome?.verified, true);
 
   // Target binding: every Docs write goes to THE Doc the creation proved,
@@ -707,17 +719,18 @@ test("an interrupted rewrite whose effect ALREADY landed is settled by a read an
   const env = configuredEnv();
   const harness = smokeRunner(smokeState(), inProgressRewriteSeed());
   const rewriteInput = googleDocsSmokeRewriteInput(WORK_ID, "doc-smoke-1", ACCOUNT);
-  const desired = rewriteInput.document_specification.text;
   const server = docServer();
   let documentReads = 0;
   const { calls } = installGoogleFake(t, (call) => {
     // The first Docs read is the fresh creation's own verification; every
     // later read is the rewrite's reconciliation, scripted to show that the
-    // earlier uncertain rewrite attempt actually landed remotely.
+    // earlier uncertain rewrite attempt actually landed remotely -- with the
+    // COMPLETE specification (text and its declared styling), which is the
+    // only read-back an interrupted write may be recovered from.
     if (call.url.includes("/documents/doc-smoke-1") && call.method === "GET") {
       documentReads += 1;
       if (documentReads > 1) {
-        return json({ title: "ENIG-REGISTRY-SMOKE-ABCD1234", body: { content: [{ endIndex: desired.length + 1, paragraph: { elements: [{ textRun: { content: desired } }] } }] } });
+        return json({ title: "ENIG-REGISTRY-SMOKE-ABCD1234", ...docShowingSpecification(rewriteInput.document_specification).toDocumentJson() });
       }
     }
     return server.handle(call);

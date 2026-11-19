@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import type { Env } from "../../types";
 import type { ToolOperationDefinition } from "../toolRegistry";
 import { buildInternalDocLayout, buildProposalDocLayout } from "../../proposalRedline";
+import { FakeGoogleDoc } from "../../testSupport/fakeGoogleDocs";
 import { findLeftoverBannedTerms, IDENTITY_PLACEHOLDERS } from "../../ai/identityRedaction";
 import { AiPolicyExecutor } from "../../ai/policy";
 import { DataBoundaryEvaluator } from "../../dataBoundary/policy";
@@ -60,11 +61,15 @@ function fakeEnv(): Env {
 
 /**
  * A scripted Docs fake: creation, the batchUpdate that rewrites the body, and
- * the read-back the operations verify against. It records the exact text the
- * document ends up holding, which is what these tests assert on.
+ * the read-back the operations verify against. The document is the shared
+ * styling-aware fake, so the batchUpdate really applies the write AND its
+ * styling and the verification read sees the complete specification back.
+ * It records the exact text the document ends up holding, which is what
+ * these tests assert on.
  */
 function installGoogleFake(t: any) {
-  const doc = { text: "", title: "", batches: [] as any[] };
+  const doc = new FakeGoogleDoc();
+  const state = { title: "", batches: [] as any[] };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: string, init?: any) => {
     const u = String(url);
@@ -72,26 +77,23 @@ function installGoogleFake(t: any) {
     const body = init?.body ? JSON.parse(init.body) : undefined;
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
     if (u.endsWith("/drive/v3/files") && method === "POST") {
-      doc.title = body.name;
+      state.title = body.name;
       return json({ id: "doc-1" });
     }
     if (u.endsWith("/documents/doc-1:batchUpdate") && method === "POST") {
-      doc.batches.push(body.requests);
-      for (const request of body.requests) {
-        if (request.deleteContentRange) doc.text = "";
-        if (request.insertText) doc.text = request.insertText.text;
-      }
+      state.batches.push(body.requests);
+      doc.applyRequests(body.requests);
       return json({});
     }
     if (u.endsWith("/documents/doc-1") && method === "GET") {
-      return json({ title: doc.title, body: { content: [{ endIndex: doc.text.length + 2, paragraph: { elements: [{ textRun: { content: doc.text } }] } }] } });
+      return json({ title: state.title, ...doc.toDocumentJson() });
     }
     throw new Error(`Unexpected Google call in this test: ${method} ${u}`);
   }) as typeof fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
-  return doc;
+  return { get text() { return doc.text; }, get title() { return state.title; }, batches: state.batches };
 }
 
 /**

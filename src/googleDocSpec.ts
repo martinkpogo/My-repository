@@ -278,10 +278,10 @@ export function buildDocStyleRequests(layout: GoogleDocLayout): unknown[] {
  * The paragraph signature each block of a resolved layout must actually show
  * in the Doc: the named style it asks for, whether it is bulleted, and its
  * start indent. Derived from the SAME table the style requests use, so the
- * expected styling and the applied styling can never drift apart. Used by the
- * registered formatting operation's reconciliation, which must settle an
- * interrupted attempt by reading the Doc -- text alone cannot show whether
- * styles were applied.
+ * expected styling and the applied styling can never drift apart. Used by
+ * every read-back verification of a document specification -- a write is
+ * verified against it, and an interrupted attempt is reconciled against it,
+ * because text alone can never show whether styles were applied.
  */
 export function expectedDocParagraphStyles(
   layout: GoogleDocLayout,
@@ -295,4 +295,89 @@ export function expectedDocParagraphStyles(
       indentStartPt: paragraph.indentStartPt ?? 0,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Read-back verification: what a document ACTUALLY shows, and whether it
+// shows the declared specification. These are the observed shapes a Docs
+// read-back is parsed into and the ONE matcher every write and every
+// reconciliation uses -- so "verified" can only ever mean "the document
+// shows the specification that was declared", and no second formatting
+// vocabulary or duplicated verification logic can creep in beside it.
+// ---------------------------------------------------------------------------
+
+/** One paragraph's ACTUAL styling, as a document read-back reports it. */
+export interface ObservedDocParagraph {
+  /** The paragraph's own 1-based Doc index (the structural element's `startIndex`). */
+  start: number;
+  /** The named style the paragraph carries ("TITLE", "HEADING_1", "HEADING_2", "HEADING_3", "NORMAL_TEXT", ...). */
+  namedStyleType: string;
+  /** True when the paragraph carries a bullet. */
+  bulleted: boolean;
+  /** The paragraph's actual start indent, in points (0 when unset). */
+  indentStartPt: number;
+  /** The paragraph's own text, including its terminating newline. Needed to tell the body's required trailing empty paragraph from a real one. */
+  text: string;
+}
+
+/** One text run's ACTUAL inline styling, over its own Doc index range (1-based UTF-16 units, end exclusive). */
+export interface ObservedDocTextStyle {
+  start: number;
+  end: number;
+  bold: boolean;
+  strikethrough: boolean;
+  underline: boolean;
+}
+
+/** The complete read-back of a document: the text it spells out plus the styling it actually shows. */
+export interface ObservedDocStyling {
+  text: string;
+  paragraphs: ObservedDocParagraph[];
+  runs: ObservedDocTextStyle[];
+}
+
+/** True when the text runs actually carry the inline marks the layout declares over their exact ranges. */
+function inlineMarksMatch(observed: readonly ObservedDocTextStyle[], layout: GoogleDocLayout): boolean {
+  const covered = (range: { start: number; end: number }, mark: (run: ObservedDocTextStyle) => boolean): boolean => {
+    const overlapping = observed.filter((run) => run.start < range.end && run.end > range.start);
+    if (overlapping.length === 0) return false;
+    return overlapping.every((run) => mark(run));
+  };
+  return layout.styles.every((style) => {
+    if (style.kind === "heading" || style.kind === "label") return covered(style, (run) => run.bold);
+    if (style.kind === "del") return covered(style, (run) => run.strikethrough);
+    return covered(style, (run) => run.underline);
+  });
+}
+
+/**
+ * True when a document read-back actually shows the styling this resolved
+ * layout declares: every declared block resolves to the paragraph that
+ * starts at its index, and that paragraph carries the named style, bullet
+ * and indent the SAME mapping table the style requests came from derives;
+ * plus every declared inline mark actually present over its exact range.
+ *
+ * Matching is by BLOCK INDEX rather than by paragraph position, because a
+ * layout may legitimately leave paragraphs undeclared (the blank separator
+ * lines between zones, the API's own required trailing empty paragraph).
+ * Text equality -- checked separately by every caller -- pins the paragraph
+ * structure itself, so index-matching each declared block verifies every
+ * declared requirement and nothing that was not declared. A block whose
+ * paragraph cannot be found fails closed: nothing is assumed about styling
+ * that cannot be located.
+ */
+export function observedStylingMatches(layout: GoogleDocLayout, observed: ObservedDocStyling): boolean {
+  const expected = expectedDocParagraphStyles(layout);
+  for (let i = 0; i < layout.blocks.length; i++) {
+    const block = layout.blocks[i];
+    const paragraph = observed.paragraphs.find((candidate) => block.start >= candidate.start && block.start < candidate.start + candidate.text.length);
+    if (!paragraph) return false;
+    const want = expected[i];
+    if (paragraph.namedStyleType !== want.namedStyleType) return false;
+    if (paragraph.bulleted !== want.bulleted) return false;
+    // Google stores points as exact values here, but compare with a hair of
+    // tolerance so a unit conversion cannot read as a mismatch.
+    if (Math.abs(paragraph.indentStartPt - want.indentStartPt) > 0.5) return false;
+  }
+  return inlineMarksMatch(observed.runs, layout);
 }

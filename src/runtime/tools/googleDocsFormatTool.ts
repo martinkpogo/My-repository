@@ -43,7 +43,7 @@
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
 import { getValidGoogleAccessToken, listAuthorizedGoogleAccounts, readGoogleDocStyling, restyleGoogleDoc } from "../../googleOAuth";
-import { expectedDocParagraphStyles, materializeDocumentSpecification, parseDocumentSpecification, type DocumentSpecification, type GoogleDocLayout } from "../../googleDocSpec";
+import { materializeDocumentSpecification, observedStylingMatches, parseDocumentSpecification, type DocumentSpecification, type GoogleDocLayout } from "../../googleDocSpec";
 
 export const GOOGLE_DOCS_FORMAT_OPERATION_ID = "google_docs.format_and_verify";
 
@@ -163,57 +163,22 @@ function mapFormatResult(result: { ok: true } | { ok: false; error: string }, do
     // Partial, reconciled before any retry -- never a success claim.
     return { ...BASE, state: "partially_completed", stage: "verification", reason: error, remote_resource: remote, reconciliation_required: true };
   }
+  if (error === "the Doc's formatting does not match the specification after the styling pass") {
+    // The batchUpdate was accepted and the text is intact, but the declared
+    // styling is not actually shown: the pass did not take effect as
+    // specified. Partial, reconciled by reading the actual styling before
+    // any retry -- matching text alone is never a verified success.
+    return { ...BASE, state: "partially_completed", stage: "verification", reason: error, remote_resource: remote, reconciliation_required: true };
+  }
   // Unknown defect: the remote state cannot be assumed either way.
   return { ...BASE, state: "unverified", reason: error, remote_resource: remote, reconciliation_required: true };
-}
-
-/** True when the text runs the observed styling covers exactly the inline marks the declared specification asks for. */
-function inlineMarksMatch(observed: { start: number; end: number; bold: boolean; strikethrough: boolean; underline: boolean }[], layout: GoogleDocLayout): boolean {
-  const covered = (range: { start: number; end: number }, mark: (run: { bold: boolean; strikethrough: boolean; underline: boolean }) => boolean): boolean => {
-    const overlapping = observed.filter((run) => run.start < range.end && run.end > range.start);
-    if (overlapping.length === 0) return false;
-    return overlapping.every((run) => mark(run));
-  };
-  return layout.styles.every((style) => {
-    if (style.kind === "heading" || style.kind === "label") return covered(style, (run) => run.bold);
-    if (style.kind === "del") return covered(style, (run) => run.strikethrough);
-    return covered(style, (run) => run.underline);
-  });
-}
-
-/**
- * True when the Doc actually shows the styling this layout asks for: the
- * same number of paragraphs, each carrying the named style, bullet and
- * indent the mapping table derives, and every inline mark the layout
- * declares actually present. Derived from the SAME tables the style requests
- * came from, so "applied" can only ever mean "the declared specification".
- */
-function stylingMatches(observed: { paragraphs: { namedStyleType: string; bulleted: boolean; indentStartPt: number; text: string }[]; runs: { start: number; end: number; bold: boolean; strikethrough: boolean; underline: boolean }[] }, layout: GoogleDocLayout): boolean {
-  const observedParagraphs = [...observed.paragraphs];
-  // The Docs body always carries one required trailing empty paragraph after
-  // a text that ends in a newline (which every canonical layout does). It is
-  // the API's own bookkeeping, not a styled block, so it is not compared.
-  const last = observedParagraphs[observedParagraphs.length - 1];
-  if (last && last.text === "") observedParagraphs.pop();
-  const expected = expectedDocParagraphStyles(layout);
-  if (observedParagraphs.length !== expected.length) return false;
-  for (let i = 0; i < expected.length; i++) {
-    const want = expected[i];
-    const got = observedParagraphs[i];
-    if (got.namedStyleType !== want.namedStyleType) return false;
-    if (got.bulleted !== want.bulleted) return false;
-    // Google stores points as exact values here, but compare with a hair of
-    // tolerance so a unit conversion cannot read as a mismatch.
-    if (Math.abs(got.indentStartPt - want.indentStartPt) > 0.5) return false;
-  }
-  return inlineMarksMatch(observed.runs, layout);
 }
 
 /**
  * Settles an interrupted formatting attempt by reading THE document it
  * targeted -- its actual styling, since its text cannot show whether styles
  * were applied. Returns `succeeded` (recovered, never re-sent) only when the
- * Doc already shows the canonical styling; `outcome: null` when it does not,
+ * Doc already shows the declared styling; `outcome: null` when it does not,
  * which is the one state in which a fresh pass may proceed (idempotent and
  * text-verified by construction); and an unverified, held outcome whenever
  * the remote state genuinely cannot be established.
@@ -258,8 +223,8 @@ async function reconcileFormatting(env: Env, input: unknown): Promise<{ outcome:
         },
       };
     }
-    if (stylingMatches(observed, layout)) {
-      // The Doc already shows the canonical styling: the effect exists and is
+    if (observedStylingMatches(layout, observed)) {
+      // The Doc already shows the declared styling: the effect exists and is
       // verified, so it is recovered and never re-sent.
       return {
         outcome: {
@@ -267,7 +232,7 @@ async function reconcileFormatting(env: Env, input: unknown): Promise<{ outcome:
           state: "succeeded",
           verified: true,
           remote_resource: remote,
-          reason: "reconciled: the document already shows the canonical styling",
+          reason: "reconciled: the document already shows the declared styling",
         },
       };
     }

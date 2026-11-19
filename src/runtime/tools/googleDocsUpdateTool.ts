@@ -3,7 +3,10 @@
  * `google_docs.update_and_verify`, version 1.0, effect `external_mutation`:
  * bring THE document to the exact body the resolved Action's
  * `document_specification` describes (text + structure + styling in one
- * batchUpdate), then read it back and claim success only when it verifies.
+ * batchUpdate), then read it back and claim success only when the COMPLETE
+ * specification verifies -- the text is exactly what was requested AND the
+ * declared paragraph styles, bullets, indentation and inline marks are
+ * actually shown. Matching text alone is never proof of success.
  *
  * This is the mutation `ensureProposalDoc` previously issued as a direct
  * Docs batchUpdate call, in both of its paths: bringing an existing Doc up
@@ -32,17 +35,19 @@
  *
  * Reconciliation is operation-specific: this operation acts on a KNOWN
  * document id (its target), so an interrupted attempt is settled by reading
- * that document back -- content matching the request means the effect
- * exists (recovered as a verified success, never rewritten again), content
- * differing means the requested effect was not applied (a fresh attempt may
- * proceed: update overwrites the body wholesale), an unreachable read keeps
+ * that document back -- BOTH halves of the specification: a document
+ * showing the exact requested text with its declared styling means the
+ * effect exists (recovered as a verified success, never rewritten again),
+ * while differing text OR matching text with missing/wrong styling means
+ * the requested effect was not applied (a fresh attempt may proceed: update
+ * overwrites the body and its styling wholesale), an unreachable read keeps
  * the outcome unverified and held, and a vanished document is a definite
  * failure (this operation never creates documents).
  */
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
-import { extractDocText, getValidGoogleAccessToken, listAuthorizedGoogleAccounts, rewriteGoogleDoc } from "../../googleOAuth";
-import { materializeDocumentSpecification, parseDocumentSpecification, type DocumentSpecification, type GoogleDocLayout } from "../../googleDocSpec";
+import { getValidGoogleAccessToken, listAuthorizedGoogleAccounts, parseGoogleDocStyling, rewriteGoogleDoc } from "../../googleOAuth";
+import { materializeDocumentSpecification, observedStylingMatches, parseDocumentSpecification, type DocumentSpecification, type GoogleDocLayout } from "../../googleDocSpec";
 
 export const GOOGLE_DOCS_UPDATE_OPERATION_ID = "google_docs.update_and_verify";
 
@@ -152,17 +157,31 @@ function mapUpdateResult(result: { ok: true } | { ok: false; error: string }, do
     // the intended final state: partial, reconciled before any retry.
     return { ...BASE, state: "partially_completed", stage: "verification", reason: error, remote_resource: remote, reconciliation_required: true };
   }
+  if (error.startsWith("the Doc read back with the wrong formatting")) {
+    // The batchUpdate was accepted and the text is exactly what was
+    // requested, but the declared styling is not actually shown: the write
+    // did not produce the complete specification. Partial, reconciled by
+    // reading the document's ACTUAL styling before any retry -- matching
+    // text alone is never a verified success.
+    return { ...BASE, state: "partially_completed", stage: "verification", reason: error, remote_resource: remote, reconciliation_required: true };
+  }
   // Unknown defect: the remote state cannot be assumed either way.
   return { ...BASE, state: "unverified", reason: error, remote_resource: remote, reconciliation_required: true };
 }
 
 /**
- * Settles an interrupted attempt by reading THE document it targeted.
- * Returns `outcome: null` only when the read establishes that the requested
- * effect does NOT exist (content differs), which is the one state in which a
- * fresh attempt may proceed; a content match is the effect, recovered as a
- * verified success; an unreachable read keeps the outcome unverified and
- * held; a vanished document is a definite failure (never a recreation).
+ * Settles an interrupted attempt by reading THE document it targeted --
+ * both halves of the specification, not just its text. Returns
+ * `outcome: null` only when the read establishes that the requested effect
+ * does NOT exist (text differs, or the text matches while the declared
+ * styling, paragraph hierarchy, bullets or indentation are missing or
+ * wrong), which is the one state in which a fresh attempt may proceed (an
+ * update overwrites the body wholesale, so it is safe); a document showing
+ * the COMPLETE specification is the effect, recovered as a verified
+ * success and never rewritten; an unreachable read keeps the outcome
+ * unverified and held; a vanished document is a definite failure (never a
+ * recreation). Matching text alone is never enough: a body without its
+ * declared formatting is not the requested effect.
  */
 async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outcome: ToolInvocationOutcome | null }> {
   const parsed = parseInput(input);
@@ -180,7 +199,7 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
   const uncertain = (reason: string): ToolInvocationOutcome => ({ ...BASE, state: "unverified", reason, remote_resource: remote, reconciliation_required: true });
   // The requested body was already resolved during validation (parseInput),
   // so the comparison target is exactly what a fresh write would produce.
-  const desired = parsed.layout.text;
+  const desired = parsed.layout;
   try {
     const token = await getValidGoogleAccessToken(env, parsed.account_identifier);
     if (!token) {
@@ -206,26 +225,34 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
       return { outcome: uncertain(`reconciliation read of the document failed (HTTP ${response.status}) -- its state is still unconfirmed, so no new write may start`) };
     }
     const body: unknown = await response.json().catch(() => null);
-    const text = extractDocText(body);
-    if (!body || typeof text !== "string") {
+    if (!body) {
       return { outcome: uncertain("the reconciliation read returned no readable document body -- no new write may start") };
     }
-    if (text.trimEnd() === desired.trimEnd()) {
-      // The earlier attempt already wrote the requested content: recovered
-      // as a verified success, and the document is never rewritten again.
-      return {
-        outcome: {
-          ...BASE,
-          state: "succeeded",
-          verified: true,
-          remote_resource: remote,
-          reason: "reconciled: the earlier attempt already wrote the requested content",
-        },
-      };
+    const observed = parseGoogleDocStyling(body);
+    if (observed.text.trimEnd() !== desired.text.trimEnd()) {
+      // The requested effect is not present; update overwrites the body
+      // wholesale, so a fresh attempt is safe.
+      return { outcome: null };
     }
-    // The requested effect is not present; update overwrites the body
-    // wholesale, so a fresh attempt is safe.
-    return { outcome: null };
+    if (!observedStylingMatches(desired, observed)) {
+      // The text matches but the declared formatting does not: the earlier
+      // attempt did NOT produce the complete specification, so it is never
+      // recovered as a success on text alone. A fresh attempt is safe (the
+      // update rewrites the body and its styling wholesale), so it may
+      // proceed.
+      return { outcome: null };
+    }
+    // The earlier attempt already wrote the complete requested specification:
+    // recovered as a verified success, and the document is never rewritten.
+    return {
+      outcome: {
+        ...BASE,
+        state: "succeeded",
+        verified: true,
+        remote_resource: remote,
+        reason: "reconciled: the earlier attempt already wrote the requested content with its declared styling",
+      },
+    };
   } catch (error) {
     return { outcome: uncertain(`reconciliation read of the document failed: ${error instanceof Error ? error.message : "unknown error"} -- no new write may start`) };
   }
