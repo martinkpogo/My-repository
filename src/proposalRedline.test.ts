@@ -110,9 +110,9 @@ test("buildDocStyleRequests: style-only requests with valid indexes -- never a t
   ]);
   const requests = buildDocStyleRequests(l) as any[];
   for (const r of requests) {
-    assert.ok(r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets, "only style requests");
+    assert.ok(r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets || r.deleteParagraphBullets, "only style requests");
     assert.ok(!r.insertText && !r.deleteContentRange && !r.replaceAllText, "never a text mutation");
-    const range = (r.updateTextStyle ?? r.updateParagraphStyle ?? r.createParagraphBullets).range;
+    const range = (r.updateTextStyle ?? r.updateParagraphStyle ?? r.createParagraphBullets ?? r.deleteParagraphBullets).range;
     assert.ok(range.startIndex >= 1 && range.endIndex <= l.text.length + 1, "every range is inside the text");
   }
   const para = (line: string) => requests.find((r) => r.updateParagraphStyle && l.text.slice(r.updateParagraphStyle.range.startIndex - 1, r.updateParagraphStyle.range.endIndex - 1) === `${line}\n`);
@@ -152,6 +152,7 @@ test("buildDocStyleRequests: every request matches the Docs API v1 schema -- upd
     updateTextStyle: ["range", "textStyle", "fields"],
     updateParagraphStyle: ["range", "paragraphStyle", "fields"],
     createParagraphBullets: ["range", "bulletPreset"],
+    deleteParagraphBullets: ["range"],
   };
   const bulletGlyphPresets = [
     "BULLET_GLYPH_PRESET_UNSPECIFIED",

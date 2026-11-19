@@ -251,7 +251,7 @@ async function reconcileGoogleDocCreation(
       }
       const data: unknown = await readResponse.json();
       const text = extractGoogleDocText(data);
-      if (text !== null && text.includes(parsed.layout.text)) {
+      if (text !== null && (text === parsed.layout.text || text === `${parsed.layout.text}\n`)) {
         return {
           outcome: {
             ...BASE,
@@ -286,7 +286,7 @@ async function reconcileGoogleDocCreation(
     const data: unknown = await response.json();
     const title = (data as { title?: unknown })?.title;
     const text = extractGoogleDocText(data);
-    if (typeof title === "string" && title === parsed.title && text !== null && text.includes(parsed.layout.text)) {
+    if (typeof title === "string" && title === parsed.title && text !== null && (text === parsed.layout.text || text === `${parsed.layout.text}\n`)) {
       return {
         outcome: {
           ...BASE,

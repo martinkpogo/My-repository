@@ -1668,7 +1668,9 @@ test("Doc formatting 1. A formatting request on the current version's Doc restyl
   const batchUpdates = calls.filter((c) => c.url.includes(":batchUpdate"));
   const lastRequests = batchUpdates.at(-1)!.body.requests;
   assert.ok(
-    lastRequests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets),
+    lastRequests.every(
+      (r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets || r.deleteParagraphBullets,
+    ),
     "the formatting call is style-only: no insert, delete or replace request",
   );
   assert.ok(lastRequests.some((r: any) => r.updateParagraphStyle?.paragraphStyle?.namedStyleType === "HEADING_1"), "canonical section-heading style applied");
@@ -1848,7 +1850,7 @@ test("Doc clarification 3. A clarification that resolves to formatting routes th
 
   assert.ok(batchUpdatesOn(calls) > stylingBefore, "the routed request actually restyled the Doc");
   const requests = calls.filter((c) => c.url.includes(":batchUpdate")).at(-1)!.body.requests;
-  assert.ok(requests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets), "the routed formatting pass is style-only: no insert, delete or replace");
+  assert.ok(requests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets || r.deleteParagraphBullets), "the routed formatting pass is style-only: no insert, delete or replace");
   assert.strictEqual(calls.text(), docTextBefore, "the Doc's text is byte-identical");
   assert.strictEqual(state.sales!.proposal!.currentVersion, 1, "formatting never creates a Version");
   assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);

@@ -41,6 +41,11 @@ interface FakeParagraph {
   namedStyleType: string;
   bulleted: boolean;
   indentStartPt: number;
+  spaceAbovePt: number;
+  spaceBelowPt: number;
+  /** The paragraph's own index range, for style application. */
+  start: number;
+  end: number;
 }
 
 /** One text run over a 1-based, end-exclusive Doc index range. */
@@ -50,6 +55,7 @@ interface FakeTextRun {
   bold: boolean;
   strikethrough: boolean;
   underline: boolean;
+  foregroundColor: { red: number; green: number; blue: number } | null;
 }
 
 export interface FakeGoogleDocOptions {
@@ -57,7 +63,7 @@ export interface FakeGoogleDocOptions {
   text?: string;
 }
 
-const DEFAULT_STYLE = { namedStyleType: "NORMAL_TEXT", bulleted: false, indentStartPt: 0 } as const;
+const DEFAULT_STYLE = { namedStyleType: "NORMAL_TEXT", bulleted: false, indentStartPt: 0, spaceAbovePt: 0, spaceBelowPt: 0 } as const;
 
 /**
  * Splits a body into paragraphs. A real Body ALWAYS ends with a protected
@@ -72,33 +78,33 @@ const DEFAULT_STYLE = { namedStyleType: "NORMAL_TEXT", bulleted: false, indentSt
 function splitIntoParagraphs(text: string): FakeParagraph[] {
   const body = text.endsWith("\n") ? text : `${text}\n`;
   const lines = body.split("\n");
-  return lines.slice(0, -1).map((line) => ({ text: `${line}\n`, ...DEFAULT_STYLE }));
-}
-
-/** The 1-based Doc index each paragraph starts at. */
-function paragraphStarts(paragraphs: readonly FakeParagraph[]): number[] {
-  const starts: number[] = [];
+  const paragraphs: FakeParagraph[] = [];
   let index = 1;
-  for (const paragraph of paragraphs) {
-    starts.push(index);
-    index += paragraph.text.length;
+  for (const line of lines.slice(0, -1)) {
+    const paragraphText = `${line}\n`;
+    const end = index + paragraphText.length;
+    paragraphs.push({ text: paragraphText, start: index, end, ...DEFAULT_STYLE });
+    index = end;
   }
-  return starts;
+  return paragraphs;
 }
 
 /** The paragraph containing a 0-based flat-text offset (the last paragraph carries an offset at/after the end). */
 function paragraphIndexAt(paragraphs: readonly FakeParagraph[], offset: number): number {
-  let acc = 0;
   for (let i = 0; i < paragraphs.length; i++) {
-    const length = paragraphs[i].text.length;
-    if (offset >= acc && offset < acc + length) return i;
-    acc += length;
+    if (offset >= paragraphs[i].start - 1 && offset < paragraphs[i].end - 1) return i;
   }
   return paragraphs.length - 1;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(value, max));
+}
+
+function colorEqual(a: { red: number; green: number; blue: number } | null, b: { red: number; green: number; blue: number } | null): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  return a.red === b.red && a.green === b.green && a.blue === b.blue;
 }
 
 export class FakeGoogleDoc {
@@ -142,23 +148,24 @@ export class FakeGoogleDoc {
   /** The `GET /documents/:id` response body, in the real API's paragraph/run shape. */
   toDocumentJson(): { body: { content: unknown[] } } {
     const content: unknown[] = [];
-    let index = 1;
     for (const paragraph of this.paragraphs) {
-      const startIndex = index;
-      const endIndex = startIndex + paragraph.text.length;
+      const paragraphStyle: Record<string, unknown> = {
+        namedStyleType: paragraph.namedStyleType,
+        spaceAbove: { magnitude: paragraph.spaceAbovePt, unit: "PT" },
+        spaceBelow: { magnitude: paragraph.spaceBelowPt, unit: "PT" },
+      };
+      if (paragraph.indentStartPt) {
+        paragraphStyle.indentStart = { magnitude: paragraph.indentStartPt, unit: "PT" };
+      }
       content.push({
-        startIndex,
-        endIndex,
+        startIndex: paragraph.start,
+        endIndex: paragraph.end,
         paragraph: {
-          namedStyleType: paragraph.namedStyleType,
+          paragraphStyle,
           ...(paragraph.bulleted ? { bullet: {} } : {}),
-          ...(paragraph.indentStartPt
-            ? { paragraphStyle: { indentStart: { magnitude: paragraph.indentStartPt, unit: "PT" } } }
-            : {}),
-          elements: this.renderElements(paragraph.text, startIndex, endIndex),
+          elements: this.renderElements(paragraph.text, paragraph.start, paragraph.end),
         },
       });
-      index = endIndex;
     }
     return { body: { content } };
   }
@@ -193,26 +200,27 @@ export class FakeGoogleDoc {
     const newFlat = flat.slice(0, from) + insert + flat.slice(to);
 
     const rebased: FakeParagraph[] = [];
-    let offset = 0;
-    for (const paragraph of splitIntoParagraphs(newFlat)) {
-      const text = paragraph.text;
+    const newParagraphs = splitIntoParagraphs(newFlat);
+    for (let i = 0; i < newParagraphs.length; i++) {
+      const paragraph = newParagraphs[i];
+      const newStart = paragraph.start - 1;
       // Map this new paragraph's start back to where it came from: text
       // before the edit keeps its offset, text after it shifts by the edit's
       // delta, and text born inside the inserted run inherits the paragraph
       // at the insertion point (what Google shows for inserted text).
-      const newStart = offset;
       let oldOffset: number;
       if (newStart < from) oldOffset = newStart;
       else if (newStart >= from + insert.length) oldOffset = newStart - insert.length + (to - from);
       else oldOffset = from;
       const origin = oldParagraphs.length > 0 ? oldParagraphs[paragraphIndexAt(oldParagraphs, oldOffset)] : null;
       rebased.push({
-        text,
+        ...paragraph,
         namedStyleType: origin?.namedStyleType ?? DEFAULT_STYLE.namedStyleType,
         bulleted: origin?.bulleted ?? DEFAULT_STYLE.bulleted,
         indentStartPt: origin?.indentStartPt ?? DEFAULT_STYLE.indentStartPt,
+        spaceAbovePt: origin?.spaceAbovePt ?? DEFAULT_STYLE.spaceAbovePt,
+        spaceBelowPt: origin?.spaceBelowPt ?? DEFAULT_STYLE.spaceBelowPt,
       });
-      offset += text.length;
     }
     this.paragraphs = rebased;
 
@@ -229,11 +237,10 @@ export class FakeGoogleDoc {
   private paragraphIndicesIn(range: { startIndex?: number; endIndex?: number } | undefined): number[] {
     const from = range?.startIndex ?? 1;
     const to = range?.endIndex ?? Number.MAX_SAFE_INTEGER;
-    const starts = paragraphStarts(this.paragraphs);
     const picked: number[] = [];
     this.paragraphs.forEach((paragraph, index) => {
-      const start = starts[index];
-      const end = start + paragraph.text.length;
+      const start = paragraph.start;
+      const end = paragraph.end;
       const selected =
         paragraph.text.length === 0 ? start >= from && start < to : start < to && end > from;
       if (selected) picked.push(index);
@@ -243,7 +250,7 @@ export class FakeGoogleDoc {
 
   private applyParagraphStyle(request: {
     range?: { startIndex?: number; endIndex?: number };
-    paragraphStyle?: { namedStyleType?: unknown; indentStart?: { magnitude?: unknown } };
+    paragraphStyle?: { namedStyleType?: unknown; indentStart?: { magnitude?: unknown }; spaceAbove?: { magnitude?: unknown }; spaceBelow?: { magnitude?: unknown } };
     fields?: unknown;
   }): void {
     const mask = new Set(String(request.fields ?? "").split(",").map((field) => field.trim()).filter(Boolean));
@@ -256,6 +263,14 @@ export class FakeGoogleDoc {
         const magnitude = request.paragraphStyle?.indentStart?.magnitude;
         paragraph.indentStartPt = typeof magnitude === "number" ? magnitude : 0;
       }
+      if (mask.has("spaceAbove")) {
+        const magnitude = request.paragraphStyle?.spaceAbove?.magnitude;
+        paragraph.spaceAbovePt = typeof magnitude === "number" ? magnitude : 0;
+      }
+      if (mask.has("spaceBelow")) {
+        const magnitude = request.paragraphStyle?.spaceBelow?.magnitude;
+        paragraph.spaceBelowPt = typeof magnitude === "number" ? magnitude : 0;
+      }
     }
   }
 
@@ -265,7 +280,7 @@ export class FakeGoogleDoc {
 
   private applyTextStyle(request: {
     range?: { startIndex?: number; endIndex?: number };
-    textStyle?: { bold?: unknown; strikethrough?: unknown; underline?: unknown };
+    textStyle?: { bold?: unknown; strikethrough?: unknown; underline?: unknown; foregroundColor?: { color?: { rgbColor?: { red?: number; green?: number; blue?: number } } } | null };
     fields?: unknown;
   }): void {
     const docEnd = this.text.length + 1;
@@ -273,18 +288,18 @@ export class FakeGoogleDoc {
     const to = clamp(request.range?.endIndex ?? docEnd, from, docEnd);
     if (to <= from) return;
     const mask = new Set(String(request.fields ?? "").split(",").map((field) => field.trim()).filter(Boolean));
-    const flagsAt = (point: number): { bold: boolean; strikethrough: boolean; underline: boolean } => {
+    const flagsAt = (point: number): { bold: boolean; strikethrough: boolean; underline: boolean; foregroundColor: { red: number; green: number; blue: number } | null } => {
       for (const run of this.runs) {
         if (run.start <= point && point < run.end) {
-          return { bold: run.bold, strikethrough: run.strikethrough, underline: run.underline };
+          return { bold: run.bold, strikethrough: run.strikethrough, underline: run.underline, foregroundColor: run.foregroundColor };
         }
       }
-      return { bold: false, strikethrough: false, underline: false };
+      return { bold: false, strikethrough: false, underline: false, foregroundColor: null };
     };
+    const clearColor = { red: 0, green: 0, blue: 0 };
+    const newColor = request.textStyle?.foregroundColor?.color?.rgbColor;
+    const targetColor = newColor !== undefined ? { red: newColor.red ?? 0, green: newColor.green ?? 0, blue: newColor.blue ?? 0 } : null;
 
-    // Split the range at its own boundaries and every run boundary inside
-    // it, then apply the fields mask to each resulting segment -- exactly
-    // how the API honours `fields` over `range`.
     const boundaries = new Set<number>([from, to]);
     for (const run of this.runs) {
       for (const edge of [run.start, run.end]) if (edge > from && edge < to) boundaries.add(edge);
@@ -298,6 +313,7 @@ export class FakeGoogleDoc {
       if (mask.has("bold")) flags.bold = request.textStyle?.bold === true;
       if (mask.has("strikethrough")) flags.strikethrough = request.textStyle?.strikethrough === true;
       if (mask.has("underline")) flags.underline = request.textStyle?.underline === true;
+      if (mask.has("foregroundColor")) flags.foregroundColor = targetColor ?? clearColor;
       middle.push({ start, end, ...flags });
     }
     this.runs = [
@@ -318,7 +334,8 @@ export class FakeGoogleDoc {
         previous.end === run.start &&
         previous.bold === run.bold &&
         previous.strikethrough === run.strikethrough &&
-        previous.underline === run.underline
+        previous.underline === run.underline &&
+        colorEqual(previous.foregroundColor, run.foregroundColor)
       ) {
         previous.end = run.end;
       } else {
@@ -348,7 +365,8 @@ export class FakeGoogleDoc {
       const start = edges[i];
       const end = edges[i + 1];
       const run = this.runAt(start);
-      const marked = run && (run.bold || run.strikethrough || run.underline);
+      const marked =
+        run && (run.bold || run.strikethrough || run.underline || run.foregroundColor !== null);
       elements.push({
         textRun: {
           content: this.text.slice(start - 1, end - 1),
@@ -358,6 +376,19 @@ export class FakeGoogleDoc {
                   ...(run!.bold ? { bold: true } : {}),
                   ...(run!.strikethrough ? { strikethrough: true } : {}),
                   ...(run!.underline ? { underline: true } : {}),
+                  ...(run!.foregroundColor !== null
+                    ? {
+                        foregroundColor: {
+                          color: {
+                            rgbColor: {
+                              red: run!.foregroundColor.red,
+                              green: run!.foregroundColor.green,
+                              blue: run!.foregroundColor.blue,
+                            },
+                          },
+                        },
+                      }
+                    : {}),
                 },
               }
             : {}),

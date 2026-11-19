@@ -242,11 +242,14 @@ const INLINE_STYLE_REQUEST: Record<DocStyleKind, { textStyle: Record<string, unk
  */
 export function buildDocStyleRequests(layout: GoogleDocLayout): unknown[] {
   const requests: unknown[] = [];
+  // Clear every carried inline formatting across the whole body so a rewrite
+  // or restyle can never retain formatting the new specification does not
+  // request (colour, bold, strikethrough, underline).
   requests.push({
     updateTextStyle: {
       range: { startIndex: 1, endIndex: 1 + layout.text.length },
       textStyle: { bold: false, strikethrough: false, underline: false },
-      fields: "bold,strikethrough,underline",
+      fields: "bold,strikethrough,underline,foregroundColor",
     },
   });
   for (const b of layout.blocks) {
@@ -257,11 +260,19 @@ export function buildDocStyleRequests(layout: GoogleDocLayout): unknown[] {
       spaceBelow: { magnitude: p.spaceBelowPt, unit: "PT" },
     };
     let fields = "namedStyleType,spaceAbove,spaceBelow";
-    if (p.indentStartPt) {
-      paragraphStyle.indentStart = { magnitude: p.indentStartPt, unit: "PT" };
-      fields += ",indentStart";
-    }
+    // Always normalise indentation: explicitly reset to zero when the block
+    // declares none, so an indented paragraph cannot retain its indent.
+    paragraphStyle.indentStart = { magnitude: p.indentStartPt ?? 0, unit: "PT" };
+    fields += ",indentStart";
     requests.push({ updateParagraphStyle: { range: { startIndex: b.start, endIndex: b.end }, paragraphStyle, fields } });
+  }
+  // Remove bullets from every paragraph the new specification does not declare
+  // as a bullet, so a bulleted paragraph cannot retain its bullets when it
+  // becomes an ordinary paragraph (or a nested bullet when it becomes flat).
+  for (const b of layout.blocks) {
+    if (b.kind !== "bullet" && b.kind !== "subBullet") {
+      requests.push({ deleteParagraphBullets: { range: { startIndex: b.start, endIndex: b.end } } });
+    }
   }
   for (const b of layout.blocks) {
     if (b.kind === "bullet" || b.kind === "subBullet") {
@@ -285,7 +296,7 @@ export function buildDocStyleRequests(layout: GoogleDocLayout): unknown[] {
  */
 export function expectedDocParagraphStyles(
   layout: GoogleDocLayout,
-): { kind: DocBlockKind; namedStyleType: string; bulleted: boolean; indentStartPt: number }[] {
+): { kind: DocBlockKind; namedStyleType: string; bulleted: boolean; indentStartPt: number; spaceAbovePt: number; spaceBelowPt: number }[] {
   return layout.blocks.map((block) => {
     const paragraph = PARAGRAPH_STYLES[block.kind];
     return {
@@ -293,6 +304,8 @@ export function expectedDocParagraphStyles(
       namedStyleType: paragraph.namedStyleType,
       bulleted: block.kind === "bullet" || block.kind === "subBullet",
       indentStartPt: paragraph.indentStartPt ?? 0,
+      spaceAbovePt: paragraph.spaceAbovePt,
+      spaceBelowPt: paragraph.spaceBelowPt,
     };
   });
 }
@@ -316,6 +329,10 @@ export interface ObservedDocParagraph {
   bulleted: boolean;
   /** The paragraph's actual start indent, in points (0 when unset). */
   indentStartPt: number;
+  /** The paragraph's actual space above, in points (0 when unset). */
+  spaceAbovePt: number;
+  /** The paragraph's actual space below, in points (0 when unset). */
+  spaceBelowPt: number;
   /** The paragraph's own text, including its terminating newline. Needed to tell the body's required trailing empty paragraph from a real one. */
   text: string;
 }
@@ -327,6 +344,8 @@ export interface ObservedDocTextStyle {
   bold: boolean;
   strikethrough: boolean;
   underline: boolean;
+  /** The run's actual foreground colour, or null when none is set. */
+  foregroundColor: { red: number; green: number; blue: number } | null;
 }
 
 /** The complete read-back of a document: the text it spells out plus the styling it actually shows. */
@@ -345,9 +364,24 @@ function inlineMarksMatch(observed: readonly ObservedDocTextStyle[], layout: Goo
   };
   return layout.styles.every((style) => {
     if (style.kind === "heading" || style.kind === "label") return covered(style, (run) => run.bold);
-    if (style.kind === "del") return covered(style, (run) => run.strikethrough);
-    return covered(style, (run) => run.underline);
+    if (style.kind === "del") return covered(style, (run) => run.strikethrough && colorMatches(run.foregroundColor, expectedForegroundColor(style.kind)));
+    if (style.kind === "add") return covered(style, (run) => run.underline && colorMatches(run.foregroundColor, expectedForegroundColor(style.kind)));
+    return true;
   });
+}
+
+/** The foreground colour each inline style kind must apply, derived from the same INLINE_STYLE_REQUEST table the requests use. */
+function expectedForegroundColor(kind: DocStyleKind): { red: number; green: number; blue: number } | null {
+  if (kind === "del") return { red: 0.8, green: 0.1, blue: 0.1 };
+  if (kind === "add") return { red: 0.05, green: 0.5, blue: 0.2 };
+  return null;
+}
+
+/** True when two foreground colours match within a small tolerance for floating-point rendering differences. */
+function colorMatches(a: { red: number; green: number; blue: number } | null, b: { red: number; green: number; blue: number } | null): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  return Math.abs(a.red - b.red) < 0.01 && Math.abs(a.green - b.green) < 0.01 && Math.abs(a.blue - b.blue) < 0.01;
 }
 
 /**
@@ -378,6 +412,8 @@ export function observedStylingMatches(layout: GoogleDocLayout, observed: Observ
     // Google stores points as exact values here, but compare with a hair of
     // tolerance so a unit conversion cannot read as a mismatch.
     if (Math.abs(paragraph.indentStartPt - want.indentStartPt) > 0.5) return false;
+    if (Math.abs(paragraph.spaceAbovePt - want.spaceAbovePt) > 0.5) return false;
+    if (Math.abs(paragraph.spaceBelowPt - want.spaceBelowPt) > 0.5) return false;
   }
   return inlineMarksMatch(observed.runs, layout);
 }

@@ -133,7 +133,7 @@ test("buildDocStyleRequests: a resolved specification maps to style-only Docs re
   const requests = buildDocStyleRequests(materialized.layout) as any[];
   assert.ok(requests.length > 0);
   for (const request of requests) {
-    assert.ok(request.updateTextStyle || request.updateParagraphStyle || request.createParagraphBullets, "only style requests");
+    assert.ok(request.updateTextStyle || request.updateParagraphStyle || request.createParagraphBullets || request.deleteParagraphBullets, "only style requests");
     assert.ok(!request.insertText && !request.deleteContentRange, "never a text mutation");
   }
   const paragraphKinds = requests.filter((r) => r.updateParagraphStyle).map((r) => r.updateParagraphStyle.paragraphStyle.namedStyleType);

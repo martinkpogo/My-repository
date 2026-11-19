@@ -666,8 +666,12 @@ export async function createGoogleDoc(
 
   const verifiedTitle = (docData.title ?? "").trim();
   const extractedText = extractDocText(docData);
-
-  if (verifiedTitle !== title || !extractedText.includes(content)) {
+  // The Docs API always terminates the body with the protected final newline,
+  // so the read-back is either exactly the requested text or that text plus
+  // the terminal newline. Anything else is a mismatch -- a matching substring
+  // is never sufficient evidence of successful creation.
+  const contentMatches = extractedText === content || extractedText === `${content}\n`;
+  if (verifiedTitle !== title || !contentMatches) {
     await logActivity(env, {
       entry: "Google Doc creation failed: verification content mismatch",
       type: "Activity",
@@ -1230,10 +1234,14 @@ export function parseGoogleDocStyling(doc: unknown): ObservedDocStyling {
       content?: {
         startIndex?: number;
         paragraph?: {
-          namedStyleType?: string;
           bullet?: unknown;
-          paragraphStyle?: { indentStart?: { magnitude?: number } };
-          elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean } } }[];
+          paragraphStyle?: {
+            namedStyleType?: string;
+            indentStart?: { magnitude?: number };
+            spaceAbove?: { magnitude?: number };
+            spaceBelow?: { magnitude?: number };
+          };
+          elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean; foregroundColor?: { color?: { rgbColor?: { red?: number; green?: number; blue?: number } } } } } }[];
         };
       }[];
     };
@@ -1251,22 +1259,29 @@ export function parseGoogleDocStyling(doc: unknown): ObservedDocStyling {
       const run = element.textRun;
       const value = run?.content ?? "";
       if (!value) continue;
+      const color = run?.textStyle?.foregroundColor?.color?.rgbColor;
       runs.push({
         start: index,
         end: index + value.length,
         bold: run?.textStyle?.bold === true,
         strikethrough: run?.textStyle?.strikethrough === true,
         underline: run?.textStyle?.underline === true,
+        foregroundColor: color !== undefined
+          ? { red: color.red ?? 0, green: color.green ?? 0, blue: color.blue ?? 0 }
+          : null,
       });
       text += value;
       paragraphText += value;
       index += value.length;
     }
+    const paragraphStyle = paragraph.paragraphStyle ?? {};
     paragraphs.push({
       start: paragraphStart,
-      namedStyleType: paragraph.namedStyleType ?? "",
+      namedStyleType: paragraphStyle.namedStyleType ?? "",
       bulleted: paragraph.bullet !== undefined && paragraph.bullet !== null,
-      indentStartPt: paragraph.paragraphStyle?.indentStart?.magnitude ?? 0,
+      indentStartPt: paragraphStyle.indentStart?.magnitude ?? 0,
+      spaceAbovePt: paragraphStyle.spaceAbove?.magnitude ?? 0,
+      spaceBelowPt: paragraphStyle.spaceBelow?.magnitude ?? 0,
       text: paragraphText,
     });
   }
