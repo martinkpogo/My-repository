@@ -28,6 +28,7 @@ import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContr
 import { handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
 import { installSatisfiedResultReview } from "../../testSupport/satisfiedResultReview";
 import { declaredResultContract } from "../../testSupport/declaredResultContract";
+import { FakeGoogleDoc } from "../../testSupport/fakeGoogleDocs";
 import { salesManifest } from "./salesManifest";
 
 // ---------------------------------------------------------------------------
@@ -1405,9 +1406,10 @@ function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
   t.after(persistence.release);
   const inner = globalThis.fetch;
   const calls: { method: string; url: string; body?: any }[] = [];
+  const docRequests: any[] = [];
+  const doc = new FakeGoogleDoc();
   let docText = "";
   let docTitle = "";
-  const docRequests: any[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
     const u = String(url);
     if (!u.includes("googleapis.com")) return inner(url as any, init);
@@ -1427,22 +1429,20 @@ function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
       return json({ id: "folder-1", name: "ENIG Proposals (token-safe)", mimeType: "application/vnd.google-apps.folder", trashed: false });
     }
     if (u.includes("/documents/doc-1:batchUpdate")) {
-      for (const r of body.requests) {
-        if (r.deleteContentRange) docText = "";
-        if (r.insertText) docText = r.insertText.text;
-      }
+      doc.applyRequests(body.requests);
       docRequests.push(...body.requests);
+      docText = doc.text;
       return json({});
     }
     if (u.endsWith("/documents/doc-1") && method === "GET") {
-      return json({ title: docTitle, body: { content: [{ endIndex: docText.length + 1, paragraph: { elements: [{ textRun: { content: docText } }] } }] } });
+      return json({ title: docTitle, ...doc.toDocumentJson() });
     }
     throw new Error(`Unexpected Google call: ${method} ${u}`);
   }) as typeof fetch;
   t.after(() => {
     globalThis.fetch = inner;
   });
-  return Object.assign(calls, { docRequests, text: () => docText, setDocText: (next: string) => void (docText = next) });
+  return Object.assign(calls, { docRequests, text: () => docText, setDocText: (next: string) => { docText = next; doc.setText(next); } });
 }
 
 test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the current version in a dedicated folder, watches it bound to that version, and shows the link", async (t) => {
