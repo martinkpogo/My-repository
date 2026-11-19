@@ -2358,8 +2358,8 @@ test("SR4. The existing Strategy Proposal remains the revision source -- the sys
 
   await handleStrategyRefinement(env, afterRefine, "Tighten the timeline.");
 
-  // The pipeline's own pre-existing identityRedaction step (ai/identityRedaction.ts,
-  // unmodified by this change) rewrites "Martin" -> "the operator" in EVERY
+  // The pipeline's own pre-existing identity-protection step (ai/identityRedaction.ts,
+  // unmodified by this change) rewrites "Martin" -> "[ENIG_OPERATOR]" in EVERY
   // outbound message, including this one -- the fixture proposal's own
   // acceptanceCriteria text ("Approved by Martin.") is redacted the same way
   // any other outbound content would be, so the embedded JSON is expected to

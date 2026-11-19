@@ -1,5 +1,9 @@
 import type { Env, WorkState } from "./types";
-import { buildProposalDocStyleRequests, type ProposalDocLayout } from "./proposalRedline";
+import { buildDocStyleRequests, observedStylingMatches, type GoogleDocLayout, type ObservedDocParagraph, type ObservedDocStyling, type ObservedDocTextStyle } from "./googleDocSpec";
+// The observed read-back shapes are declared by the neutral specification
+// module (the one vocabulary for a document's declared and actual styling);
+// re-exported here so this layer's existing consumers keep their import site.
+export type { ObservedDocParagraph, ObservedDocStyling, ObservedDocTextStyle };
 import { logActivity } from "./log";
 import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage, type InlineButton } from "./telegram";
 import { generate } from "./ai";
@@ -493,7 +497,10 @@ export async function createGoogleDoc(
   }
 
   const title = action.title.trim();
-  const content = action.content.trim();
+  // Preserve the Action's declared content exactly: no trimming, normalisation
+  // or other modification. Validation above already rejects empty/whitespace-only
+  // content; the exact value is what gets written and exactly verified.
+  const content = action.content;
   const folderId = action.folderId.trim();
   const accountIdentifier = action.accountIdentifier.trim();
 
@@ -662,8 +669,12 @@ export async function createGoogleDoc(
 
   const verifiedTitle = (docData.title ?? "").trim();
   const extractedText = extractDocText(docData);
-
-  if (verifiedTitle !== title || !extractedText.includes(content)) {
+  // The Docs API always terminates the body with the protected final newline,
+  // so the read-back is either exactly the requested text or that text plus
+  // the terminal newline. Anything else is a mismatch -- a matching substring
+  // is never sufficient evidence of successful creation.
+  const contentMatches = extractedText === content || extractedText === `${content}\n`;
+  if (verifiedTitle !== title || !contentMatches) {
     await logActivity(env, {
       entry: "Google Doc creation failed: verification content mismatch",
       type: "Activity",
@@ -1123,17 +1134,22 @@ async function describeGoogleApiFailure(res: Response): Promise<string> {
 
 /**
  * Replaces the whole body of a Doc this system created with `layout.text` and
- * applies the canonical Proposal layout styling (buildProposalDocStyleRequests:
- * paragraph hierarchy, bullets, bold headings/labels, struck removed text,
- * underlined added text), then reads the Doc back and confirms the text is
- * exactly what was written. Used to bring a Proposal's single Doc up to its
- * newest version.
+ * applies the layout's styling (buildDocStyleRequests: paragraph hierarchy,
+ * bullets, bold headings/labels, struck removed text, underlined added
+ * text), then reads the Doc back and confirms the COMPLETE specification:
+ * the text is exactly what was written AND every declared paragraph style,
+ * bullet, indent and inline mark is actually shown (the one shared matcher,
+ * `observedStylingMatches`). Matching text alone is never proof of success --
+ * a body written without its declared formatting does not verify. The layout
+ * is whatever the resolved Action's validated `document_specification`
+ * resolved to -- this established Google layer executes it and never chooses
+ * content or structure of its own.
  */
 export async function rewriteGoogleDoc(
   env: Env,
   accountIdentifier: string,
   documentId: string,
-  layout: ProposalDocLayout,
+  layout: GoogleDocLayout,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
@@ -1145,7 +1161,7 @@ export async function rewriteGoogleDoc(
   // The body always ends in a protected newline at endIndex-1; delete everything before it.
   if (before.endIndex > 2) requests.push({ deleteContentRange: { range: { startIndex: 1, endIndex: before.endIndex - 1 } } });
   requests.push({ insertText: { location: { index: 1 }, text: layout.text } });
-  requests.push(...buildProposalDocStyleRequests(layout));
+  requests.push(...buildDocStyleRequests(layout));
   let res: Response;
   try {
     res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, { method: "POST", headers, body: JSON.stringify({ requests }) });
@@ -1153,67 +1169,126 @@ export async function rewriteGoogleDoc(
     return { ok: false, error: "network error rewriting the Doc" };
   }
   if (!res.ok) return { ok: false, error: `Google Docs rewrite failed (${await describeGoogleApiFailure(res)})` };
-  const after = await readGoogleDocBody(token, documentId);
-  if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc did not read back as written" };
+  const after = await readGoogleDocStyling(token, documentId);
+  if (!after || after.text.trimEnd() !== layout.text.trimEnd()) {
+    return { ok: false, error: "the Doc did not read back as written" };
+  }
+  if (!observedStylingMatches(layout, after)) {
+    return { ok: false, error: "the Doc read back with the wrong formatting: the declared paragraph styles, bullets, indentation or inline marks are missing or wrong" };
+  }
   return { ok: true };
 }
 
 /**
- * Applies the canonical Proposal layout styling to a Doc WITHOUT touching a
- * single character of its text: reads the Doc, refuses (nothing applied) when
- * its text no longer matches the layout it should show, sends only style
- * requests, and reads back to confirm the text is still byte-identical.
- * Used by the formatting-only path for "presentation-only" comments on a
- * Proposal's Doc (tokenSafeProposal.ts's applyProposalDocFormatting).
+ * Applies a layout's styling to a Doc WITHOUT touching a single character
+ * of its text: reads the Doc, refuses (nothing applied) when its text no
+ * longer matches the layout it should show, sends only style requests
+ * (buildDocStyleRequests), and reads back to confirm BOTH halves of the
+ * specification: the text is still byte-identical AND the declared styling
+ * is actually shown (the one shared matcher, `observedStylingMatches`) --
+ * a pass whose requests did not take effect is never claimed as verified.
+ * The layout comes from the resolved Action's validated
+ * `document_specification`; this layer executes it and decides nothing.
  */
 export async function restyleGoogleDoc(
   env: Env,
   accountIdentifier: string,
   documentId: string,
-  layout: ProposalDocLayout,
+  layout: GoogleDocLayout,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const token = await getValidGoogleAccessToken(env, accountIdentifier);
   if (!token) return { ok: false, error: "Google Workspace authorization missing or invalid" };
   const before = await readGoogleDocBody(token, documentId);
   if (!before) return { ok: false, error: "the Doc could not be read" };
   if (before.text.trimEnd() !== layout.text.trimEnd()) {
-    return { ok: false, error: "the Doc's text no longer matches the current version, so formatting was refused rather than applied to drifted content" };
+    return { ok: false, error: "the Doc's text no longer matches the specification it is bound to, so formatting was refused rather than applied to drifted content" };
   }
   let res: Response;
   try {
     res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ requests: buildProposalDocStyleRequests(layout) }),
+      body: JSON.stringify({ requests: buildDocStyleRequests(layout) }),
     });
   } catch {
     return { ok: false, error: "network error formatting the Doc" };
   }
   if (!res.ok) return { ok: false, error: `Google Docs formatting failed (${await describeGoogleApiFailure(res)})` };
-  const after = await readGoogleDocBody(token, documentId);
+  const after = await readGoogleDocStyling(token, documentId);
   if (!after || after.text.trimEnd() !== layout.text.trimEnd()) return { ok: false, error: "the Doc's text changed while it was being formatted" };
+  if (!observedStylingMatches(layout, after)) {
+    return { ok: false, error: "the Doc's formatting does not match the specification after the styling pass" };
+  }
   return { ok: true };
 }
 
-/** One paragraph's ACTUAL styling, as the Docs API reports it. */
-export interface ObservedDocParagraph {
-  /** The named style the paragraph carries ("TITLE", "HEADING_1", "HEADING_2", "HEADING_3", "NORMAL_TEXT", ...). */
-  namedStyleType: string;
-  /** True when the paragraph carries a bullet. */
-  bulleted: boolean;
-  /** The paragraph's actual start indent, in points (0 when unset). */
-  indentStartPt: number;
-  /** The paragraph's own text, including its terminating newline. Needed to tell the body's required trailing empty paragraph from a real one. */
-  text: string;
-}
-
-/** One text run's ACTUAL inline styling, over its own Doc index range (1-based UTF-16 units, end exclusive). */
-export interface ObservedDocTextStyle {
-  start: number;
-  end: number;
-  bold: boolean;
-  strikethrough: boolean;
-  underline: boolean;
+/**
+ * Parses a Docs document response into the neutral observed shapes the ONE
+ * shared matcher verifies against: the text it spells out, every paragraph's
+ * own index, named style, bullet and indent, and every text run's inline
+ * marks over its own index range. Pure (no I/O) so the read-back of a write
+ * and the read-back of a reconciliation parse through exactly the same
+ * code, and a malformed body degrades to empty observations rather than
+ * throwing.
+ */
+export function parseGoogleDocStyling(doc: unknown): ObservedDocStyling {
+  const body = (doc as {
+    body?: {
+      content?: {
+        startIndex?: number;
+        paragraph?: {
+          bullet?: unknown;
+          paragraphStyle?: {
+            namedStyleType?: string;
+            indentStart?: { magnitude?: number };
+            spaceAbove?: { magnitude?: number };
+            spaceBelow?: { magnitude?: number };
+          };
+          elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean; foregroundColor?: { color?: { rgbColor?: { red?: number; green?: number; blue?: number } } } } } }[];
+        };
+      }[];
+    };
+  } | null)?.body;
+  const paragraphs: ObservedDocParagraph[] = [];
+  const runs: ObservedDocTextStyle[] = [];
+  let text = "";
+  for (const structural of body?.content ?? []) {
+    const paragraph = structural.paragraph;
+    if (!paragraph) continue;
+    const paragraphStart = structural.startIndex ?? 0;
+    let index = paragraphStart;
+    let paragraphText = "";
+    for (const element of paragraph.elements ?? []) {
+      const run = element.textRun;
+      const value = run?.content ?? "";
+      if (!value) continue;
+      const color = run?.textStyle?.foregroundColor?.color?.rgbColor;
+      runs.push({
+        start: index,
+        end: index + value.length,
+        bold: run?.textStyle?.bold === true,
+        strikethrough: run?.textStyle?.strikethrough === true,
+        underline: run?.textStyle?.underline === true,
+        foregroundColor: color !== undefined
+          ? { red: color.red ?? 0, green: color.green ?? 0, blue: color.blue ?? 0 }
+          : null,
+      });
+      text += value;
+      paragraphText += value;
+      index += value.length;
+    }
+    const paragraphStyle = paragraph.paragraphStyle ?? {};
+    paragraphs.push({
+      start: paragraphStart,
+      namedStyleType: paragraphStyle.namedStyleType ?? "",
+      bulleted: paragraph.bullet !== undefined && paragraph.bullet !== null,
+      indentStartPt: paragraphStyle.indentStart?.magnitude ?? 0,
+      spaceAbovePt: paragraphStyle.spaceAbove?.magnitude ?? 0,
+      spaceBelowPt: paragraphStyle.spaceBelow?.magnitude ?? 0,
+      text: paragraphText,
+    });
+  }
+  return { text, paragraphs, runs };
 }
 
 /**
@@ -1222,63 +1297,21 @@ export interface ObservedDocTextStyle {
  * own index range -- together with the text those runs spell out, or null
  * when the Doc cannot be read at all.
  *
- * This is what makes an interrupted FORMATTING attempt reconcilable: unlike
- * a rewrite, a styling pass leaves the text untouched, so text alone can
- * never show whether the styles were applied. Reconciliation reads them.
+ * This is what makes an interrupted FORMATTING attempt reconcilable and a
+ * completed write verifiable beyond its text: text alone can never show
+ * whether the styles were applied. Reconciliation and read-back verification
+ * both read them, through the one shared parser above.
  */
 export async function readGoogleDocStyling(
   token: string,
   documentId: string,
-): Promise<{ text: string; paragraphs: ObservedDocParagraph[]; runs: ObservedDocTextStyle[] } | null> {
+): Promise<ObservedDocStyling | null> {
   try {
     const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
-    const doc = (await res.json()) as {
-      body?: {
-        content?: {
-          startIndex?: number;
-          paragraph?: {
-            namedStyleType?: string;
-            bullet?: unknown;
-            paragraphStyle?: { indentStart?: { magnitude?: number } };
-            elements?: { textRun?: { content?: string; textStyle?: { bold?: boolean; strikethrough?: boolean; underline?: boolean } } }[];
-          };
-        }[];
-      };
-    };
-    const paragraphs: ObservedDocParagraph[] = [];
-    const runs: ObservedDocTextStyle[] = [];
-    let text = "";
-    for (const structural of doc.body?.content ?? []) {
-      const paragraph = structural.paragraph;
-      if (!paragraph) continue;
-      let index = structural.startIndex ?? 0;
-      let paragraphText = "";
-      for (const element of paragraph.elements ?? []) {
-        const run = element.textRun;
-        const value = run?.content ?? "";
-        if (!value) continue;
-        runs.push({
-          start: index,
-          end: index + value.length,
-          bold: run?.textStyle?.bold === true,
-          strikethrough: run?.textStyle?.strikethrough === true,
-          underline: run?.textStyle?.underline === true,
-        });
-        text += value;
-        paragraphText += value;
-        index += value.length;
-      }
-      paragraphs.push({
-        namedStyleType: paragraph.namedStyleType ?? "",
-        bulleted: paragraph.bullet !== undefined && paragraph.bullet !== null,
-        indentStartPt: paragraph.paragraphStyle?.indentStart?.magnitude ?? 0,
-        text: paragraphText,
-      });
-    }
-    return { text, paragraphs, runs };
+    return parseGoogleDocStyling(await res.json());
   } catch {
     return null;
   }

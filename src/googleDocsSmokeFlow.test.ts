@@ -6,6 +6,7 @@ import { handleGoogleAccountSelection, handleGoogleActionApproval, handleGoogleF
 import { getActiveWorkId } from "./sessionRouting";
 import { confirmGoogleDocsSmoke, startGoogleDocsSmokeFlow, type GoogleDocsSmokeConfirmSeams } from "./googleDocsSmokeFlow";
 import { GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX } from "./runtime/tools/googleDocsSmoke";
+import { FakeGoogleDoc } from "./testSupport/fakeGoogleDocs";
 
 /**
  * The interactive Telegram Google Docs Tool Registry SMOKE flow (LOG-1069),
@@ -150,14 +151,20 @@ const telegramTexts = (telegram: GoogleCall[]) => telegram.map((c) => String(c.b
 const callbackDatas = (telegram: GoogleCall[]) =>
   telegram.flatMap((c) => (c.body?.reply_markup?.inline_keyboard ?? []).flatMap((row: any[]) => row.map((b: any) => String(b.callback_data))));
 
-/** The happy document server (same shape as googleDocsSmoke.test.ts's). */
+/**
+ * The happy document server (same shape as googleDocsSmoke.test.ts's): the
+ * body itself is the shared styling-aware fake, so a batchUpdate really
+ * applies text AND styling and every verification read -- including the
+ * rewrite's, which deletes everything but the protected final newline --
+ * sees the complete specification back.
+ */
 function docServer() {
   let title = "";
-  let text = "";
   let folder = "";
+  const doc = new FakeGoogleDoc();
   return {
     get created() {
-      return { title, text, folder };
+      return { title, text: doc.text, folder };
     },
     handle(call: GoogleCall): Response {
       const { url, method, body } = call;
@@ -171,16 +178,11 @@ function docServer() {
         return json({ files: found });
       }
       if (url.includes(":batchUpdate")) {
-        // Apply the INSERT wherever it sits: the rewrite's batchUpdate opens
-        // with deleteContentRange (a real Docs GET returns endIndex > 2), so
-        // requests[0] is not the insert there -- applying requests[0] blindly
-        // would blank the Doc on every rewrite.
-        const insert = (body.requests ?? []).find((r: any) => r.insertText);
-        if (insert) text = insert.insertText.text;
+        doc.applyRequests(body.requests ?? []);
         return json({});
       }
       if (url.includes("/documents/doc-smoke-1") && method === "GET") {
-        return json({ title, body: { content: [{ endIndex: text ? text.length + 1 : 1, paragraph: { elements: [{ textRun: { content: text } }] } }] } });
+        return json({ title, ...doc.toDocumentJson() });
       }
       throw new Error(`Unexpected Google call: ${method} ${url}`);
     },

@@ -266,14 +266,19 @@ export class AiPolicyExecutor {
         };
       }
 
-      // Mandatory identity-redaction gate: applies to every provider, not
-      // just workers-ai -- redacting the business name and Martin's name
-      // costs nothing against a fully trusted provider, and the guarantee
-      // is stronger for having no provider-conditional bypass. Redaction
-      // is best-effort (a plain substitution can miss an unusual phrasing
-      // in live-fetched Notion governance text), so it is never trusted
-      // alone: the redacted messages are re-scanned immediately after, and
-      // any leftover match is a hard stop, not a residual leak sent anyway.
+      // Mandatory identity-protection gate: applies to every provider, not
+      // just workers-ai -- replacing the consultancy's and Martin's names
+      // with opaque placeholders costs nothing against a fully trusted
+      // provider, and the guarantee is stronger for having no
+      // provider-conditional bypass. Protection is best-effort (a plain
+      // substitution can miss an unusual phrasing in live-fetched Notion
+      // governance text), so it is never trusted alone: the protected
+      // messages are re-scanned immediately after, and any leftover match is
+      // a hard stop, not a residual leak sent anyway. Placeholders are what
+      // the provider sees and what every intermediate/persisted representation
+      // keeps; restoring the real names is a final-presentation concern only
+      // (src/telegram.ts), never something this executor does -- so a restored
+      // text that is sent out again is protected here all over again.
       const redactedMessages: AiMessage[] = effectiveTask.messages.map((m) => ({
         ...m,
         content: redactIdentityTerms(m.content),

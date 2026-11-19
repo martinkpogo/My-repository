@@ -28,6 +28,7 @@ import { FINANCE_JUDGMENT_START, FINANCE_JUDGMENT_END } from "../../handoffContr
 import { handleQuoteApproval } from "../finance/valueBasedPricingAssessor";
 import { installSatisfiedResultReview } from "../../testSupport/satisfiedResultReview";
 import { declaredResultContract } from "../../testSupport/declaredResultContract";
+import { FakeGoogleDoc } from "../../testSupport/fakeGoogleDocs";
 import { salesManifest } from "./salesManifest";
 
 // ---------------------------------------------------------------------------
@@ -1405,9 +1406,10 @@ function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
   t.after(persistence.release);
   const inner = globalThis.fetch;
   const calls: { method: string; url: string; body?: any }[] = [];
+  const docRequests: any[] = [];
+  const doc = new FakeGoogleDoc();
   let docText = "";
   let docTitle = "";
-  const docRequests: any[] = [];
   globalThis.fetch = (async (url: string, init?: any) => {
     const u = String(url);
     if (!u.includes("googleapis.com")) return inner(url as any, init);
@@ -1427,22 +1429,20 @@ function withGoogleFake(t: any, opts: { failDocCreate?: boolean } = {}) {
       return json({ id: "folder-1", name: "ENIG Proposals (token-safe)", mimeType: "application/vnd.google-apps.folder", trashed: false });
     }
     if (u.includes("/documents/doc-1:batchUpdate")) {
-      for (const r of body.requests) {
-        if (r.deleteContentRange) docText = "";
-        if (r.insertText) docText = r.insertText.text;
-      }
+      doc.applyRequests(body.requests);
       docRequests.push(...body.requests);
+      docText = doc.text;
       return json({});
     }
     if (u.endsWith("/documents/doc-1") && method === "GET") {
-      return json({ title: docTitle, body: { content: [{ endIndex: docText.length + 1, paragraph: { elements: [{ textRun: { content: docText } }] } }] } });
+      return json({ title: docTitle, ...doc.toDocumentJson() });
     }
     throw new Error(`Unexpected Google call: ${method} ${u}`);
   }) as typeof fetch;
   t.after(() => {
     globalThis.fetch = inner;
   });
-  return Object.assign(calls, { docRequests, text: () => docText, setDocText: (next: string) => void (docText = next) });
+  return Object.assign(calls, { docRequests, text: () => docText, setDocText: (next: string) => { docText = next; doc.setText(next); } });
 }
 
 test("Google Doc 1. Tapping Create Google Doc makes one Doc of exactly the current version in a dedicated folder, watches it bound to that version, and shows the link", async (t) => {
@@ -1668,7 +1668,9 @@ test("Doc formatting 1. A formatting request on the current version's Doc restyl
   const batchUpdates = calls.filter((c) => c.url.includes(":batchUpdate"));
   const lastRequests = batchUpdates.at(-1)!.body.requests;
   assert.ok(
-    lastRequests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets),
+    lastRequests.every(
+      (r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets || r.deleteParagraphBullets,
+    ),
     "the formatting call is style-only: no insert, delete or replace request",
   );
   assert.ok(lastRequests.some((r: any) => r.updateParagraphStyle?.paragraphStyle?.namedStyleType === "HEADING_1"), "canonical section-heading style applied");
@@ -1848,7 +1850,7 @@ test("Doc clarification 3. A clarification that resolves to formatting routes th
 
   assert.ok(batchUpdatesOn(calls) > stylingBefore, "the routed request actually restyled the Doc");
   const requests = calls.filter((c) => c.url.includes(":batchUpdate")).at(-1)!.body.requests;
-  assert.ok(requests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets), "the routed formatting pass is style-only: no insert, delete or replace");
+  assert.ok(requests.every((r: any) => r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets || r.deleteParagraphBullets), "the routed formatting pass is style-only: no insert, delete or replace");
   assert.strictEqual(calls.text(), docTextBefore, "the Doc's text is byte-identical");
   assert.strictEqual(state.sales!.proposal!.currentVersion, 1, "formatting never creates a Version");
   assert.strictEqual(state.sales?.pendingProposalDocClarification, undefined);
@@ -2426,4 +2428,33 @@ test("Lifecycle 14. A new substantive comment AFTER a cycle-completion approval 
   assert.strictEqual(done.approvedVersion, 2, "the exact current Version, not the superseded one");
   assert.strictEqual(sp.approvedVersion, 2);
   assert.strictEqual(text(rec["Approved Version"]), "v2");
+});
+
+// ---------------------------------------------------------------------------
+// Identity restoration at the Doc writing boundary (Martin's decision,
+// 2026-11-18): the Proposal's Google Doc is a final internal, human-readable
+// draft, so it shows "Martin" and "ENIG"; the stored Proposal Content, the
+// Work's own copy and every provider-bound payload keep the protected
+// [ENIG_OPERATOR]/[ENIG_CONSULTANCY] form.
+// ---------------------------------------------------------------------------
+
+test("Google Doc identity: the Doc is written with Martin and ENIG restored, while the stored Proposal Content keeps the protected placeholders", async (t) => {
+  const direction = "[ENIG_OPERATOR] should review [ENIG_CONSULTANCY]'s proposed direction.";
+  const strategy = approvedStrategyProposal();
+  strategy.executiveSummary = { ...strategy.executiveSummary, recommendedDirection: direction };
+  const { world, state } = await createV1(
+    t,
+    {},
+    { ho64: ho64Props({ "Verified Facts & Sources": rt(combinedHo64Facts(strategy)) }) },
+    { googleDoc: true },
+  );
+
+  const docText = (world as any).googleCalls.text();
+  assert.ok(docText.includes("Martin should review ENIG's proposed direction."), `the Doc must hold the restored, human-readable draft -- got: ${docText}`);
+  assert.ok(!docText.includes("[ENIG_"), "no identity placeholder may reach the Doc");
+
+  const stored = text(proposals(world)[0].properties["Proposal Content"]);
+  assert.ok(stored.includes(direction), "the stored Proposal Content keeps the protected representation");
+  assert.ok(!stored.includes("Martin"), "the stored record is never restored");
+  assert.strictEqual(state.sales!.proposal!.versions[0].content, stored, "the Work's own version copy stays protected");
 });

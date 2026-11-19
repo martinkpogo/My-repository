@@ -297,7 +297,17 @@ export async function confirmOutputDelivery(
     {
       tool_id: "google_docs",
       operation_id: "google_docs.create_and_verify",
-      input: { title: captured.title, content: captured.text, folder_id: folderId, account_identifier: accountIdentifier },
+      input: {
+        title: captured.title,
+        // The captured output is the PROTECTED form (it must never carry the
+        // real names in a stored record), so the specification declares the
+        // one presentation instruction the Doc needs: the Tool applies the
+        // shared identity restoration at this final internal-presentation
+        // boundary of the write.
+        document_specification: { text: captured.text, presentation: { restore_identity_placeholders: true } },
+        folder_id: folderId,
+        account_identifier: accountIdentifier,
+      },
     },
     workSessionContext(state, proof),
   );

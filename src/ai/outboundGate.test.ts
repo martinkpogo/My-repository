@@ -7,6 +7,7 @@ import { AiProvider, AiTask, InfrastructureError, ProviderAdapterResult, Provide
 import type { Env } from "../types";
 import { DataBoundaryEvaluator, PRODUCTION_OUTBOUND_POLICY, OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS } from "../dataBoundary/policy";
 import { SEMANTIC_TASK_REGISTRY } from "../dataBoundary/registry";
+import { findLeftoverBannedTerms } from "./identityRedaction";
 import type { SemanticTaskId } from "../dataBoundary/types";
 
 // ---------------------------------------------------------------------------
@@ -457,8 +458,7 @@ test("11b. Existing identity-redaction (ENIG/Martin) still runs, upstream of and
 
   assert.strictEqual(p1.attempts, 1, "redacted, token-safe content must still reach the provider");
   const sent = p1.executedMessages[0];
-  assert.ok(!sent.includes("ENIG"), "ENIG must still be redacted");
-  assert.ok(!sent.includes("Martin"), "Martin must still be redacted");
-  assert.ok(sent.includes("the business"));
-  assert.ok(sent.includes("the operator"));
+  assert.deepStrictEqual(findLeftoverBannedTerms(sent), [], "neither real name may survive in the provider payload");
+  assert.ok(sent.includes("[ENIG_CONSULTANCY]"), "the consultancy placeholder is what the provider sees");
+  assert.ok(sent.includes("[ENIG_OPERATOR]"), "the operator placeholder is what the provider sees");
 });

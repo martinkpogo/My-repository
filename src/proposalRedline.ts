@@ -6,6 +6,14 @@
  * Google or Notion I/O -- so the layout is testable and the Doc is only a
  * readable view of the hashed Proposal Content, never its source of truth.
  *
+ * This is the SALES side of the boundary: it decides WHAT a Proposal Doc
+ * shows (content, sections, ordering, structure, presentation intent) and
+ * produces a document specification in the Tool's neutral vocabulary
+ * (`src/googleDocSpec.ts`). The shared Google Docs Tool owns only validating
+ * that specification, mapping it to provider requests and verifying the
+ * result -- it contains no Proposal logic, and this module contains no
+ * Google request shapes.
+ *
  * The canonical Proposal layout is derived from the content's OWN structure
  * (buildProposalContent's title line, numbered ALL-CAPS section headings,
  * "- " bullets, "  - " nested bullets and "Label: value" lines) and never
@@ -13,31 +21,13 @@
  * `styles` carry inline styling only. The redline zone below "Changes"
  * keeps its word-level del/add marks and is never bulletized or re-headed.
  */
+import type { DocBlockKind, DocStyleRange, DocBlockRange, GoogleDocLayout } from "./googleDocSpec";
+import { materializeDocumentSpecification } from "./googleDocSpec";
+
 export type DiffKind = "same" | "del" | "add";
 export interface DiffSegment {
   kind: DiffKind;
   text: string;
-}
-export type DocStyleKind = "heading" | "del" | "add" | "label";
-export interface DocStyleRange {
-  /** Doc index, 1-based, UTF-16 code units (what the Docs API counts). */
-  start: number;
-  end: number;
-  kind: DocStyleKind;
-}
-/** Paragraph-level styling for one whole paragraph, including its terminating newline. */
-export type DocBlockKind = "title" | "heading" | "revisionHeading" | "sectionHeading" | "paragraph" | "bullet" | "subBullet";
-export interface DocBlockRange {
-  /** Doc index, 1-based UTF-16 units: the first character of the paragraph. */
-  start: number;
-  /** Exclusive end: just past the paragraph's terminating newline, as the Docs API requires for paragraph-level requests. */
-  end: number;
-  kind: DocBlockKind;
-}
-export interface ProposalDocLayout {
-  text: string;
-  styles: DocStyleRange[];
-  blocks: DocBlockRange[];
 }
 
 /** Above this many token comparisons the diff falls back to whole-text removed/added rather than risk the Worker's CPU limit. */
@@ -141,8 +131,12 @@ function currentZoneBlockKind(line: string, isFirstLine: boolean): DocBlockKind 
 /**
  * Builds the Doc body. `versions` are every version's Proposal Content in
  * order; the last is the current one. Version 1 alone has no changes section.
+ *
+ * This builder is content-agnostic: it lays out exactly the strings it is
+ * given. Provider-bound/internal representations pass through unchanged --
+ * use `buildInternalDocLayout` for the human-readable Doc itself.
  */
-export function buildProposalDocLayout(proposalId: string, versions: { version: number; content: string }[]): ProposalDocLayout {
+export function buildProposalDocLayout(proposalId: string, versions: { version: number; content: string }[]): GoogleDocLayout {
   let text = "";
   const styles: DocStyleRange[] = [];
   const blocks: DocBlockRange[] = [];
@@ -179,95 +173,31 @@ export function buildProposalDocLayout(proposalId: string, versions: { version: 
   return { text, styles, blocks };
 }
 
-/** Paragraph styling per block kind: the ONE canonical Proposal layout. */
-const PARAGRAPH_STYLES: Record<DocBlockKind, { namedStyleType: string; spaceAbovePt: number; spaceBelowPt: number; indentStartPt?: number }> = {
-  title: { namedStyleType: "TITLE", spaceAbovePt: 0, spaceBelowPt: 10 },
-  heading: { namedStyleType: "HEADING_2", spaceAbovePt: 12, spaceBelowPt: 6 },
-  revisionHeading: { namedStyleType: "HEADING_3", spaceAbovePt: 12, spaceBelowPt: 6 },
-  sectionHeading: { namedStyleType: "HEADING_1", spaceAbovePt: 14, spaceBelowPt: 6 },
-  paragraph: { namedStyleType: "NORMAL_TEXT", spaceAbovePt: 0, spaceBelowPt: 6 },
-  bullet: { namedStyleType: "NORMAL_TEXT", spaceAbovePt: 0, spaceBelowPt: 2 },
-  subBullet: { namedStyleType: "NORMAL_TEXT", spaceAbovePt: 0, spaceBelowPt: 2, indentStartPt: 36 },
-};
-
-const INLINE_STYLE_REQUEST: Record<DocStyleKind, { textStyle: Record<string, unknown>; fields: string }> = {
-  heading: { textStyle: { bold: true }, fields: "bold" },
-  label: { textStyle: { bold: true }, fields: "bold" },
-  del: { textStyle: { strikethrough: true, foregroundColor: { color: { rgbColor: { red: 0.8, green: 0.1, blue: 0.1 } } } }, fields: "strikethrough,foregroundColor" },
-  add: { textStyle: { underline: true, foregroundColor: { color: { rgbColor: { red: 0.05, green: 0.5, blue: 0.2 } } } }, fields: "underline,foregroundColor" },
-};
-
 /**
- * The complete canonical styling for a layout as Docs batchUpdate requests:
- * clear any carried inline formatting, set one named paragraph style per
- * paragraph (explicitly resetting every paragraph so a rewrite is
- * deterministic even if a previous body carried heading styles), bulletize
- * the bullet paragraphs, then the inline marks -- bold headings and labels,
- * struck removed text, underlined added text. Style-only by construction:
- * no request here inserts, deletes or replaces a single character of text.
+ * The canonical Proposal Doc layout for the HUMAN-READABLE Doc: exactly
+ * `buildProposalDocLayout`, resolved through the ONE shared materializer
+ * (`materializeDocumentSpecification` with the Action's declared presentation
+ * `restore_identity_placeholders`), so the text and the style/block ranges
+ * this Sales-side expectation is computed from are produced by the very same
+ * code path the Tool executes -- they can never drift apart.
  *
- * Every request uses the exact Docs API v1 `Request` shape, which is not
- * interchangeable between update requests: `updateTextStyle` carries
- * `textStyle`/`fields`, while `updateParagraphStyle` carries
- * `paragraphStyle`/`fields` (there is no `textStyle`). `bulletPreset` must be
- * one of the `BulletGlyphPreset` values; the canonical disc/circle/square
- * preset is `BULLET_DISC_CIRCLE_SQUARE`. An unknown field name or enum value
- * is rejected by batchUpdate as a whole with HTTP 400, so these names are
- * load-bearing, not cosmetic.
+ * The Google Doc is a final internal draft, so it shows the real names
+ * ("Martin", "ENIG"), while every stored/internal representation -- Proposal
+ * Content, WorkState, the `google_docs.*` input's `document_specification` --
+ * keeps the protected `[ENIG_OPERATOR]`/`[ENIG_CONSULTANCY]` form. Only the
+ * shared `restoreIdentityPlaceholders` (via that materializer) is used --
+ * there is no second identity mechanism for Docs. Content that later reaches
+ * an AI provider is protected again by the AI executor's unconditional
+ * redaction.
  */
-export function buildProposalDocStyleRequests(layout: ProposalDocLayout): unknown[] {
-  const requests: unknown[] = [];
-  requests.push({
-    updateTextStyle: {
-      range: { startIndex: 1, endIndex: 1 + layout.text.length },
-      textStyle: { bold: false, strikethrough: false, underline: false },
-      fields: "bold,strikethrough,underline",
-    },
+export function buildInternalDocLayout(proposalId: string, versions: { version: number; content: string }[]): GoogleDocLayout {
+  const layout = buildProposalDocLayout(proposalId, versions);
+  const materialized = materializeDocumentSpecification({
+    text: layout.text,
+    styles: layout.styles,
+    blocks: layout.blocks,
+    presentation: { restore_identity_placeholders: true },
   });
-  for (const b of layout.blocks) {
-    const p = PARAGRAPH_STYLES[b.kind];
-    const paragraphStyle: Record<string, unknown> = {
-      namedStyleType: p.namedStyleType,
-      spaceAbove: { magnitude: p.spaceAbovePt, unit: "PT" },
-      spaceBelow: { magnitude: p.spaceBelowPt, unit: "PT" },
-    };
-    let fields = "namedStyleType,spaceAbove,spaceBelow";
-    if (p.indentStartPt) {
-      paragraphStyle.indentStart = { magnitude: p.indentStartPt, unit: "PT" };
-      fields += ",indentStart";
-    }
-    requests.push({ updateParagraphStyle: { range: { startIndex: b.start, endIndex: b.end }, paragraphStyle, fields } });
-  }
-  for (const b of layout.blocks) {
-    if (b.kind === "bullet" || b.kind === "subBullet") {
-      requests.push({ createParagraphBullets: { range: { startIndex: b.start, endIndex: b.end }, bulletPreset: "BULLET_DISC_CIRCLE_SQUARE" } });
-    }
-  }
-  for (const r of layout.styles) {
-    requests.push({ updateTextStyle: { range: { startIndex: r.start, endIndex: r.end }, ...INLINE_STYLE_REQUEST[r.kind] } });
-  }
-  return requests;
-}
-
-/**
- * The paragraph signature each block of a layout must actually show in the
- * Doc: the named style it asks for, whether it is bulleted, and its start
- * indent. Derived from the SAME canonical table the style requests use, so
- * the expected styling and the applied styling can never drift apart. Used
- * by the registered formatting operation's reconciliation, which must settle
- * an interrupted attempt by reading the Doc -- text alone cannot show
- * whether styles were applied.
- */
-export function expectedDocParagraphStyles(
-  layout: ProposalDocLayout,
-): { kind: DocBlockKind; namedStyleType: string; bulleted: boolean; indentStartPt: number }[] {
-  return layout.blocks.map((block) => {
-    const paragraph = PARAGRAPH_STYLES[block.kind];
-    return {
-      kind: block.kind,
-      namedStyleType: paragraph.namedStyleType,
-      bulleted: block.kind === "bullet" || block.kind === "subBullet",
-      indentStartPt: paragraph.indentStartPt ?? 0,
-    };
-  });
+  if (!materialized.ok) throw new Error(materialized.reason);
+  return materialized.layout;
 }

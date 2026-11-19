@@ -377,3 +377,101 @@ test("redactTelegramProviderError strips token and authorization material and bo
   assert.strictEqual(bounded.length, 201, "200 chars plus the truncation marker");
   assert.ok(bounded.endsWith("…"));
 });
+
+// ---------------------------------------------------------------------------
+// Final internal presentation (Martin's decision, 2026-11-18): AI output is
+// produced and stored in the protected [ENIG_CONSULTANCY]/[ENIG_OPERATOR]
+// form, and the real names are restored only here, on the way to the
+// operator's own chat. An ordinary message is unchanged.
+// ---------------------------------------------------------------------------
+
+test("sendMessage restores identity placeholders in final internal output", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledBody: any;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    calledBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await sendMessage(
+      fakeEnv,
+      1,
+      "[ENIG_OPERATOR] should review [ENIG_CONSULTANCY]'s proposed direction.",
+    );
+    assert.strictEqual(calledBody.text, "Martin should review ENIG's proposed direction.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sendMessage leaves a message with no placeholders byte-identical", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledBody: any;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    calledBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await sendMessage(fakeEnv, 1, "Approved. Nothing else changed.");
+    assert.strictEqual(calledBody.text, "Approved. Nothing else changed.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sendMessage leaves unknown or malformed placeholders untouched", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledBody: any;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    calledBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await sendMessage(fakeEnv, 1, "Unknown [ENIG_UNRELATED] and partial [ENIG_OPERATOR");
+    assert.strictEqual(calledBody.text, "Unknown [ENIG_UNRELATED] and partial [ENIG_OPERATOR");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sendWorkspaceHatMessage restores a draft's placeholders when it is presented to Martin", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_url: string, init: any) => {
+    bodies.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await sendWorkspaceHatMessage(
+      fakeWorkspaceEnv,
+      { chatId: 1, threadId: 2, hat: "Marketing Strategist", workId: "work-1" },
+      "[ENIG_CONSULTANCY]'s proof section should name [ENIG_OPERATOR] by name.",
+    );
+    const sentText = bodies[0].text;
+    assert.ok(sentText.includes("ENIG's proof section"), `expected restored draft, got: ${sentText}`);
+    assert.ok(sentText.includes("Martin by name"), `expected restored draft, got: ${sentText}`);
+    assert.ok(!sentText.includes("[ENIG_"), "no placeholder may reach the operator's chat");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("editMessageText restores identity placeholders before editing", async () => {
+  const originalFetch = globalThis.fetch;
+  let calledBody: any;
+  globalThis.fetch = (async (_url: string, init: any) => {
+    calledBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 4242 } }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await editMessageText(fakeEnv, 1, 4242, "[ENIG_OPERATOR] updated [ENIG_CONSULTANCY]'s plan");
+    assert.strictEqual(calledBody.text, "Martin updated ENIG's plan");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

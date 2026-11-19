@@ -1,9 +1,12 @@
 /**
  * Registered Google Docs WRITE operation over an EXISTING document --
  * `google_docs.update_and_verify`, version 1.0, effect `external_mutation`:
- * bring THE document to the exact requested Proposal-version content plus the
- * canonical styling (delete + insert + style in one batchUpdate), then read
- * it back and claim success only when it verifies.
+ * bring THE document to the exact body the resolved Action's
+ * `document_specification` describes (text + structure + styling in one
+ * batchUpdate), then read it back and claim success only when the COMPLETE
+ * specification verifies -- the text is exactly what was requested AND the
+ * declared paragraph styles, bullets, indentation and inline marks are
+ * actually shown. Matching text alone is never proof of success.
  *
  * This is the mutation `ensureProposalDoc` previously issued as a direct
  * Docs batchUpdate call, in both of its paths: bringing an existing Doc up
@@ -14,57 +17,63 @@
  * Worker is actually authorized for), Access on the Work's own Action,
  * durable intent/outcome records, and the canonical five outcomes.
  *
- * The input carries pure business data only -- the Proposal id and the exact
- * Version content -- and the operation rebuilds the canonical layout itself
- * (buildProposalDocLayout), so no provider request structures and no styling
- * details ever enter the input contract. The document is targeted by its
- * opaque Drive id, validated here and bound by Access to any approval
- * evidence; account selection is resolved from this Worker's authorized
- * accounts, never taken from a caller.
+ * The input carries the document to act on, the trusted account, and the
+ * Action's declarative `document_specification` -- validated and mapped to
+ * provider requests by the Tool's neutral specification module
+ * (src/googleDocSpec.ts). This operation contains no business layout logic:
+ * what the document shows (content, sections, ordering, structure,
+ * presentation intent) is the Action's decision, and an instruction this
+ * operation does not support fails validation explicitly rather than being
+ * dropped. The specification keeps the PROTECTED identity form of the
+ * content it was assembled from; the declared
+ * `presentation.restore_identity_placeholders` is applied here, at the final
+ * internal-presentation boundary of the write, with the declared ranges
+ * remapped onto the restored text by the one shared restoration function.
+ * The document is targeted by its opaque Drive id, validated here and bound
+ * by Access to any approval evidence; account selection is resolved from
+ * this Worker's authorized accounts, never taken from a caller.
  *
  * Reconciliation is operation-specific: this operation acts on a KNOWN
  * document id (its target), so an interrupted attempt is settled by reading
- * that document back -- content matching the request means the effect
- * exists (recovered as a verified success, never rewritten again), content
- * differing means the requested effect was not applied (a fresh attempt may
- * proceed: update overwrites the body wholesale), an unreachable read keeps
+ * that document back -- BOTH halves of the specification: a document
+ * showing the exact requested text with its declared styling means the
+ * effect exists (recovered as a verified success, never rewritten again),
+ * while differing text OR matching text with missing/wrong styling means
+ * the requested effect was not applied (a fresh attempt may proceed: update
+ * overwrites the body and its styling wholesale), an unreachable read keeps
  * the outcome unverified and held, and a vanished document is a definite
  * failure (this operation never creates documents).
  */
 import type { Env } from "../../types";
 import type { ResolvedToolTarget, ToolInvocationOutcome, ToolOperationDefinition } from "../toolRegistry";
-import { extractDocText, getValidGoogleAccessToken, listAuthorizedGoogleAccounts, rewriteGoogleDoc } from "../../googleOAuth";
-import { buildProposalDocLayout } from "../../proposalRedline";
+import { getValidGoogleAccessToken, listAuthorizedGoogleAccounts, parseGoogleDocStyling, rewriteGoogleDoc } from "../../googleOAuth";
+import { materializeDocumentSpecification, observedStylingMatches, parseDocumentSpecification, type DocumentSpecification, type GoogleDocLayout } from "../../googleDocSpec";
 
 export const GOOGLE_DOCS_UPDATE_OPERATION_ID = "google_docs.update_and_verify";
 
-/** Exactly the declared input contract: the document to act on and the Proposal content it must hold. */
-const ALLOWED_INPUT_KEYS: readonly string[] = ["document_id", "account_identifier", "proposal_id", "versions"];
+/** Exactly the declared input contract: the document to act on and the specification of the body it must hold. */
+const ALLOWED_INPUT_KEYS: readonly string[] = ["document_id", "account_identifier", "document_specification"];
 
 /** An opaque url-safe Google document id -- never a path, URL or blank. */
 const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-/** One Proposal version's content, as the layout builder consumes it. */
-interface DocWriteVersion {
-  version: number;
-  content: string;
-}
-
 interface DocWriteInput {
   document_id: string;
   account_identifier: string;
-  proposal_id: string;
-  versions: DocWriteVersion[];
+  document_specification: DocumentSpecification;
+  /** The specification resolved to the exact body this operation writes and verifies (presentation applied, ranges remapped). */
+  layout: GoogleDocLayout;
 }
 
 const BASE = { tool_id: "google_docs", operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID };
 
 /**
- * Validates the input contract exactly: an object with precisely the four
- * declared fields; an opaque document id; a non-empty Proposal id; and a
- * non-empty list of well-formed versions (integer number >= 1 + non-empty
- * content, no extra keys per entry, bounded count). Returns the typed input
- * or the defect that made it invalid.
+ * Validates the input contract exactly: an object with precisely the three
+ * declared fields; an opaque document id; a non-empty account; and a
+ * well-formed `document_specification` (text plus optional, well-formed
+ * structure/styling ranges in the supported vocabulary, resolved to a
+ * writable body). Returns the typed input or the defect that made it
+ * invalid.
  */
 function parseInput(input: unknown): DocWriteInput | string {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return "input must be an object";
@@ -81,33 +90,15 @@ function parseInput(input: unknown): DocWriteInput | string {
   if (typeof record.account_identifier !== "string" || record.account_identifier.trim().length === 0) {
     return "account_identifier must be a non-empty string";
   }
-  if (typeof record.proposal_id !== "string" || record.proposal_id.trim().length === 0) {
-    return "proposal_id must be a non-empty string";
-  }
-  if (!Array.isArray(record.versions) || record.versions.length === 0) {
-    return "versions must be a non-empty array of the Proposal's versions in order";
-  }
-  if (record.versions.length > 200) return "versions carries more than 200 entries -- a document update input of that size is not a Proposal version list";
-  const versions: DocWriteVersion[] = [];
-  for (let i = 0; i < record.versions.length; i++) {
-    const entry = record.versions[i];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return `versions[${i}] must be an object with {version, content}`;
-    const versionRecord = entry as Record<string, unknown>;
-    const unexpected = Object.keys(versionRecord).find((key) => key !== "version" && key !== "content");
-    if (unexpected !== undefined) return `versions[${i}] has unknown field "${unexpected}" -- each entry is exactly {version, content}`;
-    if (typeof versionRecord.version !== "number" || !Number.isInteger(versionRecord.version) || versionRecord.version < 1) {
-      return `versions[${i}].version must be an integer >= 1`;
-    }
-    if (typeof versionRecord.content !== "string" || versionRecord.content.trim().length === 0) {
-      return `versions[${i}].content must be a non-empty string`;
-    }
-    versions.push({ version: versionRecord.version, content: versionRecord.content });
-  }
+  const specification = parseDocumentSpecification(record.document_specification, { allow_layout: true });
+  if (typeof specification === "string") return `document_specification is invalid: ${specification}`;
+  const materialized = materializeDocumentSpecification(specification);
+  if (!materialized.ok) return `document_specification is invalid: ${materialized.reason}`;
   return {
     document_id: record.document_id.trim(),
     account_identifier: record.account_identifier.trim(),
-    proposal_id: record.proposal_id.trim(),
-    versions,
+    document_specification: specification,
+    layout: materialized.layout,
   };
 }
 
@@ -166,17 +157,31 @@ function mapUpdateResult(result: { ok: true } | { ok: false; error: string }, do
     // the intended final state: partial, reconciled before any retry.
     return { ...BASE, state: "partially_completed", stage: "verification", reason: error, remote_resource: remote, reconciliation_required: true };
   }
+  if (error.startsWith("the Doc read back with the wrong formatting")) {
+    // The batchUpdate was accepted and the text is exactly what was
+    // requested, but the declared styling is not actually shown: the write
+    // did not produce the complete specification. Partial, reconciled by
+    // reading the document's ACTUAL styling before any retry -- matching
+    // text alone is never a verified success.
+    return { ...BASE, state: "partially_completed", stage: "verification", reason: error, remote_resource: remote, reconciliation_required: true };
+  }
   // Unknown defect: the remote state cannot be assumed either way.
   return { ...BASE, state: "unverified", reason: error, remote_resource: remote, reconciliation_required: true };
 }
 
 /**
- * Settles an interrupted attempt by reading THE document it targeted.
- * Returns `outcome: null` only when the read establishes that the requested
- * effect does NOT exist (content differs), which is the one state in which a
- * fresh attempt may proceed; a content match is the effect, recovered as a
- * verified success; an unreachable read keeps the outcome unverified and
- * held; a vanished document is a definite failure (never a recreation).
+ * Settles an interrupted attempt by reading THE document it targeted --
+ * both halves of the specification, not just its text. Returns
+ * `outcome: null` only when the read establishes that the requested effect
+ * does NOT exist (text differs, or the text matches while the declared
+ * styling, paragraph hierarchy, bullets or indentation are missing or
+ * wrong), which is the one state in which a fresh attempt may proceed (an
+ * update overwrites the body wholesale, so it is safe); a document showing
+ * the COMPLETE specification is the effect, recovered as a verified
+ * success and never rewritten; an unreachable read keeps the outcome
+ * unverified and held; a vanished document is a definite failure (never a
+ * recreation). Matching text alone is never enough: a body without its
+ * declared formatting is not the requested effect.
  */
 async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outcome: ToolInvocationOutcome | null }> {
   const parsed = parseInput(input);
@@ -192,12 +197,9 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
   }
   const remote = { document_id: parsed.document_id, url: documentUrl(parsed.document_id) };
   const uncertain = (reason: string): ToolInvocationOutcome => ({ ...BASE, state: "unverified", reason, remote_resource: remote, reconciliation_required: true });
-  let desired: string;
-  try {
-    desired = buildProposalDocLayout(parsed.proposal_id, parsed.versions).text;
-  } catch (error) {
-    return { outcome: uncertain(`the requested document state could not be rebuilt to compare against (${error instanceof Error ? error.message : "unknown error"}) -- no new write may start`) };
-  }
+  // The requested body was already resolved during validation (parseInput),
+  // so the comparison target is exactly what a fresh write would produce.
+  const desired = parsed.layout;
   try {
     const token = await getValidGoogleAccessToken(env, parsed.account_identifier);
     if (!token) {
@@ -223,26 +225,34 @@ async function reconcileDocumentWrite(env: Env, input: unknown): Promise<{ outco
       return { outcome: uncertain(`reconciliation read of the document failed (HTTP ${response.status}) -- its state is still unconfirmed, so no new write may start`) };
     }
     const body: unknown = await response.json().catch(() => null);
-    const text = extractDocText(body);
-    if (!body || typeof text !== "string") {
+    if (!body) {
       return { outcome: uncertain("the reconciliation read returned no readable document body -- no new write may start") };
     }
-    if (text.trimEnd() === desired.trimEnd()) {
-      // The earlier attempt already wrote the requested content: recovered
-      // as a verified success, and the document is never rewritten again.
-      return {
-        outcome: {
-          ...BASE,
-          state: "succeeded",
-          verified: true,
-          remote_resource: remote,
-          reason: "reconciled: the earlier attempt already wrote the requested content",
-        },
-      };
+    const observed = parseGoogleDocStyling(body);
+    if (observed.text.trimEnd() !== desired.text.trimEnd()) {
+      // The requested effect is not present; update overwrites the body
+      // wholesale, so a fresh attempt is safe.
+      return { outcome: null };
     }
-    // The requested effect is not present; update overwrites the body
-    // wholesale, so a fresh attempt is safe.
-    return { outcome: null };
+    if (!observedStylingMatches(desired, observed)) {
+      // The text matches but the declared formatting does not: the earlier
+      // attempt did NOT produce the complete specification, so it is never
+      // recovered as a success on text alone. A fresh attempt is safe (the
+      // update rewrites the body and its styling wholesale), so it may
+      // proceed.
+      return { outcome: null };
+    }
+    // The earlier attempt already wrote the complete requested specification:
+    // recovered as a verified success, and the document is never rewritten.
+    return {
+      outcome: {
+        ...BASE,
+        state: "succeeded",
+        verified: true,
+        remote_resource: remote,
+        reason: "reconciled: the earlier attempt already wrote the requested content with its declared styling",
+      },
+    };
   } catch (error) {
     return { outcome: uncertain(`reconciliation read of the document failed: ${error instanceof Error ? error.message : "unknown error"} -- no new write may start`) };
   }
@@ -268,8 +278,7 @@ export const googleDocsUpdateToolOperation: ToolOperationDefinition = {
       // Defensive: validateInput already ran. A failure here makes no request.
       return { ...BASE, state: "failed", stage: "validation", reason: `validation: ${parsed}` };
     }
-    const layout = buildProposalDocLayout(parsed.proposal_id, parsed.versions);
-    const result = await rewriteGoogleDoc(env, parsed.account_identifier, parsed.document_id, layout);
+    const result = await rewriteGoogleDoc(env, parsed.account_identifier, parsed.document_id, parsed.layout);
     return mapUpdateResult(result, parsed.document_id);
   },
 
