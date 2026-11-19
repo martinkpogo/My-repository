@@ -138,7 +138,40 @@ Review your own final diff before pushing. Confirm every changed file belongs to
 your task. Unrelated edits — even opportunistic cleanups — belong in their own
 change, or they make someone else's rebase needlessly hard.
 
-## 7. Approval gates, Handoffs, and deployment
+## 7. Draft PR handoff and sequential review
+
+A Draft PR is the handoff artifact between agents and Martin:
+
+- It keeps the implementation, the diff, the evidence, and the completion
+  report together in one place, and it blocks auto-merge (the Auto Merge
+  workflow skips Draft PRs) so that release stays Martin's decision.
+- The completion report lives in the **PR description**, structured per
+  `AGENTS.md` → "Draft PR handoff and review". A comment may point at it but
+  does not replace it.
+
+**Submission permissions** (standing, defined in `AGENTS.md`):
+
+- Every approved agent may commit, push to its working branch, and open a
+  Draft PR — no per-task authorization needed.
+- Only Claude Code may open a non-Draft PR, after local verification.
+- Every other agent (OpenCode, Jules, Kilo Code, Cline) stops at Draft: never
+  Ready for review, never merge, never deploy.
+
+**Sequential review — one branch, one session at a time:**
+
+- Two independent sessions must never edit the same branch concurrently. If a
+  second agent needs to correct an open Draft PR, it continues that PR's
+  branch: inspect the existing implementation first, make only approved
+  in-scope corrections, commit and push to the same branch, keep the PR
+  Draft, and refresh the completion report in the PR description.
+- Never create a second PR as a competing implementation of the same change,
+  and never open a new PR merely because another agent is reviewing or
+  fixing the first one.
+- Before pushing to a branch you did not create, confirm it is idle: check
+  the PR head SHA and `git status` in the owning worktree. Force-pushing over
+  another session's work is a coordination failure, not a shortcut.
+
+## 8. Approval gates, Handoffs, and deployment
 
 These are not negotiable in the name of speed:
 
@@ -155,9 +188,9 @@ These are not negotiable in the name of speed:
   Responsibility refuses. Do not add a fallback that guesses.
 - **Deployment** happens only through the merged-PR pipeline. No direct
   production changes, no bypassing CI or merge protections.
-- **Jules submissions are Draft PRs** and stop there; Martin marks them ready.
+- **Submissions by every agent except Claude Code are Draft PRs** (OpenCode, Jules, Kilo Code, Cline) and stop there; Martin marks them ready. Only Claude Code may open a non-Draft PR, after local verification (see §7).
 
-## 8. Known integration-owned coupling
+## 9. Known integration-owned coupling
 
 These are real and deliberately **not** refactored here — each would be a
 material architecture change, so they are documented rather than papered over:
