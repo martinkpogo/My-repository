@@ -8,6 +8,8 @@ The **standing permissions** in `AGENTS.md` ("Standing permissions and lifecycle
 
 An instruction uses the fields below to **narrow** standing permissions (for example "implement only — do not push") or to authorize something they do not cover (for example "watch through merge", "deploy"). Any narrowing or extension is explicit; nothing else changes.
 
+A task instruction may narrow standing permissions or authorize additional actions **only where the agent's individual contract permits them** — it can never override an absolute restriction of that contract. In particular, no task instruction can authorize OpenCode, Jules, Kilo Code, or Cline to mark a PR Ready for review, merge, or deploy; those agents stop at the Draft PR no matter what the instruction says.
+
 ## Assignment
 
 1. **Problem:** what is wrong or missing, and how we know.

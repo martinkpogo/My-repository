@@ -134,7 +134,7 @@ Claude Code is trusted to execute the full engineering lifecycle inside the appr
 - If Martin explicitly authorizes **deployment**, Claude Code may execute the approved deployment path and verify deployment and smoke tests.
 - Execution authority never grants permission to make a new architectural or governance decision.
 - Claude Code must report actual states rather than assuming them: commit SHA, remote push, PR URL, CI state, merge state, deployment state, and smoke-test result.
-- Narrower task-specific instructions override the standing permissions. Claude Code must not commit, push, open a PR, merge, or deploy merely because those actions would be convenient or customary.
+- Narrower task-specific instructions restrict the standing permissions (for example, **implement only** — no commit, push, or PR). Standing permissions never exceed this contract's lifecycle authority: beyond them, Claude Code must not merge or deploy merely because those actions would be convenient or customary — merging and deploying remain governed by the configured workflow or an explicit task instruction.
 
 ## OpenCode execution contract
 
@@ -144,7 +144,7 @@ OpenCode runs alongside Claude Code as a full engineering agent with the same en
 - OpenCode may watch CI and review state on its Draft PR when the task asks it to, but Ready-for-review, merge, and release decisions remain outside its authority.
 - Execution authorization never grants permission to make a new architectural or governance decision.
 - OpenCode must report actual states rather than assuming them: commit SHA, remote push, PR URL, CI state, and any pending release decision.
-- Narrower task-specific instructions override the standing permissions. OpenCode must not commit, push, or open a PR merely because those actions would be convenient or customary.
+- Narrower task-specific instructions restrict the standing permissions (for example, **implement only** — no commit, push, or PR). Standing permissions never exceed this contract's lifecycle authority: OpenCode must never mark a PR Ready for review, merge, or deploy — those are absolute restrictions of this contract, and no task instruction can authorize them.
 
 ### Engineering autonomy
 
