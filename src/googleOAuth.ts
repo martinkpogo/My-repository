@@ -1968,6 +1968,9 @@ export async function handleGoogleFolderSelection(
   const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
   const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
 
+  // First, peek to validate the pick without consuming.
+  // The WorkSession Durable Object serializes callback execution for the same
+  // workId, so no other request can consume the option between peek and consume.
   const option = await peekOpaqueOption(env, state.workId, opaqueId);
   if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
     await sendWorkspaceHatMessage(
@@ -1988,13 +1991,35 @@ export async function handleGoogleFolderSelection(
     );
     return state;
   }
-  // Consuming the list makes the pick single-use: a replayed button cannot
-  // re-pick the same folder (the same discipline as the old per-folder
-  // consume, which deleted each option on tap).
-  await kvDelete(env, `google_option:${state.workId}:${opaqueId}`);
-  const { accountIdentifier, title, content, rows } = option;
-  const folderId = picked.id;
-  const folderName = picked.name;
+
+  // Pick is valid: now atomically consume the option (read + delete).
+  // Under Durable Object serialization, this is race-free.
+  // We MUST use the consumed option for the actual pick to ensure
+  // single-use semantics even if another request consumed between peek and consume.
+  const consumed = await consumeOpaqueOption(env, state.workId, opaqueId);
+  if (!consumed) {
+    // Another request already consumed it (should not happen under DO serialization,
+    // but handled defensively).
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ That folder selection option was already consumed. Please submit the request again.",
+    );
+    return state;
+  }
+  // Re-validate the pick against the consumed option (authoritative source).
+  const revalidated = Number.isInteger(index) && index >= 0 && index < consumed.folders.length ? consumed.folders[index] : undefined;
+  if (!revalidated) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ That folder selection is no longer current -- nothing was recorded.",
+    );
+    return state;
+  }
+  const { accountIdentifier, title, content, rows } = consumed;
+  const folderId = revalidated.id;
+  const folderName = revalidated.name;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
   // Shared output-delivery flow (src/outputDelivery.ts): the folder option
   // carries `delivery: true`. Route to the final explicit confirmation, which

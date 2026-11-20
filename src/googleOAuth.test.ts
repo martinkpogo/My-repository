@@ -533,17 +533,141 @@ test("Stale and replayed folder selections are rejected -- single-use folder lis
     assert.strictEqual(listExists, false, "folder list is consumed after first pick");
 
     // Replay attempt: same button tapped again
-    // Since the list is gone, peekOpaqueOption returns null
+    // Since the list is gone, consumeOpaqueOption returns null
     await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
-    assert.match(sentTelegramText, /expired/); // error message about expired/invalid
+    assert.match(sentTelegramText, /invalid or expired/);
 
-    // Concurrent attempt: second pick (position 1) on already-consumed list
+    // Second pick (position 1) on already-consumed list
     await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`);
-    assert.match(sentTelegramText, /expired/);
+    assert.match(sentTelegramText, /invalid or expired/);
 
     // Out-of-bounds position (list is already consumed, so same error)
     await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`);
     assert.match(sentTelegramText, /invalid or expired/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Concurrent folder selections: DO serialization ensures only one succeeds", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-concurrent-folder-600";
+  // Stage a folderlist option directly
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "concurrent@enig.com",
+    title: "Concurrent Test",
+    content: "Testing concurrent selection",
+    folders: [
+      { id: "folder-1", name: "Folder One" },
+      { id: "folder-2", name: "Folder Two" },
+    ],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const sentTelegramTexts: string[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramTexts.push(body.text || "");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // In production, the WorkSession Durable Object serializes callback execution
+    // for the same workId. We simulate this by running sequentially.
+    // The atomic consumeOpaqueOption provides an additional safety layer.
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`);
+
+    // First call succeeds, second call fails (option already consumed)
+    const successMessages = sentTelegramTexts.filter((t) => t.includes("Folder One") || t.includes("Folder Two"));
+    const errorMessages = sentTelegramTexts.filter((t) => t.includes("already consumed") || t.includes("invalid or expired"));
+    assert.equal(successMessages.length, 1, "exactly one success message sent");
+    assert.equal(errorMessages.length, 1, "exactly one error message sent");
+    assert.match(successMessages[0], /concurrent@enig.com/);
+
+    // The list should be consumed
+    const store: Map<string, { value: string; expirationTtl?: number }> = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, false, "folder list is consumed after sequential picks");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Out-of-bounds position rejected while folder list still exists", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-oob-folder-700";
+  // Stage a folderlist option directly
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "oob@enig.com",
+    title: "Out of Bounds Test",
+    content: "Testing out of bounds selection",
+    folders: [
+      { id: "folder-1", name: "Folder One" },
+    ],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Attempt out-of-bounds position while list still exists (position 99, only 1 folder)
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`);
+    assert.match(sentTelegramText, /no longer current/);
+
+    // List should still exist (not consumed on invalid pick)
+    const store: Map<string, { value: string; expirationTtl?: number }> = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "folder list NOT consumed on invalid pick");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -564,8 +688,8 @@ test("Expired folder selection state is rejected (TTL expiry)", async () => {
     folders: [{ id: "folder-x", name: "Folder X" }],
   });
 
-  // Manually expire it by deleting and re-adding with 0 TTL simulation
-  // We simulate expiry by directly removing from store
+  // Manually expire it by deleting from store (simulating TTL expiry)
+  // The mock KV doesn't auto-expire, so we delete directly
   await mockKv.delete(`google_option:${workId}:${listOpaqueId}`);
 
   const state: WorkState = {
