@@ -889,7 +889,7 @@ test("an immediately delivered picker records the successful initiation exactly 
   assert.match(activities[0].activity ?? "", /authorized-account selection presented/);
 });
 
-test("50 Drive folders cost ONE storage write, and the first page shows 10 plus More folders (2026-11-18: one write per folder hit the subrequest limit)", async (t: any) => {
+test("50 Drive folders cost ONE storage write, and the continuous list shows all folders without More folders button", async (t: any) => {
   const workId = "8a1d4c2e-0000-4000-8000-000000000050";
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
   const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
@@ -906,6 +906,10 @@ test("50 Drive folders cost ONE storage write, and the first page shows 10 plus 
   await handleGoogleAccountSelection(env, state, opaqueId);
   assert.equal(optionWrites, 1, "the whole folder list is one staged option");
   const folderButtons = callbackDatas(telegram).filter((d) => d.startsWith(`googlefolder:${workId}:`));
-  assert.ok(folderButtons.length <= 11, `at most 10 folders plus More folders on the first page, got ${folderButtons.length}`);
-  assert.ok(telegramTexts(telegram).includes("More folders") || JSON.stringify(telegram).includes("More folders"), "a More folders button is offered");
+  // Now shows all 50 folders (up to MAX_FOLDERS_PER_PICKER) in a single message
+  assert.equal(folderButtons.length, 50, `shows all 50 folders in continuous list, got ${folderButtons.length}`);
+  // No "More folders" button - continuous scrolling experience restored
+  assert.ok(!telegramTexts(telegram).includes("More folders") && !JSON.stringify(telegram).includes("More folders"), "no More folders button");
+  // Shows note about total folders when at limit
+  assert.ok(telegramTexts(telegram).includes("Showing 50 of 50 folders"), "shows folder count note");
 });

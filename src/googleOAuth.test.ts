@@ -326,6 +326,95 @@ test("Folder picker queries drive folders using selected account and uses opaque
   }
 });
 
+test("Folder picker follows Google Drive API pagination (nextPageToken) and accumulates all folders", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-pagination-300";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-paginate", refresh_token: "refresh-paginate", expires_in: 3600 },
+    "paginate@enig.com",
+  );
+
+  const opaqueOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "paginate@enig.com",
+    title: "Paginated Doc",
+    content: "Test pagination",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let page1 = true;
+  let page2 = false;
+
+  globalThis.fetch = (async (url: string) => {
+    const u = String(url);
+    if (u.includes("drive/v3/files")) {
+      if (page1) {
+        page1 = false;
+        page2 = true;
+        return new Response(
+          JSON.stringify({
+            files: [
+              { id: "folder-1", name: "A First Folder" },
+              { id: "folder-2", name: "B Second Folder" },
+            ],
+            nextPageToken: "page-token-2",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (page2) {
+        page2 = false;
+        return new Response(
+          JSON.stringify({
+            files: [
+              { id: "folder-3", name: "C Third Folder" },
+              { id: "folder-4", name: "D Fourth Folder" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ files: [] }), { status: 200 });
+    }
+    if (u.includes("api.telegram.org")) {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    // The test passes if the handler completes without error and the list
+    // is staged. The actual verification of all 4 folders being present
+    // is done by checking the staged option.
+    const store: Map<string, { value: string; expirationTtl?: number }> = mockKv._rawStore;
+    let foundList = false;
+    let totalFolders = 0;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        foundList = true;
+        const option = JSON.parse(value.value);
+        totalFolders = option.folders?.length ?? 0;
+        break;
+      }
+    }
+    assert.ok(foundList, "folderlist option was staged");
+    assert.equal(totalFolders, 4, "all 4 folders from both pages are accumulated");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Folder selection sets pending action and emits proposal with approve/reject buttons", async () => {
   const { fakeEnv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
@@ -383,6 +472,126 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
     assert.ok(updatedState.pendingActionSummary, "must also set the generic pendingActionSummary for /sessions recovery");
     assert.strictEqual(updatedState.pendingActionSummary?.label, "Create Google Doc: Brand Guidelines");
     assert.deepStrictEqual(updatedState.pendingActionSummary?.buttons, sentButtons);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stale and replayed folder selections are rejected -- single-use folder list", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-stale-folder-400";
+  // Stage a folderlist option directly
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "stale@enig.com",
+    title: "Stale Test",
+    content: "Testing stale selection",
+    folders: [
+      { id: "folder-1", name: "Folder One" },
+      { id: "folder-2", name: "Folder Two" },
+    ],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // First pick: position 0 (Folder One)
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    assert.match(sentTelegramText, /Folder One/);
+    assert.match(sentTelegramText, /stale@enig.com/);
+
+    // The list should now be consumed (deleted)
+    const store: Map<string, { value: string; expirationTtl?: number }> = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, false, "folder list is consumed after first pick");
+
+    // Replay attempt: same button tapped again
+    // Since the list is gone, peekOpaqueOption returns null
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    assert.match(sentTelegramText, /expired/); // error message about expired/invalid
+
+    // Concurrent attempt: second pick (position 1) on already-consumed list
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`);
+    assert.match(sentTelegramText, /expired/);
+
+    // Out-of-bounds position (list is already consumed, so same error)
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`);
+    assert.match(sentTelegramText, /invalid or expired/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Expired folder selection state is rejected (TTL expiry)", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-expired-folder-500";
+  // Stage a folderlist option with very short TTL (1 second)
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "expired@enig.com",
+    title: "Expired Test",
+    content: "Testing expired selection",
+    folders: [{ id: "folder-x", name: "Folder X" }],
+  });
+
+  // Manually expire it by deleting and re-adding with 0 TTL simulation
+  // We simulate expiry by directly removing from store
+  await mockKv.delete(`google_option:${workId}:${listOpaqueId}`);
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Attempt to select from expired/missing option
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    assert.match(sentTelegramText, /invalid or expired/);
   } finally {
     globalThis.fetch = originalFetch;
   }
