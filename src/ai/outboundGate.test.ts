@@ -209,7 +209,7 @@ test("Strategy tasks, Finance quote judgment, and ordinary Sales proposal drafti
   }
 });
 
-test("Lead Discovery public-source tasks are TOKEN_SAFE_RUNTIME, and only the signal-evaluation and prospect-research tasks are company-suffix-exempt", () => {
+test("Lead Discovery public-source tasks plus marketing's hat decision step are TOKEN_SAFE_RUNTIME and company-suffix-exempt", () => {
   for (const id of [
     "lead.discovery_classification",
     "lead.discovery_signal_evaluation",
@@ -231,6 +231,7 @@ test("Lead Discovery public-source tasks are TOKEN_SAFE_RUNTIME, and only the si
       "lead.candidate_research_relevance",
       "lead.candidate_research_synthesis",
       "lead.discovery_signal_evaluation",
+      "marketing.hat_action_decision",
       "research.context_relevance",
       "research.plan_generation",
       "research.protocol_selection",
