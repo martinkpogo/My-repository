@@ -2085,3 +2085,241 @@ test("Drive API pagination across multiple pages retrieves all folders", async (
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Output delivery: delivery flag preserved through account selection and folder pagination", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  const workId = "work-output-delivery";
+  const allFolders = Array.from({ length: 25 }, (_, i) => ({ id: `folder-${i}`, name: `Folder ${i}` }));
+
+  let pagesSent = 0;
+  let lastButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      const urlObj = new URL(urlStr);
+      const pageSize = parseInt(urlObj.searchParams.get("pageSize") ?? "100", 10);
+      const pageToken = urlObj.searchParams.get("pageToken");
+      const start = pageToken ? parseInt(pageToken, 10) : 0;
+      const page = allFolders.slice(start, start + pageSize);
+      return new Response(
+        JSON.stringify({
+          files: page,
+          nextPageToken: start + pageSize < allFolders.length ? String(start + pageSize) : undefined,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      pagesSent++;
+      const body = JSON.parse(String(_init?.body));
+      lastButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Step 1: Account option with delivery: true
+    const accountOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+      kind: "account",
+      accountIdentifier: "user@enig.com",
+      title: "Proposal Folder",
+      content: "Content here",
+      rows: undefined,
+      docType: "doc",
+      smoke: false,
+      delivery: true,
+    });
+
+    const state: WorkState = {
+      workId,
+      chatId: 12345,
+      threadId: 777,
+      hat: "Marketing Strategist",
+      stage: "active",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Step 2: Select account - deferred picker runs inline (no deps provided)
+    await handleGoogleAccountSelection(fakeEnv, state, accountOpaqueId);
+
+    // Verify Drive was queried and picker page sent
+    assert.ok(pagesSent >= 1, "picker page was sent");
+    assert.ok(lastButtons.some((row: any[]) => row.some((b: any) => b.text === "📂 More folders")), "page 1 has 'More folders' button");
+
+    // Step 3: Inspect staged folder options - verify delivery: true is preserved
+    const moreButton = lastButtons.find((row: any[]) => row.some((b: any) => b.text === "📂 More folders"))![0];
+    const folderListOpaqueId = moreButton.callback_data.split(":")[2];
+
+    const listOptionRaw = await kvGet(fakeEnv, `google_option:${workId}:${folderListOpaqueId}`);
+    const listOption = listOptionRaw ? JSON.parse(listOptionRaw) : null;
+    assert.ok(listOption, "folder_list option exists");
+    assert.strictEqual(listOption.kind, "folder_list");
+    assert.strictEqual(listOption.delivery, true, "folder_list preserves delivery: true");
+    assert.strictEqual(listOption.pageIndex, 1, "staged for page 2");
+
+    // Verify individual folder options on page 1 also have delivery: true
+    const allKeys = await mockKv.list({ prefix: `google_option:${workId}:` });
+    const folderOptionValues = await Promise.all(
+      allKeys.keys.map(async (k) => mockKv.get(k.name)),
+    );
+    const folderOptions = folderOptionValues
+      .filter((v) => v !== null && v !== undefined)
+      .map((v) => JSON.parse(v as string))
+      .filter((o: any) => o.kind === "folder");
+    assert.ok(folderOptions.length > 0, "folder options were staged");
+    for (const fo of folderOptions) {
+      assert.strictEqual(fo.delivery, true, `folder option ${fo.folderId} preserves delivery: true`);
+    }
+
+    // Step 4: Exercise More folders page - verify delivery persists on page 2
+    const state2: WorkState = { ...state };
+    let page2Buttons: any[] = [];
+    globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.includes("api.telegram.org")) {
+        const body = JSON.parse(String(_init?.body));
+        page2Buttons = body.reply_markup?.inline_keyboard || [];
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    await handleGoogleFolderSelection(fakeEnv, state2, folderListOpaqueId);
+
+    assert.ok(page2Buttons.length > 0, "page 2 has buttons");
+    assert.ok(page2Buttons.some((row: any[]) => row.some((b: any) => b.text.startsWith("📁"))), "page 2 shows folder buttons");
+
+    // Inspect page 2 folder options - verify delivery: true is preserved
+    const allKeys2 = await mockKv.list({ prefix: `google_option:${workId}:` });
+    const page2FolderOptionValues = await Promise.all(
+      allKeys2.keys.map(async (k) => mockKv.get(k.name)),
+    );
+    const page2FolderOptions = page2FolderOptionValues
+      .filter((v) => v !== null && v !== undefined)
+      .map((v) => JSON.parse(v as string))
+      .filter((o: any) => o.kind === "folder");
+    assert.ok(page2FolderOptions.length > 0, "page 2 folder options were staged");
+    for (const fo of page2FolderOptions) {
+      assert.strictEqual(fo.delivery, true, `page 2 folder option ${fo.folderId} preserves delivery: true`);
+    }
+
+    // Step 5: Select a folder and verify output-delivery confirmation path (not legacy pendingGoogleAction)
+    const folderOpt = page2FolderOptions[0];
+    let opaqueFolderIdKey: string | undefined;
+    for (const k of allKeys2.keys) {
+      const v = await mockKv.get(k.name);
+      if (v !== null && v !== undefined && JSON.parse(v as string).folderId === folderOpt.folderId) {
+        opaqueFolderIdKey = k.name;
+        break;
+      }
+    }
+    assert.ok(opaqueFolderIdKey, "found opaque folder option key");
+    const opaqueFolderIdVal = opaqueFolderIdKey.split(":").pop()!;
+
+    const state3: WorkState = { ...state };
+    let confirmationSent = false;
+    let sentText = "";
+    let confirmationButtons: any[] = [];
+    globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.includes("api.telegram.org")) {
+        confirmationSent = true;
+        const body = JSON.parse(String(_init?.body));
+        sentText = body.text || "";
+        confirmationButtons = body.reply_markup?.inline_keyboard || [];
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    await handleGoogleFolderSelection(fakeEnv, state3, opaqueFolderIdVal);
+
+    assert.ok(confirmationSent, "confirmation message was sent");
+    assert.ok(sentText.includes("Save approved output to Google Drive"), "output-delivery confirmation presented");
+    assert.ok(confirmationButtons.some((row: any[]) => row.some((b: any) => b.text === "✅ Confirm & create Doc")), "confirm button shown");
+    assert.strictEqual(state3.pendingGoogleAction, undefined, "did NOT fall through to legacy pendingGoogleAction path");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Output delivery: delivery flag absent when not set (normal folder selection path)", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  const workId = "work-normal-path";
+  const allFolders = Array.from({ length: 5 }, (_, i) => ({ id: `folder-${i}`, name: `Normal Folder ${i}` }));
+
+  let pagesSent = 0;
+  globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      return new Response(JSON.stringify({ files: allFolders, nextPageToken: undefined }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      pagesSent++;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Account option WITHOUT delivery flag
+    const accountOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+      kind: "account",
+      accountIdentifier: "user@enig.com",
+      title: "Normal Doc",
+      content: "Normal content",
+      rows: undefined,
+      docType: "doc",
+      smoke: false,
+    });
+
+    const state: WorkState = {
+      workId,
+      chatId: 12345,
+      threadId: 777,
+      hat: "Marketing Strategist",
+      stage: "active",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await handleGoogleAccountSelection(fakeEnv, state, accountOpaqueId);
+
+    assert.strictEqual(pagesSent, 1, "picker page was sent");
+
+    // Inspect staged folder options - verify delivery is NOT true
+    const allKeys = await mockKv.list({ prefix: `google_option:${workId}:` });
+    const folderOptionValues = await Promise.all(
+      allKeys.keys.map(async (k) => mockKv.get(k.name)),
+    );
+    const folderOptions = folderOptionValues
+      .filter((v) => v !== null && v !== undefined)
+      .map((v) => JSON.parse(v as string))
+      .filter((o: any) => o.kind === "folder");
+    assert.ok(folderOptions.length > 0, "folder options were staged");
+    for (const fo of folderOptions) {
+      assert.strictEqual(fo.delivery, undefined, `folder option ${fo.folderId} does not have delivery: true`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -1947,6 +1947,7 @@ async function showFolderPickerPage(
               rows: input.rows,
               folderId: folder.id,
               folderName: folder.name,
+              delivery: input.delivery,
             },
       );
       // Callback data carries only opaque references: workId + option id.
@@ -1979,6 +1980,7 @@ async function showFolderPickerPage(
         rows: input.rows,
         docType: input.docType,
         smoke: input.smoke,
+        delivery: input.delivery,
         workId: input.workId,
         chatId: input.chatId,
         threadId: input.threadId,
